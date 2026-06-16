@@ -164,6 +164,57 @@ impl LLMConfig {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// Tool call ID for tool result messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Tool calls in assistant messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallData>>,
+    /// Name field for tool result messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl ChatMessage {
+    pub fn system(content: &str) -> Self {
+        Self {
+            role: "system".to_string(),
+            content: content.to_string(),
+            tool_call_id: None,
+            tool_calls: None,
+            name: None,
+        }
+    }
+
+    pub fn user(content: &str) -> Self {
+        Self {
+            role: "user".to_string(),
+            content: content.to_string(),
+            tool_call_id: None,
+            tool_calls: None,
+            name: None,
+        }
+    }
+
+    pub fn assistant(content: &str) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            tool_call_id: None,
+            tool_calls: None,
+            name: None,
+        }
+    }
+
+    pub fn tool_result(tool_call_id: &str, name: &str, content: &str) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: content.to_string(),
+            tool_call_id: Some(tool_call_id.to_string()),
+            tool_calls: None,
+            name: Some(name.to_string()),
+        }
+    }
 }
 
 /// Request payload for LLM completion.
@@ -173,6 +224,8 @@ pub struct CompletionRequest {
     pub max_tokens: u32,
     pub temperature: f32,
     pub stream: bool,
+    /// Optional tool definitions (OpenAI function calling format).
+    pub tools: Option<Vec<serde_json::Value>>,
 }
 
 /// Token usage statistics returned by the provider.
@@ -186,12 +239,29 @@ pub struct Usage {
     pub reasoning_tokens: Option<u32>,
 }
 
+/// A tool call requested by the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallData {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub call_type: String,
+    pub function: ToolCallFunction,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallFunction {
+    pub name: String,
+    pub arguments: String,
+}
+
 /// Response from an LLM completion call.
 #[derive(Debug, Clone)]
 pub struct CompletionResponse {
     pub content: String,
     /// Reasoning/thinking content, if provided by the model.
     pub reasoning: Option<String>,
+    /// Tool calls requested by the model, if any.
+    pub tool_calls: Vec<ToolCallData>,
     pub usage: Option<Usage>,
 }
 
@@ -235,6 +305,9 @@ struct OpenAiMessage {
     /// Extension field used by opencode-go / DeepSeek for reasoning text.
     #[serde(default)]
     reasoning_content: Option<String>,
+    /// Tool calls requested by the model (OpenAI function calling format).
+    #[serde(default)]
+    tool_calls: Option<Vec<ToolCallData>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -332,6 +405,13 @@ impl LLMClient {
             body["include_reasoning"] = serde_json::Value::Bool(true);
         }
 
+        // Include tools if provided
+        if let Some(ref tools) = request.tools {
+            if !tools.is_empty() {
+                body["tools"] = serde_json::Value::Array(tools.clone());
+            }
+        }
+
         let resp = self
             .client
             .post(&url)
@@ -387,9 +467,16 @@ impl LLMClient {
             .and_then(|m| m.reasoning_content.clone())
             .or_else(|| choice.delta.as_ref().and_then(|d| d.reasoning_content.clone()));
 
+        let tool_calls = choice
+            .message
+            .as_ref()
+            .and_then(|m| m.tool_calls.clone())
+            .unwrap_or_default();
+
         Ok(CompletionResponse {
             content,
             reasoning,
+            tool_calls,
             usage: response.usage,
         })
     }
@@ -413,6 +500,7 @@ impl LLMClient {
         Ok(CompletionResponse {
             content,
             reasoning,
+            tool_calls: vec![],
             usage: response.usage,
         })
     }
@@ -527,6 +615,7 @@ impl LLMClient {
         Ok(CompletionResponse {
             content,
             reasoning,
+            tool_calls: vec![],
             usage,
         })
     }

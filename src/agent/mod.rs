@@ -22,7 +22,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::db::queries;
-use crate::llm::{ChatMessage, CompletionRequest, LLMClient};
+use crate::llm::{ChatMessage, CompletionRequest, LLMClient, ToolCallData};
+use crate::mcp::{AppContext, McpRegistry, McpToolCall};
 use crate::models::{Message, MessageNew, MessageStatus};
 
 /// Configuration for the agent's LLM interactions.
@@ -83,6 +84,8 @@ pub struct Agent {
     pub pool: PgPool,
     pub config: AgentConfig,
     pub llm: Arc<LLMClient>,
+    pub mcp: McpRegistry,
+    pub ctx: AppContext,
 }
 
 impl Agent {
@@ -90,7 +93,7 @@ impl Agent {
     ///
     /// An LLM client is built from the agent config, falling back to
     /// environment-level defaults for any unset values.
-    pub fn new(pool: PgPool, config: AgentConfig) -> Self {
+    pub fn new(pool: PgPool, config: AgentConfig, mcp: McpRegistry, ctx: AppContext) -> Self {
         let env_cfg = crate::llm::LLMConfig::from_env();
         let llm_config = crate::llm::LLMConfig {
             provider: config
@@ -113,7 +116,7 @@ impl Agent {
             temperature: config.temperature,
         };
         let llm = Arc::new(LLMClient::new(llm_config));
-        Self { pool, config, llm }
+        Self { pool, config, llm, mcp, ctx }
     }
 
     /// Run the agent supervisor loop.
@@ -139,6 +142,8 @@ impl Agent {
         let pool = self.pool;
         let llm = self.llm;
         let config = self.config;
+        let mcp = self.mcp;
+        let ctx = self.ctx;
 
         loop {
             let channels = match queries::find_all_channels(&pool).await {
@@ -165,9 +170,11 @@ impl Agent {
                     let pool = pool.clone();
                     let llm = llm.clone();
                     let config = config.clone();
+                    let mcp_clone = mcp.clone();
+                    let ctx_clone = ctx.clone();
 
                     tokio::spawn(async move {
-                        channel_handler(pool, llm, config, channel_id, handler_token).await;
+                        channel_handler(pool, llm, config, mcp_clone, ctx_clone, channel_id, handler_token).await;
                     });
 
                     info!(
@@ -218,6 +225,8 @@ async fn channel_handler(
     pool: PgPool,
     llm: Arc<LLMClient>,
     config: AgentConfig,
+    mcp: McpRegistry,
+    ctx: AppContext,
     channel_id: i64,
     cancel: CancellationToken,
 ) {
@@ -283,7 +292,7 @@ async fn channel_handler(
                         }
                     }
 
-                    if let Err(e) = process_message(&pool, &llm, &config, msg).await {
+                    if let Err(e) = process_message(&pool, &llm, &config, &mcp, &ctx, msg).await {
                         error!("Failed to process message {}: {:?}", msg.id, e);
                     }
                 }
@@ -301,17 +310,23 @@ async fn channel_handler(
 ///
 /// 1. Update message status → `processing`
 /// 2. Get current iteration count for the thread
-/// 3. Call the LLM with system + user messages
-/// 4. If reasoning exists, save as a separate `reasoning` record
-/// 5. Save the main agent response (status: `completed`, msg_type: `message`)
-/// 6. Update original message status → `completed`
-/// 7. Return the saved response message
+/// 3. Resolve profile, provider, model from channel
+/// 4. Call the LLM with system + user messages (and tools if enabled)
+/// 5. If tool calls are returned, execute them and loop back to LLM
+/// 6. If reasoning exists, save as a separate `reasoning` record
+/// 7. Save the main agent response (msg_type: `message`)
+/// 8. Update original message status → `completed`
+/// 9. Record processing_time_ms on the original prompt message
 async fn process_message(
     pool: &PgPool,
     llm: &LLMClient,
     config: &AgentConfig,
+    mcp: &McpRegistry,
+    ctx: &AppContext,
     msg: &Message,
 ) -> Result<Message> {
+    let start_time = std::time::Instant::now();
+
     // 1. Mark the message as 'processing'
     queries::update_message_status(pool, msg.id, &MessageStatus::Processing).await?;
 
@@ -319,45 +334,104 @@ async fn process_message(
     let iterations = queries::count_thread_iterations(pool, msg.thread_id).await.unwrap_or(0);
     let next_iteration = iterations + 1;
 
-    // 3. Build LLM request
-    let system_msg = ChatMessage {
-        role: "system".to_string(),
-        content: "You are OmniAgent, a helpful AI assistant.".to_string(),
-    };
-    let user_msg = ChatMessage {
-        role: "user".to_string(),
-        content: msg.content.clone(),
-    };
+    // 3. Resolve profile, provider, model for this message
+    let profile_name = if msg.profile.is_empty() { "default".to_string() } else { msg.profile.clone() };
+    let provider_name = msg.provider.clone().or_else(|| Some(config.llm_provider.clone()));
+    let model_name = msg.model.clone().or_else(|| Some(config.llm_model.clone()));
 
-    let request = CompletionRequest {
-        messages: vec![system_msg, user_msg],
-        max_tokens: config.max_tokens,
-        temperature: config.temperature,
-        stream: false,
-    };
+    // 4. Build the initial message history
+    let mut messages = vec![
+        ChatMessage::system(
+            "You are OmniAgent, a helpful AI assistant with access to tools. \
+            When you need to read files, search data, or fetch URLs, use the available tools. \
+            Always use tools to accomplish tasks rather than making up information."
+        ),
+        ChatMessage::user(&msg.content),
+    ];
 
-    let response = match llm.completion(request).await {
-        Ok(resp) => resp,
-        Err(e) => {
-            error!("LLM call failed: {:?}", e);
-            queries::update_message_status(pool, msg.id, &MessageStatus::Failed).await?;
-            return Err(e);
+    // 5. Get allowed tools for the profile and build tool definitions
+    let profile = crate::profile::ProfileRegistry::new(&ctx.data_dir);
+    let prof = profile.get(&profile_name).cloned().unwrap_or_else(|| crate::profile::Profile::default("default", &format!("{}/profiles/default", ctx.data_dir)));
+    let tools_def = mcp.to_openai_tools(&prof.allowed_tools);
+
+    // 6. Tool-calling loop — max iterations controls total LLM calls
+    let max_llm_calls = config.max_iterations.min(20); // safety cap
+    let mut final_content = String::new();
+    let mut final_reasoning: Option<String> = None;
+    let mut final_tool_call: bool = false;
+
+    for _turn in 0..max_llm_calls {
+        let request = CompletionRequest {
+            messages: messages.clone(),
+            max_tokens: config.max_tokens,
+            temperature: config.temperature,
+            stream: false,
+            tools: if tools_def.is_empty() { None } else { Some(tools_def.clone()) },
+        };
+
+        let response = match llm.completion(request).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                error!("LLM call failed: {:?}", e);
+                final_content = format!("I encountered an error: {}", e);
+                break;
+            }
+        };
+
+        // Store reasoning if present
+        if response.reasoning.is_some() {
+            final_reasoning = response.reasoning.clone();
         }
-    };
 
-    // 4. Build metadata with usage info
-    let mut metadata = serde_json::json!({});
-    if let Some(usage) = &response.usage {
-        metadata["usage"] = serde_json::json!({
-            "prompt_tokens": usage.prompt_tokens,
-            "completion_tokens": usage.completion_tokens,
-            "cached_tokens": usage.cached_tokens,
-            "reasoning_tokens": usage.reasoning_tokens,
-        });
+        // Check for tool calls
+        if response.tool_calls.is_empty() {
+            // Normal text response — we're done
+            final_content = response.content;
+            final_tool_call = false;
+            break;
+        }
+
+        // We have tool calls — add assistant message with tool_calls
+        final_tool_call = true;
+        let mut assistant_msg = ChatMessage::assistant("");
+        assistant_msg.tool_calls = Some(response.tool_calls.clone());
+        messages.push(assistant_msg);
+
+        // Execute each tool call
+        for tc in &response.tool_calls {
+            let mcp_call = McpToolCall {
+                id: tc.id.clone(),
+                name: tc.function.name.clone(),
+                arguments: serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or(serde_json::json!({})),
+            };
+
+            let result = mcp.execute(&mcp_call, ctx.clone());
+            match result {
+                Ok(res) => {
+                    messages.push(ChatMessage::tool_result(
+                        &tc.id, &tc.function.name, &res.content,
+                    ));
+                }
+                Err(e) => {
+                    let err_msg = format!("Error executing tool '{}': {}", tc.function.name, e);
+                    messages.push(ChatMessage::tool_result(&tc.id, &tc.function.name, &err_msg));
+                }
+            }
+        }
     }
 
-    // 5. If reasoning/thinking exists, save as its own record
-    if let Some(reasoning_text) = &response.reasoning {
+    // If we exited the loop without a final text response, provide a fallback
+    if final_content.is_empty() && !final_tool_call {
+        final_content =
+            "I've completed the requested operations using my available tools.".to_string();
+    }
+
+    // 7. Build metadata with usage info
+    let mut metadata = serde_json::json!({});
+
+    // 8. If reasoning/thinking exists, save as its own record
+    if let Some(ref reasoning_text) = final_reasoning {
         if !reasoning_text.is_empty() {
             let reasoning_metadata = match metadata.get("usage") {
                 Some(u) => serde_json::json!({"usage": u}),
@@ -378,16 +452,20 @@ async fn process_message(
                 msg_type: "reasoning".to_string(),
                 msg_subtype: None,
                 iteration_count: next_iteration,
+                profile: profile_name.clone(),
+                provider: provider_name.clone(),
+                model: model_name.clone(),
+                processing_time_ms: None,
             };
             queries::create_message(pool, &reasoning_msg).await?;
         }
     }
 
-    // 6. Save the main agent response
+    // 9. Save the main agent response
     let agent_msg = MessageNew {
         channel_id: msg.channel_id,
         role: "agent".to_string(),
-        content: response.content,
+        content: final_content,
         status: MessageStatus::Completed,
         thread_id: msg.thread_id,
         thread_sequence: msg.thread_sequence + 1,
@@ -399,12 +477,23 @@ async fn process_message(
         msg_type: "message".to_string(),
         msg_subtype: None,
         iteration_count: next_iteration,
+        profile: profile_name.clone(),
+        provider: provider_name.clone(),
+        model: model_name.clone(),
+        processing_time_ms: None,
     };
 
     let saved = queries::create_message(pool, &agent_msg).await?;
 
-    // 7. Mark the original message as 'completed'
-    queries::update_message_status(pool, msg.id, &MessageStatus::Completed).await?;
+    // 10. Record processing time on the original prompt
+    let elapsed_ms = start_time.elapsed().as_millis() as i32;
+    let _ = sqlx::query(
+        "UPDATE messages SET processing_time_ms = $1, status = 'completed' WHERE id = $2 AND status = 'processing'",
+    )
+    .bind(elapsed_ms)
+    .bind(msg.id)
+    .execute(pool)
+    .await;
 
     Ok(saved)
 }

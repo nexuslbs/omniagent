@@ -78,6 +78,10 @@ pub struct Message {
     pub msg_type: String,
     pub msg_subtype: Option<String>,
     pub iteration_count: i32,
+    pub profile: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub processing_time_ms: Option<i32>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -98,4 +102,8 @@ pub struct MessageNew {
     pub msg_type: String,
     pub msg_subtype: Option<String>,
     pub iteration_count: i32,
+    pub profile: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub processing_time_ms: Option<i32>,
 }

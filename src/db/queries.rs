@@ -1,7 +1,7 @@
 use anyhow::Result;
 use sqlx::PgPool;
 
-use crate::models::{Channel, ChannelStop, Message, MessageNew, MessageStatus};
+use crate::models::{Channel, ChannelStop, Message, MessageNew, MessageStatus, ProfileNew, ProfileRow};
 
 /// Find the oldest pending messages for a channel, ordered by created_at.
 pub async fn find_pending_messages(
@@ -26,6 +26,10 @@ pub async fn find_pending_messages(
             msg_type,
             msg_subtype,
             iteration_count,
+            profile,
+            provider,
+            model,
+            processing_time_ms,
             created_at
         FROM messages
         WHERE channel_id = $1 AND status = 'pending'
@@ -47,9 +51,10 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> Result<Message> 
             channel_id, role, content, status,
             thread_id, thread_sequence, external_id,
             metadata, embedding, summary_text, is_summary,
-            msg_type, msg_subtype, iteration_count
+            msg_type, msg_subtype, iteration_count,
+            profile, provider, model, processing_time_ms
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         RETURNING
             id,
             channel_id,
@@ -66,6 +71,10 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> Result<Message> 
             msg_type,
             msg_subtype,
             iteration_count,
+            profile,
+            provider,
+            model,
+            processing_time_ms,
             created_at
         "#,
     )
@@ -83,6 +92,10 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> Result<Message> 
     .bind(&msg.msg_type)
     .bind(&msg.msg_subtype)
     .bind(msg.iteration_count)
+    .bind(&msg.profile)
+    .bind(&msg.provider)
+    .bind(&msg.model)
+    .bind(msg.processing_time_ms)
     .fetch_one(pool)
     .await?;
 
@@ -114,6 +127,9 @@ pub async fn get_channel_by_name(pool: &PgPool, name: &str) -> Result<Option<Cha
             platform,
             external_id,
             cause,
+            current_profile,
+            current_model,
+            current_provider,
             metadata,
             created_at,
             updated_at
@@ -138,6 +154,9 @@ pub async fn find_all_channels(pool: &PgPool) -> Result<Vec<Channel>> {
             platform,
             external_id,
             cause,
+            current_profile,
+            current_model,
+            current_provider,
             metadata,
             created_at,
             updated_at
@@ -174,6 +193,10 @@ pub async fn find_processing_older_than(
             msg_type,
             msg_subtype,
             iteration_count,
+            profile,
+            provider,
+            model,
+            processing_time_ms,
             created_at
         FROM messages
         WHERE status = 'processing' AND created_at < $1
@@ -209,6 +232,9 @@ pub async fn create_channel(
             platform,
             external_id,
             cause,
+            current_profile,
+            current_model,
+            current_provider,
             metadata,
             created_at,
             updated_at

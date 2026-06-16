@@ -20,5 +20,8 @@ dotenvy = "0.15"
 pgvector = { version = "0.3", features = ["sqlx"] }
 anyhow = "1"
 async-trait = "0.1"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 futures = "0.3"
+walkdir = "2"
+glob = "0.3"
+url = "2"

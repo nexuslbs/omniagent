@@ -9,8 +9,10 @@ mod agent;
 mod config;
 mod db;
 mod llm;
+mod mcp;
 mod models;
 mod platform;
+mod profile;
 mod server;
 
 #[tokio::main]
@@ -37,6 +39,10 @@ async fn main() -> Result<()> {
     db::migrations::run(&pool).await?;
     tracing::info!("Database migrations completed");
 
+    // Determine data directory (default: /opt/data)
+    let data_dir = std::env::var("OMNI_DATA_DIR").unwrap_or_else(|_| "/opt/data".to_string());
+    tracing::info!("Data directory: {}", data_dir);
+
     // Build agent config from environment
     let agent_cfg = agent::AgentConfig::from_env()?;
     tracing::info!(
@@ -48,8 +54,12 @@ async fn main() -> Result<()> {
         agent_cfg.max_iterations,
     );
 
-    // Build the agent
-    let agent = agent::Agent::new(pool.clone(), agent_cfg);
+    // Create AppContext and MCP registry
+    let ctx = mcp::AppContext::new(pool.clone(), &data_dir, Some(cfg.qdrant_url.clone()));
+    let mcp = mcp::default_registry(&ctx);
+
+    // Build the agent with MCP context
+    let agent = agent::Agent::new(pool.clone(), agent_cfg, mcp, ctx);
 
     // Shared cancellation tokens for /stop endpoint
     let cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>> =

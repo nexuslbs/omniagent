@@ -100,7 +100,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     // Drop the unique constraint on (thread_id, thread_sequence) since
     // a single LLM turn can produce multiple records (reasoning, message).
-    // Replace it with a non-unique index covering all three.
     sqlx::query(
         r#"
         DO $$ BEGIN
@@ -117,6 +116,63 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_messages_thread_seq
             ON messages(thread_id, thread_sequence);
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Profile and model columns for channels
+    sqlx::query(
+        r#"
+        ALTER TABLE channels
+            ADD COLUMN IF NOT EXISTS current_profile TEXT NOT NULL DEFAULT 'default',
+            ADD COLUMN IF NOT EXISTS current_model TEXT,
+            ADD COLUMN IF NOT EXISTS current_provider TEXT;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Profile, model, provider, processing_time for messages
+    sqlx::query(
+        r#"
+        ALTER TABLE messages
+            ADD COLUMN IF NOT EXISTS profile TEXT NOT NULL DEFAULT 'default',
+            ADD COLUMN IF NOT EXISTS provider TEXT,
+            ADD COLUMN IF NOT EXISTS model TEXT,
+            ADD COLUMN IF NOT EXISTS processing_time_ms INT;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Create profiles table
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS profiles (
+            id              BIGSERIAL PRIMARY KEY,
+            name            TEXT NOT NULL UNIQUE,
+            model           TEXT,
+            provider        TEXT,
+            base_url        TEXT,
+            api_key         TEXT,
+            max_tokens      INT,
+            temperature     DOUBLE PRECISION,
+            allowed_tools   JSONB DEFAULT '[]',
+            base_path       TEXT NOT NULL,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Index on messages for profile/model queries
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_messages_profile
+            ON messages(profile, model);
         "#,
     )
     .execute(pool)
