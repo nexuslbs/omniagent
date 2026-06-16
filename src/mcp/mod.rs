@@ -25,25 +25,35 @@ pub struct McpToolResult {
     pub is_error: bool,
 }
 
-/// Shared context available to all MCP tool handlers.
-#[derive(Clone)]
+use crate::prompt_builder::MemoryStore;
+
+/// Shared application context, available to all MCP tool handlers.
+#[derive(Debug, Clone)]
 pub struct AppContext {
     pub pool: PgPool,
     pub data_dir: String,
     #[expect(dead_code)]
     pub qdrant_url: Option<String>,
+    /// Read-only memory store (MEMORY.md + USER.md) for system prompt injection.
+    pub memory_store: Arc<MemoryStore>,
 }
 
 impl AppContext {
+    /// Create a new application context with a loaded memory store.
     pub fn new(pool: PgPool, data_dir: &str, qdrant_url: Option<String>) -> Self {
+        // Load memory store from the default profile's memories directory
+        let profile_path = format!("{}/profiles/default", data_dir);
+        let mut memory_store = MemoryStore::new(&profile_path);
+        memory_store.load_from_disk();
+
         Self {
             pool,
             data_dir: data_dir.to_string(),
             qdrant_url,
+            memory_store: Arc::new(memory_store),
         }
     }
 }
-
 /// A registered MCP tool.
 #[derive(Clone)]
 pub struct McpTool {

@@ -13,6 +13,7 @@ mod mcp;
 mod models;
 mod platform;
 mod profile;
+mod prompt_builder;
 mod server;
 
 #[tokio::main]

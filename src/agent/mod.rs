@@ -376,18 +376,15 @@ async fn process_message(
         .or_else(|| Some(config.llm_provider.clone()));
     let model_name = msg.model.clone().or_else(|| Some(config.llm_model.clone()));
 
-    // 4. Build the initial message history
+    // 4. Build the initial message history with the structured system prompt
+    let system_prompt = crate::prompt_builder::build_system_prompt(
+        &ctx.memory_store,
+        &"",  // platform — will be enriched from channel metadata in the future
+        None, // system_message
+        &profile_name,
+    );
     let mut messages = vec![
-        ChatMessage::system(
-            "You are OmniAgent, a helpful assistant with filesystem and web tools.\n\
-\n\
-RULES:\n\
-- Read local files with filesystem_read. The tool descriptions tell you exactly which tool does what.\n\
-- Use fetch ONLY for HTTP/HTTPS URLs (web pages, APIs). Never use fetch for local files.\n\
-- Write results with filesystem_write.\n\
-- Read provided files before taking action — understand the task fully.\n\
-- At the end, include a brief summary of what was accomplished.",
-        ),
+        ChatMessage::system(&system_prompt),
         ChatMessage::user(&msg.content),
     ];
 
