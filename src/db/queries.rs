@@ -23,6 +23,9 @@ pub async fn find_pending_messages(
             embedding,
             summary_text,
             is_summary,
+            msg_type,
+            msg_subtype,
+            iteration_count,
             created_at
         FROM messages
         WHERE channel_id = $1 AND status = 'pending'
@@ -43,9 +46,10 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> Result<Message> 
         INSERT INTO messages (
             channel_id, role, content, status,
             thread_id, thread_sequence, external_id,
-            metadata, embedding, summary_text, is_summary
+            metadata, embedding, summary_text, is_summary,
+            msg_type, msg_subtype, iteration_count
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         RETURNING
             id,
             channel_id,
@@ -59,6 +63,9 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> Result<Message> 
             embedding,
             summary_text,
             is_summary,
+            msg_type,
+            msg_subtype,
+            iteration_count,
             created_at
         "#,
     )
@@ -73,6 +80,9 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> Result<Message> 
     .bind(&msg.embedding)
     .bind(&msg.summary_text)
     .bind(msg.is_summary)
+    .bind(&msg.msg_type)
+    .bind(&msg.msg_subtype)
+    .bind(msg.iteration_count)
     .fetch_one(pool)
     .await?;
 
@@ -161,6 +171,9 @@ pub async fn find_processing_older_than(
             embedding,
             summary_text,
             is_summary,
+            msg_type,
+            msg_subtype,
+            iteration_count,
             created_at
         FROM messages
         WHERE status = 'processing' AND created_at < $1
@@ -302,4 +315,25 @@ pub async fn find_all_stopped_channels(pool: &PgPool) -> Result<Vec<ChannelStop>
     .await?;
 
     Ok(rows)
+}
+
+/// Count how many agent 'message'-type iterations have occurred in a thread.
+/// Used to enforce the per-thread iteration limit.
+pub async fn count_thread_iterations(
+    pool: &PgPool,
+    thread_id: i64,
+) -> Result<i32> {
+    let count: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM messages
+        WHERE thread_id = $1
+          AND role = 'agent'
+          AND msg_type = 'message'
+        "#,
+    )
+    .bind(thread_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count.unwrap_or(0) as i32)
 }

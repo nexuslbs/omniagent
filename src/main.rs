@@ -40,11 +40,12 @@ async fn main() -> Result<()> {
     // Build agent config from environment
     let agent_cfg = agent::AgentConfig::from_env()?;
     tracing::info!(
-        "Agent config — model: {}, provider: {}, max_tokens: {}, temperature: {}",
+        "Agent config — model: {}, provider: {}, max_tokens: {}, temperature: {}, max_iterations: {}",
         agent_cfg.llm_model,
         agent_cfg.llm_provider,
         agent_cfg.max_tokens,
         agent_cfg.temperature,
+        agent_cfg.max_iterations,
     );
 
     // Build the agent

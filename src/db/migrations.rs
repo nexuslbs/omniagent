@@ -85,9 +85,37 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Migration: add msg_type, msg_subtype, iteration_count columns
+    // (idempotent — skips if columns already exist)
     sqlx::query(
         r#"
-        CREATE INDEX IF NOT EXISTS idx_messages_thread
+        ALTER TABLE messages
+            ADD COLUMN IF NOT EXISTS msg_type TEXT NOT NULL DEFAULT 'message',
+            ADD COLUMN IF NOT EXISTS msg_subtype TEXT,
+            ADD COLUMN IF NOT EXISTS iteration_count INT NOT NULL DEFAULT 0;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Drop the unique constraint on (thread_id, thread_sequence) since
+    // a single LLM turn can produce multiple records (reasoning, message).
+    // Replace it with a non-unique index covering all three.
+    sqlx::query(
+        r#"
+        DO $$ BEGIN
+            ALTER TABLE messages DROP CONSTRAINT messages_thread_id_thread_sequence_key;
+        EXCEPTION
+            WHEN undefined_object THEN NULL;
+        END $$;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_messages_thread_seq
             ON messages(thread_id, thread_sequence);
         "#,
     )

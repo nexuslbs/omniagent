@@ -39,10 +39,13 @@
 //                                                   -- pgvector extension is available
 //  summary_text     TEXT                            -- cached summary of the message
 //  is_summary       BOOL NOT NULL DEFAULT false
+//  msg_type         TEXT NOT NULL DEFAULT 'message' -- 'message', 'reasoning', 'tool_call', 'tool_result'
+//  msg_subtype      TEXT                            -- optional subtype (tool name, etc.)
+//  iteration_count  INT NOT NULL DEFAULT 0          -- which agent turn in the thread
 //  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 //
 //  UNIQUE(channel_id, external_id)
-//  UNIQUE(thread_id, thread_sequence)
+//  INDEX(thread_id, thread_sequence)
 //
 // ── channel_stops ─────────────────────────────────────────────────────────
 //

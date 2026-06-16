@@ -75,6 +75,9 @@ pub struct Message {
     pub embedding: Option<String>,
     pub summary_text: Option<String>,
     pub is_summary: bool,
+    pub msg_type: String,
+    pub msg_subtype: Option<String>,
+    pub iteration_count: i32,
     pub created_at: DateTime<Utc>,
 }
 
@@ -92,4 +95,7 @@ pub struct MessageNew {
     pub embedding: Option<String>,
     pub summary_text: Option<String>,
     pub is_summary: bool,
+    pub msg_type: String,
+    pub msg_subtype: Option<String>,
+    pub iteration_count: i32,
 }

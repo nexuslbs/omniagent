@@ -35,6 +35,7 @@ pub struct AgentConfig {
     pub max_tokens: u32,
     pub temperature: f32,
     pub summarize_after_days: u32,
+    pub max_iterations: u32,
 }
 
 impl AgentConfig {
@@ -48,6 +49,7 @@ impl AgentConfig {
     /// - `MAX_TOKENS` — Max tokens per response (default: 4096)
     /// - `TEMPERATURE` — Sampling temperature (default: 0.7)
     /// - `SUMMARIZE_AFTER_DAYS` — Days before auto-summarization (default: 7)
+    /// - `MAX_ITERATIONS` — Max agent turns per thread before skipping (default: 60)
     pub fn from_env() -> Result<Self> {
         Ok(Self {
             llm_api_key: std::env::var("LLM_API_KEY").unwrap_or_default(),
@@ -68,6 +70,10 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "7".to_string())
                 .parse()
                 .unwrap_or(7),
+            max_iterations: std::env::var("MAX_ITERATIONS")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse()
+                .unwrap_or(60),
         })
     }
 }
@@ -258,6 +264,25 @@ async fn channel_handler(
                     }
 
                     info!("Processing message {} in channel {}", msg.id, channel_id);
+
+                    // Check iteration limit before processing
+                    match queries::count_thread_iterations(&pool, msg.thread_id).await {
+                        Ok(count) if count >= config.max_iterations as i32 => {
+                            info!(
+                                "Thread {} has reached iteration limit ({}/{}), skipping message {}",
+                                msg.thread_id, count, config.max_iterations, msg.id
+                            );
+                            let _ = queries::update_message_status(
+                                &pool, msg.id, &MessageStatus::Skipped,
+                            ).await;
+                            continue;
+                        }
+                        Ok(_) => {} // under limit, proceed
+                        Err(e) => {
+                            error!("Failed to count thread iterations: {:?}", e);
+                        }
+                    }
+
                     if let Err(e) = process_message(&pool, &llm, &config, msg).await {
                         error!("Failed to process message {}: {:?}", msg.id, e);
                     }
@@ -275,10 +300,12 @@ async fn channel_handler(
 /// Process a single pending message through the state machine:
 ///
 /// 1. Update message status → `processing`
-/// 2. Call the LLM with system + user messages
-/// 3. Save the agent response (status: `completed`, same thread, seq+1)
-/// 4. Update original message status → `completed`
-/// 5. Return the saved response message
+/// 2. Get current iteration count for the thread
+/// 3. Call the LLM with system + user messages
+/// 4. If reasoning exists, save as a separate `reasoning` record
+/// 5. Save the main agent response (status: `completed`, msg_type: `message`)
+/// 6. Update original message status → `completed`
+/// 7. Return the saved response message
 async fn process_message(
     pool: &PgPool,
     llm: &LLMClient,
@@ -288,7 +315,11 @@ async fn process_message(
     // 1. Mark the message as 'processing'
     queries::update_message_status(pool, msg.id, &MessageStatus::Processing).await?;
 
-    // 2. Build LLM request
+    // 2. Get current iteration count for this thread
+    let iterations = queries::count_thread_iterations(pool, msg.thread_id).await.unwrap_or(0);
+    let next_iteration = iterations + 1;
+
+    // 3. Build LLM request
     let system_msg = ChatMessage {
         role: "system".to_string(),
         content: "You are OmniAgent, a helpful AI assistant.".to_string(),
@@ -314,11 +345,8 @@ async fn process_message(
         }
     };
 
-    // 3. Build metadata with reasoning + usage info
+    // 4. Build metadata with usage info
     let mut metadata = serde_json::json!({});
-    if let Some(reasoning) = &response.reasoning {
-        metadata["reasoning"] = serde_json::Value::String(reasoning.clone());
-    }
     if let Some(usage) = &response.usage {
         metadata["usage"] = serde_json::json!({
             "prompt_tokens": usage.prompt_tokens,
@@ -328,6 +356,34 @@ async fn process_message(
         });
     }
 
+    // 5. If reasoning/thinking exists, save as its own record
+    if let Some(reasoning_text) = &response.reasoning {
+        if !reasoning_text.is_empty() {
+            let reasoning_metadata = match metadata.get("usage") {
+                Some(u) => serde_json::json!({"usage": u}),
+                None => serde_json::json!({}),
+            };
+            let reasoning_msg = MessageNew {
+                channel_id: msg.channel_id,
+                role: "agent".to_string(),
+                content: reasoning_text.clone(),
+                status: MessageStatus::Completed,
+                thread_id: msg.thread_id,
+                thread_sequence: msg.thread_sequence + 1,
+                external_id: None,
+                metadata: reasoning_metadata,
+                embedding: None,
+                summary_text: None,
+                is_summary: false,
+                msg_type: "reasoning".to_string(),
+                msg_subtype: None,
+                iteration_count: next_iteration,
+            };
+            queries::create_message(pool, &reasoning_msg).await?;
+        }
+    }
+
+    // 6. Save the main agent response
     let agent_msg = MessageNew {
         channel_id: msg.channel_id,
         role: "agent".to_string(),
@@ -340,11 +396,14 @@ async fn process_message(
         embedding: None,
         summary_text: None,
         is_summary: false,
+        msg_type: "message".to_string(),
+        msg_subtype: None,
+        iteration_count: next_iteration,
     };
 
     let saved = queries::create_message(pool, &agent_msg).await?;
 
-    // 4. Mark the original message as 'completed'
+    // 7. Mark the original message as 'completed'
     queries::update_message_status(pool, msg.id, &MessageStatus::Completed).await?;
 
     Ok(saved)
