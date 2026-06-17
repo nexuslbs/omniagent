@@ -57,6 +57,12 @@ services:
       dockerfile: Dockerfile
     env_file:
       - backup.env
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      PGUSER: omniagent
+      PGPASSWORD: omniagent
+      PGDATABASE: omniagent
     volumes:
       - ./data:/opt/data:rw
 

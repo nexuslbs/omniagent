@@ -164,5 +164,16 @@ pub fn default_registry(ctx: &AppContext) -> McpRegistry {
     // Skill creation tool
     registry.register(tools::skills::create_skill_tool());
 
+    // Kanban tools
+    registry.register(tools::kanban::create_kanban_task_tool());
+    registry.register(tools::kanban::list_kanban_tasks_tool());
+    registry.register(tools::kanban::update_kanban_task_tool());
+    registry.register(tools::kanban::delete_kanban_task_tool());
+
+    // Cron tools
+    registry.register(tools::cron::create_cron_job_tool());
+    registry.register(tools::cron::list_cron_jobs_tool());
+    registry.register(tools::cron::delete_cron_job_tool());
+
     registry
 }

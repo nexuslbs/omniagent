@@ -179,5 +179,42 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ── Kanban tasks table ──
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS kanban_tasks (
+            id         TEXT PRIMARY KEY,
+            title      TEXT NOT NULL,
+            body       TEXT DEFAULT '',
+            status     TEXT NOT NULL DEFAULT 'backlog',
+            priority   INTEGER DEFAULT 0,
+            assignee   TEXT DEFAULT '',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // ── Cron jobs table ──
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS cron_jobs (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            schedule    TEXT NOT NULL,
+            prompt      TEXT NOT NULL DEFAULT '',
+            skills      TEXT DEFAULT '[]',
+            enabled     BOOLEAN DEFAULT true,
+            last_run_at TIMESTAMP WITH TIME ZONE,
+            next_run_at TIMESTAMP WITH TIME ZONE,
+            created_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
