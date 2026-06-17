@@ -24,7 +24,7 @@ pub struct MessageDb {
     pub role: String,
     pub content: String,
     pub status: String,
-    pub thread_id: i64,
+    pub thread_id: Option<i64>,
     pub thread_sequence: i32,
     pub external_id: Option<String>,
     pub metadata: String,
@@ -55,7 +55,7 @@ impl TryFrom<MessageDb> for Message {
                 .status
                 .parse::<MessageStatus>()
                 .map_err(|_| anyhow::anyhow!("Invalid status: {}", db.status))?,
-            thread_id: db.thread_id,
+            thread_id: db.thread_id.unwrap_or(db.id),
             thread_sequence: db.thread_sequence,
             external_id: db.external_id,
             metadata: serde_json::from_str(&db.metadata).unwrap_or(serde_json::json!({})),

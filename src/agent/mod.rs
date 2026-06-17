@@ -508,16 +508,74 @@ async fn process_message(
 
         // Execute each tool call
         for tc in &response.tool_calls {
+            let tool_name = tc.function.name.clone();
+            let tool_args = tc.function.arguments.clone();
+
+            // Persist the tool call as an agent message with msg_type="tool"
+            let tool_call_msg = MessageNew {
+                channel_id: msg.channel_id,
+                role: "agent".to_string(),
+                content: tool_args,
+                status: MessageStatus::Completed,
+                thread_id: Some(msg.thread_id),
+                thread_sequence: msg.thread_sequence + 1,
+                external_id: None,
+                metadata: serde_json::json!({}),
+                embedding: None,
+                summary_text: None,
+                is_summary: false,
+                msg_type: "tool".to_string(),
+                msg_subtype: Some(tool_name.clone()),
+                iteration_count: next_iteration,
+                profile: profile_name.clone(),
+                provider: provider_name.clone(),
+                model: model_name.clone(),
+                processing_time_ms: None,
+                token_usage: None,
+            };
+            if let Err(e) = queries::create_message(pool, &tool_call_msg).await {
+                error!("Failed to persist tool call '{}': {:?}", tool_name, e);
+            }
+
             let mcp_call = McpToolCall {
                 id: tc.id.clone(),
-                name: tc.function.name.clone(),
+                name: tool_name.clone(),
                 arguments: serde_json::from_str(&tc.function.arguments)
                     .unwrap_or(serde_json::json!({})),
             };
 
+            let tool_start = std::time::Instant::now();
             let result = mcp.execute(&mcp_call, ctx.clone());
+            let tool_elapsed_ms = tool_start.elapsed().as_millis() as i32;
+
             match result {
                 Ok(res) => {
+                    // Persist the tool result as an agent message with msg_type="tool_result"
+                    let tool_result_msg = MessageNew {
+                        channel_id: msg.channel_id,
+                        role: "agent".to_string(),
+                        content: res.content.clone(),
+                        status: MessageStatus::Completed,
+                        thread_id: Some(msg.thread_id),
+                        thread_sequence: msg.thread_sequence + 1,
+                        external_id: None,
+                        metadata: serde_json::json!({}),
+                        embedding: None,
+                        summary_text: None,
+                        is_summary: false,
+                        msg_type: "tool_result".to_string(),
+                        msg_subtype: Some(tool_name.clone()),
+                        iteration_count: next_iteration,
+                        profile: profile_name.clone(),
+                        provider: provider_name.clone(),
+                        model: model_name.clone(),
+                        processing_time_ms: Some(tool_elapsed_ms),
+                        token_usage: None,
+                    };
+                    if let Err(e) = queries::create_message(pool, &tool_result_msg).await {
+                        error!("Failed to persist tool result '{}': {:?}", tool_name, e);
+                    }
+
                     messages.push(ChatMessage::tool_result(
                         &tc.id,
                         &tc.function.name,
@@ -525,7 +583,34 @@ async fn process_message(
                     ));
                 }
                 Err(e) => {
-                    let err_msg = format!("Error executing tool '{}': {}", tc.function.name, e);
+                    let err_msg = format!("Error executing tool '{}': {}", tool_name, e);
+
+                    // Persist error as tool result
+                    let tool_result_msg = MessageNew {
+                        channel_id: msg.channel_id,
+                        role: "agent".to_string(),
+                        content: err_msg.clone(),
+                        status: MessageStatus::Completed,
+                        thread_id: Some(msg.thread_id),
+                        thread_sequence: msg.thread_sequence + 1,
+                        external_id: None,
+                        metadata: serde_json::json!({}),
+                        embedding: None,
+                        summary_text: None,
+                        is_summary: false,
+                        msg_type: "tool_result".to_string(),
+                        msg_subtype: Some(tool_name.clone()),
+                        iteration_count: next_iteration,
+                        profile: profile_name.clone(),
+                        provider: provider_name.clone(),
+                        model: model_name.clone(),
+                        processing_time_ms: Some(tool_elapsed_ms),
+                        token_usage: None,
+                    };
+                    if let Err(e2) = queries::create_message(pool, &tool_result_msg).await {
+                        error!("Failed to persist tool error '{}': {:?}", tool_name, e2);
+                    }
+
                     messages.push(ChatMessage::tool_result(
                         &tc.id,
                         &tc.function.name,
@@ -673,11 +758,12 @@ async fn process_message(
 
     // 12. Record processing time and cumulative token usage on the original prompt
     let elapsed_ms = start_time.elapsed().as_millis() as i32;
+    let token_usage_str: Option<String> = summary_token_usage.as_ref().map(|v| v.to_string());
     sqlx::query(
         "UPDATE messages SET processing_time_ms = $1, token_usage = $2::jsonb, status = 'completed' WHERE id = $3 AND status = 'processing'",
     )
     .bind(elapsed_ms)
-    .bind(&summary_token_usage)
+    .bind(&token_usage_str)
     .bind(msg.id)
     .execute(pool)
     .await?;
