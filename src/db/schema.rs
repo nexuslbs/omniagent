@@ -30,7 +30,7 @@
 //  status           TEXT NOT NULL DEFAULT 'pending'
 //                                                   -- 'pending', 'processing', 'completed',
 //                                                   -- 'failed', 'skipped'
-//  thread_id        BIGINT NOT NULL                 -- groups related messages (sequential)
+//  thread_id        BIGINT                          -- groups related messages (sequential); NULL for seq-0 until normalized to id
 //  thread_sequence  INT NOT NULL                    -- order within thread
 //  external_id      TEXT                            -- e.g. Telegram message ID
 //  metadata         JSONB DEFAULT '{}'              -- arbitrary metadata

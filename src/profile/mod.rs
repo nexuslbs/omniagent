@@ -20,13 +20,11 @@ pub struct Profile {
     pub temperature: Option<f32>,
     /// List of allowed MCP tool names for this profile
     pub allowed_tools: Vec<String>,
-    /// The base directory for this profile's data (memories/, skills/, wiki/)
-    pub base_path: String,
 }
 
 impl Profile {
-    /// Create a default profile with the given name and base path.
-    pub fn default(name: &str, base_path: &str) -> Self {
+    /// Create a default profile with the given name.
+    pub fn default(name: &str) -> Self {
         Self {
             name: name.to_string(),
             model: Some("deepseek-v4-flash".to_string()),
@@ -45,7 +43,6 @@ impl Profile {
                 "search_messages".to_string(),
                 "search_wiki".to_string(),
             ],
-            base_path: base_path.to_string(),
         }
     }
 
@@ -73,6 +70,7 @@ pub struct ProfileRegistry {
     pub profiles: HashMap<String, Profile>,
     #[expect(dead_code)]
     pub default_profile: String,
+    #[expect(dead_code)]
     pub data_dir: String,
 }
 
@@ -90,11 +88,10 @@ impl ProfileRegistry {
 
     /// Ensure the default profile exists.
     fn ensure_default(&mut self) {
-        let default_path = format!("{}/profiles/default", self.data_dir);
         if !self.profiles.contains_key("default") {
             self.profiles.insert(
                 "default".to_string(),
-                Profile::default("default", &default_path),
+                Profile::default("default"),
             );
         }
     }

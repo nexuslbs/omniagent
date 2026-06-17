@@ -107,7 +107,7 @@ pub struct MessageNew {
     pub role: String,
     pub content: String,
     pub status: MessageStatus,
-    pub thread_id: i64,
+    pub thread_id: Option<i64>,
     pub thread_sequence: i32,
     pub external_id: Option<String>,
     pub metadata: serde_json::Value,

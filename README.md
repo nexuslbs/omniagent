@@ -73,12 +73,11 @@ Profile fields:
 - **provider** — LLM provider (e.g., `opencode-go`, `openai`, `anthropic`)
 - **model** — LLM model name (e.g., `deepseek-v4-flash`)
 - **allowed_tools** — which MCP tools the agent can use
-- **base_path** — data directory for memories, skills, wiki
 
 ### Creating a Profile
 
 ```sql
-INSERT INTO profiles (name, provider, model, allowed_tools, base_path)
+INSERT INTO profiles (name, provider, model, allowed_tools)
 VALUES (
   'research',
   'anthropic',

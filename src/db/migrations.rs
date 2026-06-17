@@ -147,6 +147,15 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Drop base_path from profiles (path is derived as <data_dir>/profiles/<name>/)
+    sqlx::query(
+        r#"
+        ALTER TABLE profiles DROP COLUMN IF EXISTS base_path;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     // Create profiles table
     sqlx::query(
         r#"
@@ -160,7 +169,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             max_tokens      INT,
             temperature     DOUBLE PRECISION,
             allowed_tools   JSONB DEFAULT '[]',
-            base_path       TEXT NOT NULL,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
@@ -174,6 +182,17 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_messages_profile
             ON messages(profile, model);
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Migration: make thread_id nullable so seq-0 messages can be inserted
+    // without a pre-determined thread_id, then set thread_id = id after insert.
+    sqlx::query(
+        r#"
+        ALTER TABLE messages
+        ALTER COLUMN thread_id DROP NOT NULL;
         "#,
     )
     .execute(pool)

@@ -312,7 +312,7 @@ async fn channel_handler(
                                 msg.id, e
                             ),
                             status: MessageStatus::Completed,
-                            thread_id: msg.thread_id,
+                            thread_id: Some(msg.thread_id),
                             thread_sequence: msg.thread_sequence + 1,
                             external_id: Some(format!("error:{}:{}", msg.id, chrono::Utc::now().timestamp())),
                             metadata: serde_json::json!({
@@ -422,7 +422,7 @@ async fn process_message(
     // 5. Get allowed tools for the profile and build tool definitions
     let profile = crate::profile::ProfileRegistry::new(&ctx.data_dir);
     let prof = profile.get(&profile_name).cloned().unwrap_or_else(|| {
-        crate::profile::Profile::default("default", &format!("{}/profiles/default", ctx.data_dir))
+        crate::profile::Profile::default("default")
     });
     let tools_def = mcp.to_openai_tools(&prof.allowed_tools);
 
@@ -552,7 +552,7 @@ async fn process_message(
                 role: "agent".to_string(),
                 content: reasoning_text.clone(),
                 status: MessageStatus::Completed,
-                thread_id: msg.thread_id,
+                thread_id: Some(msg.thread_id),
                 thread_sequence: msg.thread_sequence + 1,
                 external_id: None,
                 metadata: serde_json::json!({}),
@@ -578,7 +578,7 @@ async fn process_message(
         role: "agent".to_string(),
         content: final_content,
         status: MessageStatus::Completed,
-        thread_id: msg.thread_id,
+        thread_id: Some(msg.thread_id),
         thread_sequence: msg.thread_sequence + 1,
         external_id: None,
         metadata: serde_json::json!({}),
@@ -645,7 +645,7 @@ async fn process_message(
         role: "agent".to_string(),
         content: summary_text,
         status: MessageStatus::Completed,
-        thread_id: msg.thread_id,
+        thread_id: Some(msg.thread_id),
         thread_sequence: msg.thread_sequence + 2, // after reasoning (1) and message (1)
         external_id: None,
         metadata: serde_json::json!({}),

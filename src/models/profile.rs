@@ -15,7 +15,6 @@ pub struct ProfileRow {
     pub max_tokens: Option<i32>,
     pub temperature: Option<f64>,
     pub allowed_tools: serde_json::Value,
-    pub base_path: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -32,5 +31,4 @@ pub struct ProfileNew {
     pub max_tokens: Option<i32>,
     pub temperature: Option<f64>,
     pub allowed_tools: Vec<String>,
-    pub base_path: String,
 }

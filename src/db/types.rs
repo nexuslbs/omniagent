@@ -87,7 +87,7 @@ pub struct MessageNewDb {
     pub role: String,
     pub content: String,
     pub status: String,
-    pub thread_id: i64,
+    pub thread_id: Option<i64>,
     pub thread_sequence: i32,
     pub external_id: Option<String>,
     pub metadata: String,
@@ -274,6 +274,43 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> anyhow::Result<M
     row.try_into()
 }
 
+/// Insert a seq-0 message with thread_id=NULL, then immediately backfill
+/// thread_id = id so subsequent messages can reference this thread.
+/// Uses two atomic statements (the window where thread_id is NULL is
+/// recovered by the safety pass in skip_all_pending_processing).
+pub async fn init_thread_root(pool: &PgPool, msg: &MessageNew) -> anyhow::Result<Message> {
+    // Insert with thread_id=None (column is nullable after migration)
+    let inserted = create_message(pool, msg).await?;
+
+    // Backfill: SET thread_id = id for the root message
+    sql_forge!(
+        "UPDATE messages SET thread_id = id WHERE id = :id AND thread_id IS NULL",
+        ( :id = inserted.id )
+    )
+    .execute(pool)
+    .await?;
+
+    // Re-read with thread_id now populated
+    let row: MessageDb = sqlx::query_as(
+        r#"
+        SELECT
+            id, channel_id, role, content, status,
+            thread_id, thread_sequence, external_id,
+            metadata::text, embedding, summary_text, is_summary,
+            msg_type, msg_subtype, iteration_count,
+            profile, provider, model, processing_time_ms, token_usage::text,
+            TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
+        FROM messages
+        WHERE id = $1
+        "#,
+    )
+    .bind(inserted.id)
+    .fetch_one(pool)
+    .await?;
+
+    row.try_into()
+}
+
 pub async fn update_message_status(
     pool: &PgPool,
     id: i64,
@@ -339,6 +376,12 @@ pub async fn skip_pending_messages(pool: &PgPool, channel_id: i64) -> anyhow::Re
 /// Also aggregates thread-level stats (processing time, token usage, message count)
 /// and writes them back to the sequence-0 message before skipping.
 pub async fn skip_all_pending_processing(pool: &PgPool) -> anyhow::Result<u64> {
+    // Safety pass: normalize any orphaned rows where thread_id IS NULL
+    // (brief window between INSERT and init_thread_root UPDATE)
+    sqlx::query(r#"UPDATE messages SET thread_id = id WHERE thread_id IS NULL"#)
+        .execute(pool)
+        .await?;
+
     // First pass: update sequence-0 messages with aggregated thread stats, then mark skipped
     let result = sqlx::query(
         r#"

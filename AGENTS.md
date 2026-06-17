@@ -66,7 +66,8 @@ Profiles define the LLM configuration, allowed tools, and data directory for a c
 | `max_tokens` | INT? | Max tokens for this profile |
 | `temperature` | FLOAT? | Temperature for this profile |
 | `allowed_tools` | JSONB | List of allowed MCP tool names |
-| `base_path` | TEXT | Data directory (profiles/<name>/) |
+| `created_at` | TIMESTAMPTZ | When created |
+| `updated_at` | TIMESTAMPTZ | When updated |
 
 Profile resolution (for model/provider priority):
 1. Channel's `current_model`/`current_provider` (highest priority)

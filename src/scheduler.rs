@@ -39,7 +39,6 @@ async fn tick(pool: &PgPool) -> Result<()> {
 
     for job in jobs {
         let now = Utc::now();
-        let thread_id = job_name_to_thread_id(&job.name);
         let display_name = if job.display_name.is_empty() {
             &job.name
         } else {
@@ -83,7 +82,7 @@ async fn tick(pool: &PgPool) -> Result<()> {
             role: "system".to_string(),
             content: job.prompt.clone(),
             status: MessageStatus::Pending,
-            thread_id,
+            thread_id: None,  // will be set to message id by init_thread_root
             thread_sequence: 0,
             external_id: Some(format!("cron:{}:{}", job.id, now.timestamp())),
             metadata: serde_json::json!({
@@ -105,7 +104,7 @@ async fn tick(pool: &PgPool) -> Result<()> {
             token_usage: None,
         };
 
-        let msg_result = queries::create_message(pool, &msg).await;
+        let msg_result = queries::init_thread_root(pool, &msg).await;
 
         // ── Release claim and update timestamps ──
         let new_next = calculate_next_run(&job.schedule, &now);
@@ -216,14 +215,4 @@ fn calculate_next_run(expression: &str, now: &DateTime<Utc>) -> DateTime<Utc> {
             *now + chrono::Duration::hours(1)
         }
     }
-}
-
-/// Derive a stable i64 thread_id from a job name hash, producing values in [100, 149].
-fn job_name_to_thread_id(name: &str) -> i64 {
-    let mut hash: i64 = 0;
-    for byte in name.bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(byte as i64);
-    }
-    // Ensure positive and in range [100, 149]
-    100 + (hash.abs() % 50)
 }
