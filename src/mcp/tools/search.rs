@@ -1,4 +1,4 @@
-use crate::mcp::{AppContext, McpTool, McpToolResult};
+use crate::mcp::{truncate_content, AppContext, McpTool, McpToolResult, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
 use anyhow::Result;
 use serde_json::Value;
 
@@ -91,9 +91,10 @@ pub fn search_messages_tool(ctx: &AppContext) -> McpTool {
                 lines.push(format!("#{} [{}]: {}", id, role, preview));
             }
 
+            let output = format!("Found {} result(s):\n{}", results.len(), lines.join("\n\n"));
             Ok(McpToolResult {
                 call_id: String::new(),
-                content: format!("Found {} result(s):\n{}", results.len(), lines.join("\n\n")),
+                content: truncate_content(&output, DEFAULT_MAX_TOOL_OUTPUT_CHARS),
                 is_error: false,
             })
         }),
@@ -193,9 +194,10 @@ pub fn search_wiki_tool(ctx: &AppContext) -> McpTool {
                 });
             }
 
+            let output = format!("Found {} wiki result(s):\n{}", results.len(), results.join("\n\n"));
             Ok(McpToolResult {
                 call_id: String::new(),
-                content: format!("Found {} wiki result(s):\n{}", results.len(), results.join("\n\n")),
+                content: truncate_content(&output, DEFAULT_MAX_TOOL_OUTPUT_CHARS),
                 is_error: false,
             })
         }),

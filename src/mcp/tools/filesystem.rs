@@ -1,4 +1,4 @@
-use crate::mcp::{AppContext, McpTool, McpToolResult};
+use crate::mcp::{truncate_content, AppContext, McpTool, McpToolResult, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
 use anyhow::Result;
 use serde_json::Value;
 use std::fs;
@@ -38,7 +38,7 @@ pub fn read_tool() -> McpTool {
                 .map_err(|e| anyhow::anyhow!("Failed to read file '{}': {}", safe_path, e))?;
             Ok(McpToolResult {
                 call_id: String::new(),
-                content,
+                content: truncate_content(&content, DEFAULT_MAX_TOOL_OUTPUT_CHARS),
                 is_error: false,
             })
         }),
@@ -129,9 +129,21 @@ pub fn list_tool() -> McpTool {
                 results.push(format!("{} [{}]", name, typ));
             }
             results.sort();
+            let max_entries = 2000;
+            let output = if results.len() > max_entries {
+                let truncated: Vec<&str> = results.iter().take(max_entries).map(|s| s.as_str()).collect();
+                format!(
+                    "{}\n[... truncated from {} to ~{} entries]",
+                    truncated.join("\n"),
+                    results.len(),
+                    max_entries
+                )
+            } else {
+                results.join("\n")
+            };
             Ok(McpToolResult {
                 call_id: String::new(),
-                content: results.join("\n"),
+                content: output,
                 is_error: false,
             })
         }),
@@ -172,13 +184,23 @@ pub fn search_tool() -> McpTool {
                 .map(|p| p.to_string_lossy().to_string())
                 .collect();
             results.sort();
+            let max_results = 1000;
+            let output = if results.is_empty() {
+                "No matches found".to_string()
+            } else if results.len() > max_results {
+                let truncated: Vec<&str> = results.iter().take(max_results).map(|s| s.as_str()).collect();
+                format!(
+                    "{}\n[... truncated from {} to ~{} results]",
+                    truncated.join("\n"),
+                    results.len(),
+                    max_results
+                )
+            } else {
+                results.join("\n")
+            };
             Ok(McpToolResult {
                 call_id: String::new(),
-                content: if results.is_empty() {
-                    "No matches found".to_string()
-                } else {
-                    results.join("\n")
-                },
+                content: output,
                 is_error: false,
             })
         }),

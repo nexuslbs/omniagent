@@ -97,6 +97,7 @@ async fn tick(pool: &PgPool) -> Result<()> {
             msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
             iteration_count: 0,
+            iterations: 0,
             profile: "default".to_string(),
             provider: None,
             model: None,

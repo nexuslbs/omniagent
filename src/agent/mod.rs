@@ -23,7 +23,11 @@ use tracing::{error, info, warn};
 
 use crate::db::types as queries;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
-use crate::mcp::{AppContext, McpRegistry, McpToolCall};
+
+/// Maximum total characters of tool results in conversation history before
+/// old tool results are pruned (Layer 3 compression).
+const TOOL_RESULT_HISTORY_BUDGET: usize = 80_000;
+use crate::mcp::{truncate_content, AppContext, McpRegistry, McpToolCall, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
 use crate::models::{Message, MessageNew, MessageStatus};
 
 /// Configuration for the agent's LLM interactions.
@@ -325,6 +329,7 @@ async fn channel_handler(
                             msg_type: "tool".to_string(),
                             msg_subtype: Some("error".to_string()),
                             iteration_count: 0,
+                            iterations: 0,
                             profile: msg.profile.clone(),
                             provider: None,
                             model: None,
@@ -365,6 +370,52 @@ fn merge_usage(cumulative: &mut Option<Usage>, new_usage: Option<Usage>) {
     }
 }
 
+/// Prune old tool results from the conversation history when the total
+/// exceeds `TOOL_RESULT_HISTORY_BUDGET` chars (Layer 3).
+///
+/// Keeps the most recent turn's results intact and strips old tool result
+/// bodies, replacing them with a short summary, while preserving all
+/// user, assistant, and system messages unchanged.
+fn prune_old_tool_results(messages: &mut Vec<ChatMessage>) {
+    let total_tool_chars: usize = messages
+        .iter()
+        .filter(|m| m.role == "tool")
+        .map(|m| m.content.len())
+        .sum();
+
+    if total_tool_chars <= TOOL_RESULT_HISTORY_BUDGET {
+        return;
+    }
+
+    // Find the index of the last assistant message with tool_calls — this
+    // marks the most recent turn boundary. Tool results after it are kept.
+    let last_tool_turn_idx = messages
+        .iter()
+        .rposition(|m| m.role == "assistant" && m.tool_calls.is_some());
+
+    let keep_from = last_tool_turn_idx.unwrap_or(0);
+
+    for msg in messages.iter_mut().take(keep_from) {
+        if msg.role == "tool" && msg.content.len() > 500 {
+            let preview = if msg.content.len() > 200 {
+                let truncate_to = msg
+                    .content
+                    .char_indices()
+                    .nth(200)
+                    .map(|(i, _)| i)
+                    .unwrap_or(msg.content.len());
+                format!("{}...", &msg.content[..truncate_to])
+            } else {
+                msg.content.clone()
+            };
+            msg.content = format!(
+                "[Pruned tool result — was {} chars] {preview}",
+                msg.content.len(),
+            );
+        }
+    }
+}
+
 /// Process a single pending message through the state machine:
 ///
 /// 1. Update message status → `processing`
@@ -390,10 +441,9 @@ async fn process_message(
     queries::update_message_status(pool, msg.id, &MessageStatus::Processing).await?;
 
     // 2. Get current iteration count for this thread
-    let iterations = queries::count_thread_iterations(pool, msg.thread_id)
+    let current_max = queries::count_thread_iterations(pool, msg.thread_id)
         .await
         .unwrap_or(0);
-    let next_iteration = iterations + 1;
 
     // 3. Resolve profile, provider, model for this message
     let profile_name = if msg.profile.is_empty() {
@@ -435,23 +485,29 @@ async fn process_message(
     let tools_def = mcp.to_openai_tools(&prof.allowed_tools);
 
     // 6. Tool-calling loop — max iterations controls total LLM calls
-    let max_llm_calls = config.max_iterations.min(40); // safety cap
+    let remaining = config.max_iterations as i32 - current_max;
+    let max_llm_calls = remaining.max(0).min(25) as u32; // safety cap — 25 max
     let mut final_content = String::new();
     let mut final_reasoning: Option<String> = None;
     let mut final_tool_call: bool = false;
     let mut cumulative_usage: Option<Usage> = None;
     let mut limit_reached: bool = false;
+    let mut current_iter = current_max;
 
-    for turn in 0..max_llm_calls {
-        let is_last_turn = turn == max_llm_calls - 1;
-        if is_last_turn {
-            // On the final allowed turn, hint to the model that it should
-            // produce a final answer rather than more tool calls.
+    for _turn in 0..max_llm_calls {
+        current_iter += 1;  // increment before each LLM call
+
+        // If this LLM call will reach the iteration limit, hint to the model
+        // to produce a final answer rather than more tool calls.
+        if current_iter >= config.max_iterations as i32 {
             messages.push(ChatMessage::system(
                 "This is your last turn. You must provide your final answer now. \
                  Do not request additional tool calls.",
             ));
         }
+
+        // Layer 3: prune old tool results from conversation history if over budget
+        prune_old_tool_results(&mut messages);
 
         let request = CompletionRequest {
             messages: messages.clone(),
@@ -490,12 +546,8 @@ async fn process_message(
             break;
         }
 
-        // If we've reached the last turn and still got tool calls, force a response
-        if is_last_turn {
-            final_content = "I've completed the requested operations using my available tools, \
-                            but reached the iteration limit. Please check the results above."
-                .to_string();
-            final_tool_call = false;
+        // If iterations will equal the max after this call, flag interruption
+        if current_iter >= config.max_iterations as i32 {
             limit_reached = true;
             break;
         }
@@ -526,7 +578,8 @@ async fn process_message(
                 is_summary: false,
                 msg_type: "tool".to_string(),
                 msg_subtype: Some(tool_name.clone()),
-                iteration_count: next_iteration,
+                iteration_count: current_iter,
+                iterations: current_iter,
                 profile: profile_name.clone(),
                 provider: provider_name.clone(),
                 model: model_name.clone(),
@@ -550,11 +603,14 @@ async fn process_message(
 
             match result {
                 Ok(res) => {
+                    // Layer 2: truncate first — DB stores what the LLM will see
+                    let content = truncate_content(&res.content, DEFAULT_MAX_TOOL_OUTPUT_CHARS);
+
                     // Persist the tool result as an agent message with msg_type="tool_result"
                     let tool_result_msg = MessageNew {
                         channel_id: msg.channel_id,
                         role: "agent".to_string(),
-                        content: res.content.clone(),
+                        content: content.clone(),
                         status: MessageStatus::Completed,
                         thread_id: Some(msg.thread_id),
                         thread_sequence: msg.thread_sequence + 1,
@@ -565,7 +621,8 @@ async fn process_message(
                         is_summary: false,
                         msg_type: "tool_result".to_string(),
                         msg_subtype: Some(tool_name.clone()),
-                        iteration_count: next_iteration,
+                        iteration_count: current_iter,
+                        iterations: current_iter,
                         profile: profile_name.clone(),
                         provider: provider_name.clone(),
                         model: model_name.clone(),
@@ -579,7 +636,7 @@ async fn process_message(
                     messages.push(ChatMessage::tool_result(
                         &tc.id,
                         &tc.function.name,
-                        &res.content,
+                        &content,
                     ));
                 }
                 Err(e) => {
@@ -600,7 +657,8 @@ async fn process_message(
                         is_summary: false,
                         msg_type: "tool_result".to_string(),
                         msg_subtype: Some(tool_name.clone()),
-                        iteration_count: next_iteration,
+                        iteration_count: current_iter,
+                        iterations: current_iter,
                         profile: profile_name.clone(),
                         provider: provider_name.clone(),
                         model: model_name.clone(),
@@ -654,7 +712,8 @@ async fn process_message(
                 is_summary: false,
                 msg_type: "reasoning".to_string(),
                 msg_subtype: None,
-                iteration_count: next_iteration,
+                iteration_count: current_iter,
+                iterations: current_iter,
                 profile: profile_name.clone(),
                 provider: provider_name.clone(),
                 model: model_name.clone(),
@@ -680,7 +739,8 @@ async fn process_message(
         is_summary: false,
         msg_type: "message".to_string(),
         msg_subtype: None,
-        iteration_count: next_iteration,
+        iteration_count: current_iter,
+        iterations: current_iter,
         profile: profile_name.clone(),
         provider: provider_name.clone(),
         model: model_name.clone(),
@@ -690,19 +750,14 @@ async fn process_message(
 
     let saved = queries::create_message(pool, &agent_msg).await?;
 
-    // 10. Generate a summary (outside the iteration limit)
-    // Include the conversation context for the summarizer
+    // ── Summary generation (outside iteration budget) ──
     let mut summary_msgs = messages.clone();
-    if limit_reached {
-        summary_msgs.push(ChatMessage::system(&format!(
-            "The iteration limit of {limit} was reached so the response may be incomplete. \
-             Mention if the user needs to provide additional input or clarification. \
-             Now summarize what was accomplished.",
-            limit = max_llm_calls,
-        )));
+    summary_msgs.push(ChatMessage::system(if limit_reached {
+        "The iteration limit was reached so the task may be incomplete. \
+         Summarize what was accomplished and inform the user they can request to continue."
     } else {
-        summary_msgs.push(ChatMessage::system("Now summarize what was accomplished."));
-    }
+        "Now summarize what was accomplished."
+    }));
 
     let summary_request = CompletionRequest {
         messages: summary_msgs,
@@ -723,16 +778,6 @@ async fn process_message(
         }
     };
 
-    // 11. Save the summary as its own record
-    let summary_token_usage = cumulative_usage.as_ref().map(|u| {
-        serde_json::json!({
-            "prompt_tokens": u.prompt_tokens,
-            "completion_tokens": u.completion_tokens,
-            "cached_tokens": u.cached_tokens,
-            "reasoning_tokens": u.reasoning_tokens,
-        })
-    });
-
     let summary_msg = MessageNew {
         channel_id: msg.channel_id,
         role: "agent".to_string(),
@@ -747,23 +792,36 @@ async fn process_message(
         is_summary: false,
         msg_type: "summary".to_string(),
         msg_subtype: None,
-        iteration_count: next_iteration,
+        iteration_count: current_iter,
         profile: profile_name.clone(),
         provider: provider_name.clone(),
         model: model_name.clone(),
         processing_time_ms: None,
-        token_usage: summary_token_usage.clone(),
+        token_usage: None,
+        iterations: current_iter,
     };
     let _ = queries::create_message(pool, &summary_msg).await;
 
-    // 12. Record processing time and cumulative token usage on the original prompt
+    // 10. Serialize cumulative token usage and record on the original prompt
+    let token_usage_json = cumulative_usage.as_ref().map(|u| {
+        serde_json::json!({
+            "prompt_tokens": u.prompt_tokens,
+            "completion_tokens": u.completion_tokens,
+            "cached_tokens": u.cached_tokens,
+            "reasoning_tokens": u.reasoning_tokens,
+        })
+    });
+
+    let final_status = if limit_reached { "interrupted" } else { "completed" };
     let elapsed_ms = start_time.elapsed().as_millis() as i32;
-    let token_usage_str: Option<String> = summary_token_usage.as_ref().map(|v| v.to_string());
+    let token_usage_str: Option<String> = token_usage_json.as_ref().map(|v| v.to_string());
     sqlx::query(
-        "UPDATE messages SET processing_time_ms = $1, token_usage = $2::jsonb, status = 'completed' WHERE id = $3 AND status = 'processing'",
+        "UPDATE messages SET processing_time_ms = $1, token_usage = $2::jsonb, status = $3::text, iterations = $4 WHERE id = $5 AND status = 'processing'",
     )
     .bind(elapsed_ms)
     .bind(&token_usage_str)
+    .bind(final_status)
+    .bind(current_iter)
     .bind(msg.id)
     .execute(pool)
     .await?;

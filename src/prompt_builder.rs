@@ -20,45 +20,31 @@ const ENTRY_DELIMITER: &str = "\n§\n";
 // ── Character limits ────────────────────────────────────────────
 
 /// Max characters for the MEMORY block in the system prompt.
-const MEMORY_CHAR_LIMIT: usize = 4_500;
+const MEMORY_CHAR_LIMIT: usize = 2_500;
 /// Max characters for the USER profile block in the system prompt.
-const USER_CHAR_LIMIT: usize = 2_000;
+const USER_CHAR_LIMIT: usize = 1_000;
 
 // ── Stable identity / guidance texts ────────────────────────────
 
-const DEFAULT_AGENT_IDENTITY: &str = "You are OmniAgent, the Agent to Rule Them All — \
-a direct, autonomous interface for the user to accomplish any task. Your primary \
-purpose is to learn from the user and improve over time, automating tasks so the \
-user doesn't need to micromanage you. Proactively identify patterns, suggest \
-improvements, and build up your own capabilities. You can orchestrate subagents \
-for complex parallel work, though you can handle most tasks directly.";
+const DEFAULT_AGENT_IDENTITY: &str = "You are OmniAgent — precise, efficient, autonomous. \
+Your tools: filesystem, HTTP fetch, search. Use minimum roundtrips.";
 
-const TOOL_GUIDANCE: &str = "You have access to a set of tools (file system, HTTP, \
-search, and more) to accomplish tasks. Use them proactively — do not describe \
-what you would do without actually doing it. After completing a request, always \
-include a summary of what was accomplished.";
+const TOOL_GUIDANCE: &str = "TOOL USE RULES (fail the task if you violate these):\n\
+1. PLAN before acting — decide ALL data needed in one shot.\n\
+2. BATCH every fetch into ONE turn. Need 4 GitHub repos + 4 crates + 4 shields? \
+Fetch all 12 in a SINGLE tool-calling round.\n\
+3. NEVER fetch the same URL twice. If you already fetched a URL, USE its result. \
+Do not re-fetch with different query params, do not try alternative APIs for the same data. \
+The data you have is sufficient.\n\
+4. TRUST YOUR RESULTS — once you have data, move forward. Don't second-guess.\n\
+5. COMPLETE in 3-5 tool-calling rounds max. More than 10 means you failed at batching.\n\
+6. READ the input file, DO the work, WRITE output, VERIFY, DONE. No detours.\n\
+7. Skip Critical-Instructions.md and Anti-Patterns.md — they are not needed for \
+normal research tasks.";
 
-const SKILLS_GUIDANCE: &str = "Skills are reusable procedures you can create when \
-you discover recurring task patterns. When you complete a non-trivial task (5+ steps), \
-consider saving the approach as a skill so you can reuse it. Skills allow you to \
-automate workflows and become more efficient over time. You have full ability to \
-create, update, and delete skills as your knowledge grows.";
+const SKILLS_GUIDANCE: &str = "";
 
-const WIKI_GUIDANCE: &str = "You maintain a knowledge wiki at \
-<data_dir>/profiles/<profile>/wiki/ using the Karpathy method. The wiki is your \
-long-term memory for objective, referenceable facts. You SHOULD actively manage it:\n\
-- YAML frontmatter on every page (created, updated, type, tags)\n\
-- index.md as the catalog of all pages\n\
-- log.md as the chronological action log\n\
-- Reference/ directory for cross-reference documentation\n\
-- Raw/Research/ for research notes and design documents\n\
-- Cross-reference related pages with wikilinks [[Page Name]]\n\
-\n\
-As knowledge grows, add new pages for new patterns and decisions, update existing \
-pages when facts change, and delete or archive pages that are obsolete. Use the \
-filesystem tools (read, write, search, list) to manage wiki files. The wiki is \
-persistent and survives sessions — use it to store anything worth remembering \
-long-term.";
+const WIKI_GUIDANCE: &str = "Your wiki at <data_dir>/profiles/<profile>/wiki/ stores long-term knowledge.";
 
 const PROFILE_HINT: &str = "Active OmniAgent profile: default. \
 Your profile configuration determines which model, provider, and tools are available. \

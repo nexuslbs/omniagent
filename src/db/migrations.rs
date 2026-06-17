@@ -256,5 +256,15 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Migration: add iterations column (per-LLM-call counter)
+    sqlx::query(
+        r#"
+        ALTER TABLE messages
+        ADD COLUMN IF NOT EXISTS iterations INT NOT NULL DEFAULT 0
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }

@@ -14,6 +14,8 @@ pub enum MessageStatus {
     Failed,
     #[serde(rename = "skipped")]
     Skipped,
+    #[serde(rename = "interrupted")]
+    Interrupted,
 }
 
 impl fmt::Display for MessageStatus {
@@ -24,6 +26,7 @@ impl fmt::Display for MessageStatus {
             MessageStatus::Completed => write!(f, "completed"),
             MessageStatus::Failed => write!(f, "failed"),
             MessageStatus::Skipped => write!(f, "skipped"),
+            MessageStatus::Interrupted => write!(f, "interrupted"),
         }
     }
 }
@@ -38,6 +41,7 @@ impl std::str::FromStr for MessageStatus {
             "completed" => Ok(MessageStatus::Completed),
             "failed" => Ok(MessageStatus::Failed),
             "skipped" => Ok(MessageStatus::Skipped),
+            "interrupted" => Ok(MessageStatus::Interrupted),
             _ => Err(format!("invalid message status: {}", s)),
         }
     }
@@ -60,6 +64,7 @@ impl sqlx::Decode<'_, sqlx::Postgres> for MessageStatus {
             "completed" => Ok(MessageStatus::Completed),
             "failed" => Ok(MessageStatus::Failed),
             "skipped" => Ok(MessageStatus::Skipped),
+            "interrupted" => Ok(MessageStatus::Interrupted),
             _ => Err(format!("invalid message status: {}", s).into()),
         }
     }
@@ -97,6 +102,7 @@ pub struct Message {
     pub model: Option<String>,
     pub processing_time_ms: Option<i32>,
     pub token_usage: Option<serde_json::Value>,
+    pub iterations: i32,
     pub created_at: DateTime<Utc>,
 }
 
@@ -122,4 +128,5 @@ pub struct MessageNew {
     pub model: Option<String>,
     pub processing_time_ms: Option<i32>,
     pub token_usage: Option<serde_json::Value>,
+    pub iterations: i32,
 }

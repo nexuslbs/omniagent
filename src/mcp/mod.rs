@@ -4,6 +4,28 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Truncate content to `max_chars` bytes (safe UTF-8 boundary).
+/// Appends a truncation note when content exceeds the limit.
+pub fn truncate_content(content: &str, max_chars: usize) -> String {
+    if content.len() <= max_chars {
+        return content.to_string();
+    }
+    let truncate_at = content
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(content.len());
+    format!(
+        "{}...\n\n[... truncated from {} to ~{} chars]",
+        &content[..truncate_at],
+        content.len(),
+        max_chars
+    )
+}
+
+/// Default maximum output size for tool results (50K chars).
+pub const DEFAULT_MAX_TOOL_OUTPUT_CHARS: usize = 50_000;
+
 pub mod tools;
 
 /// A tool call requested by the LLM.

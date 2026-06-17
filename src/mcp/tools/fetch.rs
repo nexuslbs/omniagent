@@ -1,4 +1,4 @@
-use crate::mcp::{AppContext, McpTool, McpToolResult};
+use crate::mcp::{truncate_content, AppContext, McpTool, McpToolResult, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
 use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
@@ -42,19 +42,13 @@ pub fn fetch_tool() -> McpTool {
                     let status = response.status();
                     let body = response.text().await?;
 
-                    let preview = if body.len() > 2000 {
-                        format!("{}...\n\n[Response truncated from {} to 2000 characters]", &body[..2000], body.len())
-                    } else {
-                        body
-                    };
-
                     Ok(McpToolResult {
                         call_id: String::new(),
                         content: format!(
                             "HTTP {} {}\n\n{}",
                             status.as_u16(),
                             status.canonical_reason().unwrap_or(""),
-                            preview
+                            truncate_content(&body, DEFAULT_MAX_TOOL_OUTPUT_CHARS)
                         ),
                         is_error: !status.is_success(),
                     })

@@ -1,4 +1,4 @@
-use crate::mcp::{AppContext, McpTool, McpToolResult};
+use crate::mcp::{truncate_content, AppContext, McpTool, McpToolResult, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
 use anyhow::Result;
 use serde_json::Value;
 use sql_forge::sql_forge;
@@ -173,7 +173,7 @@ pub fn list_cron_jobs_tool() -> McpTool {
             let output = serde_json::to_string_pretty(&serde_json::json!({ "jobs": jobs }))?;
             Ok(McpToolResult {
                 call_id: String::new(),
-                content: output,
+                content: truncate_content(&output, DEFAULT_MAX_TOOL_OUTPUT_CHARS),
                 is_error: false,
             })
         }),

@@ -39,6 +39,7 @@ pub struct MessageDb {
     pub model: Option<String>,
     pub processing_time_ms: Option<i32>,
     pub token_usage: Option<String>,
+    pub iterations: i32,
     pub created_at: String,
 }
 
@@ -70,6 +71,7 @@ impl TryFrom<MessageDb> for Message {
             model: db.model,
             processing_time_ms: db.processing_time_ms,
             token_usage: db.token_usage.and_then(|v| serde_json::from_str(&v).ok()),
+            iterations: db.iterations,
             created_at: db
                 .created_at
                 .parse::<DateTime<Utc>>()
@@ -102,6 +104,7 @@ pub struct MessageNewDb {
     pub model: Option<String>,
     pub processing_time_ms: Option<i32>,
     pub token_usage: Option<String>,
+    pub iterations: i32,
 }
 
 impl From<&MessageNew> for MessageNewDb {
@@ -126,6 +129,7 @@ impl From<&MessageNew> for MessageNewDb {
             model: msg.model.clone(),
             processing_time_ms: msg.processing_time_ms,
             token_usage: msg.token_usage.as_ref().map(|v| v.to_string()),
+            iterations: msg.iterations,
         }
     }
 }
@@ -237,15 +241,17 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> anyhow::Result<M
             thread_id, thread_sequence, external_id,
             metadata, embedding, summary_text, is_summary,
             msg_type, msg_subtype, iteration_count,
-            profile, provider, model, processing_time_ms, token_usage
+            profile, provider, model, processing_time_ms, token_usage,
+            iterations
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20)
         RETURNING
             id, channel_id, role, content, status,
             thread_id, thread_sequence, external_id,
             metadata::text, embedding, summary_text, is_summary,
             msg_type, msg_subtype, iteration_count,
             profile, provider, model, processing_time_ms, token_usage::text,
+            iterations,
             TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
         "#,
     )
@@ -268,6 +274,7 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> anyhow::Result<M
     .bind(&db.model)
     .bind(db.processing_time_ms)
     .bind(&db.token_usage)
+    .bind(db.iterations)
     .fetch_one(pool)
     .await?;
 
@@ -299,6 +306,7 @@ pub async fn init_thread_root(pool: &PgPool, msg: &MessageNew) -> anyhow::Result
             metadata::text, embedding, summary_text, is_summary,
             msg_type, msg_subtype, iteration_count,
             profile, provider, model, processing_time_ms, token_usage::text,
+            iterations,
             TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
         FROM messages
         WHERE id = $1
@@ -348,10 +356,8 @@ pub async fn count_thread_iterations(pool: &PgPool, thread_id: i64) -> anyhow::R
     let count: Option<i64> = sql_forge!(
         scalar Option<i64>,
         r#"
-        SELECT COUNT(*) FROM messages
+        SELECT COALESCE(MAX(iterations), 0) FROM messages
         WHERE thread_id = :thread_id
-          AND role = 'agent'
-          AND msg_type = 'message'
         "#,
         ( :thread_id = thread_id )
     )
