@@ -70,10 +70,9 @@ Profiles define the LLM configuration, allowed tools, and data directory for a c
 | `updated_at` | TIMESTAMPTZ | When updated |
 
 Profile resolution (for model/provider priority):
-1. `msg.provider` / `msg.model` — set when message is created (channel's `current_model`/`current_provider` at message-insert time)
-2. Env vars `LLM_PROVIDER` / `LLM_MODEL` — with hardcoded fallbacks `"openai"` / `"gpt-4"` if unset
-
-Note: Profile's own `model`/`provider` fields are stored in the DB but currently unused in resolution — the message-level override + env fallback is the only path.
+1. `msg.provider` / `msg.model` — set when message is created (channel's `current_model`/`current_provider` at message-insert time) — highest priority
+2. Profile's own `model`/`provider` — fallback if message doesn't specify one
+3. Env vars `LLM_PROVIDER` / `LLM_MODEL` — with hardcoded fallbacks `"openai"` / `"gpt-4"` if unset
 
 ## Processing Pipeline
 

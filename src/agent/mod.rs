@@ -401,11 +401,23 @@ async fn process_message(
     } else {
         msg.profile.clone()
     };
+
+    // Load the profile so its model/provider can be used as fallback
+    let profile_registry = crate::profile::ProfileRegistry::new(&ctx.data_dir);
+    let prof = profile_registry.get(&profile_name).cloned().unwrap_or_else(|| {
+        crate::profile::Profile::default("default")
+    });
+
     let provider_name = msg
         .provider
         .clone()
+        .or_else(|| prof.provider.clone())
         .or_else(|| Some(config.llm_provider.clone()));
-    let model_name = msg.model.clone().or_else(|| Some(config.llm_model.clone()));
+    let model_name = msg
+        .model
+        .clone()
+        .or_else(|| prof.model.clone())
+        .or_else(|| Some(config.llm_model.clone()));
 
     // 4. Build the initial message history with the structured system prompt
     let system_prompt = crate::prompt_builder::build_system_prompt(
@@ -419,11 +431,7 @@ async fn process_message(
         ChatMessage::user(&msg.content),
     ];
 
-    // 5. Get allowed tools for the profile and build tool definitions
-    let profile = crate::profile::ProfileRegistry::new(&ctx.data_dir);
-    let prof = profile.get(&profile_name).cloned().unwrap_or_else(|| {
-        crate::profile::Profile::default("default")
-    });
+    // 5. Build tool definitions from the profile's allowed tools
     let tools_def = mcp.to_openai_tools(&prof.allowed_tools);
 
     // 6. Tool-calling loop — max iterations controls total LLM calls
