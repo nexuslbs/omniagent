@@ -38,7 +38,7 @@ Messages form the core data model. Each message has a type discriminator and tra
 | `role` | TEXT | 'user', 'agent', 'system', 'tool' |
 | `content` | TEXT | Message body |
 | `status` | TEXT | pending, processing, completed, failed, skipped |
-| `thread_id` | BIGINT | Groups messages into conversations |
+| `thread_id` | BIGINT? | Groups messages into conversations |
 | `thread_sequence` | INT | Order within thread |
 | `msg_type` | TEXT | Discriminator: 'message', 'reasoning', 'tool_call', 'tool_result' |
 | `msg_subtype` | TEXT? | Optional subtype (tool name, etc.) |
