@@ -23,7 +23,7 @@ Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP too
    ```
    Edit `.env` and set at minimum:
    - `LLM_API_KEY` — your LLM provider API key
-   - `DATABASE_URL` — PostgreSQL connection string (defaults to internal Docker network: `postgres://omniagent:omniagent@postgres:5432/omniagent`)
+   - `DATABASE_URL` — PostgreSQL connection string (default: `postgres://omniagent:omniagent@postgres:5432/omniagent`)
 
 3. Start the stack:
    ```bash
@@ -60,9 +60,9 @@ INSERT INTO channels (name, platform, external_id, cause, current_profile)
 VALUES ('my-channel', 'api', 'my-channel-1', 'user', 'default');
 ```
 
-Each channel can set a custom profile and model:
+Each channel can set a custom profile, provider, and model:
 ```sql
-UPDATE channels SET current_profile = 'research', current_model = 'claude-sonnet-4' WHERE id = 1;
+UPDATE channels SET current_profile = 'research', current_provider = 'anthropic', current_model = 'claude-sonnet-4' WHERE id = 1;
 ```
 
 ## Profiles
@@ -70,19 +70,19 @@ UPDATE channels SET current_profile = 'research', current_model = 'claude-sonnet
 Profiles bundle model configuration, provider, and allowed tools. A `default` profile is created on first startup.
 
 Profile fields:
-- **model** — LLM model name (e.g., `deepseek-v4-flash`)
 - **provider** — LLM provider (e.g., `opencode-go`, `openai`, `anthropic`)
+- **model** — LLM model name (e.g., `deepseek-v4-flash`)
 - **allowed_tools** — which MCP tools the agent can use
 - **base_path** — data directory for memories, skills, wiki
 
 ### Creating a Profile
 
 ```sql
-INSERT INTO profiles (name, model, provider, allowed_tools, base_path)
+INSERT INTO profiles (name, provider, model, allowed_tools, base_path)
 VALUES (
   'research',
-  'claude-sonnet-4',
   'anthropic',
+  'claude-sonnet-4',
   '["filesystem_read", "filesystem_write", "fetch", "search_messages", "search_wiki"]',
   '/opt/data/profiles/research'
 );
@@ -105,11 +105,11 @@ If neither the channel nor the profile specifies a model, the prompt will fail w
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OMNI_DATA_DIR` | `/opt/data` | Profile and tools directory |
-| `DATABASE_URL` | — | PostgreSQL connection string |
+| `DATABASE_URL` | `postgres://omniagent:omniagent@postgres:5432/omniagent` | PostgreSQL connection string |
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant endpoint |
 | `LLM_API_KEY` | — | API key for LLM provider |
-| `LLM_MODEL` | `deepseek-v4-flash` | Default LLM model |
 | `LLM_PROVIDER` | `opencode-go` | Provider: opencode-go, openai, anthropic |
+| `LLM_MODEL` | `deepseek-v4-flash` | Default LLM model |
 | `LLM_BASE_URL` | *per provider* | API endpoint URL |
 | `MAX_TOKENS` | `4096` | Max response tokens |
 | `TEMPERATURE` | `0.7` | Sampling temperature |
@@ -169,7 +169,7 @@ Run inside the container (`docker compose exec backup <command>`):
 | `S3_ACCESS_KEY` | — | S3 access key ID |
 | `S3_SECRET_KEY` | — | S3 secret access key |
 | `CRON_BACKUP` | `"0 5 * * *"` | Backup schedule (empty = disabled) |
-| `CRON_CHECKPOINT` | `"0 3 * * 0"` | Weekly checkpoint schedule (empty = disabled) |
+| `CRON_CHECKPOINT` | `"0 3 * * 0"` | Checkpoint schedule (empty = disabled) |
 
 Both backup and checkpoint use `rclone sync` with rclone v1.74+.
 
@@ -190,15 +190,15 @@ $OMNI_DATA_DIR/
 ## Architecture Diagram
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌──────────┐
-│   Messages   │────▶│  OmniAgent   │────▶│   LLM    │
-│ (PostgreSQL) │     │  (Rust)      │     │ Provider │
-└─────────────┘     │              │     └──────────┘
-                    │  ┌────────┐  │
-┌─────────────┐     │  │  MCP   │  │
-│   Qdrant    │◀────│  │ Tools  │  │
-│ (Vectors)   │     │  └────────┘  │
-└─────────────┘     └──────────────┘
+┌──────────────┐     ┌────────────────┐     ┌────────────┐
+│   Messages   │────▶│   OmniAgent    │────▶│    LLM     │
+│ (PostgreSQL) │     │    (Rust)      │     │  Provider  │
+└──────────────┘     │                │     └────────────┘
+                     │  ┌──────────┐  │
+┌──────────────┐     │  │   MCP    │  │
+│   Qdrant     │◀────│  │  Tools   │  │
+│  (Vectors)   │     │  └──────────┘  │
+└──────────────┘     └────────────────┘
 ```
 
 Messages flow: **PG → Agent → LLM → (tool calls loop) → PG**
@@ -214,7 +214,7 @@ services:
     expose: ["5432"]
 
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.18.2
     expose: ["6333"]
 
   omniagent:
@@ -258,7 +258,7 @@ Prompt marked as completed, processing_time_ms set
 |---------|-------|-----|
 | Messages stay `pending` | Channel stopped or agent not running | Check `GET /health`, resume channel |
 | LLM call fails | API key missing or invalid | Check `LLM_API_KEY` in `.env` |
-| Processing stuck at `processing` | Container restarted mid-call | Agent auto-recovers stale messages after 5 min |
+| Processing stuck at `processing` | Container restarted mid-call | On restart, pending/processing messages are marked as skipped |
 | No model configured | Profile + channel both lack model | Set `current_model` on channel or `model` on profile |
 | Tools returning errors | Path outside data directory | Ensure file paths are under `OMNI_DATA_DIR` |
 
