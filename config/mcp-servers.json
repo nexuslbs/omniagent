@@ -1,0 +1,13 @@
+{
+  "servers": [
+    {
+      "name": "test-server",
+      "transport": "stdio",
+      "command": "python3",
+      "args": ["scripts/mcp-test-server.py"],
+      "timeout_secs": 10,
+      "max_retries": 3,
+      "allowed_tools": ["*"]
+    }
+  ]
+}

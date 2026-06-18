@@ -118,7 +118,7 @@
 - [x] Phase 1: Context builder + grounding policy + metadata evidence logging.
 - [x] Phase 2: Hybrid retrieval + auto-retrieval trigger + contradiction checks.
 - [x] Phase 3: Memory promotion workflow + provenance + review cycle.
-- [ ] Phase 4: MCP external servers + dynamic tool registry.
+- [x] Phase 4: MCP external servers + dynamic tool registry.
 - [ ] Phase 5: Full eval/feedback-driven optimization.
 
 ## 11) Documentation Updates

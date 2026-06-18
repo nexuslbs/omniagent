@@ -26,6 +26,7 @@ pub fn truncate_content(content: &str, max_chars: usize) -> String {
 /// Default maximum output size for tool results (50K chars).
 pub const DEFAULT_MAX_TOOL_OUTPUT_CHARS: usize = 50_000;
 
+pub mod external;
 pub mod tools;
 
 /// A tool call requested by the LLM.
@@ -201,6 +202,12 @@ pub fn default_registry(ctx: &AppContext) -> McpRegistry {
     registry.register(tools::memory::promote_to_memory_tool());
     registry.register(tools::memory::list_memories_tool());
     registry.register(tools::memory::review_memories_tool());
+
+    // External MCP servers (load from config, best-effort)
+    let external_tools = external::client::initialize_external_tools(&ctx.data_dir);
+    for tool in external_tools {
+        registry.register(tool);
+    }
 
     registry
 }
