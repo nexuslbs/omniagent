@@ -27,7 +27,11 @@ use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
 /// Maximum total characters of tool results in conversation history before
 /// old tool results are pruned (Layer 3 compression).
 const TOOL_RESULT_HISTORY_BUDGET: usize = 80_000;
-use crate::mcp::{truncate_content, AppContext, McpRegistry, McpToolCall, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
+use crate::context_builder::{BlockPriority, ContextAssemblyMeta, ContextBlock, ContextBuilder};
+use crate::vectorizer::Vectorizer;
+use crate::mcp::{
+    truncate_content, AppContext, McpRegistry, McpToolCall, DEFAULT_MAX_TOOL_OUTPUT_CHARS,
+};
 use crate::models::{Message, MessageNew, MessageStatus};
 
 /// Configuration for the agent's LLM interactions.
@@ -476,10 +480,173 @@ async fn process_message(
         None, // system_message
         &profile_name,
     );
+
+    // 4b. Assemble additional context blocks via ContextBuilder
+    let ctx_assembly_meta: Option<ContextAssemblyMeta>;
+    let context_messages = {
+        let mut builder = ContextBuilder::new().with_budget(4_000);
+
+        // Classify the user message to determine retrieval needs
+        let (_query_class, needs_retrieval) =
+            crate::context_builder::classify_query(&msg.content);
+
+        // Determine retrieval aggressiveness from profile
+        let use_retrieval = needs_retrieval && prof.auto_retrieval_enabled;
+        let aggressiveness = if use_retrieval {
+            prof.retrieval_aggressiveness
+        } else {
+            0u8
+        };
+
+        // Add recent thread messages as a high-priority context block
+        match queries::get_recent_thread_messages(pool, msg.thread_id, 10).await {
+            Ok(recent_msgs) => {
+                if !recent_msgs.is_empty() {
+                    let thread_content: String = recent_msgs
+                        .iter()
+                        .rev() // oldest first
+                        .filter(|m| m.id != msg.id) // exclude the current message
+                        .map(|m| format!("[{}]: {}", m.role, m.content))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !thread_content.is_empty() {
+                        builder.add_block(ContextBlock::new(
+                            "recent_thread_messages",
+                            BlockPriority::High,
+                            &format!("Recent conversation history (current thread):\n{}", thread_content),
+                            2_500,
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to retrieve thread context: {:?}", e);
+            }
+        }
+
+        // Add retrieved past messages + wiki if retrieval is indicated
+        if aggressiveness > 0 {
+            let user_content = &msg.content;
+            let search_terms: Vec<&str> = user_content
+                .split_whitespace()
+                .filter(|w| w.len() > 4)
+                .take(5)
+                .collect();
+
+            if !search_terms.is_empty() {
+                let search_query = search_terms.join(" ");
+
+                // ILIKE text search in messages (always when retrieval is on)
+                match queries::search_messages_text(pool, &search_query, msg.channel_id, 5).await {
+                    Ok(matched_msgs) => {
+                        if !matched_msgs.is_empty() {
+                            let retrieved: String = matched_msgs
+                                .iter()
+                                .map(|m| format!("[{} msg_id={}]: {}", m.role, m.id, m.content.chars().take(300).collect::<String>()))
+                                .collect::<Vec<_>>()
+                                .join("\n---\n");
+                            builder.add_block(ContextBlock::new(
+                                "retrieved_past_messages",
+                                BlockPriority::Low,
+                                &format!("Retrieved from past conversations:\n{}", retrieved),
+                                3_000,
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to search past messages: {:?}", e);
+                    }
+                }
+
+                // Wiki text search (walkdir-based)
+                let wiki_dir = format!("{}/profiles/{}/wiki", ctx.data_dir, profile_name);
+                let wiki_results = queries::search_wiki_text(&wiki_dir, &search_query, 3);
+                if !wiki_results.is_empty() {
+                    let wiki_text: String = wiki_results
+                        .iter()
+                        .map(|(path, title, snippet)| format!("[{}] {}:\n{}", title, path, snippet))
+                        .collect::<Vec<_>>()
+                        .join("\n---\n");
+                    builder.add_block(ContextBlock::new(
+                        "retrieved_wiki_text",
+                        BlockPriority::Low,
+                        &format!("Wiki references:\n{}", wiki_text),
+                        2_000,
+                    ));
+                }
+
+                // Aggressiveness >= 2: add semantic search too
+                if aggressiveness >= 2 {
+                    // Generate a query embedding using the local hash vectorizer
+                    let hash_vec = crate::vectorizer::HashVectorizer;
+                    let query_embedding = hash_vec.generate_embedding(&search_query).await;
+                    let emb_str = crate::vectorizer::vector_to_string(&query_embedding);
+
+                    // Pgvector semantic search over messages
+                    match queries::search_messages_semantic(pool, &emb_str, msg.channel_id, 3).await {
+                        Ok(semantic_msgs) => {
+                            if !semantic_msgs.is_empty() {
+                                let semantic: String = semantic_msgs
+                                    .iter()
+                                    .map(|m| format!("[{} msg_id={}]: {}", m.role, m.id, m.content.chars().take(300).collect::<String>()))
+                                    .collect::<Vec<_>>()
+                                    .join("\n---\n");
+                                builder.add_block(ContextBlock::new(
+                                    "semantically_similar_messages",
+                                    BlockPriority::Low,
+                                    &format!("Semantically similar messages:\n{}", semantic),
+                                    2_000,
+                                ));
+                            }
+                        }
+                        Err(e) => tracing::warn!("Failed semantic search: {:?}", e),
+                    }
+
+                    // Qdrant wiki search
+                    if let Some(ref qdrant_url) = ctx.qdrant_url {
+                        let wiki_embedding = hash_vec.generate_embedding(&search_query).await;
+                        match queries::search_wiki_qdrant(qdrant_url, &wiki_embedding, 3).await {
+                            Ok(qdrant_results) => {
+                                if !qdrant_results.is_empty() {
+                                    let qdrant_text: String = qdrant_results
+                                        .iter()
+                                        .map(|(path, title, score)| format!("[{} (score={:.2})] {}", title, score, path))
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    builder.add_block(ContextBlock::new(
+                                        "semantically_similar_wiki",
+                                        BlockPriority::Low,
+                                        &format!("Wiki docs (semantic similarity):\n{}", qdrant_text),
+                                        1_500,
+                                    ));
+                                }
+                            }
+                            Err(e) => tracing::warn!("Qdrant wiki search failed: {:?}", e),
+                        }
+                    }
+                }
+            }
+        }
+
+        let (context_text, meta) = builder.assemble();
+        ctx_assembly_meta = Some(meta);
+        context_text
+    };
+
     let mut messages = vec![
         ChatMessage::system(&system_prompt),
-        ChatMessage::user(&msg.content),
     ];
+
+    // Add context blocks as system messages (before the user message)
+    if !context_messages.is_empty() {
+        messages.push(ChatMessage::system(&format!(
+            "=== Additional Context ===\n{}",
+            context_messages
+        )));
+    }
+
+    // Add the user message
+    messages.push(ChatMessage::user(&msg.content));
 
     // 5. Build tool definitions from the profile's allowed tools
     let tools_def = mcp.to_openai_tools(&prof.allowed_tools);
@@ -695,6 +862,30 @@ async fn process_message(
         })
     });
 
+    // Build evidence metadata from context assembly
+    let evidence_metadata = {
+        let mut meta = serde_json::json!({
+            "context": {
+                "selected_message_ids": [],
+                "wiki_files": [],
+                "block_counts": {},
+                "dropped_blocks": [],
+                "total_chars": 0,
+            },
+            "grounding": {
+                "policy_applied": true,
+            }
+        });
+        if let Some(ref assembly) = ctx_assembly_meta {
+            meta["context"]["selected_message_ids"] = serde_json::json!(assembly.selected_message_ids);
+            meta["context"]["wiki_files"] = serde_json::json!(assembly.wiki_files);
+            meta["context"]["block_counts"] = serde_json::json!(assembly.block_counts);
+            meta["context"]["dropped_blocks"] = serde_json::json!(assembly.dropped_blocks);
+            meta["context"]["total_chars"] = serde_json::json!(assembly.total_chars);
+        }
+        meta
+    };
+
     // 8. If reasoning/thinking exists, save as its own record
     if let Some(ref reasoning_text) = final_reasoning {
         if !reasoning_text.is_empty() {
@@ -706,7 +897,10 @@ async fn process_message(
                 thread_id: Some(msg.thread_id),
                 thread_sequence: msg.thread_sequence + 1,
                 external_id: None,
-                metadata: serde_json::json!({}),
+                metadata: serde_json::json!({
+                    "context": evidence_metadata["context"],
+                    "grounding": evidence_metadata["grounding"],
+                }),
                 embedding: None,
                 summary_text: None,
                 is_summary: false,
@@ -733,7 +927,10 @@ async fn process_message(
         thread_id: Some(msg.thread_id),
         thread_sequence: msg.thread_sequence + 1,
         external_id: None,
-        metadata: serde_json::json!({}),
+        metadata: serde_json::json!({
+            "context": evidence_metadata["context"],
+            "grounding": evidence_metadata["grounding"],
+        }),
         embedding: None,
         summary_text: None,
         is_summary: false,

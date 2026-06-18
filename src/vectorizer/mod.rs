@@ -323,10 +323,11 @@ impl Default for VectorizerConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: convert Vec<f32> to Postgres-compatible text representation
+// Helper: convert Vec<f32> to Postgres-compatible text representation.
 // ---------------------------------------------------------------------------
 
-fn vector_to_string(vec: &[f32]) -> String {
+/// Pub because it's used by agent process_message for semantic search queries.
+pub fn vector_to_string(vec: &[f32]) -> String {
     let parts: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
     format!("[{}]", parts.join(","))
 }

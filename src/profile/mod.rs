@@ -20,6 +20,12 @@ pub struct Profile {
     pub temperature: Option<f32>,
     /// List of allowed MCP tool names for this profile
     pub allowed_tools: Vec<String>,
+    /// Whether automatic retrieval is enabled for this profile
+    pub auto_retrieval_enabled: bool,
+    /// Retrieval aggressiveness: 0=off, 1=conservative, 2=balanced, 3=aggressive
+    pub retrieval_aggressiveness: u8,
+    /// Whether grounding is required for answers
+    pub grounding_required: bool,
 }
 
 impl Profile {
@@ -43,6 +49,9 @@ impl Profile {
                 "search_messages".to_string(),
                 "search_wiki".to_string(),
             ],
+            auto_retrieval_enabled: true,
+            retrieval_aggressiveness: 2,
+            grounding_required: false,
         }
     }
 

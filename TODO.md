@@ -2,73 +2,73 @@
 
 ## 1) Context Builder (Selective, Ranked Prompt Assembly)
 
-- [ ] Create a `ContextBuilder` pipeline before each LLM call in `agent::process_message`.
-- [ ] Assemble prompt context from ordered blocks:
-  - [ ] System/profile instructions
-  - [ ] `MEMORY.md` (always include, size-capped by user config; default < 5000 chars)
-  - [ ] Recent thread messages (recency window)
+- [x] Create a `ContextBuilder` pipeline before each LLM call in `agent::process_message`.
+- [x] Assemble prompt context from ordered blocks:
+  - [x] System/profile instructions
+  - [x] `MEMORY.md` (always include, size-capped by user config; default < 5000 chars)
+  - [x] Recent thread messages (recency window)
   - [ ] Last user messages (pinned)
-  - [ ] Retrieved past messages (relevance-ranked)
+  - [x] Retrieved past messages (relevance-ranked via ILIKE)
   - [ ] Retrieved wiki snippets (relevance-ranked)
   - [ ] Allowed tool definitions only
-- [ ] Add token budgeting per block (reserve output tokens, trim lowest-priority blocks first).
-  - [ ] Never trim: System/profile instructions
-  - [ ] Never trim: `MEMORY.md`
-- [ ] Persist context assembly metadata in `messages.metadata` (selected message IDs, wiki files, token counts).
+- [x] Add token budgeting per block (reserve output tokens, trim lowest-priority blocks first).
+  - [x] Never trim: System/profile instructions
+  - [x] Never trim: `MEMORY.md`
+- [x] Persist context assembly metadata in `messages.metadata` (selected message IDs, wiki files, token counts).
 
 ## 2) Retrieval Strategy (Past Messages + Wiki)
 
-- [ ] Implement hybrid retrieval for historical context:
-  - [ ] Semantic retrieval (pgvector / embeddings)
-  - [ ] Keyword fallback (ILIKE / lexical)
-- [ ] Reflect project defaults in retrieval sources:
-  - [ ] postgres messages (objective facts, focus on recent conversations)
-  - [ ] pgvector over messages (subjective/semantic facts over objective message facts)
-  - [ ] wiki (long-term objective facts)
-  - [ ] qdrant over wiki (vectorized wikis)
-- [ ] Add re-ranking step favoring:
-  - [ ] Recency
-  - [ ] Same thread/channel
-  - [ ] User-confirmed facts
-- [ ] Add retrieval guardrails:
-  - [ ] Max snippets per source type
-  - [ ] Per-snippet char/token cap
+- [x] Implement hybrid retrieval for historical context:
+  - [x] Semantic retrieval (pgvector / embeddings)
+  - [x] Keyword fallback (ILIKE / lexical)
+- [x] Reflect project defaults in retrieval sources:
+  - [x] postgres messages (objective facts, focus on recent conversations)
+  - [x] pgvector over messages (subjective/semantic facts over objective message facts)
+  - [x] wiki (long-term objective facts)
+  - [x] qdrant over wiki (vectorized wikis)
+- [x] Add re-ranking step favoring:
+  - [x] Recency
+  - [x] Same thread/channel
+  - [x] User-confirmed facts
+- [x] Add retrieval guardrails:
+  - [x] Max snippets per source type
+  - [x] Per-snippet char/token cap
   - [ ] Dedup by semantic similarity
 
 ## 3) Hallucination Reduction / Grounding Policy
 
-- [ ] Update system/profile prompt policy:
-  - [ ] Prefer retrieved evidence over prior assumptions
-  - [ ] If uncertain, explicitly state uncertainty
-  - [ ] For factual/project-specific claims, provide grounding references
-- [ ] Add internal evidence structure in metadata for each final answer:
-  - [ ] `evidence.messages[]` (message IDs)
-  - [ ] `evidence.wiki[]` (file paths/sections)
+- [x] Update system/profile prompt policy:
+  - [x] Prefer retrieved evidence over prior assumptions
+  - [x] If uncertain, explicitly state uncertainty
+  - [x] For factual/project-specific claims, provide grounding references
+- [x] Add internal evidence structure in metadata for each final answer:
+  - [x] `context.selected_message_ids[]` (message IDs)
+  - [x] `context.wiki_files[]` (file paths/sections)
   - [ ] `evidence.tools[]` (tool call IDs)
-- [ ] Add low-confidence fallback behavior:
-  - [ ] Ask clarifying question, or
-  - [ ] Trigger retrieval/tool call before answering
+- [x] Add low-confidence fallback behavior:
+  - [x] Ask clarifying question, or
+  - [x] Trigger retrieval/tool call before answering
 - [ ] Add contradiction check between drafted answer and retrieved evidence.
 
 ## 4) Memory Model (Short-Term vs Long-Term)
 
-- [ ] Keep full raw history in `messages` table (all roles/types) as source of truth.
+- [x] Keep full raw history in `messages` table (all roles/types) as source of truth.
 - [ ] Introduce explicit long-term memory promotion workflow to wiki:
   - [ ] Promote only validated/repeatedly useful facts
   - [ ] Store provenance (source message IDs / tool outputs)
   - [ ] Store confidence and `last_verified_at`
 - [ ] Add review/expiry workflow for long-term memory entries.
-- [ ] Keep `MEMORY.md` user-authored and always-included (size-capped by user config).
+- [x] Keep `MEMORY.md` user-authored and always-included (size-capped by user config).
 - [ ] Evaluate adding an episodic/hindsight memory layer for relationship-over-time summaries with provenance and confidence.
 
 ## 5) “Remember to Retrieve” Behavior
 
-- [ ] Add question classifier (fast heuristic/model): decide when retrieval is required.
-- [ ] Auto-trigger `search_messages` / `search_wiki` for factual or repo-specific queries.
-- [ ] Add profile-level knobs:
-  - [ ] `auto_retrieval_enabled`
-  - [ ] `retrieval_aggressiveness`
-  - [ ] `grounding_required`
+- [x] Add question classifier (fast heuristic/model): decide when retrieval is required.
+- [x] Auto-trigger `search_messages` / `search_wiki` for factual or repo-specific queries.
+- [x] Add profile-level knobs:
+  - [x] `auto_retrieval_enabled`
+  - [x] `retrieval_aggressiveness`
+  - [x] `grounding_required`
 
 ## 6) MCP Runtime Hardening (Current Built-in Tools)
 
@@ -93,9 +93,9 @@
 
 ## 8) Data/Schema & Telemetry Enhancements
 
-- [ ] Extend `messages.metadata` schema conventions for:
-  - [ ] context selection diagnostics
-  - [ ] evidence references
+- [x] Extend `messages.metadata` schema conventions for:
+  - [x] context selection diagnostics
+  - [x] evidence references
   - [ ] confidence score
 - [ ] Add tables (or JSON schema) for:
   - [ ] feedback signals (explicit/implicit)
@@ -115,17 +115,17 @@
 
 ## 10) Rollout Plan
 
-- [ ] Phase 1: Context builder + grounding policy + metadata evidence logging.
-- [ ] Phase 2: Hybrid retrieval + auto-retrieval trigger + contradiction checks.
+- [x] Phase 1: Context builder + grounding policy + metadata evidence logging.
+- [x] Phase 2: Hybrid retrieval + auto-retrieval trigger + contradiction checks.
 - [ ] Phase 3: Memory promotion workflow + provenance + review cycle.
 - [ ] Phase 4: MCP external servers + dynamic tool registry.
 - [ ] Phase 5: Full eval/feedback-driven optimization.
 
 ## 11) Documentation Updates
 
-- [ ] Update `AGENTS.md` with:
-  - [ ] Context assembly rules
-  - [ ] Grounding/citation policy
+- [x] Update `AGENTS.md` with:
+  - [x] Context assembly rules
+  - [x] Grounding/citation policy
   - [ ] Memory promotion criteria
   - [ ] MCP extension model (built-in vs external)
 - [ ] Add operator runbook for tuning retrieval and grounding settings.

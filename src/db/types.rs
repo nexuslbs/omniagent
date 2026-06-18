@@ -546,6 +546,76 @@ pub async fn delete_old_messages(
     Ok(result.rows_affected())
 }
 
+// ---------------------------------------------------------------------------
+// Context retrieval helper functions
+// ---------------------------------------------------------------------------
+
+/// Get recent messages from a thread for context assembly.
+pub async fn get_recent_thread_messages(
+    pool: &PgPool,
+    thread_id: i64,
+    limit: i64,
+) -> anyhow::Result<Vec<Message>> {
+    let rows: Vec<MessageDb> = sql_forge!(
+        MessageDb,
+        r#"
+        SELECT
+            id, channel_id, role, content, status,
+            thread_id, thread_sequence, external_id,
+            metadata::text AS "metadata?", embedding, summary_text, is_summary,
+            msg_type, msg_subtype, iteration_count,
+            profile, provider, model, processing_time_ms, token_usage::text AS "token_usage?",
+            iterations,
+            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at!"
+        FROM messages
+        WHERE thread_id = :thread_id
+          AND role IN ('user', 'agent')
+          AND msg_type IN ('message', 'reasoning')
+        ORDER BY created_at DESC
+        LIMIT :limit
+        "#,
+        ( :thread_id = thread_id, :limit = limit )
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(|r| r.try_into()).collect()
+}
+
+/// Search messages by text content (ILIKE) for context retrieval.
+pub async fn search_messages_text(
+    pool: &PgPool,
+    query: &str,
+    channel_id: i64,
+    limit: i64,
+) -> anyhow::Result<Vec<Message>> {
+    let pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+    let rows: Vec<MessageDb> = sql_forge!(
+        MessageDb,
+        r#"
+        SELECT
+            id, channel_id, role, content, status,
+            thread_id, thread_sequence, external_id,
+            metadata::text AS "metadata?", embedding, summary_text, is_summary,
+            msg_type, msg_subtype, iteration_count,
+            profile, provider, model, processing_time_ms, token_usage::text AS "token_usage?",
+            iterations,
+            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at!"
+        FROM messages
+        WHERE channel_id = :channel_id
+          AND content ILIKE :pattern
+          AND role IN ('user', 'agent')
+        ORDER BY created_at DESC
+        LIMIT :limit
+        "#,
+        ( :channel_id = channel_id, :pattern = &pattern, :limit = limit )
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(|r| r.try_into()).collect()
+}
+
 /// Find messages where embedding IS NULL, ordered by created_at, with a limit.
 /// Only returns messages with role='user' or role='agent'.
 pub async fn find_messages_without_embeddings(
@@ -630,6 +700,162 @@ pub async fn create_channel(
     .await?;
 
     row.try_into()
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid retrieval: pgvector semantic search for messages
+// ---------------------------------------------------------------------------
+
+/// Search messages by embedding similarity (pgvector cosine distance).
+/// Uses raw sqlx for vector operator support (pgvector <=>).
+/// Returns messages sorted by similarity (closest first).
+pub async fn search_messages_semantic(
+    pool: &PgPool,
+    embedding_str: &str,
+    channel_id: i64,
+    limit: i64,
+) -> anyhow::Result<Vec<Message>> {
+    // Use raw sqlx query since pgvector's <=> operator isn't supported by sql_forge!
+    let rows: Vec<MessageDb> = sqlx::query_as(
+        r#"
+        SELECT
+            id, channel_id, role, content, status,
+            thread_id, thread_sequence, external_id,
+            metadata::text AS "metadata?", embedding, summary_text, is_summary,
+            msg_type, msg_subtype, iteration_count,
+            profile, provider, model, processing_time_ms, token_usage::text AS "token_usage?",
+            iterations,
+            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at!"
+        FROM messages
+        WHERE channel_id = $1
+          AND embedding IS NOT NULL
+          AND role IN ('user', 'agent')
+        ORDER BY embedding::vector(1536) <=> $2::vector(1536)
+        LIMIT $3
+        "#,
+    )
+    .bind(channel_id)
+    .bind(embedding_str)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(|r| r.try_into()).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Wiki text search (walkdir-based)
+// ---------------------------------------------------------------------------
+
+/// Search wiki markdown files by text content using walkdir.
+/// Searches for the query string in file contents (case-insensitive).
+pub fn search_wiki_text(wiki_dir: &str, query: &str, limit: usize) -> Vec<(String, String, String)> {
+    let query_lower = query.to_lowercase();
+    let wiki_path = std::path::Path::new(wiki_dir);
+    if !wiki_path.exists() {
+        return vec![];
+    }
+
+    let mut results = Vec::new();
+    let mut count = 0usize;
+
+    for entry in walkdir::WalkDir::new(wiki_path)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("md")).unwrap_or(false) {
+            match std::fs::read_to_string(path) {
+                Ok(content) => {
+                    if content.to_lowercase().contains(&query_lower) {
+                        let file_path = path.to_string_lossy().to_string();
+                        let title = path.file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("untitled")
+                            .to_string();
+                        // Find the matching section (first ~200 chars around match)
+                        let snippet = if let Some(idx) = content.to_lowercase().find(&query_lower) {
+                            let start = idx.saturating_sub(100);
+                            let end = (idx + query.len() + 200).min(content.len());
+                            let snippet: String = content[start..end].chars().collect();
+                            format!("...{}...", snippet.trim())
+                        } else {
+                            content.chars().take(300).collect()
+                        };
+                        results.push((file_path, title, snippet));
+                        count += 1;
+                        if count >= limit {
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read wiki file {:?}: {}", path, e);
+                }
+            }
+        }
+    }
+    results
+}
+
+// ---------------------------------------------------------------------------
+// Qdrant semantic search for wiki
+// ---------------------------------------------------------------------------
+
+/// Search wiki documents in Qdrant by vector similarity.
+pub async fn search_wiki_qdrant(
+    qdrant_url: &str,
+    embedding: &[f32],
+    limit: usize,
+) -> anyhow::Result<Vec<(String, String, f32)>> {
+    let url = format!("{}/collections/wiki/points/search", qdrant_url);
+    let client = reqwest::Client::new();
+
+    let body = serde_json::json!({
+        "vector": embedding,
+        "limit": limit,
+        "with_payload": true,
+    });
+
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Qdrant search request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Qdrant search failed ({}): {}", status, text);
+    }
+
+    let data: serde_json::Value = resp.json().await?;
+    let mut results = Vec::new();
+
+    if let Some(result_array) = data.get("result").and_then(|r| r.as_array()) {
+        for point in result_array {
+            let score = point.get("score").and_then(|s| s.as_f64()).unwrap_or(0.0) as f32;
+            let payload = point.get("payload").and_then(|p| p.as_object());
+            let file_path = payload
+                .and_then(|p| p.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let title = payload
+                .and_then(|p| p.get("title"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("untitled")
+                .to_string();
+            results.push((file_path, title, score));
+        }
+    }
+
+    Ok(results)
 }
 
 #[expect(dead_code)]

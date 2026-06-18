@@ -69,3 +69,18 @@
 //  embedding storage and similarity search. Optional; the DO block in
 //  migrations gracefully handles absence.
 //
+// ── messages.metadata Conventions ─────────────────────────────────────────
+//
+// The `metadata` JSONB column stores structured metadata per message.
+// Standard top-level keys:
+//
+//  error_type       string     Present on error messages ('processing', etc.)
+//  original_msg_id  int        Original message ID for error messages
+//  context          object     Context assembly diagnostics (agent responses)
+//    selected_message_ids  []int    Message IDs selected for the prompt
+//    wiki_files            []string Wiki file paths referenced
+//    block_counts          {}       Char counts per context block label
+//    dropped_blocks        []string Block labels dropped due to budget
+//    total_chars           int      Total assembled character count
+//  grounding        object     Grounding policy metadata
+//    policy_applied  bool     Whether grounding policy was applied

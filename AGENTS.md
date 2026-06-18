@@ -116,6 +116,96 @@ The `MAX_ITERATIONS` setting (default 60) controls two things:
 - **Per-thread agent turns**: Counting `msg_type='message'` where `role='agent'`. Once this count reaches `MAX_ITERATIONS`, new user messages in that thread are skipped.
 - **LLM tool-calling loops per message**: The tool-calling loop within `process_message` is capped at `min(MAX_ITERATIONS, 20)` to prevent runaway tool calls.
 
+## Question Classifier
+
+OmniAgent includes a heuristic query classifier (`context_builder::classify_query`) that categorizes user messages into five types and determines whether retrieval should run:
+
+| Class | Description | Retrieval? | Examples |
+|-------|-------------|-----------|----------|
+| `Greeting` | Simple greetings / acknowledgments | No | "hi", "thanks", "ok", "👍" |
+| `Command` | Instructions to perform an action | No | "/help", "write a file" |
+| `FollowUp` | Brief follow-ups referencing previous context | No | "continue", "what about the other one" |
+| `Factual` | Questions about system, project, or data | Yes | "What is X?", "How does Y work?" |
+| `ExternalQuery` | Questions needing real-time/external data | Yes | "Show me the weather forecast" |
+
+Retrieval is also triggered for messages >100 characters (complex tasks).
+
+## Hybrid Retrieval
+
+OmniAgent uses a tiered retrieval system controlled by a profile-level `retrieval_aggressiveness` setting (0-3):
+
+| Level | Name | Retrieval Sources |
+|-------|------|-------------------|
+| 0 | Off | No retrieval (only recent thread context) |
+| 1 | Conservative | ILIKE text search in messages + wiki text search |
+| 2 | Balanced | Everything in Level 1 + pgvector semantic message search + Qdrant wiki search |
+| 3 | Aggressive | Everything in Level 2 with higher limits |
+
+### Retrieval Sources
+
+1. **ILIKE text search** (`search_messages_text`) — keyword matching in messages table
+2. **Wiki text search** (`search_wiki_text`) — walkdir-based content search in wiki markdown files
+3. **pgvector semantic search** (`search_messages_semantic`) — cosine similarity via pgvector `<=>` operator against message embeddings (Level 2+)
+4. **Qdrant wiki search** (`search_wiki_qdrant`) — vector similarity search in Qdrant wiki collection (Level 2+)
+
+All retrieval results are assembled as `Low` priority context blocks via the ContextBuilder, trimmed by budget.
+
+## Context Assembly
+
+OmniAgent uses a `ContextBuilder` pipeline (see `src/context_builder.rs`) that assembles the LLM prompt from ordered blocks with priority-based trimming.
+
+### Context Blocks (in priority order)
+
+| Priority | Block | Description |
+|----------|-------|-------------|
+| NeverTrim | System/profile instructions | Agent identity, tool rules, grounding policy — never trimmed |
+| NeverTrim | MEMORY.md | User-authored persistent memory, always included, size-capped |
+| High | Recent thread messages | Recency window of current conversation thread (up to 10 messages) |
+| High | Pinned user messages | Explicitly marked important messages |
+| Normal | Active tool definitions | JSON Schema for all tools allowed by the profile |
+| Low | Retrieved past messages | ILIKE text search results from past conversations |
+| Low | Retrieved wiki snippets | Text search results from profile wiki files |
+
+### Token Budgeting
+
+- Total context budget: 4,000 characters (configurable)
+- Output token reserve: 2,000 characters (subtracted from context budget)
+- When total exceeds context budget, blocks are trimmed in priority order:
+  - Per-block character caps are applied first (truncation)
+  - If still over budget, entire low-priority blocks are dropped
+- Never-trim blocks are always included in full
+
+### Context Assembly Metadata
+
+On every final agent response (and reasoning block), the `messages.metadata` JSONB column captures:
+
+```json
+{
+  "context": {
+    "selected_message_ids": [123, 124],
+    "wiki_files": ["path/to/file.md"],
+    "block_counts": {
+      "recent_thread_messages": 1200,
+      "retrieved_past_messages": 800
+    },
+    "dropped_blocks": ["low_priority_wiki"],
+    "total_chars": 3500
+  },
+  "grounding": {
+    "policy_applied": true
+  }
+}
+```
+
+## Grounding Policy
+
+The grounding policy is embedded in every system prompt (constant `GROUNDING_POLICY` in `prompt_builder.rs`):
+
+1. **Prefer retrieved evidence** over prior assumptions — cite evidence explicitly when available
+2. **State uncertainty** — if uncertain about a factual/project-specific claim, say so clearly
+3. **Provide grounding references** — for factual claims, reference message IDs, wiki file paths, or tool call IDs
+4. **Trigger retrieval** — if insufficient evidence, ask a clarifying question or trigger search/retrieval before answering
+
 ## MCP (Model Context Protocol) Tools
 
 Tools are invoked via OpenAI-compatible function calling format. The LLM receives a `tools` array in the request body, and can respond with `tool_calls` in the message.

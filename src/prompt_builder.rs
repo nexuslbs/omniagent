@@ -44,6 +44,17 @@ normal research tasks.";
 
 const SKILLS_GUIDANCE: &str = "";
 
+/// Grounding policy — instructions for evidence-based answers.
+const GROUNDING_POLICY: &str = "GROUNDING POLICY:\n\
+1. Prefer retrieved evidence over prior assumptions — when evidence is \
+available in your context, cite it explicitly.\n\
+2. If uncertain about a factual or project-specific claim, state your \
+uncertainty clearly. Do not fabricate details.\n\
+3. For factual/project-specific claims, provide grounding references \
+whenever possible (message IDs, wiki file paths, tool call IDs).\n\
+4. If you lack sufficient evidence to answer, either ask a clarifying \
+question or trigger a search/retrieval tool before responding.";
+
 const WIKI_GUIDANCE: &str = "Your wiki at <data_dir>/profiles/<profile>/wiki/ stores long-term knowledge.";
 
 const PROFILE_HINT: &str = "Active OmniAgent profile: default. \
@@ -208,6 +219,7 @@ pub fn build_system_prompt_parts(
     stable_parts.push(DEFAULT_AGENT_IDENTITY.to_string());
     stable_parts.push(TOOL_GUIDANCE.to_string());
     stable_parts.push(SKILLS_GUIDANCE.to_string());
+    stable_parts.push(GROUNDING_POLICY.to_string());
 
     // Wiki guidance with the actual data directory
     let wiki_hint = WIKI_GUIDANCE.replace("<profile>", profile_name);
@@ -355,7 +367,7 @@ mod tests {
         let prompt =
             build_system_prompt(&store, "telegram", Some("Custom system message"), "default");
         assert!(prompt.contains("OmniAgent"));
-        assert!(prompt.contains("You have access to a set of tools"));
+        assert!(prompt.contains("GROUNDING POLICY"));
         assert!(prompt.contains("Test memory"));
         assert!(prompt.contains("Test user"));
         assert!(prompt.contains("Telegram"));

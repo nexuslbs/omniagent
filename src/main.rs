@@ -7,6 +7,7 @@ use tracing_subscriber::EnvFilter;
 
 mod agent;
 mod config;
+mod context_builder;
 mod db;
 mod llm;
 mod mcp;
