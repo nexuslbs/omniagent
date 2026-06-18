@@ -85,6 +85,65 @@ impl TryFrom<MessageDb> for Message {
 // MessageNew DB struct (for INSERT params)
 // ---------------------------------------------------------------------------
 
+/// Intermediate result type for create_message INSERT RETURNING.
+/// Mirrors the RETURNING columns exactly, used because `sql_forge!`
+/// compile-time validation via sqlx::query_as! can't infer nullability
+/// for computed expressions without a DB connection.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CreateMessageRow {
+    pub id: i64,
+    pub channel_id: i64,
+    pub role: String,
+    pub content: String,
+    pub status: String,
+    pub thread_id: Option<i64>,
+    pub thread_sequence: i32,
+    pub external_id: Option<String>,
+    pub metadata: Option<String>,
+    pub embedding: Option<String>,
+    pub summary_text: Option<String>,
+    pub is_summary: bool,
+    pub msg_type: String,
+    pub msg_subtype: Option<String>,
+    pub iteration_count: i32,
+    pub profile: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub processing_time_ms: Option<i32>,
+    pub token_usage: Option<String>,
+    pub iterations: i32,
+    pub created_at: String,
+}
+
+impl From<CreateMessageRow> for MessageDb {
+    fn from(r: CreateMessageRow) -> Self {
+        Self {
+            id: r.id,
+            channel_id: r.channel_id,
+            role: r.role,
+            content: r.content,
+            status: r.status,
+            thread_id: r.thread_id,
+            thread_sequence: r.thread_sequence,
+            external_id: r.external_id,
+            metadata: r.metadata,
+            embedding: r.embedding,
+            summary_text: r.summary_text,
+            is_summary: r.is_summary,
+            msg_type: r.msg_type,
+            msg_subtype: r.msg_subtype,
+            iteration_count: r.iteration_count,
+            profile: r.profile,
+            provider: r.provider,
+            model: r.model,
+            processing_time_ms: r.processing_time_ms,
+            token_usage: r.token_usage,
+            iterations: r.iterations,
+            created_at: r.created_at,
+        }
+    }
+}
+
 pub struct MessageNewDb {
     pub channel_id: i64,
     pub role: String,
@@ -237,7 +296,15 @@ pub async fn find_pending_messages(pool: &PgPool, channel_id: i64) -> anyhow::Re
 
 pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> anyhow::Result<Message> {
     let db = MessageNewDb::from(msg);
-    let row: MessageDb = sqlx::query_as(
+    let metadata_val: serde_json::Value = serde_json::from_str(&db.metadata).unwrap_or_default();
+    let processing_time_ms_val: i32 = db.processing_time_ms.unwrap_or(0);
+    let token_usage_val: serde_json::Value = db
+        .token_usage
+        .as_ref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let row: CreateMessageRow = sql_forge!(
+        CreateMessageRow,
         r#"
         INSERT INTO messages (
             channel_id, role, content, status,
@@ -247,41 +314,22 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> anyhow::Result<M
             profile, provider, model, processing_time_ms, token_usage,
             iterations
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19::jsonb, $20)
+        VALUES (:channel_id, :role, :content, :status, :thread_id, :thread_sequence, :external_id, :metadata, :embedding, :summary_text, :is_summary, :msg_type, :msg_subtype, :iteration_count, :profile, :provider, :model, :processing_time_ms, :token_usage, :iterations)
         RETURNING
             id, channel_id, role, content, status,
             thread_id, thread_sequence, external_id,
-            metadata::text, embedding, summary_text, is_summary,
+            metadata::text AS "metadata?", embedding, summary_text, is_summary,
             msg_type, msg_subtype, iteration_count,
-            profile, provider, model, processing_time_ms, token_usage::text,
+            profile, provider, model, processing_time_ms, token_usage::text AS "token_usage?",
             iterations,
-            TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS created_at
+            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at!"
         "#,
+        ( :channel_id = db.channel_id, :role = &db.role, :content = &db.content, :status = &db.status, :thread_id = db.thread_id.unwrap_or(0), :thread_sequence = db.thread_sequence, :external_id = db.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = db.embedding.as_deref().unwrap_or(""), :summary_text = db.summary_text.as_deref().unwrap_or(""), :is_summary = db.is_summary, :msg_type = &db.msg_type, :msg_subtype = db.msg_subtype.as_deref().unwrap_or(""), :iteration_count = db.iteration_count, :profile = &db.profile, :provider = db.provider.as_deref().unwrap_or(""), :model = db.model.as_deref().unwrap_or(""), :processing_time_ms = processing_time_ms_val, :token_usage = &token_usage_val, :iterations = db.iterations )
     )
-    .bind(db.channel_id)
-    .bind(&db.role)
-    .bind(&db.content)
-    .bind(&db.status)
-    .bind(db.thread_id)
-    .bind(db.thread_sequence)
-    .bind(&db.external_id)
-    .bind(&db.metadata)
-    .bind(&db.embedding)
-    .bind(&db.summary_text)
-    .bind(db.is_summary)
-    .bind(&db.msg_type)
-    .bind(&db.msg_subtype)
-    .bind(db.iteration_count)
-    .bind(&db.profile)
-    .bind(&db.provider)
-    .bind(&db.model)
-    .bind(db.processing_time_ms)
-    .bind(&db.token_usage)
-    .bind(db.iterations)
     .fetch_one(pool)
     .await?;
 
-    row.try_into()
+    MessageDb::from(row).try_into()
 }
 
 /// Insert a seq-0 message with thread_id=NULL, then immediately backfill
