@@ -53,11 +53,11 @@
 ## 4) Memory Model (Short-Term vs Long-Term)
 
 - [x] Keep full raw history in `messages` table (all roles/types) as source of truth.
-- [ ] Introduce explicit long-term memory promotion workflow to wiki:
-  - [ ] Promote only validated/repeatedly useful facts
-  - [ ] Store provenance (source message IDs / tool outputs)
-  - [ ] Store confidence and `last_verified_at`
-- [ ] Add review/expiry workflow for long-term memory entries.
+- [x] Introduce explicit long-term memory promotion workflow to wiki:
+  - [x] Promote only validated/repeatedly useful facts
+  - [x] Store provenance (source message IDs / tool outputs)
+  - [x] Store confidence and `last_verified_at`
+- [x] Add review/expiry workflow for long-term memory entries.
 - [x] Keep `MEMORY.md` user-authored and always-included (size-capped by user config).
 - [ ] Evaluate adding an episodic/hindsight memory layer for relationship-over-time summaries with provenance and confidence.
 
@@ -117,7 +117,7 @@
 
 - [x] Phase 1: Context builder + grounding policy + metadata evidence logging.
 - [x] Phase 2: Hybrid retrieval + auto-retrieval trigger + contradiction checks.
-- [ ] Phase 3: Memory promotion workflow + provenance + review cycle.
+- [x] Phase 3: Memory promotion workflow + provenance + review cycle.
 - [ ] Phase 4: MCP external servers + dynamic tool registry.
 - [ ] Phase 5: Full eval/feedback-driven optimization.
 

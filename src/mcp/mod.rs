@@ -197,5 +197,10 @@ pub fn default_registry(ctx: &AppContext) -> McpRegistry {
     registry.register(tools::cron::list_cron_jobs_tool());
     registry.register(tools::cron::delete_cron_job_tool());
 
+    // Memory tools
+    registry.register(tools::memory::promote_to_memory_tool());
+    registry.register(tools::memory::list_memories_tool());
+    registry.register(tools::memory::review_memories_tool());
+
     registry
 }

@@ -230,6 +230,24 @@ Tools live in `src/mcp/tools/`. Each tool has:
 | `fetch` | HTTP GET (research, API calls) |
 | `search_messages` | ILIKE text search in messages table |
 | `search_wiki` | Text search in profile wiki files |
+| `promote_to_memory` | Promote validated facts to long-term wiki memory |
+| `list_memories` | List promoted memory entries |
+| `review_memories` | Scan for expired/soon-to-expire memory entries needing renewal |
+
+### Memory Promotion
+
+Agent can promote validated facts to long-term wiki memory via three MCP tools:
+
+- **`promote_to_memory`** — writes a fact as a markdown file under `Memory/Promoted/` with YAML frontmatter:
+  - `type`: `memory`
+  - `confidence`: high / medium / low
+  - `source_message_ids`: conversation message IDs supporting the fact
+  - `source_tool_outputs`: tool call IDs that produced evidence
+  - `created_at`, `last_verified_at`, `expires_at`: ISO timestamps
+- **`list_memories`** — lists active memory entries (or includes expired)
+- **`review_memories`** — generates a report of expired and soon-to-expire entries with renewal recommendations
+
+Only promote facts that have been directly validated through conversation or tool output. Promoted memories are available for future wiki search and Qdrant vector search.
 
 ### Path Restriction
 
