@@ -221,7 +221,7 @@ def error_result(message):
 
 TOOLS = [
     {
-        "name": "docker_ps",
+        "name": "ps",
         "description": "List running Docker containers. Use all=true to include stopped ones.",
         "inputSchema": {
             "type": "object",
@@ -232,7 +232,7 @@ TOOLS = [
         }
     },
     {
-        "name": "docker_compose",
+        "name": "compose",
         "description": "Run docker compose commands (ps, up, down, logs, build, exec, stop, restart)",
         "inputSchema": {
             "type": "object",
@@ -246,7 +246,7 @@ TOOLS = [
         }
     },
     {
-        "name": "docker_exec",
+        "name": "exec",
         "description": "Run a command inside a running container",
         "inputSchema": {
             "type": "object",
@@ -259,7 +259,7 @@ TOOLS = [
         }
     },
     {
-        "name": "docker_build",
+        "name": "build",
         "description": "Build a Docker image from a Dockerfile in a directory",
         "inputSchema": {
             "type": "object",
@@ -273,7 +273,7 @@ TOOLS = [
         }
     },
     {
-        "name": "docker_info",
+        "name": "info",
         "description": "Get Docker system information (version, running containers, disk usage)",
         "inputSchema": {
             "type": "object",
@@ -287,7 +287,7 @@ TOOLS = [
         }
     },
     {
-        "name": "docker_run",
+        "name": "run",
         "description": "Run a raw docker command (advanced). Args are passed directly to 'docker ...'",
         "inputSchema": {
             "type": "object",
@@ -321,12 +321,12 @@ def handle_call_tool(msg_id, params):
     arguments = params.get("arguments", {})
 
     tool_map = {
-        "docker_ps": tool_docker_ps,
-        "docker_compose": tool_docker_compose,
-        "docker_exec": tool_docker_exec,
-        "docker_build": tool_docker_build,
-        "docker_info": tool_docker_info,
-        "docker_run": tool_docker_run,
+        "ps": tool_docker_ps,
+        "compose": tool_docker_compose,
+        "exec": tool_docker_exec,
+        "build": tool_docker_build,
+        "info": tool_docker_info,
+        "run": tool_docker_run,
     }
 
     handler = tool_map.get(tool_name)

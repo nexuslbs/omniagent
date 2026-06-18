@@ -441,7 +441,7 @@ TOOLS = [
         }
     },
     {
-        "name": "git_status",
+        "name": "status",
         "description": "Get the git status of a repository (branch, changes, etc.)",
         "inputSchema": {
             "type": "object",
@@ -495,7 +495,7 @@ def handle_call_tool(msg_id, params):
         "create_github_repo": tool_create_github_repo,
         "clone_repo": tool_clone_repo,
         "commit_and_push": tool_commit_and_push,
-        "git_status": tool_git_status,
+        "status": tool_git_status,
     }
 
     handler = tool_map.get(tool_name)

@@ -52,6 +52,18 @@ impl Profile {
                 "list_memories".to_string(),
                 "review_memories".to_string(),
                 "get_metrics".to_string(),
+                // External MCP tools — git
+                "git_create_github_repo".to_string(),
+                "git_clone_repo".to_string(),
+                "git_commit_and_push".to_string(),
+                "git_status".to_string(),
+                // External MCP tools — docker
+                "docker_ps".to_string(),
+                "docker_compose".to_string(),
+                "docker_exec".to_string(),
+                "docker_build".to_string(),
+                "docker_info".to_string(),
+                "docker_run".to_string(),
             ],
             auto_retrieval_enabled: true,
             retrieval_aggressiveness: 2,
