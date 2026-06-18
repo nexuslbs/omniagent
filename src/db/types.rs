@@ -355,38 +355,52 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> anyhow::Result<M
     MessageDb::from(row).try_into()
 }
 
-/// Insert a seq-0 message with thread_id=NULL, then immediately backfill
-/// thread_id = id so subsequent messages can reference this thread.
-/// Uses two atomic statements (the window where thread_id is NULL is
-/// recovered by the safety pass in skip_all_pending_processing).
+/// Insert a seq-0 message with thread_id=NULL using a CTE, then atomically
+/// backfill thread_id = id before the row is visible to any other reader.
+///
+/// The CTE runs as a single statement in Postgres, so there is no window
+/// where another transaction can see a seq-0 message with NULL thread_id.
 pub async fn init_thread_root(pool: &PgPool, msg: &MessageNew) -> anyhow::Result<Message> {
-    // Insert with thread_id=None (column is nullable after migration)
-    let inserted = create_message(pool, msg).await?;
+    let db = MessageNewDb::from(msg);
+    let metadata_val: serde_json::Value = serde_json::from_str(&db.metadata).unwrap_or_default();
+    let processing_time_ms_val: i32 = db.processing_time_ms.unwrap_or(0);
+    let token_usage_val: serde_json::Value = db
+        .token_usage
+        .as_ref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(serde_json::Value::Null);
 
-    // Backfill: SET thread_id = id for the root message
-    sql_forge!(
-        "UPDATE messages SET thread_id = id WHERE id = :id AND thread_id IS NULL",
-        ( :id = inserted.id )
-    )
-    .execute(pool)
-    .await?;
-
-    // Re-read with thread_id now populated
+    // CTE: INSERT with thread_id=NULL, then UPDATE to set thread_id = id
+    // The entire CTE is a single statement, so the row is never visible
+    // externally with a NULL thread_id.
     let row: MessageDb = sql_forge!(
         MessageDb,
         r#"
-        SELECT
-            id, channel_id, role, content, status,
-            thread_id, thread_sequence, external_id,
-            metadata::text AS "metadata", embedding, summary_text, is_summary,
-            msg_type, msg_subtype, iteration_count,
-            profile, provider, model, processing_time_ms, token_usage::text AS "token_usage",
-            iterations,
-            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
-        FROM messages
-        WHERE id = :id
+        WITH ins AS (
+            INSERT INTO messages (
+                channel_id, role, content, status,
+                thread_id, thread_sequence, external_id,
+                metadata, embedding, summary_text, is_summary,
+                msg_type, msg_subtype, iteration_count,
+                profile, provider, model, processing_time_ms, token_usage,
+                iterations
+            )
+            VALUES (:channel_id, :role, :content, :status, NULLIF(0::bigint, 0::bigint), :thread_sequence, NULLIF(:external_id, '')::text, :metadata, NULLIF(:embedding, '')::text, NULLIF(:summary_text, '')::text, :is_summary, :msg_type, NULLIF(:msg_subtype, '')::text, :iteration_count, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:processing_time_ms, 0)::int, :token_usage, :iterations)
+            RETURNING id
+        )
+        UPDATE messages m SET thread_id = m.id
+        FROM ins
+        WHERE m.id = ins.id
+        RETURNING
+            m.id, m.channel_id, m.role, m.content, m.status,
+            m.thread_id, m.thread_sequence, m.external_id,
+            m.metadata::text AS "metadata", m.embedding, m.summary_text, m.is_summary,
+            m.msg_type, m.msg_subtype, m.iteration_count,
+            m.profile, m.provider, m.model, m.processing_time_ms, m.token_usage::text AS "token_usage",
+            m.iterations,
+            COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         "#,
-        ( :id = inserted.id )
+        ( :channel_id = db.channel_id, :role = &db.role, :content = &db.content, :status = &db.status, :thread_sequence = db.thread_sequence, :external_id = db.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = db.embedding.as_deref().unwrap_or(""), :summary_text = db.summary_text.as_deref().unwrap_or(""), :is_summary = db.is_summary, :msg_type = &db.msg_type, :msg_subtype = db.msg_subtype.as_deref().unwrap_or(""), :iteration_count = db.iteration_count, :profile = &db.profile, :provider = db.provider.as_deref().unwrap_or(""), :model = db.model.as_deref().unwrap_or(""), :processing_time_ms = processing_time_ms_val, :token_usage = &token_usage_val, :iterations = db.iterations )
     )
     .fetch_one(pool)
     .await?;
@@ -443,6 +457,39 @@ pub async fn count_thread_iterations(pool: &PgPool, thread_id: i64) -> anyhow::R
     .await?;
 
     Ok(count.unwrap_or(0))
+}
+
+/// Atomically normalize NULL thread_ids for any pending messages.
+/// This is a safety net: ensures no pending message ever has a NULL
+/// thread_id before the agent tries to process it.
+pub async fn normalize_null_thread_ids(pool: &PgPool) -> anyhow::Result<u64> {
+    let result = sql_forge!(
+        "UPDATE messages SET thread_id = id WHERE thread_id IS NULL AND status = 'pending'"
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Atomically claim a pending message for processing by updating its
+/// status to 'processing' only if it's still 'pending'.
+/// Returns true if the message was successfully claimed, false if
+/// another worker already claimed it (or it was already processed).
+pub async fn try_claim_message(pool: &PgPool, msg_id: i64) -> bool {
+    let result = sql_forge!(
+        "UPDATE messages SET status = 'processing' WHERE id = :id AND status = 'pending'",
+        ( :id = msg_id )
+    )
+    .execute(pool)
+    .await;
+
+    match result {
+        Ok(r) => r.rows_affected() > 0,
+        Err(e) => {
+            tracing::error!("Failed to claim message {}: {:?}", msg_id, e);
+            false
+        }
+    }
 }
 
 pub async fn skip_pending_messages(pool: &PgPool, channel_id: i64) -> anyhow::Result<u64> {

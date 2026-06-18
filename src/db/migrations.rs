@@ -267,6 +267,36 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ── Read-only user for query_database tool ──
+    sql_forge!(
+        r#"
+        DO $$
+        BEGIN
+            CREATE USER omniagent_readonly WITH PASSWORD 'omniagent_readonly';
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
+        END $$;
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    sql_forge!("GRANT CONNECT ON DATABASE omniagent TO omniagent_readonly")
+        .execute(pool)
+        .await?;
+
+    sql_forge!("GRANT USAGE ON SCHEMA public TO omniagent_readonly")
+        .execute(pool)
+        .await?;
+
+    sql_forge!("GRANT SELECT ON ALL TABLES IN SCHEMA public TO omniagent_readonly")
+        .execute(pool)
+        .await?;
+
+    sql_forge!("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO omniagent_readonly")
+        .execute(pool)
+        .await?;
+
     // ── Summaries table for cross-thread thread summaries ──
     sql_forge!(
         r#"

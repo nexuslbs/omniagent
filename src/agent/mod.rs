@@ -21,7 +21,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::db::types as queries;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
@@ -55,6 +55,12 @@ pub struct AgentConfig {
     pub summary_tokens: u32,
     /// Days before old messages and summaries are deleted.
     pub delete_after_days: u32,
+    /// When true, the agent generates a plan/context before execution.
+    pub prompt_graph_enabled: bool,
+    /// Max output tokens for the planning LLM call.
+    pub prompt_graph_max_tokens: u32,
+    /// Number of refinement iterations for the plan (0 = disabled, one-shot).
+    pub prompt_graph_iterations: u32,
 }
 
 impl AgentConfig {
@@ -103,6 +109,18 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .unwrap_or(30),
+            prompt_graph_enabled: std::env::var("PROMPT_GRAPH_ENABLED")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse::<bool>()
+                .unwrap_or(false),
+            prompt_graph_max_tokens: std::env::var("PROMPT_GRAPH_MAX_TOKENS")
+                .unwrap_or_else(|_| "2048".to_string())
+                .parse()
+                .unwrap_or(2048),
+            prompt_graph_iterations: std::env::var("PROMPT_GRAPH_ITERATIONS")
+                .unwrap_or_else(|_| "0".to_string())
+                .parse()
+                .unwrap_or(0),
         })
     }
 }
@@ -312,7 +330,13 @@ async fn channel_handler(
 
                     info!("Processing message {} in channel {}", msg.id, channel_id);
 
-                    // Check iteration limit before processing
+                    // Safety: normalize any pending message whose thread_id is
+                    // still NULL (should be extremely rare now that init_thread_root
+                    // uses an atomic CTE, but this catches edge cases from external
+                    // scripts or old data).
+                    let _ = queries::normalize_null_thread_ids(&pool).await;
+
+                    // Check iteration limit before claiming the message
                     match queries::count_thread_iterations(&pool, msg.thread_id).await {
                         Ok(count) if count >= config.max_iterations as i32 => {
                             info!(
@@ -328,6 +352,17 @@ async fn channel_handler(
                         Err(e) => {
                             error!("Failed to count thread iterations: {:?}", e);
                         }
+                    }
+
+                    // Anti-double-execute guard: atomically claim this message by
+                    // updating its status to 'processing' only if it's still 'pending'.
+                    // If another agent instance claimed it first, skip.
+                    if !queries::try_claim_message(&pool, msg.id).await {
+                        debug!(
+                            "Message {} was already claimed by another worker, skipping",
+                            msg.id
+                        );
+                        continue;
                     }
 
                     if let Err(e) = process_message(&pool, &llm, &config, &mcp, &ctx, msg).await {
@@ -883,6 +918,121 @@ async fn process_message(
         context_text
     };
 
+    // Track cumulative token usage across all LLM calls
+    let mut cumulative_usage: Option<Usage> = None;
+
+    // ── Planning Phase (PROMPT_GRAPH_ENABLED) ─────────────────────
+    // Generate a plan/context specification before execution.
+    // The plan is injected as context for the execution LLM.
+    let plan_content: Option<String> = if config.prompt_graph_enabled {
+        let max_iter = config.prompt_graph_iterations.max(1); // at least 1
+        let max_tokens = config.prompt_graph_max_tokens;
+        let mut last_plan: Option<String> = None;
+        let mut accepted = false;
+
+        for iter in 0..(max_iter + 1) {
+            // Build the planning prompt (lightweight — no tools, no heavy context)
+            let planning_prompt = crate::prompt_builder::build_planning_prompt(
+                &ctx.memory_store,
+                "",   // platform
+                &profile_name,
+                &msg.content,
+                iter,
+                max_iter,
+                last_plan.as_deref(),
+            );
+
+            let planning_messages = vec![
+                ChatMessage::system(&planning_prompt),
+            ];
+
+            let plan_request = CompletionRequest {
+                messages: planning_messages,
+                max_tokens,
+                temperature: 0.3,
+                stream: false,
+                tools: None,
+            };
+
+            match llm.completion(plan_request).await {
+                Ok(resp) => {
+                    merge_usage(&mut cumulative_usage, resp.usage);
+                    let content = resp.content;
+
+                    // Check if the LLM accepted the plan (refinement mode)
+                    if content.trim() == "PLAN_ACCEPTED" {
+                        info!(
+                            "[plan] Plan accepted after {} iteration(s) for message {}",
+                            iter, msg.id
+                        );
+                        accepted = true;
+                        break;
+                    }
+
+                    info!(
+                        "[plan] Generated plan for message {} ({} chars, iteration {}/{})",
+                        msg.id,
+                        content.len(),
+                        iter + 1,
+                        max_iter + 1,
+                    );
+
+                    // Save the plan as a plan-type message
+                    let plan_msg = MessageNew {
+                        channel_id: msg.channel_id,
+                        role: "agent".to_string(),
+                        content: content.clone(),
+                        status: MessageStatus::Completed,
+                        thread_id: Some(msg.thread_id),
+                        thread_sequence: msg.thread_sequence + 1,
+                        external_id: None,
+                        metadata: serde_json::json!({
+                            "plan_iteration": iter,
+                            "plan_accepted": iter == 0 && max_iter == 0 || false,
+                        }),
+                        embedding: None,
+                        summary_text: None,
+                        is_summary: false,
+                        msg_type: "plan".to_string(),
+                        msg_subtype: Some("markdown".to_string()),
+                        iteration_count: current_max,
+                        iterations: current_max,
+                        profile: profile_name.clone(),
+                        provider: provider_name.clone(),
+                        model: model_name.clone(),
+                        processing_time_ms: None,
+                        token_usage: None,
+                    };
+                    let _ = queries::create_message(pool, &plan_msg).await;
+
+                    last_plan = Some(content);
+
+                    // If no refinement iterations configured, one shot is enough
+                    if config.prompt_graph_iterations == 0 {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    warn!("[plan] Failed to generate plan for message {}: {:?}", msg.id, e);
+                    break;
+                }
+            }
+        }
+
+        if accepted {
+            last_plan
+        } else {
+            // If we have a last plan (even if not explicitly accepted), use it
+            if last_plan.is_some() {
+                last_plan
+            } else {
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut messages = vec![
         ChatMessage::system(&system_prompt),
     ];
@@ -893,6 +1043,22 @@ async fn process_message(
             "=== Additional Context ===\n{}",
             context_messages
         )));
+    }
+
+    // Inject the plan as execution context if one was generated
+    if let Some(ref plan) = plan_content {
+        messages.push(ChatMessage::system(&format!(
+            "=== Generated Plan (use as guidance) ===\n\
+             A plan was generated for the current task. Follow it unless tool results \
+             contradict it. Do NOT explore alternative approaches that the plan already \
+             considered — adapt only when necessary.\n\n{}",
+            plan
+        )));
+        info!(
+            "[plan] Injected plan as context for message {} ({} chars)",
+            msg.id,
+            plan.len(),
+        );
     }
 
     // Add the user message
@@ -907,7 +1073,6 @@ async fn process_message(
     let mut final_content = String::new();
     let mut final_reasoning: Option<String> = None;
     let mut final_tool_call: bool = false;
-    let mut cumulative_usage: Option<Usage> = None;
     let mut limit_reached: bool = false;
     let mut current_iter = current_max;
 
@@ -1262,7 +1427,7 @@ async fn process_message(
         metadata: serde_json::json!({}),
         embedding: None,
         summary_text: None,
-        is_summary: false,
+        is_summary: true,
         msg_type: "summary".to_string(),
         msg_subtype: None,
         iteration_count: current_iter,

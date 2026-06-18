@@ -336,6 +336,107 @@ pub fn build_system_prompt(
     segments.join("\n\n")
 }
 
+/// Build a lightweight planning prompt for the PROMPT_GRAPH phase.
+///
+/// This is a focused prompt that asks the LLM to produce a plan / context
+/// specification before the actual execution. The plan is then injected
+/// as context for the execution phase.
+///
+/// The user message is included as a reference so the LLM can scope its
+/// plan appropriately, but it does NOT execute any tools here.
+pub fn build_planning_prompt(
+    memory_store: &MemoryStore,
+    platform: &str,
+    _profile_name: &str,
+    user_message: &str,
+    plan_iteration: u32,
+    _max_iterations: u32,
+    previous_plan: Option<&str>,
+) -> String {
+    // Base system identity — everything except tool guidance since
+    // planning doesn't execute tools.
+    let identity = DEFAULT_AGENT_IDENTITY;
+
+    // Memory + user profile
+    let mut volatile_parts: Vec<String> = Vec::new();
+    if let Some(mem_block) = memory_store.format_for_system_prompt("memory") {
+        volatile_parts.push(mem_block.to_string());
+    }
+    if let Some(user_block) = memory_store.format_for_system_prompt("user") {
+        volatile_parts.push(user_block.to_string());
+    }
+
+    // Platform hint
+    if let Some(hint) = platform_hint(platform) {
+        volatile_parts.push(hint);
+    }
+
+    // Timestamp
+    use chrono::Utc;
+    let now = Utc::now();
+    volatile_parts.push(format!("Conversation started: {}", now.format("%A, %B %d, %Y")));
+
+    // Build the planning instruction
+    let is_refinement = plan_iteration > 0 && previous_plan.is_some();
+    let task_instruction = if is_refinement {
+        format!(
+            r#"You previously produced a plan for the user's request. \
+Review it below and improve it. Fix any gaps or errors. \
+If the plan is already complete and correct, respond with exactly:
+
+PLAN_ACCEPTED
+
+Otherwise, produce an improved plan.
+
+Previous plan:
+{prev}"#,
+            prev = previous_plan.unwrap_or("")
+        )
+    } else {
+        r#"You are in the PLANNING phase. Your job is to produce a detailed plan
+for how to fulfill the user's request.
+
+The plan should specify:
+1. What tools or capabilities you will need
+2. What data or resources you need to retrieve
+3. The step-by-step approach
+4. Any assumptions or preconditions
+
+Produce a single, direct execution path. Do NOT include fallback approaches,
+alternatives, or contingency plans — if the chosen path fails at execution
+time, the execution phase will adapt naturally.
+
+Format your plan as structured markdown with sections.
+Do NOT execute any tools or produce code — only plan.
+
+The user's request is provided below as a reference."#.to_string()
+    };
+
+    let volatile = volatile_parts
+        .into_iter()
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    format!(
+        r#"{identity}
+
+{volatile}
+
+## Planning Task
+
+{task_instruction}
+
+## User Request (reference)
+
+{user_message}"#,
+        identity = identity,
+        volatile = volatile,
+        task_instruction = task_instruction,
+        user_message = user_message,
+    )
+}
+
 /// Result of `build_system_prompt_parts`.
 pub struct PromptParts {
     pub stable: String,
