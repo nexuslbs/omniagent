@@ -54,6 +54,7 @@ use crate::prompt_builder::MemoryStore;
 #[derive(Debug, Clone)]
 pub struct AppContext {
     pub pool: PgPool,
+    pub readonly_pool: PgPool,
     pub data_dir: String,
     pub workspace_dir: String,
     pub qdrant_url: Option<String>,
@@ -63,7 +64,7 @@ pub struct AppContext {
 
 impl AppContext {
     /// Create a new application context with a loaded memory store.
-    pub fn new(pool: PgPool, data_dir: &str, workspace_dir: &str, qdrant_url: Option<String>) -> Self {
+    pub fn new(pool: PgPool, readonly_pool: PgPool, data_dir: &str, workspace_dir: &str, qdrant_url: Option<String>) -> Self {
         // Load memory store from the default profile's memories directory
         let profile_path = format!("{}/profiles/default", data_dir);
         let mut memory_store = MemoryStore::new(&profile_path);
@@ -71,6 +72,7 @@ impl AppContext {
 
         Self {
             pool,
+            readonly_pool,
             data_dir: data_dir.to_string(),
             workspace_dir: workspace_dir.to_string(),
             qdrant_url,
@@ -206,6 +208,18 @@ pub fn default_registry(ctx: &AppContext) -> McpRegistry {
 
     // Metrics tool
     registry.register(tools::metrics::get_metrics_tool());
+
+    // Database query tool (read-only)
+    registry.register(tools::query::query_database_tool(ctx));
+
+    // Docker compose tool
+    registry.register(tools::docker::compose_tool());
+
+    // Git/GitHub tools
+    registry.register(tools::git::create_github_repo_tool());
+    registry.register(tools::git::clone_repo_tool());
+    registry.register(tools::git::commit_and_push_tool());
+    registry.register(tools::git::status_tool());
 
     // External MCP servers (load from config, best-effort)
     let external_tools = external::client::initialize_external_tools(&ctx.data_dir);

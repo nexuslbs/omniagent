@@ -1,8 +1,11 @@
 pub mod cron;
+pub mod docker;
 pub mod fetch;
 pub mod filesystem;
+pub mod git;
 pub mod kanban;
 pub mod memory;
 pub mod metrics;
+pub mod query;
 pub mod search;
 pub mod skills;
