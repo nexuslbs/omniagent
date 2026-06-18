@@ -8,6 +8,15 @@
       "timeout_secs": 10,
       "max_retries": 3,
       "allowed_tools": ["*"]
+    },
+    {
+      "name": "git",
+      "transport": "stdio",
+      "command": "python3",
+      "args": ["scripts/mcp-git-server.py"],
+      "timeout_secs": 120,
+      "max_retries": 3,
+      "allowed_tools": ["*"]
     }
   ]
 }

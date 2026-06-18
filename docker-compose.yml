@@ -45,9 +45,18 @@ services:
       - cargo-git:/usr/local/cargo/git
       - ./data:/opt/data:rw
       - /tmp/data/omni:/tmp/data/omni:rw
+      - /var/run/docker.sock:/var/run/docker.sock:rw
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /opt/workspace:/opt/workspace:rw
+      - /opt/data/credentials:/opt/data/credentials:ro
+      - /opt/data/.env:/opt/data/.env:ro
     expose:
       - "8080"
+    ports:
+      - "127.0.0.1:8080:8080"
     user: root
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   backup:
     build:

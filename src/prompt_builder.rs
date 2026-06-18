@@ -46,7 +46,14 @@ Existing knowledge may already cover the topic.\n\
 normal research tasks.\n\
 9. OUTPUT QUALITY: When writing research-output.md, include clear headers, \
 comparison tables where appropriate, and cite sources. Verify the file was written \
-by reading it back with filesystem_read.";
+by reading it back with filesystem_read.\n\
+\n\
+FILESYSTEM ACCESS:\n\
+- Read/write/search/list operations target data_dir=<data_dir> only.\n\
+- Research output file path: <data_dir>/research-output.md (MUST write to this path).\n\
+- The file read/write tools are restricted to <data_dir>/ — anything outside will fail.\n\
+- To read the research input, use filesystem_read(path=\"<data_dir>/research-input.md\").\n\
+- Do NOT try to access paths under /app/ — they are outside the data directory.";
 
 const RESEARCH_WORKFLOW: &str = "\
 RESEARCH WORKFLOW (follow this exact sequence for research tasks):\n\

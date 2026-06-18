@@ -1200,10 +1200,22 @@ async fn process_message(
     // the conversation flow (user requests + agent responses), not raw tool
     // outputs. This keeps summary tokens low and avoids silent failures
     // from oversized context windows.
+    // CRITICAL: Also strip tool_calls from assistant messages, otherwise
+    // DeepSeek rejects the request with 'assistant message with tool_calls
+    // must be followed by tool messages responding to each tool_call_id'.
     let mut summary_msgs: Vec<ChatMessage> = messages
         .iter()
         .filter(|m| m.role != "tool")
-        .cloned()
+        .map(|m| {
+            let mut cloned = m.clone();
+            // Remove tool_calls from assistant messages since we removed
+            // the corresponding tool results — DeepSeek requires tool_call
+            // chains to be complete.
+            if cloned.role == "assistant" && cloned.tool_calls.is_some() {
+                cloned.tool_calls = None;
+            }
+            cloned
+        })
         .collect();
     summary_msgs.push(ChatMessage::system(if limit_reached {
         "The iteration limit was reached so the task may be incomplete. \

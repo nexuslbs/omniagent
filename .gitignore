@@ -3,3 +3,6 @@
 .env
 backup.env
 *.swp
+
+# MCP script cache
+scripts/__pycache__/
