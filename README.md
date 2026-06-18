@@ -2,7 +2,32 @@
 
 Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP tool support.
 
-## Quick Start
+## Features
+
+### 🧠 Context Builder & Grounding
+- **Priority-ranked prompt assembly** (`ContextBuilder`) — NeverTrim (system, MEMORY.md) → High (thread messages) → Normal (tool defs) → Low (retrieved content)
+- **Token budgeting** — per-block character caps, lowest-priority blocks dropped when over budget
+- **Grounding policy** — embedded in every system prompt: prefer evidence, state uncertainty, cite references
+- **Evidence metadata** — `messages.metadata` captures context diagnostics (`context.selected_message_ids`, `block_counts`, `dropped_blocks`, `total_chars`) and grounding flags
+
+### 🔍 Hybrid Retrieval
+- **4-tier retrieval** controlled by profile `retrieval_aggressiveness` (0-3):
+  - Level 1: ILIKE text search in messages + wiki text search (walkdir)
+  - Level 2+: pgvector semantic search (`<=>` cosine similarity on message embeddings) + Qdrant vector search on wiki content
+- **Query classifier** — heuristic (Greeting/Command/FollowUp/Factual/ExternalQuery) gates whether retrieval runs
+- Re-ranking with recency and same-thread boosts
+
+### 💾 Memory Promotion
+- **3 MCP tools** (`promote_to_memory`, `list_memories`, `review_memories`)
+- YAML frontmatter with `confidence`, `source_message_ids`, `source_tool_outputs`, `created_at`, `expires_at`, `last_verified_at`
+- 30-day default expiry with review workflow
+
+### 🔌 MCP External Servers
+- **stdio transport** — spawn subprocesses, JSON-RPC 2.0 over stdin/stdout
+- **HTTP transport** — connect to remote MCP servers via HTTP POST
+- **Circuit breaker** — automatic disable after N consecutive failures
+- **Dynamic tool registry** — external tools auto-merge with built-in tools at startup
+- Configured via `MCP_SERVERS_CONFIG` env var or `<data_dir>/config/mcp-servers.json`
 
 ### Requirements
 
@@ -116,6 +141,9 @@ If neither the channel nor the profile specifies a model, the prompt will fail w
 | `HOST` | `0.0.0.0` | HTTP bind address |
 | `PORT` | `8080` | HTTP port |
 | `DELETE_AFTER_DAYS` | `30` | Message retention period |
+| `MCP_SERVERS_CONFIG` | — | External MCP servers config file path |
+| `VECTORIZE_MESSAGES` | `false` | Enable message embedding generation |
+| `VECTORIZE_WIKI` | `false` | Enable wiki embedding generation |
 
 ## API Endpoints
 
@@ -183,6 +211,10 @@ $OMNI_DATA_DIR/
       memories/         # Memory files (MEMORY.md, SOUL.md)
       skills/           # Reusable skills
       wiki/             # Wiki reference content
+        Memory/
+          Promoted/     # Promoted long-term memories
+  config/
+    mcp-servers.json    # External MCP server config (optional)
   tools/                # MCP tool definitions
 ```
 

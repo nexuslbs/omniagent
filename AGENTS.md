@@ -249,6 +249,54 @@ Agent can promote validated facts to long-term wiki memory via three MCP tools:
 
 Only promote facts that have been directly validated through conversation or tool output. Promoted memories are available for future wiki search and Qdrant vector search.
 
+### MCP External Servers
+
+OmniAgent can connect to external MCP servers via stdio or HTTP transports. External tools are merged with built-in tools at startup and appear with a `{server_name}_` prefix in the LLM's tool list.
+
+#### Configuration
+
+Create a JSON or YAML config file and set `MCP_SERVERS_CONFIG` env var to its path, or place it at `<data_dir>/config/mcp-servers.json`:
+
+```json
+{
+  "servers": [
+    {
+      "name": "my-server",
+      "transport": "stdio",
+      "command": "python3",
+      "args": ["/path/to/mcp-server.py"],
+      "timeout_secs": 30,
+      "max_retries": 3,
+      "allowed_tools": ["*"]
+    },
+    {
+      "name": "remote-api",
+      "transport": "http",
+      "url": "http://localhost:3000/mcp",
+      "timeout_secs": 60,
+      "allowed_tools": ["search", "compute"]
+    }
+  ]
+}
+```
+
+#### Transports
+
+| Transport | Protocol | Use Case |
+|-----------|----------|----------|
+| `stdio` | JSON-RPC 2.0 over stdin/stdout | Local subprocess servers (Python, Node.js, etc.) |
+| `http` | JSON-RPC 2.0 over HTTP POST | Remote MCP servers behind HTTP endpoints |
+
+#### Circuit Breaker
+
+Each external server has a circuit breaker that tracks consecutive failures. After `max_retries` consecutive failures, the circuit opens and tool calls return an informative error instead of blocking. A successful call resets the counter.
+
+#### Security
+
+- Environment variable references (`\${VAR_NAME}`) in server config are resolved at load time
+- The agent only connects to servers listed in the allowlist
+- Filesystem path restrictions apply to all external tools via the `AppContext` data directory
+
 ### Path Restriction
 
 All filesystem tools enforce that accessed paths must be within the data directory (`OMNI_DATA_DIR`, default `/opt/data`). Paths are canonicalized before the check.
@@ -312,13 +360,14 @@ $OMNI_DATA_DIR/
 src/
   main.rs            ─ Entry point, initialization
   config.rs          ─ Base config (DB, Qdrant, server)
+  context_builder.rs ─ ContextBuilder, query classifier, re-ranking
   agent/
     mod.rs           ─ Agent supervisor, channel handler, process_message
   llm/
     mod.rs           ─ LLM client, provider abstraction, function calling
   db/
     migrations.rs    ─ Schema migrations
-    queries.rs       ─ All SQL queries
+    types.rs         ─ All SQL queries (sql_forge macros)
     schema.rs        ─ Schema documentation
     mod.rs           ─ DB connection pool
   models/
@@ -327,18 +376,31 @@ src/
     profile.rs       ─ ProfileRow, ProfileNew
     mod.rs           ─ Module exports
   mcp/
-    mod.rs           ─ McpRegistry, AppContext, tool execution
+    mod.rs           ─ McpRegistry, AppContext, tool execution, external loader
     tools/
       mod.rs         ─ Tool declarations
       filesystem.rs  ─ Filesystem MCP tools
       fetch.rs       ─ HTTP fetch tool
       search.rs      ─ Message & wiki search tools
+      skills.rs      ─ Skill creation tool
+      cron.rs        ─ Cron job management tools
+      kanban.rs      ─ Kanban task management tools
+      memory.rs      ─ Memory promotion, listing, review tools
+    external/
+      mod.rs         ─ External MCP server module declarations
+      protocol.rs    ─ JSON-RPC 2.0 / MCP protocol types
+      config.rs      ─ Server configuration loading (JSON/YAML)
+      client.rs      ─ StdioMcpClient, HttpMcpClient, CircuitBreaker
   profile/
     mod.rs           ─ Profile struct, ProfileRegistry
+  prompt_builder.rs  ─ System prompt assembly (3-tier: stable, context, volatile)
+  vectorizer/
+    mod.rs           ─ HashVectorizer, ApiVectorizer, wiki/message vectorization
+  scheduler.rs       ─ Cron job scheduler with concurrency guard
   platform/
     mod.rs           ─ Platform trait, Telegram stub
   server/
-    mod.rs           ─ HTTP endpoints (health, stop)
+    mod.rs           ─ HTTP endpoints (health, stop, prompt)
 ```
 
 ## Concurrency Model
