@@ -350,15 +350,24 @@ fn handle_query(pool: sqlx::PgPool, args: &Value) -> Result<McpToolResult> {
                 let mut map = serde_json::Map::new();
                 for (i, col) in row.columns().iter().enumerate() {
                     let name = col.name();
-                    // Try to decode as text first, fall back to null
-                    let val: Result<String, _> = row.try_get::<String, _>(i);
-                    match val {
-                        Ok(s) => { map.insert(name.to_string(), serde_json::Value::String(s)); }
-                        Err(_) => {
-                            let _null: Option<String> = row.try_get(i).ok().flatten();
-                            map.insert(name.to_string(), serde_json::json!(_null));
-                        }
-                    }
+                    // Try types in priority order: String, i64, f64, bool, then null
+                    let value: serde_json::Value = if let Ok(s) = row.try_get::<&str, _>(i) {
+                        serde_json::Value::String(s.to_string())
+                    } else if let Ok(n) = row.try_get::<i64, _>(i) {
+                        serde_json::json!(n)
+                    } else if let Ok(n) = row.try_get::<f64, _>(i) {
+                        serde_json::json!(n)
+                    } else if let Ok(b) = row.try_get::<bool, _>(i) {
+                        serde_json::json!(b)
+                    } else {
+                        // Check if the column is truly NULL
+                        row.try_get::<Option<String>, _>(i)
+                            .ok()
+                            .flatten()
+                            .map(serde_json::Value::String)
+                            .unwrap_or(serde_json::Value::Null)
+                    };
+                    map.insert(name.to_string(), value);
                 }
                 json_rows.push(serde_json::Value::Object(map));
             }
