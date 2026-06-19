@@ -600,6 +600,29 @@ pub async fn find_channel_by_id(
     row.map(|r| r.try_into()).transpose()
 }
 
+/// Get a channel by id, including its actual metadata (not hardcoded '{}').
+pub async fn get_channel_by_id(pool: &PgPool, channel_id: i64) -> anyhow::Result<Option<Channel>> {
+    let row: Option<ChannelDb> = sql_forge!(
+        ChannelDb,
+        r#"
+        SELECT
+            id, name, platform, external_id, cause,
+            current_profile, current_model, current_provider,
+            readonly,
+            COALESCE(closed, false) as "closed",
+            COALESCE(metadata::text, '{}') AS "metadata",
+            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
+            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
+        FROM channels
+        WHERE id = :id
+        "#,
+        ( :id = channel_id )
+    )
+    .fetch_optional(pool)
+    .await?;
+    row.map(|r| r.try_into()).transpose()
+}
+
 pub async fn create_channel(
     pool: &PgPool,
     name: &str,

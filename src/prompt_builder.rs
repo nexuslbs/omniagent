@@ -85,6 +85,22 @@ Use search_wiki to find relevant wiki pages. \
 Use search_messages to find past conversations and research results. \
 Both are available as MCP tools — check them before fetching external data.";
 
+const DB_SCHEMA: &str = "DATABASE SCHEMA (PostgreSQL):\\n\\\
+channels: id, name, platform, external_id, cause, metadata (JSONB), closed, created_at, updated_at\\n\\\
+threads: id, channel_id, status, cause, profile, provider, model, \
+input_tokens, cached_tokens, output_tokens, duration_ms, created_at, started_at, ended_at\\n\\\
+messages: id, thread_id, role, content, thread_sequence, msg_type, msg_subtype, \
+external_id, metadata (JSONB), embedding, summary_text, is_summary, \
+processing_time_ms (tool latency), token_usage (JSONB), created_at\\n\\\
+summaries: id, channel_id, next_thread_id, content (cross-thread summary text), created_at\\n\\\
+\\n\\\
+Key relationships: threads.channel_id → channels.id ; messages.thread_id → threads.id ; \
+summaries.channel_id → channels.id\\n\\\
+\\n\\\
+The query_database MCP tool gives you read-only SQL access (SELECT only). Query these tables directly via \
+sql-forge or SQL. Use search_messages for full-text search across messages. \
+Use summaries to understand what happened in prior threads.";
+
 const DOCKER_EXECUTION_GUIDANCE: &str = "DOCKER CODE EXECUTION: \
 You can execute arbitrary code, run builds, install packages, and perform \
 computations using Docker. The `compose` tool supports: ps, up, down, logs, \
@@ -265,6 +281,7 @@ pub fn build_system_prompt_parts(
     stable_parts.push(SKILLS_GUIDANCE.to_string());
     stable_parts.push(GROUNDING_POLICY.to_string());
     stable_parts.push(DOCKER_EXECUTION_GUIDANCE.to_string());
+    stable_parts.push(DB_SCHEMA.to_string());
 
     // Wiki guidance with the actual data directory
     let wiki_hint = WIKI_GUIDANCE.replace("<profile>", profile_name);

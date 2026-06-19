@@ -1047,10 +1047,25 @@ async fn process_thread(
     // Track cumulative token usage across all LLM calls
     let mut cumulative_usage: Option<Usage> = None;
 
-    // ── Planning Phase (PROMPT_GRAPH_ENABLED) ─────────────────────
-    // Generate a plan/context specification before execution.
-    // The plan is injected as context for the execution LLM.
-    let plan_content: Option<String> = if config.prompt_graph_enabled {
+    // ── Planning Phase ──
+    // Determine planning mode: channel metadata > global config
+    let channel = queries::get_channel_by_id(pool, thread.channel_id).await?.unwrap_or_default();
+    let planning_mode = channel.metadata.get("planning_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto");
+
+    let should_plan = match planning_mode {
+        "never" => false,
+        "always" => true,
+        "auto" | _ => {
+            // Auto: plan if message > 200 chars AND is first in thread
+            config.prompt_graph_enabled 
+                && cause_msg.content.len() > 200 
+                && cause_msg.thread_sequence == 0
+        }
+    };
+
+    let plan_content: Option<String> = if should_plan {
         let max_iter = config.prompt_graph_iterations.max(1); // at least 1
         let max_tokens = config.prompt_graph_max_tokens;
         let mut last_plan: Option<String> = None;
