@@ -334,12 +334,14 @@ async fn prompt_preview_handler(
             .unwrap_or_else(|| crate::profile::Profile::default(profile_name));
 
         let provider_name = channel.current_provider.clone()
-            .or_else(|| prof.provider.clone())
-            .unwrap_or_else(|| std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "opencode-go".to_string()));
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("LLM_PROVIDER").ok().filter(|s| !s.is_empty()))
+            .unwrap_or_else(|| "opencode-go".to_string());
 
         let model_name = channel.current_model.clone()
-            .or_else(|| prof.model.clone())
-            .unwrap_or_else(|| std::env::var("LLM_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string()));
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("LLM_MODEL").ok().filter(|s| !s.is_empty()))
+            .unwrap_or_else(|| "deepseek-v4-flash".to_string());
 
         // Resolve provider enum for the resolved provider name
         let resolved_provider: crate::llm::ProviderKind = match provider_name.parse() {
