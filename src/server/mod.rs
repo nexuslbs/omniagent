@@ -358,24 +358,28 @@ async fn prompt_preview_handler(
             None,
         );
 
-        // Create LLM client — resolve base_url, api_key, and api_mode
-        // for the ACTUAL provider (channel > profile > env), not the
-        // env's default, so that e.g. a deepseek channel doesn't hit
-        // the opencode-go API with the wrong auth/format.
+        // Create LLM client — match how the agent resolves config.
+        // The agent (Agent::new) uses config.llm_api_key (=LLM_API_KEY)
+        // as primary, NOT DEEPSEEK_API_KEY. Only fall back to
+        // DEEPSEEK_API_KEY if LLM_API_KEY is absent (matches the
+        // AgentConfig::from_env() fallback logic).
         let base_url = std::env::var("LLM_BASE_URL").unwrap_or_else(|_| match resolved_provider {
             crate::llm::ProviderKind::OpenCodeGo => "https://opencode.ai/zen/go/v1".to_string(),
             crate::llm::ProviderKind::OpenAI => "https://api.openai.com/v1".to_string(),
             crate::llm::ProviderKind::Anthropic => "https://api.anthropic.com/v1".to_string(),
             crate::llm::ProviderKind::DeepSeek => "https://api.deepseek.com/v1".to_string(),
         });
-        let api_key = match resolved_provider {
-            crate::llm::ProviderKind::DeepSeek => {
-                std::env::var("DEEPSEEK_API_KEY")
-                    .or_else(|_| std::env::var("LLM_API_KEY"))
-                    .unwrap_or_default()
-            }
-            _ => std::env::var("LLM_API_KEY").unwrap_or_default(),
-        };
+        let api_key = std::env::var("LLM_API_KEY")
+            .or_else(|_| {
+                // agent's AgentConfig::from_env() fallback
+                let provider = std::env::var("LLM_PROVIDER").unwrap_or_default();
+                if provider == "deepseek" {
+                    std::env::var("DEEPSEEK_API_KEY")
+                } else {
+                    Err(std::env::VarError::NotPresent)
+                }
+            })
+            .unwrap_or_default();
         let api_mode = crate::llm::ApiMode::resolve(resolved_provider, &model_name);
 
         let llm_config = crate::llm::LLMConfig {
