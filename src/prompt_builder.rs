@@ -336,7 +336,7 @@ pub fn build_system_prompt(
     segments.join("\n\n")
 }
 
-/// Build a lightweight planning prompt for the PROMPT_GRAPH phase.
+/// Build a lightweight planning prompt for the PROMPT_PLAN phase.
 ///
 /// This is a focused prompt that asks the LLM to produce a plan / context
 /// specification before the actual execution. The plan is then injected

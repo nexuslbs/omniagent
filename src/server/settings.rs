@@ -170,8 +170,8 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         // ── Planning (Prompt Graph) ──
         (
-            "PROMPT_GRAPH_ENABLED".into(),
-            get_env_or_default("PROMPT_GRAPH_ENABLED", "false"),
+            "PROMPT_PLAN_ENABLED".into(),
+            get_env_or_default("PROMPT_PLAN_ENABLED", "false"),
             SettingMeta {
                 field_type: "boolean".into(),
                 description: "Enable planning phase before execution".into(),
@@ -184,8 +184,8 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
             },
         ),
         (
-            "PROMPT_GRAPH_MAX_TOKENS".into(),
-            get_env_or_default("PROMPT_GRAPH_MAX_TOKENS", "2048"),
+            "PROMPT_PLAN_MAX_TOKENS".into(),
+            get_env_or_default("PROMPT_PLAN_MAX_TOKENS", "2048"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Maximum tokens for the planning LLM call".into(),
@@ -408,8 +408,8 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
     for (name, value, meta) in defs {
         let cat_name = match name.as_str() {
             "MAX_TOKENS" | "TEMPERATURE" | "MAX_ITERATIONS" | "LLM_MAX_TOKENS" => "general",
-            "PROMPT_GRAPH_ENABLED"
-            | "PROMPT_GRAPH_MAX_TOKENS"
+            "PROMPT_PLAN_ENABLED"
+            | "PROMPT_PLAN_MAX_TOKENS"
             | "PROMPT_GRAPH_ITERATIONS" => "planning",
             "SUMMARIZE_AFTER_DAYS"
             | "DELETE_AFTER_DAYS"
@@ -483,8 +483,8 @@ async fn update_settings_handler(
         "TEMPERATURE",
         "MAX_ITERATIONS",
         "LLM_MAX_TOKENS",
-        "PROMPT_GRAPH_ENABLED",
-        "PROMPT_GRAPH_MAX_TOKENS",
+        "PROMPT_PLAN_ENABLED",
+        "PROMPT_PLAN_MAX_TOKENS",
         "PROMPT_GRAPH_ITERATIONS",
         "SUMMARIZE_AFTER_DAYS",
         "DELETE_AFTER_DAYS",

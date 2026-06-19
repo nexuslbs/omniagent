@@ -57,9 +57,9 @@ pub struct AgentConfig {
     /// Days before old messages and summaries are deleted.
     pub delete_after_days: u32,
     /// When true, the agent generates a plan/context before execution.
-    pub prompt_graph_enabled: bool,
+    pub prompt_plan_enabled: bool,
     /// Max output tokens for the planning LLM call.
-    pub prompt_graph_max_tokens: u32,
+    pub prompt_plan_max_tokens: u32,
     /// Number of refinement iterations for the plan (0 = disabled, one-shot).
     pub prompt_graph_iterations: u32,
 }
@@ -119,11 +119,11 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .unwrap_or(30),
-            prompt_graph_enabled: std::env::var("PROMPT_GRAPH_ENABLED")
+            prompt_plan_enabled: std::env::var("PROMPT_PLAN_ENABLED")
                 .unwrap_or_else(|_| "false".to_string())
                 .parse::<bool>()
                 .unwrap_or(false),
-            prompt_graph_max_tokens: std::env::var("PROMPT_GRAPH_MAX_TOKENS")
+            prompt_plan_max_tokens: std::env::var("PROMPT_PLAN_MAX_TOKENS")
                 .unwrap_or_else(|_| "2048".to_string())
                 .parse()
                 .unwrap_or(2048),
@@ -1066,7 +1066,7 @@ async fn process_thread(
         "always" => true,
         _ => {
             // Auto: plan if message > 200 chars AND is first in thread
-            config.prompt_graph_enabled 
+            config.prompt_plan_enabled 
                 && cause_msg.content.len() > 200 
                 && cause_msg.thread_sequence == 0
         }
@@ -1074,7 +1074,7 @@ async fn process_thread(
 
     let plan_content: Option<String> = if should_plan {
         let max_iter = config.prompt_graph_iterations.max(1); // at least 1
-        let max_tokens = config.prompt_graph_max_tokens;
+        let max_tokens = config.prompt_plan_max_tokens;
         let mut last_plan: Option<String> = None;
         let mut accepted = false;
 
