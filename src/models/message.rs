@@ -17,6 +17,8 @@ pub struct Message {
     pub msg_type: String,
     pub msg_subtype: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub processing_time_ms: Option<i32>,
+    pub token_usage: Option<serde_json::Value>,
 }
 
 /// Payload for creating a new message (without server-assigned fields).
@@ -33,4 +35,6 @@ pub struct MessageNew {
     pub is_summary: bool,
     pub msg_type: String,
     pub msg_subtype: Option<String>,
+    pub processing_time_ms: Option<i32>,
+    pub token_usage: Option<serde_json::Value>,
 }

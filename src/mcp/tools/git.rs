@@ -341,7 +341,7 @@ fn handle_clone_repo(args: &Value) -> Result<McpToolResult> {
     let target_dir = args["dir"].as_str().unwrap_or("").to_string();
 
     let actual_dir = if target_dir.is_empty() {
-        url.trim_end_matches('/').split('/').last()
+        url.trim_end_matches('/').split('/').next_back()
             .unwrap_or("repo")
             .trim_end_matches(".git")
             .to_string()

@@ -17,6 +17,7 @@ pub struct Thread {
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
+    pub terminal: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

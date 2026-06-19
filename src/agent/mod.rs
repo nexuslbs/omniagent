@@ -735,6 +735,8 @@ async fn process_thread(
             is_summary: false,
             msg_type: "error".to_string(),
             msg_subtype: Some("no-profile".to_string()),
+            processing_time_ms: None,
+            token_usage: None,
         };
         let saved = queries::create_message(pool, &err_msg).await?;
         let _ = queries::complete_thread(pool, thread.id, "failed", 0, 0, 0, 0).await;
@@ -761,6 +763,8 @@ async fn process_thread(
             is_summary: false,
             msg_type: "error".to_string(),
             msg_subtype: Some("invalid-profile".to_string()),
+            processing_time_ms: None,
+            token_usage: None,
         };
         let saved = queries::create_message(pool, &err_msg).await?;
         let _ = queries::complete_thread(pool, thread.id, "failed", 0, 0, 0, 0).await;
@@ -768,7 +772,7 @@ async fn process_thread(
     }
 
     // 3c. Check provider is set on the thread
-    if provider_name.as_ref().map_or(true, |s| s.is_empty()) {
+    if provider_name.as_ref().is_none_or(|s| s.is_empty()) {
         let err_msg = MessageNew {
             thread_id: thread.id,
             role: "system".to_string(),
@@ -787,6 +791,8 @@ async fn process_thread(
             is_summary: false,
             msg_type: "error".to_string(),
             msg_subtype: Some("no-provider".to_string()),
+            processing_time_ms: None,
+            token_usage: None,
         };
         let saved = queries::create_message(pool, &err_msg).await?;
         let _ = queries::complete_thread(pool, thread.id, "failed", 0, 0, 0, 0).await;
@@ -794,7 +800,7 @@ async fn process_thread(
     }
 
     // 3d. Check model is set on the thread
-    if model_name.as_ref().map_or(true, |s| s.is_empty()) {
+    if model_name.as_ref().is_none_or(|s| s.is_empty()) {
         let err_msg = MessageNew {
             thread_id: thread.id,
             role: "system".to_string(),
@@ -813,6 +819,8 @@ async fn process_thread(
             is_summary: false,
             msg_type: "error".to_string(),
             msg_subtype: Some("no-model".to_string()),
+            processing_time_ms: None,
+            token_usage: None,
         };
         let saved = queries::create_message(pool, &err_msg).await?;
         let _ = queries::complete_thread(pool, thread.id, "failed", 0, 0, 0, 0).await;
@@ -825,8 +833,8 @@ async fn process_thread(
     });
 
     // Use provider/model directly from the thread stamp (no fallback chain)
-    let provider_name = provider_name;
-    let model_name = model_name;
+    let _provider_name = provider_name;
+    let _model_name = model_name;
 
     // 4. Build the initial message history with the structured system prompt
     let system_prompt = crate::prompt_builder::build_system_prompt(
@@ -1111,6 +1119,8 @@ async fn process_thread(
                         is_summary: false,
                         msg_type: "plan".to_string(),
                         msg_subtype: Some("markdown".to_string()),
+                        processing_time_ms: None,
+                        token_usage: None,
                     };
                     match queries::create_message(pool, &plan_msg).await {
                         Ok(_) => {},
@@ -1270,6 +1280,8 @@ async fn process_thread(
                 is_summary: false,
                 msg_type: "tool".to_string(),
                 msg_subtype: Some(tool_name.clone()),
+                processing_time_ms: None,
+                token_usage: None,
             };
             match persist_or_abort(pool, &tool_call_msg, thread.id).await {
                 CreateMessageResult::FkViolation => anyhow::bail!("FK violation — thread {} no longer exists", thread.id),
@@ -1306,6 +1318,8 @@ async fn process_thread(
                         is_summary: false,
                         msg_type: "tool_result".to_string(),
                         msg_subtype: Some(tool_name.clone()),
+                        processing_time_ms: Some(tool_elapsed_ms),
+                        token_usage: None,
                     };
                     match persist_or_abort(pool, &tool_result_msg, thread.id).await {
                         CreateMessageResult::FkViolation => anyhow::bail!("FK violation — thread {} no longer exists", thread.id),
@@ -1335,6 +1349,8 @@ async fn process_thread(
                         is_summary: false,
                         msg_type: "tool_result".to_string(),
                         msg_subtype: Some(tool_name.clone()),
+                        processing_time_ms: Some(tool_elapsed_ms),
+                        token_usage: None,
                     };
                     match persist_or_abort(pool, &tool_result_msg, thread.id).await {
                         CreateMessageResult::FkViolation => anyhow::bail!("FK violation — thread {} no longer exists", thread.id),
@@ -1410,12 +1426,15 @@ async fn process_thread(
                 is_summary: false,
                 msg_type: "reasoning".to_string(),
                 msg_subtype: None,
+                processing_time_ms: None,
+                token_usage: None,
             };
             queries::create_message(pool, &reasoning_msg).await?;
         }
     }
 
     // 9. Save the main agent response
+    let agent_elapsed_ms = start_time.elapsed().as_millis() as i32;
     let agent_msg = MessageNew {
         thread_id: thread.id,
         role: "agent".to_string(),
@@ -1431,6 +1450,8 @@ async fn process_thread(
         is_summary: false,
         msg_type: "message".to_string(),
         msg_subtype: None,
+        processing_time_ms: Some(agent_elapsed_ms),
+        token_usage: token_usage_json.clone(),
     };
 
     let saved = queries::create_message(pool, &agent_msg).await?;
@@ -1469,22 +1490,33 @@ async fn process_thread(
         tools: None,
     };
 
-    let summary_text = match llm.completion(summary_request).await {
+    let summary_start = std::time::Instant::now();
+    let (summary_text, summary_token_usage) = match llm.completion(summary_request).await {
         Ok(resp) => {
+            let usage = resp.usage.clone();
             merge_usage(&mut cumulative_usage, resp.usage);
+            let tokens = usage.as_ref().map(|u| {
+                serde_json::json!({
+                    "prompt_tokens": u.prompt_tokens,
+                    "completion_tokens": u.completion_tokens,
+                    "cached_tokens": u.cached_tokens,
+                    "reasoning_tokens": u.reasoning_tokens,
+                })
+            });
             info!(
                 "[summary] Generated summary for thread {} ({} chars, limit_reached={})",
                 thread.id,
                 resp.content.len(),
                 limit_reached,
             );
-            resp.content
+            (resp.content, tokens)
         }
         Err(e) => {
             warn!("[summary] Failed to generate summary for thread {}: {:?}", thread.id, e);
-            format!("Summary generation failed: {}", e)
+            (format!("Summary generation failed: {}", e), None)
         }
     };
+    let summary_elapsed_ms = summary_start.elapsed().as_millis() as i32;
 
     let summary_msg = MessageNew {
         thread_id: thread.id,
@@ -1498,6 +1530,8 @@ async fn process_thread(
         is_summary: true,
         msg_type: "summary".to_string(),
         msg_subtype: None,
+        processing_time_ms: Some(summary_elapsed_ms),
+        token_usage: summary_token_usage,
     };
     match queries::create_message(pool, &summary_msg).await {
         Ok(_) => {
@@ -1511,12 +1545,8 @@ async fn process_thread(
 
     // 10. Complete the thread with final token counts and duration
     let final_status = if limit_reached { "interrupted" } else { "completed" };
-    let elapsed_ms = start_time.elapsed().as_millis() as i32;
-    let input_tokens = cumulative_usage.as_ref().map(|u| u.prompt_tokens as i32).unwrap_or(0);
-    let cached_tokens = cumulative_usage.as_ref().and_then(|u| u.cached_tokens.map(|c| c as i32)).unwrap_or(0);
-    let output_tokens = cumulative_usage.as_ref().map(|u| u.completion_tokens as i32).unwrap_or(0);
 
-    queries::complete_thread(pool, thread.id, final_status, input_tokens, cached_tokens, output_tokens, elapsed_ms).await?;
+    queries::complete_thread(pool, thread.id, final_status, 0, 0, 0, 0).await?;
 
     // 11. Trigger cross-thread summary check
     check_and_generate_summary(pool, llm, config, thread.channel_id).await;

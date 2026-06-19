@@ -29,6 +29,7 @@ pub struct ThreadDb {
     pub created_at: Option<String>,
     pub started_at: Option<String>,
     pub ended_at: Option<String>,
+    pub terminal: bool,
 }
 
 impl TryFrom<ThreadDb> for Thread {
@@ -71,6 +72,7 @@ impl TryFrom<ThreadDb> for Thread {
             } else {
                 None
             },
+            terminal: db.terminal,
         })
     }
 }
@@ -94,6 +96,8 @@ pub struct MessageDb {
     pub msg_type: String,
     pub msg_subtype: Option<String>,
     pub created_at: Option<String>,
+    pub token_usage: Option<String>,
+    pub processing_time_ms: Option<i32>,
 }
 
 impl TryFrom<MessageDb> for Message {
@@ -119,6 +123,8 @@ impl TryFrom<MessageDb> for Message {
                 .unwrap_or("")
                 .parse::<DateTime<Utc>>()
                 .map_err(|e| anyhow::anyhow!("Invalid timestamp '{}': {}", db.created_at.as_deref().unwrap_or("?"), e))?,
+            token_usage: db.token_usage.as_deref().map(|s| serde_json::from_str(s).unwrap_or_default()),
+            processing_time_ms: db.processing_time_ms,
         })
     }
 }
@@ -242,7 +248,8 @@ pub async fn create_thread(
             input_tokens, cached_tokens, output_tokens, duration_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             ''::text AS "started_at",
-            ''::text AS "ended_at"
+            ''::text AS "ended_at",
+            terminal
         "#,
         ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = provider.unwrap_or(""), :model = model.unwrap_or("") )
     )
@@ -255,12 +262,51 @@ pub async fn create_thread(
 /// Set a thread's status to 'pending' so the executor picks it up.
 pub async fn set_thread_pending(pool: &PgPool, thread_id: i64) -> anyhow::Result<()> {
     sql_forge!(
-        "UPDATE threads SET status = 'pending' WHERE id = :id",
+        "UPDATE threads SET status = 'pending' WHERE id = :id AND NOT terminal",
         ( :id = thread_id )
     )
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// Create the seq-0 (cause) message and set the thread to pending in a single transaction.
+pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> anyhow::Result<Message> {
+    let mut tx = pool.begin().await?;
+    let metadata_val: serde_json::Value = serde_json::from_str(&msg.metadata.to_string()).unwrap_or_default();
+    let token_usage_val: serde_json::Value = msg.token_usage.clone().unwrap_or(serde_json::Value::Null);
+    let saved: MessageDb = sql_forge!(
+        MessageDb,
+        r#"
+        INSERT INTO messages (
+            thread_id, role, content, thread_sequence, external_id,
+            metadata, embedding, summary_text, is_summary,
+            msg_type, msg_subtype, processing_time_ms, token_usage
+        )
+        VALUES (:thread_id, :role, :content, :thread_sequence, NULLIF(:external_id, '')::text,
+            :metadata, NULLIF(:embedding, '')::text, NULLIF(:summary_text, '')::text, :is_summary,
+            :msg_type, NULLIF(:msg_subtype, '')::text, NULLIF(:processing_time_ms, -1)::int, NULLIF(:token_usage, 'null')::jsonb)
+        RETURNING
+            id, thread_id, role, content, thread_sequence, external_id,
+            metadata::text AS "metadata", embedding, summary_text, is_summary,
+            msg_type, msg_subtype,
+            token_usage::text AS "token_usage", processing_time_ms,
+            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
+        "#,
+        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :processing_time_ms = msg.processing_time_ms.unwrap_or(-1), :token_usage = &token_usage_val.to_string() )
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sql_forge!(
+        "UPDATE threads SET status = 'pending' WHERE id = :id AND NOT terminal",
+        ( :id = msg.thread_id )
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    saved.try_into()
 }
 
 /// Find pending threads for a channel.
@@ -276,7 +322,8 @@ pub async fn find_pending_threads_by_channel(
             input_tokens, cached_tokens, output_tokens, duration_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
-            COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at"
+            COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
+            terminal
         FROM threads
         WHERE channel_id = :channel_id AND status = 'pending'
         ORDER BY created_at ASC
@@ -293,7 +340,7 @@ pub async fn find_pending_threads_by_channel(
 /// Returns true if the thread was successfully claimed.
 pub async fn claim_thread(pool: &PgPool, thread_id: i64) -> bool {
     let result = sql_forge!(
-        "UPDATE threads SET status = 'processing', started_at = NOW() WHERE id = :id AND status = 'pending'",
+        "UPDATE threads SET status = 'processing', started_at = NOW() WHERE id = :id AND status = 'pending' AND NOT terminal",
         ( :id = thread_id )
     )
     .execute(pool)
@@ -313,23 +360,39 @@ pub async fn complete_thread(
     pool: &PgPool,
     thread_id: i64,
     status: &str,
-    input_tokens: i32,
-    cached_tokens: i32,
-    output_tokens: i32,
-    duration_ms: i32,
+    _input_tokens: i32,
+    _cached_tokens: i32,
+    _output_tokens: i32,
+    _duration_ms: i32,
 ) -> anyhow::Result<()> {
     sql_forge!(
         r#"
         UPDATE threads
         SET status = :status,
-            input_tokens = :input_tokens,
-            cached_tokens = :cached_tokens,
-            output_tokens = :output_tokens,
-            duration_ms = :duration_ms,
-            ended_at = NOW()
-        WHERE id = :id
+            input_tokens = COALESCE(
+                (SELECT SUM((token_usage->>'prompt_tokens')::int)
+                 FROM messages WHERE thread_id = :id AND token_usage IS NOT NULL),
+                0
+            ),
+            cached_tokens = COALESCE(
+                (SELECT SUM((token_usage->>'cached_tokens')::int)
+                 FROM messages WHERE thread_id = :id AND token_usage IS NOT NULL),
+                0
+            ),
+            output_tokens = COALESCE(
+                (SELECT SUM((token_usage->>'completion_tokens')::int)
+                 FROM messages WHERE thread_id = :id AND token_usage IS NOT NULL),
+                0
+            ),
+            duration_ms = COALESCE(
+                EXTRACT(EPOCH FROM (NOW() - COALESCE(started_at, NOW())))::int * 1000,
+                0
+            ),
+            ended_at = NOW(),
+            terminal = true
+        WHERE id = :id AND NOT terminal
         "#,
-        ( :status = status, :input_tokens = input_tokens, :cached_tokens = cached_tokens, :output_tokens = output_tokens, :duration_ms = duration_ms, :id = thread_id )
+        ( :status = status, :id = thread_id )
     )
     .execute(pool)
     .await?;
@@ -340,7 +403,7 @@ pub async fn complete_thread(
 /// Set all pending/processing threads for a channel to 'skipped'.
 pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> anyhow::Result<u64> {
     let result = sql_forge!(
-        "UPDATE threads SET status = 'skipped', ended_at = NOW() WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
+        "UPDATE threads SET status = 'skipped', ended_at = NOW(), terminal = true WHERE channel_id = :channel_id AND status IN ('pending', 'processing') AND NOT terminal",
         ( :channel_id = channel_id )
     )
     .execute(pool)
@@ -367,8 +430,8 @@ pub async fn skip_all_pending_threads(pool: &PgPool) -> anyhow::Result<u64> {
     let result = sql_forge!(
         r#"
         UPDATE threads
-        SET status = 'skipped', ended_at = NOW()
-        WHERE status IN ('pending', 'processing')
+        SET status = 'skipped', ended_at = NOW(), terminal = true
+        WHERE status IN ('pending', 'processing') AND NOT terminal
         "#
     )
     .execute(pool)
@@ -386,6 +449,7 @@ pub async fn get_cause_message(pool: &PgPool, thread_id: i64) -> anyhow::Result<
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
             msg_type, msg_subtype,
+            token_usage::text AS "token_usage", processing_time_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages
         WHERE thread_id = :thread_id AND role = 'cause'
@@ -407,24 +471,26 @@ pub async fn get_cause_message(pool: &PgPool, thread_id: i64) -> anyhow::Result<
 /// Insert a new message (no status/channel/provider/model — those are on the thread).
 pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> anyhow::Result<Message> {
     let metadata_val: serde_json::Value = serde_json::from_str(&msg.metadata.to_string()).unwrap_or_default();
+    let token_usage_val: serde_json::Value = msg.token_usage.clone().unwrap_or(serde_json::Value::Null);
     let row: MessageDb = sql_forge!(
         MessageDb,
         r#"
         INSERT INTO messages (
             thread_id, role, content, thread_sequence, external_id,
             metadata, embedding, summary_text, is_summary,
-            msg_type, msg_subtype
+            msg_type, msg_subtype, processing_time_ms, token_usage
         )
         VALUES (:thread_id, :role, :content, :thread_sequence, NULLIF(:external_id, '')::text,
             :metadata, NULLIF(:embedding, '')::text, NULLIF(:summary_text, '')::text, :is_summary,
-            :msg_type, NULLIF(:msg_subtype, '')::text)
+            :msg_type, NULLIF(:msg_subtype, '')::text, NULLIF(:processing_time_ms, -1)::int, NULLIF(:token_usage, 'null')::jsonb)
         RETURNING
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
             msg_type, msg_subtype,
+            token_usage::text AS "token_usage", processing_time_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         "#,
-        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or("") )
+        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :processing_time_ms = msg.processing_time_ms.unwrap_or(-1), :token_usage = &token_usage_val.to_string() )
     )
     .fetch_one(pool)
     .await?;
@@ -683,6 +749,7 @@ pub async fn get_recent_thread_messages(
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
             msg_type, msg_subtype,
+            token_usage::text AS "token_usage", processing_time_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages
         WHERE thread_id = :thread_id
@@ -714,6 +781,7 @@ pub async fn search_messages_text(
             m.id, m.thread_id, m.role, m.content, m.thread_sequence, m.external_id,
             m.metadata::text AS "metadata", m.embedding, m.summary_text, m.is_summary,
             m.msg_type, m.msg_subtype,
+            m.token_usage::text AS "token_usage", m.processing_time_ms,
             COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages m
         JOIN threads t ON t.id = m.thread_id
@@ -990,7 +1058,8 @@ pub async fn get_completed_seq0_threads_since(
             input_tokens, cached_tokens, output_tokens, duration_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
-            COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at"
+            COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
+            terminal
         FROM threads
         WHERE channel_id = :channel_id
           AND status = 'completed'
@@ -1018,6 +1087,7 @@ pub async fn get_thread_messages(
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
             msg_type, msg_subtype,
+            token_usage::text AS "token_usage", processing_time_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages
         WHERE thread_id = :thread_id

@@ -496,5 +496,15 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Add terminal flag to threads (prevents further state transitions)
+    sql_forge!(
+        r#"
+        ALTER TABLE threads
+        ADD COLUMN IF NOT EXISTS terminal BOOLEAN NOT NULL DEFAULT false
+        "#
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }

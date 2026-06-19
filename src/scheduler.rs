@@ -167,12 +167,14 @@ async fn tick(pool: &PgPool, data_dir: &str) -> Result<()> {
             is_summary: false,
             msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
+            processing_time_ms: None,
+            token_usage: None,
         };
 
-        match queries::create_message(pool, &cause_msg).await {
+        match queries::create_cause_and_set_pending(pool, &cause_msg).await {
             Ok(created) => {
                 info!(
-                    "[cron-scheduler] Created cause message {} for thread {} (job '{}')",
+                    "[cron-scheduler] Created cause message {} and set thread {} pending for job '{}'",
                     created.id, thread.id, display_name
                 );
             }
@@ -188,17 +190,7 @@ async fn tick(pool: &PgPool, data_dir: &str) -> Result<()> {
         }
 
         // ── Set thread status to 'pending' so the executor picks it up ──
-        if let Err(e) = queries::set_thread_pending(pool, thread.id).await {
-            error!(
-                "[cron-scheduler] Failed to set thread {} pending for job '{}': {:?}",
-                thread.id, display_name, e
-            );
-        } else {
-            info!(
-                "[cron-scheduler] Thread {} set to pending for job '{}'",
-                thread.id, display_name
-            );
-        }
+        // (now handled inside create_cause_and_set_pending)
 
         // ── Release claim and update timestamps ──
         let new_next = calculate_next_run(&job.schedule, &now);

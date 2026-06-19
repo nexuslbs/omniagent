@@ -517,7 +517,7 @@ impl McpServerClient for HttpMcpClient {
         let req = build_initialize_request(id);
         let response = self.post(&req)?;
 
-        let result_value = match parse_response(&response.trim())? {
+        let result_value = match parse_response(response.trim())? {
             JsonRpcResponse::Success { result, .. } => result,
             JsonRpcResponse::Error { error, .. } => {
                 return Err(anyhow::anyhow!("MCP initialize error ({}): {}", error.code, error.message));
@@ -538,7 +538,7 @@ impl McpServerClient for HttpMcpClient {
         let req = build_list_tools_request(id);
         let response = self.post(&req)?;
 
-        let list_value = match parse_response(&response.trim())? {
+        let list_value = match parse_response(response.trim())? {
             JsonRpcResponse::Success { result, .. } => result,
             JsonRpcResponse::Error { error, .. } => {
                 return Err(anyhow::anyhow!("MCP tools/list error ({}): {}", error.code, error.message));
@@ -564,7 +564,7 @@ impl McpServerClient for HttpMcpClient {
         let req = build_call_tool_request(id, name, arguments);
         let response = self.post(&req)?;
 
-        let result_value = match parse_response(&response.trim())? {
+        let result_value = match parse_response(response.trim())? {
             JsonRpcResponse::Success { result, .. } => result,
             JsonRpcResponse::Error { error, .. } => {
                 return Err(anyhow::anyhow!("MCP tool call error ({}): {}", error.code, error.message));

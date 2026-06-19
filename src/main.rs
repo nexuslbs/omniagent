@@ -323,10 +323,10 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                     is_summary: false,
                     msg_type: "message".to_string(),
                     msg_subtype: None,
+                    processing_time_ms: None,
+                    token_usage: None,
                 };
-                let saved = db::types::create_message(&pool, &root_msg).await?;
-                // Set thread pending so the executor can process it
-                let _ = db::types::set_thread_pending(&pool, thread.id).await;
+                let saved = db::types::create_cause_and_set_pending(&pool, &root_msg).await?;
                 thread_id = saved.thread_id;
                 next_sequence = 1;
                 println!("┌─ New conversation thread #{} ────────────────────────┐", thread_id);
@@ -358,10 +358,10 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
             is_summary: false,
             msg_type: "message".to_string(),
             msg_subtype: None,
+            processing_time_ms: None,
+            token_usage: None,
         };
-        db::types::create_message(&pool, &msg).await?;
-        // Set thread pending so executor picks it up
-        let _ = db::types::set_thread_pending(&pool, thread.id).await;
+        db::types::create_cause_and_set_pending(&pool, &msg).await?;
         let _user_msg_id = 0;
 
         // Poll for agent responses
@@ -408,8 +408,8 @@ async fn ensure_cli_channel(
     if let Some(channel_db) = existing {
         // Update profile/model/provider if changed
         if channel_db.current_profile != profile_name
-            || model.map_or(true, |m| channel_db.current_model.as_deref() != Some(m))
-            || provider.map_or(true, |p| channel_db.current_provider.as_deref() != Some(p))
+            || model.is_none_or(|m| channel_db.current_model.as_deref() != Some(m))
+            || provider.is_none_or(|p| channel_db.current_provider.as_deref() != Some(p))
         {
             sql_forge!(
                 r#"
@@ -533,6 +533,8 @@ async fn get_or_create_thread(pool: &PgPool, channel_id: i64, profile_name: &str
         is_summary: false,
         msg_type: "message".to_string(),
         msg_subtype: None,
+        processing_time_ms: None,
+        token_usage: None,
     };
     let saved = queries::create_message(pool, &root_msg).await?;
     Ok(saved.thread_id)

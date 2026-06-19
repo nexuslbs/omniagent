@@ -464,13 +464,15 @@ pub fn update_kanban_task_tool() -> McpTool {
                                     is_summary: false,
                                     msg_type: "kanban".to_string(),
                                     msg_subtype: Some(t.id.clone()),
+                                    processing_time_ms: None,
+                                    token_usage: None,
                                 };
 
-                                match queries::create_message(&pool, &cause_msg).await {
+                                match queries::create_cause_and_set_pending(&pool, &cause_msg).await {
                                     Ok(created) => {
                                         tracing::info!(
-                                            "Created cause message {} for kanban task '{}' in thread {} channel {}",
-                                            created.id, t.id, thread.id, task_channel_id
+                                            "Created cause message {} and set thread {} pending for kanban task '{}' channel {}",
+                                            created.id, thread.id, t.id, task_channel_id
                                         );
                                     }
                                     Err(e) => {
@@ -478,10 +480,7 @@ pub fn update_kanban_task_tool() -> McpTool {
                                     }
                                 }
 
-                                // Set thread status to 'pending' so the executor picks it up
-                                queries::set_thread_pending(&pool, thread.id)
-                                    .await
-                                    .map_err(|e| anyhow::anyhow!("Failed to set thread pending for ready task '{}': {e}", t.id))?;
+                                // Set thread status to 'pending' — handled inside create_cause_and_set_pending
 
                                 tracing::info!(
                                     "Thread {} set to pending for kanban task '{}'",
