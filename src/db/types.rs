@@ -932,7 +932,19 @@ pub async fn delete_old_summaries(
 pub fn search_wiki_text(wiki_dir: &str, query: &str, limit: usize) -> Vec<(String, String, String)> {
     use std::fs;
     let query_lower = query.to_lowercase();
-    let mut results = Vec::new();
+
+    // Split query into individual search terms
+    let terms: Vec<&str> = query_lower
+        .split_whitespace()
+        .filter(|t| t.len() > 2) // ignore very short words
+        .collect();
+
+    // If no meaningful terms, fall back to whole-query matching
+    let use_terms = !terms.is_empty();
+    let search_terms: Vec<&str> = if use_terms { terms } else { vec![&query_lower] };
+
+    let mut scored: Vec<(String, String, usize, String)> = Vec::new();
+    // results: Vec<(relative_path, title, max_score, Vec<(snippet_line, matching_term)>)>
 
     let walker = walkdir::WalkDir::new(wiki_dir)
         .follow_links(true)
@@ -940,10 +952,7 @@ pub fn search_wiki_text(wiki_dir: &str, query: &str, limit: usize) -> Vec<(Strin
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file() && e.path().extension().map(|ext| ext == "md").unwrap_or(false));
 
-    for entry in walker.take(limit * 10) {
-        if results.len() >= limit {
-            break;
-        }
+    for entry in walker {
         let path = entry.path();
         let relative = path.strip_prefix(wiki_dir).unwrap_or(path).display().to_string();
         let content = match fs::read_to_string(path) {
@@ -955,19 +964,43 @@ pub fn search_wiki_text(wiki_dir: &str, query: &str, limit: usize) -> Vec<(Strin
             .find(|l| l.starts_with("# "))
             .map(|l| l.trim_start_matches("# ").to_string())
             .unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().to_string());
+        // Count how many unique terms match at least one line
+        let content_lower = content.to_lowercase();
+        let match_count = search_terms
+            .iter()
+            .filter(|term| content_lower.contains(*term))
+            .count();
 
+        if match_count == 0 {
+            continue;
+        }
+
+        // Find the best snippet (line with the most matching terms)
+        let mut best_snippet = String::new();
+        let mut best_snippet_score = 0usize;
         for line in content.lines() {
-            if line.to_lowercase().contains(&query_lower) {
-                let snippet = line.trim().chars().take(200).collect::<String>();
-                results.push((relative.clone(), title.clone(), snippet));
-                if results.len() >= limit {
-                    break;
-                }
+            let line_lower = line.to_lowercase();
+            let line_score = search_terms
+                .iter()
+                .filter(|term| line_lower.contains(*term))
+                .count();
+            if line_score > best_snippet_score {
+                best_snippet = line.trim().chars().take(200).collect();
+                best_snippet_score = line_score;
             }
         }
+        // Score = unique term matches + bonus for best snippet score
+        let score = match_count * 100 + best_snippet_score;
+        scored.push((relative, title, score, best_snippet));
     }
 
-    results
+    // Sort by score descending, take top `limit`
+    scored.sort_by(|a, b| b.2.cmp(&a.2));
+    scored.truncate(limit);
+
+    scored.into_iter()
+        .map(|(path, title, _score, snippet)| (path, title, snippet))
+        .collect()
 }
 
 pub async fn search_wiki_qdrant(
