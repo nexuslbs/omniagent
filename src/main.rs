@@ -138,7 +138,7 @@ async fn run_server() -> Result<()> {
 
     // Create platform registry and register built-in platforms
     let mut registry = platform::PlatformRegistry::new();
-    registry.register(Box::new(platform::TelegramPlatform::new()));
+    registry.register(Box::new(crate::platform::telegram::TelegramPlatform::new()));
     let _platform_handles = registry.start_all(pool.clone());
 
     // Spawn HTTP server (health, /stop endpoint)

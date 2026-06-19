@@ -7,6 +7,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::PgPool;
 
+pub mod telegram;
+
 /// A platform that can receive messages from external sources and send
 /// responses back to them.
 ///
@@ -74,37 +76,5 @@ impl PlatformRegistry {
                 })
             })
             .collect()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Stub platform implementations
-// ---------------------------------------------------------------------------
-
-/// Stub Telegram platform — logs startup but does nothing yet.
-pub struct TelegramPlatform;
-
-impl TelegramPlatform {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl Platform for TelegramPlatform {
-    fn name(&self) -> &str {
-        "telegram"
-    }
-
-    async fn start(&self, _pool: PgPool) -> Result<()> {
-        tracing::info!("Telegram platform not yet implemented — staying alive as a stub");
-        // Keep the task alive forever (stub).
-        futures::future::pending::<()>().await;
-        Ok(())
-    }
-
-    async fn send_response(&self, _pool: &PgPool, _message_id: i64) -> Result<()> {
-        tracing::warn!("Telegram platform send_response not yet implemented");
-        Ok(())
     }
 }
