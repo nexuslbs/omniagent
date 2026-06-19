@@ -85,6 +85,21 @@ Use search_wiki to find relevant wiki pages. \
 Use search_messages to find past conversations and research results. \
 Both are available as MCP tools — check them before fetching external data.";
 
+const DOCKER_EXECUTION_GUIDANCE: &str = "DOCKER CODE EXECUTION: \
+You can execute arbitrary code, run builds, install packages, and perform \
+computations using Docker. The `compose` tool supports: ps, up, down, logs, \
+build, exec, stop, restart, pull. \
+\
+TOOLBOX PATTERN: If the task needs tools not available in the agent container, \
+create a docker-compose.yml with a 'toolbox' service in the workspace directory, \
+build it, then use `compose exec toolbox <cmd>` to run anything. \
+This keeps side-effects isolated, reproducible, and portable. \
+\
+EXISTING PROJECTS: If the workspace project already has a docker-compose.yml, \
+use `compose exec <service> <cmd>` to run commands inside its containers. \
+Prefer this over installing tools in the agent container — it keeps the agent \
+image lean and projects self-contained.";
+
 const PROFILE_HINT: &str = "Active OmniAgent profile: default. \
 Your profile configuration determines which model, provider, and tools are available. \
 Profile data (memories, user profile) lives under the profile's data directory.";
@@ -249,6 +264,7 @@ pub fn build_system_prompt_parts(
     stable_parts.push(RESEARCH_WORKFLOW.to_string());
     stable_parts.push(SKILLS_GUIDANCE.to_string());
     stable_parts.push(GROUNDING_POLICY.to_string());
+    stable_parts.push(DOCKER_EXECUTION_GUIDANCE.to_string());
 
     // Wiki guidance with the actual data directory
     let wiki_hint = WIKI_GUIDANCE.replace("<profile>", profile_name);
