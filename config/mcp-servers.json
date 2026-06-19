@@ -19,7 +19,7 @@
       "allowed_tools": ["*"]
     },
     {
-      "name": "docker-compose",
+      "name": "docker",
       "transport": "stdio",
       "command": "python3",
       "args": ["scripts/mcp-docker-server.py"],
