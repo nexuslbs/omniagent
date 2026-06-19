@@ -295,6 +295,9 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
     println!("│  OmniAgent CLI — channel: {}, profile: {}  │", current_channel_name, channel.current_profile);
     println!("│  Type your messages. /exit to quit. /new for new channel  │");
     println!("│  /channel to create or claim a channel                   │");
+    println!("│  /subscribe <name> to receive summaries from a channel    │");
+    println!("│  /unsubscribe <name> to stop receiving summaries          │");
+    println!("│  /subscriptions to list your current subscriptions        │");
     println!("└─────────────────────────────────────────────────────────┘\n");
 
     // Get or create the current thread
@@ -303,6 +306,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
 
     // Initialize cursor-based polling tracker — skip existing messages
     let mut last_seen_id: i64 = get_max_message_id(&pool, current_channel_id).await?;
+    let mut last_seen_summary_id: i64 = 0;
 
     let stdin = io::stdin();
     let mut reader = stdin.lock();
@@ -352,6 +356,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                         .await?;
                         let _ = get_next_sequence(&pool, current_channel_id, thread_id).await?;
                         last_seen_id = get_max_message_id(&pool, current_channel_id).await?;
+                        last_seen_summary_id = 0;
                         println!(
                             "Switched to channel '{}' (id={}).",
                             current_channel_name, current_channel_id
@@ -449,6 +454,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                 session_has_channel = true;
                 // session_id unchanged — session keeps owning the new channel
                 last_seen_id = get_max_message_id(&pool, current_channel_id).await?;
+                last_seen_summary_id = 0;
 
                 // Start a fresh thread on the new channel
                 thread_id = get_or_create_thread(
@@ -464,6 +470,75 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                     "Created and claimed new channel '{}' (id={}).",
                     auto_name, new_channel_row.id
                 );
+                continue;
+            }
+            cmd if cmd.starts_with("/subscribe ") => {
+                let name = cmd.trim_start_matches("/subscribe ").trim().to_string();
+                if name.is_empty() {
+                    println!("Usage: /subscribe <channel_name>");
+                    continue;
+                }
+                match db::types::get_channel_by_name(&pool, &name).await? {
+                    Some(ch) => {
+                        let sub_id = db::types::add_subscription(
+                            &pool, ch.id, "cli", &session_id,
+                        ).await?;
+                        println!(
+                            "Subscribed to summaries from channel '{}' (sub_id={}).",
+                            ch.name, sub_id
+                        );
+                    }
+                    None => {
+                        println!("Channel '{}' not found.", name);
+                    }
+                }
+                continue;
+            }
+            cmd if cmd.starts_with("/unsubscribe ") => {
+                let name = cmd.trim_start_matches("/unsubscribe ").trim().to_string();
+                if name.is_empty() {
+                    println!("Usage: /unsubscribe <channel_name>");
+                    continue;
+                }
+                match db::types::get_channel_by_name(&pool, &name).await? {
+                    Some(ch) => {
+                        let removed = db::types::remove_subscription(
+                            &pool, ch.id, "cli", &session_id,
+                        ).await?;
+                        if removed {
+                            println!(
+                                "Unsubscribed from summaries from channel '{}'.",
+                                ch.name
+                            );
+                        } else {
+                            println!(
+                                "Not currently subscribed to channel '{}'.",
+                                ch.name
+                            );
+                        }
+                    }
+                    None => {
+                        println!("Channel '{}' not found.", name);
+                    }
+                }
+                continue;
+            }
+            "/subscriptions" => {
+                let subs = db::types::get_subscriptions_for_subscriber(
+                    &pool, "cli", &session_id,
+                ).await?;
+                if subs.is_empty() {
+                    println!("You are not subscribed to any channels.");
+                } else {
+                    println!("Your subscriptions:");
+                    for sub in &subs {
+                        let ch_name = db::types::find_channel_by_id(&pool, sub.channel_id)
+                            .await?
+                            .map(|c| c.name)
+                            .unwrap_or_else(|| format!("id={}", sub.channel_id));
+                        println!("  - {} (channel_id={})", ch_name, sub.channel_id);
+                    }
+                }
                 continue;
             }
             _ => {}
@@ -515,7 +590,9 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
         db::types::create_cause_and_set_pending(&pool, &msg).await?;
 
         // Poll for agent responses using cursor-based polling
-        last_seen_id = poll_for_response(&pool, current_channel_id, last_seen_id, &session_id).await?;
+        (last_seen_id, last_seen_summary_id) = poll_for_response(
+            &pool, current_channel_id, last_seen_id, last_seen_summary_id, &session_id,
+        ).await?;
     }
 
     Ok(())
@@ -745,12 +822,14 @@ async fn get_max_message_id(pool: &PgPool, channel_id: i64) -> Result<i64> {
 /// Polls every 500ms and prints messages as they arrive (all at once when
 /// the thread completes, filtered by t.status = 'completed').
 /// Before each cycle, checks that this session still owns the channel.
+/// Also fetches and displays summaries from subscribed channels.
 async fn poll_for_response(
     pool: &PgPool,
     channel_id: i64,
     last_seen_id: i64,
+    last_seen_summary_id: i64,
     session_id: &str,
-) -> Result<i64> {
+) -> Result<(i64, i64)> {
     use sql_forge::sql_forge;
     use tokio::time::{sleep, Duration};
 
@@ -772,6 +851,7 @@ async fn poll_for_response(
     }
 
     let mut last_seen = last_seen_id;
+    let mut last_seen_summary = last_seen_summary_id;
     let timeout = Duration::from_secs(300); // 5 min max wait
     let poll_start = std::time::Instant::now();
 
@@ -783,13 +863,13 @@ async fn poll_for_response(
                     "\n[ERR_SESSION_NO_CHANNEL] This session no longer has a channel. \
                      Use /channel to claim one.\n"
                 );
-                return Ok(last_seen);
+                return Ok((last_seen, last_seen_summary));
             }
         }
 
         if poll_start.elapsed() > timeout {
             println!("[Timeout] Agent did not respond within 5 minutes.");
-            return Ok(last_seen);
+            return Ok((last_seen, last_seen_summary));
         }
 
         let responses: Vec<ResponseMsg> = sql_forge!(
@@ -870,11 +950,36 @@ async fn poll_for_response(
                     println!();
 
                     last_seen = msg.id;
-                    return Ok(last_seen);
+                    return Ok((last_seen, last_seen_summary));
                 }
                 _ => continue,
             }
             last_seen = msg.id;
+        }
+
+        // After processing main channel messages, also check for new summaries
+        // from channels that this session is subscribed to
+        let subs = db::types::get_subscriptions_for_subscriber(pool, "cli", session_id).await?;
+        for sub in &subs {
+            let summaries = db::types::get_summaries_since(pool, sub.channel_id, last_seen_summary).await?;
+            for summary in &summaries {
+                // Look up the channel name for display
+                let ch_name = db::types::find_channel_by_id(pool, sub.channel_id)
+                    .await?
+                    .map(|c| c.name)
+                    .unwrap_or_else(|| format!("id={}", sub.channel_id));
+
+                println!();
+                println!("┌─ [summary from {}] ────────────────", ch_name);
+                for chunk in summary.content.split('\n') {
+                    println!("│ {}", chunk);
+                }
+                println!("└─────────────────────────────────────");
+
+                if summary.id > last_seen_summary {
+                    last_seen_summary = summary.id;
+                }
+            }
         }
 
         sleep(Duration::from_millis(200)).await;

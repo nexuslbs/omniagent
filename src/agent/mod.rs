@@ -27,6 +27,7 @@ use crate::db::types as queries;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
 use crate::models::{Channel, Message, MessageNew, Thread};
 use crate::platform::queue::OutboundEnvelope;
+use crate::platform::enqueue_notification;
 
 /// Maximum total characters of tool results in conversation history before
 /// old tool results are pruned (Layer 3 compression).
@@ -1740,5 +1741,26 @@ async fn enqueue_delivery(
 
     if let Err(e) = sender.try_send(envelope) {
         tracing::warn!("Failed to enqueue delivery for message {}: {:?}", saved.id, e);
+    }
+
+    // If this is a summary, also deliver to all subscribers of this channel
+    if saved.msg_type == "summary" {
+        let subscribers = queries::get_subscribers_for_channel(&ctx.pool, channel.id).await;
+        if let Ok(subs) = subscribers {
+            for sub in subs {
+                tracing::info!(
+                    "Forwarding summary from channel '{}' to subscriber {}:{}",
+                    channel.name,
+                    sub.subscriber_platform,
+                    sub.subscriber_resource,
+                );
+                enqueue_notification(
+                    &ctx.platform_senders,
+                    &sub.subscriber_platform,
+                    &sub.subscriber_resource,
+                    &format!("[summary from {}]\n{}", channel.name, saved.content),
+                );
+            }
+        }
     }
 }

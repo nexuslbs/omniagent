@@ -547,5 +547,21 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ── Channel subscriptions table for summary delivery across channels ──
+    sql_forge!(
+        r#"
+        CREATE TABLE IF NOT EXISTS channel_subscriptions (
+            id                      BIGSERIAL PRIMARY KEY,
+            channel_id              BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            subscriber_platform     TEXT NOT NULL,
+            subscriber_resource     TEXT NOT NULL,
+            created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(channel_id, subscriber_platform, subscriber_resource)
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
