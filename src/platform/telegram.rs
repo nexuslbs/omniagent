@@ -34,7 +34,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 
-use crate::platform::Platform;
+use crate::platform::{Platform, OutboundReceiver};
 
 // ---------------------------------------------------------------------------
 // TelegramBotClient — thin HTTP wrapper around the Telegram Bot API
@@ -259,9 +259,15 @@ async fn process_outbound(
                 continue;
             }
 
-            "tool" => {
-                let tool_name = msg.msg_subtype.as_deref().unwrap_or("unknown");
-                let line = format!("🔧 tool:{}", tool_name);
+            "tool" | "plan" | "reasoning" => {
+                let line = match msg.msg_type.as_str() {
+                    "plan" => "🔧 tool:planned".to_string(),
+                    "reasoning" => "💭 reasoning".to_string(),
+                    _ => {
+                        let tool_name = msg.msg_subtype.as_deref().unwrap_or("unknown");
+                        format!("🔧 tool:{}", tool_name)
+                    }
+                };
 
                 if let Some(edit_msg_id) = state.tool_edit_ids.get(&thread_id) {
                     match bot.edit_message_text(&state.chat_id, *edit_msg_id, &line, None).await {
@@ -299,16 +305,7 @@ async fn process_outbound(
                 state.last_processed_id = msg_id;
             }
 
-            "reasoning" => {
-                if !msg.content.trim().is_empty() {
-                    if let Err(e) = bot.send_message(&state.chat_id, &msg.content, None, None, true).await {
-                        tracing::warn!("Failed to send reasoning for thread {}: {:?}", thread_id, e);
-                    }
-                }
-                state.last_processed_id = msg_id;
-            }
-
-            "message" | "plan" => {
+            "message" => {
                 if !msg.content.trim().is_empty() {
                     if let Err(e) = bot.send_message(&state.chat_id, &msg.content, None, None, false).await {
                         tracing::warn!("Failed to send {} for thread {}: {:?}", msg.msg_type, thread_id, e);
@@ -444,18 +441,18 @@ async fn fetch_unsent_messages(
 /// Process inbound messages via Telegram Bot API long polling.
 ///
 /// Runs in a loop, calling `getUpdates` with a long timeout.  Each new
-/// message in the configured chat is inserted as a seq-0 pending thread
-/// into the database for the agent to pick up.
+/// message is looked up by (platform, resource_identifier).  If a matching
+/// channel exists, the message is inserted as a new pending thread.
+/// If no channel is found for the chat, a notification is sent back to
+/// inform the user that the chat is not configured.
 ///
 /// **Disabled by default** — enable via `TELEGRAM_POLLING_ENABLED=true`.
 #[allow(dead_code)]
 async fn inbound_polling_loop(
     bot: TelegramBotClient,
     pool: PgPool,
-    chat_id: String,
-    db_channel_id: i64,
 ) {
-    tracing::info!("Telegram inbound polling started for chat_id={}", chat_id);
+    tracing::info!("Telegram inbound polling started");
 
     let mut offset: Option<i64> = None;
 
@@ -474,13 +471,8 @@ async fn inbound_polling_loop(
                         }
                     };
 
-                    // Only process messages from our configured chat
                     let msg_chat_id = msg["chat"]["id"].as_i64().unwrap_or(0);
                     let msg_chat_id_str = msg_chat_id.to_string();
-                    if msg_chat_id_str != chat_id {
-                        offset = Some(update_id + 1);
-                        continue;
-                    }
 
                     // Extract text content
                     let text = msg["text"].as_str().unwrap_or("").to_string();
@@ -491,15 +483,54 @@ async fn inbound_polling_loop(
 
                     let telegram_msg_id = msg["message_id"].as_i64().unwrap_or(0);
 
-                    tracing::info!(
-                        "Inbound Telegram message from chat {}: {}",
-                        msg_chat_id,
-                        text.chars().take(100).collect::<String>()
-                    );
+                    // Look up channel by (platform, resource_identifier)
+                    match crate::db::types::get_channel_by_platform_and_resource(
+                        &pool,
+                        "telegram",
+                        &msg_chat_id_str,
+                    )
+                    .await
+                    {
+                        Ok(Some(channel)) => {
+                            tracing::info!(
+                                "Inbound Telegram message from chat {} (channel {}): {}",
+                                msg_chat_id,
+                                channel.id,
+                                text.chars().take(100).collect::<String>()
+                            );
 
-                    // Insert as a new thread into the DB
-                    if let Err(e) = insert_inbound_message(&pool, db_channel_id, &text, telegram_msg_id).await {
-                        tracing::error!("Failed to insert inbound message: {:?}", e);
+                            // Insert as a new thread into the DB
+                            if let Err(e) = insert_inbound_message(&pool, channel.id, &text, telegram_msg_id).await {
+                                tracing::error!("Failed to insert inbound message: {:?}", e);
+                            }
+                        }
+                        Ok(None) => {
+                            // No channel found — orphan message, send notification
+                            tracing::info!(
+                                "Orphan inbound message from unknown chat {} — sending notification",
+                                msg_chat_id
+                            );
+                            let notification = format!(
+                                "This chat is not configured for the agent. No active channel found."
+                            );
+                            if let Err(e) = bot
+                                .send_message(&msg_chat_id_str, &notification, None, None, false)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to send orphan notification to {}: {:?}",
+                                    msg_chat_id_str,
+                                    e
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to look up channel for chat {}: {:?}",
+                                msg_chat_id_str,
+                                e
+                            );
+                        }
                     }
 
                     offset = Some(update_id + 1);
@@ -614,10 +645,13 @@ async fn inbound_websocket_loop(
 // Find or create the Telegram channel in the DB
 // ---------------------------------------------------------------------------
 
-async fn find_or_create_channel(
-    pool: &PgPool,
-    chat_id: &str,
-) -> Result<i64> {
+async fn find_or_create_channel(pool: &PgPool, chat_id: &str) -> Result<i64> {
+    // First try by (platform, resource_identifier)
+    if let Ok(Some(ch)) = crate::db::types::get_channel_by_platform_and_resource(pool, "telegram", chat_id).await {
+        return Ok(ch.id);
+    }
+
+    // Fall back to old lookup by (platform, external_id) for backward compat
     #[derive(Debug, sqlx::FromRow)]
     struct ChannelRow {
         id: i64,
@@ -645,10 +679,15 @@ async fn find_or_create_channel(
         "telegram",
         chat_id,
         "user",
+        chat_id,
     )
     .await?;
 
-    tracing::info!("Created telegram channel '{}' (id={}) in DB", channel.name, channel.id);
+    tracing::info!(
+        "Created telegram channel '{}' (id={}) in DB",
+        channel.name,
+        channel.id
+    );
     Ok(channel.id)
 }
 
@@ -681,11 +720,13 @@ impl Platform for TelegramPlatform {
         "telegram"
     }
 
-    async fn start(&self, pool: PgPool) -> Result<()> {
+    async fn start(&self, pool: PgPool, receiver: OutboundReceiver) -> Result<()> {
         if !self.is_enabled() {
             tracing::info!(
                 "Telegram platform not configured (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) — staying alive as stub"
             );
+            // Drop receiver to close the channel so senders don't block
+            drop(receiver);
             futures::future::pending::<()>().await;
             return Ok(());
         }
@@ -719,9 +760,8 @@ impl Platform for TelegramPlatform {
         if polling_enabled {
             let bot_clone = TelegramBotClient::new(&self.bot_token);
             let pool_clone = pool.clone();
-            let chat_id = self.chat_id.clone();
             tokio::spawn(async move {
-                inbound_polling_loop(bot_clone, pool_clone, chat_id, db_channel_id).await;
+                inbound_polling_loop(bot_clone, pool_clone).await;
             });
             tracing::info!("Telegram inbound polling enabled");
         } else {
@@ -754,8 +794,46 @@ impl Platform for TelegramPlatform {
             state.progress_enabled,
         );
 
-        // ── Outbound loop — poll DB for new messages and deliver ─────────
+        // ── Outbound loop — drain notification envelopes, then poll DB ────
+        let mut receiver = receiver;
         loop {
+            // Drain notification envelopes from the outbound queue (non-blocking)
+            loop {
+                match receiver.try_recv() {
+                    Ok(envelope) => {
+                        if envelope.msg_type == "notification" && !envelope.content.trim().is_empty() {
+                            let chat_id = &envelope.resource_identifier;
+                            tracing::info!(
+                                "Delivering notification to chat_id={}: {}",
+                                chat_id,
+                                envelope.content.chars().take(80).collect::<String>()
+                            );
+                            if let Err(e) = bot
+                                .send_message(chat_id, &envelope.content, None, None, false)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to send notification to {}: {:?}",
+                                    chat_id,
+                                    e
+                                );
+                            }
+                        } else {
+                            tracing::debug!(
+                                "Ignoring envelope msg_type='{}' in notification drain",
+                                envelope.msg_type
+                            );
+                        }
+                    }
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                        tracing::warn!("Telegram outbound channel disconnected");
+                        break;
+                    }
+                }
+            }
+
+            // Poll DB for new unsent messages
             if let Err(e) = process_outbound(&bot, &pool, &mut state).await {
                 tracing::error!("Telegram outbound processing error: {:?}", e);
             }

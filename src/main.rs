@@ -20,6 +20,8 @@ mod scheduler;
 mod server;
 mod vectorizer;
 
+use crate::platform::OutboundSender;
+
 /// OmniAgent — autonomous agent system with Postgres, pgvector, MCP tools.
 #[derive(Parser, Debug)]
 #[command(name = "omniagent", about = "OmniAgent — autonomous agent system")]
@@ -109,9 +111,22 @@ async fn run_server() -> Result<()> {
         agent_cfg.max_iterations,
     );
 
+    // Create platform registry and register built-in platforms
+    let mut registry = platform::PlatformRegistry::new();
+    registry.register(Box::new(crate::platform::telegram::TelegramPlatform::new()));
+    let platform_senders = registry.clone_senders();
+    let _platform_handles = registry.start_all(pool.clone());
+
     // Create AppContext and MCP registry
     let readonly_pool = db::connect(&cfg.database_readonly_url).await?;
-    let ctx = mcp::AppContext::new(pool.clone(), readonly_pool, &data_dir, &workspace_dir, Some(cfg.qdrant_url.clone()));
+    let ctx = mcp::AppContext::new(
+        pool.clone(),
+        readonly_pool,
+        &data_dir,
+        &workspace_dir,
+        Some(cfg.qdrant_url.clone()),
+        platform_senders,
+    );
     let mcp = mcp::default_registry(&ctx);
 
     // Build the agent with MCP context
@@ -135,11 +150,6 @@ async fn run_server() -> Result<()> {
     let agent_handle = tokio::spawn(async move {
         agent.run(cancel_tokens_agent).await;
     });
-
-    // Create platform registry and register built-in platforms
-    let mut registry = platform::PlatformRegistry::new();
-    registry.register(Box::new(crate::platform::telegram::TelegramPlatform::new()));
-    let _platform_handles = registry.start_all(pool.clone());
 
     // Spawn HTTP server (health, /stop endpoint)
     let pool_server = pool.clone();
@@ -250,7 +260,21 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
 
     // Find or create the CLI channel
     let channel = ensure_cli_channel(&pool, &channel_name, &profile_name, model.as_deref(), provider.as_deref()).await?;
-    let channel_id = channel.id;
+    let mut current_channel_id = channel.id;
+    let mut current_channel_name = channel.name.clone();
+
+    // Generate a unique session ID for this CLI process
+    let mut session_id = format!(
+        "cli-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+
+    // Claim this channel for our session (will notify old session if reassigned)
+    crate::platform::claim_channel(&pool, current_channel_id, &session_id, "cli", None).await?;
 
     // Resolve provider+model for stamping on all seq-0 messages in this session
     // Order: channel.current_provider → profile provider → env → default
@@ -268,17 +292,22 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
         .unwrap_or_else(|| "deepseek-v4-flash".to_string());
 
     println!("\n┌─────────────────────────────────────────────────────────┐");
-    println!("│  OmniAgent CLI — channel: {}, profile: {}  │", channel.name, channel.current_profile);
-    println!("│  Type your messages. /exit to quit. /new for new thread  │");
+    println!("│  OmniAgent CLI — channel: {}, profile: {}  │", current_channel_name, channel.current_profile);
+    println!("│  Type your messages. /exit to quit. /new for new channel  │");
+    println!("│  /channel to create or claim a channel                   │");
     println!("└─────────────────────────────────────────────────────────┘\n");
 
     // Get or create the current thread
-    let mut thread_id = get_or_create_thread(&pool, channel_id, &profile_name, &resolved_provider, &resolved_model).await?;
-    let _ = get_next_sequence(&pool, channel_id, thread_id).await?;
+    let mut thread_id = get_or_create_thread(&pool, current_channel_id, &profile_name, &resolved_provider, &resolved_model).await?;
+    let _ = get_next_sequence(&pool, current_channel_id, thread_id).await?;
+
+    // Initialize cursor-based polling tracker — skip existing messages
+    let mut last_seen_id: i64 = get_max_message_id(&pool, current_channel_id).await?;
 
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let mut line = String::new();
+    let mut session_has_channel = true;
 
     loop {
         print!("> ");
@@ -300,39 +329,161 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                 println!("Goodbye.");
                 break;
             }
-            "/new" => {
-                // Start a new thread
-                let thread = db::types::create_thread(
+            "/channel" => {
+                match handle_channel_command(
                     &pool,
-                    "user",
-                    channel_id,
-                    &profile_name,
-                    Some(&resolved_provider),
-                    Some(&resolved_model),
-                ).await?;
+                    &mut reader,
+                    &session_id,
+                )
+                .await?
+                {
+                    Some((new_id, new_name)) => {
+                        current_channel_id = new_id;
+                        current_channel_name = new_name;
+                        session_has_channel = true;
+                        // Start a fresh thread on the new channel
+                        thread_id = get_or_create_thread(
+                            &pool,
+                            current_channel_id,
+                            &profile_name,
+                            &resolved_provider,
+                            &resolved_model,
+                        )
+                        .await?;
+                        let _ = get_next_sequence(&pool, current_channel_id, thread_id).await?;
+                        last_seen_id = get_max_message_id(&pool, current_channel_id).await?;
+                        println!(
+                            "Switched to channel '{}' (id={}).",
+                            current_channel_name, current_channel_id
+                        );
+                    }
+                    None => {
+                        // User cancelled
+                    }
+                }
+                continue;
+            }
+            "/new" if !session_has_channel => {
+                eprintln!(
+                    "\n[ERR_SESSION_NO_CHANNEL] This session no longer has a channel. \
+                     Use /channel to claim one.\n"
+                );
+                continue;
+            }
+            "/new" => {
+                // Transactional /new: atomically un-claim the old channel,
+                // create a new channel with the existing session_id as
+                // resource_identifier, and set profile/model — all in one
+                // transaction so the session never has no channel.
+                // session_id stays unchanged — session keeps owning the new channel.
+                use std::time::{SystemTime, UNIX_EPOCH};
+                use sql_forge::sql_forge;
+                let unique_suffix = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                let auto_name = format!("cli-new-{}-{}", std::process::id(), unique_suffix);
 
-                let root_msg = models::MessageNew {
-                    thread_id: thread.id,
-                    role: "cause".to_string(),
-                    content: "/new".to_string(),
-                    thread_sequence: 0,
-                    external_id: None,
-                    metadata: serde_json::json!({"cli_new_thread": true}),
-                    embedding: None,
-                    summary_text: None,
-                    is_summary: false,
-                    msg_type: "message".to_string(),
-                    msg_subtype: None,
-                    processing_time_ms: None,
-                    token_usage: None,
-                };
-                let saved = db::types::create_cause_and_set_pending(&pool, &root_msg).await?;
-                thread_id = saved.thread_id;
-                // next_sequence = 1;
-                println!("┌─ New conversation thread #{} ────────────────────────┐", thread_id);
+                // Begin a single SQL transaction
+                let mut tx = pool.begin().await?;
+
+                // 1. Un-claim the current channel (set resource_identifier to
+                //    the channel name so it's available for the next session,
+                //    while avoiding NOT NULL on external_id and the UNIQUE
+                //    constraint on (platform, resource_identifier))
+                sql_forge!(
+                    r#"
+                    UPDATE channels
+                    SET resource_identifier = name,
+                        external_id = name,
+                        updated_at = NOW()
+                    WHERE id = :id
+                    "#,
+                    ( :id = current_channel_id )
+                )
+                .execute(&mut *tx)
+                .await?;
+
+                // 2. Create a new channel with the existing session_id as resource_identifier
+                #[derive(Debug, sqlx::FromRow, Clone)]
+                struct NewChannelRow {
+                    id: i64,
+                    name: String,
+                }
+
+                let new_channel_row: NewChannelRow = sql_forge!(
+                    NewChannelRow,
+                    r#"
+                    INSERT INTO channels (name, platform, external_id, cause, resource_identifier)
+                    VALUES (:name, 'cli', :name, 'user', :session_id)
+                    RETURNING id, name
+                    "#,
+                    ( :name = &auto_name, :session_id = &session_id )
+                )
+                .fetch_one(&mut *tx)
+                .await?;
+
+                // 3. Set profile/model on the new channel
+                sql_forge!(
+                    r#"
+                    UPDATE channels
+                    SET current_profile = :profile,
+                        current_model = NULLIF(:model, '')::text,
+                        current_provider = NULLIF(:provider, '')::text,
+                        updated_at = NOW()
+                    WHERE id = :id
+                    "#,
+                    ( :profile = &profile_name,
+                      :model = &resolved_model,
+                      :provider = &resolved_provider,
+                      :id = new_channel_row.id )
+                )
+                .execute(&mut *tx)
+                .await?;
+
+                // Commit — session always has a channel
+                tx.commit().await?;
+
+                current_channel_id = new_channel_row.id;
+                current_channel_name = auto_name.clone();
+                session_has_channel = true;
+                // session_id unchanged — session keeps owning the new channel
+                last_seen_id = get_max_message_id(&pool, current_channel_id).await?;
+
+                // Start a fresh thread on the new channel
+                thread_id = get_or_create_thread(
+                    &pool,
+                    current_channel_id,
+                    &profile_name,
+                    &resolved_provider,
+                    &resolved_model,
+                ).await?;
+                let _ = get_next_sequence(&pool, current_channel_id, thread_id).await?;
+
+                println!(
+                    "Created and claimed new channel '{}' (id={}).",
+                    auto_name, new_channel_row.id
+                );
                 continue;
             }
             _ => {}
+        }
+
+        // Check if this session still owns the channel
+        if session_has_channel {
+            if let Some(ch) = db::types::find_channel_by_id(&pool, current_channel_id).await? {
+                if ch.resource_identifier.as_deref() != Some(&session_id) {
+                    session_has_channel = false;
+                }
+            }
+        }
+
+        if !session_has_channel {
+            eprintln!(
+                "\n[ERR_SESSION_NO_CHANNEL] This session no longer has a channel. \
+                 Use /channel to claim one.\n"
+            );
+            continue;
         }
 
         // Insert user message as pending (it will be picked up by the executor)
@@ -340,7 +491,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
         let thread = db::types::create_thread(
             &pool,
             "user",
-            channel_id,
+            current_channel_id,
             &profile_name,
             Some(&resolved_provider),
             Some(&resolved_model),
@@ -362,14 +513,9 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
             token_usage: None,
         };
         db::types::create_cause_and_set_pending(&pool, &msg).await?;
-        let _user_msg_id = 0;
 
-        // Poll for agent responses
-        poll_for_response(&pool, channel_id, thread_id, _user_msg_id).await?;
-
-        // Update next_sequence to reflect all messages added by the agent
-        let _max_seq = get_max_sequence(&pool, channel_id, thread_id).await?;
-        // next_sequence = _max_seq + 1;
+        // Poll for agent responses using cursor-based polling
+        last_seen_id = poll_for_response(&pool, current_channel_id, last_seen_id, &session_id).await?;
     }
 
     Ok(())
@@ -390,7 +536,11 @@ async fn ensure_cli_channel(
         crate::db::types::ChannelDb,
         r#"
         SELECT
-            id, name, platform, external_id, cause,
+            id, name,
+            COALESCE(platform, '') AS "platform",
+            resource_identifier,
+            COALESCE(external_id, '') AS "external_id",
+            cause,
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
@@ -428,8 +578,9 @@ async fn ensure_cli_channel(
         let channel = models::Channel {
             id: channel_db.id,
             name: channel_db.name.clone(),
-            platform: "cli".to_string(),
-            external_id: channel_db.name,
+            platform: Some("cli".to_string()),
+            resource_identifier: Some(channel_db.name.clone()),
+            external_id: Some(channel_db.name),
             cause: "user".to_string(),
             current_profile: profile_name.to_string(),
             current_model: model.map(|m| m.to_string()),
@@ -444,7 +595,7 @@ async fn ensure_cli_channel(
     }
 
     // Create new channel
-    let new_channel = db::types::create_channel(pool, channel_name, "cli", channel_name, "user").await?;
+    let new_channel = db::types::create_channel(pool, channel_name, "cli", channel_name, "user", channel_name).await?;
     // Update profile/model/provider
     sql_forge!(
         r#"
@@ -462,8 +613,9 @@ async fn ensure_cli_channel(
     Ok(models::Channel {
         id: new_channel.id,
         name: channel_name.to_string(),
-        platform: "cli".to_string(),
-        external_id: channel_name.to_string(),
+        platform: Some("cli".to_string()),
+        resource_identifier: Some(channel_name.to_string()),
+        external_id: Some(channel_name.to_string()),
         cause: "user".to_string(),
         current_profile: profile_name.to_string(),
         current_model: model.map(|m| m.to_string()),
@@ -561,55 +713,97 @@ async fn get_next_sequence(pool: &PgPool, channel_id: i64, thread_id: i64) -> Re
 }
 
 /// Get the maximum thread_sequence in a thread.
+#[allow(dead_code)]
 async fn get_max_sequence(pool: &PgPool, channel_id: i64, thread_id: i64) -> Result<i32> {
     get_next_sequence(pool, channel_id, thread_id).await.map(|n| n - 1)
 }
 
+/// Get the maximum message id for a given channel.
+/// Used to initialize the polling cursor so the first poll skips existing messages.
+async fn get_max_message_id(pool: &PgPool, channel_id: i64) -> Result<i64> {
+    use sql_forge::sql_forge;
+
+    #[derive(Debug, sqlx::FromRow)]
+    struct MaxId {
+        max_id: Option<i64>,
+    }
+
+    let row: MaxId = sql_forge!(
+        MaxId,
+        "SELECT MAX(m.id) AS \"max_id\" FROM messages m JOIN threads t ON t.id = m.thread_id WHERE t.channel_id = :channel_id",
+        ( :channel_id = channel_id )
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row.max_id.unwrap_or(0))
+}
+
 /// Poll for agent responses after inserting a user message.
-/// Returns the message ID of the agent's response.
-/// Polls every 500ms and prints messages as they arrive.
+/// Uses cursor-based polling by message id (not thread_sequence).
+/// Returns the latest message id processed as the cursor for the next call.
+/// Polls every 500ms and prints messages as they arrive (all at once when
+/// the thread completes, filtered by t.status = 'completed').
+/// Before each cycle, checks that this session still owns the channel.
 async fn poll_for_response(
     pool: &PgPool,
     channel_id: i64,
-    thread_id: i64,
-    after_sequence: i32,
-) -> Result<i32> {
+    last_seen_id: i64,
+    session_id: &str,
+) -> Result<i64> {
     use sql_forge::sql_forge;
     use tokio::time::{sleep, Duration};
 
     #[derive(Debug, sqlx::FromRow)]
     #[allow(dead_code)]
+    struct MessageContentOnly {
+        content: String,
+    }
+
+    #[derive(Debug, sqlx::FromRow)]
+    #[allow(dead_code)]
     struct ResponseMsg {
         id: i64,
+        thread_id: i64,
         role: String,
         content: String,
         msg_type: String,
         msg_subtype: Option<String>,
-        thread_sequence: i32,
     }
 
-    let mut seen_up_to = after_sequence;
+    let mut last_seen = last_seen_id;
     let timeout = Duration::from_secs(300); // 5 min max wait
     let poll_start = std::time::Instant::now();
 
     loop {
+        // Check if this session still owns the channel (reassignment guard)
+        if let Some(ch) = db::types::find_channel_by_id(pool, channel_id).await? {
+            if ch.resource_identifier.as_deref() != Some(session_id) {
+                println!(
+                    "\n[ERR_SESSION_NO_CHANNEL] This session no longer has a channel. \
+                     Use /channel to claim one.\n"
+                );
+                return Ok(last_seen);
+            }
+        }
+
         if poll_start.elapsed() > timeout {
             println!("[Timeout] Agent did not respond within 5 minutes.");
-            return Ok(seen_up_to);
+            return Ok(last_seen);
         }
 
         let responses: Vec<ResponseMsg> = sql_forge!(
             ResponseMsg,
             r#"
-            SELECT m.id, m.role, m.content, m.msg_type, m.msg_subtype, m.thread_sequence
+            SELECT m.id, m.thread_id, m.role, m.content, m.msg_type, m.msg_subtype
             FROM messages m
             JOIN threads t ON t.id = m.thread_id
             WHERE t.channel_id = :channel_id
-              AND m.thread_id = :thread_id
-              AND m.thread_sequence > :after_sequence
-            ORDER BY m.thread_sequence ASC
+              AND m.id > :last_seen
+              AND t.status = 'completed'
+            ORDER BY m.id ASC
             "#,
-            ( :channel_id = channel_id, :thread_id = thread_id, :after_sequence = seen_up_to )
+            ( :channel_id = channel_id, :last_seen = last_seen )
         )
         .fetch_all(pool)
         .await?;
@@ -620,35 +814,275 @@ async fn poll_for_response(
         }
 
         for msg in &responses {
-            // Skip tool/tool_result messages in CLI output
             match msg.msg_type.as_str() {
-                "tool" | "tool_result" => continue,
-                _ => {}
-            }
+                "tool" => {
+                    let name = msg.msg_subtype.as_deref().unwrap_or("unknown");
+                    println!("🔧 tool:{}", name);
+                }
+                "plan" => {
+                    println!("🔧 tool:planned");
+                }
+                "reasoning" => {
+                    println!("💭 reasoning");
+                }
+                "tool_result" => {
+                    // Skip entirely — never display anything
+                    continue;
+                }
+                "message" if msg.role == "agent" => {
+                    println!("\n┌─ Agent ────────────────────────────");
+                    for chunk in msg.content.split('\n') {
+                        println!("│ {}", chunk);
+                    }
+                    println!("└─────────────────────────────────────");
+                }
+                "summary" => {
+                    // Show with "> [quote]\n\n" prefix before the summary box
+                    let cause_content = sql_forge!(
+                        MessageContentOnly,
+                        r#"
+                        SELECT content FROM messages
+                        WHERE thread_id = :thread_id AND thread_sequence = 0 AND role = 'cause'
+                        LIMIT 1
+                        "#,
+                        ( :thread_id = msg.thread_id )
+                    )
+                    .fetch_optional(pool)
+                    .await?
+                    .map(|r: MessageContentOnly| r.content)
+                    .unwrap_or_default();
 
-            let prefix = match msg.msg_type.as_str() {
-                "reasoning" => "┌─ Reasoning ──────────────────────────",
-                "message" if msg.role == "agent" => "┌─ Agent ────────────────────────────",
-                "summary" => "┌─ Summary ──────────────────────────",
+                    if !cause_content.is_empty() {
+                        let truncated: String = cause_content.chars().take(100).collect();
+                        if cause_content.len() > 100 {
+                            println!("> {}...", truncated);
+                        } else {
+                            println!("> {}", truncated);
+                        }
+                    }
+                    // blank line after quote (2 newlines total including the one from println)
+                    println!();
+                    println!("┌─ Summary ──────────────────────────");
+                    for chunk in msg.content.split('\n') {
+                        println!("│ {}", chunk);
+                    }
+                    println!("└─────────────────────────────────────");
+                    println!();
+
+                    last_seen = msg.id;
+                    return Ok(last_seen);
+                }
                 _ => continue,
-            };
-
-            // Print the response
-            println!("\n{}", prefix);
-            for chunk in msg.content.split('\n') {
-                println!("│ {}", chunk);
             }
-            println!("└─────────────────────────────────────");
-
-            seen_up_to = msg.thread_sequence;
-
-            // Once we see a summary, the response is complete
-            if msg.msg_type == "summary" {
-                println!();
-                return Ok(seen_up_to);
-            }
+            last_seen = msg.id;
         }
 
         sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Handle the `/channel` interactive command.
+///
+/// Shows a 3-way menu:
+///   1. Create a new channel  — prompts for name, profile, model
+///   2. Use an existing channel — lists all channels for selection
+///   3. Cancel
+///
+/// Returns `Some((channel_id, channel_name))` on success, or `None` if cancelled.
+async fn handle_channel_command<R: std::io::BufRead + Unpin>(
+    pool: &PgPool,
+    reader: &mut R,
+    session_id: &str,
+) -> Result<Option<(i64, String)>> {
+    use sql_forge::sql_forge;
+
+    loop {
+        println!("\n── Channel options ──");
+        println!("  1. Create a new channel");
+        println!("  2. Use an existing channel");
+        println!("  3. Cancel");
+        print!("Enter choice (1-3): ");
+        io::stdout().flush()?;
+
+        let mut choice = String::new();
+        reader.read_line(&mut choice)?;
+
+        match choice.trim() {
+            "1" => {
+                // ── Create a new channel ──────────────────────────────
+
+                // 1a. Ask for channel name
+                let name = loop {
+                    print!("Enter channel name (alphanumeric, underscore, hyphen only): ");
+                    io::stdout().flush()?;
+                    let mut input = String::new();
+                    reader.read_line(&mut input)?;
+                    let name = input.trim().to_string();
+
+                    if db::types::validate_channel_name(&name) {
+                        // Check uniqueness (only among 'cli' platform channels)
+                        let existing =
+                            db::types::get_channel_by_platform_name(pool, "cli", &name).await?;
+                        if existing.is_some() {
+                            println!(
+                                "A channel named '{}' already exists. Choose a different name.",
+                                name
+                            );
+                            continue;
+                        }
+                        break name;
+                    } else {
+                        println!(
+                            "Invalid name. Use only letters, numbers, underscores, and hyphens."
+                        );
+                    }
+                };
+
+                // 1b. Show available profiles from DB + always include "default"
+                let db_profiles = db::types::find_all_profiles(pool).await?;
+                let mut profile_names: Vec<String> =
+                    db_profiles.iter().map(|p| p.name.clone()).collect();
+                if !profile_names.contains(&"default".to_string()) {
+                    profile_names.insert(0, "default".to_string());
+                }
+
+                println!("\nAvailable profiles:");
+                for (i, pn) in profile_names.iter().enumerate() {
+                    println!("  {}. {}", i + 1, pn);
+                }
+
+                let selected_profile = loop {
+                    print!("Choose profile (number): ");
+                    io::stdout().flush()?;
+                    let mut input = String::new();
+                    reader.read_line(&mut input)?;
+                    if let Ok(idx) = input.trim().parse::<usize>() {
+                        if idx >= 1 && idx <= profile_names.len() {
+                            break profile_names[idx - 1].clone();
+                        }
+                    }
+                    println!("Invalid choice.");
+                };
+
+                // 1c. Show model options
+                let common_models = [
+                    "",
+                    "deepseek-v4-flash",
+                    "gpt-4o",
+                    "claude-3-opus-20240229",
+                    "claude-3-sonnet-20240229",
+                    "gpt-4-turbo",
+                    "gpt-3.5-turbo",
+                ];
+                println!("\nAvailable models:");
+                println!("  1. (use profile model)");
+                for (i, m) in common_models.iter().skip(1).enumerate() {
+                    println!("  {}. {}", i + 2, m);
+                }
+
+                let selected_model: Option<String> = loop {
+                    print!("Choose model (number): ");
+                    io::stdout().flush()?;
+                    let mut input = String::new();
+                    reader.read_line(&mut input)?;
+                    if let Ok(idx) = input.trim().parse::<usize>() {
+                        if idx == 1 {
+                            break None;
+                        }
+                        if idx >= 2 && idx <= common_models.len() + 1 {
+                            break Some(common_models[idx - 1].to_string());
+                        }
+                    }
+                    println!("Invalid choice.");
+                };
+
+                // 1d. Create the channel and claim it
+                let new_channel = db::types::create_channel(
+                    pool,
+                    &name,
+                    "cli",
+                    &name,
+                    "user",
+                    &name,
+                )
+                .await?;
+
+                // Set profile/model on the newly created channel
+                sql_forge!(
+                    r#"
+                    UPDATE channels
+                    SET current_profile = :profile,
+                        current_model = NULLIF(:model, '')::text,
+                        current_provider = ''
+                    WHERE id = :id
+                    "#,
+                    ( :profile = &selected_profile, :model = selected_model.as_deref().unwrap_or(""), :id = new_channel.id )
+                )
+                .execute(pool)
+                .await?;
+
+                // Claim for this session
+                crate::platform::claim_channel(pool, new_channel.id, session_id, "cli", None)
+                    .await?;
+
+                println!(
+                    "Created and claimed channel '{}' (id={}).",
+                    name, new_channel.id
+                );
+                return Ok(Some((new_channel.id, name)));
+            }
+
+            "2" => {
+                // ── Use an existing channel ───────────────────────────
+                let all_channels = db::types::find_all_channels(pool).await?;
+
+                if all_channels.is_empty() {
+                    println!("No channels exist yet. Create one first.");
+                    continue;
+                }
+
+                println!("\nAvailable channels:");
+                for (i, ch) in all_channels.iter().enumerate() {
+                    let plat = ch.platform.as_deref().unwrap_or("none");
+                    println!("  {}. {} ({})", i + 1, ch.name, plat);
+                }
+                println!("  {}. Cancel", all_channels.len() + 1);
+
+                let selected_idx = loop {
+                    print!("Choose channel (number): ");
+                    io::stdout().flush()?;
+                    let mut input = String::new();
+                    reader.read_line(&mut input)?;
+                    if let Ok(idx) = input.trim().parse::<usize>() {
+                        if idx == all_channels.len() + 1 {
+                            return Ok(None);
+                        }
+                        if idx >= 1 && idx <= all_channels.len() {
+                            break idx;
+                        }
+                    }
+                    println!("Invalid choice.");
+                };
+
+                let ch = &all_channels[selected_idx - 1];
+                let ch_id = ch.id;
+                let ch_name = ch.name.clone();
+
+                // Claim the selected channel for this session
+                crate::platform::claim_channel(pool, ch_id, session_id, "cli", None).await?;
+
+                println!("Claimed channel '{}' (id={}).", ch_name, ch_id);
+                return Ok(Some((ch_id, ch_name)));
+            }
+
+            "3" => {
+                println!("Canceled.");
+                return Ok(None);
+            }
+
+            _ => {
+                println!("Please enter 1, 2, or 3.");
+            }
+        }
     }
 }

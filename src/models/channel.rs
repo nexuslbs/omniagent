@@ -5,8 +5,15 @@ use serde::{Deserialize, Serialize};
 pub struct Channel {
     pub id: i64,
     pub name: String,
-    pub platform: String,
-    pub external_id: String,
+    /// Platform name ("telegram", "cli", etc.).  NULL means no-platform
+    /// (e.g. cron/kanban channels that only exist for scheduling).
+    pub platform: Option<String>,
+    /// Identifier of the resource within the platform (chat_id, terminal
+    /// session id, etc.).  NULL when there is no platform.
+    pub resource_identifier: Option<String>,
+    /// Legacy alias — kept for backward compatibility.  Same value as
+    /// `resource_identifier` when platform is set.
+    pub external_id: Option<String>,
     pub cause: String,
     pub current_profile: String,
     pub current_model: Option<String>,
@@ -23,8 +30,9 @@ impl Default for Channel {
         Self {
             id: 0,
             name: String::new(),
-            platform: String::new(),
-            external_id: String::new(),
+            platform: None,
+            resource_identifier: None,
+            external_id: None,
             cause: String::new(),
             current_profile: String::new(),
             current_model: None,

@@ -25,6 +25,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::db::types as queries;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
+use crate::models::{Channel, Message, MessageNew, Thread};
+use crate::platform::queue::OutboundEnvelope;
 
 /// Maximum total characters of tool results in conversation history before
 /// old tool results are pruned (Layer 3 compression).
@@ -34,9 +36,7 @@ use crate::vectorizer::Vectorizer;
 use crate::mcp::{
     truncate_content, AppContext, McpRegistry, McpToolCall, DEFAULT_MAX_TOOL_OUTPUT_CHARS,
 };
-use crate::models::{Message, MessageNew, Thread};
 
-/// Configuration for the agent's LLM interactions.
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub llm_api_key: String,
@@ -424,10 +424,9 @@ fn is_fk_violation(e: &anyhow::Error) -> bool {
 }
 
 /// Persist a message and detect FK violations that should abort thread processing.
-/// Returns Ok on success, Err(FkViolation) if the FK constraint fails (thread deleted/missing),
-/// or propagates other errors.
+/// Returns the created message on success, or an error variant.
 enum CreateMessageResult {
-    Success,
+    Success(Message),
     FkViolation,
     OtherError(anyhow::Error),
 }
@@ -438,7 +437,7 @@ async fn persist_or_abort(
     thread_id: i64,
 ) -> CreateMessageResult {
     match queries::create_message(pool, msg).await {
-        Ok(_) => CreateMessageResult::Success,
+        Ok(saved) => CreateMessageResult::Success(saved),
         Err(e) if is_fk_violation(&e) => {
             error!(
                 "FK violation inserting message for thread {} — marking thread as failed",
@@ -1299,7 +1298,15 @@ async fn process_thread(
             match persist_or_abort(pool, &tool_call_msg, thread.id).await {
                 CreateMessageResult::FkViolation => anyhow::bail!("FK violation — thread {} no longer exists", thread.id),
                 CreateMessageResult::OtherError(e) => error!("Failed to persist tool call '{}': {:?}", tool_name, e),
-                CreateMessageResult::Success => {}
+                CreateMessageResult::Success(saved) => {
+                    enqueue_delivery(
+                        ctx,
+                        &saved,
+                        &channel,
+                        thread,
+                        cause_msg.external_id.clone(),
+                    ).await;
+                }
             }
 
             let mcp_call = McpToolCall {
@@ -1337,7 +1344,7 @@ async fn process_thread(
                     match persist_or_abort(pool, &tool_result_msg, thread.id).await {
                         CreateMessageResult::FkViolation => anyhow::bail!("FK violation — thread {} no longer exists", thread.id),
                         CreateMessageResult::OtherError(e) => error!("Failed to persist tool result '{}': {:?}", tool_name, e),
-                        CreateMessageResult::Success => {}
+                        CreateMessageResult::Success(_) => {}
                     }
 
                     messages.push(ChatMessage::tool_result(
@@ -1368,7 +1375,7 @@ async fn process_thread(
                     match persist_or_abort(pool, &tool_result_msg, thread.id).await {
                         CreateMessageResult::FkViolation => anyhow::bail!("FK violation — thread {} no longer exists", thread.id),
                         CreateMessageResult::OtherError(e2) => error!("Failed to persist tool error '{}': {:?}", tool_name, e2),
-                        CreateMessageResult::Success => {}
+                        CreateMessageResult::Success(_) => {}
                     }
 
                     messages.push(ChatMessage::tool_result(
@@ -1442,7 +1449,14 @@ async fn process_thread(
                 processing_time_ms: None,
                 token_usage: None,
             };
-            queries::create_message(pool, &reasoning_msg).await?;
+            let reasoning_saved = queries::create_message(pool, &reasoning_msg).await?;
+            enqueue_delivery(
+                        ctx,
+                &reasoning_saved,
+                &channel,
+                thread,
+                cause_msg.external_id.clone(),
+            ).await;
         }
     }
 
@@ -1468,6 +1482,14 @@ async fn process_thread(
     };
 
     let saved = queries::create_message(pool, &agent_msg).await?;
+
+    enqueue_delivery(
+        ctx,
+        &saved,
+        &channel,
+        thread,
+        cause_msg.external_id.clone(),
+    ).await;
 
     // ── Summary generation (outside iteration budget) ──
     // Strip tool results from summary context — the summary only needs
@@ -1546,18 +1568,28 @@ async fn process_thread(
         processing_time_ms: Some(summary_elapsed_ms),
         token_usage: summary_token_usage,
     };
+    // Define final status before potential early return
+    let final_status = if limit_reached { "interrupted" } else { "completed" };
+
     match queries::create_message(pool, &summary_msg).await {
-        Ok(_) => {
+        Ok(summary_saved) => {
             info!(
                 "[summary] Saved summary message for thread {}",
                 thread.id,
             );
+            enqueue_delivery(
+                        ctx,
+                &summary_saved,
+                &channel,
+                thread,
+                cause_msg.external_id.clone(),
+            ).await;
         }
-        Err(e) => warn!("[summary] Failed to save summary for thread {}: {:?}", thread.id, e),
+        Err(e) => warn!(
+            "[summary] Failed to save summary for thread {}: {:?}",
+            thread.id, e
+        ),
     }
-
-    // 10. Complete the thread with final token counts and duration
-    let final_status = if limit_reached { "interrupted" } else { "completed" };
 
     queries::complete_thread(pool, thread.id, final_status, 0, 0, 0, 0).await?;
 
@@ -1640,4 +1672,73 @@ pub async fn skip_on_startup(pool: &PgPool) -> Result<u64> {
     }
 
     Ok(count)
+}
+
+/// Enqueue a message for delivery to its platform.
+async fn enqueue_delivery(
+    ctx: &AppContext,
+    saved: &Message,
+    channel: &Channel,
+    thread: &Thread,
+    cause_external_id: Option<String>,
+) {
+    let platform = match &channel.platform {
+        Some(p) => p.clone(),
+        None => return,
+    };
+    let resource_identifier = match &channel.resource_identifier {
+        Some(r) => r.clone(),
+        None => return,
+    };
+
+    // Look up the per-platform sender
+    let sender = match ctx.platform_senders.get(&platform) {
+        Some(s) => s.clone(),
+        None => return,
+    };
+
+    // For non-user threads, only deliver summaries and errors
+    if thread.cause != "user" && saved.msg_type != "summary" && saved.msg_type != "error" {
+        return;
+    }
+
+    // Never deliver tool results directly
+    if saved.msg_type == "tool_result" {
+        return;
+    }
+
+    let envelope_content = if saved.msg_type == "summary" && platform == "cli" {
+        // Quote the seq-0 message for CLI delivery (not needed for Telegram — it uses reply threading)
+        match queries::get_cause_message(&ctx.pool, saved.thread_id).await {
+            Ok(Some(cause)) => {
+                let cause_trimmed: String = cause.content.chars().take(100).collect();
+                let quoted = if cause.content.len() > 100 {
+                    format!("> {}...\n\n{}", cause_trimmed, saved.content)
+                } else {
+                    format!("> {}\n\n{}", cause_trimmed, saved.content)
+                };
+                quoted
+            }
+            _ => saved.content.clone(),
+        }
+    } else {
+        saved.content.clone()
+    };
+
+    let envelope = OutboundEnvelope {
+        message_id: saved.id,
+        resource_identifier,
+        content: envelope_content,
+        msg_type: saved.msg_type.clone(),
+        msg_subtype: saved.msg_subtype.clone(),
+        thread_id: saved.thread_id,
+        thread_sequence: saved.thread_sequence,
+        cause_external_id,
+        is_summary: saved.is_summary,
+        is_user_thread: thread.cause == "user",
+    };
+
+    if let Err(e) = sender.try_send(envelope) {
+        tracing::warn!("Failed to enqueue delivery for message {}: {:?}", saved.id, e);
+    }
 }

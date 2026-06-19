@@ -137,8 +137,9 @@ impl TryFrom<MessageDb> for Message {
 pub struct ChannelDb {
     pub id: i64,
     pub name: String,
-    pub platform: String,
-    pub external_id: String,
+    pub platform: Option<String>,
+    pub resource_identifier: Option<String>,
+    pub external_id: Option<String>,
     pub cause: String,
     pub current_profile: String,
     pub current_model: Option<String>,
@@ -158,6 +159,7 @@ impl TryFrom<ChannelDb> for Channel {
             id: db.id,
             name: db.name,
             platform: db.platform,
+            resource_identifier: db.resource_identifier,
             external_id: db.external_id,
             cause: db.cause,
             current_profile: db.current_profile,
@@ -501,6 +503,85 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> anyhow::Result<M
 }
 
 // ---------------------------------------------------------------------------
+// Profile DB struct and queries
+// ---------------------------------------------------------------------------
+
+/// A profile as stored in the DB — uses string timestamps for sql-forge compatibility.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ProfileDb {
+    pub id: i64,
+    pub name: String,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub max_tokens: Option<i32>,
+    pub temperature: Option<f64>,
+    pub allowed_tools: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// Fetch all profiles from the database, ordered by name.
+pub async fn find_all_profiles(pool: &PgPool) -> anyhow::Result<Vec<ProfileDb>> {
+    let rows: Vec<ProfileDb> = sql_forge!(
+        ProfileDb,
+        r#"
+        SELECT
+            id, name, model, provider, base_url, api_key,
+            max_tokens, temperature,
+            COALESCE(allowed_tools::text, '[]') AS "allowed_tools",
+            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
+            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
+        FROM profiles
+        ORDER BY name ASC
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+/// Claim a channel for a session by updating its resource_identifier.
+/// Returns the old resource_identifier (if any) so the caller can notify the
+/// previous session.
+pub async fn claim_channel_resource(
+    pool: &PgPool,
+    channel_id: i64,
+    session_id: &str,
+) -> anyhow::Result<Option<String>> {
+    // Get old resource_identifier first
+    let old = find_channel_by_id(pool, channel_id).await?;
+    let old_rid = old.and_then(|c| c.resource_identifier.filter(|r| !r.is_empty()));
+
+    // Update resource_identifier and external_id to our session_id
+    sql_forge!(
+        r#"
+        UPDATE channels
+        SET resource_identifier = :session_id,
+            external_id = :session_id,
+            updated_at = NOW()
+        WHERE id = :channel_id
+        "#,
+        ( :session_id = session_id, :channel_id = channel_id )
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(old_rid)
+}
+
+/// Validate that a channel name contains only allowed characters.
+pub fn validate_channel_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+}
+
+// ---------------------------------------------------------------------------
 // Channel query functions — mostly unchanged
 // ---------------------------------------------------------------------------
 
@@ -509,7 +590,11 @@ pub async fn find_all_channels(pool: &PgPool) -> anyhow::Result<Vec<Channel>> {
         ChannelDb,
         r#"
         SELECT
-            id, name, platform, external_id, cause,
+            id, name,
+            COALESCE(platform, '') AS "platform",
+            resource_identifier,
+            COALESCE(external_id, '') AS "external_id",
+            cause,
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
@@ -531,7 +616,11 @@ pub async fn get_channel_by_name(pool: &PgPool, name: &str) -> anyhow::Result<Op
         ChannelDb,
         r#"
         SELECT
-            id, name, platform, external_id, cause,
+            id, name,
+            COALESCE(platform, '') AS "platform",
+            resource_identifier,
+            COALESCE(external_id, '') AS "external_id",
+            cause,
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
@@ -558,7 +647,11 @@ pub async fn get_channel_by_platform_name(
         ChannelDb,
         r#"
         SELECT
-            id, name, platform, external_id, cause,
+            id, name,
+            COALESCE(platform, '') AS "platform",
+            resource_identifier,
+            COALESCE(external_id, '') AS "external_id",
+            cause,
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
@@ -584,7 +677,11 @@ pub async fn find_channel_by_id(
         ChannelDb,
         r#"
         SELECT
-            id, name, platform, external_id, cause,
+            id, name,
+            COALESCE(platform, '') AS "platform",
+            resource_identifier,
+            COALESCE(external_id, '') AS "external_id",
+            cause,
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
@@ -608,7 +705,11 @@ pub async fn get_channel_by_id(pool: &PgPool, channel_id: i64) -> anyhow::Result
         ChannelDb,
         r#"
         SELECT
-            id, name, platform, external_id, cause,
+            id, name,
+            COALESCE(platform, '') AS "platform",
+            resource_identifier,
+            COALESCE(external_id, '') AS "external_id",
+            cause,
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
@@ -631,16 +732,21 @@ pub async fn create_channel(
     platform: &str,
     external_id: &str,
     cause: &str,
+    resource_identifier: &str,
 ) -> anyhow::Result<Channel> {
     let row: ChannelDb = sql_forge!(
         ChannelDb,
         r#"
-        INSERT INTO channels (name, platform, external_id, cause)
-        VALUES (:name, :platform, :external_id, :cause)
+        INSERT INTO channels (name, platform, external_id, cause, resource_identifier)
+        VALUES (:name, NULLIF(:platform, '')::text, :external_id, :cause, NULLIF(:resource_identifier, '')::text)
         ON CONFLICT (platform, external_id)
         DO UPDATE SET updated_at = NOW()
         RETURNING
-            id, name, platform, external_id, cause,
+            id, name,
+            COALESCE(platform, '') AS "platform",
+            resource_identifier,
+            COALESCE(external_id, '') AS "external_id",
+            cause,
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
@@ -648,12 +754,117 @@ pub async fn create_channel(
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
         "#,
-        ( :name = name, :platform = platform, :external_id = external_id, :cause = cause )
+        ( :name = name, :platform = platform, :external_id = external_id, :cause = cause, :resource_identifier = resource_identifier )
     )
     .fetch_one(pool)
     .await?;
 
     row.try_into()
+}
+
+/// Look up a channel by (platform, resource_identifier).
+pub async fn get_channel_by_platform_and_resource(
+    pool: &PgPool,
+    platform: &str,
+    resource_identifier: &str,
+) -> anyhow::Result<Option<Channel>> {
+    let row: Option<ChannelDb> = sql_forge!(
+        ChannelDb,
+        r#"
+        SELECT
+            id, name,
+            COALESCE(platform, '') AS "platform",
+            resource_identifier,
+            COALESCE(external_id, '') AS "external_id",
+            cause,
+            current_profile, current_model, current_provider,
+            readonly,
+            COALESCE(closed, false) as "closed",
+            COALESCE(metadata::text, '{}') AS "metadata",
+            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
+            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
+        FROM channels
+        WHERE platform = :platform AND resource_identifier = :resource_identifier
+        "#,
+        ( :platform = platform, :resource_identifier = resource_identifier )
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|r| r.try_into()).transpose()
+}
+
+/// Old channel info returned by `update_channel_platform`.
+#[derive(Debug, Clone)]
+pub struct OldChannelInfo {
+    pub old_platform: Option<String>,
+    pub old_resource_identifier: Option<String>,
+}
+
+/// Update a channel's platform + resource_identifier by its stable channel ID.
+///
+/// This is used when a channel's connection changes (e.g., from telegram:chat1
+/// to discord:server1). The channel is found by its stable `channel_id`, not
+/// by platform + external_id (which just changed).
+///
+/// Returns the old platform and resource_identifier values so callers can
+/// notify the old platform that the channel is no longer active there.
+pub async fn update_channel_platform(
+    pool: &PgPool,
+    channel_id: i64,
+    new_platform: &str,
+    new_resource_identifier: &str,
+    new_external_id: &str,
+) -> anyhow::Result<OldChannelInfo> {
+    // Query old values first
+    let old: Option<ChannelDb> = sql_forge!(
+        ChannelDb,
+        r#"
+        SELECT
+            id, name,
+            COALESCE(platform, '') AS "platform",
+            resource_identifier,
+            COALESCE(external_id, '') AS "external_id",
+            cause,
+            current_profile, current_model, current_provider,
+            readonly,
+            COALESCE(closed, false) as "closed",
+            '{}'::text AS "metadata",
+            ''::text AS "created_at",
+            ''::text AS "updated_at"
+        FROM channels
+        WHERE id = :id
+        "#,
+        ( :id = channel_id )
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let old_platform = old.as_ref().and_then(|c| {
+        let p = c.platform.as_deref().unwrap_or("");
+        if p.is_empty() { None } else { Some(p.to_string()) }
+    });
+    let old_resource_identifier = old.as_ref().and_then(|c| c.resource_identifier.clone());
+
+    // Update the row
+    sql_forge!(
+        r#"
+        UPDATE channels
+        SET platform = NULLIF(:platform, '')::text,
+            resource_identifier = NULLIF(:resource_identifier, '')::text,
+            external_id = NULLIF(:external_id, '')::text,
+            updated_at = NOW()
+        WHERE id = :id
+        "#,
+        ( :platform = new_platform, :resource_identifier = new_resource_identifier, :external_id = new_external_id, :id = channel_id )
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(OldChannelInfo {
+        old_platform,
+        old_resource_identifier,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -688,7 +899,11 @@ pub async fn is_channel_closed(pool: &PgPool, channel_id: i64) -> anyhow::Result
         ChannelDb,
         r#"
         SELECT
-            id, name, platform, external_id, cause,
+            id, name,
+            COALESCE(platform, '') AS "platform",
+            resource_identifier,
+            COALESCE(external_id, '') AS "external_id",
+            cause,
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
@@ -747,7 +962,7 @@ pub async fn get_channel_status(pool: &PgPool, channel_id: i64) -> anyhow::Resul
     Ok(Some(ChannelStatus {
         channel_id: ch.id,
         name: ch.name,
-        platform: ch.platform,
+        platform: ch.platform.unwrap_or_default(),
         closed: ch.closed,
         current_profile: ch.current_profile,
         current_model: ch.current_model,

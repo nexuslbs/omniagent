@@ -251,7 +251,7 @@ async fn prompt_handler(
     let mut memory_store = MemoryStore::new(&profile_path);
     memory_store.load_from_disk();
 
-    let platform = channel.platform.as_str();
+    let platform = channel.platform.as_deref().unwrap_or("");
     let system_prompt = build_system_prompt(&memory_store, platform, None, profile_name);
 
     let result = format!(

@@ -246,7 +246,7 @@ async fn release_job(
 
 /// Ensure a cron channel exists (upsert on conflict).
 async fn ensure_cron_channel(pool: &PgPool) -> Result<crate::models::Channel> {
-    queries::create_channel(pool, "cron-default", "cron", "cron-default", "cron").await
+    queries::create_channel(pool, "cron-default", "cron", "cron-default", "cron", "cron-default").await
 }
 
 /// Parse a cron expression and compute the next run after `now`.

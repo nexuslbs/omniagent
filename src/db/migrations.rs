@@ -506,5 +506,46 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ── Make platform nullable in channels, add resource_identifier ──
+    sql_forge!(
+        r#"
+        ALTER TABLE channels ALTER COLUMN platform DROP NOT NULL;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sql_forge!(
+        r#"
+        ALTER TABLE channels ADD COLUMN IF NOT EXISTS resource_identifier TEXT;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sql_forge!(
+        r#"
+        ALTER TABLE channels ADD COLUMN IF NOT EXISTS external_id TEXT;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // ── Add UNIQUE(platform, resource_identifier) if it doesn't exist ──
+    sql_forge!(
+        r#"
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'channels_platform_resource_identifier_key'
+            ) THEN
+                ALTER TABLE channels
+                ADD CONSTRAINT channels_platform_resource_identifier_key
+                UNIQUE (platform, resource_identifier);
+            END IF;
+        END $$;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }

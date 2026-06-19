@@ -10,13 +10,15 @@
 //  id          BIGSERIAL PRIMARY KEY        -- auto-incrementing
 //  name        TEXT NOT NULL                -- e.g. "user-lucas", "cron-daily-backup"
 //  platform    TEXT NOT NULL                -- e.g. "telegram", "cron"
-//  external_id TEXT NOT NULL                -- e.g. Telegram chat ID
+//  external_id TEXT NOT NULL                -- e.g. Telegram chat ID (legacy, same as resource_identifier)
+//  resource_identifier TEXT                 -- identifier within the platform (chat_id, session id, etc.)
 //  cause       TEXT NOT NULL                -- 'user' or 'cron'
 //  metadata    JSONB DEFAULT '{}'           -- arbitrary metadata
 //  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 //  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 //
 //  UNIQUE(platform, external_id)
+//  UNIQUE(platform, resource_identifier)
 //
 // ── messages ──────────────────────────────────────────────────────────────
 //

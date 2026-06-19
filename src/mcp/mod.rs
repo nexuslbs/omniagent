@@ -4,6 +4,8 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::platform::OutboundSender;
+
 /// Truncate content to `max_chars` bytes (safe UTF-8 boundary).
 /// Appends a truncation note when content exceeds the limit.
 pub fn truncate_content(content: &str, max_chars: usize) -> String {
@@ -60,11 +62,21 @@ pub struct AppContext {
     pub qdrant_url: Option<String>,
     /// Read-only memory store (MEMORY.md + USER.md) for system prompt injection.
     pub memory_store: Arc<MemoryStore>,
+    /// Per-platform outbound delivery senders.  Each platform gets its own
+    /// mpsc channel so that a slow/failing platform never blocks others.
+    pub platform_senders: HashMap<String, OutboundSender>,
 }
 
 impl AppContext {
     /// Create a new application context with a loaded memory store.
-    pub fn new(pool: PgPool, readonly_pool: PgPool, data_dir: &str, workspace_dir: &str, qdrant_url: Option<String>) -> Self {
+    pub fn new(
+        pool: PgPool,
+        readonly_pool: PgPool,
+        data_dir: &str,
+        workspace_dir: &str,
+        qdrant_url: Option<String>,
+        platform_senders: HashMap<String, OutboundSender>,
+    ) -> Self {
         // Load memory store from the default profile's memories directory
         let profile_path = format!("{}/profiles/default", data_dir);
         let mut memory_store = MemoryStore::new(&profile_path);
@@ -77,6 +89,7 @@ impl AppContext {
             workspace_dir: workspace_dir.to_string(),
             qdrant_url,
             memory_store: Arc::new(memory_store),
+            platform_senders,
         }
     }
 }
