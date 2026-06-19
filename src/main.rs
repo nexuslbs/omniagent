@@ -274,7 +274,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
 
     // Get or create the current thread
     let mut thread_id = get_or_create_thread(&pool, channel_id, &profile_name, &resolved_provider, &resolved_model).await?;
-    let mut next_sequence = get_next_sequence(&pool, channel_id, thread_id).await?;
+    let _ = get_next_sequence(&pool, channel_id, thread_id).await?;
 
     let stdin = io::stdin();
     let mut reader = stdin.lock();
@@ -328,7 +328,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                 };
                 let saved = db::types::create_cause_and_set_pending(&pool, &root_msg).await?;
                 thread_id = saved.thread_id;
-                next_sequence = 1;
+                // next_sequence = 1;
                 println!("┌─ New conversation thread #{} ────────────────────────┐", thread_id);
                 continue;
             }
@@ -368,8 +368,8 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
         poll_for_response(&pool, channel_id, thread_id, _user_msg_id).await?;
 
         // Update next_sequence to reflect all messages added by the agent
-        let max_seq = get_max_sequence(&pool, channel_id, thread_id).await?;
-        next_sequence = max_seq + 1;
+        let _max_seq = get_max_sequence(&pool, channel_id, thread_id).await?;
+        // next_sequence = _max_seq + 1;
     }
 
     Ok(())

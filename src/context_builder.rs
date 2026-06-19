@@ -122,7 +122,7 @@ pub struct ContextAssemblyMeta {
 }
 
 // ---------------------------------------------------------------------------
-/// Builder struct
+// Builder struct
 // ---------------------------------------------------------------------------
 
 /// The ContextBuilder assembles an LLM prompt from ordered blocks with

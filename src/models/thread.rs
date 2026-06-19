@@ -20,6 +20,7 @@ pub struct Thread {
     pub terminal: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadNew {
     pub cause: String,

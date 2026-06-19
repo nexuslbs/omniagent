@@ -417,10 +417,8 @@ fn merge_usage(cumulative: &mut Option<Usage>, new_usage: Option<Usage>) {
 /// These indicate the thread was deleted or the FK constraint was broken —
 /// the thread should be marked as failed rather than retried.
 fn is_fk_violation(e: &anyhow::Error) -> bool {
-    if let Some(db_err) = e.downcast_ref::<sqlx::Error>() {
-        if let sqlx::Error::Database(ref dberr) = db_err {
+    if let Some(sqlx::Error::Database(ref dberr)) = e.downcast_ref::<sqlx::Error>() {
             return dberr.code().as_deref() == Some("23503");
-        }
     }
     false
 }
@@ -459,7 +457,7 @@ async fn persist_or_abort(
 /// Keeps the most recent turn's results intact and strips old tool result
 /// bodies, replacing them with a short summary, while preserving all
 /// user, assistant, and system messages unchanged.
-fn prune_old_tool_results(messages: &mut Vec<ChatMessage>) {
+fn prune_old_tool_results(messages: &mut [ChatMessage]) {
     let total_tool_chars: usize = messages
         .iter()
         .filter(|m| m.role == "tool")
@@ -1057,7 +1055,7 @@ async fn process_thread(
     let should_plan = match planning_mode {
         "never" => false,
         "always" => true,
-        "auto" | _ => {
+        _ => {
             // Auto: plan if message > 200 chars AND is first in thread
             config.prompt_graph_enabled 
                 && cause_msg.content.len() > 200 
@@ -1127,7 +1125,7 @@ async fn process_thread(
                         external_id: None,
                         metadata: serde_json::json!({
                             "plan_iteration": iter,
-                            "plan_accepted": iter == 0 && max_iter == 0 || false,
+                            "plan_accepted": iter == 0 && max_iter == 0,
                         }),
                         embedding: None,
                         summary_text: None,
@@ -1206,7 +1204,7 @@ async fn process_thread(
 
     // 6. Tool-calling loop — max iterations controls total LLM calls
     let remaining = config.max_iterations as i32 - current_msg_count;
-    let max_llm_calls = remaining.max(0).min(25) as u32; // safety cap — 25 max
+    let max_llm_calls = remaining.clamp(0, 25) as u32; // safety cap — 25 max
     let mut final_content = String::new();
     let mut final_reasoning: Option<String> = None;
     let mut final_tool_call: bool = false;

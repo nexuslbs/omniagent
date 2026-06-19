@@ -186,6 +186,7 @@ impl TryFrom<ChannelDb> for Channel {
 // ChannelStop DB struct (for SELECT results) — unchanged
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ChannelStopDb {
     pub id: i64,
@@ -259,6 +260,7 @@ pub async fn create_thread(
     row.try_into()
 }
 
+#[allow(dead_code)]
 /// Set a thread's status to 'pending' so the executor picks it up.
 pub async fn set_thread_pending(pool: &PgPool, thread_id: i64) -> anyhow::Result<()> {
     sql_forge!(
@@ -995,7 +997,7 @@ pub fn search_wiki_text(wiki_dir: &str, query: &str, limit: usize) -> Vec<(Strin
     }
 
     // Sort by score descending, take top `limit`
-    scored.sort_by(|a, b| b.2.cmp(&a.2));
+    scored.sort_by_key(|b| std::cmp::Reverse(b.2));
     scored.truncate(limit);
 
     scored.into_iter()

@@ -39,6 +39,7 @@ impl Default for Channel {
 }
 
 /// Tracks channels that have been stopped (paused).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ChannelStop {
     pub id: i64,

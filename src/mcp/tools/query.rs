@@ -468,10 +468,8 @@ mod tests {
             content: "hello".to_string(),
             msg_type: "message".to_string(),
             msg_subtype: None,
-            channel_id: 1,
             thread_id: Some(1),
             thread_sequence: 0,
-            profile: "default".to_string(),
             created_at: Some("2026-06-18T12:00:00Z".to_string()),
         };
         assert_eq!(msg.createdat_ref(), Some("2026-06-18T12:00:00Z"));

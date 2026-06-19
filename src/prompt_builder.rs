@@ -273,15 +273,15 @@ pub fn build_system_prompt_parts(
     use std::env;
 
     // ── Stable tier ────────────────────────────────────────────
-    let mut stable_parts: Vec<String> = Vec::new();
-
-    stable_parts.push(DEFAULT_AGENT_IDENTITY.to_string());
-    stable_parts.push(TOOL_GUIDANCE.to_string());
-    stable_parts.push(RESEARCH_WORKFLOW.to_string());
-    stable_parts.push(SKILLS_GUIDANCE.to_string());
-    stable_parts.push(GROUNDING_POLICY.to_string());
-    stable_parts.push(DOCKER_EXECUTION_GUIDANCE.to_string());
-    stable_parts.push(DB_SCHEMA.to_string());
+    let mut stable_parts: Vec<String> = vec![
+        DEFAULT_AGENT_IDENTITY.to_string(),
+        TOOL_GUIDANCE.to_string(),
+        RESEARCH_WORKFLOW.to_string(),
+        SKILLS_GUIDANCE.to_string(),
+        GROUNDING_POLICY.to_string(),
+        DOCKER_EXECUTION_GUIDANCE.to_string(),
+        DB_SCHEMA.to_string(),
+    ];
 
     // Wiki guidance with the actual data directory
     let wiki_hint = WIKI_GUIDANCE.replace("<profile>", profile_name);
