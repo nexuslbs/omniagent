@@ -324,8 +324,51 @@ async fn prompt_preview_handler(
 
     let mut messages = vec![
         serde_json::json!({ "role": "system", "content": system_prompt }),
-        serde_json::json!({ "role": "user", "content": body.prompt }),
     ];
+
+    // Add recent seq-0 messages from the same channel (last 5)
+    match sqlx::query_as::<_, (i64, String, String, String)>(
+        "SELECT id, content, role, msg_type FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE channel_id = $1) AND thread_sequence = 0 ORDER BY created_at DESC LIMIT 5"
+    )
+    .bind(channel.id)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(msgs) if !msgs.is_empty() => {
+            let recent_text: String = msgs.iter().rev().map(|(id, content, role, _msg_type)| {
+                format!("[msg {}] {}: {}", id, role, content.chars().take(200).collect::<String>())
+            }).collect::<Vec<_>>().join("\n");
+            messages.push(serde_json::json!({ "role": "system", "content": format!("Recent conversations in this channel:\n{}", recent_text) }));
+        }
+        _ => {}
+    }
+
+    // Add skills from profile
+    let skills_dir = format!("{}/profiles/{}/skills", state.data_dir, profile_name);
+    if let Ok(entries) = std::fs::read_dir(&skills_dir) {
+        let mut skills = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+                    let first_line = content.lines().next().unwrap_or("").trim();
+                    let desc = if first_line.starts_with('#') {
+                        first_line.trim_start_matches('#').trim()
+                    } else {
+                        first_line
+                    };
+                    skills.push(format!("- {}: {}", name, desc));
+                }
+            }
+        }
+        if !skills.is_empty() {
+            messages.push(serde_json::json!({ "role": "system", "content": format!("Available skills:\n{}", skills.join("\n")) }));
+        }
+    }
+
+    // Add user prompt
+    messages.push(serde_json::json!({ "role": "user", "content": body.prompt }));
 
     let plan = if body.plan {
         // Resolve provider/model: channel > profile > env

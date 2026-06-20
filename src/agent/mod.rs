@@ -951,6 +951,35 @@ async fn process_thread(
             }
         }
 
+        // Add profile skills as context
+        let skills_dir = format!("{}/profiles/{}/skills", ctx.data_dir, profile_name);
+        if let Ok(entries) = std::fs::read_dir(&skills_dir) {
+            let mut skills = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+                        let first_line = content.lines().next().unwrap_or("").trim();
+                        let desc = if first_line.starts_with('#') {
+                            first_line.trim_start_matches('#').trim()
+                        } else {
+                            first_line
+                        };
+                        skills.push(format!("- {}: {}", name, desc));
+                    }
+                }
+            }
+            if !skills.is_empty() {
+                builder.add_block(ContextBlock::new(
+                    "profile_skills",
+                    BlockPriority::Normal,
+                    &format!("Available skills:\n{}", skills.join("\n")),
+                    3_000,
+                ));
+            }
+        }
+
         // Add retrieved past messages + wiki if retrieval is indicated
         if aggressiveness > 0 {
             let user_content = &cause_msg.content;
