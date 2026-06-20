@@ -63,7 +63,7 @@ pub fn create_cron_job_tool() -> McpTool {
                 },
                 "direct_task_type": {
                     "type": "string",
-                    "description": "For mode='direct': the predefined task type. Currently supported: 'kanban_dispatcher'"
+                    "description": "For mode='direct': the predefined task type. Known types: kanban_dispatcher, relevance_indexer (keep in sync with DIRECT_TASK_TYPES in scheduler.rs)"
                 }
             },
             "required": ["name", "schedule"]
@@ -315,7 +315,7 @@ pub fn update_cron_job_tool() -> McpTool {
                 },
                 "direct_task_type": {
                     "type": "string",
-                    "description": "For direct mode: 'kanban_dispatcher'"
+                    "description": "For mode='direct': the predefined task type. Known types: kanban_dispatcher, relevance_indexer"
                 },
                 "active": {
                     "type": "boolean",

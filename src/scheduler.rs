@@ -21,6 +21,14 @@ use tracing::{error, info, warn};
 use crate::db::types as queries;
 use crate::models::MessageNew;
 
+/// Central list of all known direct-mode task types.
+/// Add new variants here, then add a match arm in `handle_direct_task`.
+/// Keep in sync with DIRECT_TASK_TYPES in dashboard server (server/routes/schedule.ts).
+pub const DIRECT_TASK_TYPES: &[(&str, &str)] = &[
+    ("kanban_dispatcher", "Kanban Dispatcher"),
+    ("relevance_indexer", "Relevance Indexer"),
+];
+
 #[derive(Debug, FromRow)]
 struct CronJobDueRow {
     id: String,
@@ -110,9 +118,10 @@ async fn tick(pool: &PgPool, data_dir: &str) -> Result<()> {
                         crate::relevance::run_relevance_indexer(pool, data_dir).await?;
                     }
                     other => {
+                        let known: Vec<&str> = DIRECT_TASK_TYPES.iter().map(|(v, _)| *v).collect();
                         warn!(
-                            "[cron-scheduler] Unknown direct_task_type '{}' for job '{}', skipping",
-                            other, display_name
+                            "[cron-scheduler] Unknown direct_task_type '{}' for job '{}'. Known types: {}",
+                            other, display_name, known.join(", ")
                         );
                     }
                 }
@@ -282,7 +291,7 @@ async fn release_job(
 
 /// Ensure a cron channel exists (upsert on conflict).
 async fn ensure_cron_channel(pool: &PgPool) -> Result<crate::models::Channel> {
-    queries::create_channel(pool, "cron", "cron", "cron", "cron", "cron").await
+    queries::create_channel(pool, "cron-session", "cron", "cron", "cron", "cron-session").await
 }
 
 /// Run the kanban_dispatcher: move all 'todo' tasks to 'ready' by creating

@@ -6,3 +6,4 @@ backup.env
 
 # MCP script cache
 scripts/__pycache__/
+/omniagent

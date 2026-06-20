@@ -331,9 +331,32 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> an
     .fetch_one(&mut *tx)
     .await?;
 
+    // Determine thread status based on channel state
+    // If the channel is closed, set to 'skipped' unless the message role is 'system' (for /open etc.)
+    let thread_status = {
+        let channel_closed: Option<bool> = sql_forge!(
+            scalar Option<bool>,
+            r#"
+            SELECT ch.closed
+            FROM channels ch
+            JOIN threads t ON t.channel_id = ch.id
+            WHERE t.id = :thread_id
+            "#,
+            ( :thread_id = msg.thread_id )
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+
+        if channel_closed.unwrap_or(false) && msg.role != "system" {
+            "skipped"
+        } else {
+            "pending"
+        }
+    };
+
     sql_forge!(
-        "UPDATE threads SET status = 'pending' WHERE id = :id AND NOT terminal",
-        ( :id = msg.thread_id )
+        "UPDATE threads SET status = :status WHERE id = :id AND NOT terminal",
+        ( :status = thread_status, :id = msg.thread_id )
     )
     .execute(&mut *tx)
     .await?;
