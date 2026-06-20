@@ -5,7 +5,7 @@ Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP too
 ## Features
 
 ### 🧠 Context Builder & Grounding
-- **Priority-ranked prompt assembly** (`ContextBuilder`) — NeverTrim (system, MEMORY.md) → High (thread messages) → Normal (tool defs) → Low (retrieved content)
+- **Priority-ranked prompt assembly** (`ContextBuilder`) — NeverTrim (system, MEMORY.md, subtasks) → High (thread messages) → Normal (tool defs) → Low (retrieved content)
 - **Token budgeting** — per-block character caps, lowest-priority blocks dropped when over budget
 - **Grounding policy** — embedded in every system prompt: prefer evidence, state uncertainty, cite references
 - **Evidence metadata** — `messages.metadata` captures context diagnostics (`context.selected_message_ids`, `block_counts`, `dropped_blocks`, `total_chars`) and grounding flags
@@ -28,6 +28,29 @@ Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP too
 - **Circuit breaker** — automatic disable after N consecutive failures
 - **Dynamic tool registry** — external tools auto-merge with built-in tools at startup
 - Configured via `MCP_SERVERS_CONFIG` env var or `<data_dir>/config/mcp-servers.json`
+
+### 📋 Thread Subtasks
+
+Thread subtasks enable the LLM to decompose a complex request into trackable sub-items. Subtasks are stored in the `thread_subtasks` table and managed via the `manage_subtasks` MCP tool.
+
+**Tool: `manage_subtasks`**
+- Actions: `add`, `list`, `update`, `delete`, `get_counts`
+- Each subtask has: `id`, `thread_id`, `description`, `status` (pending/completed/cancelled), `priority`
+- Returns structured JSON with `current_subtask`, counts per status, and full subtask list
+
+**Current Subtask Logic:**
+- The first pending subtask (ordered by `priority DESC`, `created_at ASC`) is the "current" subtask
+- When all subtasks are completed/cancelled, `current_subtask` is `null`
+- This drives the prompt injection — only the current subtask is prominently displayed
+
+**Prompt Injection:**
+- When subtasks exist, a `[Thread Subtasks]` section is injected into the system prompt (NeverTrim tier)
+- Shows current subtask with status emoji, and remaining subtask count
+- Only injected when there are active (non-cancelled) subtasks — empty threads see no section
+
+**Override Pattern:**
+- To redefine a thread's subtasks, delete all existing ones (`action: delete` for each) then add new ones
+- Bulk updates supported via SQL-level operations (e.g., mark all as completed)
 
 ### Requirements
 

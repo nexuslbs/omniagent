@@ -52,6 +52,16 @@ cargo sqlx prepare -- --bin omniagent
 - Add to default profile's `allowed_tools` if it should be available by default
 - Tool descriptions must include: ACTION PREFIX + USE CASE + NEGATIVE SPACE
 
+### Subtask Tool (`manage_subtasks`)
+- Located at `src/mcp/tools/subtasks.rs`
+- Backend module at `src/subtask/mod.rs` — uses `sql_forge!()` for all DB operations
+- DB table: `thread_subtasks` (columns: `id`, `thread_id`, `description`, `status`, `priority`, `created_at`, `updated_at`)
+- Foreign key: `thread_id` → `threads(id)` with `ON DELETE CASCADE`
+- **Actions**: `add` (insert + return full state), `list` (all for thread), `update` (status + description), `delete` (by id), `get_counts` (aggregate)
+- **Current subtask** (`get_current_subtask`): queries the first `pending` row ordered by `priority DESC, created_at ASC`
+- Prompt injection in `src/prompt_builder.rs:format_subtask_section()` — only injected when subtasks exist and at least one is non-cancelled
+- **Override pattern**: Delete all subtasks for a thread (`DELETE FROM thread_subtasks WHERE thread_id = ?`), then add new ones
+
 ### Thread Summaries
 - Summaries are stored in the `summaries` table (channel_id, next_thread_id, content, created_at)
 - A summary is generated every `2*SUMMARY_WINDOW` completed seq-0 (thread-root) messages per channel
