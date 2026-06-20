@@ -132,6 +132,8 @@ fn platform_hint(platform: &str) -> Option<String> {
 pub struct MemoryStore {
     /// Path to the profile's memories directory.
     memories_dir: PathBuf,
+    /// Profile base path (<data_dir>/profiles/<name>), used to locate wiki/relevant-index.md.
+    profile_path: Option<String>,
     /// Frozen snapshot for system prompt — set once at `load_from_disk()`.
     snapshot: HashMap<String, String>,
 }
@@ -156,6 +158,7 @@ impl MemoryStore {
     pub fn new(base_path: &str) -> Self {
         Self {
             memories_dir: PathBuf::from(base_path).join("memories"),
+            profile_path: Some(base_path.to_string()),
             snapshot: HashMap::new(),
         }
     }
@@ -185,6 +188,35 @@ impl MemoryStore {
             None
         } else {
             Some(block.as_str())
+        }
+    }
+
+    /// Load relevant-index.md from the profile's wiki directory and return as a block.
+    /// Returns None if the file doesn't exist or is empty.
+    pub fn load_relevant_index(&self) -> Option<String> {
+        let profile_path = match self.profile_path {
+            Some(ref p) => p.clone(),
+            None => return None,
+        };
+        let wiki_index_path = PathBuf::from(&profile_path).join("wiki").join("relevant-index.md");
+        if !wiki_index_path.exists() {
+            return None;
+        }
+        match fs::read_to_string(&wiki_index_path) {
+            Ok(content) => {
+                let trimmed = content.trim().to_string();
+                if trimmed.is_empty() || trimmed.contains("(No wiki pages found)") {
+                    return None;
+                }
+                Some(format!(
+                    "RELEVANT WIKI PAGES (most important wiki files for context):\n{}",
+                    trimmed
+                ))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read relevant-index.md {:?}: {}", wiki_index_path, e);
+                None
+            }
         }
     }
 
@@ -308,6 +340,11 @@ pub fn build_system_prompt_parts(
     }
     if let Some(user_block) = memory_store.format_for_system_prompt("user") {
         volatile_parts.push(user_block.to_string());
+    }
+
+    // Relevant wiki index (compact listing of most important wiki pages)
+    if let Some(relevant_block) = memory_store.load_relevant_index() {
+        volatile_parts.push(relevant_block);
     }
 
     // Timestamp line

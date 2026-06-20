@@ -102,6 +102,13 @@ async fn tick(pool: &PgPool, data_dir: &str) -> Result<()> {
                         );
                         run_kanban_dispatcher(pool).await?;
                     }
+                    "relevance_indexer" => {
+                        info!(
+                            "[cron-scheduler] Running relevance_indexer for job '{}'",
+                            display_name
+                        );
+                        crate::relevance::run_relevance_indexer(pool, data_dir).await?;
+                    }
                     other => {
                         warn!(
                             "[cron-scheduler] Unknown direct_task_type '{}' for job '{}', skipping",

@@ -16,6 +16,7 @@ mod models;
 mod platform;
 mod profile;
 mod prompt_builder;
+mod relevance;
 mod scheduler;
 mod server;
 mod vectorizer;
