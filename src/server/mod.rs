@@ -327,16 +327,10 @@ async fn prompt_preview_handler(
     ];
 
     // Add recent seq-0 messages from the same channel (last 5)
-    match sqlx::query_as::<_, (i64, String, String, String)>(
-        "SELECT id, content, role, msg_type FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE channel_id = $1) AND thread_sequence = 0 ORDER BY created_at DESC LIMIT 5"
-    )
-    .bind(channel.id)
-    .fetch_all(&state.pool)
-    .await
-    {
+    match queries::get_recent_channel_seq0_messages(&state.pool, channel.id, 5).await {
         Ok(msgs) if !msgs.is_empty() => {
-            let recent_text: String = msgs.iter().rev().map(|(id, content, role, _msg_type)| {
-                format!("[msg {}] {}: {}", id, role, content.chars().take(200).collect::<String>())
+            let recent_text: String = msgs.iter().rev().map(|msg| {
+                format!("[msg {}] {}: {}", msg.id, msg.role, msg.content.chars().take(200).collect::<String>())
             }).collect::<Vec<_>>().join("\n");
             messages.push(serde_json::json!({ "role": "system", "content": format!("Recent conversations in this channel:\n{}", recent_text) }));
         }

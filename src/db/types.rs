@@ -1013,6 +1013,41 @@ pub async fn get_channel_status(pool: &PgPool, channel_id: i64) -> anyhow::Resul
 }
 
 // ---------------------------------------------------------------------------
+// Channel seq-0 message query — for recent channel context
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ChannelSeq0Message {
+    pub id: i64,
+    pub content: String,
+    pub role: String,
+    pub msg_type: String,
+}
+
+/// Get the most recent seq-0 (thread root) messages for a channel.
+pub async fn get_recent_channel_seq0_messages(
+    pool: &PgPool,
+    channel_id: i64,
+    limit: i64,
+) -> anyhow::Result<Vec<ChannelSeq0Message>> {
+    let rows: Vec<ChannelSeq0Message> = sql_forge!(
+        ChannelSeq0Message,
+        r#"
+        SELECT id, content, role, msg_type
+        FROM messages
+        WHERE thread_id IN (SELECT id FROM threads WHERE channel_id = :channel_id)
+          AND thread_sequence = 0
+        ORDER BY created_at DESC
+        LIMIT :limit
+        "#,
+        ( :channel_id = channel_id, :limit = limit )
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+// ---------------------------------------------------------------------------
 // Context retrieval helper functions — updated for new message schema
 // ---------------------------------------------------------------------------
 
