@@ -1,0 +1,15 @@
+{
+  "name": "test-python-tool",
+  "version": "0.1.0",
+  "type": "mcp",
+  "description": "Test Python MCP tool server — echo and wait tools with configurable greeting",
+  "config_schema": [
+    {
+      "key": "GREETING_NAME",
+      "label": "Greeting Name",
+      "type": "text",
+      "default": "World",
+      "description": "Default name to use in echo greeting when no input is provided"
+    }
+  ]
+}

@@ -278,16 +278,16 @@ async fn handle_tools_list<W: AsyncWriteExt + Unpin>(
 
     let echo_tool = McpTool {
         name: "echo".to_string(),
-        description: "Echo back the input text".to_string(),
+        description: "Echo back a greeting: 'Hello, {input}'".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "text": {
+                "input": {
                     "type": "string",
-                    "description": "Text to echo back"
+                    "description": "Name to greet (default: GREETING_NAME env var or 'World')"
                 }
             },
-            "required": ["text"]
+            "required": []
         }),
     };
 
@@ -445,15 +445,20 @@ async fn handle_echo<W: AsyncWriteExt + Unpin>(
     req_id: u64,
     params: &CallToolParams,
 ) -> Result<()> {
-    let text = params
+    // Read input param, or GREETING_NAME env var, or default to "World"
+    let name = params
         .arguments
         .as_ref()
-        .and_then(|a| a.get("text"))
+        .and_then(|a| a.get("input"))
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("GREETING_NAME").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "World".to_string());
 
-    tracing::info!("echo tool called: text='{}'", text);
+    let text = format!("Hello, {}", name);
+
+    tracing::info!("echo tool called: name='{}'", name);
 
     let result = CallToolResult {
         content: vec![ToolContent::Text { text }],

@@ -5,7 +5,9 @@
       "transport": "stdio",
       "command": "./plugins/mcp/test-rust-tool/target/release/test-rust-tool",
       "args": [],
-      "env": {}
+      "env": {
+        "GREETING_NAME": "Omni"
+      }
     }
   ]
 }

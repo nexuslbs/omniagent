@@ -69,13 +69,13 @@ def handle_tools_list(req_id):
         },
         {
             "name": "echo",
-            "description": "Echo back the input text",
+            "description": "Echo back a greeting: 'Hello, {input}'",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string", "description": "Text to echo back"}
+                    "input": {"type": "string", "description": "Name to greet (default: GREETING_NAME env var or 'World')"}
                 },
-                "required": ["text"],
+                "required": [],
             },
         },
     ]
@@ -132,7 +132,11 @@ def handle_wait(req_id, arguments):
 
 
 def handle_echo(req_id, arguments):
-    text = (arguments or {}).get("text", "")
+    name = (arguments or {}).get("input", "")
+    greeting_name = os.environ.get("GREETING_NAME", "World")
+    if not name:
+        name = greeting_name
+    text = f"Hello, {name}"
     log.info("echo tool called: text='%s'", text)
     send_json(
         make_success(

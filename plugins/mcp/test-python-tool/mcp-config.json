@@ -5,7 +5,9 @@
       "transport": "stdio",
       "command": "python3",
       "args": ["plugins/mcp/test-python-tool/server.py"],
-      "env": {},
+      "env": {
+        "GREETING_NAME": "Omni"
+      },
       "timeout_secs": 900,
       "max_retries": 1,
       "allowed_tools": ["*"]

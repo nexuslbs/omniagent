@@ -12,5 +12,13 @@
     "inbound": false,
     "outbound": true
   },
-  "config_schema": []
+  "config_schema": [
+    {
+      "key": "PLATFORM_GREETING",
+      "label": "Platform Greeting",
+      "type": "text",
+      "default": "Hello from Rust",
+      "description": "Greeting message shown in platform status"
+    }
+  ]
 }
