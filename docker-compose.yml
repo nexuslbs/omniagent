@@ -48,7 +48,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:rw
       - /opt/workspace/omni-workspace:/opt/workspace:rw
       - /opt/data/credentials:/opt/data/credentials:ro
-      - /opt/data/.env:/opt/data/.env:ro
+      - /opt/data/.env:/opt/data/.env:rw
     expose:
       - "8080"
     ports:
