@@ -216,8 +216,8 @@ mod tests {
     #[test]
     fn test_default_profile_has_all_tools() {
         let p = Profile::default("test");
-        assert!(p.allowed_tools.contains(&"filesystem_read".to_string()));
-        assert!(p.allowed_tools.contains(&"compose".to_string()));
+        assert!(p.allowed_tools.contains(&"filesystem:read".to_string()));
+        assert!(p.allowed_tools.contains(&"docker:compose".to_string()));
         assert_eq!(p.allowed_tools.len(), ALL_KNOWN_TOOLS.len());
     }
 
