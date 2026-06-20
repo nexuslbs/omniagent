@@ -14,6 +14,7 @@ mod llm;
 mod mcp;
 mod models;
 mod platform;
+mod plugin;
 mod profile;
 mod prompt_builder;
 mod relevance;
@@ -93,6 +94,13 @@ async fn run_server() -> Result<()> {
     db::migrations::run(&pool).await?;
     tracing::info!("Database migrations completed");
 
+    // Sync plugins from disk after migrations
+    let data_dir = std::env::var("OMNI_DATA_DIR").unwrap_or_else(|_| "/opt/data".to_string());
+    let workspace_dir = std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
+    if let Err(e) = plugin::sync_plugins_from_disk(&pool, &data_dir).await {
+        tracing::warn!("Plugin sync failed (non-fatal): {:?}", e);
+    }
+
     // Determine data directory (default: /opt/data)
     let data_dir = std::env::var("OMNI_DATA_DIR").unwrap_or_else(|_| "/opt/data".to_string());
     tracing::info!("Data directory: {}", data_dir);
@@ -112,9 +120,29 @@ async fn run_server() -> Result<()> {
         agent_cfg.max_iterations,
     );
 
-    // Create platform registry and register built-in platforms
+    // Create platform registry and register platforms
     let mut registry = platform::PlatformRegistry::new();
+
+    // Built-in Telegram platform (kept for backward compatibility)
     registry.register(Box::new(crate::platform::telegram::TelegramPlatform::new()));
+
+    // Load external platform plugins from config
+    let external_plugins = platform::external::load_plugins_config(&data_dir);
+    for plugin_config in &external_plugins {
+        if !plugin_config.enabled {
+            tracing::info!("Skipping disabled platform plugin: {}", plugin_config.name);
+            continue;
+        }
+        tracing::info!(
+            "Registering external platform plugin: {} (command: {} {})",
+            plugin_config.name,
+            plugin_config.command,
+            plugin_config.args.join(" ")
+        );
+        let client = platform::external::client::ExternalPlatformClient::new(plugin_config.clone());
+        registry.register(Box::new(client));
+    }
+
     let platform_senders = registry.clone_senders();
     let _platform_handles = registry.start_all(pool.clone());
 
@@ -579,6 +607,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
             Some(&resolved_provider),
             Some(&resolved_model),
             None,
+            None,
         ).await?;
 
         let msg = models::MessageNew {
@@ -757,6 +786,7 @@ async fn get_or_create_thread(pool: &PgPool, channel_id: i64, profile_name: &str
         profile_name,
         Some(resolved_provider),
         Some(resolved_model),
+        None,
         None,
     ).await?;
 

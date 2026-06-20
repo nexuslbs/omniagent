@@ -1,0 +1,16 @@
+{
+  "name": "test-python",
+  "version": "0.1.0",
+  "type": "platform",
+  "description": "Test platform plugin for verifying the platform plugin protocol",
+  "entrypoint": {
+    "command": "python3",
+    "args": ["platform.py"],
+    "transport": "stdio"
+  },
+  "capabilities": {
+    "inbound": false,
+    "outbound": true
+  },
+  "config_schema": []
+}

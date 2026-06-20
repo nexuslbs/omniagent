@@ -30,9 +30,10 @@ use crate::db::types as queries;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, LLMConfig};
 use crate::prompt_builder::{build_planning_prompt, build_system_prompt, MemoryStore};
 
+pub mod plugins;
 /// Shared application state for the HTTP server.
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     pool: PgPool,
     cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
     data_dir: String,
@@ -67,6 +68,7 @@ pub async fn start_server(
         .route("/prompt/:channel_name", get(prompt_handler))
         .route("/prompt-preview/:channel_name", post(prompt_preview_handler))
         .nest("/settings", settings::settings_router())
+        .merge(plugins::plugin_router())
         .with_state(app_state);
 
     let addr = format!("{}:{}", host, port);

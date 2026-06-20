@@ -238,6 +238,9 @@ pub fn default_registry(ctx: &AppContext) -> McpRegistry {
     registry.register(tools::git::commit_and_push_tool());
     registry.register(tools::git::status_tool());
 
+    // Plugin management tool
+    registry.register(tools::plugin_manager::plugin_manager_tool());
+
     // External MCP servers (load from config, best-effort)
     let external_tools = external::client::initialize_external_tools(&ctx.data_dir);
     for tool in external_tools {

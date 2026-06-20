@@ -583,5 +583,54 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ── Add schedule_task_id to threads for cron job / schedule association ──
+    sql_forge!(
+        r#"
+        ALTER TABLE threads
+        ADD COLUMN IF NOT EXISTS schedule_task_id TEXT
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Index for fast lookups by schedule_task_id
+    sql_forge!(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_threads_schedule_task_id
+        ON threads(schedule_task_id)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // ── Plugin registry table ──
+    sql_forge!(
+        r#"
+        CREATE TABLE IF NOT EXISTS plugin_registry (
+            id          SERIAL PRIMARY KEY,
+            name        VARCHAR(255) NOT NULL UNIQUE,
+            plugin_type VARCHAR(50)  NOT NULL,
+            version     VARCHAR(50)  NOT NULL DEFAULT '0.1.0',
+            source      TEXT,
+            status      VARCHAR(20)  NOT NULL DEFAULT 'enabled',
+            manifest    JSONB        NOT NULL DEFAULT '{}',
+            config      JSONB        NOT NULL DEFAULT '{}',
+            created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Unique index on (name) for upsert operations
+    sql_forge!(
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_plugin_registry_name ON plugin_registry(name);
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }

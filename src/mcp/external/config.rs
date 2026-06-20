@@ -10,7 +10,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
 
 /// Supported MCP transport types.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -61,20 +60,24 @@ pub struct McpServersConfig {
     pub servers: Vec<McpServerConfig>,
 }
 
-/// Load external MCP server configurations from the config file.
+/// Load external MCP server configurations from the config file
+/// AND from any plugins/mcp/ directories.
 ///
 /// Looks for the config file at:
 /// 1. Path specified in `MCP_SERVERS_CONFIG` env var
 /// 2. `<data_dir>/config/mcp-servers.json`
 ///
-/// Returns an empty list if no config file is found.
+/// Additionally scans `plugins/mcp/` subdirectories for `mcp-config.json` files.
+/// Returns the merged list of all discovered servers.
 pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
-    // Try env var first
+    let mut all_servers = Vec::new();
+
+    // Try config file first
     let config_path = std::env::var("MCP_SERVERS_CONFIG")
         .ok()
         .or_else(|| {
             let default = format!("{}/config/mcp-servers.json", data_dir);
-            let path = Path::new(&default);
+            let path = std::path::Path::new(&default);
             if path.exists() { Some(default) } else { None }
         });
 
@@ -87,19 +90,93 @@ pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
                         config.servers.len(),
                         path
                     );
-                    config.servers
+                    all_servers.extend(config.servers);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to load MCP servers config from {}: {:?}", path, e);
-                    vec![]
                 }
             }
         }
         None => {
-            tracing::info!("No MCP servers config found (set MCP_SERVERS_CONFIG env var)");
-            vec![]
+            tracing::info!("No MCP servers config file found (set MCP_SERVERS_CONFIG env var)");
         }
     }
+
+    // Also scan plugins/mcp/ directories for mcp-config.json files
+    let plugin_servers = discover_plugin_servers(data_dir);
+    if !plugin_servers.is_empty() {
+        tracing::info!(
+            "Loaded {} MCP server(s) from plugins/mcp/ directories",
+            plugin_servers.len()
+        );
+        all_servers.extend(plugin_servers);
+    }
+
+    all_servers
+}
+
+/// Scan `plugins/mcp/` subdirectories for `mcp-config.json` files.
+///
+/// Each subdirectory under `plugins/mcp/` is expected to optionally contain
+/// an `mcp-config.json` file that defines one or more MCP server configurations.
+/// This allows MCP servers to be packaged as self-contained plugins.
+///
+/// The workspace directory is determined from the `WORKSPACE_DIR` env var
+/// (default: `/opt/workspace`).
+pub fn discover_plugin_servers(_data_dir: &str) -> Vec<McpServerConfig> {
+    // The plugins/mcp/ directory is relative to the workspace directory
+    let workspace_dir = std::env::var("WORKSPACE_DIR")
+        .unwrap_or_else(|_| "/opt/workspace".to_string());
+    let plugins_dir = format!("{}/plugins/mcp", workspace_dir);
+    let plugins_path = std::path::Path::new(&plugins_dir);
+
+    if !plugins_path.exists() || !plugins_path.is_dir() {
+        return vec![];
+    }
+
+    let mut servers = Vec::new();
+
+    // Scan subdirectories
+    let entries = match std::fs::read_dir(plugins_path) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!("Failed to read plugins/mcp directory {}: {:?}", plugins_dir, e);
+            return vec![];
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let config_file = path.join("mcp-config.json");
+        if !config_file.exists() {
+            continue;
+        }
+
+        let config_path_str = config_file.to_string_lossy().to_string();
+        match read_config_file(&config_path_str) {
+            Ok(config) => {
+                tracing::info!(
+                    "Loaded {} MCP server(s) from plugin config: {}",
+                    config.servers.len(),
+                    config_path_str
+                );
+                servers.extend(config.servers);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to parse MCP plugin config from {}: {:?}",
+                    config_path_str,
+                    e
+                );
+            }
+        }
+    }
+
+    servers
 }
 
 /// Read and parse the MCP servers config file (JSON or YAML).

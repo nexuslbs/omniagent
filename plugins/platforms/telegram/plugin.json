@@ -1,0 +1,43 @@
+{
+  "name": "telegram",
+  "version": "1.0.0",
+  "type": "platform",
+  "description": "Telegram Bot API platform — send and receive messages via Telegram",
+  "entrypoint": {
+    "command": "./target/release/telegram-platform",
+    "args": [],
+    "transport": "stdio"
+  },
+  "capabilities": {
+    "inbound": true,
+    "outbound": true
+  },
+  "config_schema": [
+    {
+      "key": "bot_token",
+      "label": "Bot Token",
+      "type": "secret",
+      "required": true,
+      "description": "Telegram Bot API token from @BotFather",
+      "secret": true
+    },
+    {
+      "key": "polling_enabled",
+      "label": "Enable inbound polling",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "Poll Telegram for incoming messages"
+    },
+    {
+      "key": "polling_interval",
+      "label": "Polling interval (seconds)",
+      "type": "integer",
+      "required": false,
+      "default": 30,
+      "min": 5,
+      "max": 300,
+      "description": "How often to poll for new messages"
+    }
+  ]
+}

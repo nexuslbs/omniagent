@@ -575,6 +575,7 @@ async fn insert_inbound_message(
         Some(&provider),
         Some(&model),
         None,
+        None,
     )
     .await?;
 

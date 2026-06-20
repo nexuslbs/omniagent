@@ -6,6 +6,7 @@ pub mod git;
 pub mod kanban;
 pub mod memory;
 pub mod metrics;
+pub mod plugin_manager;
 pub mod query;
 pub mod search;
 pub mod skills;

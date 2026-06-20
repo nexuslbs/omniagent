@@ -31,6 +31,7 @@ pub struct ThreadDb {
     pub ended_at: Option<String>,
     pub terminal: bool,
     pub task_id: Option<String>,
+    pub schedule_task_id: Option<String>,
 }
 
 impl TryFrom<ThreadDb> for Thread {
@@ -75,6 +76,7 @@ impl TryFrom<ThreadDb> for Thread {
             },
             terminal: db.terminal,
             task_id: db.task_id,
+            schedule_task_id: db.schedule_task_id,
         })
     }
 }
@@ -257,21 +259,22 @@ pub async fn create_thread(
     provider: Option<&str>,
     model: Option<&str>,
     task_id: Option<&str>,
+    schedule_task_id: Option<&str>,
 ) -> anyhow::Result<Thread> {
     let row: ThreadDb = sql_forge!(
         ThreadDb,
         r#"
-        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id)
-        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text)
+        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id)
+        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text)
         RETURNING
-            id, status, cause, channel_id, profile, provider, model, task_id,
+            id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
             input_tokens, cached_tokens, output_tokens, duration_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             ''::text AS "started_at",
             ''::text AS "ended_at",
             terminal
         "#,
-        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = provider.unwrap_or(""), :model = model.unwrap_or(""), :task_id = task_id.unwrap_or("") )
+        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = provider.unwrap_or(""), :model = model.unwrap_or(""), :task_id = task_id.unwrap_or(""), :schedule_task_id = schedule_task_id.unwrap_or("") )
     )
     .fetch_one(pool)
     .await?;
@@ -374,7 +377,7 @@ pub async fn find_pending_threads_by_channel(
         ThreadDb,
         r#"
         SELECT
-            id, status, cause, channel_id, profile, provider, model, task_id,
+            id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
             input_tokens, cached_tokens, output_tokens, duration_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
@@ -1389,7 +1392,7 @@ pub async fn get_completed_seq0_threads_since(
         ThreadDb,
         r#"
         SELECT
-            id, status, cause, channel_id, profile, provider, model, task_id,
+            id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
             input_tokens, cached_tokens, output_tokens, duration_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",

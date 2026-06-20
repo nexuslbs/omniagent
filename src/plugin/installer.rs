@@ -1,0 +1,501 @@
+//! Filesystem helpers for plugin installation, uninstallation, and discovery.
+//!
+//! Supports:
+//! - Installing from URL (.tar.gz, .tgz, .zip)
+//! - Uninstalling (removing plugin directory)
+//! - Discovering plugins from disk
+
+use anyhow::{Context, Result};
+use std::path::Path;
+
+use crate::plugin::{load_manifest, PluginManifest, PluginType};
+
+// ---------------------------------------------------------------------------
+// Install from URL
+// ---------------------------------------------------------------------------
+
+/// Download a tarball/zip from a URL and extract it to `<data_dir>/plugins/installed/<name>/`.
+///
+/// Uses `reqwest::blocking::get` to download and shell commands (tar, unzip) to extract.
+/// Returns the parsed PluginManifest from the extracted plugin.json.
+pub fn install_from_url(url: &str, data_dir: &str) -> Result<PluginManifest> {
+    let response = reqwest::blocking::get(url)
+        .with_context(|| format!("Failed to download plugin from {}", url))?;
+
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "Failed to download plugin from {}: HTTP {}",
+            url,
+            response.status()
+        );
+    }
+
+    let bytes = response
+        .bytes()
+        .with_context(|| format!("Failed to read response body from {}", url))?;
+
+    // Create a temp directory for extraction using a unique name under /tmp
+    let temp_id = format!("omniagent-plugin-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos());
+    let temp_path = std::path::PathBuf::from("/tmp").join(&temp_id);
+    std::fs::create_dir_all(&temp_path)
+        .with_context(|| format!("Failed to create temp directory at {:?}", temp_path))?;
+
+    // Cleanup on drop (if still present)
+    let temp_path_clone = temp_path.clone();
+    let cleanup = std::sync::Mutex::new(Some(temp_path_clone));
+
+    let result = install_from_url_inner(url, &bytes, &temp_path, data_dir);
+
+    // Clean up temp directory
+    if let Ok(mut path_opt) = cleanup.lock() {
+        if let Some(path) = path_opt.take() {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+
+    result
+}
+
+fn install_from_url_inner(url: &str, bytes: &[u8], temp_path: &std::path::Path, data_dir: &str) -> Result<PluginManifest> {
+    // Determine file extension to choose extraction method
+    let url_lower = url.to_lowercase();
+    let archive_path;
+
+    if url_lower.ends_with(".tar.gz") || url_lower.ends_with(".tgz") {
+        archive_path = temp_path.join("plugin.tar.gz");
+        std::fs::write(&archive_path, &bytes)
+            .with_context(|| "Failed to write downloaded archive to temp dir")?;
+
+        // Extract using tar
+        let status = std::process::Command::new("tar")
+            .arg("-xzf")
+            .arg(&archive_path)
+            .arg("-C")
+            .arg(&temp_path)
+            .status()
+            .context("Failed to execute tar command")?;
+
+        if !status.success() {
+            anyhow::bail!("tar extraction failed with status: {}", status);
+        }
+    } else if url_lower.ends_with(".zip") {
+        archive_path = temp_path.join("plugin.zip");
+        std::fs::write(&archive_path, &bytes)
+            .with_context(|| "Failed to write downloaded archive to temp dir")?;
+
+        // Extract using unzip
+        let status = std::process::Command::new("unzip")
+            .arg("-o")
+            .arg(&archive_path)
+            .arg("-d")
+            .arg(&temp_path)
+            .status()
+            .context("Failed to execute unzip command")?;
+
+        if !status.success() {
+            anyhow::bail!("unzip extraction failed with status: {}", status);
+        }
+    } else {
+        anyhow::bail!(
+            "Unsupported archive format in URL '{}'. Supported: .tar.gz, .tgz, .zip",
+            url
+        );
+    }
+
+    // Find plugin.json in the extracted directory
+    let plugin_json = find_plugin_json(&temp_path)?;
+    let manifest = load_manifest(&plugin_json)?;
+
+    // Copy to the installed plugins directory
+    let install_dir = format!("{}/plugins/installed/{}", data_dir, manifest.name);
+    let install_path = Path::new(&install_dir);
+
+    // Remove existing if present
+    if install_path.exists() {
+        std::fs::remove_dir_all(install_path)
+            .with_context(|| format!("Failed to remove existing plugin directory: {}", install_dir))?;
+    }
+
+    // Create parent directories
+    std::fs::create_dir_all(install_path.parent().unwrap())
+        .with_context(|| format!("Failed to create parent directories for: {}", install_dir))?;
+
+    // Copy the extracted plugin directory to the install location
+    let extracted_dir = Path::new(&plugin_json).parent().unwrap();
+    let copy_result = copy_dir_recursive(extracted_dir, install_path);
+    if let Err(e) = copy_result {
+        // Clean up on failure
+        let _ = std::fs::remove_dir_all(install_path);
+        return Err(e).context(format!("Failed to copy plugin to install directory: {}", install_dir));
+    }
+
+    // Verify the installed manifest
+    let installed_manifest_path = format!("{}/plugin.json", install_dir);
+    let manifest = load_manifest(&installed_manifest_path)
+        .with_context(|| format!("Failed to verify installed plugin manifest at: {}", installed_manifest_path))?;
+
+    tracing::info!(
+        "Installed plugin '{}' version {} from {}",
+        manifest.name,
+        manifest.version,
+        url
+    );
+
+    Ok(manifest)
+}
+
+/// Recursively copy a directory.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    if !src.is_dir() {
+        anyhow::bail!("Source is not a directory: {:?}", src);
+    }
+    if !dst.exists() {
+        std::fs::create_dir_all(dst)
+            .with_context(|| format!("Failed to create directory: {:?}", dst))?;
+    }
+
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let entry_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if entry_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)
+                .with_context(|| format!("Failed to copy {:?} to {:?}", src_path, dst_path))?;
+        }
+    }
+    Ok(())
+}
+
+/// Find the first plugin.json in a directory tree (searches top-level and one level deep).
+fn find_plugin_json(dir: &Path) -> Result<String> {
+    // Check if plugin.json exists at the top level
+    let top_level = dir.join("plugin.json");
+    if top_level.exists() {
+        return Ok(top_level.to_string_lossy().to_string());
+    }
+
+    // Search one level deep
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let candidate = path.join("plugin.json");
+                if candidate.exists() {
+                    return Ok(candidate.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "No plugin.json found in extracted archive at: {:?}",
+        dir
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Uninstall
+// ---------------------------------------------------------------------------
+
+/// Remove a plugin directory from `<data_dir>/plugins/installed/<name>/`.
+pub fn uninstall(name: &str, data_dir: &str) -> Result<()> {
+    let install_dir = format!("{}/plugins/installed/{}", data_dir, name);
+    let path = Path::new(&install_dir);
+
+    if !path.exists() {
+        anyhow::bail!(
+            "Plugin '{}' is not installed at: {}",
+            name,
+            install_dir
+        );
+    }
+
+    if !path.is_dir() {
+        anyhow::bail!(
+            "Plugin path is not a directory: {}",
+            install_dir
+        );
+    }
+
+    std::fs::remove_dir_all(path)
+        .with_context(|| format!("Failed to remove plugin directory: {}", install_dir))?;
+
+    tracing::info!("Uninstalled plugin '{}'", name);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Discover plugins
+// ---------------------------------------------------------------------------
+
+/// Discover all plugins from disk by scanning installed and bundled directories.
+///
+/// Returns a vector of `(PluginManifest, source_type, base_path)` tuples.
+///
+/// Scans:
+/// - `<data_dir>/plugins/installed/<name>/plugin.json` — source: "installed"
+/// - `<workspace_dir>/plugins/<type>/<name>/plugin.json` — source: "bundled"
+///
+/// For backward compatibility, ALSO scans:
+/// - `<data_dir>/config/platforms.json` — source: "legacy_platform"
+/// - `<data_dir>/config/mcp-servers.json` — source: "legacy_mcp"
+pub fn discover_plugins(
+    data_dir: &str,
+    workspace_dir: &str,
+) -> Vec<(PluginManifest, String, String)> {
+    let mut results = Vec::new();
+
+    // 1. Scan installed plugins: <data_dir>/plugins/installed/<name>/plugin.json
+    let installed_base = format!("{}/plugins/installed", data_dir);
+    if let Ok(entries) = std::fs::read_dir(&installed_base) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let manifest_path = path.join("plugin.json");
+            if manifest_path.exists() {
+                let path_str = manifest_path.to_string_lossy().to_string();
+                match load_manifest(&path_str) {
+                    Ok(manifest) => {
+                        results.push((manifest, "installed".to_string(), path_str));
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to load installed plugin manifest at {}: {:?}", path_str, e);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Scan bundled plugins: <workspace_dir>/plugins/<type>/<name>/plugin.json
+    let bundled_base = format!("{}/plugins", workspace_dir);
+    if let Ok(bundled_entries) = std::fs::read_dir(&bundled_base) {
+        for entry in bundled_entries.flatten() {
+            let type_path = entry.path();
+            if !type_path.is_dir() {
+                continue;
+            }
+            // type_path is like plugins/mcp or plugins/platform
+            if let Ok(plugin_entries) = std::fs::read_dir(&type_path) {
+                for plugin_entry in plugin_entries.flatten() {
+                    let plugin_path = plugin_entry.path();
+                    if !plugin_path.is_dir() {
+                        continue;
+                    }
+                    let manifest_path = plugin_path.join("plugin.json");
+                    if manifest_path.exists() {
+                        let path_str = manifest_path.to_string_lossy().to_string();
+                        match load_manifest(&path_str) {
+                            Ok(manifest) => {
+                                results.push((manifest, "bundled".to_string(), path_str));
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to load bundled plugin manifest at {}: {:?}",
+                                    path_str,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Legacy backward compatibility: platforms.json → synthetic platform plugin
+    let platforms_config = format!("{}/config/platforms.json", data_dir);
+    if Path::new(&platforms_config).exists() {
+        match std::fs::read_to_string(&platforms_config) {
+            Ok(content) => {
+                if let Ok(config) = serde_json::from_str::<crate::platform::external::PlatformPluginsConfig>(&content) {
+                    for plugin_cfg in &config.platforms {
+                        let manifest = PluginManifest {
+                            name: format!("platform:{}", plugin_cfg.name),
+                            version: "0.1.0".to_string(),
+                            plugin_type: PluginType::Platform,
+                            description: Some(format!(
+                                "Legacy platform plugin '{}'",
+                                plugin_cfg.name
+                            )),
+                            entrypoint: crate::plugin::PluginEntrypoint {
+                                command: plugin_cfg.command.clone(),
+                                args: plugin_cfg.args.clone(),
+                                transport: "stdio".to_string(),
+                                url: None,
+                            },
+                            capabilities: Some(crate::plugin::PluginCapabilities {
+                                inbound: true,
+                                outbound: true,
+                            }),
+                            config_schema: vec![],
+                        };
+                        results.push((manifest, "legacy_platform".to_string(), platforms_config.clone()));
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to read legacy platforms config {}: {:?}",
+                    platforms_config,
+                    e
+                );
+            }
+        }
+    }
+
+    // 4. Legacy backward compatibility: mcp-servers.json → synthetic MCP plugin
+    let mcp_config = format!("{}/config/mcp-servers.json", data_dir);
+    if Path::new(&mcp_config).exists() {
+        match std::fs::read_to_string(&mcp_config) {
+            Ok(content) => {
+                if let Ok(config) = serde_json::from_str::<crate::mcp::external::config::McpServersConfig>(&content) {
+                    for server_cfg in &config.servers {
+                        let transport_str = match server_cfg.transport {
+                            crate::mcp::external::config::McpTransport::Stdio => "stdio",
+                            crate::mcp::external::config::McpTransport::Http => "http",
+                        };
+                        let manifest = PluginManifest {
+                            name: format!("mcp:{}", server_cfg.name),
+                            version: "0.1.0".to_string(),
+                            plugin_type: PluginType::Mcp,
+                            description: Some(format!(
+                                "Legacy MCP server '{}'",
+                                server_cfg.name
+                            )),
+                            entrypoint: crate::plugin::PluginEntrypoint {
+                                command: server_cfg.command.clone().unwrap_or_default(),
+                                args: server_cfg.args.clone(),
+                                transport: transport_str.to_string(),
+                                url: server_cfg.url.clone(),
+                            },
+                            capabilities: None,
+                            config_schema: vec![],
+                        };
+                        results.push((manifest, "legacy_mcp".to_string(), mcp_config.clone()));
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to read legacy MCP config {}: {:?}",
+                    mcp_config,
+                    e
+                );
+            }
+        }
+    }
+
+    results
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_discover_plugins_empty_dirs() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let workspace_dir = tempfile::tempdir().unwrap();
+
+        // No plugin dirs exist yet
+        let plugins = discover_plugins(
+            data_dir.path().to_str().unwrap(),
+            workspace_dir.path().to_str().unwrap(),
+        );
+        assert!(plugins.is_empty());
+    }
+
+    #[test]
+    fn test_discover_installed_plugin() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let workspace_dir = tempfile::tempdir().unwrap();
+
+        // Create an installed plugin
+        let plugin_dir = data_dir.path().join("plugins").join("installed").join("my-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let manifest_content = r#"{
+            "name": "my-plugin",
+            "version": "1.0.0",
+            "type": "mcp",
+            "entrypoint": {
+                "command": "python3",
+                "args": ["server.py"]
+            }
+        }"#;
+        std::fs::write(plugin_dir.join("plugin.json"), manifest_content).unwrap();
+
+        let plugins = discover_plugins(
+            data_dir.path().to_str().unwrap(),
+            workspace_dir.path().to_str().unwrap(),
+        );
+        assert_eq!(plugins.len(), 1);
+        assert_eq!(plugins[0].0.name, "my-plugin");
+        assert_eq!(plugins[0].1, "installed");
+    }
+
+    #[test]
+    fn test_find_plugin_json_top_level() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("plugin.json"), r#"{"name":"test","type":"mcp","entrypoint":{"command":"test"}}"#).unwrap();
+        let found = find_plugin_json(dir.path()).unwrap();
+        assert_eq!(found, dir.path().join("plugin.json").to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn test_find_plugin_json_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("plugin-dir");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("plugin.json"), r#"{"name":"test","type":"mcp","entrypoint":{"command":"test"}}"#).unwrap();
+        let found = find_plugin_json(dir.path()).unwrap();
+        assert_eq!(found, nested.join("plugin.json").to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn test_find_plugin_json_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = find_plugin_json(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_uninstall_nonexistent() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let result = uninstall("nonexistent-plugin", data_dir.path().to_str().unwrap());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_copy_dir_recursive() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        // Create a nested structure
+        std::fs::create_dir(src.path().join("subdir")).unwrap();
+        std::fs::write(src.path().join("file1.txt"), "content1").unwrap();
+        std::fs::write(src.path().join("subdir").join("file2.txt"), "content2").unwrap();
+
+        let dst_path = dst.path().join("copied");
+        copy_dir_recursive(src.path(), &dst_path).unwrap();
+
+        assert!(dst_path.join("file1.txt").exists());
+        assert!(dst_path.join("subdir").join("file2.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dst_path.join("file1.txt")).unwrap(),
+            "content1"
+        );
+    }
+}

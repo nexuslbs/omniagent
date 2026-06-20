@@ -175,6 +175,7 @@ async fn tick(pool: &PgPool, data_dir: &str) -> Result<()> {
             provider.as_deref(),
             model.as_deref(),
             None,
+            Some(&job.id),
         )
         .await
         {
@@ -386,6 +387,7 @@ async fn run_kanban_dispatcher(pool: &PgPool) -> Result<()> {
             None,
             None,
             Some(&t.id),
+            None,
         )
         .await
         {

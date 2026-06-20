@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use std::collections::HashMap;
 
+pub mod external;
 pub mod queue;
 pub mod telegram;
 

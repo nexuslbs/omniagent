@@ -1,0 +1,15 @@
+[package]
+name = "telegram-platform"
+version = "0.1.0"
+edition = "2021"
+description = "Telegram platform plugin for OmniAgent — implements the platform plugin protocol"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+chrono = "0.4"
