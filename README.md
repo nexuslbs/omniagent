@@ -29,10 +29,13 @@ Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP too
 - **Dynamic tool registry** — external tools auto-merge with built-in tools at startup
 - Configured via `MCP_SERVERS_CONFIG` env var or `<data_dir>/config/mcp-servers.json`
 
-### 🔐 Vault Integration
-- Secrets (e.g., `DEEPSEEK_API_KEY`) can be stored in **HashiCorp Vault** at `hermes-vault:8200`
-- A helper script at `/opt/data/scripts/inject-deepseek-key.py` reads from Vault path `kv/data/hermes-user` and injects into the environment
-- Enables secure key management without storing secrets in `.env` files
+### 🔐 Secret Management
+
+The agent reads API keys from environment variables (`LLM_API_KEY`, `DEEPSEEK_API_KEY`). When running inside the **Hermes** container ecosystem, the **Hermes Vault** (HashiCorp Vault at `hermes-vault:8200`) can inject secrets via a helper script:
+
+- `/opt/data/scripts/inject-deepseek-key.py` — reads `DEEPSEEK_API_KEY` from Hermes Vault path `kv/data/hermes-user` and writes it to the `.env` file
+- This is **optional** — the agent does not bundle or require a Vault service. Standard env vars work identically.
+- The Vault and inject scripts are part of the **Hermes environment**, not the omniagent stack.
 
 ### Requirements
 
@@ -52,7 +55,7 @@ Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP too
    cp .env.example .env
    ```
    Edit `.env` and set at minimum:
-   - `LLM_API_KEY` — your LLM provider API key (or use the Vault helper for DeepSeek)
+   - `LLM_API_KEY` — your LLM provider API key (or use the Hermes Vault helper for DeepSeek)
    - `DATABASE_URL` — PostgreSQL connection string (default: `postgres://omniagent:***@postgres:5432/omniagent`)
 
 3. Start the stack:
@@ -467,7 +470,7 @@ This will:
 | `LLM_PROVIDER` | `opencode-go` | Provider: `opencode-go`, `openai`, `anthropic`, `deepseek` |
 | `LLM_MODEL` | `deepseek-v4-flash` | Default LLM model |
 | `LLM_BASE_URL` | *per provider* | API endpoint URL |
-| `DEEPSEEK_API_KEY` | — | DeepSeek-specific API key (sourced from Vault at `kv/data/hermes-user`) |
+| `DEEPSEEK_API_KEY` | — | DeepSeek-specific API key (sourced via Hermes Vault at `kv/data/hermes-user`, or set directly) |
 | `DEEPSEEK_BASE_URL` | *default* | DeepSeek API endpoint base URL |
 | `MAX_TOKENS` | `4096` | Max response tokens |
 | `TEMPERATURE` | `0.7` | Sampling temperature |
@@ -667,7 +670,7 @@ $OMNI_DATA_DIR/
     mcp-servers.json    # External MCP server config (optional)
   tools/                # MCP tool definitions
   scripts/
-    inject-deepseek-key.py  # Vault helper for DeepSeek API key injection
+    inject-deepseek-key.py  # Hermes Vault helper (optional, Hermes environment only)
 ```
 
 ## Architecture Diagram
