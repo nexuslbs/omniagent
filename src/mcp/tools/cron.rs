@@ -4,6 +4,7 @@ use anyhow::Result;
 use serde_json::Value;
 use sql_forge::sql_forge;
 use sqlx::FromRow;
+use std::str::FromStr;
 use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
@@ -99,6 +100,20 @@ pub fn create_cron_job_tool() -> McpTool {
             }
             if schedule.is_empty() {
                 anyhow::bail!("Schedule must not be empty");
+            }
+            // Validate cron expression: must be 7-field quartz format
+            {
+                let fields: Vec<&str> = schedule.split_whitespace().collect();
+                if fields.len() != 7 {
+                    anyhow::bail!(
+                        "Invalid cron expression '{}': expected 7 fields (sec min hour day month weekday year), got {} fields. \
+                         Use 7-field quartz format, e.g. '0 0 9 * * 1-5 *' for weekdays at 9am, '* * * * * * *' for every second",
+                        schedule, fields.len()
+                    );
+                }
+                if let Err(e) = cron::Schedule::from_str(schedule) {
+                    anyhow::bail!("Invalid cron expression '{}': {}", schedule, e);
+                }
             }
             if mode == "agentic" && prompt.as_deref().unwrap_or("").is_empty() {
                 anyhow::bail!("Prompt must not be empty for agentic mode");
@@ -374,6 +389,20 @@ pub fn update_cron_job_tool() -> McpTool {
                         sql_forge!("UPDATE cron_jobs SET display_name = :val, updated_at = NOW() WHERE name = :name", ( :val = val, :name = &name_owned )).execute(&pool).await?;
                     }
                     if let Some(val) = args["schedule"].as_str() {
+                        // Validate cron expression: must be 7-field quartz format
+                        {
+                            let fields: Vec<&str> = val.split_whitespace().collect();
+                            if fields.len() != 7 {
+                                anyhow::bail!(
+                                    "Invalid cron expression '{}': expected 7 fields (sec min hour day month weekday year), got {} fields. \
+                                     Use 7-field quartz format, e.g. '0 0 9 * * 1-5 *' for weekdays at 9am, '* * * * * * *' for every second",
+                                    val, fields.len()
+                                );
+                            }
+                            if let Err(e) = cron::Schedule::from_str(val) {
+                                anyhow::bail!("Invalid cron expression '{}': {}", val, e);
+                            }
+                        }
                         sql_forge!("UPDATE cron_jobs SET schedule = :val, updated_at = NOW() WHERE name = :name", ( :val = val, :name = &name_owned )).execute(&pool).await?;
                     }
                     if args.get("prompt").is_some() {
