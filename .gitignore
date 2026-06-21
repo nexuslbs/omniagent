@@ -7,3 +7,6 @@ backup.env
 # MCP script cache
 scripts/__pycache__/
 /omniagent
+
+# Plugin build artifacts (Rust MCP tools)
+plugins/mcp/*/target/
