@@ -160,7 +160,7 @@ async fn run_server() -> Result<()> {
     let mcp = mcp::default_registry(&ctx);
 
     // Build the agent with MCP context
-    let agent = agent::Agent::new(pool.clone(), agent_cfg.clone(), mcp, ctx);
+    let agent = agent::Agent::new(pool.clone(), agent_cfg.clone(), mcp.clone(), ctx.clone());
 
     // ── STARTUP: Skip pending/processing messages BEFORE spawning any concurrent tasks ──
     if let Err(e) = agent::skip_on_startup(&pool).await {
@@ -193,6 +193,8 @@ async fn run_server() -> Result<()> {
             server_port,
             cancel_tokens_server,
             data_dir_server,
+            mcp,
+            ctx,
         )
         .await;
     });
@@ -558,6 +560,10 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
             }
             "/usage" => {
                 handle_usage_command(&pool).await?;
+                continue;
+            }
+            cmd if cmd.starts_with("/action") => {
+                handle_action_command(&pool, cmd).await?;
                 continue;
             }
             "/subscriptions" => {
@@ -1228,6 +1234,88 @@ async fn handle_channel_command<R: std::io::BufRead + Unpin>(
             }
         }
     }
+}
+
+/// Handle the `/action` command — list or run saved actions.
+///
+/// Usage:
+///   /action         — list all actions with numbers
+///   /action <num>   — run the numbered action
+async fn handle_action_command(pool: &PgPool, input: &str) -> anyhow::Result<()> {
+    let parts: Vec<&str> = input.trim().splitn(2, ' ').collect();
+    let action_arg = parts.get(1).map(|s| s.trim());
+
+    if let Some(num_str) = action_arg {
+        if num_str.is_empty() {
+            // Just "/action " — list
+            let actions = db::types::list_actions(pool).await?;
+            if actions.is_empty() {
+                println!("No actions saved. Create one via the HTTP API: POST /actions");
+                return Ok(());
+            }
+            println!();
+            println!("┌─ Saved Actions ──────────────────────────────────────");
+            for (i, a) in actions.iter().enumerate() {
+                println!("│ {}. {} (tool: {})", i + 1, a.name, a.tool_name);
+            }
+            println!("└───────────────────────────────────────────────────────");
+            println!();
+            return Ok(());
+        }
+
+        // Parse the number and run the action
+        let num: usize = match num_str.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                println!("Usage: /action [number]");
+                println!("  /action        — list all actions");
+                println!("  /action <num>  — run the numbered action");
+                return Ok(());
+            }
+        };
+
+        let actions = db::types::list_actions(pool).await?;
+        if actions.is_empty() {
+            println!("No actions saved. Create one via the HTTP API: POST /actions");
+            return Ok(());
+        }
+        if num == 0 || num > actions.len() {
+            println!("Invalid action number. Use /action to list available actions (1-{}).", actions.len());
+            return Ok(());
+        }
+
+        let action = &actions[num - 1];
+        println!();
+        println!("┌─ Running Action ────────────────────────────────────────");
+        println!("│ Name:     {}", action.name);
+        println!("│ Tool:     {}", action.tool_name);
+        println!("│ Params:   {}", action.params);
+        println!("└─────────────────────────────────────────────────────────");
+        println!();
+
+        // We need to call the MCP tool. Since we don't have the MCP registry
+        // in the CLI, we just print a message directing to use the HTTP API.
+        // The run endpoint is available at POST /actions/:id/run
+        println!("To execute this action, use the HTTP API:");
+        println!("  POST /actions/{}/run", action.id);
+        println!();
+    } else {
+        // No argument — list all actions
+        let actions = db::types::list_actions(pool).await?;
+        if actions.is_empty() {
+            println!("No actions saved. Create one via the HTTP API: POST /actions");
+            return Ok(());
+        }
+        println!();
+        println!("┌─ Saved Actions ──────────────────────────────────────────");
+        for (i, a) in actions.iter().enumerate() {
+            println!("│ {}. {} (tool: {})", i + 1, a.name, a.tool_name);
+        }
+        println!("└─────────────────────────────────────────────────────────");
+        println!();
+    }
+
+    Ok(())
 }
 
 /// Handle the `/usage` command — display token usage stats per channel.

@@ -672,5 +672,21 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ── Actions table ──
+    sql_forge!(
+        r#"
+        CREATE TABLE IF NOT EXISTS actions (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            tool_name   TEXT NOT NULL,
+            params      JSONB NOT NULL DEFAULT '{}',
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }

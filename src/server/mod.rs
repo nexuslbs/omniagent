@@ -8,6 +8,11 @@
 //! - `GET /status/{channel_id}` — channel status info
 //! - `GET /prompt/{channel_name}` — show system prompt for a channel
 //! - `POST /prompt-preview/{channel_name}` — preview full prompt (no DB writes), optionally plan
+//! - `GET /actions` — list saved actions
+//! - `POST /actions` — create a new action
+//! - `PUT /actions/:id` — update an action
+//! - `DELETE /actions/:id` — delete an action
+//! - `POST /actions/:id/run` — execute an action (call its MCP tool)
 
 mod settings;
 
@@ -15,7 +20,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put, delete},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -28,6 +33,7 @@ use tracing::{error, info};
 
 use crate::db::types as queries;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, LLMConfig};
+use crate::mcp::{AppContext, McpRegistry, McpToolCall};
 use crate::prompt_builder::{build_planning_prompt, build_system_prompt, MemoryStore};
 
 pub mod plugins;
@@ -39,6 +45,10 @@ pub(crate) struct AppState {
     data_dir: String,
     /// Path to the .env file for settings API
     env_path: String,
+    /// MCP tool registry for executing actions
+    mcp_registry: McpRegistry,
+    /// Application context for MCP tool execution
+    app_context: AppContext,
 }
 
 /// Start the HTTP server on the given host and port.
@@ -48,12 +58,16 @@ pub async fn start_server(
     port: u16,
     cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
     data_dir: String,
+    mcp_registry: McpRegistry,
+    app_context: AppContext,
 ) {
     let app_state = Arc::new(AppState {
         pool,
         cancel_tokens,
         data_dir: data_dir.clone(),
         env_path: format!("{}/.env", data_dir),
+        mcp_registry,
+        app_context,
     });
 
     let app = Router::new()
@@ -67,6 +81,12 @@ pub async fn start_server(
         .route("/status/:channel_id", get(status_handler))
         .route("/prompt/:channel_name", get(prompt_handler))
         .route("/prompt-preview/:channel_name", post(prompt_preview_handler))
+        .route("/actions", get(list_actions_handler))
+        .route("/actions", post(create_action_handler))
+        .route("/actions/:id", put(update_action_handler))
+        .route("/actions/:id", delete(delete_action_handler))
+        .route("/actions/:id/run", post(run_action_handler))
+        .route("/mcp/tools", get(list_mcp_tools_handler))
         .nest("/settings", settings::settings_router())
         .merge(plugins::plugin_router())
         .with_state(app_state);
@@ -495,4 +515,179 @@ async fn prompt_preview_handler(
             "plan": plan,
         })),
     )
+}
+
+// ── Action request/response types ──
+
+#[derive(Deserialize)]
+struct CreateActionRequest {
+    name: String,
+    tool_name: String,
+    #[serde(default = "default_params")]
+    params: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct UpdateActionRequest {
+    name: String,
+    tool_name: String,
+    #[serde(default = "default_params")]
+    params: serde_json::Value,
+}
+
+fn default_params() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+// ── Action handlers ──
+
+/// GET /actions — list all saved actions.
+async fn list_actions_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    match queries::list_actions(&state.pool).await {
+        Ok(actions) => Json(serde_json::json!(actions)),
+        Err(e) => {
+            error!("Failed to list actions: {:?}", e);
+            Json(serde_json::json!({ "error": e.to_string() }))
+        }
+    }
+}
+
+/// POST /actions — create a new action.
+async fn create_action_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<CreateActionRequest>,
+) -> impl IntoResponse {
+    match queries::create_action(&state.pool, &body.name, &body.tool_name, &body.params).await {
+        Ok(action) => (StatusCode::CREATED, Json(serde_json::json!(action))).into_response(),
+        Err(e) => {
+            error!("Failed to create action: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// PUT /actions/:id — update an action.
+async fn update_action_handler(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<UpdateActionRequest>,
+) -> impl IntoResponse {
+    match queries::update_action(&state.pool, &id, &body.name, &body.tool_name, &body.params).await {
+        Ok(action) => Json(serde_json::json!(action)).into_response(),
+        Err(e) => {
+            error!("Failed to update action {}: {:?}", id, e);
+            if e.to_string().contains("no rows") {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": format!("Action '{}' not found", id) })),
+                )
+                    .into_response()
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "error": e.to_string() })),
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
+/// DELETE /actions/:id — delete an action.
+async fn delete_action_handler(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match queries::delete_action(&state.pool, &id).await {
+        Ok(count) if count > 0 => (StatusCode::NO_CONTENT, "".to_string()).into_response(),
+        Ok(_) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("Action '{}' not found", id) })),
+        )
+            .into_response(),
+        Err(e) => {
+            error!("Failed to delete action {}: {:?}", id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /actions/:id/run — execute an action by calling its MCP tool.
+async fn run_action_handler(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    // 1. Look up the action
+    let action = match queries::get_action(&state.pool, &id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => {
+            return Json(serde_json::json!({
+                "error": format!("Action '{}' not found", id)
+            }));
+        }
+        Err(e) => {
+            error!("Failed to get action {}: {:?}", id, e);
+            return Json(serde_json::json!({ "error": e.to_string() }));
+        }
+    };
+
+    // 2. Create an MCP tool call with the stored params
+    let mcp_call = McpToolCall {
+        id: format!("run-{}", action.id),
+        name: action.tool_name.clone(),
+        arguments: action.params.clone(),
+    };
+
+    // 3. Execute via MCP registry
+    let ctx = state.app_context.clone();
+    match state.mcp_registry.execute(&mcp_call, ctx) {
+        Ok(result) => {
+            Json(serde_json::json!({
+                "action_id": action.id,
+                "name": action.name,
+                "tool_name": action.tool_name,
+                "result": result.content,
+                "is_error": false,
+            }))
+        }
+        Err(e) => {
+            error!("Failed to execute action {} (tool: {}): {:?}", action.id, action.tool_name, e);
+            Json(serde_json::json!({
+                "action_id": action.id,
+                "name": action.name,
+                "tool_name": action.tool_name,
+                "result": e.to_string(),
+                "is_error": true,
+            }))
+        }
+    }
+}
+
+/// GET /mcp/tools — list all registered MCP tools with their input schemas.
+async fn list_mcp_tools_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let tools: Vec<serde_json::Value> = state
+        .mcp_registry
+        .all()
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+            })
+        })
+        .collect();
+    Json(serde_json::json!(tools))
 }

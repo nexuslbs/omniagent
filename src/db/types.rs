@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use sql_forge::sql_forge;
 use sqlx::PgPool;
 
-use crate::models::{Channel, ChannelStop, Message, MessageNew, Thread};
+use crate::models::{Action, Channel, ChannelStop, Message, MessageNew, Thread};
 
 // ---------------------------------------------------------------------------
 // Thread DB struct (for SELECT results)
@@ -1659,4 +1659,152 @@ pub async fn get_channel_usage_stats(pool: &PgPool) -> anyhow::Result<Vec<Channe
     .await?;
 
     Ok(rows)
+}
+
+// ---------------------------------------------------------------------------
+// Action DB struct and CRUD functions
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ActionDb {
+    pub id: String,
+    pub name: String,
+    pub tool_name: String,
+    pub params: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+impl TryFrom<ActionDb> for Action {
+    type Error = anyhow::Error;
+
+    fn try_from(db: ActionDb) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: db.id,
+            name: db.name,
+            tool_name: db.tool_name,
+            params: db.params.as_deref().map(|s| serde_json::from_str(s).unwrap_or_default()).unwrap_or_default(),
+            created_at: db.created_at.unwrap_or_default(),
+            updated_at: db.updated_at.unwrap_or_default(),
+        })
+    }
+}
+
+/// Create a new action.
+pub async fn create_action(
+    pool: &PgPool,
+    name: &str,
+    tool_name: &str,
+    params: &serde_json::Value,
+) -> anyhow::Result<Action> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let id = format!(
+        "act_{:x}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let row: ActionDb = sql_forge!(
+        ActionDb,
+        r#"
+        INSERT INTO actions (id, name, tool_name, params)
+        VALUES (:id, :name, :tool_name, NULLIF(:params, '{}')::jsonb)
+        RETURNING
+            id, name, tool_name,
+            params::text AS "params",
+            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
+            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
+        "#,
+        ( :id = &id, :name = name, :tool_name = tool_name, :params = &params.to_string() )
+    )
+    .fetch_one(pool)
+    .await?;
+
+    row.try_into()
+}
+
+/// List all actions ordered by creation time.
+pub async fn list_actions(pool: &PgPool) -> anyhow::Result<Vec<Action>> {
+    let rows: Vec<ActionDb> = sql_forge!(
+        ActionDb,
+        r#"
+        SELECT
+            id, name, tool_name,
+            params::text AS "params",
+            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
+            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
+        FROM actions
+        ORDER BY created_at ASC
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(|r| r.try_into()).collect()
+}
+
+/// Get an action by id.
+pub async fn get_action(pool: &PgPool, id: &str) -> anyhow::Result<Option<Action>> {
+    let row: Option<ActionDb> = sql_forge!(
+        ActionDb,
+        r#"
+        SELECT
+            id, name, tool_name,
+            params::text AS "params",
+            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
+            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
+        FROM actions
+        WHERE id = :id
+        "#,
+        ( :id = id )
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(|r| r.try_into()).transpose()
+}
+
+/// Update an action by id.
+pub async fn update_action(
+    pool: &PgPool,
+    id: &str,
+    name: &str,
+    tool_name: &str,
+    params: &serde_json::Value,
+) -> anyhow::Result<Action> {
+    let row: ActionDb = sql_forge!(
+        ActionDb,
+        r#"
+        UPDATE actions
+        SET name = :name,
+            tool_name = :tool_name,
+            params = NULLIF(:params, '{}')::jsonb,
+            updated_at = NOW()
+        WHERE id = :id
+        RETURNING
+            id, name, tool_name,
+            params::text AS "params",
+            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
+            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
+        "#,
+        ( :id = id, :name = name, :tool_name = tool_name, :params = &params.to_string() )
+    )
+    .fetch_one(pool)
+    .await?;
+
+    row.try_into()
+}
+
+/// Delete an action by id. Returns the number of rows affected (0 or 1).
+pub async fn delete_action(pool: &PgPool, id: &str) -> anyhow::Result<u64> {
+    let result = sql_forge!(
+        "DELETE FROM actions WHERE id = :id",
+        ( :id = id )
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
 }
