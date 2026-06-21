@@ -2,8 +2,9 @@
 //!
 //! Each subtask belongs to a thread and tracks a single actionable item
 //! with status: pending, completed, cancelled.
-
+use anyhow::Result;
 use sql_forge::sql_forge;
+use sqlx::FromRow;
 use sqlx::PgPool;
 
 // ---------------------------------------------------------------------------
@@ -29,6 +30,15 @@ pub struct SubtaskCounts {
     pub pending_count: i64,
     pub cancelled_count: i64,
     pub total_count: i64,
+}
+
+/// DB row for subtask count query.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct SubtaskCountRow {
+    completed_count: Option<i64>,
+    pending_count: Option<i64>,
+    cancelled_count: Option<i64>,
+    total_count: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -168,26 +178,26 @@ pub async fn get_current_subtask(
 
 /// Get subtask counts for a thread.
 pub async fn get_subtask_counts(pool: &PgPool, thread_id: i64) -> anyhow::Result<SubtaskCounts> {
-    // Use raw sqlx query to avoid sql_forge! compile-time issues with aggregate functions
-    let row: (i64, i64, i64, i64) = sqlx::query_as(
+    let row: SubtaskCountRow = sql_forge!(
+        SubtaskCountRow,
         r#"
         SELECT
-            COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0)::bigint,
-            COALESCE(SUM(CASE WHEN status = 'pending'   THEN 1 ELSE 0 END), 0)::bigint,
-            COALESCE(SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END), 0)::bigint,
-            COUNT(*)::bigint
+            COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0)::bigint AS completed_count,
+            COALESCE(SUM(CASE WHEN status = 'pending'   THEN 1 ELSE 0 END), 0)::bigint AS pending_count,
+            COALESCE(SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END), 0)::bigint AS cancelled_count,
+            COUNT(*)::bigint AS total_count
         FROM thread_subtasks
-        WHERE thread_id = $1
-        "#
+        WHERE thread_id = :thread_id
+        "#,
+        ( :thread_id = thread_id )
     )
-    .bind(thread_id)
     .fetch_one(pool)
     .await?;
 
     Ok(SubtaskCounts {
-        completed_count: row.0,
-        pending_count: row.1,
-        cancelled_count: row.2,
-        total_count: row.3,
+        completed_count: row.completed_count.unwrap_or(0),
+        pending_count: row.pending_count.unwrap_or(0),
+        cancelled_count: row.cancelled_count.unwrap_or(0),
+        total_count: row.total_count.unwrap_or(0),
     })
 }

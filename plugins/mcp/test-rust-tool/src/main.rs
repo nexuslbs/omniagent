@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::time::Duration;
@@ -291,8 +292,23 @@ async fn handle_tools_list<W: AsyncWriteExt + Unpin>(
         }),
     };
 
+    let save_datetime_tool = McpTool {
+        name: "save_datetime".to_string(),
+        description: "Write the current date/time (ISO 8601 format) to a file".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path to write the datetime to"
+                }
+            },
+            "required": ["path"]
+        }),
+    };
+
     let result = ListToolsResult {
-        tools: vec![wait_tool, echo_tool],
+        tools: vec![wait_tool, echo_tool, save_datetime_tool],
     };
 
     let response = JsonRpcSuccess {
@@ -306,7 +322,7 @@ async fn handle_tools_list<W: AsyncWriteExt + Unpin>(
     writer.write_all(b"\n").await?;
     writer.flush().await?;
 
-    tracing::info!("tools/list returned 2 tools");
+    tracing::info!("tools/list returned 3 tools");
     Ok(())
 }
 
@@ -320,6 +336,7 @@ async fn handle_tools_call<W: AsyncWriteExt + Unpin>(
     match params.name.as_str() {
         "wait" => handle_wait(writer, req_id, params).await?,
         "echo" => handle_echo(writer, req_id, params).await?,
+        "save_datetime" => handle_save_datetime(writer, req_id, params).await?,
         _ => {
             send_error(
                 writer,
@@ -477,6 +494,90 @@ async fn handle_echo<W: AsyncWriteExt + Unpin>(
     writer.flush().await?;
 
     tracing::info!("echo tool completed");
+    Ok(())
+}
+
+async fn handle_save_datetime<W: AsyncWriteExt + Unpin>(
+    writer: &mut tokio::io::BufWriter<W>,
+    req_id: u64,
+    params: &CallToolParams,
+) -> Result<()> {
+    // Extract path from arguments (required)
+    let path = params
+        .arguments
+        .as_ref()
+        .and_then(|a| a.get("path"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let path = match path {
+        Some(p) => p,
+        None => {
+            let result = CallToolResult {
+                content: vec![ToolContent::Text {
+                    text: "Error: 'path' argument is required".to_string(),
+                }],
+                is_error: true,
+            };
+            let response = JsonRpcSuccess {
+                jsonrpc: "2.0".to_string(),
+                id: req_id,
+                result: serde_json::to_value(result)?,
+            };
+            let json = serde_json::to_string(&response)?;
+            writer.write_all(json.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+            writer.flush().await?;
+            tracing::warn!("save_datetime tool called without path argument");
+            return Ok(());
+        }
+    };
+
+    let datetime = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    tracing::info!("save_datetime tool called: path='{}'", path);
+
+    // Write to file, replacing all content
+    match tokio::fs::write(&path, &datetime).await {
+        Ok(_) => {
+            let result = CallToolResult {
+                content: vec![ToolContent::Text {
+                    text: format!("Saved datetime to {}: {}", path, datetime),
+                }],
+                is_error: false,
+            };
+            let response = JsonRpcSuccess {
+                jsonrpc: "2.0".to_string(),
+                id: req_id,
+                result: serde_json::to_value(result)?,
+            };
+            let json = serde_json::to_string(&response)?;
+            writer.write_all(json.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+            writer.flush().await?;
+            tracing::info!("save_datetime tool completed: wrote to {}", path);
+        }
+        Err(e) => {
+            let result = CallToolResult {
+                content: vec![ToolContent::Text {
+                    text: format!("Error writing to {}: {}", path, e),
+                }],
+                is_error: true,
+            };
+            let response = JsonRpcSuccess {
+                jsonrpc: "2.0".to_string(),
+                id: req_id,
+                result: serde_json::to_value(result)?,
+            };
+            let json = serde_json::to_string(&response)?;
+            writer.write_all(json.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+            writer.flush().await?;
+            tracing::warn!("save_datetime tool failed to write to {}: {}", path, e);
+        }
+    }
+
     Ok(())
 }
 

@@ -186,6 +186,8 @@ async fn run_server() -> Result<()> {
     let server_host = cfg.host.clone();
     let server_port = cfg.port;
     let data_dir_server = data_dir.clone();
+    let mcp_for_server = mcp.clone();
+    let ctx_for_server = ctx.clone();
     let server_handle = tokio::spawn(async move {
         server::start_server(
             pool_server,
@@ -193,8 +195,8 @@ async fn run_server() -> Result<()> {
             server_port,
             cancel_tokens_server,
             data_dir_server,
-            mcp,
-            ctx,
+            mcp_for_server,
+            ctx_for_server,
         )
         .await;
     });
@@ -250,7 +252,7 @@ async fn run_server() -> Result<()> {
     });
 
     // Spawn cron scheduler
-    let cron_handle = scheduler::spawn(pool.clone(), data_dir.clone());
+    let cron_handle = scheduler::spawn(pool.clone(), data_dir.clone(), mcp.clone(), ctx.clone());
 
     // Graceful shutdown
     tokio::select! {

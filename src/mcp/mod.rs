@@ -244,6 +244,11 @@ pub fn default_registry(ctx: &AppContext) -> McpRegistry {
     // Thread subtask management tool
     registry.register(tools::subtasks::manage_subtasks_tool());
 
+    // Actions tools (built-in system actions)
+    for action_tool in crate::mcp::tools::actions::tools() {
+        registry.register(action_tool);
+    }
+
     // External MCP servers (load from config, best-effort)
     let external_tools = external::client::initialize_external_tools(&ctx.data_dir);
     for tool in external_tools {

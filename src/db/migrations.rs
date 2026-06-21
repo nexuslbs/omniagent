@@ -1,11 +1,10 @@
 use anyhow::Result;
-use sql_forge::sql_forge;
 use sqlx::PgPool;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Enable pgvector extension — wrapped in DO block so it doesn't fail
     // if pgvector isn't installed (optional vector support).
-    sql_forge!(
+    sqlx::query(
             r#"
             DO $$ BEGIN
                 CREATE EXTENSION IF NOT EXISTS vector;
@@ -19,7 +18,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .await?;
 
     // Create channels table
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS channels (
             id          BIGSERIAL PRIMARY KEY,
@@ -38,7 +37,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Create messages table
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS messages (
             id              BIGSERIAL PRIMARY KEY,
@@ -63,7 +62,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Create channel_stops table for tracking stopped/paused channels
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS channel_stops (
             id          BIGSERIAL PRIMARY KEY,
@@ -78,7 +77,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     // Migration: add msg_type, msg_subtype, iteration_count columns
     // (idempotent — skips if columns already exist)
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE messages
             ADD COLUMN IF NOT EXISTS msg_type TEXT NOT NULL DEFAULT 'message',
@@ -91,7 +90,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     // Drop the unique constraint on (thread_id, thread_sequence) since
     // a single LLM turn can produce multiple records (reasoning, message).
-    sql_forge!(
+    sqlx::query(
         r#"
         DO $$ BEGIN
             ALTER TABLE messages DROP CONSTRAINT messages_thread_id_thread_sequence_key;
@@ -103,7 +102,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE INDEX IF NOT EXISTS idx_messages_thread_seq
             ON messages(thread_id, thread_sequence);
@@ -113,7 +112,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Profile and model columns for channels
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE channels
             ADD COLUMN IF NOT EXISTS current_profile TEXT NOT NULL DEFAULT 'default',
@@ -125,7 +124,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Profile, model, provider, processing_time for messages
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE messages
             ADD COLUMN IF NOT EXISTS profile TEXT NOT NULL DEFAULT 'default',
@@ -140,7 +139,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     // Migration: make thread_id nullable so seq-0 messages can be inserted
     // without a pre-determined thread_id, then set thread_id = id after insert.
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE messages
         ALTER COLUMN thread_id DROP NOT NULL;
@@ -150,7 +149,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Drop profiles table — data now lives in profiles/<name>/config.json ──
-    sql_forge!(
+    sqlx::query(
         r#"
         DROP TABLE IF EXISTS profiles CASCADE;
         "#,
@@ -159,7 +158,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Kanban tasks table ──
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS kanban_tasks (
             id         TEXT PRIMARY KEY,
@@ -177,7 +176,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Cron jobs table ──
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS cron_jobs (
             id          TEXT PRIMARY KEY,
@@ -197,7 +196,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Add display_name if it doesn't exist (for existing tables)
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE cron_jobs
         ADD COLUMN IF NOT EXISTS display_name TEXT NOT NULL DEFAULT ''
@@ -207,7 +206,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Add running flag for atomic concurrency guard
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE cron_jobs
         ADD COLUMN IF NOT EXISTS running BOOLEAN NOT NULL DEFAULT false
@@ -217,7 +216,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Migration: add iterations column (per-LLM-call counter)
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE messages
         ADD COLUMN IF NOT EXISTS iterations INT NOT NULL DEFAULT 0
@@ -227,7 +226,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Read-only user for query_database tool ──
-    sql_forge!(
+    sqlx::query(
         r#"
         DO $$
         BEGIN
@@ -240,24 +239,24 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sql_forge!("GRANT CONNECT ON DATABASE omniagent TO omniagent_readonly")
+    sqlx::query("GRANT CONNECT ON DATABASE omniagent TO omniagent_readonly")
         .execute(pool)
         .await?;
 
-    sql_forge!("GRANT USAGE ON SCHEMA public TO omniagent_readonly")
+    sqlx::query("GRANT USAGE ON SCHEMA public TO omniagent_readonly")
         .execute(pool)
         .await?;
 
-    sql_forge!("GRANT SELECT ON ALL TABLES IN SCHEMA public TO omniagent_readonly")
+    sqlx::query("GRANT SELECT ON ALL TABLES IN SCHEMA public TO omniagent_readonly")
         .execute(pool)
         .await?;
 
-    sql_forge!("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO omniagent_readonly")
+    sqlx::query("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO omniagent_readonly")
         .execute(pool)
         .await?;
 
     // ── Add channel_id and profile to kanban_tasks ──
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE kanban_tasks
         ADD COLUMN IF NOT EXISTS channel_id BIGINT REFERENCES channels(id),
@@ -268,7 +267,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Add channel_id and profile to cron_jobs ──
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE cron_jobs
         ADD COLUMN IF NOT EXISTS channel_id BIGINT REFERENCES channels(id),
@@ -279,7 +278,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Add readonly column to channels ──
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE channels
         ADD COLUMN IF NOT EXISTS readonly BOOLEAN NOT NULL DEFAULT false
@@ -289,7 +288,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Add updated_at to cron_jobs for stale-lock detection ──
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE cron_jobs
         ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -299,7 +298,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Summaries table for cross-thread thread summaries ──
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS summaries (
             id              BIGSERIAL PRIMARY KEY,
@@ -315,7 +314,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     // ── Threads table migration ──
     // Creates the threads table and migrates data from the old flat messages table.
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS threads (
             id              BIGSERIAL PRIMARY KEY,
@@ -338,7 +337,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE INDEX IF NOT EXISTS idx_threads_channel_status ON threads(channel_id, status);
         "#
@@ -426,7 +425,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     }
 
     // Add foreign key (safe: won't fail if constraint already exists)
-    sql_forge!(
+    sqlx::query(
         r#"
         DO $$ BEGIN
             ALTER TABLE messages ADD CONSTRAINT fk_messages_thread FOREIGN KEY (thread_id) REFERENCES threads(id);
@@ -439,7 +438,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Ensure messages.thread_id is NOT NULL (in case the migration block above was skipped)
-    sql_forge!(
+    sqlx::query(
         r#"
         DO $$ BEGIN
             ALTER TABLE messages ALTER COLUMN thread_id SET NOT NULL;
@@ -452,7 +451,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Add closed column to channels (default false — channels start opened)
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE channels
         ADD COLUMN IF NOT EXISTS closed BOOLEAN NOT NULL DEFAULT false
@@ -462,7 +461,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Index on threads for channel_id + status queries
-    sql_forge!(
+    sqlx::query(
         r#"
         DO $$ BEGIN
             CREATE INDEX IF NOT EXISTS idx_threads_channel_status
@@ -476,7 +475,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Add terminal flag to threads (prevents further state transitions)
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE threads
         ADD COLUMN IF NOT EXISTS terminal BOOLEAN NOT NULL DEFAULT false
@@ -486,21 +485,21 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Make platform nullable in channels, add resource_identifier ──
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE channels ALTER COLUMN platform DROP NOT NULL;
         "#,
     )
     .execute(pool)
     .await?;
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE channels ADD COLUMN IF NOT EXISTS resource_identifier TEXT;
         "#,
     )
     .execute(pool)
     .await?;
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE channels ADD COLUMN IF NOT EXISTS external_id TEXT;
         "#,
@@ -509,7 +508,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Add UNIQUE(platform, resource_identifier) if it doesn't exist ──
-    sql_forge!(
+    sqlx::query(
         r#"
         DO $$ BEGIN
             IF NOT EXISTS (
@@ -527,7 +526,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Channel subscriptions table for summary delivery across channels ──
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS channel_subscriptions (
             id                      BIGSERIAL PRIMARY KEY,
@@ -543,7 +542,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Add task_id to threads for kanban task association ──
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE threads
         ADD COLUMN IF NOT EXISTS task_id TEXT REFERENCES kanban_tasks(id)
@@ -553,7 +552,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Kanban task dependencies table ──
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS kanban_task_dependencies (
             task_id TEXT NOT NULL REFERENCES kanban_tasks(id) ON DELETE CASCADE,
@@ -567,24 +566,24 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Cron job mode, direct_task_type, active columns ──
-    sql_forge!(
+    sqlx::query(
         r#"ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'agentic'"#,
     )
     .execute(pool)
     .await?;
-    sql_forge!(
+    sqlx::query(
         r#"ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS direct_task_type TEXT DEFAULT NULL"#,
     )
     .execute(pool)
     .await?;
-    sql_forge!(
+    sqlx::query(
         r#"ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true"#,
     )
     .execute(pool)
     .await?;
 
     // ── Add schedule_task_id to threads for cron job / schedule association ──
-    sql_forge!(
+    sqlx::query(
         r#"
         ALTER TABLE threads
         ADD COLUMN IF NOT EXISTS schedule_task_id TEXT
@@ -594,7 +593,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Index for fast lookups by schedule_task_id
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE INDEX IF NOT EXISTS idx_threads_schedule_task_id
         ON threads(schedule_task_id)
@@ -604,7 +603,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Plugin registry table ──
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS plugin_registry (
             id          SERIAL PRIMARY KEY,
@@ -624,7 +623,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Unique index on (name) for upsert operations
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE UNIQUE INDEX IF NOT EXISTS idx_plugin_registry_name ON plugin_registry(name);
         "#,
@@ -633,7 +632,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Migrate id column from SERIAL (INT4) to BIGSERIAL (INT8) to match Rust i64
-    sql_forge!(
+    sqlx::query(
         r#"
         DO $$ BEGIN
             ALTER TABLE plugin_registry ALTER COLUMN id TYPE BIGINT;
@@ -647,7 +646,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Thread subtasks table ──
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS thread_subtasks (
             id          BIGSERIAL PRIMARY KEY,
@@ -663,7 +662,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE INDEX IF NOT EXISTS idx_thread_subtasks_thread_id
         ON thread_subtasks(thread_id);
@@ -673,7 +672,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Actions table ──
-    sql_forge!(
+    sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS actions (
             id          TEXT PRIMARY KEY,

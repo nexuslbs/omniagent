@@ -1673,6 +1673,7 @@ pub struct ActionDb {
     pub params: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
+    pub is_builtin: Option<bool>,
 }
 
 impl TryFrom<ActionDb> for Action {
@@ -1686,6 +1687,7 @@ impl TryFrom<ActionDb> for Action {
             params: db.params.as_deref().map(|s| serde_json::from_str(s).unwrap_or_default()).unwrap_or_default(),
             created_at: db.created_at.unwrap_or_default(),
             updated_at: db.updated_at.unwrap_or_default(),
+            is_builtin: db.is_builtin.unwrap_or(false),
         })
     }
 }
@@ -1715,7 +1717,8 @@ pub async fn create_action(
             id, name, tool_name,
             params::text AS "params",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
+            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at",
+            is_builtin
         "#,
         ( :id = &id, :name = name, :tool_name = tool_name, :params = &params.to_string() )
     )
@@ -1734,7 +1737,8 @@ pub async fn list_actions(pool: &PgPool) -> anyhow::Result<Vec<Action>> {
             id, name, tool_name,
             params::text AS "params",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
+            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at",
+            is_builtin
         FROM actions
         ORDER BY created_at ASC
         "#
@@ -1754,7 +1758,8 @@ pub async fn get_action(pool: &PgPool, id: &str) -> anyhow::Result<Option<Action
             id, name, tool_name,
             params::text AS "params",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
+            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at",
+            is_builtin
         FROM actions
         WHERE id = :id
         "#,
@@ -1787,7 +1792,8 @@ pub async fn update_action(
             id, name, tool_name,
             params::text AS "params",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
+            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at",
+            is_builtin
         "#,
         ( :id = id, :name = name, :tool_name = tool_name, :params = &params.to_string() )
     )

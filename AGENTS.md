@@ -3,11 +3,12 @@
 ## Guidelines
 
 ### SQL Queries: Always use sql_forge!()
-**Every SQL query MUST use `sql_forge!()`.** No raw `sqlx::query`, `sqlx::query_as`, or `sqlx::query_scalar` except where sqlx's compile-time macros cannot handle the type:
+**Every SQL query MUST use `sql_forge!()`.** No raw `sqlx::query`, `sqlx::query_as`, or `sqlx::query_scalar` except where documented below:
 
+**Exceptions (must use `sqlx::query()` runtime):**
+- **`src/db/migrations.rs`** — DDL (CREATE TABLE, ALTER TABLE, etc.) changes the schema at runtime. `sql_forge!()` validates columns against the live DB at compile time, creating a chicken-and-egg problem when the migration adds columns that the same migration file later references. Use `sqlx::query("SQL").execute(pool)` for all migration DDL and seed INSERTs.
 - **pgvector `<=>` operator** — The `vector` type from pgvector is not in sqlx's hardcoded compile-time type registry. This affects `sqlx::query_as!` and `sql_forge!()` equally. Use `sqlx::query_as::<_, DbStruct>()` (runtime) with a comment explaining why.
-
-DDL (CREATE TABLE, ALTER TABLE, CREATE INDEX) works with `sql_forge!("SQL")` in execute-only form (no struct, no params) — it wraps `sqlx::query()` at runtime.
+- **Dynamic SQL** — Variable column sets or fully dynamic queries must use `sqlx::query(sqlx::AssertSqlSafe(sql))` with appropriate safety measures.
 
 Dynamic SQL (variable column sets) should be decomposed into individual static `sql_forge!()` UPDATEs per field rather than building SQL strings at runtime.
 

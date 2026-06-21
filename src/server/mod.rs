@@ -604,6 +604,35 @@ async fn delete_action_handler(
     Path(id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    // First check if the action exists and is builtin
+    match queries::get_action(&state.pool, &id).await {
+        Ok(Some(action)) => {
+            if action.is_builtin {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("Cannot delete built-in action '{}'", action.name) })),
+                )
+                    .into_response();
+            }
+        }
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("Action '{}' not found", id) })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            error!("Failed to get action {}: {:?}", id, e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    }
+
+    // Proceed with deletion
     match queries::delete_action(&state.pool, &id).await {
         Ok(count) if count > 0 => (StatusCode::NO_CONTENT, "".to_string()).into_response(),
         Ok(_) => (

@@ -9,6 +9,7 @@
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
+use sql_forge::sql_forge;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::fs;
@@ -269,19 +270,22 @@ async fn collect_reference_counts(
         let query_path = file.rel_path.replace('\\', "/");
         let pattern = format!("%{}%", query_path);
 
-        let result: std::result::Result<Option<i64>, sqlx::Error> = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM messages WHERE content ILIKE $1"
+        #[derive(Debug, sqlx::FromRow)]
+        struct CountRow {
+            count: Option<i64>,
+        }
+
+        let result: std::result::Result<CountRow, sqlx::Error> = sql_forge!(
+            CountRow,
+            "SELECT COUNT(*)::bigint AS count FROM messages WHERE content ILIKE :pattern",
+            ( :pattern = &pattern )
         )
-        .bind(&pattern)
         .fetch_one(pool)
         .await;
 
         match result {
-            Ok(Some(count)) => {
-                counts.insert(file.rel_path.clone(), count as u64);
-            }
-            Ok(None) => {
-                counts.insert(file.rel_path.clone(), 0);
+            Ok(row) => {
+                counts.insert(file.rel_path.clone(), row.count.unwrap_or(0) as u64);
             }
             Err(e) => {
                 warn!("[relevance-indexer] Failed to count references for '{}': {:?}", file.rel_path, e);

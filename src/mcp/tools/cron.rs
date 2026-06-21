@@ -8,18 +8,19 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
 #[derive(Debug, FromRow)]
-struct CronJobListRow {
-    id: String,
-    name: Option<String>,
-    schedule: String,
-    prompt: Option<String>,
-    enabled: Option<bool>,
-    mode: Option<String>,
-    direct_task_type: Option<String>,
-    active: Option<bool>,
-    last_run_at: Option<DateTime<Utc>>,
-    next_run_at: Option<DateTime<Utc>>,
-    created_at: Option<DateTime<Utc>>,
+pub struct CronJobListRow {
+    pub id: String,
+    pub name: Option<String>,
+    pub schedule: String,
+    pub prompt: Option<String>,
+    pub enabled: Option<bool>,
+    pub mode: Option<String>,
+    pub direct_task_type: Option<String>,
+    pub action_id: Option<String>,
+    pub active: Option<bool>,
+    pub last_run_at: Option<DateTime<Utc>>,
+    pub next_run_at: Option<DateTime<Utc>>,
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 pub fn create_cron_job_tool() -> McpTool {
@@ -59,11 +60,15 @@ pub fn create_cron_job_tool() -> McpTool {
                 },
                 "mode": {
                     "type": "string",
-                    "description": "Job mode: 'agentic' (default) for LLM-powered prompts, 'direct' for predefined task types"
+                    "description": "Job mode: 'agentic' (default) for LLM-powered prompts, 'direct' for predefined task types, 'action' for a registered action"
                 },
                 "direct_task_type": {
                     "type": "string",
                     "description": "For mode='direct': the predefined task type. Known types: kanban_dispatcher, relevance_indexer (keep in sync with DIRECT_TASK_TYPES in scheduler.rs)"
+                },
+                "action_id": {
+                    "type": "string",
+                    "description": "For mode='action': the action ID to execute (from the actions table)"
                 }
             },
             "required": ["name", "schedule"]
@@ -87,6 +92,7 @@ pub fn create_cron_job_tool() -> McpTool {
             let profile_arg = args["profile"].as_str().map(|s| s.to_string());
             let mode = args["mode"].as_str().unwrap_or("agentic").to_string();
             let direct_task_type = args["direct_task_type"].as_str().map(|s| s.to_string());
+            let action_id = args["action_id"].as_str().map(|s| s.to_string());
 
             if name.is_empty() {
                 anyhow::bail!("Job name must not be empty");
@@ -100,8 +106,11 @@ pub fn create_cron_job_tool() -> McpTool {
             if mode == "direct" && direct_task_type.is_none() {
                 anyhow::bail!("direct_task_type is required for direct mode");
             }
-            if mode != "agentic" && mode != "direct" {
-                anyhow::bail!("Invalid mode '{}'. Must be 'agentic' or 'direct'", mode);
+            if mode == "action" && action_id.is_none() {
+                anyhow::bail!("action_id is required for action mode");
+            }
+            if mode != "agentic" && mode != "direct" && mode != "action" {
+                anyhow::bail!("Invalid mode '{}'. Must be 'agentic', 'direct', or 'action'", mode);
             }
 
             // Generate a unique ID
@@ -142,10 +151,10 @@ pub fn create_cron_job_tool() -> McpTool {
 
                     sql_forge!(
                         r#"
-                        INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, channel_id, profile, mode, direct_task_type)
-                        VALUES (:id, :name, :display_name, :schedule, NULLIF(:prompt, '')::text, :skills, :channel_id, NULLIF(:profile, '')::text, :mode, NULLIF(:direct_task_type, '')::text)
+                        INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, channel_id, profile, mode, direct_task_type, action_id)
+                        VALUES (:id, :name, :display_name, :schedule, NULLIF(:prompt, '')::text, :skills, :channel_id, NULLIF(:profile, '')::text, :mode, NULLIF(:direct_task_type, '')::text, NULLIF(:action_id, '')::text)
                         "#,
-                        ( :id = &id, :name = &name_owned, :display_name = &display_name_owned, :schedule = schedule, :prompt = prompt.as_deref().unwrap_or(""), :skills = skills_json.to_string(), :channel_id = resolved_channel_id, :profile = profile_arg.as_deref().unwrap_or(""), :mode = &mode, :direct_task_type = direct_task_type.as_deref().unwrap_or("") )
+                        ( :id = &id, :name = &name_owned, :display_name = &display_name_owned, :schedule = schedule, :prompt = prompt.as_deref().unwrap_or(""), :skills = skills_json.to_string(), :channel_id = resolved_channel_id, :profile = profile_arg.as_deref().unwrap_or(""), :mode = &mode, :direct_task_type = direct_task_type.as_deref().unwrap_or(""), :action_id = action_id.as_deref().unwrap_or("") )
                     )
                     .execute(&pool)
                     .await
@@ -185,7 +194,7 @@ pub fn list_cron_jobs_tool() -> McpTool {
                     sql_forge!(
                         CronJobListRow,
                         r#"
-                        SELECT id, name, schedule, prompt, enabled, mode, direct_task_type, active, last_run_at, next_run_at, created_at
+                        SELECT id, name, schedule, prompt, enabled, mode, direct_task_type, action_id, active, last_run_at, next_run_at, created_at
                         FROM cron_jobs
                         WHERE 1 = :_one
                         ORDER BY created_at DESC
@@ -203,7 +212,7 @@ pub fn list_cron_jobs_tool() -> McpTool {
                 .map(|r| {
                     serde_json::json!({
                         "id": r.id,
-                        "name": r.name,
+                        "name": r.name.unwrap_or_default(),
                         "schedule": r.schedule,
                         "prompt_preview": r.prompt.as_ref().map(|p| if p.len() > 100 {
                             format!("{}...", &p[..100])
@@ -213,6 +222,7 @@ pub fn list_cron_jobs_tool() -> McpTool {
                         "enabled": r.enabled.unwrap_or(false),
                         "mode": r.mode.unwrap_or_else(|| "agentic".to_string()),
                         "direct_task_type": r.direct_task_type,
+                        "action_id": r.action_id,
                         "active": r.active.unwrap_or(true),
                         "last_run_at": r.last_run_at,
                         "next_run_at": r.next_run_at,
@@ -311,11 +321,15 @@ pub fn update_cron_job_tool() -> McpTool {
                 },
                 "mode": {
                     "type": "string",
-                    "description": "Job mode: 'agentic' or 'direct'"
+                    "description": "Job mode: 'agentic', 'direct', or 'action'"
                 },
                 "direct_task_type": {
                     "type": "string",
                     "description": "For mode='direct': the predefined task type. Known types: kanban_dispatcher, relevance_indexer"
+                },
+                "action_id": {
+                    "type": "string",
+                    "description": "For mode='action': the action ID to execute (from the actions table)"
                 },
                 "active": {
                     "type": "boolean",
@@ -343,7 +357,7 @@ pub fn update_cron_job_tool() -> McpTool {
 
             let pool = ctx.pool.clone();
             let name_owned = name.to_string();
-            let updated_fields: Vec<&str> = ["display_name", "schedule", "prompt", "enabled", "mode", "direct_task_type", "active", "skills", "channel_id", "profile"]
+            let updated_fields: Vec<&str> = ["display_name", "schedule", "prompt", "enabled", "mode", "direct_task_type", "action_id", "active", "skills", "channel_id", "profile"]
                 .iter()
                 .filter(|k| args.get(*k).is_some())
                 .copied()
@@ -370,14 +384,18 @@ pub fn update_cron_job_tool() -> McpTool {
                         sql_forge!("UPDATE cron_jobs SET enabled = :val, updated_at = NOW() WHERE name = :name", ( :val = val, :name = &name_owned )).execute(&pool).await?;
                     }
                     if let Some(val) = args["mode"].as_str() {
-                        if val != "agentic" && val != "direct" {
-                            anyhow::bail!("Invalid mode '{}'. Must be 'agentic' or 'direct'", val);
+                        if val != "agentic" && val != "direct" && val != "action" {
+                            anyhow::bail!("Invalid mode '{}'. Must be 'agentic', 'direct', or 'action'", val);
                         }
                         sql_forge!("UPDATE cron_jobs SET mode = :val, updated_at = NOW() WHERE name = :name", ( :val = val, :name = &name_owned )).execute(&pool).await?;
                     }
                     if args.get("direct_task_type").is_some() {
                         let val = args["direct_task_type"].as_str().unwrap_or("");
                         sql_forge!("UPDATE cron_jobs SET direct_task_type = NULLIF(:val, '')::text, updated_at = NOW() WHERE name = :name", ( :val = val, :name = &name_owned )).execute(&pool).await?;
+                    }
+                    if args.get("action_id").is_some() {
+                        let val = args["action_id"].as_str().unwrap_or("");
+                        sql_forge!("UPDATE cron_jobs SET action_id = NULLIF(:val, '')::text, updated_at = NOW() WHERE name = :name", ( :val = val, :name = &name_owned )).execute(&pool).await?;
                     }
                     if let Some(val) = args["active"].as_bool() {
                         sql_forge!("UPDATE cron_jobs SET active = :val, updated_at = NOW() WHERE name = :name", ( :val = val, :name = &name_owned )).execute(&pool).await?;

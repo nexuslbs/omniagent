@@ -332,8 +332,9 @@ VALUES ('cron_abc123', 'hourly-report', 'Hourly Report', '0 0 * * * * *', 'Gener
 | `profile` | Profile to use (NULL = channel's current_profile) |
 | `schedule` | 7-field quartz cron expression |
 | `prompt` | The message content to execute |
-| `mode` | Execution mode: `agentic` (default) or `direct` |
+| `mode` | Execution mode: `agentic` (default), `direct`, or `action` |
 | `direct_task_type` | Task type for `direct` mode (e.g., `kanban_dispatcher`) |
+| `action_id` | Action ID for `action` mode — references the `actions` table |
 | `enabled` | Whether the job is active |
 | `active` | Whether the job is currently claimed by a scheduler |
 
@@ -342,6 +343,8 @@ VALUES ('cron_abc123', 'hourly-report', 'Hourly Report', '0 0 * * * * *', 'Gener
 - **`agentic`** (default): Normal cron agent execution — the prompt is sent to the LLM for processing, with full tool access and reasoning.
 - **`direct`**: Bypasses the LLM and runs a specific task directly. Currently supports:
   - `kanban_dispatcher`: Moves kanban tasks from `todo` to `ready` status (ordered by priority then position), triggering execution of their body as the prompt.
+  - `relevance_indexer`: Scans wiki files and regenerates the relevant-index.md based on recency and reference counts.
+- **`action`**: Executes a registered action from the `actions` table (user-defined or built-in). The action's MCP tool is called with its saved parameters. No LLM call is made — the action runs as a direct Rust function or MCP tool invocation.
 
 ### Scheduler
 

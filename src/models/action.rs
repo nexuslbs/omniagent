@@ -9,4 +9,6 @@ pub struct Action {
     pub params: serde_json::Value,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub is_builtin: bool,
 }

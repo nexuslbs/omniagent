@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod cron;
 pub mod docker;
 pub mod fetch;

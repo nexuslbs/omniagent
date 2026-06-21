@@ -14,6 +14,7 @@ import sys
 import time
 import logging
 import threading
+from datetime import datetime, timezone
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,9 +79,20 @@ def handle_tools_list(req_id):
                 "required": [],
             },
         },
+        {
+            "name": "save_datetime",
+            "description": "Write the current date/time (ISO 8601 format) to a file",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path to write the datetime to"}
+                },
+                "required": ["path"],
+            },
+        },
     ]
     send_json(make_success(req_id, {"tools": tools}))
-    log.info("tools/list returned 2 tools")
+    log.info("tools/list returned 3 tools")
 
 
 def handle_wait(req_id, arguments):
@@ -150,6 +162,50 @@ def handle_echo(req_id, arguments):
     log.info("echo tool completed")
 
 
+def handle_save_datetime(req_id, arguments):
+    path = (arguments or {}).get("path")
+    if not path:
+        send_json(
+            make_success(
+                req_id,
+                {
+                    "content": [{"type": "text", "text": "Error: 'path' argument is required"}],
+                    "isError": True,
+                },
+            )
+        )
+        log.warning("save_datetime tool called without path argument")
+        return
+
+    datetime_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    log.info("save_datetime tool called: path='%s'", path)
+
+    try:
+        with open(path, "w") as f:
+            f.write(datetime_str)
+        send_json(
+            make_success(
+                req_id,
+                {
+                    "content": [{"type": "text", "text": f"Saved datetime to {path}: {datetime_str}"}],
+                    "isError": False,
+                },
+            )
+        )
+        log.info("save_datetime tool completed: wrote to %s", path)
+    except Exception as e:
+        send_json(
+            make_success(
+                req_id,
+                {
+                    "content": [{"type": "text", "text": f"Error writing to {path}: {e}"}],
+                    "isError": True,
+                },
+            )
+        )
+        log.warning("save_datetime tool failed to write to %s: %s", path, e)
+
+
 def main():
     global initialized
 
@@ -212,6 +268,8 @@ def main():
                     handle_wait(req_id, arguments)
                 elif tool_name == "echo":
                     handle_echo(req_id, arguments)
+                elif tool_name == "save_datetime":
+                    handle_save_datetime(req_id, arguments)
                 else:
                     if req_id is not None:
                         send_json(

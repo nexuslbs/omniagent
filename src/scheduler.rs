@@ -19,6 +19,7 @@ use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
 use crate::db::types as queries;
+use crate::mcp::{AppContext, McpRegistry, McpToolCall};
 use crate::models::MessageNew;
 
 /// Central list of all known direct-mode task types.
@@ -40,15 +41,16 @@ struct CronJobDueRow {
     profile: Option<String>,
     mode: Option<String>,
     direct_task_type: Option<String>,
+    action_id: Option<String>,
 }
 
 /// Spawn the cron scheduler loop as a background task.
-pub fn spawn(pool: PgPool, data_dir: String) -> tokio::task::JoinHandle<()> {
+pub fn spawn(pool: PgPool, data_dir: String, mcp_registry: McpRegistry, app_context: AppContext) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         info!("[cron-scheduler] Starting cron scheduler loop");
 
         loop {
-            if let Err(e) = tick(&pool, &data_dir).await {
+            if let Err(e) = tick(&pool, &data_dir, &mcp_registry, &app_context).await {
                 error!("[cron-scheduler] Tick failed: {:?}", e);
             }
             sleep(Duration::from_secs(30)).await;
@@ -57,7 +59,7 @@ pub fn spawn(pool: PgPool, data_dir: String) -> tokio::task::JoinHandle<()> {
 }
 
 /// One tick: find due jobs, claim one atomically, fire it, release.
-async fn tick(pool: &PgPool, data_dir: &str) -> Result<()> {
+async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_context: &AppContext) -> Result<()> {
     let jobs = fetch_due_jobs(pool).await?;
 
     for job in jobs {
@@ -123,6 +125,73 @@ async fn tick(pool: &PgPool, data_dir: &str) -> Result<()> {
                             "[cron-scheduler] Unknown direct_task_type '{}' for job '{}'. Known types: {}",
                             other, display_name, known.join(", ")
                         );
+                    }
+                }
+            }
+            let new_next = calculate_next_run(&job.schedule, &now);
+            release_job(pool, &job.id, &now, &new_next).await?;
+            continue;
+        }
+
+        // ── Action mode: run built-in action by action_id ──
+        if job_mode == "action" {
+            if let Some(ref action_id) = job.action_id {
+                match action_id.as_str() {
+                    "builtin_kanban_dispatcher" => {
+                        info!(
+                            "[cron-scheduler] Running action '{}' (kanban_dispatcher) for job '{}'",
+                            action_id, display_name
+                        );
+                        run_kanban_dispatcher(pool, data_dir).await?;
+                    }
+                    "builtin_relevance_indexer" => {
+                        info!(
+                            "[cron-scheduler] Running action '{}' (relevance_indexer) for job '{}'",
+                            action_id, display_name
+                        );
+                        crate::relevance::run_relevance_indexer(pool, data_dir).await?;
+                    }
+                    other => {
+                        info!(
+                            "[cron-scheduler] Looking up user-defined action '{}' for job '{}'",
+                            other, display_name
+                        );
+                        // Look up action from DB, then call its MCP tool
+                        match queries::get_action(pool, other).await {
+                            Ok(Some(action)) => {
+                                let call = McpToolCall {
+                                    id: String::new(),
+                                    name: action.tool_name.clone(),
+                                    arguments: action.params.clone(),
+                                };
+                                match mcp_registry.execute(&call, app_context.clone()) {
+                                    Ok(result) => {
+                                        info!(
+                                            "[cron-scheduler] Action '{}' completed for job '{}': {}",
+                                            other, display_name, result.content
+                                        );
+                                    }
+                                    Err(e) => {
+                                        error!(
+                                            "[cron-scheduler] Action '{}' failed for job '{}': {:?}",
+                                            other, display_name, e
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                warn!(
+                                    "[cron-scheduler] Action '{}' not found in DB for job '{}'",
+                                    other, display_name
+                                );
+                            }
+                            Err(e) => {
+                                error!(
+                                    "[cron-scheduler] Failed to look up action '{}' for job '{}': {:?}",
+                                    other, display_name, e
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -258,7 +327,7 @@ async fn fetch_due_jobs(pool: &PgPool) -> Result<Vec<CronJobDueRow>> {
     let rows: Vec<CronJobDueRow> = sql_forge!(
         CronJobDueRow,
         r#"
-        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, direct_task_type
+        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, direct_task_type, action_id
         FROM cron_jobs
         WHERE enabled = true
           AND active = true
@@ -306,7 +375,7 @@ async fn ensure_cron_channel(pool: &PgPool) -> Result<crate::models::Channel> {
 /// Run the kanban_dispatcher: move all 'todo' tasks to 'ready' by creating
 /// threads and messages for each, respecting dependencies and ordering by
 /// priority DESC, position ASC.
-async fn run_kanban_dispatcher(pool: &PgPool, data_dir: &str) -> Result<()> {
+pub async fn run_kanban_dispatcher(pool: &PgPool, data_dir: &str) -> Result<()> {
     #[derive(Debug, FromRow)]
     struct TodoTaskRow {
         id: String,
