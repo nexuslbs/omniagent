@@ -687,5 +687,46 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ── Actions ID sequence ──
+    sqlx::query(
+        r#"CREATE SEQUENCE IF NOT EXISTS actions_id_seq START 1;"#,
+    )
+    .execute(pool)
+    .await?;
+
+    // ── Add is_builtin column to actions table ──
+    sqlx::query(
+        r#"ALTER TABLE actions ADD COLUMN IF NOT EXISTS is_builtin BOOLEAN NOT NULL DEFAULT false;"#,
+    )
+    .execute(pool)
+    .await?;
+
+    // ── Add action_id column to cron_jobs table ──
+    sqlx::query(
+        r#"ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS action_id TEXT REFERENCES actions(id);"#,
+    )
+    .execute(pool)
+    .await?;
+
+    // ── Seed built-in actions ──
+    sqlx::query(
+        r#"
+        INSERT INTO actions (id, name, tool_name, params, is_builtin)
+        VALUES ('builtin_kanban_dispatcher', 'Kanban Dispatcher', 'actions_kanban_dispatcher', '{}', true)
+        ON CONFLICT (id) DO NOTHING;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO actions (id, name, tool_name, params, is_builtin)
+        VALUES ('builtin_relevance_indexer', 'Relevance Indexer', 'actions_relevance_indexer', '{}', true)
+        ON CONFLICT (id) DO NOTHING;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }

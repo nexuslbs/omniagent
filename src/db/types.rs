@@ -1699,20 +1699,11 @@ pub async fn create_action(
     tool_name: &str,
     params: &serde_json::Value,
 ) -> anyhow::Result<Action> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let id = format!(
-        "act_{:x}",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
     let row: ActionDb = sql_forge!(
         ActionDb,
         r#"
         INSERT INTO actions (id, name, tool_name, params)
-        VALUES (:id, :name, :tool_name, NULLIF(:params, '{}')::jsonb)
+        VALUES (CAST(nextval('actions_id_seq') AS TEXT), :name, :tool_name, NULLIF(:params, '{}')::jsonb)
         RETURNING
             id, name, tool_name,
             params::text AS "params",
@@ -1720,7 +1711,7 @@ pub async fn create_action(
             COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at",
             is_builtin
         "#,
-        ( :id = &id, :name = name, :tool_name = tool_name, :params = &params.to_string() )
+        ( :name = name, :tool_name = tool_name, :params = &params.to_string() )
     )
     .fetch_one(pool)
     .await?;
