@@ -41,7 +41,7 @@ services:
     environment:
       MM_SQLSETTINGS_DRIVERNAME: postgres
       MM_SQLSETTINGS_DATASOURCE: postgres://omniagent:omniagent@mattermost-db:5432/mattermost?sslmode=disable
-      MM_SERVICESETTINGS_SITEURL: https://hermes-app-5.nexuslbs.org
+      MM_SERVICESETTINGS_SITEURL: ${MATTERMOST_SITE_URL:-https://hermes-app-5.nexuslbs.org}
       MM_SERVICESETTINGS_ENABLEBOTACCOUNTCREATION: "true"
       MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS: "true"
     volumes:
