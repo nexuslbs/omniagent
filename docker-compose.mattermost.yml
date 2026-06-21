@@ -45,6 +45,7 @@ services:
       MM_SERVICESETTINGS_ENABLEBOTACCOUNTCREATION: "true"
       MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS: "true"
       MM_ANALYTICS_SETTINGS_ENABLE: "false"
+      MM_LOGSETTINGS_ENABLEDIAGNOSTICS: "false"
     volumes:
       - mattermost-config-vol:/mattermost/config:rw
       - mattermost-data-vol:/mattermost/data:rw
