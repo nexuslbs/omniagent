@@ -201,49 +201,123 @@ fn handle_search_messages(pool: sqlx::PgPool, args: &Value) -> Result<McpToolRes
             let embedding = hash_vec.generate_embedding(&query_text).await;
             let emb_str = vector_to_string(&embedding);
             // Runtime-only sqlx::query_as — pgvector <=> operator not supported by sqlx compile-time macros
-            if let Some(cid) = channel_id {
-                sqlx::query_as::<_, MessageResult>(
-                    r#"
-                    SELECT
-                        m.id, m.role, m.content, m.msg_type, m.msg_subtype,
-                        m.thread_id, m.thread_sequence,
-                        COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
-                    FROM messages m
-                    JOIN threads t ON t.id = m.thread_id
-                    WHERE t.channel_id = $1
-                      AND m.embedding IS NOT NULL
-                      AND m.embedding != ''
-                      AND m.role IN ('user', 'agent')
-                    ORDER BY m.embedding::vector(1536) <=> $2::vector(1536)
-                    LIMIT $3
-                    "#,
-                )
-                .bind(cid)
-                .bind(&emb_str)
-                .bind(limit)
-                .fetch_all(&pool)
-                .await
-                .map_err(|e| anyhow::anyhow!(e))
+            // Two-stage decay: HNSW-indexed ANN search → recency re-rank
+            // Fallback to TEXT cast when embedding_vec column doesn't exist
+            let has_vec_column: bool = sqlx::query_scalar(
+                r#"SELECT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'messages' AND column_name = 'embedding_vec'
+                )"#,
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(false);
+
+            if has_vec_column {
+                if let Some(cid) = channel_id {
+                    sqlx::query_as::<_, MessageResult>(
+                        r#"
+                        WITH vector_candidates AS (
+                            SELECT m.id, m.created_at,
+                                   (m.embedding_vec <=> $2::vector(1536)) AS distance_raw
+                            FROM messages m
+                            JOIN threads t ON t.id = m.thread_id
+                            WHERE t.channel_id = $1
+                              AND m.embedding_vec IS NOT NULL
+                              AND m.role IN ('user', 'agent')
+                            ORDER BY m.embedding_vec <=> $2::vector(1536)
+                            LIMIT 100
+                        )
+                        SELECT
+                            m.id, m.role, m.content, m.msg_type, m.msg_subtype,
+                            m.thread_id, m.thread_sequence,
+                            COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
+                        FROM messages m
+                        JOIN vector_candidates vc ON vc.id = m.id
+                        ORDER BY vc.distance_raw * (1 + EXTRACT(EPOCH FROM (NOW() - vc.created_at)) / 86400)
+                        LIMIT $3
+                        "#,
+                    )
+                    .bind(cid)
+                    .bind(&emb_str)
+                    .bind(limit)
+                    .fetch_all(&pool)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+                } else {
+                    sqlx::query_as::<_, MessageResult>(
+                        r#"
+                        WITH vector_candidates AS (
+                            SELECT m.id, m.created_at,
+                                   (m.embedding_vec <=> $1::vector(1536)) AS distance_raw
+                            FROM messages m
+                            WHERE m.embedding_vec IS NOT NULL
+                              AND m.role IN ('user', 'agent')
+                            ORDER BY m.embedding_vec <=> $1::vector(1536)
+                            LIMIT 100
+                        )
+                        SELECT
+                            m.id, m.role, m.content, m.msg_type, m.msg_subtype,
+                            m.thread_id, m.thread_sequence,
+                            COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
+                        FROM messages m
+                        JOIN vector_candidates vc ON vc.id = m.id
+                        ORDER BY vc.distance_raw * (1 + EXTRACT(EPOCH FROM (NOW() - vc.created_at)) / 86400)
+                        LIMIT $2
+                        "#,
+                    )
+                    .bind(&emb_str)
+                    .bind(limit)
+                    .fetch_all(&pool)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+                }
             } else {
-                sqlx::query_as::<_, MessageResult>(
-                    r#"
-                    SELECT
-                        m.id, m.role, m.content, m.msg_type, m.msg_subtype,
-                        m.thread_id, m.thread_sequence,
-                        COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
-                    FROM messages m
-                    WHERE m.embedding IS NOT NULL
-                      AND m.embedding != ''
-                      AND m.role IN ('user', 'agent')
-                    ORDER BY m.embedding::vector(1536) <=> $1::vector(1536)
-                    LIMIT $2
-                    "#,
-                )
-                .bind(&emb_str)
-                .bind(limit)
-                .fetch_all(&pool)
-                .await
-                .map_err(|e| anyhow::anyhow!(e))
+                // Fallback: TEXT cast approach (pgvector extension not available)
+                if let Some(cid) = channel_id {
+                    sqlx::query_as::<_, MessageResult>(
+                        r#"
+                        SELECT
+                            m.id, m.role, m.content, m.msg_type, m.msg_subtype,
+                            m.thread_id, m.thread_sequence,
+                            COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
+                        FROM messages m
+                        JOIN threads t ON t.id = m.thread_id
+                        WHERE t.channel_id = $1
+                          AND m.embedding IS NOT NULL
+                          AND m.embedding != ''
+                          AND m.role IN ('user', 'agent')
+                        ORDER BY m.embedding::vector(1536) <=> $2::vector(1536)
+                        LIMIT $3
+                        "#,
+                    )
+                    .bind(cid)
+                    .bind(&emb_str)
+                    .bind(limit)
+                    .fetch_all(&pool)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+                } else {
+                    sqlx::query_as::<_, MessageResult>(
+                        r#"
+                        SELECT
+                            m.id, m.role, m.content, m.msg_type, m.msg_subtype,
+                            m.thread_id, m.thread_sequence,
+                            COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
+                        FROM messages m
+                        WHERE m.embedding IS NOT NULL
+                          AND m.embedding != ''
+                          AND m.role IN ('user', 'agent')
+                        ORDER BY m.embedding::vector(1536) <=> $1::vector(1536)
+                        LIMIT $2
+                        "#,
+                    )
+                    .bind(&emb_str)
+                    .bind(limit)
+                    .fetch_all(&pool)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+                }
             }
         })
     })?;

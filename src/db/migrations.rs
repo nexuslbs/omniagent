@@ -735,5 +735,83 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ── Phase 1: native vector column + HNSW index + two-stage decay ──
+    // Adds a native vector(1536) column, backfills existing TEXT embeddings,
+    // creates an HNSW index for fast ANN search, then enables two-stage
+    // recency-weighted retrieval. The old TEXT `embedding` column is kept as
+    // a fallback during Phase 1; it will be dropped when Phase 2 completes.
+    //
+    // All operations are idempotent — safe to run on every startup.
+    let vector_available: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')"#,
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if vector_available {
+        // 1. Add native vector(1536) column
+        sqlx::query(
+            r#"
+            ALTER TABLE messages
+            ADD COLUMN IF NOT EXISTS embedding_vec vector(1536)
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // 2. Backfill existing TEXT embeddings into the vector column
+        //    Runs only if there are rows with embedding IS NOT NULL AND embedding_vec IS NULL.
+        //    The cast from TEXT to vector(1536) uses the `[0.1,0.2,...]` array literal format.
+        let backfill_result = sqlx::query(
+            r#"
+            UPDATE messages
+            SET embedding_vec = embedding::vector(1536)
+            WHERE embedding IS NOT NULL
+              AND embedding != ''
+              AND embedding_vec IS NULL
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        let backfilled = backfill_result.rows_affected();
+        if backfilled > 0 {
+            tracing::info!("Backfilled {} embeddings into embedding_vec column", backfilled);
+        }
+
+        // 3. Create HNSW index on the vector column for fast ANN search.
+        //    IF NOT EXISTS is supported for non-concurrent CREATE INDEX in PG 14+.
+        //    The index uses cosine distance (<=>) which matches our query operator.
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_messages_embedding_vec_hnsw
+            ON messages USING hnsw (embedding_vec vector_cosine_ops)
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        // 4. Also create a B-tree index on created_at for the recency re-ranking.
+        //    This helps the final ORDER BY in the two-stage approach when the
+        //    candidate pool is large (up to 100 rows), though it's mainly useful
+        //    for the outer re-ranking step.
+        //    For 100 rows the sort is in-memory, so this is mostly for completeness.
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_messages_created_at
+            ON messages(created_at DESC)
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        tracing::info!("pgvector HNSW index and embedding_vec column ready");
+    } else {
+        tracing::warn!(
+            "pgvector extension not available — skipping HNSW index and vector column. \
+             Text-cast fallback will be used for semantic search."
+        );
+    }
+
     Ok(())
 }
