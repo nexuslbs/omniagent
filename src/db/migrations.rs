@@ -728,5 +728,12 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ── Add silent column to cron_jobs table ──
+    sqlx::query(
+        r#"ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS silent BOOLEAN NOT NULL DEFAULT false;"#,
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }

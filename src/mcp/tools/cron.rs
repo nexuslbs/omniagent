@@ -21,6 +21,7 @@ pub struct CronJobListRow {
     pub last_run_at: Option<DateTime<Utc>>,
     pub next_run_at: Option<DateTime<Utc>>,
     pub created_at: Option<DateTime<Utc>>,
+    pub silent: Option<bool>,
 }
 
 pub fn create_cron_job_tool() -> McpTool {
@@ -65,6 +66,10 @@ pub fn create_cron_job_tool() -> McpTool {
                 "action_id": {
                     "type": "string",
                     "description": "For mode='action': the action ID to execute (from the actions table)"
+                },
+                "silent": {
+                    "type": "boolean",
+                    "description": "When true and mode='action', no thread/messages are created on success (only errors produce a thread)"
                 }
             },
             "required": ["name", "schedule"]
@@ -88,6 +93,7 @@ pub fn create_cron_job_tool() -> McpTool {
             let profile_arg = args["profile"].as_str().map(|s| s.to_string());
             let mode = args["mode"].as_str().unwrap_or("agentic").to_string();
             let action_id = args["action_id"].as_str().map(|s| s.to_string());
+            let silent = args["silent"].as_bool();
 
             if name.is_empty() {
                 anyhow::bail!("Job name must not be empty");
@@ -157,10 +163,10 @@ pub fn create_cron_job_tool() -> McpTool {
 
                     sql_forge!(
                         r#"
-                        INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, channel_id, profile, mode, action_id)
-                        VALUES (:id, :name, :display_name, :schedule, NULLIF(:prompt, '')::text, :skills, :channel_id, NULLIF(:profile, '')::text, :mode, NULLIF(:action_id, '')::text)
+                        INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, channel_id, profile, mode, action_id, silent)
+                        VALUES (:id, :name, :display_name, :schedule, NULLIF(:prompt, '')::text, :skills, :channel_id, NULLIF(:profile, '')::text, :mode, NULLIF(:action_id, '')::text, :silent)
                         "#,
-                        ( :id = &id, :name = &name_owned, :display_name = &display_name_owned, :schedule = schedule, :prompt = prompt.as_deref().unwrap_or(""), :skills = skills_json.to_string(), :channel_id = resolved_channel_id, :profile = profile_arg.as_deref().unwrap_or(""), :mode = &mode, :action_id = action_id.as_deref().unwrap_or("") )
+                        ( :id = &id, :name = &name_owned, :display_name = &display_name_owned, :schedule = schedule, :prompt = prompt.as_deref().unwrap_or(""), :skills = skills_json.to_string(), :channel_id = resolved_channel_id, :profile = profile_arg.as_deref().unwrap_or(""), :mode = &mode, :action_id = action_id.as_deref().unwrap_or(""), :silent = silent.unwrap_or(false) )
                     )
                     .execute(&pool)
                     .await
@@ -200,7 +206,7 @@ pub fn list_cron_jobs_tool() -> McpTool {
                     sql_forge!(
                         CronJobListRow,
                         r#"
-                        SELECT id, name, schedule, prompt, enabled, mode, action_id, active, last_run_at, next_run_at, created_at
+                        SELECT id, name, schedule, prompt, enabled, mode, action_id, active, last_run_at, next_run_at, created_at, silent
                         FROM cron_jobs
                         WHERE 1 = :_one
                         ORDER BY created_at DESC
@@ -232,6 +238,7 @@ pub fn list_cron_jobs_tool() -> McpTool {
                         "last_run_at": r.last_run_at,
                         "next_run_at": r.next_run_at,
                         "created_at": r.created_at.map(|t| t.to_rfc3339()),
+                        "silent": r.silent.unwrap_or(false),
                     })
                 })
                 .collect();
@@ -347,6 +354,10 @@ pub fn update_cron_job_tool() -> McpTool {
                 "profile": {
                     "type": "string",
                     "description": "Profile name to use"
+                },
+                "silent": {
+                    "type": "boolean",
+                    "description": "When true and mode='action', no thread/messages are created on success (only errors produce a thread)"
                 }
             },
             "required": ["name"]
@@ -358,7 +369,7 @@ pub fn update_cron_job_tool() -> McpTool {
 
             let pool = ctx.pool.clone();
             let name_owned = name.to_string();
-            let updated_fields: Vec<&str> = ["display_name", "schedule", "prompt", "enabled", "mode", "action_id", "active", "skills", "channel_id", "profile"]
+            let updated_fields: Vec<&str> = ["display_name", "schedule", "prompt", "enabled", "mode", "action_id", "active", "skills", "channel_id", "profile", "silent"]
                 .iter()
                 .filter(|k| args.get(*k).is_some())
                 .copied()
@@ -422,6 +433,9 @@ pub fn update_cron_job_tool() -> McpTool {
                     if args.get("profile").is_some() {
                         let val = args["profile"].as_str().unwrap_or("");
                         sql_forge!("UPDATE cron_jobs SET profile = NULLIF(:val, '')::text, updated_at = NOW() WHERE name = :name", ( :val = val, :name = &name_owned )).execute(&pool).await?;
+                    }
+                    if let Some(val) = args["silent"].as_bool() {
+                        sql_forge!("UPDATE cron_jobs SET silent = :val, updated_at = NOW() WHERE name = :name", ( :val = val, :name = &name_owned )).execute(&pool).await?;
                     }
 
                     Ok::<_, anyhow::Error>(())

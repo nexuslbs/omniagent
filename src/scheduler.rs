@@ -33,6 +33,7 @@ struct CronJobDueRow {
     profile: Option<String>,
     mode: Option<String>,
     action_id: Option<String>,
+    silent: Option<bool>,
 }
 
 /// Spawn the cron scheduler loop as a background task.
@@ -106,66 +107,20 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
             thread_id: i64,
             now_ts: i64,
         ) -> anyhow::Result<()> {
-            // ── Resolve action name and execute ──
-            let (action_name, exec_result): (String, Result<(), String>) = match action_id {
-                "builtin_kanban_dispatcher" => {
-                    let name = "Kanban Dispatcher".to_string();
-                    let r = run_kanban_dispatcher(pool, data_dir)
-                        .await
-                        .map_err(|e| format!("{:#}", e));
-                    (name, r)
-                }
-                "builtin_relevance_indexer" => {
-                    let name = "Relevance Indexer".to_string();
-                    let r = crate::relevance::run_relevance_indexer(pool, data_dir)
-                        .await
-                        .map_err(|e| format!("{:#}", e));
-                    (name, r)
-                }
-                other => {
-                    match queries::get_action(pool, other).await {
-                        Ok(Some(action)) => {
-                            let call = McpToolCall {
-                                id: String::new(),
-                                name: action.tool_name.clone(),
-                                arguments: action.params.clone(),
-                            };
-                            let r = match mcp_registry
-                                .execute(&call, app_context.clone())
-                                .await
-                            {
-                                Ok(result) => {
-                                    if result.is_error {
-                                        Err(result.content)
-                                    } else {
-                                        Ok(())
-                                    }
-                                }
-                                Err(e) => Err(format!("{:#}", e)),
-                            };
-                            (action.name, r)
-                        }
-                        Ok(None) => {
-                            (other.to_string(), Err(format!("Action '{}' not found", other)))
-                        }
-                        Err(e) => {
-                            (other.to_string(), Err(format!("DB lookup failed: {:#}", e)))
-                        }
-                    }
-                }
-            };
-
-            let cron_name = job.name.clone().unwrap_or_default();
-            let metadata = serde_json::json!({
-                "cron_job_id": job.id,
-                "cron_job_name": job.name,
-                "cron_display_name": display_name,
-                "scheduled_at": job.schedule,
-            });
+            let (action_name, exec_result) = resolve_and_execute_action(
+                pool, data_dir, mcp_registry, app_context, job, display_name, action_id,
+            ).await;
 
             match exec_result {
                 Ok(()) => {
                     // ── Success: system terminal + seq-0 ──
+                    let cron_name = job.name.clone().unwrap_or_default();
+                    let metadata = serde_json::json!({
+                        "cron_job_id": job.id,
+                        "cron_job_name": job.name,
+                        "cron_display_name": display_name,
+                        "scheduled_at": job.schedule,
+                    });
                     queries::set_thread_system(pool, thread_id).await?;
                     let msg = MessageNew {
                         thread_id,
@@ -185,55 +140,7 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
                     queries::create_message(pool, &msg).await?;
                 }
                 Err(err_msg) => {
-                    // ── Failure: failed thread + seq-0 + seq-1 error ──
-                    let err_subtype = if let Some(code) = extract_error_code(&err_msg) {
-                        Some(code)
-                    } else {
-                        None
-                    };
-
-                    sql_forge!(
-                        "UPDATE threads SET status = 'failed', terminal = true WHERE id = :id",
-                        ( :id = thread_id )
-                    )
-                    .execute(pool)
-                    .await?;
-
-                    // seq-0: action name
-                    let msg0 = MessageNew {
-                        thread_id,
-                        role: "system".to_string(),
-                        content: action_name,
-                        thread_sequence: 0,
-                        external_id: Some(format!("cron:{}:{}", job.id, now_ts)),
-                        metadata: metadata.clone(),
-                        embedding: None,
-                        summary_text: None,
-                        is_summary: false,
-                        msg_type: "cron".to_string(),
-                        msg_subtype: Some(cron_name.clone()),
-                        processing_time_ms: None,
-                        token_usage: None,
-                    };
-                    queries::create_message(pool, &msg0).await?;
-
-                    // seq-1: error details
-                    let msg1 = MessageNew {
-                        thread_id,
-                        role: "system".to_string(),
-                        content: err_msg,
-                        thread_sequence: 1,
-                        external_id: Some(format!("cron:{}:{}:error", job.id, now_ts)),
-                        metadata,
-                        embedding: None,
-                        summary_text: None,
-                        is_summary: false,
-                        msg_type: "error".to_string(),
-                        msg_subtype: err_subtype,
-                        processing_time_ms: None,
-                        token_usage: None,
-                    };
-                    queries::create_message(pool, &msg1).await?;
+                    report_action_failure(pool, job, display_name, &action_name, err_msg, thread_id, now_ts).await?;
                 }
             }
 
@@ -243,27 +150,55 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
         let job_mode = job.mode.as_deref().unwrap_or("agentic");
         if job_mode == "action" {
             if let Some(ref action_id) = job.action_id {
-                let cron_channel = ensure_cron_channel(pool).await?;
-                let thread = queries::create_thread(
-                    pool,
-                    "cron",
-                    cron_channel.id,
-                    "cron",
-                    None,
-                    None,
-                    None,
-                    Some(&job.id),
-                )
-                .await?;
+                let silent = job.silent.unwrap_or(false);
+                if silent {
+                    // Silent mode: run action first, only create thread on error
+                    let (action_name, exec_result) = resolve_and_execute_action(
+                        pool, data_dir, mcp_registry, app_context,
+                        &job, display_name, action_id,
+                    ).await;
 
-                if let Err(e) = run_action_and_report(
-                    pool, data_dir, mcp_registry, app_context,
-                    &job, display_name, action_id, thread.id, now.timestamp(),
-                ).await {
-                    error!(
-                        "[cron-scheduler] Action reporting failed for job '{}': {:?}",
-                        display_name, e
-                    );
+                    if let Err(err_msg) = exec_result {
+                        // Action failed — now create thread + report error
+                        let cron_channel = ensure_cron_channel(pool).await?;
+                        let thread = queries::create_thread(
+                            pool,
+                            "cron",
+                            cron_channel.id,
+                            "cron",
+                            None,
+                            None,
+                            None,
+                            Some(&job.id),
+                        )
+                        .await?;
+                        report_action_failure(pool, &job, display_name, &action_name, err_msg, thread.id, now.timestamp()).await?;
+                    }
+                    // Success: nothing to do, no thread created
+                } else {
+                    // Normal mode: current behavior
+                    let cron_channel = ensure_cron_channel(pool).await?;
+                    let thread = queries::create_thread(
+                        pool,
+                        "cron",
+                        cron_channel.id,
+                        "cron",
+                        None,
+                        None,
+                        None,
+                        Some(&job.id),
+                    )
+                    .await?;
+
+                    if let Err(e) = run_action_and_report(
+                        pool, data_dir, mcp_registry, app_context,
+                        &job, display_name, action_id, thread.id, now.timestamp(),
+                    ).await {
+                        error!(
+                            "[cron-scheduler] Action reporting failed for job '{}': {:?}",
+                            display_name, e
+                        );
+                    }
                 }
             }
             let new_next = calculate_next_run(&job.schedule, &now);
@@ -398,7 +333,7 @@ async fn fetch_due_jobs(pool: &PgPool) -> Result<Vec<CronJobDueRow>> {
     let rows: Vec<CronJobDueRow> = sql_forge!(
         CronJobDueRow,
         r#"
-        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id
+        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id, silent
         FROM cron_jobs
         WHERE enabled = true
           AND active = true
@@ -446,6 +381,123 @@ async fn ensure_cron_channel(pool: &PgPool) -> Result<crate::models::Channel> {
     }
     queries::create_channel(pool, "cron-session", "cron", "cron-default", "cron", "cron-session").await
         .map_err(|e| anyhow::anyhow!("Failed to create cron channel: {:#}", e))
+}
+
+/// Resolve and execute an action, returning (action_name, result).
+async fn resolve_and_execute_action(
+    pool: &PgPool,
+    data_dir: &str,
+    mcp_registry: &McpRegistry,
+    app_context: &AppContext,
+    job: &CronJobDueRow,
+    display_name: &str,
+    action_id: &str,
+) -> (String, Result<(), String>) {
+    match action_id {
+        "builtin_kanban_dispatcher" => {
+            let name = "Kanban Dispatcher".to_string();
+            let r = run_kanban_dispatcher(pool, data_dir)
+                .await
+                .map_err(|e| format!("{:#}", e));
+            (name, r)
+        }
+        "builtin_relevance_indexer" => {
+            let name = "Relevance Indexer".to_string();
+            let r = crate::relevance::run_relevance_indexer(pool, data_dir)
+                .await
+                .map_err(|e| format!("{:#}", e));
+            (name, r)
+        }
+        other => {
+            match queries::get_action(pool, other).await {
+                Ok(Some(action)) => {
+                    let call = McpToolCall {
+                        id: String::new(),
+                        name: action.tool_name.clone(),
+                        arguments: action.params.clone(),
+                    };
+                    let r = match mcp_registry.execute(&call, app_context.clone()).await {
+                        Ok(result) => {
+                            if result.is_error { Err(result.content) } else { Ok(()) }
+                        }
+                        Err(e) => Err(format!("{:#}", e)),
+                    };
+                    (action.name, r)
+                }
+                Ok(None) => (other.to_string(), Err(format!("Action '{}' not found", other))),
+                Err(e) => (other.to_string(), Err(format!("DB lookup failed: {:#}", e))),
+            }
+        }
+    }
+}
+
+/// Report an action failure by setting thread to failed and writing seq-0/seq-1 messages.
+async fn report_action_failure(
+    pool: &PgPool,
+    job: &CronJobDueRow,
+    display_name: &str,
+    action_name: &str,
+    err_msg: String,
+    thread_id: i64,
+    now_ts: i64,
+) -> anyhow::Result<()> {
+    let cron_name = job.name.clone().unwrap_or_default();
+    let err_subtype = if let Some(code) = extract_error_code(&err_msg) {
+        Some(code)
+    } else {
+        None
+    };
+    let metadata = serde_json::json!({
+        "cron_job_id": job.id,
+        "cron_job_name": job.name,
+        "cron_display_name": display_name,
+        "scheduled_at": job.schedule,
+    });
+
+    sql_forge!(
+        "UPDATE threads SET status = 'failed', terminal = true WHERE id = :id",
+        ( :id = thread_id )
+    )
+    .execute(pool)
+    .await?;
+
+    // seq-0: action name
+    let msg0 = MessageNew {
+        thread_id,
+        role: "system".to_string(),
+        content: action_name.to_string(),
+        thread_sequence: 0,
+        external_id: Some(format!("cron:{}:{:?}", job.id, now_ts)),
+        metadata: metadata.clone(),
+        embedding: None,
+        summary_text: None,
+        is_summary: false,
+        msg_type: "cron".to_string(),
+        msg_subtype: Some(cron_name.clone()),
+        processing_time_ms: None,
+        token_usage: None,
+    };
+    queries::create_message(pool, &msg0).await?;
+
+    // seq-1: error details
+    let msg1 = MessageNew {
+        thread_id,
+        role: "system".to_string(),
+        content: err_msg,
+        thread_sequence: 1,
+        external_id: Some(format!("cron:{}:{:?}:error", job.id, now_ts)),
+        metadata,
+        embedding: None,
+        summary_text: None,
+        is_summary: false,
+        msg_type: "error".to_string(),
+        msg_subtype: err_subtype,
+        processing_time_ms: None,
+        token_usage: None,
+    };
+    queries::create_message(pool, &msg1).await?;
+
+    Ok(())
 }
 
 /// Run the kanban_dispatcher: move all 'todo' tasks to 'ready' by creating
