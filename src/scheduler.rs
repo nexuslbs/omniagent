@@ -22,14 +22,6 @@ use crate::db::types as queries;
 use crate::mcp::{AppContext, McpRegistry, McpToolCall};
 use crate::models::MessageNew;
 
-/// Central list of all known direct-mode task types.
-/// Add new variants here, then add a match arm in `handle_direct_task`.
-/// Keep in sync with DIRECT_TASK_TYPES in dashboard server (server/routes/schedule.ts).
-pub const DIRECT_TASK_TYPES: &[(&str, &str)] = &[
-    ("kanban_dispatcher", "Kanban Dispatcher"),
-    ("relevance_indexer", "Relevance Indexer"),
-];
-
 #[derive(Debug, FromRow)]
 struct CronJobDueRow {
     id: String,
@@ -40,7 +32,6 @@ struct CronJobDueRow {
     channel_id: Option<i64>,
     profile: Option<String>,
     mode: Option<String>,
-    direct_task_type: Option<String>,
     action_id: Option<String>,
 }
 
@@ -99,39 +90,6 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
             "[cron-scheduler] Firing job '{}' (id={})",
             display_name, job.id
         );
-
-        // ── Direct mode: run predefined task without agent ──
-        let job_mode = job.mode.as_deref().unwrap_or("agentic");
-        if job_mode == "direct" {
-            if let Some(task_type) = job.direct_task_type.as_deref() {
-                match task_type {
-                    "kanban_dispatcher" => {
-                        info!(
-                            "[cron-scheduler] Running kanban_dispatcher for job '{}'",
-                            display_name
-                        );
-                        run_kanban_dispatcher(pool, data_dir).await?;
-                    }
-                    "relevance_indexer" => {
-                        info!(
-                            "[cron-scheduler] Running relevance_indexer for job '{}'",
-                            display_name
-                        );
-                        crate::relevance::run_relevance_indexer(pool, data_dir).await?;
-                    }
-                    other => {
-                        let known: Vec<&str> = DIRECT_TASK_TYPES.iter().map(|(v, _)| *v).collect();
-                        warn!(
-                            "[cron-scheduler] Unknown direct_task_type '{}' for job '{}'. Known types: {}",
-                            other, display_name, known.join(", ")
-                        );
-                    }
-                }
-            }
-            let new_next = calculate_next_run(&job.schedule, &now);
-            release_job(pool, &job.id, &now, &new_next).await?;
-            continue;
-        }
 
         // ── Action mode: run built-in action by action_id ──
         // Writes result as terminal system messages (seq-0: action name, type=cron, subtype=job name).
@@ -282,6 +240,7 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
             Ok(())
         }
 
+        let job_mode = job.mode.as_deref().unwrap_or("agentic");
         if job_mode == "action" {
             if let Some(ref action_id) = job.action_id {
                 let cron_channel = ensure_cron_channel(pool).await?;
@@ -439,7 +398,7 @@ async fn fetch_due_jobs(pool: &PgPool) -> Result<Vec<CronJobDueRow>> {
     let rows: Vec<CronJobDueRow> = sql_forge!(
         CronJobDueRow,
         r#"
-        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, direct_task_type, action_id
+        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id
         FROM cron_jobs
         WHERE enabled = true
           AND active = true
