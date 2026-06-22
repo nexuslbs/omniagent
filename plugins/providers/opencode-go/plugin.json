@@ -7,7 +7,7 @@
   "api_mode": "dynamic",
   "config_schema": [
     { "key": "api_key", "label": "API Key", "type": "secret", "required": false, "description": "Set via LLM_API_KEY env var" },
-    { "key": "default_model", "label": "Default Model", "type": "enum", "default": "deepseek-v4-flash", "allowed_values": ["deepseek-v4-flash", "glm-4-plus", "kimi-latest", "minimax-m2-ultra", "qwen3.7-max"] }
+    { "key": "default_model", "label": "Default Model", "type": "enum", "default": "deepseek-v4-flash", "refresh_url": "https://opencode.ai/zen/go/v1/models" }
   ],
   "env": {}
 }

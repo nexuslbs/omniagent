@@ -10,12 +10,14 @@ pub mod installer;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sql_forge::sql_forge;
 use sqlx::{FromRow, PgPool};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -99,6 +101,10 @@ pub struct ConfigSchemaField {
     pub max: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>, // "uri", "email", "password"
+    /// URL to fetch dynamic enum values from (expects OpenAI `/v1/models` format: `{data: [{id:...}]}`).
+    /// When set, `allowed_values` is populated from this endpoint instead of the hardcoded list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -383,6 +389,94 @@ fn resolve_env_var(value: &str) -> String {
         }
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic enum refresh (refresh_url support)
+// ---------------------------------------------------------------------------
+
+struct DynamicEnumEntry {
+    values: Vec<String>,
+    fetched_at: std::time::Instant,
+}
+
+static DYNAMIC_ENUM_CACHE: Lazy<Mutex<HashMap<String, DynamicEnumEntry>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+const DYNAMIC_ENUM_TTL: std::time::Duration = std::time::Duration::from_secs(300); // 5 minutes
+
+/// Fetch model IDs from an OpenAI-compatible `/v1/models` endpoint and return them.
+async fn fetch_enum_values(url: &str) -> Result<Vec<String>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .context("Failed to build HTTP client")?;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("Failed to fetch {}", url))?;
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .with_context(|| format!("Failed to parse response from {}", url))?;
+
+    let mut values = Vec::new();
+    if let Some(data) = json["data"].as_array() {
+        for item in data {
+            if let Some(id) = item["id"].as_str() {
+                values.push(id.to_string());
+            }
+        }
+    }
+
+    if values.is_empty() {
+        anyhow::bail!("No model IDs found in response from {} (expected {{data: [{{id: ...}}]}})", url);
+    }
+
+    Ok(values)
+}
+
+/// Refresh dynamic enum values for a specific plugin by name.
+///
+/// Fetches from the plugin's `refresh_url` (if any), updates the in-memory cache,
+/// and returns the enriched plugin detail with fresh `allowed_values`.
+/// Returns `None` if the plugin has no `refresh_url` fields.
+pub async fn refresh_plugin_models(pool: &PgPool, name: &str) -> Result<Option<PluginDetail>> {
+    let row = get_plugin_by_name(pool, name)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Plugin '{}' not found", name))?;
+
+    let mut detail = enrich_plugin(&row);
+    let mut had_refresh = false;
+
+    for field in detail.config_schema.iter_mut() {
+        let refresh_url = match &field.refresh_url {
+            Some(url) if !url.is_empty() => url.clone(),
+            _ => continue,
+        };
+        had_refresh = true;
+
+        match fetch_enum_values(&refresh_url).await {
+            Ok(values) => {
+                field.allowed_values = Some(values.clone());
+                let mut cache = DYNAMIC_ENUM_CACHE.lock().unwrap();
+                cache.insert(
+                    refresh_url,
+                    DynamicEnumEntry {
+                        values,
+                        fetched_at: std::time::Instant::now(),
+                    },
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Failed to refresh dynamic enum from {}: {:#}", refresh_url, e);
+                // Keep existing allowed_values if fetch fails
+            }
+        }
+    }
+
+    Ok(if had_refresh { Some(detail) } else { None })
 }
 
 // ---------------------------------------------------------------------------

@@ -101,6 +101,7 @@ pub async fn start_server(
         .route("/api/plugins/{name}/enable", post(plugins::enable_plugin_handler))
         .route("/api/plugins/{name}/disable", post(plugins::disable_plugin_handler))
         .route("/api/plugins/{name}/reinstall", post(plugins::reinstall_plugin_handler))
+        .route("/api/plugins/{name}/refresh-models", post(plugins::refresh_models_handler))
         .route("/api/plugins/{name}", delete(plugins::delete_plugin_handler))
         .route("/api/plugins/install-url", post(plugins::install_url_handler))
         // ── Settings routes ──

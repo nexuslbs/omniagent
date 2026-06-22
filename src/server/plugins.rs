@@ -67,6 +67,7 @@ pub fn plugin_router() -> Router<Arc<AppState>> {
         .route("/api/plugins/{name}/enable", post(enable_plugin_handler))
         .route("/api/plugins/{name}/disable", post(disable_plugin_handler))
         .route("/api/plugins/{name}/reinstall", post(reinstall_plugin_handler))
+        .route("/api/plugins/{name}/refresh-models", post(refresh_models_handler))
         .route("/api/plugins/{name}", delete(delete_plugin_handler))
         .route("/api/plugins/install-url", post(install_url_handler))
 }
@@ -257,6 +258,43 @@ pub async fn reinstall_plugin_handler(
             (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
                 "success": false,
                 "error": format!("Failed to re-scan plugins: {}", e)
+            }))).into_response()
+        }
+    }
+}
+
+/// POST /api/plugins/:name/refresh-models — refresh dynamic model list from external API.
+pub async fn refresh_models_handler(
+    Path(name): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match plugin::refresh_plugin_models(&state.pool, &name).await {
+        Ok(Some(detail)) => {
+            info!(
+                "Refreshed dynamic models for plugin '{}' ({} models)",
+                name,
+                detail.config_schema.iter()
+                    .filter(|f| f.allowed_values.is_some())
+                    .map(|f| f.allowed_values.as_ref().map(|v| v.len()).unwrap_or(0))
+                    .sum::<usize>()
+            );
+            (StatusCode::OK, Json(serde_json::json!({
+                "success": true,
+                "data": detail
+            }))).into_response()
+        }
+        Ok(None) => {
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                "success": false,
+                "error": format!("Plugin '{}' has no refresh_url fields", name)
+            }))).into_response()
+        }
+        Err(e) => {
+            let msg = format!("Failed to refresh models for plugin '{}': {}", name, e);
+            error!("{}", msg);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                "success": false,
+                "error": msg
             }))).into_response()
         }
     }
