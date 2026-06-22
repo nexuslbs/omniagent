@@ -500,7 +500,7 @@ async fn inbound_polling_loop(
                             );
 
                             // Check for /model command
-                            if text.starts_with("/model") {
+                            if text.starts_with("//model") {
                                 if let Err(e) = handle_telegram_model_command(
                                     &bot,
                                     &pool,

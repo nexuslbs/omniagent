@@ -355,7 +355,7 @@ impl Platform for ExternalPlatformClient {
                                                 );
 
                                                 // Handle /new BEFORE channel lookup — creates a fresh channel
-                                                if inbound.text.starts_with("/new") {
+                                                if inbound.text.starts_with("//new") {
                                                     let reply = match crate::commands::handle_new_external(
                                                         &pool,
                                                         &plugin_name,
@@ -383,7 +383,7 @@ impl Platform for ExternalPlatformClient {
                                                 ).await {
                                                     Ok(Some(channel)) => {
                                                         // Check for /model command
-                                                        if inbound.text.starts_with("/model") {
+                                                        if inbound.text.starts_with("//model") {
                                                             let reply = handle_external_model_command(
                                                                 &pool,
                                                                 channel.id,
@@ -399,7 +399,7 @@ impl Platform for ExternalPlatformClient {
                                                         }
 
                                                         // Check for /channel command
-                                                        if inbound.text.starts_with("/channel") {
+                                                        if inbound.text.starts_with("//channel") {
                                                             let reply = handle_external_channel_command(
                                                                 &pool,
                                                                 &plugin_name,
@@ -417,7 +417,7 @@ impl Platform for ExternalPlatformClient {
                                                         }
 
                                                         // Check for /profile command
-                                                        if inbound.text.starts_with("/profile") {
+                                                        if inbound.text.starts_with("//profile") {
                                                             let reply = handle_external_profile_command(
                                                                 &pool,
                                                                 &inbound.text,

@@ -329,9 +329,9 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
     println!("┌─────────────────────────────────────────────────────────┐");
     println!("│  OmniAgent CLI — channel: {}, profile: {}  │", current_channel_name, channel.current_profile);
     println!("│  Type your messages. /exit to quit. /new for new channel  │");
-    println!("│  /channel to create or claim a channel                   │");
-    println!("│  /profile to view/set the active profile                 │");
-    println!("│  /model to view/set the active provider and model        │");
+    println!("│  //channel to create or claim a channel                   │");
+    println!("│  //profile to view/set the active profile                 │");
+    println!("│  //model to view/set the active provider and model        │");
     println!("│  /subscribe <name> to receive summaries from a channel    │");
     println!("│  /unsubscribe <name> to stop receiving summaries          │");
     println!("│  /subscriptions to list your current subscriptions        │");
@@ -373,7 +373,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                 println!("Goodbye.");
                 break;
             }
-            "/channel" => {
+            "//channel" => {
                 match handle_channel_command(
                     &pool,
                     &mut reader,
@@ -408,7 +408,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                 }
                 continue;
             }
-            "/new" => {
+            "//new" => {
                 // Transactional /new: atomically un-claim the old channel,
                 // create a new channel with the existing session_id as
                 // resource_identifier, and set profile/model — all in one
@@ -610,7 +610,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
         if !session_has_channel {
             eprintln!(
                 "\n[ERR_SESSION_NO_CHANNEL] This session no longer has a channel. \
-                 Use /channel to claim one.\n"
+                 Use //channel to claim one.\n"
             );
             continue;
         }
@@ -919,7 +919,7 @@ async fn poll_for_response(
             if ch.resource_identifier.as_deref() != Some(session_id) {
                 println!(
                     "\n[ERR_SESSION_NO_CHANNEL] This session no longer has a channel. \
-                     Use /channel to claim one.\n"
+                     Use //channel to claim one.\n"
                 );
                 return Ok((last_seen, last_seen_summary));
             }

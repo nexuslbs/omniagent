@@ -40,15 +40,15 @@ pub struct ModelCommand {
 /// Parse a `/model` command text from any platform.
 ///
 /// Valid forms:
-///   `/model`                        → Show
-///   `/model <provider>`             → Set provider, keep model
-///   `/model <provider> <model>`     → Set both
-///   `/model reset`                  → Reset both
-///   `/model reset provider`         → Reset provider only
-///   `/model reset model`            → Reset model only
+///   `//model`                        → Show
+///   `//model <provider>`             → Set provider, keep model
+///   `//model <provider> <model>`     → Set both
+///   `//model reset`                  → Reset both
+///   `//model reset provider`         → Reset provider only
+///   `//model reset model`            → Reset model only
 pub fn parse_model_command(input: &str) -> Result<ModelCommand> {
     let input = input.trim();
-    let rest = input.strip_prefix("/model").unwrap_or(input).trim();
+    let rest = input.strip_prefix("//model").unwrap_or(input).trim();
 
     if rest.is_empty() {
         return Ok(ModelCommand {
@@ -110,7 +110,7 @@ pub fn parse_model_command(input: &str) -> Result<ModelCommand> {
         }),
         _ => {
             anyhow::bail!(
-                "Usage: /model [provider] [model] | /model reset [provider|model]"
+                "Usage: //model [provider] [model] | //model reset [provider|model]"
             );
         }
     }
@@ -158,7 +158,7 @@ pub struct NewCommand;
 /// Parse a `/new` command text. Valid form: `/new` (no arguments).
 pub fn parse_new_command(input: &str) -> Result<NewCommand> {
     let input = input.trim();
-    let rest = input.strip_prefix("/new").unwrap_or(input).trim();
+    let rest = input.strip_prefix("//new").unwrap_or(input).trim();
     if !rest.is_empty() {
         anyhow::bail!("Usage: /new (no arguments)");
     }
@@ -188,7 +188,7 @@ pub enum ChannelCommand {
 ///   `/channel <name>` → Switch
 pub fn parse_channel_command(input: &str) -> Result<ChannelCommand> {
     let input = input.trim();
-    let rest = input.strip_prefix("/channel").unwrap_or(input).trim();
+    let rest = input.strip_prefix("//channel").unwrap_or(input).trim();
     if rest.is_empty() {
         return Ok(ChannelCommand::Show);
     }
@@ -222,7 +222,7 @@ pub enum ProfileCommand {
 ///   `/profile reset`     → Reset
 pub fn parse_profile_command(input: &str) -> Result<ProfileCommand> {
     let input = input.trim();
-    let rest = input.strip_prefix("/profile").unwrap_or(input).trim();
+    let rest = input.strip_prefix("//profile").unwrap_or(input).trim();
     if rest.is_empty() {
         return Ok(ProfileCommand::Show);
     }
@@ -317,16 +317,16 @@ mod tests {
 
     #[test]
     fn test_parse_show() {
-        let cmd = parse_model_command("/model").unwrap();
+        let cmd = parse_model_command("//model").unwrap();
         assert_eq!(cmd.action, ModelAction::Show);
 
-        let cmd = parse_model_command("  /model  ").unwrap();
+        let cmd = parse_model_command("  //model  ").unwrap();
         assert_eq!(cmd.action, ModelAction::Show);
     }
 
     #[test]
     fn test_parse_set_provider_only() {
-        let cmd = parse_model_command("/model opencode-go").unwrap();
+        let cmd = parse_model_command("//model opencode-go").unwrap();
         assert_eq!(
             cmd.action,
             ModelAction::Set {
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn test_parse_set_both() {
-        let cmd = parse_model_command("/model opencode-go deepseek-v4-flash").unwrap();
+        let cmd = parse_model_command("//model opencode-go deepseek-v4-flash").unwrap();
         assert_eq!(
             cmd.action,
             ModelAction::Set {
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_parse_reset_both() {
-        let cmd = parse_model_command("/model reset").unwrap();
+        let cmd = parse_model_command("//model reset").unwrap();
         assert_eq!(
             cmd.action,
             ModelAction::Reset {
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn test_parse_reset_provider() {
-        let cmd = parse_model_command("/model reset provider").unwrap();
+        let cmd = parse_model_command("//model reset provider").unwrap();
         assert_eq!(
             cmd.action,
             ModelAction::Reset {
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn test_parse_reset_model() {
-        let cmd = parse_model_command("/model reset model").unwrap();
+        let cmd = parse_model_command("//model reset model").unwrap();
         assert_eq!(
             cmd.action,
             ModelAction::Reset {
@@ -386,13 +386,13 @@ mod tests {
 
     #[test]
     fn test_parse_too_many_args() {
-        let cmd = parse_model_command("/model a b c");
+        let cmd = parse_model_command("//model a b c");
         assert!(cmd.is_err());
     }
 
     #[test]
     fn test_parse_bad_reset_target() {
-        let cmd = parse_model_command("/model reset foo");
+        let cmd = parse_model_command("//model reset foo");
         assert!(cmd.is_err());
     }
 
@@ -400,19 +400,19 @@ mod tests {
 
     #[test]
     fn test_parse_new() {
-        let cmd = parse_new_command("/new").unwrap();
+        let cmd = parse_new_command("//new").unwrap();
         assert!(matches!(cmd, NewCommand));
     }
 
     #[test]
     fn test_parse_new_with_args() {
-        let cmd = parse_new_command("/new foo");
+        let cmd = parse_new_command("//new foo");
         assert!(cmd.is_err());
     }
 
     #[test]
     fn test_parse_new_whitespace() {
-        let cmd = parse_new_command("  /new  ").unwrap();
+        let cmd = parse_new_command("  //new  ").unwrap();
         assert!(matches!(cmd, NewCommand));
     }
 
@@ -420,19 +420,19 @@ mod tests {
 
     #[test]
     fn test_parse_channel_show() {
-        let cmd = parse_channel_command("/channel").unwrap();
+        let cmd = parse_channel_command("//channel").unwrap();
         assert!(matches!(cmd, ChannelCommand::Show));
     }
 
     #[test]
     fn test_parse_channel_list() {
-        let cmd = parse_channel_command("/channel list").unwrap();
+        let cmd = parse_channel_command("//channel list").unwrap();
         assert!(matches!(cmd, ChannelCommand::List));
     }
 
     #[test]
     fn test_parse_channel_switch() {
-        let cmd = parse_channel_command("/channel my-channel").unwrap();
+        let cmd = parse_channel_command("//channel my-channel").unwrap();
         match cmd {
             ChannelCommand::Switch(name) => assert_eq!(name, "my-channel"),
             _ => panic!("Expected Switch"),
@@ -443,13 +443,13 @@ mod tests {
 
     #[test]
     fn test_parse_profile_show() {
-        let cmd = parse_profile_command("/profile").unwrap();
+        let cmd = parse_profile_command("//profile").unwrap();
         assert!(matches!(cmd, ProfileCommand::Show));
     }
 
     #[test]
     fn test_parse_profile_set() {
-        let cmd = parse_profile_command("/profile default").unwrap();
+        let cmd = parse_profile_command("//profile default").unwrap();
         match cmd {
             ProfileCommand::Set(name) => assert_eq!(name, "default"),
             _ => panic!("Expected Set"),
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn test_parse_profile_reset() {
-        let cmd = parse_profile_command("/profile reset").unwrap();
+        let cmd = parse_profile_command("//profile reset").unwrap();
         assert!(matches!(cmd, ProfileCommand::Reset));
     }
 }
