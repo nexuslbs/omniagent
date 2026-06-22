@@ -322,7 +322,7 @@ pub async fn delete_plugin(pool: &PgPool, name: &str) -> Result<bool> {
 
 /// Convert a PluginRegistryRow into a PluginDetail (enriched with parsed schema + resolved env).
 pub fn enrich_plugin(row: &PluginRegistryRow) -> PluginDetail {
-    let config_schema = row.manifest["config_schema"]
+    let mut config_schema = row.manifest["config_schema"]
         .as_array()
         .map(|arr| {
             arr.iter()
@@ -330,6 +330,18 @@ pub fn enrich_plugin(row: &PluginRegistryRow) -> PluginDetail {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+
+    // Populate allowed_values from dynamic enum cache for fields with refresh_url
+    for field in config_schema.iter_mut() {
+        if let Some(ref url) = field.refresh_url {
+            let cache = DYNAMIC_ENUM_CACHE.lock().unwrap();
+            if let Some(entry) = cache.get(url) {
+                if entry.fetched_at.elapsed() < DYNAMIC_ENUM_TTL {
+                    field.allowed_values = Some(entry.values.clone());
+                }
+            }
+        }
+    }
 
     // Resolve env vars from manifest's env block, then merge DB config on top
     let manifest_env = row.manifest["env"].as_object().cloned().unwrap_or_default();
