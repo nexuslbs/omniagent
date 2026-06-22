@@ -354,8 +354,8 @@ impl Platform for ExternalPlatformClient {
                                                     inbound.text.chars().take(50).collect::<String>()
                                                 );
 
-                                                // Handle /new BEFORE channel lookup — creates a fresh channel
-                                                if inbound.text.starts_with("//new") {
+                                                // Handle $new or /new BEFORE channel lookup — creates a fresh channel
+                                                if inbound.text.starts_with("$new") || inbound.text.starts_with("//new") {
                                                     let reply = match crate::commands::handle_new_external(
                                                         &pool,
                                                         &plugin_name,

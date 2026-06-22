@@ -50,6 +50,7 @@ pub fn parse_model_command(input: &str) -> Result<ModelCommand> {
     let trimmed = input.trim();
     let rest = trimmed.strip_prefix("//model")
         .or_else(|| trimmed.strip_prefix("/model"))
+        .or_else(|| trimmed.strip_prefix("$model"))
         .unwrap_or(trimmed)
         .trim();
 
@@ -89,14 +90,14 @@ pub fn parse_model_command(input: &str) -> Result<ModelCommand> {
             }
             _ => {
                 anyhow::bail!(
-                    "Unknown reset target '{}'. Use: /model reset, /model reset provider, /model reset model",
+                    "Unknown reset target '{}'. Use: $model reset, $model reset provider, $model reset model",
                     target
                 );
             }
         }
     }
 
-    // `/model <provider>` or `/model <provider> <model>`
+    // `$model <provider>` or `$model <provider> <model>`
     let parts: Vec<&str> = rest.split_whitespace().collect();
     match parts.len() {
         1 => Ok(ModelCommand {
@@ -163,6 +164,7 @@ pub fn parse_new_command(input: &str) -> Result<NewCommand> {
     let trimmed = input.trim();
     let rest = trimmed.strip_prefix("//new")
         .or_else(|| trimmed.strip_prefix("/new"))
+        .or_else(|| trimmed.strip_prefix("$new"))
         .unwrap_or(trimmed)
         .trim();
     if !rest.is_empty() {
@@ -196,6 +198,7 @@ pub fn parse_channel_command(input: &str) -> Result<ChannelCommand> {
     let trimmed = input.trim();
     let rest = trimmed.strip_prefix("//channel")
         .or_else(|| trimmed.strip_prefix("/channel"))
+        .or_else(|| trimmed.strip_prefix("$channel"))
         .unwrap_or(trimmed)
         .trim();
     if rest.is_empty() {
@@ -233,6 +236,7 @@ pub fn parse_profile_command(input: &str) -> Result<ProfileCommand> {
     let trimmed = input.trim();
     let rest = trimmed.strip_prefix("//profile")
         .or_else(|| trimmed.strip_prefix("/profile"))
+        .or_else(|| trimmed.strip_prefix("$profile"))
         .unwrap_or(trimmed)
         .trim();
     if rest.is_empty() {

@@ -170,6 +170,72 @@ impl MattermostClient {
         Ok(user)
     }
 
+    /// Get teams a user is a member of.
+    async fn get_teams(&self, user_id: &str) -> Result<Vec<MattermostTeam>> {
+        let resp = self
+            .http_client
+            .get(format!(
+                "{}/api/v4/users/{}/teams",
+                self.api_base, user_id
+            ))
+            .header("Authorization", &self.auth_header)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let body: Value = resp
+            .json()
+            .await
+            .context("Failed to parse getTeams response")?;
+
+        if !status.is_success() {
+            let msg = body["message"].as_str().unwrap_or("unknown error");
+            return Err(anyhow::anyhow!(
+                "Mattermost getTeams failed ({}): {}",
+                status,
+                msg
+            ));
+        }
+
+        let teams: Vec<MattermostTeam> = serde_json::from_value(body)
+            .context("Failed to parse Mattermost teams")?;
+
+        Ok(teams)
+    }
+
+    /// Get channels a user is a member of in a specific team.
+    async fn get_user_channels(&self, user_id: &str, team_id: &str) -> Result<Vec<MattermostChannel>> {
+        let resp = self
+            .http_client
+            .get(format!(
+                "{}/api/v4/users/{}/teams/{}/channels",
+                self.api_base, user_id, team_id
+            ))
+            .header("Authorization", &self.auth_header)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let body: Value = resp
+            .json()
+            .await
+            .context("Failed to parse getUserChannels response")?;
+
+        if !status.is_success() {
+            let msg = body["message"].as_str().unwrap_or("unknown error");
+            return Err(anyhow::anyhow!(
+                "Mattermost getUserChannels failed ({}): {}",
+                status,
+                msg
+            ));
+        }
+
+        let channels: Vec<MattermostChannel> = serde_json::from_value(body)
+            .context("Failed to parse Mattermost channels")?;
+
+        Ok(channels)
+    }
+
     /// Get posts for a channel, ordered by create_at descending.
     /// Returns up to `per_page` posts.
     async fn get_channel_posts(
@@ -270,6 +336,27 @@ struct MattermostUser {
     username: String,
     #[serde(default)]
     is_bot: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MattermostTeam {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MattermostChannel {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(rename = "type")]
+    #[serde(default)]
+    channel_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -397,17 +484,13 @@ async fn main() -> Result<()> {
     let _bot_username = std::env::var("MATTERMOST_BOT_USERNAME")
         .unwrap_or_else(|_| "omniagent".to_string());
 
-    // Parse comma-separated channel IDs to watch
-    let channel_ids_str = std::env::var("MATTERMOST_CHANNEL_IDS").unwrap_or_default();
-    let channel_ids: Vec<String> = if channel_ids_str.is_empty() {
-        vec![]
-    } else {
-        channel_ids_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    };
+    // Optional manual channel overrides (merged with auto-discovered channels)
+    let manual_channel_ids: Vec<String> = std::env::var("MATTERMOST_CHANNEL_IDS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     let client = MattermostClient::new(&server_url, &access_token);
 
@@ -427,6 +510,24 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Auto-discover channels the bot is a member of
+    let initial_channels = discover_channels(&client, &bot_user.id).await;
+    let mut channel_ids: Vec<String> = initial_channels;
+    // Merge manual overrides
+    for ch_id in &manual_channel_ids {
+        if !channel_ids.contains(ch_id) {
+            channel_ids.push(ch_id.clone());
+        }
+    }
+
+    if !channel_ids.is_empty() {
+        tracing::info!(
+            "Watching {} channel(s): {}",
+            channel_ids.len(),
+            channel_ids.join(", ")
+        );
+    }
+
     // Stdin/stdout for the protocol
     let stdin = tokio::io::stdin();
     let reader = BufReader::new(stdin);
@@ -437,55 +538,100 @@ async fn main() -> Result<()> {
 
     // ── Inbound (polling or WebSocket) ──────────────────────────────────
     let use_websocket = connection_mode == "websocket";
-    let inbound_handle = if !channel_ids.is_empty() || use_websocket {
+    let inbound_handle: Option<tokio::task::JoinHandle<()>> = if use_websocket {
+        let bot_id = bot_user.id.clone();
+        Some(tokio::spawn(async move {
+            ws_event_loop(
+                server_url,
+                access_token,
+                channel_ids,
+                bot_id,
+            ).await;
+        }))
+    } else if polling_enabled {
         let client = MattermostClient::new(&server_url, &access_token);
         let bot_id = bot_user.id.clone();
 
-        if use_websocket {
-            Some(tokio::spawn(async move {
-                ws_event_loop(
-                    server_url,
-                    access_token,
-                    channel_ids,
-                    bot_id,
-                ).await;
-            }))
-        } else if polling_enabled && !channel_ids.is_empty() {
+        // Manual override channels for periodic re-merge
+        let manual_ids = manual_channel_ids;
+
+        Some(tokio::spawn(async move {
+            // Shared state: the channel list, periodically refreshed
+            let mut current_ids: Vec<String> = channel_ids;
+            let mut last_discovery: Vec<String> = current_ids.clone();
+
+            // Cursor tracking: oldest create_at seen per channel
             let mut last_create_at: HashMap<String, i64> = HashMap::new();
             let mut bot_cache: HashMap<String, bool> = HashMap::new();
             bot_cache.insert(bot_id.clone(), true);
 
-            Some(tokio::spawn(async move {
-                // Initialize cursors for all channels
-                for ch_id in &channel_ids {
-                    init_channel_cursor(&client, ch_id, &mut last_create_at).await;
-                }
+            // Initialize cursors for all channels
+            for ch_id in &current_ids {
+                init_channel_cursor(&client, ch_id, &mut last_create_at).await;
+            }
 
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(polling_interval_secs)).await;
+            let mut refresh_counter: u64 = 0;
+            let refresh_interval: u64 = 4; // refresh discovery every N poll cycles
 
-                    for ch_id in &channel_ids {
-                        let count = poll_channel(
-                            &client, ch_id, &bot_id,
-                            &mut last_create_at, &mut bot_cache,
-                        ).await;
-                        if count > 0 {
-                            tracing::debug!(
-                                "Polling: processed {} new post(s) in channel {}",
-                                count, ch_id
-                            );
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(polling_interval_secs)).await;
+
+                // Periodically refresh channel discovery (every N cycles)
+                refresh_counter += 1;
+                if refresh_counter >= refresh_interval {
+                    refresh_counter = 0;
+
+                    // Discover channels the bot is currently a member of
+                    let discovered = discover_channels(&client, &bot_id).await;
+
+                    // Merge with manual overrides
+                    let mut merged = discovered.clone();
+                    for ch_id in &manual_ids {
+                        if !merged.contains(ch_id) {
+                            merged.push(ch_id.clone());
                         }
                     }
+
+                    // Detect new channels since last refresh
+                    for ch_id in &merged {
+                        if !last_discovery.contains(ch_id) {
+                            tracing::info!(
+                                "Discovered new channel {}, initializing cursor",
+                                ch_id
+                            );
+                            if !last_create_at.contains_key(ch_id.as_str()) {
+                                init_channel_cursor(&client, ch_id, &mut last_create_at).await;
+                            }
+                        }
+                    }
+
+                    // Detect removed channels
+                    for ch_id in &last_discovery {
+                        if !merged.contains(ch_id) && !manual_ids.contains(ch_id) {
+                            tracing::info!("Channel {} no longer accessible, removing", ch_id);
+                            last_create_at.remove(ch_id.as_str());
+                        }
+                    }
+
+                    current_ids = merged;
+                    last_discovery = current_ids.clone();
                 }
-            }))
-        } else {
-            if polling_enabled && channel_ids.is_empty() {
-                tracing::warn!(
-                    "Polling enabled but no channel IDs configured. Set MATTERMOST_CHANNEL_IDS."
-                );
+
+                // Poll all known channels
+                for ch_id in &current_ids {
+                    let count = poll_channel(
+                        &client, ch_id, &bot_id,
+                        &mut last_create_at, &mut bot_cache,
+                    ).await;
+                    if count > 0 {
+                        tracing::debug!(
+                            "Polling: processed {} new post(s) in channel {}",
+                            count, ch_id
+                        );
+                    }
+                }
             }
-            None
-        }
+        }))
     } else {
         None
     };
@@ -881,6 +1027,41 @@ async fn init_channel_cursor(
             );
         }
     }
+}
+
+/// Auto-discover all channels the bot is a member of across all teams.
+async fn discover_channels(client: &MattermostClient, bot_id: &str) -> Vec<String> {
+    let mut channel_ids: Vec<String> = Vec::new();
+
+    let teams = match client.get_teams(bot_id).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("Failed to discover teams: {:?}", e);
+            return channel_ids;
+        }
+    };
+
+    for team in &teams {
+        match client.get_user_channels(bot_id, &team.id).await {
+            Ok(channels) => {
+                for ch in &channels {
+                    channel_ids.push(ch.id.clone());
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to discover channels for team {} ({}): {:?}",
+                    team.display_name,
+                    team.id,
+                    e
+                );
+            }
+        }
+    }
+
+    channel_ids.sort();
+    channel_ids.dedup();
+    channel_ids
 }
 
 /// Build the WebSocket URL from the HTTP(S) server URL.
