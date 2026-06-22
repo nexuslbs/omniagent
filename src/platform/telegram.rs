@@ -499,6 +499,24 @@ async fn inbound_polling_loop(
                                 text.chars().take(100).collect::<String>()
                             );
 
+                            // Check for /model command
+                            if text.starts_with("/model") {
+                                if let Err(e) = handle_telegram_model_command(
+                                    &bot,
+                                    &pool,
+                                    &msg_chat_id_str,
+                                    channel.id,
+                                    &text,
+                                ).await {
+                                    tracing::error!(
+                                        "Failed to handle /model command from {}: {:?}",
+                                        msg_chat_id_str,
+                                        e
+                                    );
+                                }
+                                continue;
+                            }
+
                             // Insert as a new thread into the DB
                             if let Err(e) = insert_inbound_message(&pool, channel.id, &text, telegram_msg_id).await {
                                 tracing::error!("Failed to insert inbound message: {:?}", e);
@@ -607,6 +625,83 @@ async fn insert_inbound_message(
         telegram_msg_id
     );
 
+    Ok(())
+}
+
+/// Handle a `/model` command received via Telegram.
+async fn handle_telegram_model_command(
+    bot: &TelegramBotClient,
+    pool: &sqlx::PgPool,
+    chat_id: &str,
+    channel_id: i64,
+    text: &str,
+) -> anyhow::Result<()> {
+    let parsed = match crate::commands::parse_model_command(text) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            let msg = format!("Error: {}", e);
+            if let Err(send_err) = bot.send_message(chat_id, &msg, None, None, false).await {
+                tracing::warn!("Failed to send error reply to {}: {:?}", chat_id, send_err);
+            }
+            return Ok(());
+        }
+    };
+
+    let reply = match parsed.action {
+        crate::commands::ModelAction::Show => {
+            match crate::db::types::get_channel_by_id(pool, channel_id).await? {
+                Some(ch) => crate::commands::format_model_status(
+                    ch.current_provider.as_deref(),
+                    ch.current_model.as_deref(),
+                ),
+                None => "Channel not found.".to_string(),
+            }
+        }
+        crate::commands::ModelAction::Set { provider, model } => {
+            // Validate provider if provided
+            if let Some(ref p) = provider {
+                if !p.is_empty() {
+                    if let Err(e) = crate::commands::validate_provider(pool, p).await {
+                        let msg = format!("Error: {}", e);
+                        if let Err(send_err) = bot.send_message(chat_id, &msg, None, None, false).await {
+                            tracing::warn!("Failed to send error reply to {}: {:?}", chat_id, send_err);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+
+            let update_provider = provider.as_deref();
+            let update_model = model.as_deref();
+            crate::db::types::update_channel_model(pool, channel_id, update_provider, update_model).await?;
+
+            let provider_display = update_provider.unwrap_or("(unchanged)");
+            let model_display = update_model.unwrap_or("(unchanged)");
+            format!(
+                "✅ Channel updated — provider: {}, model: {}",
+                provider_display, model_display
+            )
+        }
+        crate::commands::ModelAction::Reset { provider, model } => {
+            let update_provider = if provider { Some("") } else { None };
+            let update_model = if model { Some("") } else { None };
+            crate::db::types::update_channel_model(pool, channel_id, update_provider, update_model).await?;
+
+            let parts = vec![
+                if provider { "provider" } else { "" },
+                if model { "model" } else { "" },
+            ];
+            let parts: Vec<&str> = parts.into_iter().filter(|s| !s.is_empty()).collect();
+            format!(
+                "✅ Channel {} reset — will fall back to profile/env defaults.",
+                parts.join(" and ")
+            )
+        }
+    };
+
+    if let Err(e) = bot.send_message(chat_id, &reply, None, None, false).await {
+        tracing::warn!("Failed to send /model reply to {}: {:?}", chat_id, e);
+    }
     Ok(())
 }
 

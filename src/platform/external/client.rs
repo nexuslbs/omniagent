@@ -357,6 +357,39 @@ impl Platform for ExternalPlatformClient {
                                                     &inbound.resource_identifier,
                                                 ).await {
                                                     Ok(Some(channel)) => {
+                                                        // Check for /model command
+                                                        if inbound.text.starts_with("/model") {
+                                                            let reply = handle_external_model_command(
+                                                                &pool,
+                                                                channel.id,
+                                                                &inbound.text,
+                                                            ).await;
+                                                            let deliver_params = crate::platform::external::DeliverParams {
+                                                                resource_identifier: inbound.resource_identifier.clone(),
+                                                                content: reply,
+                                                                msg_type: "message".to_string(),
+                                                                msg_subtype: None,
+                                                                thread_id: 0,
+                                                                cause_external_id: Some(inbound.external_id),
+                                                                is_summary: false,
+                                                                is_user_thread: false,
+                                                            };
+                                                            let id = next_id_val;
+                                                            next_id_val += 1;
+                                                            let req = crate::platform::external::build_deliver_request(id, &deliver_params);
+                                                            if let Err(e) = stdin.write_all(req.as_bytes()).await {
+                                                                tracing::error!(
+                                                                    "Failed to write /model reply to plugin '{}': {:?}",
+                                                                    plugin_name,
+                                                                    e
+                                                                );
+                                                            }
+                                                            if let Err(e) = stdin.write_all(b"\n").await {
+                                                                tracing::error!("Failed to write newline: {:?}", e);
+                                                            }
+                                                            continue;
+                                                        }
+
                                                         if let Ok(thread) = crate::db::types::create_thread(
                                                             &pool,
                                                             "user",
@@ -469,6 +502,74 @@ impl Platform for ExternalPlatformClient {
             self.config.name
         );
         Ok(())
+    }
+}
+
+/// Handle a `/model` command received via an external platform plugin.
+/// Returns the reply text to deliver back to the user.
+async fn handle_external_model_command(
+    pool: &sqlx::PgPool,
+    channel_id: i64,
+    text: &str,
+) -> String {
+    let parsed = match crate::commands::parse_model_command(text) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            return format!("Error: {}", e);
+        }
+    };
+
+    match parsed.action {
+        crate::commands::ModelAction::Show => {
+            let channel = match crate::db::types::get_channel_by_id(pool, channel_id).await {
+                Ok(Some(ch)) => ch,
+                _ => return "Channel not found.".to_string(),
+            };
+            crate::commands::format_model_status(
+                channel.current_provider.as_deref(),
+                channel.current_model.as_deref(),
+            )
+        }
+        crate::commands::ModelAction::Set { provider, model } => {
+            // Validate provider if provided
+            if let Some(ref p) = provider {
+                if !p.is_empty() {
+                    if let Err(e) = crate::commands::validate_provider(pool, p).await {
+                        return format!("Error: {}", e);
+                    }
+                }
+            }
+
+            let update_provider = provider.as_deref();
+            let update_model = model.as_deref();
+            if let Err(e) = crate::db::types::update_channel_model(pool, channel_id, update_provider, update_model).await {
+                return format!("Error updating channel: {}", e);
+            }
+
+            let provider_display = update_provider.unwrap_or("(unchanged)");
+            let model_display = update_model.unwrap_or("(unchanged)");
+            format!(
+                "Channel updated — provider: {}, model: {}",
+                provider_display, model_display
+            )
+        }
+        crate::commands::ModelAction::Reset { provider, model } => {
+            let update_provider = if provider { Some("") } else { None };
+            let update_model = if model { Some("") } else { None };
+            if let Err(e) = crate::db::types::update_channel_model(pool, channel_id, update_provider, update_model).await {
+                return format!("Error resetting channel: {}", e);
+            }
+
+            let parts = vec![
+                if provider { "provider" } else { "" },
+                if model { "model" } else { "" },
+            ];
+            let parts: Vec<&str> = parts.into_iter().filter(|s| !s.is_empty()).collect();
+            format!(
+                "Channel {} reset — will fall back to profile/env defaults.",
+                parts.join(" and ")
+            )
+        }
     }
 }
 

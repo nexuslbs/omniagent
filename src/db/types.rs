@@ -946,6 +946,65 @@ pub async fn update_channel_platform(
     })
 }
 
+/// Update a channel's provider and/or model by its stable channel ID.
+///
+/// Only non-None fields are updated (partial update). Pass `None` to leave
+/// the current value unchanged, or `Some("")` to clear it to NULL.
+pub async fn update_channel_model(
+    pool: &PgPool,
+    channel_id: i64,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> anyhow::Result<()> {
+    // Build a dynamic UPDATE using COALESCE to preserve existing values
+    // for any parameter that is None.
+    let set_provider = provider.map(|p| {
+        if p.is_empty() {
+            "NULL::text".to_string()
+        } else {
+            format!("'{}'", p.replace('\'', "''"))
+        }
+    });
+    let set_model = model.map(|m| {
+        if m.is_empty() {
+            "NULL::text".to_string()
+        } else {
+            format!("'{}'", m.replace('\'', "''"))
+        }
+    });
+
+    let provider_sql = set_provider
+        .map(|v| format!("current_provider = {}", v))
+        .unwrap_or_default();
+    let model_sql = set_model
+        .map(|v| format!("current_model = {}", v))
+        .unwrap_or_default();
+
+    let mut sets = Vec::new();
+    if !provider_sql.is_empty() {
+        sets.push(provider_sql);
+    }
+    if !model_sql.is_empty() {
+        sets.push(model_sql);
+    }
+
+    if sets.is_empty() {
+        return Ok(());
+    }
+
+    let sql = format!(
+        "UPDATE channels SET {}, updated_at = NOW() WHERE id = $1",
+        sets.join(", ")
+    );
+
+    sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
+        .bind(channel_id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Channel open/close/status queries
 // ---------------------------------------------------------------------------

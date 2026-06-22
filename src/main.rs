@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 mod agent;
+mod commands;
 mod config;
 mod context_builder;
 mod db;
@@ -584,6 +585,10 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                         println!("  - {} (channel_id={})", ch_name, sub.channel_id);
                     }
                 }
+                continue;
+            }
+            cmd if cmd.starts_with("/model") => {
+                handle_cli_model_command(&pool, cmd, current_channel_id).await?;
                 continue;
             }
             _ => {}
@@ -1357,6 +1362,83 @@ async fn handle_usage_command(pool: &PgPool) -> anyhow::Result<()> {
     );
     println!("└─────────────────────────────────────────────────────────");
     println!();
+
+    Ok(())
+}
+
+/// Handle the `/model` command in the CLI.
+async fn handle_cli_model_command(
+    pool: &PgPool,
+    input: &str,
+    channel_id: i64,
+) -> anyhow::Result<()> {
+    let parsed = match commands::parse_model_command(input) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            println!("Error: {}", e);
+            return Ok(());
+        }
+    };
+
+    match parsed.action {
+        commands::ModelAction::Show => {
+            let channel = match db::types::get_channel_by_id(pool, channel_id).await? {
+                Some(ch) => ch,
+                None => {
+                    println!("Channel not found.");
+                    return Ok(());
+                }
+            };
+            println!(
+                "{}",
+                commands::format_model_status(
+                    channel.current_provider.as_deref(),
+                    channel.current_model.as_deref(),
+                )
+            );
+        }
+        commands::ModelAction::Set { provider, model } => {
+            // Validate provider if provided
+            if let Some(ref p) = provider {
+                if !p.is_empty() {
+                    match commands::validate_provider(pool, p).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            println!("Error: {}", e);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
+            // For CLI, update provider and model: pass Some("") to clear, None to skip
+            let update_provider = provider.as_deref();
+            let update_model = model.as_deref();
+
+            db::types::update_channel_model(pool, channel_id, update_provider, update_model).await?;
+
+            let provider_display = update_provider.unwrap_or("(unchanged)");
+            let model_display = update_model.unwrap_or("(unchanged)");
+            println!(
+                "Channel model updated — provider: {}, model: {}",
+                provider_display, model_display
+            );
+        }
+        commands::ModelAction::Reset { provider, model } => {
+            // Pass empty string to clear to NULL
+            let update_provider = if provider { Some("") } else { None };
+            let update_model = if model { Some("") } else { None };
+
+            db::types::update_channel_model(pool, channel_id, update_provider, update_model).await?;
+
+            let parts = vec![
+                if provider { "provider" } else { "" },
+                if model { "model" } else { "" },
+            ];
+            let parts: Vec<&str> = parts.into_iter().filter(|s| !s.is_empty()).collect();
+            println!("Channel {} reset — will fall back to profile/env defaults.", parts.join(" and "));
+        }
+    }
 
     Ok(())
 }
