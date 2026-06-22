@@ -1344,6 +1344,68 @@ pub async fn delete_old_summaries(
     Ok(result.rows_affected())
 }
 
+/// Get the latest seq-0 message in a channel (for context preview).
+pub async fn get_latest_seq0_message(
+    pool: &PgPool,
+    channel_id: i64,
+) -> anyhow::Result<Option<Message>> {
+    #[derive(Debug, sqlx::FromRow)]
+    struct IdContent {
+        id: i64,
+        content: String,
+    }
+    let row: Option<IdContent> = sqlx::query_as(
+        r#"
+        SELECT m.id, m.content
+        FROM messages m
+        JOIN threads t ON t.id = m.thread_id
+        WHERE t.channel_id = $1
+          AND m.thread_sequence = 0
+        ORDER BY m.id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some(r) => Ok(Some(Message {
+            id: r.id,
+            content: r.content,
+            thread_id: 0,
+            role: String::new(),
+            thread_sequence: 0,
+            external_id: None,
+            metadata: serde_json::Value::Null,
+            embedding: None,
+            summary_text: None,
+            is_summary: false,
+            msg_type: String::new(),
+            msg_subtype: None,
+            created_at: chrono::Utc::now(),
+            processing_time_ms: None,
+            token_usage: None,
+        })),
+        None => Ok(None),
+    }
+}
+
+/// Get the thread ID for a given message.
+pub async fn get_message_thread(
+    pool: &PgPool,
+    message_id: i64,
+) -> anyhow::Result<Option<i64>> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT thread_id FROM messages WHERE id = $1",
+    )
+    .bind(message_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| r.0))
+}
+
 pub fn search_wiki_text(wiki_dir: &str, query: &str, limit: usize) -> Vec<(String, String, String)> {
     use std::fs;
     let query_lower = query.to_lowercase();

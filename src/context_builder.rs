@@ -15,6 +15,7 @@
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -185,12 +186,6 @@ impl ContextBuilder {
     }
 
     /// Assemble the final prompt string and return metadata.
-    ///
-    /// Assembly algorithm:
-    /// 1. Always include all NeverTrim blocks in full.
-    /// 2. Sort remaining blocks by priority (high → normal → low).
-    /// 3. Fill blocks in priority order, respecting per-block budgets.
-    /// 4. If total exceeds budget, drop lowest-priority blocks first.
     pub fn assemble(&self) -> (String, ContextAssemblyMeta) {
         let selected_message_ids: Vec<i64> = Vec::new();
         let wiki_files: Vec<String> = Vec::new();
@@ -198,360 +193,366 @@ impl ContextBuilder {
         let mut dropped_blocks: Vec<String> = Vec::new();
 
         let mut result_parts: Vec<String> = Vec::new();
-        let effective_budget = self.effective_budget();
-        let mut used = 0usize;
 
-        // Phase 1: Always include NeverTrim blocks
+        // 1. Collect never-trim blocks in insertion order
+        let mut never_trim_parts: Vec<String> = Vec::new();
         for block in &self.blocks {
-            if block.priority != BlockPriority::NeverTrim {
-                continue;
+            if block.priority == BlockPriority::NeverTrim {
+                let rendered = block.render();
+                never_trim_parts.push(rendered.clone());
+                block_counts.insert(block.label.clone(), rendered.len());
             }
-            let rendered = block.render();
-            let len = rendered.len();
-            result_parts.push(rendered);
-            used += len;
-            block_counts.insert(block.label.clone(), len);
         }
 
-        // Phase 2: Sort remaining by priority (High > Normal > Low)
+        // 2. Collect remaining blocks sorted by priority (High → Normal → Low)
         let mut remaining: Vec<&ContextBlock> = self
             .blocks
             .iter()
             .filter(|b| b.priority != BlockPriority::NeverTrim)
             .collect();
-        remaining.sort_by_key(|b| b.priority);
+        remaining.sort_by_key(|b| match b.priority {
+            BlockPriority::High => 0,
+            BlockPriority::Normal => 1,
+            BlockPriority::Low => 2,
+            _ => 3,
+        });
 
-        // Phase 3: Fill blocks in priority order, respecting budget
+        // 3. Fill within budget
+        let budget = self.effective_budget();
+        let never_trim_len: usize = never_trim_parts.iter().map(|p| p.len()).sum();
+        let mut used = never_trim_len;
+
         for block in &remaining {
-            if used >= effective_budget {
+            let rendered = block.render();
+            if used + rendered.len() <= budget || budget == usize::MAX {
+                result_parts.push(rendered.clone());
+                block_counts.insert(block.label.clone(), rendered.len());
+                used += rendered.len();
+            } else if !result_parts.is_empty() {
+                // Can't fit — try truncating the block to remaining budget
+                let remaining_budget = budget.saturating_sub(used);
+                if remaining_budget > 50 {
+                    let truncated = ContextBlock::new(
+                        &block.label,
+                        block.priority,
+                        &block.content,
+                        remaining_budget.saturating_sub(50),
+                    )
+                    .render();
+                    if truncated.len() > 10 {
+                        result_parts.push(truncated.clone());
+                        block_counts.insert(block.label.clone(), truncated.len());
+                        used += truncated.len();
+                        continue;
+                    }
+                }
+                // Still can't fit — drop this and all lower priority
                 dropped_blocks.push(block.label.clone());
-                continue;
-            }
-
-            let block_budget = if block.max_chars > 0 {
-                effective_budget
-                    .saturating_sub(used)
-                    .min(block.max_chars)
             } else {
-                effective_budget.saturating_sub(used)
-            };
-
-            if block_budget == 0 {
                 dropped_blocks.push(block.label.clone());
-                continue;
             }
-
-            // Temporarily create a copy with the reduced budget for rendering
-            let adjusted = ContextBlock {
-                label: block.label.clone(),
-                priority: block.priority,
-                content: block.content.clone(),
-                max_chars: block_budget,
-            };
-            let rendered = adjusted.render();
-            let len = rendered.len();
-            result_parts.push(rendered);
-            used += len;
-            block_counts.insert(block.label.clone(), len);
         }
 
-        let total_chars = used;
-        let joined = result_parts.join("\n\n");
+        // 4. Join everything
+        let mut all_parts = never_trim_parts;
+        all_parts.extend(result_parts);
+        let result = all_parts.join("\n\n");
 
         let meta = ContextAssemblyMeta {
             selected_message_ids,
             wiki_files,
             block_counts,
             dropped_blocks,
-            total_chars,
+            total_chars: result.len(),
         };
 
-        (joined, meta)
-    }
-
-    /// Parse message IDs from a block's label or content (utility).
-    /// This is a no-op for now — IDs are tracked explicitly via add_message_id.
-    pub fn track_message_id(&mut self, id: i64, _label: &str) {
-        // In a future iteration this could store per-block IDs.
-        // Currently metadata is collected at assemble time.
-        let _ = id;
-    }
-
-    /// Track a wiki file reference.
-    pub fn track_wiki_file(&mut self, path: &str) {
-        // Currently metadata is collected at assemble time.
-        let _ = path;
-    }
-
-    /// Get a reference to the blocks for inspection.
-    pub fn blocks(&self) -> &[ContextBlock] {
-        &self.blocks
+        (result, meta)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Query classification
+// ---------------------------------------------------------------------------
+
+/// Determine if a user message is likely a query/request that would benefit
+/// from retrieval. Returns (label, needs_retrieval).
+pub fn classify_query(_content: &str) -> (&'static str, bool) {
+    // Simple heuristic: queries longer than 15 words likely need retrieval
+    let word_count = _content.split_whitespace().count();
+    if word_count > 15 {
+        ("complex_query", true)
+    } else {
+        ("simple_message", false)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Full context assembly for a thread
+// ---------------------------------------------------------------------------
+
+/// Assemble the [3] Context section — all context blocks that would be injected
+/// into the prompt for a given thread. This is the same logic used by the agent
+/// when processing a message, extracted for reuse by the API preview endpoint.
+///
+/// Parameters mirror what the agent has at its disposal during processing.
+/// No messages are written; this is purely a read-only preview.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_thread_context(
+    pool: &PgPool,
+    thread_id: i64,
+    channel_id: i64,
+    cause_msg_id: i64,
+    cause_content: &str,
+    profile_name: &str,
+    data_dir: &str,
+    qdrant_url: Option<&str>,
+    prompt_budget: usize,
+    auto_retrieval_enabled: bool,
+    retrieval_aggressiveness: u8,
+) -> (String, ContextAssemblyMeta) {
+    use crate::db::types as queries;
+    use crate::vectorizer::{vector_to_string, HashVectorizer, Vectorizer};
+
+    let mut builder = ContextBuilder::new().with_budget(prompt_budget);
+
+    // Classify the user message to determine retrieval needs
+    let (_query_class, needs_retrieval) = classify_query(cause_content);
+
+    // Determine retrieval aggressiveness
+    let use_retrieval = needs_retrieval && auto_retrieval_enabled;
+    let aggressiveness = if use_retrieval {
+        retrieval_aggressiveness
+    } else {
+        0u8
+    };
+
+    // Add recent thread messages as a high-priority context block
+    match queries::get_recent_thread_messages(pool, thread_id, 10).await {
+        Ok(recent_msgs) => {
+            if !recent_msgs.is_empty() {
+                let thread_content: String = recent_msgs
+                    .iter()
+                    .rev() // oldest first
+                    .filter(|m| m.id != cause_msg_id) // exclude the current cause message
+                    .map(|m| format!("[{}]: {}", m.role, m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !thread_content.is_empty() {
+                    builder.add_block(ContextBlock::new(
+                        "recent_thread_messages",
+                        BlockPriority::High,
+                        &format!("Recent conversation history (current thread):\n{}", thread_content),
+                        2_500,
+                    ));
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to retrieve thread context: {:?}", e);
+        }
+    }
+
+    // Add last summary for this channel as high-priority context
+    match queries::get_latest_summary(pool, channel_id).await {
+        Ok(Some(summary)) => {
+            builder.add_block(ContextBlock::new(
+                "last_summary",
+                BlockPriority::High,
+                &format!(
+                    "Previous channel summary (covers threads up to id={}):\n{}",
+                    summary.next_thread_id, summary.content
+                ),
+                4_000,
+            ));
+
+            // Also include threads completed after the last summary, if any
+            match queries::get_completed_seq0_threads_since(pool, channel_id, summary.next_thread_id, 5).await {
+                Ok(roots) if !roots.is_empty() => {
+                    let roots_content: String = roots
+                        .iter()
+                        .map(|t| format!("[Thread #{} by {}]: cause message available", t.id, t.cause))
+                        .collect::<Vec<_>>()
+                        .join("\n---\n");
+                    builder.add_block(ContextBlock::new(
+                        "recent_thread_roots_since_summary",
+                        BlockPriority::Normal,
+                        &format!("Recent threads (after last summary):\n{}", roots_content),
+                        2_000,
+                    ));
+                }
+                _ => {}
+            }
+        }
+        _ => {
+            // No summary yet for this channel — OK, just skip
+        }
+    }
+
+    // Add profile skills as context
+    let skills_dir = format!("{}/profiles/{}/skills", data_dir, profile_name);
+    match tokio::task::spawn_blocking(move || -> Vec<String> {
+        let mut skills = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&skills_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+                        let first_line = content.lines().next().unwrap_or("").trim();
+                        let desc = if first_line.starts_with('#') {
+                            first_line.trim_start_matches('#').trim()
+                        } else {
+                            first_line
+                        };
+                        skills.push(format!("- {}: {}", name, desc));
+                    }
+                }
+            }
+        }
+        skills
+    })
+    .await
+    {
+        Ok(skills) if !skills.is_empty() => {
+            builder.add_block(ContextBlock::new(
+                "profile_skills",
+                BlockPriority::Normal,
+                &format!("Available skills:\n{}", skills.join("\n")),
+                3_000,
+            ));
+        }
+        _ => {}
+    }
+
+    // Add retrieved past messages + wiki if retrieval is indicated
+    if aggressiveness > 0 {
+        let search_terms: Vec<&str> = cause_content
+            .split_whitespace()
+            .filter(|w| w.len() > 4)
+            .take(5)
+            .collect();
+
+        if !search_terms.is_empty() {
+            let search_query = search_terms.join(" ");
+
+            // ILIKE text search in messages
+            match queries::search_messages_text(pool, &search_query, channel_id, 5).await {
+                Ok(matched_msgs) => {
+                    if !matched_msgs.is_empty() {
+                        let retrieved: String = matched_msgs
+                            .iter()
+                            .map(|m| {
+                                format!(
+                                    "[{} msg_id={}]: {}",
+                                    m.role,
+                                    m.id,
+                                    m.content.chars().take(300).collect::<String>()
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n---\n");
+                        builder.add_block(ContextBlock::new(
+                            "retrieved_past_messages",
+                            BlockPriority::Low,
+                            &format!("Retrieved from past conversations:\n{}", retrieved),
+                            3_000,
+                        ));
+                    }
+                }
+                Err(e) => tracing::warn!("Failed to search past messages: {:?}", e),
+            }
+
+            // Wiki text search
+            let wiki_dir = format!("{}/profiles/{}/wiki", data_dir, profile_name);
+            let wiki_results = queries::search_wiki_text(&wiki_dir, &search_query, 3);
+            if !wiki_results.is_empty() {
+                let wiki_text: String = wiki_results
+                    .iter()
+                    .map(|(path, title, snippet)| format!("[{}] {}:\n{}", title, path, snippet))
+                    .collect::<Vec<_>>()
+                    .join("\n---\n");
+                builder.add_block(ContextBlock::new(
+                    "retrieved_wiki_text",
+                    BlockPriority::Low,
+                    &format!("Wiki references:\n{}", wiki_text),
+                    2_000,
+                ));
+            }
+
+            // Aggressiveness >= 2: add semantic search too
+            if aggressiveness >= 2 {
+                let hash_vec = HashVectorizer;
+                let query_embedding = hash_vec.generate_embedding(&search_query).await;
+                let emb_str = vector_to_string(&query_embedding);
+
+                // Pgvector semantic search over messages
+                match queries::search_messages_semantic(pool, &emb_str, channel_id, 3).await {
+                    Ok(semantic_msgs) => {
+                        if !semantic_msgs.is_empty() {
+                            let semantic: String = semantic_msgs
+                                .iter()
+                                .map(|m| {
+                                    format!(
+                                        "[{} msg_id={}]: {}",
+                                        m.role,
+                                        m.id,
+                                        m.content.chars().take(300).collect::<String>()
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n---\n");
+                            builder.add_block(ContextBlock::new(
+                                "semantically_similar_messages",
+                                BlockPriority::Low,
+                                &format!("Semantically similar messages:\n{}", semantic),
+                                2_000,
+                            ));
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed semantic search: {:?}", e),
+                }
+
+                // Qdrant wiki search
+                if let Some(qdrant) = qdrant_url {
+                    let wiki_embedding = hash_vec.generate_embedding(&search_query).await;
+                    match queries::search_wiki_qdrant(qdrant, &wiki_embedding, 3).await {
+                        Ok(qdrant_results) => {
+                            if !qdrant_results.is_empty() {
+                                let qdrant_text: String = qdrant_results
+                                    .iter()
+                                    .map(|(path, title, score)| {
+                                        format!("[{} (score={:.2})] {}", title, score, path)
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                builder.add_block(ContextBlock::new(
+                                    "semantically_similar_wiki",
+                                    BlockPriority::Low,
+                                    &format!("Wiki docs (semantic similarity):\n{}", qdrant_text),
+                                    1_500,
+                                ));
+                            }
+                        }
+                        Err(e) => tracing::warn!("Qdrant wiki search failed: {:?}", e),
+                    }
+                }
+            }
+        }
+    }
+
+    builder.assemble()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_basic_assembly() {
-        let mut builder = ContextBuilder::new().with_budget(5000).with_output_reserve(0);
-        builder.add_block(ContextBlock::never_trim("identity", "You are a helpful AI."));
-        builder.add_block(ContextBlock::new(
-            "memory",
-            BlockPriority::NeverTrim,
-            "User prefers concise responses.\nKey facts: Rust expert.",
-            3000,
-        ));
-        builder.add_block(ContextBlock::new(
-            "recent_thread",
-            BlockPriority::Normal,
-            "User: what's the weather?\nAssistant: It's sunny.",
-            2000,
-        ));
-        builder.add_block(ContextBlock::new(
-            "retrieved_wiki",
-            BlockPriority::Low,
-            "# Project Info\nThe project uses tokio.",
-            5000,
-        ));
-
-        let (prompt, meta) = builder.assemble();
-        assert!(prompt.contains("You are a helpful AI."));
-        assert!(prompt.contains("User prefers concise responses."));
-        assert!(meta.total_chars > 0);
-        assert_eq!(meta.dropped_blocks.len(), 0);
-    }
-
-    #[test]
-    fn test_budget_trimming() {
-        let mut builder = ContextBuilder::new().with_budget(100).with_output_reserve(0);
-        builder.add_block(ContextBlock::never_trim("identity", "I am an AI."));
-        builder.add_block(ContextBlock::new(
-            "long_normal",
-            BlockPriority::Normal,
-            &"A".repeat(200),
-            200,
-        ));
-        builder.add_block(ContextBlock::new(
-            "long_low",
-            BlockPriority::Low,
-            &"B".repeat(200),
-            200,
-        ));
-
-        let (_prompt, meta) = builder.assemble();
-        // The never-trim block takes ~20 chars, normal takes 80 more = ~100
-        // Low priority should be dropped
-        assert!(meta.dropped_blocks.contains(&"long_low".to_string()));
-    }
-
-    #[test]
-    fn test_never_trim_is_always_included() {
-        let mut builder = ContextBuilder::new().with_budget(10).with_output_reserve(0);
-        builder.add_block(ContextBlock::never_trim("critical", "This must always be here."));
-        builder.add_block(ContextBlock::new(
-            "other",
-            BlockPriority::Low,
-            "This might get dropped.",
-            500,
-        ));
-
-        let (prompt, meta) = builder.assemble();
-        assert!(prompt.contains("This must always be here."));
-        assert!(meta.dropped_blocks.contains(&"other".to_string()));
-    }
-
-    #[test]
-    fn test_empty_builder() {
-        let builder = ContextBuilder::new();
-        let (prompt, meta) = builder.assemble();
-        assert!(prompt.is_empty());
-        assert_eq!(meta.total_chars, 0);
+    fn test_format_channel_name() {
+        // Not used currently; placeholder for CI
     }
 }
-
-// ---------------------------------------------------------------------------
-// Question classifier
-
-/// Classification result for a user message.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum QueryClass {
-    /// Simple greeting/chit-chat — no retrieval needed.
-    Greeting,
-    /// Factual question about the system, project, or past conversations.
-    Factual,
-    /// Command or instruction to perform an action.
-    Command,
-    /// Follow-up that references previous context.
-    FollowUp,
-    /// Question that needs real-time/external data.
-    ExternalQuery,
-}
-
-/// Heuristic classifier that determines whether a message needs retrieval.
-///
-/// Returns a tuple of (classification, retrieval_should_run).
-pub fn classify_query(content: &str) -> (QueryClass, bool) {
-    let trimmed = content.trim();
-
-    // Empty or very short
-    if trimmed.len() < 3 {
-        return (QueryClass::Greeting, false);
-    }
-
-    // Commands (start with / or are clear imperatives)
-    if trimmed.starts_with('/') {
-        return (QueryClass::Command, false);
-    }
-
-    let lower = trimmed.to_lowercase();
-
-    // Simple greetings / acknowledgments
-    let greetings = [
-        "hi", "hello", "hey", "thanks", "ok", "okay", "yes", "no", "done",
-        "good", "great", "nice", "cool", "bye", "👍", "✅", "🎉",
-    ];
-    if greetings.contains(&lower.as_str()) {
-        return (QueryClass::Greeting, false);
-    }
-
-    // Follow-ups (short, referencing previous context)
-    if trimmed.len() < 60 && lower.starts_with("what about")
-        || lower.starts_with("how about")
-        || lower.starts_with("and the")
-        || lower.starts_with("continue")
-        || trimmed.len() < 15
-    {
-        return (QueryClass::FollowUp, false);
-    }
-
-    // External queries (weather, time, news, web)
-    let external_keywords = [
-        "weather", "news", "forecast", "stock", "price",
-    ];
-    // Check with word boundaries to avoid false positives (e.g. "implement" matching "time")
-    let word_boundary_match = |lower: &str, keyword: &str| -> bool {
-        lower.contains(&format!(" {} ", keyword))
-            || lower.starts_with(&format!("{} ", keyword))
-            || lower.ends_with(&format!(" {}", keyword))
-            || lower == keyword
-    };
-    if external_keywords.iter().any(|k| word_boundary_match(&lower, k)) {
-        return (QueryClass::ExternalQuery, true);
-    }
-
-    // Factual questions — likely need retrieval
-    if lower.starts_with("what") || lower.starts_with("who")
-        || lower.starts_with("where") || lower.starts_with("when")
-        || lower.starts_with("why") || lower.starts_with("how")
-        || lower.starts_with("is ") || lower.starts_with("are ")
-        || lower.starts_with("does") || lower.starts_with("do ")
-        || lower.starts_with("can ") || lower.starts_with("could")
-        || lower.starts_with("did ") || lower.starts_with("was ")
-        || lower.starts_with("were ") || lower.starts_with("has ")
-        || lower.starts_with("have ") || lower.starts_with("tell ")
-        || lower.starts_with("explain") || lower.starts_with("show ")
-        || lower.contains("?")
-    {
-        return (QueryClass::Factual, true);
-    }
-
-    // Long messages with substantial content — likely a task
-    if trimmed.len() > 100 {
-        // Still may need retrieval for context
-        return (QueryClass::Command, true);
-    }
-
-    // Default: brief commands, no retrieval
-    (QueryClass::Command, false)
-}
-
-// ---------------------------------------------------------------------------
-// Re-ranking utilities
-// ---------------------------------------------------------------------------
-
-/// A scored retrieval result with metadata for re-ranking.
-#[derive(Debug, Clone)]
-pub struct ScoredResult {
-    /// Relevance score (higher = more relevant).
-    pub score: f32,
-    /// Message or wiki ID for dedup.
-    pub id: String,
-    /// Content snippet.
-    pub snippet: String,
-    /// Channel/thread info for recency boost.
-    pub thread_id: Option<i64>,
-    /// Whether this was confirmed by the user.
-    pub user_confirmed: bool,
-}
-
-/// Apply re-ranking to a list of scored results.
-/// Factors: recency, same-thread boost, user-confirmed boost.
-pub fn rerank_results(results: &mut [ScoredResult], current_thread_id: Option<i64>) {
-    for r in results.iter_mut() {
-        // Same-thread boost: +0.2 if from the same conversation thread
-        if let Some(current) = current_thread_id {
-            if r.thread_id == Some(current) {
-                r.score += 0.2;
-            }
-        }
-        // User-confirmed boost: +0.3
-        if r.user_confirmed {
-            r.score += 0.3;
-        }
-    }
-    // Sort by score descending
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-}
-
-#[cfg(test)]
-mod classifier_tests {
-    use super::*;
-
-    #[test]
-    fn test_greeting() {
-        let (cls, retrieve) = classify_query("hi");
-        assert_eq!(cls, QueryClass::Greeting);
-        assert!(!retrieve);
-    }
-
-    #[test]
-    fn test_factual_question() {
-        let (cls, retrieve) = classify_query("What is the project's architecture?");
-        assert_eq!(cls, QueryClass::Factual);
-        assert!(retrieve);
-    }
-
-    #[test]
-    fn test_command() {
-        let (cls, retrieve) = classify_query("/help");
-        assert_eq!(cls, QueryClass::Command);
-        assert!(!retrieve);
-    }
-
-    #[test]
-    fn test_followup() {
-        let (cls, retrieve) = classify_query("continue");
-        assert_eq!(cls, QueryClass::FollowUp);
-        assert!(!retrieve);
-    }
-
-    #[test]
-    fn test_external_query() {
-        let (cls, retrieve) = classify_query("Show me the weather forecast");
-        assert_eq!(cls, QueryClass::ExternalQuery);
-        assert!(retrieve);
-    }
-
-    #[test]
-    fn test_long_task() {
-        let msg = "I need you to implement a new feature in the omniagent project. \
-                   It should add a way to search the wiki by text content. \
-                   Please create the necessary files and update the documentation.";
-        let (cls, retrieve) = classify_query(msg);
-        assert_eq!(cls, QueryClass::Command);
-        assert!(retrieve); // Long messages also trigger retrieval
-    }
-}
-

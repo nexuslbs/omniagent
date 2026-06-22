@@ -88,6 +88,8 @@ pub async fn start_server(
         .route("/actions/{id}", delete(delete_action_handler))
         .route("/actions/{id}/run", post(run_action_handler))
         .route("/mcp/tools", get(list_mcp_tools_handler))
+        // ── Context preview (section [3] only, no messages written) ──
+        .route("/api/context/{channel_name}", get(context_preview_handler))
         // ── Plugin management routes ──
         .route("/api/plugins/ping", get(|| async { "pong" }))
         .route("/api/plugins/check-state", get(diagnostic::check_state))
@@ -728,4 +730,99 @@ async fn list_mcp_tools_handler(
         })
         .collect();
     Json(serde_json::json!(tools))
+}
+
+/// GET /api/context/{channel_name} — preview section [3] Context, read-only.
+///
+/// Assembles the same ContextBuilder blocks that would be injected into the
+/// prompt for the latest thread in this channel. No messages are written.
+/// Returns the full context text as a string.
+async fn context_preview_handler(
+    Path(channel_name): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let channel = match queries::get_channel_by_name(&state.pool, &channel_name).await {
+        Ok(Some(ch)) => ch,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("Channel '{}' not found", channel_name) })),
+            );
+        }
+        Err(e) => {
+            error!("Failed to look up channel '{}': {:?}", channel_name, e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Database error: {}", e) })),
+            );
+        }
+    };
+
+    let profile_name = if channel.current_profile.is_empty() {
+        "default"
+    } else {
+        &channel.current_profile
+    };
+
+    // Get the latest seq-0 message in this channel to use as the cause
+    // (so retrieval/search context is based on real content).
+    let (cause_id, cause_content) = match queries::get_latest_seq0_message(&state.pool, channel.id).await {
+        Ok(Some(msg)) => (msg.id, msg.content),
+        Ok(None) => {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({ "context": "", "info": "No messages in this channel" })),
+            );
+        }
+        Err(e) => {
+            error!("Failed to get latest message for channel {}: {:?}", channel.id, e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Database error: {}", e) })),
+            );
+        }
+    };
+
+    // Get the thread this message belongs to
+    let thread_id = match queries::get_message_thread(&state.pool, cause_id).await {
+        Ok(Some(tid)) => tid,
+        Ok(None) => {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({ "context": "", "info": "Message has no thread" })),
+            );
+        }
+        Err(e) => {
+            error!("Failed to get thread for message {}: {:?}", cause_id, e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": format!("Database error: {}", e) })),
+            );
+        }
+    };
+
+    // Resolve profile
+    let profile_registry = crate::profile::ProfileRegistry::new(&state.data_dir);
+    let prof = profile_registry.get(profile_name).cloned()
+        .unwrap_or_else(|| crate::profile::Profile::default(profile_name));
+
+    let prompt_budget = prof.prompt_budget.unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT);
+
+    // Build context — same function the agent uses
+    let qdrant_url = std::env::var("QDRANT_URL").ok();
+    let (context_text, _meta) = crate::context_builder::build_thread_context(
+        &state.pool,
+        thread_id,
+        channel.id,
+        cause_id,
+        &cause_content,
+        profile_name,
+        &state.data_dir,
+        qdrant_url.as_deref(),
+        prompt_budget,
+        prof.auto_retrieval_enabled,
+        prof.retrieval_aggressiveness,
+    ).await;
+
+    (StatusCode::OK, Json(serde_json::json!({ "context": context_text })))
 }
