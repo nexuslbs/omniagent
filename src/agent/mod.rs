@@ -32,6 +32,9 @@ use crate::platform::enqueue_notification;
 /// Maximum total characters of tool results in conversation history before
 /// old tool results are pruned (Layer 3 compression).
 const TOOL_RESULT_HISTORY_BUDGET: usize = 120_000;
+/// Maximum number of times the LLM can try to end without completing all subtasks
+/// before the thread is marked as failed.
+const MAX_UNFINISHED_SUBTASK_RETRIES: u32 = 3;
 use crate::context_builder::{BlockPriority, ContextAssemblyMeta, ContextBlock, ContextBuilder};
 use crate::vectorizer::Vectorizer;
 use crate::mcp::{
@@ -1109,25 +1112,49 @@ async fn process_thread(
 
                     // For complex tasks, auto-create subtasks from the plan content
                     if complexity == crate::context_builder::Complexity::Complex && content.len() > 100 {
-                        let plan_lines: Vec<&str> = content.lines()
-                            .filter(|l| {
-                                let t = l.trim();
-                                (t.starts_with(|c: char| c.is_ascii_digit()) || t.starts_with("- ") || t.starts_with("* ")) 
-                                    && t.len() > 10
-                                    && !t.contains("tool") && !t.contains("step") && !t.contains("Note") 
-                                    && t.find(|c: char| c == '.' || c == ')').map(|i| i < 5).unwrap_or(false)
-                            })
-                            .take(6) // max 6 subtasks
-                            .collect();
-                        for (i, line) in plan_lines.iter().enumerate() {
-                            let clean = line.trim().trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')' || c == '-' || c == '*' || c == ' ').trim();
-                            if !clean.is_empty() {
-                                let priority = (plan_lines.len() - i) as i32; // higher prio first
-                                if let Err(e) = crate::subtask::add_subtask(pool, thread.id, clean, priority).await {
-                                    warn!("[plan] Failed to create subtask '{}': {:?}", clean, e);
-                                } else {
-                                    info!("[plan] Created subtask '{}' for complex thread {}", clean, thread.id);
+                        // Try parsing the plan as JSON with description + steps first
+                        let mut subtask_descriptions: Vec<String> = Vec::new();
+                        if let Ok(plan_json) = serde_json::from_str::<serde_json::Value>(&content) {
+                            if let Some(steps) = plan_json.get("steps").and_then(|v| v.as_array()) {
+                                for step_val in steps {
+                                    if let Some(step) = step_val.as_str() {
+                                        let clean = step.trim().trim_end_matches(|c: char| c == '*' || c == '`').trim();
+                                        if !clean.is_empty() {
+                                            subtask_descriptions.push(clean.to_string());
+                                        }
+                                    }
                                 }
+                            }
+                        }
+
+                        // Fallback to markdown line parsing if JSON didn't work
+                        if subtask_descriptions.is_empty() {
+                            let plan_lines: Vec<&str> = content.lines()
+                                .filter(|l| {
+                                    let t = l.trim();
+                                    (t.starts_with(|c: char| c.is_ascii_digit()) || t.starts_with("- ") || t.starts_with("* "))
+                                        && t.len() > 10
+                                        && !t.contains("tool") && !t.contains("step") && !t.contains("Note")
+                                        && t.find(|c: char| c == '.' || c == ')').map(|i| i < 5).unwrap_or(false)
+                                })
+                                .take(6)
+                                .collect();
+                            for line in &plan_lines {
+                                let clean = line.trim().trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')' || c == '-' || c == '*' || c == ' ').trim().trim_end_matches(|c: char| c == '*' || c == '`').trim();
+                                if !clean.is_empty() {
+                                    subtask_descriptions.push(clean.to_string());
+                                }
+                            }
+                        }
+
+                        // Create subtasks from collected descriptions (limit to 6)
+                        let total = subtask_descriptions.len().min(6);
+                        for (i, desc) in subtask_descriptions.iter().take(6).enumerate() {
+                            let priority = (total - i) as i32;
+                            if let Err(e) = crate::subtask::add_subtask(pool, thread.id, desc, priority).await {
+                                warn!("[plan] Failed to create subtask '{}': {:?}", desc, e);
+                            } else {
+                                info!("[plan] Created subtask '{}' for complex thread {}", desc, thread.id);
                             }
                         }
                     }
@@ -1212,6 +1239,8 @@ async fn process_thread(
     let mut final_tool_call: bool = false;
     let mut limit_reached: bool = false;
     let mut current_iter = current_msg_count;
+    let mut force_failed: bool = false;
+    let mut unfinished_subtask_retries: u32 = 0;
 
     for _turn in 0..max_llm_calls {
         current_iter += 1;  // increment before each LLM call
@@ -1259,7 +1288,54 @@ async fn process_thread(
 
         // Check for tool calls
         if response.tool_calls.is_empty() {
-            // Normal text response — we're done
+            // Subtask enforcement: check if all subtasks are completed/cancelled
+            // before allowing the LLM to deliver its final answer
+            let pending_subtasks = match crate::subtask::list_subtasks(pool, thread.id).await {
+                Ok(list) => list.into_iter().filter(|st| st.status == "pending" || st.status == "in_progress").collect::<Vec<_>>(),
+                Err(_) => Vec::new(),
+            };
+
+            if !pending_subtasks.is_empty() && unfinished_subtask_retries < MAX_UNFINISHED_SUBTASK_RETRIES {
+                unfinished_subtask_retries += 1;
+                let names: Vec<String> = pending_subtasks.iter()
+                    .map(|st| format!("#{}: {}", st.id, st.description))
+                    .collect();
+                let feedback = format!(
+                    "[System] You have {} unfinished subtask(s) that must be completed or cancelled before you can deliver your final answer:\n\n{}\n\nUse `manage_subtasks(thread_id={}, action=\"update\", subtask_id=N, status=\"completed\")` \
+                     for each finished subtask, or status=\"cancelled\" if a subtask is no longer relevant. \
+                     Then respond with your final summary when all subtasks are resolved.",
+                    pending_subtasks.len(),
+                    names.join("\n"),
+                    thread.id,
+                );
+                messages.push(ChatMessage::system(&feedback));
+                info!(
+                    "[subtask] Enforcement: LLM tried to end with {} unfinished subtask(s) (retry {}/{})",
+                    pending_subtasks.len(),
+                    unfinished_subtask_retries,
+                    MAX_UNFINISHED_SUBTASK_RETRIES,
+                );
+                continue;
+            }
+
+            if !pending_subtasks.is_empty() {
+                // Exhausted retries — force the thread to fail
+                warn!(
+                    "[subtask] Enforcement exhausted after {} retries — {} subtask(s) still unfinished for thread {}",
+                    MAX_UNFINISHED_SUBTASK_RETRIES,
+                    pending_subtasks.len(),
+                    thread.id,
+                );
+                final_content = format!(
+                    "I ran out of attempts to complete all subtasks. The following remain unfinished:\n{}",
+                    pending_subtasks.iter().map(|st| format!("- #{}: {} ({})", st.id, st.description, st.status)).collect::<Vec<_>>().join("\n"),
+                );
+                final_tool_call = false;
+                force_failed = true;
+                break;
+            }
+
+            // Normal text response — all subtasks done (or none exist)
             final_content = response.content;
             final_tool_call = false;
             break;
@@ -1644,10 +1720,16 @@ async fn process_thread(
         }
     }
     // Define final status before potential early return
-    let final_status = if limit_reached { "interrupted" } else { "completed" };
+    let final_status = if force_failed {
+        "failed"
+    } else if limit_reached {
+        "interrupted"
+    } else {
+        "completed"
+    };
 
-    // Auto-complete any remaining pending subtasks when the thread completes
-    if final_status == "completed" {
+    // Auto-complete any remaining pending subtasks when the thread completes normally
+    if !force_failed && final_status == "completed" {
         if let Ok(subtasks) = crate::subtask::list_subtasks(pool, thread.id).await {
             for st in &subtasks {
                 if st.status == "pending" || st.status == "in_progress" {

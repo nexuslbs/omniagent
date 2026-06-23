@@ -468,8 +468,19 @@ Previous plan:
             prev = previous_plan.unwrap_or("")
         )
     } else {
-        r#"You are in the PLANNING phase. Your job is to produce a detailed plan
-for how to fulfill the user's request.
+        r#"You are in the PLANNING phase. Your job is to produce a detailed execution plan
+for the user's request.
+
+Reply with a JSON object (and ONLY valid JSON — no surrounding markdown, no backticks) with the following structure:
+
+{
+  "description": "Brief summary of your overall approach (1-2 sentences)",
+  "steps": [
+    "Step 1: what to do first",
+    "Step 2: what to do next",
+    "Step 3: what to do after"
+  ]
+}
 
 The plan should specify:
 1. What tools or capabilities you will need
@@ -477,11 +488,10 @@ The plan should specify:
 3. The step-by-step approach
 4. Any assumptions or preconditions
 
-Produce a single, direct execution path. Do NOT include fallback approaches,
-alternatives, or contingency plans — if the chosen path fails at execution
-time, the execution phase will adapt naturally.
+Each step should be a clear, actionable description. Keep steps concise (under 200 chars each).
+Aim for 3-6 steps. Do NOT include fallback approaches, alternatives, or contingency plans
+— if the chosen path fails at execution time, the execution phase will adapt naturally.
 
-Format your plan as structured markdown with sections.
 Do NOT execute any tools or produce code — only plan.
 
 The user's request is provided below as a reference."#.to_string()
