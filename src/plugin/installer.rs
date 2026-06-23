@@ -315,7 +315,7 @@ pub fn discover_plugins(
     // that aren't covered by bundled/installed plugin.json files.
     // These get synthetic manifests but won't have config_schema unless
     // a plugin.json is also present under the installed/bundled paths.
-    let mcp_plugin_servers = crate::mcp::external::config::discover_plugin_servers(data_dir, workspace_dir);
+    let mcp_plugin_servers = crate::mcp::external::config::discover_plugin_servers(data_dir);
     for srv in &mcp_plugin_servers {
         // Only add if not already in results (dedup by name)
         if !results.iter().any(|(m, _, _)| m.name == srv.name) {

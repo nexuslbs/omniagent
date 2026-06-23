@@ -69,7 +69,7 @@ pub struct McpServersConfig {
 ///
 /// Additionally scans `plugins/mcp/` subdirectories for `mcp-config.json` files.
 /// Returns the merged list of all discovered servers.
-pub fn load_servers_config(data_dir: &str, workspace_dir: &str) -> Vec<McpServerConfig> {
+pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
     let mut all_servers = Vec::new();
 
     // Try config file first
@@ -103,7 +103,7 @@ pub fn load_servers_config(data_dir: &str, workspace_dir: &str) -> Vec<McpServer
     }
 
     // Also scan plugins/mcp/ directories for mcp-config.json files
-    let plugin_servers = discover_plugin_servers(data_dir, workspace_dir);
+    let plugin_servers = discover_plugin_servers(data_dir);
     if !plugin_servers.is_empty() {
         tracing::info!(
             "Loaded {} MCP server(s) from plugins/mcp/ directories",
@@ -120,8 +120,8 @@ pub fn load_servers_config(data_dir: &str, workspace_dir: &str) -> Vec<McpServer
 /// Each subdirectory under `plugins/mcp/` is expected to optionally contain
 /// an `mcp-config.json` file that defines one or more MCP server configurations.
 /// This allows MCP servers to be packaged as self-contained plugins.
-pub fn discover_plugin_servers(_data_dir: &str, workspace_dir: &str) -> Vec<McpServerConfig> {
-    let plugins_dir = format!("{}/plugins/mcp", workspace_dir);
+pub fn discover_plugin_servers(data_dir: &str) -> Vec<McpServerConfig> {
+    let plugins_dir = format!("{}/plugins/mcp", data_dir);
     let plugins_path = std::path::Path::new(&plugins_dir);
 
     if !plugins_path.exists() || !plugins_path.is_dir() {
