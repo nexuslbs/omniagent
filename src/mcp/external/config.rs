@@ -69,7 +69,7 @@ pub struct McpServersConfig {
 ///
 /// Additionally scans `plugins/mcp/` subdirectories for `mcp-config.json` files.
 /// Returns the merged list of all discovered servers.
-pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
+pub fn load_servers_config(data_dir: &str, workspace_dir: &str) -> Vec<McpServerConfig> {
     let mut all_servers = Vec::new();
 
     // Try config file first
@@ -103,7 +103,7 @@ pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
     }
 
     // Also scan plugins/mcp/ directories for mcp-config.json files
-    let plugin_servers = discover_plugin_servers(data_dir);
+    let plugin_servers = discover_plugin_servers(data_dir, workspace_dir);
     if !plugin_servers.is_empty() {
         tracing::info!(
             "Loaded {} MCP server(s) from plugins/mcp/ directories",
@@ -120,13 +120,7 @@ pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
 /// Each subdirectory under `plugins/mcp/` is expected to optionally contain
 /// an `mcp-config.json` file that defines one or more MCP server configurations.
 /// This allows MCP servers to be packaged as self-contained plugins.
-///
-/// The workspace directory is determined from the `WORKSPACE_DIR` env var
-/// (default: `/opt/workspace`).
-pub fn discover_plugin_servers(_data_dir: &str) -> Vec<McpServerConfig> {
-    // The plugins/mcp/ directory is relative to the workspace directory
-    let workspace_dir = std::env::var("WORKSPACE_DIR")
-        .unwrap_or_else(|_| "/opt/workspace".to_string());
+pub fn discover_plugin_servers(_data_dir: &str, workspace_dir: &str) -> Vec<McpServerConfig> {
     let plugins_dir = format!("{}/plugins/mcp", workspace_dir);
     let plugins_path = std::path::Path::new(&plugins_dir);
 

@@ -253,7 +253,7 @@ pub fn default_registry(ctx: &AppContext) -> McpRegistry {
     }
 
     // External MCP servers (load from config, best-effort)
-    let external_tools = external::client::initialize_external_tools(&ctx.data_dir);
+    let external_tools = external::client::initialize_external_tools(&ctx.data_dir, &ctx.workspace_dir);
     for tool in external_tools {
         registry.register(tool);
     }

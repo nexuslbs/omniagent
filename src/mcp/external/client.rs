@@ -651,8 +651,8 @@ pub fn create_client(config: McpServerConfig) -> Box<dyn McpServerClient> {
 
 /// Initialize all external MCP servers and register their tools.
 /// Returns a list of McpTool instances merged from all servers.
-pub fn initialize_external_tools(data_dir: &str) -> Vec<McpTool> {
-    let configs = crate::mcp::external::config::load_servers_config(data_dir);
+pub fn initialize_external_tools(data_dir: &str, workspace_dir: &str) -> Vec<McpTool> {
+    let configs = crate::mcp::external::config::load_servers_config(data_dir, workspace_dir);
     let mut all_tools = Vec::new();
 
     for cfg in configs {
