@@ -1280,6 +1280,7 @@ async fn process_thread(
     let mut limit_reached: bool = false;
     let mut current_iter = current_msg_count;
     let mut unfinished_subtask_retries: u32 = 0;
+    let mut calls_since_subtask_management: u32 = 0;
 
     for _turn in 0..max_llm_calls {
         current_iter += 1;  // increment before each LLM call
@@ -1338,15 +1339,18 @@ async fn process_thread(
                 if !pending_subtasks.is_empty() && unfinished_subtask_retries < std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(3u32) {
                     unfinished_subtask_retries += 1;
                     let names: Vec<String> = pending_subtasks.iter()
-                        .map(|st| format!("#{}: {}", st.id, st.description))
+                        .map(|st| format!("#{}: {} ({})", st.id, st.description, st.status))
                         .collect();
                     let feedback = format!(
-                        "[System] You have {} unfinished subtask(s) that must be completed or cancelled before you can deliver your final answer:\n\n{}\n\nUse `manage_subtasks(thread_id={}, action=\"update\", subtask_id=N, status=\"completed\")` \
-                         for each finished subtask, or status=\"cancelled\" if a subtask is no longer relevant. \
-                         Then respond with your final summary when all subtasks are resolved.",
-                        pending_subtasks.len(),
-                        names.join("\n"),
+                        "[Subtask Required] You cannot end this thread while subtasks are still pending. \
+                         BEFORE writing your final answer, call `manage_subtasks(thread_id={}, action=\"update\", subtask_id=N, status=\"completed\")` \
+                         for each subtask you've already finished. If any subtask is no longer needed, use status=\"cancelled\".\n\n\
+                         Remaining unfinished subtasks:\n{}\n\n\
+                         You will be retried (attempt {}/{}) — use this chance to manage them.",
                         thread.id,
+                        names.join("\n"),
+                        unfinished_subtask_retries,
+                        std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(3u32),
                     );
                     messages.push(ChatMessage::system(&feedback));
                     info!(
@@ -1564,8 +1568,39 @@ async fn process_thread(
                     ));
                 }
             }
+        } // end for tc
+
+        // Proactive subtask reminder: if the LLM has made several tool call
+        // rounds without managing subtasks, inject a gentle nudge.
+        if enable_subtasks {
+            // Check if any tool call in this round was manage_subtasks
+            let called_manage = response.tool_calls.iter()
+                .any(|tc| tc.function.name == "manage_subtasks");
+            if called_manage {
+                calls_since_subtask_management = 0;
+            } else {
+                calls_since_subtask_management += 1;
+            }
+
+            if calls_since_subtask_management >= 3 {
+                if let Ok(subtasks) = crate::subtask::list_subtasks(pool, thread.id).await {
+                    let pending_count = subtasks.iter()
+                        .filter(|st| st.status == "pending" || st.status == "in_progress")
+                        .count();
+                    if pending_count > 0 {
+                        let reminder = format!(
+                            "[Progress Check] You've made {} tool call rounds without updating your subtasks. \
+                             If you've completed any steps, call `manage_subtasks(thread_id={}, action=\"update\", subtask_id=N, status=\"completed\")` \
+                             for each finished subtask now. This keeps progress accurate.",
+                            calls_since_subtask_management, thread.id,
+                        );
+                        messages.push(ChatMessage::system(&reminder));
+                        calls_since_subtask_management = 0;
+                    }
+                }
+            }
         }
-    }
+    } // end for _turn
 
     // If we exited the loop without a final text response, provide a fallback
     if final_content.is_empty() && !final_tool_call {
