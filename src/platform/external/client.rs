@@ -442,6 +442,12 @@ impl Platform for ExternalPlatformClient {
                                                             channel.current_model.as_deref(),
                                                             None,
                                                             None,
+                                                            &crate::db::types::resolve_thread_planning_mode(
+                                                                channel.metadata.get("planning_mode").and_then(|v| v.as_str()).unwrap_or(""),
+                                                                "",
+                                                                "message",
+                                                                &std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string()),
+                                                            ),
                                                         ).await {
                                                             let msg = crate::models::MessageNew {
                                                                 thread_id: thread.id,

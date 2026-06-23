@@ -758,6 +758,28 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ── Add planning_mode columns ──
+    // Threads: single source of truth for planning mode at runtime
+    sqlx::query(
+        r#"ALTER TABLE threads ADD COLUMN IF NOT EXISTS planning_mode TEXT NOT NULL DEFAULT '';"#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Channels: override for all threads in the channel
+    sqlx::query(
+        r#"ALTER TABLE channels ADD COLUMN IF NOT EXISTS planning_mode TEXT NOT NULL DEFAULT '';"#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Cron jobs: task-level override for cron threads
+    sqlx::query(
+        r#"ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS planning_mode TEXT NOT NULL DEFAULT '';"#,
+    )
+    .execute(pool)
+    .await?;
+
     // ── GIN trigram index for ILIKE search performance ──
     // Enables pg_trgm extension (idempotent) and creates a GIN index on
     // messages.content for fast ILIKE / LIKE / similarity queries.

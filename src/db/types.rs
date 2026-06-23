@@ -8,6 +8,7 @@ use sql_forge::sql_forge;
 use sqlx::PgPool;
 
 use crate::models::{Action, Channel, ChannelStop, Message, MessageNew, Thread};
+use crate::agent::AgentConfig;
 
 // ---------------------------------------------------------------------------
 // Thread DB struct (for SELECT results)
@@ -32,6 +33,7 @@ pub struct ThreadDb {
     pub terminal: bool,
     pub task_id: Option<String>,
     pub schedule_task_id: Option<String>,
+    pub planning_mode: String,
 }
 
 impl TryFrom<ThreadDb> for Thread {
@@ -77,6 +79,7 @@ impl TryFrom<ThreadDb> for Thread {
             terminal: db.terminal,
             task_id: db.task_id,
             schedule_task_id: db.schedule_task_id,
+            planning_mode: db.planning_mode,
         })
     }
 }
@@ -260,21 +263,23 @@ pub async fn create_thread(
     model: Option<&str>,
     task_id: Option<&str>,
     schedule_task_id: Option<&str>,
+    planning_mode: &str,
 ) -> anyhow::Result<Thread> {
     let row: ThreadDb = sql_forge!(
         ThreadDb,
         r#"
-        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id)
-        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text)
+        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id, planning_mode)
+        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :planning_mode)
         RETURNING
             id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
             input_tokens, cached_tokens, output_tokens, duration_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             ''::text AS "started_at",
             ''::text AS "ended_at",
-            terminal
+            terminal,
+            planning_mode
         "#,
-        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = provider.unwrap_or(""), :model = model.unwrap_or(""), :task_id = task_id.unwrap_or(""), :schedule_task_id = schedule_task_id.unwrap_or("") )
+        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = provider.unwrap_or(""), :model = model.unwrap_or(""), :task_id = task_id.unwrap_or(""), :schedule_task_id = schedule_task_id.unwrap_or(""), :planning_mode = planning_mode )
     )
     .fetch_one(pool)
     .await?;
@@ -304,6 +309,77 @@ pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> anyhow::Result<
     .execute(pool)
     .await?;
     Ok(())
+}
+
+// ── Planning mode resolution ──────────────────────────────────
+
+/// Resolve what planning_mode to stamp on a thread at creation time.
+///
+/// Priority:
+/// 1. Channel planning_mode (column on channels table) — overrides everything
+/// 2. Task-level planning_mode (for cron tasks: "no_plan" -> "prompt_only",
+///    "max_plan" -> max of global mode)
+/// 3. Kanban tasks always get the max plan mode currently enabled
+/// 4. Default (empty string) — runtime uses complexity-based logic
+///
+/// The resolved value is stored on the thread at creation time and is the
+/// single source of truth during thread execution.
+pub fn resolve_thread_planning_mode(
+    channel_planning_mode: &str,
+    task_planning_mode: &str,
+    msg_type: &str,
+    global_planning_mode: &str,
+) -> String {
+    // 1. Channel override (absolute — overrides everything)
+    if !channel_planning_mode.is_empty() {
+        return normalize_task_planning_mode(channel_planning_mode);
+    }
+
+    // 2. Cron task with explicit mode
+    if msg_type == "cron" && !task_planning_mode.is_empty() {
+        match task_planning_mode {
+            "no_plan" => return "prompt_only".to_string(),
+            "max_plan" => return resolve_max_plan(global_planning_mode),
+            other => return normalize_task_planning_mode(other),
+        }
+    }
+
+    // 3. Kanban — always use max plan mode currently enabled
+    if msg_type == "kanban" {
+        return resolve_max_plan(global_planning_mode);
+    }
+
+    // 4. Default: empty string — runtime does complexity-based resolution
+    String::new()
+}
+
+/// Normalize a planning mode value to one of the canonical values.
+fn normalize_task_planning_mode(mode: &str) -> String {
+    match mode {
+        "never" => "prompt_only".to_string(),
+        "always" => "auto_subtasks".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Calculate the maximum plan mode that should be used based on the
+/// global PLANNING_MODE setting. Kanban tasks always use this.
+fn resolve_max_plan(global_mode: &str) -> String {
+    match global_mode {
+        "auto_subtasks" | "always" => "auto_subtasks".to_string(),
+        "auto_plan" => "auto_plan".to_string(),
+        _ => "prompt_only".to_string(),
+    }
+}
+
+/// Resolve the max tool-call iterations based on the thread's planning mode.
+/// These replace the old single MAX_ITERATIONS setting.
+pub fn max_iterations_for_planning_mode(config: &AgentConfig, planning_mode: &str) -> u32 {
+    match planning_mode {
+        "auto_subtasks" | "always" => config.max_iterations_complex_plan,
+        "auto_plan" => config.max_iterations_simple_plan,
+        _ => config.max_iterations_no_plan, // no plan or complexity-based
+    }
 }
 
 #[allow(dead_code)]
@@ -407,7 +483,8 @@ pub async fn find_pending_threads_by_channel(
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
             COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
-            terminal
+            terminal,
+            planning_mode
         FROM threads
         WHERE channel_id = :channel_id AND status = 'pending'
         ORDER BY created_at ASC
@@ -1592,7 +1669,8 @@ pub async fn get_completed_seq0_threads_since(
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
             COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
-            terminal
+            terminal,
+            planning_mode
         FROM threads
         WHERE channel_id = :channel_id
           AND status = 'completed'

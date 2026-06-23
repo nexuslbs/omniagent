@@ -20,6 +20,7 @@ pub struct Thread {
     pub terminal: bool,
     pub task_id: Option<String>,
     pub schedule_task_id: Option<String>,
+    pub planning_mode: String,
 }
 
 #[allow(dead_code)]
@@ -32,4 +33,5 @@ pub struct ThreadNew {
     pub model: Option<String>,
     pub task_id: Option<String>,
     pub schedule_task_id: Option<String>,
+    pub planning_mode: String,
 }

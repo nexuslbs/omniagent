@@ -51,7 +51,12 @@ pub struct AgentConfig {
     pub temperature: f32,
     #[expect(dead_code)]
     pub summarize_after_days: u32,
-    pub max_iterations: u32,
+    /// Max iterations for threads with no planning mode (complexity-based).
+    pub max_iterations_no_plan: u32,
+    /// Max iterations for threads with simple planning (auto_plan).
+    pub max_iterations_simple_plan: u32,
+    /// Max iterations for threads with complex planning + subtasks (auto_subtasks).
+    pub max_iterations_complex_plan: u32,
     /// Number of threads per half-window for summary generation.
     /// A summary is generated every 2*summary_window completed threads.
     pub summary_window: u32,
@@ -102,10 +107,18 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "7".to_string())
                 .parse()
                 .unwrap_or(7),
-            max_iterations: std::env::var("MAX_ITERATIONS")
-                .unwrap_or_else(|_| "60".to_string())
+            max_iterations_no_plan: std::env::var("MAX_ITERATIONS_NO_PLAN")
+                .unwrap_or_else(|_| "30".to_string())
                 .parse()
-                .unwrap_or(60),
+                .unwrap_or(30),
+            max_iterations_simple_plan: std::env::var("MAX_ITERATIONS_SIMPLE_PLAN")
+                .unwrap_or_else(|_| "120".to_string())
+                .parse()
+                .unwrap_or(120),
+            max_iterations_complex_plan: std::env::var("MAX_ITERATIONS_COMPLEX_PLAN")
+                .unwrap_or_else(|_| "600".to_string())
+                .parse()
+                .unwrap_or(600),
             summary_window: std::env::var("SUMMARY_WINDOW")
                 .unwrap_or_else(|_| "10".to_string())
                 .parse()
@@ -361,11 +374,12 @@ async fn channel_handler(
                     };
 
                     // Check message count limit before claiming the thread
+                    let max_iter = queries::max_iterations_for_planning_mode(&config, &thread.planning_mode);
                     match queries::count_thread_messages(&pool, thread.id).await {
-                        Ok(count) if count >= config.max_iterations as i32 => {
+                        Ok(count) if count >= max_iter as i32 => {
                             info!(
                                 "Thread {} has reached message limit ({}/{}), skipping",
-                                thread.id, count, config.max_iterations
+                                thread.id, count, max_iter
                             );
                             let _ = queries::complete_thread(&pool, thread.id, "skipped", 0, 0, 0, 0).await;
                             continue;
@@ -980,20 +994,21 @@ async fn process_thread(
     let mut force_failed: bool = false;
 
     // ── Planning Phase ──
-    // Determine planning mode: channel metadata > global PLANNING_MODE env var
+    // Read planning_mode from thread (single source of truth, resolved at creation time)
+    let planning_mode = if thread.planning_mode.is_empty() {
+        // Default — use global PLANNING_MODE with runtime complexity checks
+        std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string())
+    } else {
+        thread.planning_mode.clone()
+    };
+
+    // Fetch channel for delivery — cached for use throughout the function
     let channel = queries::get_channel_by_id(pool, thread.channel_id).await?.unwrap_or_default();
-    let mut planning_mode = channel.metadata.get("planning_mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if planning_mode.is_empty() {
-        planning_mode = std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string());
-    }
 
     // Whether subtask creation and enforcement are enabled
     let enable_subtasks = planning_mode == "auto_subtasks";
 
-    // Classify message complexity for adaptive behavior
+    // Classify message complexity for adaptive behavior (used only in default mode)
     let complexity = crate::context_builder::classify_complexity(
         &cause_msg.content,
         &cause_msg.msg_type,
@@ -1001,30 +1016,34 @@ async fn process_thread(
     );
 
     // Determine if we should run the planning phase
-    let should_plan = match planning_mode.as_str() {
-        "never" | "prompt_only" => false,
-        "always" => true,
-        "auto_plan" | "auto_subtasks" => {
-            // Kanban/cron tasks always get planning in plan modes
-            if cause_msg.msg_type == "kanban" || cause_msg.msg_type == "cron" {
-                true
-            } else if complexity == crate::context_builder::Complexity::Simple {
-                false
-            } else {
-                // Auto: plan if message > 100 chars AND is first in thread
-                cause_msg.content.len() > 100
-                    && cause_msg.thread_sequence == 0
+    // When thread.planning_mode is set (non-empty), it was forced at creation time
+    // and we always respect it without runtime complexity checks.
+    // When empty (default), we use the global PLANNING_MODE with complexity checks.
+    let should_plan = if !thread.planning_mode.is_empty() {
+        // Forced mode — respect the thread's stored mode directly
+        matches!(planning_mode.as_str(), "always" | "auto_plan" | "auto_subtasks")
+    } else {
+        // Default mode — use complexity-based checks with the global PLANNING_MODE
+        match planning_mode.as_str() {
+            "never" | "prompt_only" => false,
+            "always" => true,
+            "auto_plan" | "auto_subtasks" => {
+                if complexity == crate::context_builder::Complexity::Simple {
+                    false
+                } else {
+                    // Auto: plan if message > 100 chars AND is first in thread
+                    cause_msg.content.len() > 100
+                        && cause_msg.thread_sequence == 0
+                }
             }
-        }
-        _ => {
-            // Unknown mode — fall back to auto behavior
-            if cause_msg.msg_type == "kanban" || cause_msg.msg_type == "cron" {
-                true
-            } else if complexity == crate::context_builder::Complexity::Simple {
-                false
-            } else {
-                cause_msg.content.len() > 100
-                    && cause_msg.thread_sequence == 0
+            _ => {
+                // Unknown mode — fall back to auto behavior
+                if complexity == crate::context_builder::Complexity::Simple {
+                    false
+                } else {
+                    cause_msg.content.len() > 100
+                        && cause_msg.thread_sequence == 0
+                }
             }
         }
     };
@@ -1240,7 +1259,8 @@ async fn process_thread(
     let tools_def = mcp.to_openai_tools(&prof.allowed_tools);
 
     // 6. Tool-calling loop — max iterations controls total LLM calls
-    let remaining = config.max_iterations as i32 - current_msg_count;
+    let iter_limit = queries::max_iterations_for_planning_mode(config, &thread.planning_mode) as i32;
+    let remaining = iter_limit - current_msg_count;
     let max_llm_calls = remaining.clamp(0, 25) as u32; // safety cap — 25 max
     let mut final_content = String::new();
     let mut final_reasoning: Option<String> = None;
@@ -1255,7 +1275,7 @@ async fn process_thread(
 
         // If this LLM call will reach the iteration limit, hint to the model
         // to produce a final answer rather than more tool calls.
-        if current_iter >= config.max_iterations as i32 {
+        if current_iter >= iter_limit {
             messages.push(ChatMessage::system(
                 "This is your last turn. You must provide your final answer now. \
                  Do not request additional tool calls.",
@@ -1264,6 +1284,8 @@ async fn process_thread(
 
         // Layer 3: prune old tool results from conversation history if over budget
         prune_old_tool_results(&mut messages);
+
+        // ── LLM completion call ──
 
         let request = CompletionRequest {
             messages: messages.clone(),
@@ -1361,7 +1383,7 @@ async fn process_thread(
         }
 
         // If iterations will equal the max after this call, flag interruption
-        if current_iter >= config.max_iterations as i32 {
+        if current_iter >= iter_limit {
             limit_reached = true;
             break;
         }

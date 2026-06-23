@@ -35,6 +35,7 @@ struct CronJobDueRow {
     action_id: Option<String>,
     silent: Option<bool>,
     instruction_file: Option<String>,
+    planning_mode: String,
 }
 
 /// Spawn the cron scheduler loop as a background task.
@@ -171,6 +172,7 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
                             None,
                             None,
                             Some(&job.id),
+                            &job.planning_mode,
                         )
                         .await?;
                         report_action_failure(pool, &job, display_name, &action_name, err_msg, thread.id, now.timestamp()).await?;
@@ -188,6 +190,7 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
                         None,
                         None,
                         Some(&job.id),
+                        &job.planning_mode,
                     )
                     .await?;
 
@@ -251,6 +254,12 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
         };
 
         // ── Create a thread with cause='cron' ──
+        let planning_mode = queries::resolve_thread_planning_mode(
+            channel.metadata.get("planning_mode").and_then(|v| v.as_str()).unwrap_or(""),
+            &job.planning_mode,
+            "cron",
+            &std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string()),
+        );
         let thread = match queries::create_thread(
             pool,
             "cron",
@@ -260,6 +269,7 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
             model.as_deref(),
             None,
             Some(&job.id),
+            &planning_mode,
         )
         .await
         {
@@ -335,7 +345,7 @@ async fn fetch_due_jobs(pool: &PgPool) -> Result<Vec<CronJobDueRow>> {
     let rows: Vec<CronJobDueRow> = sql_forge!(
         CronJobDueRow,
         r#"
-        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id, silent, instruction_file
+        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id, silent, instruction_file, planning_mode
         FROM cron_jobs
         WHERE enabled = true
           AND active = true
@@ -638,6 +648,12 @@ pub async fn run_kanban_dispatcher(pool: &PgPool, data_dir: &str) -> Result<()> 
         };
 
         // Create thread with resolved profile, provider, and model
+        let planning_mode = queries::resolve_thread_planning_mode(
+            channel.metadata.get("planning_mode").and_then(|v| v.as_str()).unwrap_or(""),
+            "",
+            "kanban",
+            &std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string()),
+        );
         let thread = match queries::create_thread(
             pool,
             "kanban",
@@ -647,6 +663,7 @@ pub async fn run_kanban_dispatcher(pool: &PgPool, data_dir: &str) -> Result<()> 
             Some(&model),
             Some(&t.id),
             None,
+            &planning_mode,
         )
         .await
         {

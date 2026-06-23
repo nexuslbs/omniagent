@@ -147,14 +147,36 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
             },
         ),
         (
-            "MAX_ITERATIONS".into(),
-            get_env_or_default("MAX_ITERATIONS", "60"),
+            "MAX_ITERATIONS_NO_PLAN".into(),
+            get_env_or_default("MAX_ITERATIONS_NO_PLAN", "30"),
             SettingMeta {
                 field_type: "number".into(),
-                description: "Maximum agent turns per thread before stopping".into(),
+                description: "Max tool-call iterations for threads with no planning (complexity-based)".into(),
                 options: None,
                 readonly: false,
-                default: Some("60".into()),
+                default: Some("30".into()),
+            },
+        ),
+        (
+            "MAX_ITERATIONS_SIMPLE_PLAN".into(),
+            get_env_or_default("MAX_ITERATIONS_SIMPLE_PLAN", "120"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Max tool-call iterations for threads with simple planning (auto_plan)".into(),
+                options: None,
+                readonly: false,
+                default: Some("120".into()),
+            },
+        ),
+        (
+            "MAX_ITERATIONS_COMPLEX_PLAN".into(),
+            get_env_or_default("MAX_ITERATIONS_COMPLEX_PLAN", "600"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Max tool-call iterations for threads with complex planning + subtasks (auto_subtasks)".into(),
+                options: None,
+                readonly: false,
+                default: Some("600".into()),
             },
         ),
         (
@@ -430,7 +452,8 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
 
     for (name, value, meta) in defs {
         let cat_name = match name.as_str() {
-            "MAX_TOKENS" | "TEMPERATURE" | "MAX_ITERATIONS" | "LLM_MAX_TOKENS" => "general",
+            "MAX_TOKENS" | "TEMPERATURE" | "LLM_MAX_TOKENS" => "general",
+            "MAX_ITERATIONS_NO_PLAN" | "MAX_ITERATIONS_SIMPLE_PLAN" | "MAX_ITERATIONS_COMPLEX_PLAN" => "general",
             "PLANNING_MODE"
             | "PROMPT_PLAN_MAX_TOKENS"
             | "MAX_UNFINISHED_SUBTASK_RETRIES" => "planning",
@@ -516,7 +539,9 @@ pub async fn update_settings_handler(
     let writable_keys: std::collections::HashSet<&str> = [
         "MAX_TOKENS",
         "TEMPERATURE",
-        "MAX_ITERATIONS",
+        "MAX_ITERATIONS_NO_PLAN",
+        "MAX_ITERATIONS_SIMPLE_PLAN",
+        "MAX_ITERATIONS_COMPLEX_PLAN",
         "LLM_MAX_TOKENS",
         "PROMPT_PLAN_MAX_TOKENS",
         "PLANNING_MODE",

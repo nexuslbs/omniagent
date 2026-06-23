@@ -115,12 +115,17 @@ async fn run_server() -> Result<()> {
     // Build agent config from environment
     let agent_cfg = agent::AgentConfig::from_env()?;
     tracing::info!(
-        "Agent config — model: {}, provider: {}, max_tokens: {}, temperature: {}, max_iterations: {}",
+        "Agent config — model: {}, provider: {}, max_tokens: {}, temperature: {}",
         agent_cfg.llm_model,
         agent_cfg.llm_provider,
         agent_cfg.max_tokens,
         agent_cfg.temperature,
-        agent_cfg.max_iterations,
+    );
+    tracing::info!(
+        "Iteration limits — no_plan: {}, simple_plan: {}, complex_plan: {}",
+        agent_cfg.max_iterations_no_plan,
+        agent_cfg.max_iterations_simple_plan,
+        agent_cfg.max_iterations_complex_plan,
     );
 
     // Create platform registry and register platforms
@@ -340,7 +345,13 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
     println!("└─────────────────────────────────────────────────────────┘\n");
 
     // Get or create the current thread
-    let mut thread_id = get_or_create_thread(&pool, current_channel_id, &profile_name, &resolved_provider, &resolved_model).await?;
+    let planning_mode = db::types::resolve_thread_planning_mode(
+        channel.metadata.get("planning_mode").and_then(|v| v.as_str()).unwrap_or(""),
+        "",
+        "message",
+        &std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string()),
+    );
+    let mut thread_id = get_or_create_thread(&pool, current_channel_id, &profile_name, &resolved_provider, &resolved_model, &planning_mode).await?;
     // Mark the /start thread as a system thread (terminal, never processed by executor)
     db::types::set_thread_system(&pool, thread_id).await?;
     let _ = get_next_sequence(&pool, current_channel_id, thread_id).await?;
@@ -393,6 +404,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                             &profile_name,
                             &resolved_provider,
                             &resolved_model,
+                            "",
                         )
                         .await?;
                         let _ = get_next_sequence(&pool, current_channel_id, thread_id).await?;
@@ -497,6 +509,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                     &profile_name,
                     &resolved_provider,
                     &resolved_model,
+                    "",
                 ).await?;
                 let _ = get_next_sequence(&pool, current_channel_id, thread_id).await?;
 
@@ -627,6 +640,12 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
             Some(&resolved_model),
             None,
             None,
+            &db::types::resolve_thread_planning_mode(
+                channel.metadata.get("planning_mode").and_then(|v| v.as_str()).unwrap_or(""),
+                "",
+                "message",
+                &std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string()),
+            ),
         ).await?;
 
         let msg = models::MessageNew {
@@ -763,7 +782,7 @@ async fn ensure_cli_channel(
 }
 
 /// Get or create a thread for the CLI session.
-async fn get_or_create_thread(pool: &PgPool, channel_id: i64, profile_name: &str, resolved_provider: &str, resolved_model: &str) -> Result<i64> {
+async fn get_or_create_thread(pool: &PgPool, channel_id: i64, profile_name: &str, resolved_provider: &str, resolved_model: &str, planning_mode: &str) -> Result<i64> {
     use sql_forge::sql_forge;
     use crate::db::types as queries;
 
@@ -807,6 +826,7 @@ async fn get_or_create_thread(pool: &PgPool, channel_id: i64, profile_name: &str
         Some(resolved_model),
         None,
         None,
+        planning_mode,
     ).await?;
 
     let root_msg = models::MessageNew {

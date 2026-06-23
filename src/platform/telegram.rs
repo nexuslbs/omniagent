@@ -594,6 +594,12 @@ async fn insert_inbound_message(
         Some(&model),
         None,
         None,
+        &crate::db::types::resolve_thread_planning_mode(
+            channel.metadata.get("planning_mode").and_then(|v| v.as_str()).unwrap_or(""),
+            "",
+            "message",
+            &std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string()),
+        ),
     )
     .await?;
 
