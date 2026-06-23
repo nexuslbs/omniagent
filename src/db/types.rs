@@ -320,15 +320,17 @@ pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> anyhow::Result<
 /// 2. Task-level planning_mode (for cron tasks: "no_plan" -> "prompt_only",
 ///    "max_plan" -> max of global mode)
 /// 3. Kanban tasks always get the max plan mode currently enabled
-/// 4. Default (empty string) — runtime uses complexity-based logic
+/// 4. User/cron default (no task mode) — classify by prompt complexity
 ///
 /// The resolved value is stored on the thread at creation time and is the
-/// single source of truth during thread execution.
+/// single source of truth during thread execution. All threads have exactly
+/// one of: "prompt_only", "auto_plan", "auto_subtasks".
 pub fn resolve_thread_planning_mode(
     channel_planning_mode: &str,
     task_planning_mode: &str,
     msg_type: &str,
     global_planning_mode: &str,
+    content: &str,
 ) -> String {
     // 1. Channel override (absolute — overrides everything)
     if !channel_planning_mode.is_empty() {
@@ -349,8 +351,8 @@ pub fn resolve_thread_planning_mode(
         return resolve_max_plan(global_planning_mode);
     }
 
-    // 4. Default: empty string — runtime does complexity-based resolution
-    String::new()
+    // 4. User / Cron default — classify by prompt complexity
+    classify_complexity_for_planning(content, msg_type)
 }
 
 /// Normalize a planning mode value to one of the canonical values.
@@ -369,6 +371,67 @@ fn resolve_max_plan(global_mode: &str) -> String {
         "auto_subtasks" | "always" => "auto_subtasks".to_string(),
         "auto_plan" => "auto_plan".to_string(),
         _ => "prompt_only".to_string(),
+    }
+}
+
+/// Classify a prompt by complexity and return the appropriate planning mode.
+///
+/// Reads threshold settings from environment variables:
+/// - `PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS` (default 60)
+/// - `PLANNING_COMPLEXITY_STANDARD_MAX_CHARS` (default 200)
+/// - `PLANNING_COMPLEXITY_KEYWORDS` (default comma-separated list)
+///
+/// Returns one of: "prompt_only", "auto_plan", "auto_subtasks".
+fn classify_complexity_for_planning(content: &str, msg_type: &str) -> String {
+    let trimmed = content.trim();
+    let char_len = trimmed.len();
+    let word_count = trimmed.split_whitespace().count();
+
+    // Read thresholds from env (cached at thread creation)
+    let simple_max: usize = std::env::var("PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS")
+        .unwrap_or_else(|_| "60".to_string())
+        .parse()
+        .unwrap_or(60);
+    let standard_max: usize = std::env::var("PLANNING_COMPLEXITY_STANDARD_MAX_CHARS")
+        .unwrap_or_else(|_| "200".to_string())
+        .parse()
+        .unwrap_or(200);
+
+    // Simple: short / greeting messages
+    if char_len < simple_max || word_count <= 3 {
+        let lower = trimmed.to_lowercase();
+        let greetings = [
+            "hi", "hello", "hey", "ok", "okay", "k", "thanks", "ty", "thx",
+            "\u{1f44d}", "\u{1f64f}", "done", "yes", "no", "good", "great",
+        ];
+        if word_count <= 2 || greetings.iter().any(|g| lower.contains(g)) {
+            return "prompt_only".to_string();
+        }
+    }
+
+    // Complex: action keywords or substantial length
+    let keywords_raw = std::env::var("PLANNING_COMPLEXITY_KEYWORDS")
+        .unwrap_or_else(|_| {
+            "implement,refactor,redesign,architecture,create,build,design,develop,\
+             migrate,restructure,overhaul,rewrite,configure,set up,deploy,integrate,\
+             add feature,fix bug,resolve issue,multi-step,complex"
+                .to_string()
+        });
+    let complex_keywords: Vec<&str> = keywords_raw.split(',').map(|s| s.trim()).collect();
+
+    let lower = trimmed.to_lowercase();
+    let is_complex_keyword = complex_keywords.iter().any(|kw| lower.contains(kw));
+    let has_substantive_length = char_len > standard_max;
+
+    if is_complex_keyword || has_substantive_length {
+        return "auto_subtasks".to_string();
+    }
+
+    // Standard — use global PLANNING_MODE (simple plan by default)
+    let global_mode = std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string());
+    match global_mode.as_str() {
+        "auto_plan" | "auto_subtasks" | "always" => "auto_plan".to_string(),
+        _ => "auto_plan".to_string(),
     }
 }
 

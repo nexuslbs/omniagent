@@ -228,6 +228,42 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 default: Some("3".into()),
             },
         ),
+        (
+            "PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS".into(),
+            get_env_or_default("PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS", "60"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Max character count for simple prompts (greetings, short commands) — these get no plan".into(),
+                options: None,
+                readonly: false,
+                default: Some("60".into()),
+            },
+        ),
+        (
+            "PLANNING_COMPLEXITY_STANDARD_MAX_CHARS".into(),
+            get_env_or_default("PLANNING_COMPLEXITY_STANDARD_MAX_CHARS", "200"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Max character count for standard prompts — prompts above this get full planning with subtasks".into(),
+                options: None,
+                readonly: false,
+                default: Some("200".into()),
+            },
+        ),
+        (
+            "PLANNING_COMPLEXITY_KEYWORDS".into(),
+            get_env_or_default(
+                "PLANNING_COMPLEXITY_KEYWORDS",
+                "implement,refactor,redesign,architecture,create,build,design,develop,migrate,restructure,overhaul,rewrite,configure,set up,deploy,integrate,add feature,fix bug,resolve issue,multi-step,complex",
+            ),
+            SettingMeta {
+                field_type: "textarea".into(),
+                description: "Comma-separated keywords that trigger complex planning with subtasks".into(),
+                options: None,
+                readonly: false,
+                default: Some("implement,refactor,redesign,architecture,create,build,design,develop,migrate,restructure,overhaul,rewrite,configure,set up,deploy,integrate,add feature,fix bug,resolve issue,multi-step,complex".into()),
+            },
+        ),
         // ── Memory & Retention ──
         (
             "MEMORY_MAX_CHARS".into(),
@@ -456,7 +492,10 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             "MAX_ITERATIONS_NO_PLAN" | "MAX_ITERATIONS_SIMPLE_PLAN" | "MAX_ITERATIONS_COMPLEX_PLAN" => "general",
             "PLANNING_MODE"
             | "PROMPT_PLAN_MAX_TOKENS"
-            | "MAX_UNFINISHED_SUBTASK_RETRIES" => "planning",
+            | "MAX_UNFINISHED_SUBTASK_RETRIES"
+            | "PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS"
+            | "PLANNING_COMPLEXITY_STANDARD_MAX_CHARS"
+            | "PLANNING_COMPLEXITY_KEYWORDS" => "planning",
             "SUMMARIZE_AFTER_DAYS"
             | "DELETE_AFTER_DAYS"
             | "SUMMARY_WINDOW"

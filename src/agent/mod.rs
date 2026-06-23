@@ -996,8 +996,8 @@ async fn process_thread(
     // ── Planning Phase ──
     // Read planning_mode from thread (single source of truth, resolved at creation time)
     let planning_mode = if thread.planning_mode.is_empty() {
-        // Default — use global PLANNING_MODE with runtime complexity checks
-        std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string())
+        // Safety net for any remaining empty threads (backfilled to prompt_only)
+        "prompt_only".to_string()
     } else {
         thread.planning_mode.clone()
     };
@@ -1008,45 +1008,14 @@ async fn process_thread(
     // Whether subtask creation and enforcement are enabled
     let enable_subtasks = planning_mode == "auto_subtasks";
 
-    // Classify message complexity for adaptive behavior (used only in default mode)
-    let complexity = crate::context_builder::classify_complexity(
-        &cause_msg.content,
-        &cause_msg.msg_type,
-        cause_msg.metadata.get("kanban_task_id").or_else(|| cause_msg.metadata.get("cron_job_id")).map(|_| cause_msg.content.len()),
-    );
-
     // Determine if we should run the planning phase
-    // When thread.planning_mode is set (non-empty), it was forced at creation time
-    // and we always respect it without runtime complexity checks.
-    // When empty (default), we use the global PLANNING_MODE with complexity checks.
-    let should_plan = if !thread.planning_mode.is_empty() {
-        // Forced mode — respect the thread's stored mode directly
-        matches!(planning_mode.as_str(), "always" | "auto_plan" | "auto_subtasks")
-    } else {
-        // Default mode — use complexity-based checks with the global PLANNING_MODE
-        match planning_mode.as_str() {
-            "never" | "prompt_only" => false,
-            "always" => true,
-            "auto_plan" | "auto_subtasks" => {
-                if complexity == crate::context_builder::Complexity::Simple {
-                    false
-                } else {
-                    // Auto: plan if message > 100 chars AND is first in thread
-                    cause_msg.content.len() > 100
-                        && cause_msg.thread_sequence == 0
-                }
-            }
-            _ => {
-                // Unknown mode — fall back to auto behavior
-                if complexity == crate::context_builder::Complexity::Simple {
-                    false
-                } else {
-                    cause_msg.content.len() > 100
-                        && cause_msg.thread_sequence == 0
-                }
-            }
-        }
-    };
+    // The thread's planning_mode was resolved at creation time and is the
+    // single source of truth. Threads always have exactly one of:
+    // "prompt_only" (no plan), "auto_plan" (simple plan), "auto_subtasks" (plan + subtasks).
+    let should_plan = matches!(
+        planning_mode.as_str(),
+        "always" | "auto_plan" | "auto_subtasks"
+    );
 
     let plan_content: Option<String> = if should_plan {
         let max_iter = 0; // one-shot, no refinement iterations
@@ -1136,8 +1105,7 @@ async fn process_thread(
                     }
 
                     // For complex tasks, auto-create subtasks from JSON plan content
-                    // No fallback — invalid JSON triggers retry or thread failure
-                    if enable_subtasks && complexity == crate::context_builder::Complexity::Complex && content.len() > 100 {
+                    if enable_subtasks && content.len() > 100 {
                         let max_json_retries: u32 = std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
                         match serde_json::from_str::<serde_json::Value>(&content) {
                             Ok(plan_json) => {

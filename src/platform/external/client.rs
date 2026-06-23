@@ -447,6 +447,7 @@ impl Platform for ExternalPlatformClient {
                                                                 "",
                                                                 "message",
                                                                 &std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string()),
+                                                                &inbound.text,
                                                             ),
                                                         ).await {
                                                             let msg = crate::models::MessageNew {

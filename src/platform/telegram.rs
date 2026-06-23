@@ -599,6 +599,7 @@ async fn insert_inbound_message(
             "",
             "message",
             &std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string()),
+            text,
         ),
     )
     .await?;

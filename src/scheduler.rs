@@ -259,6 +259,7 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
             &job.planning_mode,
             "cron",
             &std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string()),
+            &job.prompt.clone().unwrap_or_default(),
         );
         let thread = match queries::create_thread(
             pool,
@@ -653,6 +654,7 @@ pub async fn run_kanban_dispatcher(pool: &PgPool, data_dir: &str) -> Result<()> 
             "",
             "kanban",
             &std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string()),
+            "",
         );
         let thread = match queries::create_thread(
             pool,

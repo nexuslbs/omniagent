@@ -350,6 +350,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
         "",
         "message",
         &std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string()),
+        "",
     );
     let mut thread_id = get_or_create_thread(&pool, current_channel_id, &profile_name, &resolved_provider, &resolved_model, &planning_mode).await?;
     // Mark the /start thread as a system thread (terminal, never processed by executor)
@@ -645,6 +646,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                 "",
                 "message",
                 &std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string()),
+                &input,
             ),
         ).await?;
 
