@@ -39,7 +39,7 @@ services:
       QDRANT_URL: http://qdrant:6333
       HOST: 0.0.0.0
       PORT: 8080
-      WORKSPACE_DIR: /opt/workspace
+      WORKSPACE_DIR: /opt/workspace/omni-workspace
       HINDSIGHT_URL: http://omniagent-hindsight:8888
     volumes:
       - ./:/app
@@ -47,7 +47,7 @@ services:
       - cargo-git:/usr/local/cargo/git
       - ./data:/opt/data:rw
       - /var/run/docker.sock:/var/run/docker.sock:rw
-      - /opt/workspace/omni-workspace:/opt/workspace:rw
+      - /opt/workspace/omni-workspace:/opt/workspace/omni-workspace:rw
       - /opt/data/credentials:/opt/data/credentials:ro
       - /opt/data/.env:/opt/data/.env:rw
     expose:
