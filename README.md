@@ -25,6 +25,29 @@ Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP too
 - YAML frontmatter with `confidence`, `source_message_ids`, `source_tool_outputs`, `created_at`, `expires_at`, `last_verified_at`
 - 30-day default expiry with review workflow
 
+### 🔄 Dynamic Enum Refresh (`refresh_url`)
+
+Provider plugins can define a `refresh_url` on `enum` type `config_schema` fields to dynamically fetch model options from an external API at runtime, rather than relying on a static `allowed_values` list.
+
+**How it works:**
+
+1. **Plugin definition** — a `ConfigSchemaField` with `type: "enum"` and a `refresh_url` pointing to an OpenAI-compatible `/v1/models` endpoint:
+   ```json
+   { "key": "default_model", "label": "Default Model", "type": "enum", "refresh_url": "https://api.deepseek.com/v1/models" }
+   ```
+
+2. **On-demand refresh** — `POST /api/plugins/{name}/refresh-models` fetches models from the URL, parses `{data: [{id: "model-name"}, ...]}` responses, and updates an in-memory cache.
+
+3. **In-memory cache** — `DYNAMIC_ENUM_CACHE` (Mutex\<HashMap\<String, DynamicEnumEntry\>\>) with a 5-minute TTL. Cache is checked when enriching plugin data for API responses (`enrich_plugin()`).
+
+4. **API key resolution** — for authenticated endpoints, the key is resolved as `{PLUGIN_NAME}_API_KEY` → `LLM_API_KEY` environment variable, sent as a `Bearer` token.
+
+5. **Graceful fallback** — if the fetch fails, existing `allowed_values` are preserved (either hardcoded fallbacks in `plugin.json` or the previous cache entry).
+
+**Currently used by:**
+- **deepseek** — `refresh_url: "https://api.deepseek.com/v1/models"` with static fallback `["deepseek-v4-flash", "deepseek-v3", "deepseek-r1"]`
+- **opencode-go** — `refresh_url: "https://opencode.ai/zen/go/v1/models"` (no static fallback)
+
 ### 🔌 MCP External Servers
 - **stdio transport** — spawn subprocesses, JSON-RPC 2.0 over stdin/stdout
 - **HTTP transport** — connect to remote MCP servers via HTTP POST

@@ -205,6 +205,32 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 default: Some("0".into()),
             },
         ),
+        (
+            "PLANNING_MODE".into(),
+            get_env_or_default("PLANNING_MODE", "auto_subtasks"),
+            SettingMeta {
+                field_type: "select".into(),
+                description: "How tasks are planned: Prompt Only (no plan), Auto-Plan (plan context only), or Auto-Plan + Subtasks (with step tracking and enforcement)".into(),
+                options: Some(vec![
+                    SettingOption { id: "prompt_only".into(), name: "Prompt Only — send as is, no planning".into() },
+                    SettingOption { id: "auto_plan".into(), name: "Auto-Plan — create plan for context (no subtasks)".into() },
+                    SettingOption { id: "auto_subtasks".into(), name: "Auto-Plan + Subtasks — enforce completion via subtasks".into() },
+                ]),
+                readonly: false,
+                default: Some("auto_subtasks".into()),
+            },
+        ),
+        (
+            "MAX_UNFINISHED_SUBTASK_RETRIES".into(),
+            get_env_or_default("MAX_UNFINISHED_SUBTASK_RETRIES", "3"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Max retries before marking a thread as failed when subtasks remain unfinished or plan JSON is invalid".into(),
+                options: None,
+                readonly: false,
+                default: Some("3".into()),
+            },
+        ),
         // ── Memory & Retention ──
         (
             "MEMORY_MAX_CHARS".into(),
@@ -432,7 +458,9 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             "MAX_TOKENS" | "TEMPERATURE" | "MAX_ITERATIONS" | "LLM_MAX_TOKENS" => "general",
             "PROMPT_PLAN_ENABLED"
             | "PROMPT_PLAN_MAX_TOKENS"
-            | "PROMPT_GRAPH_ITERATIONS" => "planning",
+            | "PROMPT_GRAPH_ITERATIONS"
+            | "PLANNING_MODE"
+            | "MAX_UNFINISHED_SUBTASK_RETRIES" => "planning",
             "SUMMARIZE_AFTER_DAYS"
             | "DELETE_AFTER_DAYS"
             | "SUMMARY_WINDOW"
@@ -520,6 +548,8 @@ pub async fn update_settings_handler(
         "PROMPT_PLAN_ENABLED",
         "PROMPT_PLAN_MAX_TOKENS",
         "PROMPT_GRAPH_ITERATIONS",
+        "PLANNING_MODE",
+        "MAX_UNFINISHED_SUBTASK_RETRIES",
         "SUMMARIZE_AFTER_DAYS",
         "DELETE_AFTER_DAYS",
         "SUMMARY_WINDOW",

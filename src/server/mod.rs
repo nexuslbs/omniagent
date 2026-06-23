@@ -456,6 +456,7 @@ async fn prompt_preview_handler(
             0,
             0,
             None,
+            false, // preview route doesn't need JSON plan output
         );
 
         // Create LLM client — match how the agent resolves config.

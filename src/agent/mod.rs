@@ -34,7 +34,6 @@ use crate::platform::enqueue_notification;
 const TOOL_RESULT_HISTORY_BUDGET: usize = 120_000;
 /// Maximum number of times the LLM can try to end without completing all subtasks
 /// before the thread is marked as failed.
-const MAX_UNFINISHED_SUBTASK_RETRIES: u32 = 3;
 use crate::context_builder::{BlockPriority, ContextAssemblyMeta, ContextBlock, ContextBuilder};
 use crate::vectorizer::Vectorizer;
 use crate::mcp::{
@@ -990,13 +989,21 @@ async fn process_thread(
 
     // Track cumulative token usage across all LLM calls
     let mut cumulative_usage: Option<Usage> = None;
+    let mut force_failed: bool = false;
 
     // ── Planning Phase ──
-    // Determine planning mode: channel metadata > global config
+    // Determine planning mode: channel metadata > global PLANNING_MODE env var
     let channel = queries::get_channel_by_id(pool, thread.channel_id).await?.unwrap_or_default();
-    let planning_mode = channel.metadata.get("planning_mode")
+    let mut planning_mode = channel.metadata.get("planning_mode")
         .and_then(|v| v.as_str())
-        .unwrap_or("auto");
+        .unwrap_or("")
+        .to_string();
+    if planning_mode.is_empty() {
+        planning_mode = std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string());
+    }
+
+    // Whether subtask creation and enforcement are enabled
+    let enable_subtasks = planning_mode == "auto_subtasks";
 
     // Classify message complexity for adaptive behavior
     let complexity = crate::context_builder::classify_complexity(
@@ -1006,15 +1013,24 @@ async fn process_thread(
     );
 
     // Determine if we should run the planning phase
-    let should_plan = match planning_mode {
-        "never" => false,
+    let should_plan = match planning_mode.as_str() {
+        "never" | "prompt_only" => false,
         "always" => true,
-        _ => {
+        "auto_plan" | "auto_subtasks" => {
             if complexity == crate::context_builder::Complexity::Simple {
-                // Simple messages skip planning entirely for faster response
                 false
             } else {
                 // Auto: plan if message > 100 chars AND is first in thread
+                config.prompt_plan_enabled 
+                    && cause_msg.content.len() > 100
+                    && cause_msg.thread_sequence == 0
+            }
+        }
+        _ => {
+            // Unknown mode — fall back to auto behavior
+            if complexity == crate::context_builder::Complexity::Simple {
+                false
+            } else {
                 config.prompt_plan_enabled 
                     && cause_msg.content.len() > 100
                     && cause_msg.thread_sequence == 0
@@ -1027,6 +1043,8 @@ async fn process_thread(
         let max_tokens = config.prompt_plan_max_tokens;
         let mut last_plan: Option<String> = None;
         let mut accepted = false;
+        let mut json_failure_count: u32 = 0;
+        let mut json_error_msg: Option<String> = None;
 
         for iter in 0..(max_iter + 1) {
             // Build the planning prompt (lightweight — no tools, no heavy context)
@@ -1038,11 +1056,19 @@ async fn process_thread(
                 iter,
                 max_iter,
                 last_plan.as_deref(),
+                enable_subtasks,
             );
 
-            let planning_messages = vec![
-                ChatMessage::system(&planning_prompt),
-            ];
+            let planning_messages = if let Some(ref err) = json_error_msg {
+                vec![
+                    ChatMessage::system(&planning_prompt),
+                    ChatMessage::system(err),
+                ]
+            } else {
+                vec![
+                    ChatMessage::system(&planning_prompt),
+                ]
+            };
 
             let plan_request = CompletionRequest {
                 messages: planning_messages,
@@ -1110,51 +1136,65 @@ async fn process_thread(
                         Err(e) => warn!("[plan] Failed to persist plan for thread {}: {:?}", thread.id, e),
                     }
 
-                    // For complex tasks, auto-create subtasks from the plan content
-                    if complexity == crate::context_builder::Complexity::Complex && content.len() > 100 {
-                        // Try parsing the plan as JSON with description + steps first
-                        let mut subtask_descriptions: Vec<String> = Vec::new();
-                        if let Ok(plan_json) = serde_json::from_str::<serde_json::Value>(&content) {
-                            if let Some(steps) = plan_json.get("steps").and_then(|v| v.as_array()) {
-                                for step_val in steps {
-                                    if let Some(step) = step_val.as_str() {
-                                        let clean = step.trim().trim_end_matches(|c: char| c == '*' || c == '`').trim();
-                                        if !clean.is_empty() {
-                                            subtask_descriptions.push(clean.to_string());
+                    // For complex tasks, auto-create subtasks from JSON plan content
+                    // No fallback — invalid JSON triggers retry or thread failure
+                    if enable_subtasks && complexity == crate::context_builder::Complexity::Complex && content.len() > 100 {
+                        let max_json_retries: u32 = std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+                        match serde_json::from_str::<serde_json::Value>(&content) {
+                            Ok(plan_json) => {
+                                if let Some(steps) = plan_json.get("steps").and_then(|v| v.as_array()) {
+                                    // Valid JSON with steps — create subtasks
+                                    let total = steps.len().min(6);
+                                    for (i, step_val) in steps.iter().enumerate().take(6) {
+                                        if let Some(step) = step_val.as_str() {
+                                            let clean = step.trim().trim_end_matches(|c: char| c == '*' || c == '`').trim();
+                                            if !clean.is_empty() {
+                                                let priority = (total - i) as i32;
+                                                if let Err(e) = crate::subtask::add_subtask(pool, thread.id, clean, priority).await {
+                                                    warn!("[plan] Failed to create subtask '{}': {:?}", clean, e);
+                                                } else {
+                                                    info!("[plan] Created subtask '{}' for complex thread {}", clean, thread.id);
+                                                }
+                                            }
                                         }
                                     }
+                                    json_error_msg = None;
+                                } else {
+                                    // JSON valid but missing "steps" field
+                                    json_failure_count += 1;
+                                    if json_failure_count > max_json_retries {
+                                        warn!("[plan] JSON validation exhausted — missing 'steps' field after {} retries for thread {}", max_json_retries, thread.id);
+                                        force_failed = true;
+                                        break;
+                                    }
+                                    json_error_msg = Some(format!(
+                                        "ERROR: Your plan JSON is missing the required \"steps\" array. \
+                                         You MUST return a JSON object with \"description\" (string) and \"steps\" (array of strings). \
+                                         No surrounding markdown, no backticks, no extra text. \
+                                         Attempt {}/{} — fix the JSON or the thread will fail.",
+                                        json_failure_count, max_json_retries
+                                    ));
+                                  last_plan = Some(content.clone());
+                                    continue;
                                 }
                             }
-                        }
-
-                        // Fallback to markdown line parsing if JSON didn't work
-                        if subtask_descriptions.is_empty() {
-                            let plan_lines: Vec<&str> = content.lines()
-                                .filter(|l| {
-                                    let t = l.trim();
-                                    (t.starts_with(|c: char| c.is_ascii_digit()) || t.starts_with("- ") || t.starts_with("* "))
-                                        && t.len() > 10
-                                        && !t.contains("tool") && !t.contains("step") && !t.contains("Note")
-                                        && t.find(|c: char| c == '.' || c == ')').map(|i| i < 5).unwrap_or(false)
-                                })
-                                .take(6)
-                                .collect();
-                            for line in &plan_lines {
-                                let clean = line.trim().trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')' || c == '-' || c == '*' || c == ' ').trim().trim_end_matches(|c: char| c == '*' || c == '`').trim();
-                                if !clean.is_empty() {
-                                    subtask_descriptions.push(clean.to_string());
+                            Err(e) => {
+                                // Invalid JSON syntax
+                                json_failure_count += 1;
+                                if json_failure_count > max_json_retries {
+                                    warn!("[plan] JSON validation exhausted — invalid JSON after {} retries for thread {}: {}", max_json_retries, thread.id, e);
+                                    force_failed = true;
+                                    break;
                                 }
-                            }
-                        }
-
-                        // Create subtasks from collected descriptions (limit to 6)
-                        let total = subtask_descriptions.len().min(6);
-                        for (i, desc) in subtask_descriptions.iter().take(6).enumerate() {
-                            let priority = (total - i) as i32;
-                            if let Err(e) = crate::subtask::add_subtask(pool, thread.id, desc, priority).await {
-                                warn!("[plan] Failed to create subtask '{}': {:?}", desc, e);
-                            } else {
-                                info!("[plan] Created subtask '{}' for complex thread {}", desc, thread.id);
+                                json_error_msg = Some(format!(
+                                    "ERROR: Your response was not valid JSON. Parsing error: {}. \
+                                     You MUST return a valid JSON object with \"description\" and \"steps\" fields. \
+                                     No surrounding markdown, no backticks, no extra text. \
+                                     Attempt {}/{} — fix the JSON or the thread will fail.",
+                                    e, json_failure_count, max_json_retries
+                                ));
+                              last_plan = Some(content.clone());
+                                continue;
                             }
                         }
                     }
@@ -1239,7 +1279,6 @@ async fn process_thread(
     let mut final_tool_call: bool = false;
     let mut limit_reached: bool = false;
     let mut current_iter = current_msg_count;
-    let mut force_failed: bool = false;
     let mut unfinished_subtask_retries: u32 = 0;
 
     for _turn in 0..max_llm_calls {
@@ -1288,55 +1327,63 @@ async fn process_thread(
 
         // Check for tool calls
         if response.tool_calls.is_empty() {
-            // Subtask enforcement: check if all subtasks are completed/cancelled
-            // before allowing the LLM to deliver its final answer
-            let pending_subtasks = match crate::subtask::list_subtasks(pool, thread.id).await {
-                Ok(list) => list.into_iter().filter(|st| st.status == "pending" || st.status == "in_progress").collect::<Vec<_>>(),
-                Err(_) => Vec::new(),
+            // Subtask enforcement: only when subtask mode is active
+            if enable_subtasks {
+                // Check if all subtasks are completed/cancelled before allowing final answer
+                let pending_subtasks = match crate::subtask::list_subtasks(pool, thread.id).await {
+                    Ok(list) => list.into_iter().filter(|st| st.status == "pending" || st.status == "in_progress").collect::<Vec<_>>(),
+                    Err(_) => Vec::new(),
+                };
+
+                if !pending_subtasks.is_empty() && unfinished_subtask_retries < std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(3u32) {
+                    unfinished_subtask_retries += 1;
+                    let names: Vec<String> = pending_subtasks.iter()
+                        .map(|st| format!("#{}: {}", st.id, st.description))
+                        .collect();
+                    let feedback = format!(
+                        "[System] You have {} unfinished subtask(s) that must be completed or cancelled before you can deliver your final answer:\n\n{}\n\nUse `manage_subtasks(thread_id={}, action=\"update\", subtask_id=N, status=\"completed\")` \
+                         for each finished subtask, or status=\"cancelled\" if a subtask is no longer relevant. \
+                         Then respond with your final summary when all subtasks are resolved.",
+                        pending_subtasks.len(),
+                        names.join("\n"),
+                        thread.id,
+                    );
+                    messages.push(ChatMessage::system(&feedback));
+                    info!(
+                        "[subtask] Enforcement: LLM tried to end with {} unfinished subtask(s) (retry {}/{})",
+                        pending_subtasks.len(),
+                        unfinished_subtask_retries,
+                        std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(3u32),
+                    );
+                    // Don't consume from the iteration budget — this is enforcement overhead
+                    current_iter -= 1;
+                    continue;
+                }
+
+                if !pending_subtasks.is_empty() {
+                    // Exhausted retries — force the thread to fail
+                    warn!(
+                        "[subtask] Enforcement exhausted after {} retries — {} subtask(s) still unfinished for thread {}",
+                        std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(3u32),
+                        pending_subtasks.len(),
+                        thread.id,
+                    );
+                    final_content = format!(
+                        "I ran out of attempts to complete all subtasks. The following remain unfinished:\n{}",
+                        pending_subtasks.iter().map(|st| format!("- #{}: {} ({})", st.id, st.description, st.status)).collect::<Vec<_>>().join("\n"),
+                    );
+                    final_tool_call = false;
+                    force_failed = true;
+                    break;
+                }
+            }
+
+            // Normal text response — all subtasks done (or subtask mode off)
+            final_content = if response.content.is_empty() {
+                response.reasoning.clone().unwrap_or_default()
+            } else {
+                response.content
             };
-
-            if !pending_subtasks.is_empty() && unfinished_subtask_retries < MAX_UNFINISHED_SUBTASK_RETRIES {
-                unfinished_subtask_retries += 1;
-                let names: Vec<String> = pending_subtasks.iter()
-                    .map(|st| format!("#{}: {}", st.id, st.description))
-                    .collect();
-                let feedback = format!(
-                    "[System] You have {} unfinished subtask(s) that must be completed or cancelled before you can deliver your final answer:\n\n{}\n\nUse `manage_subtasks(thread_id={}, action=\"update\", subtask_id=N, status=\"completed\")` \
-                     for each finished subtask, or status=\"cancelled\" if a subtask is no longer relevant. \
-                     Then respond with your final summary when all subtasks are resolved.",
-                    pending_subtasks.len(),
-                    names.join("\n"),
-                    thread.id,
-                );
-                messages.push(ChatMessage::system(&feedback));
-                info!(
-                    "[subtask] Enforcement: LLM tried to end with {} unfinished subtask(s) (retry {}/{})",
-                    pending_subtasks.len(),
-                    unfinished_subtask_retries,
-                    MAX_UNFINISHED_SUBTASK_RETRIES,
-                );
-                continue;
-            }
-
-            if !pending_subtasks.is_empty() {
-                // Exhausted retries — force the thread to fail
-                warn!(
-                    "[subtask] Enforcement exhausted after {} retries — {} subtask(s) still unfinished for thread {}",
-                    MAX_UNFINISHED_SUBTASK_RETRIES,
-                    pending_subtasks.len(),
-                    thread.id,
-                );
-                final_content = format!(
-                    "I ran out of attempts to complete all subtasks. The following remain unfinished:\n{}",
-                    pending_subtasks.iter().map(|st| format!("- #{}: {} ({})", st.id, st.description, st.status)).collect::<Vec<_>>().join("\n"),
-                );
-                final_tool_call = false;
-                force_failed = true;
-                break;
-            }
-
-            // Normal text response — all subtasks done (or none exist)
-            final_content = response.content;
             final_tool_call = false;
             break;
         }
@@ -1369,7 +1416,7 @@ async fn process_thread(
         if is_multi_tool {
             let multi_content = response.tool_calls
                 .iter()
-                .map(|tc| tc.function.arguments.clone())
+                .map(|tc| format!("{}: {}", tc.function.name, tc.function.arguments))
                 .collect::<Vec<_>>()
                 .join("\n");
             let multi_msg = MessageNew {
@@ -1728,20 +1775,41 @@ async fn process_thread(
         "completed"
     };
 
-    // Auto-complete any remaining pending subtasks when the thread completes normally
-    if !force_failed && final_status == "completed" {
-        if let Ok(subtasks) = crate::subtask::list_subtasks(pool, thread.id).await {
-            for st in &subtasks {
-                if st.status == "pending" || st.status == "in_progress" {
-                    let _ = crate::subtask::update_subtask_status(pool, st.id, "completed").await;
-                    info!(
-                        "[subtask] Auto-completed subtask {} ('{}') for completed thread {}",
-                        st.id, st.description, thread.id
-                    );
-                }
+    // Post-loop subtask enforcement: if any subtasks remain pending/in_progress
+    // after the tool-calling loop ends (regardless of why it ended), fail the thread.
+    // Subtasks must only be marked completed/cancelled by the LLM via manage_subtasks tool.
+    if enable_subtasks && !force_failed && final_status == "completed" {
+        if let Ok(post_subtasks) = crate::subtask::list_subtasks(pool, thread.id).await {
+            let unfinished: Vec<_> = post_subtasks.iter()
+                .filter(|st| st.status == "pending" || st.status == "in_progress")
+                .collect();
+            if !unfinished.is_empty() {
+                warn!(
+                    "[subtask] Post-loop enforcement: {} subtask(s) still unfinished for thread {} — forcing failure",
+                    unfinished.len(),
+                    thread.id,
+                );
+                force_failed = true;
+                let names: Vec<String> = unfinished.iter()
+                    .map(|st| format!("- #{}: {} ({})", st.id, st.description, st.status))
+                    .collect();
+                final_content = format!(
+                    "The thread was ended with {} unfinished subtask(s) that were never completed or cancelled by the LLM:\n\n{}\n\nAll subtasks must be explicitly completed or cancelled via the manage_subtasks tool.",
+                    unfinished.len(),
+                    names.join("\n"),
+                );
             }
         }
     }
+
+    // Recompute final status after post-loop enforcement
+    let final_status = if force_failed {
+        "failed"
+    } else if limit_reached {
+        "interrupted"
+    } else {
+        "completed"
+    };
 
     queries::complete_thread(pool, thread.id, final_status, 0, 0, 0, 0).await?;
 

@@ -50,7 +50,7 @@ async fn aggregate_metrics(
         FROM threads t
         JOIN messages m ON m.thread_id = t.id
         WHERE m.role = 'agent'
-          AND m.msg_type = 'message'
+          AND m.msg_type IN ('message', 'summary')
           AND m.created_at >= :cutoff
           AND (:profile_filter = '' OR t.profile = :profile_filter)
         GROUP BY t.profile, t.provider, t.model
@@ -79,7 +79,7 @@ async fn count_grounded_responses(
         FROM messages m
         JOIN threads t ON t.id = m.thread_id
         WHERE m.role = 'agent'
-          AND m.msg_type = 'message'
+          AND m.msg_type IN ('message', 'summary')
           AND m.created_at >= :cutoff
           AND (:profile_filter = '' OR t.profile = :profile_filter)
         "#,
@@ -97,7 +97,7 @@ async fn count_grounded_responses(
         FROM messages m
         JOIN threads t ON t.id = m.thread_id
         WHERE m.role = 'agent'
-          AND m.msg_type = 'message'
+          AND m.msg_type IN ('message', 'summary')
           AND m.created_at >= :cutoff
           AND (m.metadata->'context'->>'total_chars') IS NOT NULL
           AND (:profile_filter = '' OR t.profile = :profile_filter)
@@ -159,7 +159,7 @@ async fn count_corrections(
             FROM messages m
             JOIN threads t ON t.id = m.thread_id
             WHERE m.role = 'agent'
-              AND m.msg_type = 'message'
+              AND m.msg_type IN ('message', 'summary')
               AND m.created_at >= :cutoff
               AND (:profile_filter = '' OR t.profile = :profile_filter)
         )

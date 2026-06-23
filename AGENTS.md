@@ -61,6 +61,78 @@ All modals should provide explicit close buttons (✕ close button + Cancel/Conf
 - Add to default profile's `allowed_tools` if it should be available by default
 - Tool descriptions must include: ACTION PREFIX + USE CASE + NEGATIVE SPACE
 
+### Dynamic Enum Refresh (`refresh_url`)
+
+Provider plugins can source model lists dynamically from an external API using `refresh_url` on `enum` config schema fields.
+
+**Source locations:**
+- **Core logic:** `src/plugin/mod.rs` — `fetch_enum_values()`, `refresh_plugin_models()`, `DYNAMIC_ENUM_CACHE`
+- **API handler:** `src/server/plugins.rs` — `refresh_models_handler()`
+- **Route registration:** `src/server/mod.rs:106` — `POST /api/plugins/{name}/refresh-models`
+
+**Schema field type (`ConfigSchemaField`):**
+```rust
+pub struct ConfigSchemaField {
+    pub key: String,
+    pub label: String,
+    pub field_type: FieldType,  // String, Secret, Boolean, Integer, Enum, MultiSelect
+    pub refresh_url: Option<String>,  // URL for dynamic enum values
+    pub allowed_values: Option<Vec<String>>,  // Static fallback list
+    // ...
+}
+```
+
+**Cache architecture:**
+- `DYNAMIC_ENUM_CACHE` — `Lazy<Mutex<HashMap<String, DynamicEnumEntry>>>` where key is the refresh_url
+- `DynamicEnumEntry` stores `values: Vec<String>` + `fetched_at: Instant`
+- TTL: `DYNAMIC_ENUM_TTL` = 300 seconds (5 minutes)
+- Cache is checked in `enrich_plugin()` when populating `allowed_values` for API responses
+
+**Refresh flow (`refresh_plugin_models()`):**
+1. Fetches plugin by name from `plugin_registry` table
+2. Enriches to `PluginDetail` with parsed config_schema
+3. Iterates schema fields looking for non-empty `refresh_url`
+4. Resolves API key: `{PLUGIN_NAME}_API_KEY` → `LLM_API_KEY` env vars (uppercased, dashes → underscores)
+5. Calls `fetch_enum_values(url, api_key)` — GET request with 5s timeout, Bearer auth if key present
+6. Parses response as `{data: [{id: "model-name"}, ...]}` (OpenAI `/v1/models` format)
+7. On success: updates the field's `allowed_values` + populates the in-memory cache
+8. On failure: logs warning, preserves existing `allowed_values` (no breaking change)
+9. Returns `Some(detail)` if any field had a refresh_url, `None` otherwise
+
+**API key resolution logic:**
+```rust
+let api_key = std::env::var(format!("{}_API_KEY", name.to_uppercase().replace('-', "_")))
+    .ok().filter(|k| !k.is_empty())
+    .or_else(|| std::env::var("LLM_API_KEY").ok().filter(|k| !k.is_empty()));
+```
+
+So for the `deepseek` plugin, it checks `DEEPSEEK_API_KEY` first, then `LLM_API_KEY`.
+
+**Response format:**
+```json
+// POST /api/plugins/deepseek/refresh-models
+{
+  "success": true,
+  "data": {
+    "name": "deepseek",
+    "config_schema": [
+      { "key": "default_model", "label": "Default Model", "type": "enum",
+        "allowed_values": ["deepseek-v4-flash", "deepseek-v3", "deepseek-r1", "deepseek-coder"],
+        "refresh_url": "https://api.deepseek.com/v1/models" }
+    ]
+  }
+}
+```
+
+**Error cases:**
+- Plugin not found → `404 Not Found`
+- Plugin has no `refresh_url` fields → `400 Bad Request` with message "Plugin has no refresh_url fields"
+- Network/parse failure → `500 Internal Server Error`, but the cache keeps the previous values
+
+**Currently used by:**
+- `deepseek` (provider) — `refresh_url: "https://api.deepseek.com/v1/models"` + static fallback
+- `opencode-go` (provider) — `refresh_url: "https://opencode.ai/zen/go/v1/models"` (no static fallback)
+
 ### Hindsight Populator (`hindsight_populator.rs`)
 - Located at `src/hindsight_populator.rs`
 - Queries new messages from the DB (id > watermark) and retains them into omniagent-hindsight

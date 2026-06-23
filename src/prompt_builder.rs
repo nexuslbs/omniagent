@@ -427,6 +427,7 @@ pub fn build_planning_prompt(
     plan_iteration: u32,
     _max_iterations: u32,
     previous_plan: Option<&str>,
+    use_json_plan: bool,
 ) -> String {
     // Base system identity — everything except tool guidance since
     // planning doesn't execute tools.
@@ -467,7 +468,7 @@ Previous plan:
 {prev}"#,
             prev = previous_plan.unwrap_or("")
         )
-    } else {
+    } else if use_json_plan {
         r#"You are in the PLANNING phase. Your job is to produce a detailed execution plan
 for the user's request.
 
@@ -492,6 +493,30 @@ Each step should be a clear, actionable description. Keep steps concise (under 2
 Aim for 3-6 steps. Do NOT include fallback approaches, alternatives, or contingency plans
 — if the chosen path fails at execution time, the execution phase will adapt naturally.
 
+IMPORTANT: Each step in "steps" will be automatically converted into a tracked subtask.
+During execution, you MUST call `manage_subtasks(thread_id, action="update", subtask_id=N, status="completed")`
+for each step as you finish it, or `manage_subtasks(thread_id, action="update", subtask_id=N, status="cancelled")`
+if a step becomes irrelevant. Use `manage_subtasks(thread_id, action="list")` to see current state.
+If you reach the end of execution with any subtask still pending, the thread will be marked as FAILED.
+
+Do NOT execute any tools or produce code — only plan.
+
+The user's request is provided below as a reference."#.to_string()
+    } else {
+        r#"You are in the PLANNING phase. Your job is to produce a detailed plan
+for how to fulfill the user's request.
+
+The plan should specify:
+1. What tools or capabilities you will need
+2. What data or resources you need to retrieve
+3. The step-by-step approach
+4. Any assumptions or preconditions
+
+Produce a single, direct execution path. Do NOT include fallback approaches,
+alternatives, or contingency plans — if the chosen path fails at execution
+time, the execution phase will adapt naturally.
+
+Format your plan as structured markdown with sections.
 Do NOT execute any tools or produce code — only plan.
 
 The user's request is provided below as a reference."#.to_string()
