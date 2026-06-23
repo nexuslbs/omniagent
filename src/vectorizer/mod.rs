@@ -677,27 +677,32 @@ pub struct MessageEmbeddingRow {
 /// via `futures::future::pending()`). It is intended to be spawned as its own
 /// tokio task from main.
 pub async fn spawn_vectorizers(pool: PgPool, config: &crate::config::Config, data_dir: &str) {
+    struct MakeVectorizerConfig<'a> {
+        api_url: &'a Option<String>,
+        protocol: &'a str,
+        api_key: &'a Option<String>,
+        api_model: &'a Option<String>,
+    }
+
     fn make_vectorizer(
         method: &str,
-        api_url: &Option<String>,
-        protocol: &str,
-        api_key: &Option<String>,
-        api_model: &Option<String>,
         target: &str,
+        config: MakeVectorizerConfig<'_>,
     ) -> Box<dyn Vectorizer> {
         match method {
             "api" => {
-                if let Some(ref url) = api_url {
-                    let proto = EmbeddingProtocol::from_str(protocol).unwrap_or_else(|e| {
+                if let Some(ref url) = config.api_url {
+                    let proto = EmbeddingProtocol::from_str(config.protocol).unwrap_or_else(|e| {
                         tracing::warn!(
                             "{}: invalid protocol '{}': {}; falling back to OpenAI",
                             target,
-                            protocol,
+                            config.protocol,
                             e
                         );
                         EmbeddingProtocol::OpenAI
                     });
-                    let model = api_model
+                    let model = config
+                        .api_model
                         .clone()
                         .unwrap_or_else(|| "text-embedding-ada-002".to_string());
                     tracing::info!(
@@ -710,7 +715,7 @@ pub async fn spawn_vectorizers(pool: PgPool, config: &crate::config::Config, dat
                     Box::new(ApiVectorizer::new(
                         proto,
                         url.clone(),
-                        api_key.clone(),
+                        config.api_key.clone(),
                         model,
                     ))
                 } else {
@@ -744,11 +749,13 @@ pub async fn spawn_vectorizers(pool: PgPool, config: &crate::config::Config, dat
             pool_clone,
             make_vectorizer(
                 &messages_config.method,
-                &messages_config.api_url,
-                &messages_config.protocol,
-                &messages_config.api_key,
-                &messages_config.api_model,
                 "messages",
+                MakeVectorizerConfig {
+                    api_url: &messages_config.api_url,
+                    protocol: &messages_config.protocol,
+                    api_key: &messages_config.api_key,
+                    api_model: &messages_config.api_model,
+                },
             ),
             messages_config,
         );
@@ -776,11 +783,13 @@ pub async fn spawn_vectorizers(pool: PgPool, config: &crate::config::Config, dat
             config.qdrant_url.clone(),
             make_vectorizer(
                 &wiki_config.method,
-                &wiki_config.api_url,
-                &wiki_config.protocol,
-                &wiki_config.api_key,
-                &wiki_config.api_model,
                 "wiki",
+                MakeVectorizerConfig {
+                    api_url: &wiki_config.api_url,
+                    protocol: &wiki_config.protocol,
+                    api_key: &wiki_config.api_key,
+                    api_model: &wiki_config.api_model,
+                },
             ),
             wiki_config,
             data_dir,

@@ -112,7 +112,13 @@ async fn index_profile(pool: &PgPool, data_dir: &str, profile_name: &str) -> Res
 
     // Scan wiki files
     let mut files: Vec<WikiFile> = Vec::new();
-    collect_wiki_files(&wiki_dir, &wiki_dir, &mut files, &mut cache, &cache_path)?;
+    let mut ctx = CollectWikiFilesCtx {
+        root: &wiki_dir,
+        files: &mut files,
+        cache: &mut cache,
+        cache_path: &cache_path,
+    };
+    collect_wiki_files(&mut ctx, &wiki_dir)?;
 
     if files.is_empty() {
         info!("[relevance-indexer] No wiki files found for profile '{}'", profile_name);
@@ -162,14 +168,16 @@ async fn index_profile(pool: &PgPool, data_dir: &str, profile_name: &str) -> Res
 
 // ── File scanning ──
 
-fn collect_wiki_files(
-    root: &Path,
-    dir: &Path,
-    files: &mut Vec<WikiFile>,
-    cache: &mut HashMap<String, CacheEntry>,
-    cache_path: &Path,
-) -> Result<()> {
-    if files.len() >= MAX_FILES {
+/// Shared context for collect_wiki_files across recursive calls.
+struct CollectWikiFilesCtx<'a> {
+    root: &'a Path,
+    files: &'a mut Vec<WikiFile>,
+    cache: &'a mut HashMap<String, CacheEntry>,
+    cache_path: &'a Path,
+}
+
+fn collect_wiki_files(ctx: &mut CollectWikiFilesCtx<'_>, dir: &Path) -> Result<()> {
+    if ctx.files.len() >= MAX_FILES {
         return Ok(());
     }
 
@@ -187,7 +195,7 @@ fn collect_wiki_files(
         }
 
         if path.is_dir() {
-            collect_wiki_files(root, &path, files, cache, cache_path)?;
+            collect_wiki_files(ctx, &path)?;
             continue;
         }
 
@@ -195,7 +203,7 @@ fn collect_wiki_files(
             continue;
         }
 
-        let rel_path = path.strip_prefix(root)
+        let rel_path = path.strip_prefix(ctx.root)
             .ok()
             .and_then(|p| p.to_str())
             .map(|s| s.to_string());
@@ -223,10 +231,10 @@ fn collect_wiki_files(
         let checksum = compute_sha256(&content);
 
         // Check cache — if checksum matches, skip re-computation and use cached score
-        if let Some(cached) = cache.get(&rel_path) {
+        if let Some(cached) = ctx.cache.get(&rel_path) {
             if cached.checksum == checksum && cached.mtime_secs == mtime_secs {
                 // File unchanged — push with cached score
-                files.push(WikiFile {
+                ctx.files.push(WikiFile {
                     rel_path,
                     abs_path: path,
                     mtime_secs,
@@ -239,7 +247,7 @@ fn collect_wiki_files(
         }
 
         // New or changed file — will compute score later
-        files.push(WikiFile {
+        ctx.files.push(WikiFile {
             rel_path,
             abs_path: path,
             mtime_secs,

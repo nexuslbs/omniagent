@@ -196,16 +196,19 @@ async fn run_server() -> Result<()> {
     let mcp_for_server = mcp.clone();
     let ctx_for_server = ctx.clone();
     let server_handle = tokio::spawn(async move {
-        server::start_server(
-            pool_server,
-            server_host,
-            server_port,
-            cancel_tokens_server,
-            data_dir_server,
-            mcp_for_server,
-            ctx_for_server,
-        )
-        .await;
+        if let Err(e) = server::start_server(server::ServerConfig {
+            pool: pool_server,
+            host: server_host,
+            port: server_port,
+            cancel_tokens: cancel_tokens_server,
+            data_dir: data_dir_server,
+            mcp_registry: mcp_for_server,
+            app_context: ctx_for_server,
+        })
+        .await
+        {
+            tracing::error!("HTTP server error: {:?}", e);
+        }
     });
 
     tracing::info!(
@@ -315,7 +318,16 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
     );
 
     // Claim this channel for our session (will notify old session if reassigned)
-    crate::platform::claim_channel(&pool, current_channel_id, &session_id, "cli", None).await?;
+    crate::platform::claim_channel(
+        &pool,
+        crate::platform::ClaimChannelParams {
+            channel_id: current_channel_id,
+            session_id: &session_id,
+            platform_name: "cli",
+            senders: None,
+        },
+    )
+    .await?;
 
     // Resolve provider+model for stamping on all seq-0 messages in this session
     // Order: channel.current_provider → profile provider → env → default
@@ -351,7 +363,13 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
         "message",
         &std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string()),
     );
-    let mut thread_id = get_or_create_thread(&pool, current_channel_id, &profile_name, &resolved_provider, &resolved_model, &planning_mode).await?;
+    let mut thread_id = get_or_create_thread(&pool, ThreadLookupParams {
+        channel_id: current_channel_id,
+        profile_name: profile_name.clone(),
+        resolved_provider: resolved_provider.clone(),
+        resolved_model: resolved_model.clone(),
+        planning_mode: planning_mode.clone(),
+    }).await?;
     // Mark the /start thread as a system thread (terminal, never processed by executor)
     db::types::set_thread_system(&pool, thread_id).await?;
     let _ = get_next_sequence(&pool, current_channel_id, thread_id).await?;
@@ -400,11 +418,13 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                         // Start a fresh thread on the new channel
                         thread_id = get_or_create_thread(
                             &pool,
-                            current_channel_id,
-                            &profile_name,
-                            &resolved_provider,
-                            &resolved_model,
-                            "",
+                            ThreadLookupParams {
+                                channel_id: current_channel_id,
+                                profile_name: profile_name.clone(),
+                                resolved_provider: resolved_provider.clone(),
+                                resolved_model: resolved_model.clone(),
+                                planning_mode: "".to_string(),
+                            },
                         )
                         .await?;
                         let _ = get_next_sequence(&pool, current_channel_id, thread_id).await?;
@@ -505,11 +525,13 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                 // Start a fresh thread on the new channel
                 thread_id = get_or_create_thread(
                     &pool,
-                    current_channel_id,
-                    &profile_name,
-                    &resolved_provider,
-                    &resolved_model,
-                    "",
+                    ThreadLookupParams {
+                        channel_id: current_channel_id,
+                        profile_name: profile_name.clone(),
+                        resolved_provider: resolved_provider.clone(),
+                        resolved_model: resolved_model.clone(),
+                        planning_mode: "".to_string(),
+                    },
                 ).await?;
                 let _ = get_next_sequence(&pool, current_channel_id, thread_id).await?;
 
@@ -636,16 +658,18 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
             "user",
             current_channel_id,
             &profile_name,
-            Some(&resolved_provider),
-            Some(&resolved_model),
-            None,
-            None,
-            &input,
-            None,
-            serde_json::json!({}),
-            "message",
-            None,
-            "",
+            db::types::ThreadCauseParams {
+                provider: Some(resolved_provider.clone()),
+                model: Some(resolved_model.clone()),
+                task_id: None,
+                schedule_task_id: None,
+                content: input.clone(),
+                external_id: None,
+                metadata: serde_json::json!({}),
+                msg_type: "message".to_string(),
+                msg_subtype: None,
+                task_planning_mode: String::new(),
+            },
         ).await?;
 
         // Poll for agent responses using cursor-based polling
@@ -731,7 +755,16 @@ async fn ensure_cli_channel(
     }
 
     // Create new channel
-    let new_channel = db::types::create_channel(pool, channel_name, "cli", channel_name, "user", channel_name).await?;
+    let new_channel = db::types::create_channel(
+        pool,
+        db::types::CreateChannelParams {
+            name: channel_name.to_string(),
+            platform: "cli".to_string(),
+            external_id: channel_name.to_string(),
+            cause: "user".to_string(),
+            resource_identifier: channel_name.to_string(),
+        },
+    ).await?;
     // Update profile/model/provider
     sql_forge!(
         r#"
@@ -764,8 +797,16 @@ async fn ensure_cli_channel(
     })
 }
 
+struct ThreadLookupParams {
+    channel_id: i64,
+    profile_name: String,
+    resolved_provider: String,
+    resolved_model: String,
+    planning_mode: String,
+}
+
 /// Get or create a thread for the CLI session.
-async fn get_or_create_thread(pool: &PgPool, channel_id: i64, profile_name: &str, resolved_provider: &str, resolved_model: &str, planning_mode: &str) -> Result<i64> {
+async fn get_or_create_thread(pool: &PgPool, p: ThreadLookupParams) -> Result<i64> {
     use sql_forge::sql_forge;
     use crate::db::types as queries;
 
@@ -788,7 +829,7 @@ async fn get_or_create_thread(pool: &PgPool, channel_id: i64, profile_name: &str
         ORDER BY m.id DESC
         LIMIT 1
         "#,
-        ( :channel_id = channel_id )
+        ( :channel_id = p.channel_id )
     )
     .fetch_optional(pool)
     .await?;
@@ -803,13 +844,15 @@ async fn get_or_create_thread(pool: &PgPool, channel_id: i64, profile_name: &str
     let thread = queries::create_thread(
         pool,
         "user",
-        channel_id,
-        profile_name,
-        Some(resolved_provider),
-        Some(resolved_model),
-        None,
-        None,
-        planning_mode,
+        p.channel_id,
+        p.profile_name.as_str(),
+        queries::CreateThreadParams {
+            provider: Some(p.resolved_provider.clone()),
+            model: Some(p.resolved_model.clone()),
+            task_id: None,
+            schedule_task_id: None,
+            planning_mode: p.planning_mode.clone(),
+        },
     ).await?;
 
     let root_msg = models::MessageNew {
@@ -1163,11 +1206,13 @@ async fn handle_channel_command<R: std::io::BufRead + Unpin>(
                 // 1d. Create the channel and claim it
                 let new_channel = db::types::create_channel(
                     pool,
-                    &name,
-                    "cli",
-                    &name,
-                    "user",
-                    &name,
+                    db::types::CreateChannelParams {
+                        name: name.clone(),
+                        platform: "cli".to_string(),
+                        external_id: name.clone(),
+                        cause: "user".to_string(),
+                        resource_identifier: name.clone(),
+                    },
                 )
                 .await?;
 
@@ -1186,8 +1231,16 @@ async fn handle_channel_command<R: std::io::BufRead + Unpin>(
                 .await?;
 
                 // Claim for this session
-                crate::platform::claim_channel(pool, new_channel.id, session_id, "cli", None)
-                    .await?;
+                crate::platform::claim_channel(
+                    pool,
+                    crate::platform::ClaimChannelParams {
+                        channel_id: new_channel.id,
+                        session_id,
+                        platform_name: "cli",
+                        senders: None,
+                    },
+                )
+                .await?;
 
                 println!(
                     "Created and claimed channel '{}' (id={}).",
@@ -1233,7 +1286,16 @@ async fn handle_channel_command<R: std::io::BufRead + Unpin>(
                 let ch_name = ch.name.clone();
 
                 // Claim the selected channel for this session
-                crate::platform::claim_channel(pool, ch_id, session_id, "cli", None).await?;
+                crate::platform::claim_channel(
+                    pool,
+                    crate::platform::ClaimChannelParams {
+                        channel_id: ch_id,
+                        session_id,
+                        platform_name: "cli",
+                        senders: None,
+                    },
+                )
+                .await?;
 
                 println!("Claimed channel '{}' (id={}).", ch_name, ch_id);
                 return Ok(Some((ch_id, ch_name)));

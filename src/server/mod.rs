@@ -29,12 +29,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use anyhow::{Context, Result};
 use tracing::{error, info};
 
 use crate::db::types as queries;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, LLMConfig};
 use crate::mcp::{AppContext, McpRegistry, McpToolCall};
-use crate::prompt_builder::{build_planning_prompt, build_system_prompt, MemoryStore};
+use crate::prompt_builder::{build_planning_prompt, build_system_prompt, MemoryStore, PlanningPromptParams};
 
 pub mod plugins;
 mod diagnostic;
@@ -52,23 +53,27 @@ pub(crate) struct AppState {
     app_context: AppContext,
 }
 
+/// Configuration for the HTTP server.
+#[derive(Clone)]
+pub struct ServerConfig {
+    pub pool: PgPool,
+    pub host: String,
+    pub port: u16,
+    pub cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
+    pub data_dir: String,
+    pub mcp_registry: McpRegistry,
+    pub app_context: AppContext,
+}
+
 /// Start the HTTP server on the given host and port.
-pub async fn start_server(
-    pool: PgPool,
-    host: String,
-    port: u16,
-    cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
-    data_dir: String,
-    mcp_registry: McpRegistry,
-    app_context: AppContext,
-) {
+pub async fn start_server(config: ServerConfig) -> Result<()> {
     let app_state = Arc::new(AppState {
-        pool,
-        cancel_tokens,
-        data_dir: data_dir.clone(),
-        env_path: format!("{}/.env", data_dir),
-        mcp_registry,
-        app_context,
+        pool: config.pool,
+        cancel_tokens: config.cancel_tokens,
+        data_dir: config.data_dir.clone(),
+        env_path: format!("{}/.env", config.data_dir),
+        mcp_registry: config.mcp_registry,
+        app_context: config.app_context,
     });
 
     let app = Router::new()
@@ -111,16 +116,18 @@ pub async fn start_server(
         .route("/settings", put(settings::update_settings_handler))
         .with_state(app_state);
 
-    let addr = format!("{}:{}", host, port);
-    info!("Starting HTTP server on {}", addr);
+    let addr = format!("{}:{}", config.host, config.port);
+    info!("Starting HTTP server on {addr}");
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .expect("Failed to bind HTTP server address");
+        .context("Failed to bind HTTP server address")?;
 
     axum::serve(listener, app)
         .await
-        .expect("HTTP server exited with error");
+        .context("HTTP server exited with error")?;
+
+    Ok(())
 }
 
 /// Simple health check — returns "ok".
@@ -450,13 +457,15 @@ async fn prompt_preview_handler(
         // Build planning prompt
         let planning_prompt = build_planning_prompt(
             &memory_store,
-            platform,
-            profile_name,
-            &body.prompt,
-            0,
-            0,
-            None,
-            false, // preview route doesn't need JSON plan output
+            PlanningPromptParams {
+                platform,
+                profile_name,
+                user_message: &body.prompt,
+                plan_iteration: 0,
+                max_iterations: 0,
+                previous_plan: None,
+                use_json_plan: false, // preview route doesn't need JSON plan output
+            },
         );
 
         // Create LLM client — match how the agent resolves config.
@@ -807,22 +816,24 @@ async fn context_preview_handler(
     let prof = profile_registry.get(profile_name).cloned()
         .unwrap_or_else(|| crate::profile::Profile::default(profile_name));
 
-    let prompt_budget = prof.prompt_budget.unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT);
-
     // Build context — same function the agent uses
     let qdrant_url = std::env::var("QDRANT_URL").ok();
     let (context_text, _meta) = crate::context_builder::build_thread_context(
         &state.pool,
-        thread_id,
-        channel.id,
-        cause_id,
-        &cause_content,
-        profile_name,
-        &state.data_dir,
-        qdrant_url.as_deref(),
-        prompt_budget,
-        prof.auto_retrieval_enabled,
-        prof.retrieval_aggressiveness,
+        &crate::context_builder::ThreadContextIdentifiers {
+            thread_id,
+            channel_id: channel.id,
+            cause_msg_id: cause_id,
+        },
+        &crate::context_builder::ThreadContextConfig {
+            cause_content: &cause_content,
+            profile_name,
+            data_dir: &state.data_dir,
+            qdrant_url: qdrant_url.as_deref(),
+            prompt_budget: prof.prompt_budget.unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
+            auto_retrieval_enabled: prof.auto_retrieval_enabled,
+            retrieval_aggressiveness: prof.retrieval_aggressiveness,
+        },
     ).await;
 
     (StatusCode::OK, Json(serde_json::json!({ "context": context_text })))

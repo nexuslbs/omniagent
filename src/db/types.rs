@@ -253,17 +253,24 @@ pub struct SubscriptionDb {
 // Thread query functions
 // ---------------------------------------------------------------------------
 
+/// Parameters for [`create_thread`]. Collects all fields beyond
+/// pool / cause / channel_id / profile into a single struct.
+#[derive(Debug, Clone)]
+pub struct CreateThreadParams {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub task_id: Option<String>,
+    pub schedule_task_id: Option<String>,
+    pub planning_mode: String,
+}
+
 /// Create a new thread with status 'created'.
 pub async fn create_thread(
     pool: &PgPool,
     cause: &str,
     channel_id: i64,
     profile: &str,
-    provider: Option<&str>,
-    model: Option<&str>,
-    task_id: Option<&str>,
-    schedule_task_id: Option<&str>,
-    planning_mode: &str,
+    p: CreateThreadParams,
 ) -> anyhow::Result<Thread> {
     let row: ThreadDb = sql_forge!(
         ThreadDb,
@@ -279,7 +286,7 @@ pub async fn create_thread(
             terminal,
             planning_mode
         "#,
-        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = provider.unwrap_or(""), :model = model.unwrap_or(""), :task_id = task_id.unwrap_or(""), :schedule_task_id = schedule_task_id.unwrap_or(""), :planning_mode = planning_mode )
+        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :planning_mode = &p.planning_mode )
     )
     .fetch_one(pool)
     .await?;
@@ -565,6 +572,22 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> an
     saved.try_into()
 }
 
+/// Parameters for [`create_thread_with_cause`]. Collects all fields beyond
+/// pool / cause / channel_id / profile into a single struct.
+#[derive(Debug, Clone)]
+pub struct ThreadCauseParams {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub task_id: Option<String>,
+    pub schedule_task_id: Option<String>,
+    pub content: String,
+    pub external_id: Option<String>,
+    pub metadata: serde_json::Value,
+    pub msg_type: String,
+    pub msg_subtype: Option<String>,
+    pub task_planning_mode: String,
+}
+
 /// Create a thread and its seq-0 cause message in a single operation.
 ///
 /// Resolves the planning mode internally using the prompt content for
@@ -577,16 +600,7 @@ pub async fn create_thread_with_cause(
     cause: &str,
     channel_id: i64,
     profile: &str,
-    provider: Option<&str>,
-    model: Option<&str>,
-    task_id: Option<&str>,
-    schedule_task_id: Option<&str>,
-    content: &str,
-    external_id: Option<String>,
-    metadata: serde_json::Value,
-    msg_type: &str,
-    msg_subtype: Option<String>,
-    task_planning_mode: &str,
+    p: ThreadCauseParams,
 ) -> anyhow::Result<(Thread, Message)> {
     // 1. Get channel for its planning_mode override and current_* fields
     let channel = get_channel_by_id(pool, channel_id)
@@ -605,10 +619,10 @@ pub async fn create_thread_with_cause(
         .unwrap_or("");
     let planning_mode = resolve_thread_planning_mode_with_content(
         channel_pm,
-        task_planning_mode,
-        msg_type,
+        &p.task_planning_mode,
+        &p.msg_type,
         &global_mode,
-        content,
+        &p.content,
     );
 
     // 4. Create the thread
@@ -617,11 +631,13 @@ pub async fn create_thread_with_cause(
         cause,
         channel_id,
         profile,
-        provider,
-        model,
-        task_id,
-        schedule_task_id,
-        &planning_mode,
+        CreateThreadParams {
+            provider: p.provider.clone(),
+            model: p.model.clone(),
+            task_id: p.task_id.clone(),
+            schedule_task_id: p.schedule_task_id.clone(),
+            planning_mode: planning_mode.clone(),
+        },
     )
     .await?;
 
@@ -629,15 +645,15 @@ pub async fn create_thread_with_cause(
     let msg = MessageNew {
         thread_id: thread.id,
         role: "cause".to_string(),
-        content: content.to_string(),
+        content: p.content.clone(),
         thread_sequence: 0,
-        external_id,
-        metadata,
+        external_id: p.external_id,
+        metadata: p.metadata,
         embedding: None,
         summary_text: None,
         is_summary: false,
-        msg_type: msg_type.to_string(),
-        msg_subtype,
+        msg_type: p.msg_type.clone(),
+        msg_subtype: p.msg_subtype,
         processing_time_ms: None,
         token_usage: None,
     };
@@ -694,15 +710,21 @@ pub async fn claim_thread(pool: &PgPool, thread_id: i64) -> bool {
     }
 }
 
+/// Stats for completing a thread.
+#[derive(Debug, Clone)]
+pub struct CompleteThreadStats {
+    pub input_tokens: i32,
+    pub cached_tokens: i32,
+    pub output_tokens: i32,
+    pub duration_ms: i32,
+}
+
 /// Complete a thread with final status and usage stats.
 pub async fn complete_thread(
     pool: &PgPool,
     thread_id: i64,
     status: &str,
-    _input_tokens: i32,
-    _cached_tokens: i32,
-    _output_tokens: i32,
-    _duration_ms: i32,
+    stats: CompleteThreadStats,
 ) -> anyhow::Result<()> {
     sql_forge!(
         r#"
@@ -1060,13 +1082,18 @@ pub async fn get_channel_by_id(pool: &PgPool, channel_id: i64) -> anyhow::Result
     row.map(|r| r.try_into()).transpose()
 }
 
+#[derive(Debug, Clone)]
+pub struct CreateChannelParams {
+    pub name: String,
+    pub platform: String,
+    pub external_id: String,
+    pub cause: String,
+    pub resource_identifier: String,
+}
+
 pub async fn create_channel(
     pool: &PgPool,
-    name: &str,
-    platform: &str,
-    external_id: &str,
-    cause: &str,
-    resource_identifier: &str,
+    p: CreateChannelParams,
 ) -> anyhow::Result<Channel> {
     let row: ChannelDb = sql_forge!(
         ChannelDb,
@@ -1088,7 +1115,7 @@ pub async fn create_channel(
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
         "#,
-        ( :name = name, :platform = platform, :external_id = external_id, :cause = cause, :resource_identifier = resource_identifier )
+        ( :name = p.name.as_str(), :platform = p.platform.as_str(), :external_id = p.external_id.as_str(), :cause = p.cause.as_str(), :resource_identifier = p.resource_identifier.as_str() )
     )
     .fetch_one(pool)
     .await?;

@@ -100,6 +100,14 @@ impl PlatformRegistry {
     }
 }
 
+/// Parameters for [`claim_channel`].
+pub struct ClaimChannelParams<'a> {
+    pub channel_id: i64,
+    pub session_id: &'a str,
+    pub platform_name: &'a str,
+    pub senders: Option<&'a HashMap<String, OutboundSender>>,
+}
+
 /// Claim a channel for a session: update its resource_identifier and notify the
 /// old session (if any) via `enqueue_notification`.
 ///
@@ -109,24 +117,22 @@ impl PlatformRegistry {
 /// will log a warning instead of sending a notification.
 pub async fn claim_channel(
     pool: &PgPool,
-    channel_id: i64,
-    session_id: &str,
-    platform_name: &str,
-    senders: Option<&HashMap<String, OutboundSender>>,
+    p: ClaimChannelParams<'_>,
 ) -> anyhow::Result<()> {
-    let old_rid = crate::db::types::claim_channel_resource(pool, channel_id, session_id).await?;
+    let old_rid =
+        crate::db::types::claim_channel_resource(pool, p.channel_id, p.session_id).await?;
 
     if let Some(ref old) = old_rid {
-        if old != session_id {
+        if old != p.session_id {
             let msg = "This CLI channel has been reassigned to a new session.";
-            if let Some(s) = senders {
-                enqueue_notification(s, platform_name, old, msg);
+            if let Some(s) = p.senders {
+                enqueue_notification(s, p.platform_name, old, msg);
             } else {
                 tracing::warn!(
                     "Channel {} reassigned from '{}' to '{}' (no platform senders available)",
-                    channel_id,
+                    p.channel_id,
                     old,
-                    session_id,
+                    p.session_id,
                 );
             }
         }

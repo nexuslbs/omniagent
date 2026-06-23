@@ -360,12 +360,14 @@ pub async fn install_url_handler(
 
     match plugin::upsert_plugin(
         &state.pool,
-        &manifest.name,
-        plugin_type_str,
-        &manifest.version,
-        Some(&body.url),
-        &manifest_json,
-        &serde_json::json!({}),
+        plugin::UpsertPluginParams {
+            name: &manifest.name,
+            plugin_type: plugin_type_str,
+            version: &manifest.version,
+            source: Some(&body.url),
+            manifest: &manifest_json,
+            config: &serde_json::json!({}),
+        },
     )
     .await
     {

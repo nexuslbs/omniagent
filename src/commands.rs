@@ -269,11 +269,13 @@ pub async fn handle_new_external(
     // Create channel (ON CONFLICT will update updated_at but return existing)
     let channel = crate::db::types::create_channel(
         pool,
-        &name,
-        platform,
-        resource_identifier,
-        "user",
-        resource_identifier,
+        crate::db::types::CreateChannelParams {
+            name,
+            platform: platform.to_string(),
+            external_id: resource_identifier.to_string(),
+            cause: "user".to_string(),
+            resource_identifier: resource_identifier.to_string(),
+        },
     )
     .await?;
     Ok(channel)

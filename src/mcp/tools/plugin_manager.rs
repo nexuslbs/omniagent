@@ -98,12 +98,14 @@ pub fn plugin_manager_tool() -> McpTool {
                         handle.block_on(async {
                             plugin::upsert_plugin(
                                 &pool,
-                                &manifest.name,
-                                plugin_type_str,
-                                &manifest.version,
-                                Some(url),
-                                &manifest_json,
-                                &serde_json::json!({}),
+                                plugin::UpsertPluginParams {
+                                    name: &manifest.name,
+                                    plugin_type: plugin_type_str,
+                                    version: &manifest.version,
+                                    source: Some(url),
+                                    manifest: &manifest_json,
+                                    config: &serde_json::json!({}),
+                                },
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("Failed to register plugin in DB: {}", e))

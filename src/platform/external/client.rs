@@ -438,16 +438,18 @@ impl Platform for ExternalPlatformClient {
                                                             "user",
                                                             channel.id,
                                                             &channel.current_profile,
-                                                            channel.current_provider.as_deref(),
-                                                            channel.current_model.as_deref(),
-                                                            None,
-                                                            None,
-                                                            &inbound.text,
-                                                            Some(inbound.external_id),
-                                                            inbound.metadata,
-                                                            "message",
-                                                            None,
-                                                            "",
+                                                            crate::db::types::ThreadCauseParams {
+                                                                provider: channel.current_provider.clone(),
+                                                                model: channel.current_model.clone(),
+                                                                task_id: None,
+                                                                schedule_task_id: None,
+                                                                content: inbound.text.clone(),
+                                                                external_id: Some(inbound.external_id),
+                                                                metadata: inbound.metadata,
+                                                                msg_type: "message".to_string(),
+                                                                msg_subtype: None,
+                                                                task_planning_mode: String::new(),
+                                                            },
                                                         ).await {
                                                             // success — message and thread created
                                                         } else {

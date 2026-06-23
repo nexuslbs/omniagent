@@ -590,19 +590,21 @@ async fn insert_inbound_message(
         "user",
         channel_id,
         &profile_name,
-        Some(&provider),
-        Some(&model),
-        None,
-        None,
-        text,
-        Some(telegram_msg_id.to_string()),
-        serde_json::json!({
-            "telegram_chat_id": channel.external_id,
-            "telegram_msg_id": telegram_msg_id,
-        }),
-        "message",
-        None,
-        "",
+        crate::db::types::ThreadCauseParams {
+            provider: Some(provider),
+            model: Some(model),
+            task_id: None,
+            schedule_task_id: None,
+            content: text.to_string(),
+            external_id: Some(telegram_msg_id.to_string()),
+            metadata: serde_json::json!({
+                "telegram_chat_id": channel.external_id,
+                "telegram_msg_id": telegram_msg_id,
+            }),
+            msg_type: "message".to_string(),
+            msg_subtype: None,
+            task_planning_mode: String::new(),
+        },
     )
     .await?;
 
@@ -751,13 +753,16 @@ async fn find_or_create_channel(pool: &PgPool, chat_id: &str) -> Result<i64> {
         return Ok(row.id);
     }
 
+    let channel_name = format!("telegram-{}", chat_id);
     let channel = crate::db::types::create_channel(
         pool,
-        &format!("telegram-{}", chat_id),
-        "telegram",
-        chat_id,
-        "user",
-        chat_id,
+        crate::db::types::CreateChannelParams {
+            name: channel_name,
+            platform: "telegram".to_string(),
+            external_id: chat_id.to_string(),
+            cause: "user".to_string(),
+            resource_identifier: chat_id.to_string(),
+        },
     )
     .await?;
 

@@ -343,50 +343,71 @@ fn classify_query(_content: &str) -> (&'static str, bool) {
 // Full context assembly for a thread
 // ---------------------------------------------------------------------------
 
+/// Identifiers for the thread whose context is being assembled.
+#[derive(Debug, Clone)]
+pub struct ThreadContextIdentifiers {
+    pub thread_id: i64,
+    pub channel_id: i64,
+    pub cause_msg_id: i64,
+}
+
+/// Configuration parameters for context assembly.
+///
+/// Groups the content, profile, runtime paths, retrieval flags, and budget
+/// that were previously individual parameters on `build_thread_context`.
+#[derive(Debug, Clone)]
+pub struct ThreadContextConfig<'a> {
+    /// The user message that caused this thread to be processed.
+    pub cause_content: &'a str,
+    /// Name of the active profile (used to locate skills / wiki dirs).
+    pub profile_name: &'a str,
+    /// Base data directory (e.g. `ctx.data_dir` in the agent).
+    pub data_dir: &'a str,
+    /// Optional Qdrant URL for semantic wiki search.
+    pub qdrant_url: Option<&'a str>,
+    /// Character budget for the assembled context (prompt part only).
+    pub prompt_budget: usize,
+    /// Whether automatic retrieval (text/semantic search) is enabled.
+    pub auto_retrieval_enabled: bool,
+    /// How aggressively to perform retrieval (0 = disabled, 1 = text only, 2+ = text + semantic).
+    pub retrieval_aggressiveness: u8,
+}
+
 /// Assemble the [3] Context section — all context blocks that would be injected
 /// into the prompt for a given thread. This is the same logic used by the agent
 /// when processing a message, extracted for reuse by the API preview endpoint.
 ///
 /// Parameters mirror what the agent has at its disposal during processing.
 /// No messages are written; this is purely a read-only preview.
-#[allow(clippy::too_many_arguments)]
 pub async fn build_thread_context(
     pool: &PgPool,
-    thread_id: i64,
-    channel_id: i64,
-    cause_msg_id: i64,
-    cause_content: &str,
-    profile_name: &str,
-    data_dir: &str,
-    qdrant_url: Option<&str>,
-    prompt_budget: usize,
-    auto_retrieval_enabled: bool,
-    retrieval_aggressiveness: u8,
+    ids: &ThreadContextIdentifiers,
+    config: &ThreadContextConfig<'_>,
 ) -> (String, ContextAssemblyMeta) {
     use crate::db::types as queries;
     use crate::vectorizer::{vector_to_string, HashVectorizer, Vectorizer};
 
-    let mut builder = ContextBuilder::new().with_budget(prompt_budget);
+    let mut builder = ContextBuilder::new().with_budget(config.prompt_budget);
 
     // Classify the user message to determine retrieval needs
-    let (_query_class, needs_retrieval) = classify_query(cause_content);
+    let (_query_class, needs_retrieval) = classify_query(config.cause_content);
 
     // Determine retrieval aggressiveness
-    let use_retrieval = needs_retrieval && auto_retrieval_enabled;
+    let use_retrieval = needs_retrieval && config.auto_retrieval_enabled;
     let aggressiveness = if use_retrieval {
-        retrieval_aggressiveness
+        config.retrieval_aggressiveness
     } else {
         0u8
     };
 
     // Add recent thread messages as a high-priority context block
-    match queries::get_recent_thread_messages(pool, thread_id, 10).await {
+    match queries::get_recent_thread_messages(pool, ids.thread_id, 10).await {
         Ok(recent_msgs) => {
             if !recent_msgs.is_empty() {
                 let thread_content: String = recent_msgs
                     .iter()
                     .rev() // oldest first
-                    .filter(|m| m.id != cause_msg_id) // exclude the current cause message
+                    .filter(|m| m.id != ids.cause_msg_id) // exclude the current cause message
                     .map(|m| format!("[{}]: {}", m.role, m.content))
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -406,7 +427,7 @@ pub async fn build_thread_context(
     }
 
     // Add last summary for this channel as high-priority context
-    match queries::get_latest_summary(pool, channel_id).await {
+    match queries::get_latest_summary(pool, ids.channel_id).await {
         Ok(Some(summary)) => {
             builder.add_block(ContextBlock::new(
                 "last_summary",
@@ -419,7 +440,7 @@ pub async fn build_thread_context(
             ));
 
             // Also include threads completed after the last summary, if any
-            match queries::get_completed_seq0_threads_since(pool, channel_id, summary.next_thread_id, 5).await {
+            match queries::get_completed_seq0_threads_since(pool, ids.channel_id, summary.next_thread_id, 5).await {
                 Ok(roots) if !roots.is_empty() => {
                     let roots_content: String = roots
                         .iter()
@@ -442,7 +463,7 @@ pub async fn build_thread_context(
     }
 
     // Add profile skills as context
-    let skills_dir = format!("{}/profiles/{}/skills", data_dir, profile_name);
+    let skills_dir = format!("{}/profiles/{}/skills", config.data_dir, config.profile_name);
     match tokio::task::spawn_blocking(move || -> Vec<String> {
         let mut skills = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&skills_dir) {
@@ -486,7 +507,7 @@ pub async fn build_thread_context(
 
     // Add retrieved past messages + wiki if retrieval is indicated
     if aggressiveness > 0 {
-        let search_terms: Vec<&str> = cause_content
+        let search_terms: Vec<&str> = config.cause_content
             .split_whitespace()
             .filter(|w| w.len() > 4)
             .take(5)
@@ -497,13 +518,13 @@ pub async fn build_thread_context(
 
             // ── Hybrid message search (text + semantic fused via RRF) ──
             // Collect results from both sources, then fuse
-            let text_msgs = queries::search_messages_text(pool, &search_query, channel_id, 10).await
+            let text_msgs = queries::search_messages_text(pool, &search_query, ids.channel_id, 10).await
                 .unwrap_or_default();
             let semantic_msgs = if aggressiveness >= 2 {
                 let hash_vec = HashVectorizer;
                 let query_embedding = hash_vec.generate_embedding(&search_query).await;
                 let emb_str = vector_to_string(&query_embedding);
-                queries::search_messages_semantic(pool, &emb_str, channel_id, 10).await
+                queries::search_messages_semantic(pool, &emb_str, ids.channel_id, 10).await
                     .unwrap_or_default()
             } else {
                 vec![]
@@ -572,11 +593,11 @@ pub async fn build_thread_context(
 
             // ── Hybrid wiki search (text + Qdrant semantic fused via RRF) ──
             // Collect results from both wiki text search and Qdrant, then fuse
-            let wiki_dir = format!("{}/profiles/{}/wiki", data_dir, profile_name);
+            let wiki_dir = format!("{}/profiles/{}/wiki", config.data_dir, config.profile_name);
             let wiki_text_results = queries::search_wiki_text(&wiki_dir, &search_query, 5);
 
             let qdrant_results = if aggressiveness >= 2 {
-                if let Some(qdrant) = qdrant_url {
+                if let Some(qdrant) = config.qdrant_url {
                     let hash_vec = HashVectorizer;
                     let wiki_embedding = hash_vec.generate_embedding(&search_query).await;
                     queries::search_wiki_qdrant(qdrant, &wiki_embedding, 5).await
@@ -655,7 +676,7 @@ pub async fn build_thread_context(
 
             // Build the recall payload from the cause content
             let recall_payload = serde_json::json!({
-                "query": cause_content,
+                "query": config.cause_content,
                 "limit": 5,
             });
 

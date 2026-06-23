@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::db::types as queries;
+use crate::db::types::CompleteThreadStats;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
 use crate::models::{Channel, Message, MessageNew, Thread};
 use crate::platform::queue::OutboundEnvelope;
@@ -39,7 +40,7 @@ use crate::vectorizer::Vectorizer;
 use crate::mcp::{
     truncate_content, AppContext, McpRegistry, McpToolCall, DEFAULT_MAX_TOOL_OUTPUT_CHARS,
 };
-use crate::prompt_builder::format_subtask_section;
+use crate::prompt_builder::{format_subtask_section, PlanningPromptParams};
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -66,6 +67,17 @@ pub struct AgentConfig {
     pub delete_after_days: u32,
     /// Max output tokens for the planning LLM call.
     pub prompt_plan_max_tokens: u32,
+}
+
+/// Shared context bundle used by channel_handler and process_thread.
+/// Combines the infrastructure dependencies that are passed to both functions.
+#[derive(Clone)]
+pub struct AgentContext {
+    pub pool: PgPool,
+    pub llm: Arc<LLMClient>,
+    pub config: AgentConfig,
+    pub mcp: McpRegistry,
+    pub ctx: AppContext,
 }
 
 impl AgentConfig {
@@ -198,14 +210,16 @@ impl Agent {
     /// The `cancel_tokens` map is shared with the HTTP server so the
     /// `/stop/{channel_id}` endpoint can cancel channel handlers.
     pub async fn run(self, cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>) {
-        let pool = self.pool;
-        let llm = self.llm;
-        let config = self.config;
-        let mcp = self.mcp;
-        let ctx = self.ctx;
+        let agent_ctx = AgentContext {
+            pool: self.pool,
+            llm: self.llm,
+            config: self.config,
+            mcp: self.mcp,
+            ctx: self.ctx,
+        };
 
         loop {
-            let channels = match queries::find_all_channels(&pool).await {
+            let channels = match queries::find_all_channels(&agent_ctx.pool).await {
                 Ok(ch) => ch,
                 Err(e) => {
                     error!("Failed to list channels: {:?}", e);
@@ -224,7 +238,7 @@ impl Agent {
                 if let std::collections::hash_map::Entry::Vacant(e) = tokens.entry(channel_id) {
                     // Skip spawning if the channel is closed — it will be spawned
                     // when the channel is opened via the /open endpoint
-                    if let Ok(true) = queries::is_channel_closed(&pool, channel_id).await {
+                    if let Ok(true) = queries::is_channel_closed(&agent_ctx.pool, channel_id).await {
                         continue;
                     }
 
@@ -232,23 +246,10 @@ impl Agent {
                     let handler_token = token.clone();
                     e.insert(token);
 
-                    let pool = pool.clone();
-                    let llm = llm.clone();
-                    let config = config.clone();
-                    let mcp_clone = mcp.clone();
-                    let ctx_clone = ctx.clone();
+                    let cfg = agent_ctx.clone();
 
                     tokio::spawn(async move {
-                        channel_handler(
-                            pool,
-                            llm,
-                            config,
-                            mcp_clone,
-                            ctx_clone,
-                            channel_id,
-                            handler_token,
-                        )
-                        .await;
+                        channel_handler(cfg, channel_id, handler_token).await;
                     });
 
                     info!(
@@ -268,7 +269,7 @@ impl Agent {
             for &channel_id in &stopped_ids {
                 if let Some(token) = tokens.get(&channel_id) {
                     if !token.is_cancelled() {
-                        if let Ok(true) = queries::is_channel_closed(&pool, channel_id).await
+                        if let Ok(true) = queries::is_channel_closed(&agent_ctx.pool, channel_id).await
                         {
                             info!(
                                 "Channel {} has been closed, cancelling handler",
@@ -306,11 +307,7 @@ impl Agent {
 /// The loop exits cleanly when the cancellation token is triggered or
 /// when the channel is marked as stopped in the database.
 async fn channel_handler(
-    pool: PgPool,
-    llm: Arc<LLMClient>,
-    config: AgentConfig,
-    mcp: McpRegistry,
-    ctx: AppContext,
+    cfg: AgentContext,
     channel_id: i64,
     cancel: CancellationToken,
 ) {
@@ -322,19 +319,19 @@ async fn channel_handler(
         tokio::select! {
             _ = cancel.cancelled() => {
                 info!("Channel {} handler cancelled", channel_id);
-                let _ = queries::skip_channel_threads(&pool, channel_id).await;
+                let _ = queries::skip_channel_threads(&cfg.pool, channel_id).await;
                 break;
             }
             _ = async {
                 // Check if the channel has been closed in the DB
-                if let Ok(true) = queries::is_channel_closed(&pool, channel_id).await {
+                if let Ok(true) = queries::is_channel_closed(&cfg.pool, channel_id).await {
                     info!("Channel {} is closed in DB, handler exiting", channel_id);
-                    let _ = queries::skip_channel_threads(&pool, channel_id).await;
+                    let _ = queries::skip_channel_threads(&cfg.pool, channel_id).await;
                     return;
                 }
 
                 // Fetch pending threads for this channel
-                let threads = match queries::find_pending_threads_by_channel(&pool, channel_id).await {
+                let threads = match queries::find_pending_threads_by_channel(&cfg.pool, channel_id).await {
                     Ok(threads) => threads,
                     Err(e) => {
                         error!("Error fetching pending threads for channel {}: {:?}", channel_id, e);
@@ -345,26 +342,26 @@ async fn channel_handler(
                 for thread in &threads {
                     // Best-effort cancellation check before each thread
                     if cancel.is_cancelled() {
-                        let _ = queries::skip_channel_threads(&pool, channel_id).await;
+                        let _ = queries::skip_channel_threads(&cfg.pool, channel_id).await;
                         return;
                     }
 
                     // Check if the channel was closed between batches
-                    if let Ok(true) = queries::is_channel_closed(&pool, channel_id).await {
+                    if let Ok(true) = queries::is_channel_closed(&cfg.pool, channel_id).await {
                         info!("Channel {} closed during batch processing", channel_id);
-                        let _ = queries::skip_channel_threads(&pool, channel_id).await;
+                        let _ = queries::skip_channel_threads(&cfg.pool, channel_id).await;
                         return;
                     }
 
                     info!("Processing thread {} in channel {}", thread.id, channel_id);
 
                     // Get the cause message for this thread
-                    let cause_msg = match queries::get_cause_message(&pool, thread.id).await {
+                    let cause_msg = match queries::get_cause_message(&cfg.pool, thread.id).await {
                         Ok(Some(msg)) => msg,
                         Ok(None) => {
                             error!("Thread {} has no cause message, skipping", thread.id);
                             // Mark thread as interrupted
-                            let _ = queries::complete_thread(&pool, thread.id, "interrupted", 0, 0, 0, 0).await;
+                            let _ = queries::complete_thread(&cfg.pool, thread.id, "interrupted", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
                             continue;
                         }
                         Err(e) => {
@@ -374,14 +371,14 @@ async fn channel_handler(
                     };
 
                     // Check message count limit before claiming the thread
-                    let max_iter = queries::max_iterations_for_planning_mode(&config, &thread.planning_mode);
-                    match queries::count_thread_messages(&pool, thread.id).await {
+                    let max_iter = queries::max_iterations_for_planning_mode(&cfg.config, &thread.planning_mode);
+                    match queries::count_thread_messages(&cfg.pool, thread.id).await {
                         Ok(count) if count >= max_iter as i32 => {
                             info!(
                                 "Thread {} has reached message limit ({}/{}), skipping",
                                 thread.id, count, max_iter
                             );
-                            let _ = queries::complete_thread(&pool, thread.id, "skipped", 0, 0, 0, 0).await;
+                            let _ = queries::complete_thread(&cfg.pool, thread.id, "skipped", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
                             continue;
                         }
                         Ok(_) => {} // under limit, proceed
@@ -393,7 +390,7 @@ async fn channel_handler(
                     // Anti-double-execute guard: atomically claim this thread by
                     // updating its status to 'processing' only if it's still 'pending'.
                     // If another agent instance claimed it first, skip.
-                    if !queries::claim_thread(&pool, thread.id).await {
+                    if !queries::claim_thread(&cfg.pool, thread.id).await {
                         debug!(
                             "Thread {} was already claimed by another worker, skipping",
                             thread.id
@@ -403,16 +400,16 @@ async fn channel_handler(
 
                     // If this thread is linked to a kanban task, mark it as running
                     if let Some(ref task_id) = thread.task_id {
-                        let _ = queries::update_kanban_status(&pool, task_id, "running").await;
+                        let _ = queries::update_kanban_status(&cfg.pool, task_id, "running").await;
                     }
 
-                    if let Err(e) = process_thread(&pool, &llm, &config, &mcp, &ctx, thread, &cause_msg).await {
+                    if let Err(e) = process_thread(&cfg, thread, &cause_msg).await {
                         error!("Failed to process thread {}: {:?}", thread.id, e);
                         // Mark thread as failed
-                        let _ = queries::complete_thread(&pool, thread.id, "failed", 0, 0, 0, 0).await;
+                        let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
                         // If this thread is linked to a kanban task, mark it as blocked
                         if let Some(ref task_id) = thread.task_id {
-                            let _ = queries::update_kanban_status(&pool, task_id, "blocked").await;
+                            let _ = queries::update_kanban_status(&cfg.pool, task_id, "blocked").await;
                         }
                     }
                 }
@@ -472,7 +469,7 @@ async fn persist_or_abort(
                 thread_id
             );
             // Mark the thread as failed
-            let _ = queries::complete_thread(pool, thread_id, "failed", 0, 0, 0, 0).await;
+            let _ = queries::complete_thread(pool, thread_id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
             CreateMessageResult::FkViolation
         }
         Err(e) => CreateMessageResult::OtherError(e),
@@ -728,11 +725,7 @@ async fn check_and_generate_summary(
 /// 9. Update thread status → completed/failed, record token_usage + duration
 /// 10. Trigger cross-thread summary if enough threads have accumulated
 async fn process_thread(
-    pool: &PgPool,
-    llm: &LLMClient,
-    config: &AgentConfig,
-    mcp: &McpRegistry,
-    ctx: &AppContext,
+    cfg: &AgentContext,
     thread: &Thread,
     cause_msg: &Message,
 ) -> Result<Message> {
@@ -742,7 +735,7 @@ async fn process_thread(
     // The claim_thread function already set status='processing' and started_at=NOW()
 
     // 2. Get current message count for this thread
-    let current_msg_count = queries::count_thread_messages(pool, thread.id)
+    let current_msg_count = queries::count_thread_messages(&cfg.pool, thread.id)
         .await
         .unwrap_or(0);
 
@@ -751,7 +744,7 @@ async fn process_thread(
     let provider_name = thread.provider.clone();
     let model_name = thread.model.clone();
 
-    let profile_registry = crate::profile::ProfileRegistry::new(&ctx.data_dir);
+    let profile_registry = crate::profile::ProfileRegistry::new(&cfg.ctx.data_dir);
 
     // 3a. Check profile name is present
     if profile_name.is_empty() {
@@ -775,11 +768,11 @@ async fn process_thread(
             processing_time_ms: None,
             token_usage: None,
         };
-        let saved = queries::create_message(pool, &err_msg).await?;
-        let _ = queries::complete_thread(pool, thread.id, "failed", 0, 0, 0, 0).await;
+        let saved = queries::create_message(&cfg.pool, &err_msg).await?;
+        let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
         // Deliver the error message back to the user's platform
-        if let Ok(Some(channel)) = queries::get_channel_by_id(pool, thread.channel_id).await {
-            enqueue_delivery(ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
+        if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
+            enqueue_delivery(&cfg.ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
         }
         return Ok(saved);
     }
@@ -807,8 +800,8 @@ async fn process_thread(
             processing_time_ms: None,
             token_usage: None,
         };
-        let saved = queries::create_message(pool, &err_msg).await?;
-        let _ = queries::complete_thread(pool, thread.id, "failed", 0, 0, 0, 0).await;
+        let saved = queries::create_message(&cfg.pool, &err_msg).await?;
+        let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
         return Ok(saved);
     }
 
@@ -835,11 +828,11 @@ async fn process_thread(
             processing_time_ms: None,
             token_usage: None,
         };
-        let saved = queries::create_message(pool, &err_msg).await?;
-        let _ = queries::complete_thread(pool, thread.id, "failed", 0, 0, 0, 0).await;
+        let saved = queries::create_message(&cfg.pool, &err_msg).await?;
+        let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
         // Deliver the error message back to the user's platform
-        if let Ok(Some(channel)) = queries::get_channel_by_id(pool, thread.channel_id).await {
-            enqueue_delivery(ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
+        if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
+            enqueue_delivery(&cfg.ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
         }
         return Ok(saved);
     }
@@ -867,11 +860,11 @@ async fn process_thread(
             processing_time_ms: None,
             token_usage: None,
         };
-        let saved = queries::create_message(pool, &err_msg).await?;
-        let _ = queries::complete_thread(pool, thread.id, "failed", 0, 0, 0, 0).await;
+        let saved = queries::create_message(&cfg.pool, &err_msg).await?;
+        let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
         // Deliver the error message back to the user's platform
-        if let Ok(Some(channel)) = queries::get_channel_by_id(pool, thread.channel_id).await {
-            enqueue_delivery(ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
+        if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
+            enqueue_delivery(&cfg.ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
         }
         return Ok(saved);
     }
@@ -887,14 +880,14 @@ async fn process_thread(
 
     // 4. Build the initial message history with the structured system prompt
     let system_prompt = crate::prompt_builder::build_system_prompt(
-        &ctx.memory_store,
+        &cfg.ctx.memory_store,
         "",   // platform — will be enriched from channel metadata in the future
         None, // system_message
         &profile_name,
     );
 
     // 4a. Inject subtask context if the thread has subtasks
-    let subtask_section: Option<String> = match crate::subtask::list_subtasks(pool, thread.id).await
+    let subtask_section: Option<String> = match crate::subtask::list_subtasks(&cfg.pool, thread.id).await
     {
         Ok(subtask_rows) => {
             if subtask_rows.is_empty() {
@@ -948,7 +941,7 @@ async fn process_thread(
                         .filter(|s| !s.is_empty())
                 });
             if let Some(template) = template_name {
-                let content = crate::prompt_builder::load_template(&ctx.data_dir, &profile_name, template);
+                let content = crate::prompt_builder::load_template(&cfg.ctx.data_dir, &profile_name, template);
                 if let Some(ref tmpl) = content {
                     info!(
                         "Loaded template '{}' for thread {} ({} chars)",
@@ -973,17 +966,21 @@ async fn process_thread(
     let ctx_assembly_meta: Option<ContextAssemblyMeta>;
     let context_messages = {
         let (context_text, meta) = crate::context_builder::build_thread_context(
-            pool,
-            thread.id,
-            thread.channel_id,
-            cause_msg.id,
-            &cause_msg.content,
-            &profile_name,
-            &ctx.data_dir,
-            ctx.qdrant_url.as_deref(),
-            prof.prompt_budget.unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
-            prof.auto_retrieval_enabled,
-            prof.retrieval_aggressiveness,
+            &cfg.pool,
+            &crate::context_builder::ThreadContextIdentifiers {
+                thread_id: thread.id,
+                channel_id: thread.channel_id,
+                cause_msg_id: cause_msg.id,
+            },
+            &crate::context_builder::ThreadContextConfig {
+                cause_content: &cause_msg.content,
+                profile_name: &profile_name,
+                data_dir: &cfg.ctx.data_dir,
+                qdrant_url: cfg.ctx.qdrant_url.as_deref(),
+                prompt_budget: prof.prompt_budget.unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
+                auto_retrieval_enabled: prof.auto_retrieval_enabled,
+                retrieval_aggressiveness: prof.retrieval_aggressiveness,
+            },
         ).await;
         ctx_assembly_meta = Some(meta);
         context_text
@@ -1003,7 +1000,7 @@ async fn process_thread(
     };
 
     // Fetch channel for delivery — cached for use throughout the function
-    let channel = queries::get_channel_by_id(pool, thread.channel_id).await?.unwrap_or_default();
+    let channel = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await?.unwrap_or_default();
 
     // Whether subtask creation and enforcement are enabled
     let enable_subtasks = planning_mode == "auto_subtasks";
@@ -1019,7 +1016,7 @@ async fn process_thread(
 
     let plan_content: Option<String> = if should_plan {
         let max_iter = 0; // one-shot, no refinement iterations
-        let max_tokens = config.prompt_plan_max_tokens;
+        let max_tokens = cfg.config.prompt_plan_max_tokens;
         let mut last_plan: Option<String> = None;
         let mut json_failure_count: u32 = 0;
         let mut json_error_msg: Option<String> = None;
@@ -1027,14 +1024,16 @@ async fn process_thread(
         for iter in 0..(max_iter + 1) {
             // Build the planning prompt (lightweight — no tools, no heavy context)
             let planning_prompt = crate::prompt_builder::build_planning_prompt(
-                &ctx.memory_store,
-                "",   // platform
-                &profile_name,
-                &cause_msg.content,
-                iter,
-                max_iter,
-                last_plan.as_deref(),
-                enable_subtasks,
+                &cfg.ctx.memory_store,
+                PlanningPromptParams {
+                    platform: "",   // platform
+                    profile_name: &profile_name,
+                    user_message: &cause_msg.content,
+                    plan_iteration: iter,
+                    max_iterations: max_iter,
+                    previous_plan: last_plan.as_deref(),
+                    use_json_plan: enable_subtasks,
+                },
             );
 
             let planning_messages = if let Some(ref err) = json_error_msg {
@@ -1056,7 +1055,7 @@ async fn process_thread(
                 tools: None,
             };
 
-            match llm.completion(plan_request).await {
+            match cfg.llm.completion(plan_request).await {
                 Ok(resp) => {
                     merge_usage(&mut cumulative_usage, resp.usage.clone());
                     let content = resp.content;
@@ -1099,7 +1098,7 @@ async fn process_thread(
                         processing_time_ms: plan_duration_ms,
                         token_usage: plan_token_usage,
                     };
-                    match queries::create_message(pool, &plan_msg).await {
+                    match queries::create_message(&cfg.pool, &plan_msg).await {
                         Ok(_) => {},
                         Err(e) => warn!("[plan] Failed to persist plan for thread {}: {:?}", thread.id, e),
                     }
@@ -1117,7 +1116,7 @@ async fn process_thread(
                                             let clean = step.trim().trim_end_matches(|c: char| c == '*' || c == '`').trim();
                                             if !clean.is_empty() {
                                                 let priority = (total - i) as i32;
-                                                if let Err(e) = crate::subtask::add_subtask(pool, thread.id, clean, priority).await {
+                                                if let Err(e) = crate::subtask::add_subtask(&cfg.pool, thread.id, clean, priority).await {
                                                     warn!("[plan] Failed to create subtask '{}': {:?}", clean, e);
                                                 } else {
                                                     info!("[plan] Created subtask '{}' for complex thread {}", clean, thread.id);
@@ -1224,10 +1223,10 @@ async fn process_thread(
     messages.push(ChatMessage::user(&cause_msg.content));
 
     // 5. Build tool definitions from the profile's allowed tools
-    let tools_def = mcp.to_openai_tools(&prof.allowed_tools);
+    let tools_def = cfg.mcp.to_openai_tools(&prof.allowed_tools);
 
     // 6. Tool-calling loop — max iterations controls total LLM calls
-    let iter_limit = queries::max_iterations_for_planning_mode(config, &thread.planning_mode) as i32;
+    let iter_limit = queries::max_iterations_for_planning_mode(&cfg.config, &thread.planning_mode) as i32;
     let remaining = iter_limit - current_msg_count;
     let max_llm_calls = remaining.clamp(0, 25) as u32; // safety cap — 25 max
     let mut final_content = String::new();
@@ -1257,8 +1256,8 @@ async fn process_thread(
 
         let request = CompletionRequest {
             messages: messages.clone(),
-            max_tokens: config.max_tokens,
-            temperature: config.temperature,
+            max_tokens: cfg.config.max_tokens,
+            temperature: cfg.config.temperature,
             stream: false,
             tools: if tools_def.is_empty() {
                 None
@@ -1267,7 +1266,7 @@ async fn process_thread(
             },
         };
 
-        let response = match llm.completion(request).await {
+        let response = match cfg.llm.completion(request).await {
             Ok(resp) => resp,
             Err(e) => {
                 error!("LLM call failed: {:?}", e);
@@ -1289,7 +1288,7 @@ async fn process_thread(
             // Subtask enforcement: only when subtask mode is active
             if enable_subtasks {
                 // Check if all subtasks are completed/cancelled before allowing final answer
-                let pending_subtasks = match crate::subtask::list_subtasks(pool, thread.id).await {
+                let pending_subtasks = match crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
                     Ok(list) => list.into_iter().filter(|st| st.status == "pending" || st.status == "in_progress").collect::<Vec<_>>(),
                     Err(_) => Vec::new(),
                 };
@@ -1396,7 +1395,7 @@ async fn process_thread(
                 processing_time_ms: tool_duration_ms,
                 token_usage: tool_token_usage.clone(),
             };
-            match persist_or_abort(pool, &multi_msg, thread.id).await {
+            match persist_or_abort(&cfg.pool, &multi_msg, thread.id).await {
                 CreateMessageResult::FkViolation => {
                     anyhow::bail!("FK violation — thread {} no longer exists", thread.id)
                 }
@@ -1404,7 +1403,7 @@ async fn process_thread(
                     error!("Failed to persist multi-tool message: {:?}", e)
                 }
                 CreateMessageResult::Success(saved) => {
-                    enqueue_delivery(ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
+                    enqueue_delivery(&cfg.ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
                 }
             }
         }
@@ -1438,7 +1437,7 @@ async fn process_thread(
                 processing_time_ms: tool_ptime,
                 token_usage: tool_tu,
             };
-            match persist_or_abort(pool, &tool_call_msg, thread.id).await {
+            match persist_or_abort(&cfg.pool, &tool_call_msg, thread.id).await {
                 CreateMessageResult::FkViolation => {
                     anyhow::bail!("FK violation — thread {} no longer exists", thread.id)
                 }
@@ -1446,7 +1445,7 @@ async fn process_thread(
                     error!("Failed to persist tool call '{}': {:?}", tool_name, e)
                 }
                 CreateMessageResult::Success(saved) => {
-                    enqueue_delivery(ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
+                    enqueue_delivery(&cfg.ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
                 }
             }
 
@@ -1458,7 +1457,7 @@ async fn process_thread(
             };
 
             let tool_start = std::time::Instant::now();
-            let result = mcp.execute(&mcp_call, ctx.clone()).await;
+            let result = cfg.mcp.execute(&mcp_call, cfg.ctx.clone()).await;
             let tool_elapsed_ms = tool_start.elapsed().as_millis() as i32;
 
             match result {
@@ -1482,7 +1481,7 @@ async fn process_thread(
                         processing_time_ms: Some(tool_elapsed_ms),
                         token_usage: None,
                     };
-                    match persist_or_abort(pool, &tool_result_msg, thread.id).await {
+                    match persist_or_abort(&cfg.pool, &tool_result_msg, thread.id).await {
                         CreateMessageResult::FkViolation => anyhow::bail!("FK violation — thread {} no longer exists", thread.id),
                         CreateMessageResult::OtherError(e) => error!("Failed to persist tool result '{}': {:?}", tool_name, e),
                         CreateMessageResult::Success(_) => {}
@@ -1513,7 +1512,7 @@ async fn process_thread(
                         processing_time_ms: Some(tool_elapsed_ms),
                         token_usage: None,
                     };
-                    match persist_or_abort(pool, &tool_result_msg, thread.id).await {
+                    match persist_or_abort(&cfg.pool, &tool_result_msg, thread.id).await {
                         CreateMessageResult::FkViolation => anyhow::bail!("FK violation — thread {} no longer exists", thread.id),
                         CreateMessageResult::OtherError(e2) => error!("Failed to persist tool error '{}': {:?}", tool_name, e2),
                         CreateMessageResult::Success(_) => {}
@@ -1541,7 +1540,7 @@ async fn process_thread(
             }
 
             if calls_since_subtask_management >= 3 {
-                if let Ok(subtasks) = crate::subtask::list_subtasks(pool, thread.id).await {
+                if let Ok(subtasks) = crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
                     let pending_count = subtasks.iter()
                         .filter(|st| st.status == "pending" || st.status == "in_progress")
                         .count();
@@ -1621,9 +1620,9 @@ async fn process_thread(
                 processing_time_ms: None,
                 token_usage: None,
             };
-            let reasoning_saved = queries::create_message(pool, &reasoning_msg).await?;
+            let reasoning_saved = queries::create_message(&cfg.pool, &reasoning_msg).await?;
             enqueue_delivery(
-                        ctx,
+                &cfg.ctx,
                 &reasoning_saved,
                 &channel,
                 thread,
@@ -1653,10 +1652,10 @@ async fn process_thread(
         token_usage: token_usage_json.clone(),
     };
 
-    let saved = queries::create_message(pool, &agent_msg).await?;
+    let saved = queries::create_message(&cfg.pool, &agent_msg).await?;
 
     enqueue_delivery(
-        ctx,
+        &cfg.ctx,
         &saved,
         &channel,
         thread,
@@ -1699,7 +1698,7 @@ async fn process_thread(
         };
 
         let summary_start = std::time::Instant::now();
-        let (summary_text, summary_token_usage) = match llm.completion(summary_request).await {
+        let (summary_text, summary_token_usage) = match cfg.llm.completion(summary_request).await {
             Ok(resp) => {
                 let usage = resp.usage.clone();
                 merge_usage(&mut cumulative_usage, resp.usage);
@@ -1742,11 +1741,11 @@ async fn process_thread(
             token_usage: summary_token_usage,
         };
 
-        match queries::create_message(pool, &summary_msg).await {
+        match queries::create_message(&cfg.pool, &summary_msg).await {
             Ok(summary_saved) => {
                 info!("[summary] Saved summary message for thread {}", thread.id,);
                 enqueue_delivery(
-                    ctx,
+                    &cfg.ctx,
                     &summary_saved,
                     &channel,
                     thread,
@@ -1772,7 +1771,7 @@ async fn process_thread(
     // after the tool-calling loop ends (regardless of why it ended), fail the thread.
     // Subtasks must only be marked completed/cancelled by the LLM via manage_subtasks tool.
     if enable_subtasks && !force_failed && final_status == "completed" {
-        if let Ok(post_subtasks) = crate::subtask::list_subtasks(pool, thread.id).await {
+        if let Ok(post_subtasks) = crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
             let unfinished: Vec<_> = post_subtasks.iter()
                 .filter(|st| st.status == "pending" || st.status == "in_progress")
                 .collect();
@@ -1804,7 +1803,7 @@ async fn process_thread(
         "completed"
     };
 
-    queries::complete_thread(pool, thread.id, final_status, 0, 0, 0, 0).await?;
+    queries::complete_thread(&cfg.pool, thread.id, final_status, CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await?;
 
     // If this thread is linked to a kanban task, update its status
     if let Some(ref task_id) = thread.task_id {
@@ -1813,11 +1812,11 @@ async fn process_thread(
         } else {
             "blocked"
         };
-        let _ = queries::update_kanban_status(pool, task_id, kanban_status).await;
+        let _ = queries::update_kanban_status(&cfg.pool, task_id, kanban_status).await;
     }
 
     // 11. Trigger cross-thread summary check
-    check_and_generate_summary(pool, llm, config, thread.channel_id).await;
+    check_and_generate_summary(&cfg.pool, &cfg.llm, &cfg.config, thread.channel_id).await;
 
     Ok(saved)
 }

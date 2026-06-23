@@ -158,6 +158,17 @@ pub struct PluginDetail {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Parameters for [`upsert_plugin`].
+#[derive(Debug, Clone)]
+pub struct UpsertPluginParams<'a> {
+    pub name: &'a str,
+    pub plugin_type: &'a str,
+    pub version: &'a str,
+    pub source: Option<&'a str>,
+    pub manifest: &'a serde_json::Value,
+    pub config: &'a serde_json::Value,
+}
+
 // ---------------------------------------------------------------------------
 // Default helpers
 // ---------------------------------------------------------------------------
@@ -228,12 +239,7 @@ pub async fn get_plugin_by_name(pool: &PgPool, name: &str) -> Result<Option<Plug
 /// Upsert a plugin (INSERT ON CONFLICT UPDATE).
 pub async fn upsert_plugin(
     pool: &PgPool,
-    name: &str,
-    plugin_type: &str,
-    version: &str,
-    source: Option<&str>,
-    manifest: &serde_json::Value,
-    config: &serde_json::Value,
+    p: UpsertPluginParams<'_>,
 ) -> Result<PluginRegistryRow> {
     let row: PluginRegistryRow = sql_forge!(
         PluginRegistryRow,
@@ -249,16 +255,16 @@ pub async fn upsert_plugin(
         RETURNING id, name, plugin_type, version, source, status, manifest, config,
                   created_at, updated_at
         "#,
-        ( :name = name,
-          :plugin_type = plugin_type,
-          :version = version,
-          :source = source.unwrap_or(""),
-          :manifest = manifest,
-          :config = config )
+        ( :name = p.name,
+          :plugin_type = p.plugin_type,
+          :version = p.version,
+          :source = p.source.unwrap_or(""),
+          :manifest = p.manifest,
+          :config = p.config )
     )
     .fetch_one(pool)
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to upsert plugin '{}': {}", name, e))?;
+    .map_err(|e| anyhow::anyhow!("Failed to upsert plugin '{}': {}", p.name, e))?;
     Ok(row)
 }
 
@@ -540,12 +546,14 @@ pub async fn sync_plugins_from_disk(pool: &PgPool, data_dir: &str) -> Result<()>
 
         match upsert_plugin(
             pool,
-            &manifest.name,
-            plugin_type_str,
-            &manifest.version,
-            Some(source_type),
-            &manifest_json,
-            &serde_json::json!({}),
+            UpsertPluginParams {
+                name: &manifest.name,
+                plugin_type: plugin_type_str,
+                version: &manifest.version,
+                source: Some(source_type),
+                manifest: &manifest_json,
+                config: &serde_json::json!({}),
+            },
         )
         .await
         {

@@ -411,6 +411,17 @@ pub fn build_system_prompt(
     segments.join("\n\n")
 }
 
+/// Parameters for [`build_planning_prompt`].
+pub struct PlanningPromptParams<'a> {
+    pub platform: &'a str,
+    pub profile_name: &'a str,
+    pub user_message: &'a str,
+    pub plan_iteration: u32,
+    pub max_iterations: u32,
+    pub previous_plan: Option<&'a str>,
+    pub use_json_plan: bool,
+}
+
 /// Build a lightweight planning prompt for the PROMPT_PLAN phase.
 ///
 /// This is a focused prompt that asks the LLM to produce a plan / context
@@ -421,13 +432,7 @@ pub fn build_system_prompt(
 /// plan appropriately, but it does NOT execute any tools here.
 pub fn build_planning_prompt(
     memory_store: &MemoryStore,
-    platform: &str,
-    _profile_name: &str,
-    user_message: &str,
-    plan_iteration: u32,
-    _max_iterations: u32,
-    previous_plan: Option<&str>,
-    use_json_plan: bool,
+    p: PlanningPromptParams<'_>,
 ) -> String {
     // Base system identity — everything except tool guidance since
     // planning doesn't execute tools.
@@ -443,7 +448,7 @@ pub fn build_planning_prompt(
     }
 
     // Platform hint
-    if let Some(hint) = platform_hint(platform) {
+    if let Some(hint) = platform_hint(p.platform) {
         volatile_parts.push(hint);
     }
 
@@ -453,7 +458,7 @@ pub fn build_planning_prompt(
     volatile_parts.push(format!("Conversation started: {}", now.format("%A, %B %d, %Y")));
 
     // Build the planning instruction
-    let is_refinement = plan_iteration > 0 && previous_plan.is_some();
+    let is_refinement = p.plan_iteration > 0 && p.previous_plan.is_some();
     let task_instruction = if is_refinement {
         format!(
             r#"You previously produced a plan for the user's request. \
@@ -466,9 +471,9 @@ Otherwise, produce an improved plan.
 
 Previous plan:
 {prev}"#,
-            prev = previous_plan.unwrap_or("")
+            prev = p.previous_plan.unwrap_or("")
         )
-    } else if use_json_plan {
+    } else if p.use_json_plan {
         r#"You are in the PLANNING phase. Your job is to produce a detailed execution plan
 for the user's request.
 
@@ -543,7 +548,7 @@ The user's request is provided below as a reference."#.to_string()
         identity = identity,
         volatile = volatile,
         task_instruction = task_instruction,
-        user_message = user_message,
+        user_message = p.user_message,
     )
 }
 
