@@ -140,10 +140,13 @@ pub fn compose_tool() -> McpTool {
             // Build arguments vector
             let mut arg_parts: Vec<String> = Vec::new();
 
+            // Prepend "compose" — the args vector is passed to `docker` CLI,
+            // so the full command is `docker compose <subcommand> ...`
+            arg_parts.push("compose".to_string());
+
             // Note: current_dir() is already set in run_docker(), so CWD
             // is sufficient for compose to find docker-compose.yml. No
-            // need for --project-directory (which is a compose-only flag
-            // and would break when passed directly to the docker binary).
+            // need for --project-directory.
 
             arg_parts.push(command.clone());
 
