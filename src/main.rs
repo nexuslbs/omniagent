@@ -477,6 +477,7 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                 #[derive(Debug, sqlx::FromRow, Clone)]
                 struct NewChannelRow {
                     id: i64,
+                    #[allow(dead_code)]
                     name: String,
                 }
 
@@ -514,7 +515,6 @@ async fn run_cli(channel_name: String, profile_name: String, model: Option<Strin
                 tx.commit().await?;
 
                 current_channel_id = new_channel_row.id;
-                current_channel_name = auto_name.clone();
                 session_has_channel = true;
                 // session_id unchanged — session keeps owning the new channel
                 last_seen_id = get_max_message_id(&pool, current_channel_id).await?;

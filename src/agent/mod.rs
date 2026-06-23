@@ -1784,14 +1784,6 @@ async fn process_thread(
                     thread.id,
                 );
                 force_failed = true;
-                let names: Vec<String> = unfinished.iter()
-                    .map(|st| format!("- #{}: {} ({})", st.id, st.description, st.status))
-                    .collect();
-                final_content = format!(
-                    "The thread was ended with {} unfinished subtask(s) that were never completed or cancelled by the LLM:\n\n{}\n\nAll subtasks must be explicitly completed or cancelled via the manage_subtasks tool.",
-                    unfinished.len(),
-                    names.join("\n"),
-                );
             }
         }
     }

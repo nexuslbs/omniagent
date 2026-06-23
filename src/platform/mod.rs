@@ -67,6 +67,7 @@ impl PlatformRegistry {
     /// Get a clone of the outbound sender for a given platform.
     ///
     /// Returns `None` if the platform is not registered.
+    #[allow(dead_code)]
     pub fn sender_for(&self, platform_name: &str) -> Option<OutboundSender> {
         self.senders.get(platform_name).cloned()
     }

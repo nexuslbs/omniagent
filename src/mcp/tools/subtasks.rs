@@ -68,7 +68,7 @@ pub fn manage_subtasks_tool() -> McpTool {
 
                             let priority = args["priority"].as_i64().unwrap_or(0) as i32;
 
-                            let subtask = subtask::add_subtask(&pool, thread_id, description, priority).await?;
+                            let _subtask = subtask::add_subtask(&pool, thread_id, description, priority).await?;
 
                             let counts = subtask::get_subtask_counts(&pool, thread_id).await?;
                             let current = subtask::get_current_subtask(&pool, thread_id).await?;

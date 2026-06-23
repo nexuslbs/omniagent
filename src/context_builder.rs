@@ -615,11 +615,11 @@ pub async fn build_thread_context(
             } else {
                 let mut wiki_scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
                 // Track which items we include (top N by fused score)
-                for (rank, (path, title, snippet)) in wiki_text_results.iter().enumerate() {
+                for (rank, (path, _title, _snippet)) in wiki_text_results.iter().enumerate() {
                     let score = RRF_TEXT_WEIGHT / (RRF_K + rank as f64 + 1.0);
                     *wiki_scores.entry(path.clone()).or_insert(0.0) += score;
                 }
-                for (rank, (path, title, _score)) in qdrant_results.iter().enumerate() {
+                for (rank, (path, _title, _score)) in qdrant_results.iter().enumerate() {
                     let score = RRF_SEMANTIC_WEIGHT / (RRF_K + rank as f64 + 1.0);
                     *wiki_scores.entry(path.clone()).or_insert(0.0) += score;
                 }

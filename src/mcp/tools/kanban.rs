@@ -17,6 +17,7 @@ struct KanbanTaskRow {
     status: String,
     priority: Option<i32>,
     assignee: Option<String>,
+    #[allow(dead_code)]
     template: Option<String>,
     created_at: Option<DateTime<Utc>>,
     updated_at: Option<DateTime<Utc>>,

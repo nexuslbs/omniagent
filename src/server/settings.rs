@@ -77,6 +77,7 @@ pub struct SettingUpdate {
 }
 
 /// Build the router for /settings endpoints using the shared AppState.
+#[allow(dead_code)]
 pub fn settings_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(get_settings_handler))

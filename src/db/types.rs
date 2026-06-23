@@ -241,6 +241,7 @@ pub struct SummaryDb {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SubscriptionDb {
+    #[allow(dead_code)]
     pub id: i64,
     pub channel_id: i64,
     pub subscriber_platform: String,
@@ -308,6 +309,7 @@ pub async fn set_thread_system(pool: &PgPool, thread_id: i64) -> anyhow::Result<
 
 /// Set a thread's status to 'failed' (terminal — action execution failure).
 /// These threads should never be picked up by the executor.
+#[allow(dead_code)]
 pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> anyhow::Result<()> {
     sql_forge!(
         "UPDATE threads SET status = 'failed', terminal = true WHERE id = :id",
@@ -422,7 +424,7 @@ fn resolve_max_plan(global_mode: &str) -> String {
 /// - `PLANNING_COMPLEXITY_KEYWORDS` (default comma-separated list)
 ///
 /// Returns one of: "prompt_only", "auto_plan", "auto_subtasks".
-fn classify_complexity_for_planning(content: &str, msg_type: &str) -> String {
+fn classify_complexity_for_planning(content: &str, _msg_type: &str) -> String {
     let trimmed = content.trim();
     let char_len = trimmed.len();
     let word_count = trimmed.split_whitespace().count();
@@ -701,9 +703,13 @@ pub async fn claim_thread(pool: &PgPool, thread_id: i64) -> bool {
 /// Stats for completing a thread.
 #[derive(Debug, Clone)]
 pub struct CompleteThreadStats {
+    #[allow(dead_code)]
     pub input_tokens: i32,
+    #[allow(dead_code)]
     pub cached_tokens: i32,
+    #[allow(dead_code)]
     pub output_tokens: i32,
+    #[allow(dead_code)]
     pub duration_ms: i32,
 }
 
@@ -712,7 +718,7 @@ pub async fn complete_thread(
     pool: &PgPool,
     thread_id: i64,
     status: &str,
-    stats: CompleteThreadStats,
+    _stats: CompleteThreadStats,
 ) -> anyhow::Result<()> {
     sql_forge!(
         r#"
@@ -1145,6 +1151,7 @@ pub async fn get_channel_by_platform_and_resource(
 
 /// Old channel info returned by `update_channel_platform`.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OldChannelInfo {
     pub old_platform: Option<String>,
     pub old_resource_identifier: Option<String>,
@@ -1158,6 +1165,7 @@ pub struct OldChannelInfo {
 ///
 /// Returns the old platform and resource_identifier values so callers can
 /// notify the old platform that the channel is no longer active there.
+#[allow(dead_code)]
 pub async fn update_channel_platform(
     pool: &PgPool,
     channel_id: i64,
@@ -1388,7 +1396,9 @@ pub async fn get_channel_status(pool: &PgPool, channel_id: i64) -> anyhow::Resul
 pub struct ChannelSeq0Message {
     pub id: i64,
     pub content: String,
+    #[allow(dead_code)]
     pub role: String,
+    #[allow(dead_code)]
     pub msg_type: String,
 }
 
@@ -2052,13 +2062,16 @@ pub async fn get_summaries_since(
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ChannelUsageStats {
+    #[allow(dead_code)]
     pub channel_id: i64,
     pub channel_name: String,
     pub model: Option<String>,
     pub total_input_tokens: Option<i64>,
     pub total_cached_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
+    #[allow(dead_code)]
     pub total_threads: Option<i64>,
+    #[allow(dead_code)]
     pub total_duration_ms: Option<i64>,
 }
 

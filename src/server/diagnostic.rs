@@ -72,7 +72,7 @@ pub async fn check_enrich_json(
     let t2 = std::time::Instant::now();
 
     // JSON construction
-    let val = serde_json::json!({
+    let _val = serde_json::json!({
         "success": true,
         "data": details
     });

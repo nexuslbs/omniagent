@@ -53,7 +53,9 @@ impl fmt::Display for ProviderId {
 /// Provider defaults loaded from plugin manifests (plugins/providers/*/plugin.json).
 #[derive(Debug, Clone)]
 pub struct ProviderMetadata {
+    #[allow(dead_code)]
     pub name: String,
+    #[allow(dead_code)]
     pub default_base_url: String,
     pub api_mode: String,
 }
@@ -145,6 +147,7 @@ pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::ne
     map
 });
 
+#[allow(dead_code)]
 /// Resolve the default base URL for a provider from the plugin metadata.
 pub fn resolve_default_base_url(provider_name: &str) -> String {
     PROVIDER_METADATA

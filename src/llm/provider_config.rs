@@ -9,6 +9,7 @@ use sqlx::PgPool;
 
 use crate::plugin;
 
+#[allow(dead_code)]
 /// Resolved provider configuration from the plugin_registry.
 pub struct ProviderConfig {
     pub name: String,
@@ -20,6 +21,7 @@ pub struct ProviderConfig {
 /// Query the plugin_registry for provider details.
 ///
 /// Falls back to env-var defaults if the provider is not found in the DB.
+#[allow(dead_code)]
 pub async fn resolve_provider_config(
     pool: &PgPool,
     provider_name: &str,

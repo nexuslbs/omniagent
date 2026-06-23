@@ -34,6 +34,7 @@ pub struct OutboundEnvelope {
     /// Thread this message belongs to.
     pub thread_id: i64,
     /// Sequence within the thread.
+    #[allow(dead_code)]
     pub thread_sequence: i32,
     /// The cause (seq-0) message's external_id — used for threading replies.
     pub cause_external_id: Option<String>,
