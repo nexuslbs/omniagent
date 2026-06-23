@@ -370,28 +370,7 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 default: None,
             },
         ),
-        (
-            "LLM_API_KEY".into(),
-            get_env_or_default("LLM_API_KEY", ""),
-            SettingMeta {
-                field_type: "secret".into(),
-                description: "API key for the LLM provider".into(),
-                options: None,
-                readonly: false,
-                default: None,
-            },
-        ),
-        (
-            "DEEPSEEK_API_KEY".into(),
-            get_env_or_default("DEEPSEEK_API_KEY", ""),
-            SettingMeta {
-                field_type: "secret".into(),
-                description: "DeepSeek API key (fallback for LLM_API_KEY)".into(),
-                options: None,
-                readonly: false,
-                default: None,
-            },
-        ),
+        // API keys are now managed per-provider via the Providers page,
         // ── System (read-only) ──
         (
             "HOST".into(),
@@ -504,9 +483,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "USER_MAX_CHARS" => "memory",
             "LLM_PROVIDER"
             | "LLM_MODEL"
-            | "LLM_BASE_URL"
-            | "LLM_API_KEY"
-            | "DEEPSEEK_API_KEY" => "llm",
+            | "LLM_BASE_URL" => "llm",
             _ => "system",
         };
 
@@ -594,8 +571,6 @@ pub async fn update_settings_handler(
         "LLM_PROVIDER",
         "LLM_MODEL",
         "LLM_BASE_URL",
-        "LLM_API_KEY",
-        "DEEPSEEK_API_KEY",
     ]
     .into_iter()
     .collect();

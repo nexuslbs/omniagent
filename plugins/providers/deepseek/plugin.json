@@ -6,7 +6,7 @@
   "default_base_url": "https://api.deepseek.com/v1",
   "api_mode": "chat_completions",
   "config_schema": [
-    { "key": "api_key", "label": "API Key", "type": "secret", "required": false, "description": "Set via DEEPSEEK_API_KEY or LLM_API_KEY env var" },
+    { "key": "api_key", "label": "API Key", "type": "secret", "required": false, "description": "Set via DEEPSEEK_API_KEY env var" },
     { "key": "default_model", "label": "Default Model", "type": "enum", "default": "deepseek-v4-flash", "refresh_url": "https://api.deepseek.com/v1/models", "allowed_values": ["deepseek-v4-flash", "deepseek-v3", "deepseek-r1"] }
   ],
   "env": {}

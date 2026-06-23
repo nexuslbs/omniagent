@@ -6,7 +6,7 @@
   "default_base_url": "https://api.openai.com/v1",
   "api_mode": "chat_completions",
   "config_schema": [
-    { "key": "api_key", "label": "API Key", "type": "secret", "required": false, "description": "Set via LLM_API_KEY env var" },
+    { "key": "api_key", "label": "API Key", "type": "secret", "required": false, "description": "Set via OPENAI_API_KEY env var" },
     { "key": "default_model", "label": "Default Model", "type": "string", "default": "gpt-4o" }
   ],
   "env": {}

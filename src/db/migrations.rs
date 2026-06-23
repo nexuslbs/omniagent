@@ -875,5 +875,45 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         );
     }
 
+    // ── Secrets for user-managed key/value store with versioning ──
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS secrets (
+            id              BIGSERIAL PRIMARY KEY,
+            name            VARCHAR(255) NOT NULL UNIQUE,
+            field_type      VARCHAR(20) NOT NULL DEFAULT 'password',
+            current_value   TEXT NOT NULL DEFAULT '',
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS secret_versions (
+            id              BIGSERIAL PRIMARY KEY,
+            secret_id       BIGINT NOT NULL REFERENCES secrets(id) ON DELETE CASCADE,
+            version_number  INT NOT NULL,
+            value           TEXT NOT NULL,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(secret_id, version_number)
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_secret_versions_secret_id
+        ON secret_versions(secret_id);
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }

@@ -367,6 +367,23 @@ pub fn enrich_plugin(row: &PluginRegistryRow) -> PluginDetail {
         }
     }
 
+    // For provider plugins, resolve api_key from process env as fallback for display
+    if row.plugin_type == "provider" {
+        let name_upper = row.name.to_uppercase().replace('-', "_");
+        let provider_api_key_var = format!("{}_API_KEY", name_upper);
+        for field in &config_schema {
+            if field.key == "api_key" && !resolved.contains_key("api_key") {
+                let env_val = std::env::var(&provider_api_key_var)
+                    .or_else(|_| std::env::var("LLM_API_KEY"))
+                    .unwrap_or_default();
+                if !env_val.is_empty() {
+                    resolved.insert("api_key".to_string(), env_val);
+                }
+                break;
+            }
+        }
+    }
+
     PluginDetail {
         id: row.id,
         name: row.name.clone(),
@@ -384,25 +401,28 @@ pub fn enrich_plugin(row: &PluginRegistryRow) -> PluginDetail {
 }
 
 /// Resolve ${VAR} references in a string against the process environment.
-/// Leaves unresolvable references as-is (e.g. ${MISSING_VAR} stays literal).
-/// If the variable is not set, the reference is left unchanged and the loop
-/// terminates to prevent infinite re-resolution of unresolvable references.
+/// Unresolvable references are replaced with empty string.
 fn resolve_env_var(value: &str) -> String {
     let mut result = value.to_string();
-    // Match ${VAR_NAME} patterns and replace with env value if found
-    while let Some(start) = result.find("${") {
-        if let Some(end) = result[start..].find('}') {
-            let var_name = &result[start + 2..start + end];
-            match std::env::var(var_name) {
-                Ok(val) => {
-                    result.replace_range(start..start + end + 1, &val);
+    loop {
+        let before = result.clone();
+        while let Some(start) = result.find("${") {
+            if let Some(end) = result[start..].find('}') {
+                let var_name = &result[start + 2..start + end];
+                match std::env::var(var_name) {
+                    Ok(val) => {
+                        result.replace_range(start..start + end + 1, &val);
+                    }
+                    Err(_) => {
+                        // Var not set — replace with empty string
+                        result.replace_range(start..start + end + 1, "");
+                    }
                 }
-                Err(_) => {
-                    // Var not set — leave literal ${VAR_NAME} and stop resolving
-                    break;
-                }
+            } else {
+                break;
             }
-        } else {
+        }
+        if result == before {
             break;
         }
     }

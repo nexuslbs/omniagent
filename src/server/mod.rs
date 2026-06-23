@@ -15,6 +15,7 @@
 //! - `POST /actions/:id/run` — execute an action (call its MCP tool)
 
 mod settings;
+mod secrets;
 
 use axum::{
     extract::{Path, State},
@@ -114,6 +115,8 @@ pub async fn start_server(config: ServerConfig) -> Result<()> {
         // ── Settings routes ──
         .route("/settings", get(settings::get_settings_handler))
         .route("/settings", put(settings::update_settings_handler))
+        // ── Secrets routes ──
+        .merge(secrets::secrets_router())
         .with_state(app_state);
 
     let addr = format!("{}:{}", config.host, config.port);
@@ -468,11 +471,8 @@ async fn prompt_preview_handler(
             },
         );
 
-        // Create LLM client — match how the agent resolves config.
-        // The agent (Agent::new) uses config.llm_api_key (=LLM_API_KEY)
-        // as primary, NOT DEEPSEEK_API_KEY. Only fall back to
-        // DEEPSEEK_API_KEY if LLM_API_KEY is absent (matches the
-        // AgentConfig::from_env() fallback logic).
+        // Create LLM client — match how the agent resolves config
+        // (AgentConfig::from_env() tries LLM_API_KEY, then {PROVIDER}_API_KEY).
         let base_url = std::env::var("LLM_BASE_URL").unwrap_or_else(|_| match provider_name.as_str() {
             "opencode-go" => "https://opencode.ai/zen/go/v1".to_string(),
             "openai" => "https://api.openai.com/v1".to_string(),
@@ -482,13 +482,15 @@ async fn prompt_preview_handler(
         });
         let api_key = std::env::var("LLM_API_KEY")
             .or_else(|_| {
-                // agent's AgentConfig::from_env() fallback
-                let provider = std::env::var("LLM_PROVIDER").unwrap_or_default();
-                if provider == "deepseek" {
-                    std::env::var("DEEPSEEK_API_KEY")
-                } else {
-                    Err(std::env::VarError::NotPresent)
+                // AgentConfig::from_env() fallback — {PROVIDER}_API_KEY
+                if provider_name.is_empty() {
+                    return Err(std::env::VarError::NotPresent);
                 }
+                let provider_key = format!(
+                    "{}_API_KEY",
+                    provider_name.to_uppercase().replace('-', "_")
+                );
+                std::env::var(&provider_key)
             })
             .unwrap_or_default();
         let api_mode = crate::llm::ApiMode::resolve(&provider_name, &model_name);

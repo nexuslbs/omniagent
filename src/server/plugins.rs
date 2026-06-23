@@ -134,30 +134,74 @@ pub async fn update_config_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateConfigRequest>,
 ) -> impl IntoResponse {
-    match plugin::update_plugin_config(&state.pool, &name, &body.config).await {
-        Ok(row) => {
-            let detail = plugin::enrich_plugin(&row);
-            info!("Updated config for plugin '{}'", name);
-            (StatusCode::OK, Json(serde_json::json!({
-                "success": true,
-                "data": detail
-            }))).into_response()
-        }
+    // Save to DB first
+    let row = match plugin::update_plugin_config(&state.pool, &name, &body.config).await {
+        Ok(row) => row,
         Err(e) => {
             if e.to_string().contains("no rows") {
-                (StatusCode::NOT_FOUND, Json(serde_json::json!({
+                return (StatusCode::NOT_FOUND, Json(serde_json::json!({
                     "success": false,
                     "error": "Plugin not found"
-                }))).into_response()
+                }))).into_response();
             } else {
                 error!("Failed to update config for plugin '{}': {:?}", name, e);
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
                     "success": false,
                     "error": format!("Failed to update config: {}", e)
-                }))).into_response()
+                }))).into_response();
+            }
+        }
+    };
+
+    // If saving an api_key for a provider, also write to .env as {NAME}_API_KEY
+    if row.plugin_type == "provider" {
+        if let Some(config_obj) = body.config.as_object() {
+            if let Some(api_key_val) = config_obj.get("api_key").and_then(|v| v.as_str()) {
+                let name_upper = name.to_uppercase().replace('-', "_");
+                let env_key = format!("{}_API_KEY", name_upper);
+
+                // Load current .env, set the key, write back
+                let env_path = state.env_path.clone();
+                let env_key_clone = env_key.clone();
+                let api_key_owned = api_key_val.to_string();
+                let result = tokio::task::spawn_blocking(move || {
+                    let content = std::fs::read_to_string(&env_path).unwrap_or_default();
+                    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+
+                    // Track if we found and replaced the key
+                    let mut found = false;
+                    for line in lines.iter_mut() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with(&env_key_clone) && trimmed.contains('=') {
+                            *line = format!("{}={}", env_key_clone, api_key_owned);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        lines.push(format!("{}={}", env_key_clone, api_key_owned));
+                    }
+
+                    let new_content = lines.join("\n") + "\n";
+                    std::fs::write(&env_path, new_content).ok();
+                }).await;
+
+                if result.is_ok() {
+                    // Also set in process env so current processes pick it up
+                    std::env::set_var(&env_key, api_key_val);
+                }
+
+                info!("Saved api_key for plugin '{}' to .env as {}", name, env_key);
             }
         }
     }
+
+    let detail = plugin::enrich_plugin(&row);
+    info!("Updated config for plugin '{}'", name);
+    (StatusCode::OK, Json(serde_json::json!({
+        "success": true,
+        "data": detail
+    }))).into_response()
 }
 
 /// POST /api/plugins/:name/enable — set status to 'enabled'.
