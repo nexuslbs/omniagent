@@ -59,12 +59,8 @@ pub struct AgentConfig {
     pub summary_tokens: u32,
     /// Days before old messages and summaries are deleted.
     pub delete_after_days: u32,
-    /// When true, the agent generates a plan/context before execution.
-    pub prompt_plan_enabled: bool,
     /// Max output tokens for the planning LLM call.
     pub prompt_plan_max_tokens: u32,
-    /// Number of refinement iterations for the plan (0 = disabled, one-shot).
-    pub prompt_graph_iterations: u32,
 }
 
 impl AgentConfig {
@@ -122,18 +118,10 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .unwrap_or(30),
-            prompt_plan_enabled: std::env::var("PROMPT_PLAN_ENABLED")
-                .unwrap_or_else(|_| "false".to_string())
-                .parse::<bool>()
-                .unwrap_or(false),
             prompt_plan_max_tokens: std::env::var("PROMPT_PLAN_MAX_TOKENS")
                 .unwrap_or_else(|_| "2048".to_string())
                 .parse()
                 .unwrap_or(2048),
-            prompt_graph_iterations: std::env::var("PROMPT_GRAPH_ITERATIONS")
-                .unwrap_or_else(|_| "0".to_string())
-                .parse()
-                .unwrap_or(0),
         })
     }
 }
@@ -1017,32 +1005,34 @@ async fn process_thread(
         "never" | "prompt_only" => false,
         "always" => true,
         "auto_plan" | "auto_subtasks" => {
-            if complexity == crate::context_builder::Complexity::Simple {
+            // Kanban/cron tasks always get planning in plan modes
+            if cause_msg.msg_type == "kanban" || cause_msg.msg_type == "cron" {
+                true
+            } else if complexity == crate::context_builder::Complexity::Simple {
                 false
             } else {
                 // Auto: plan if message > 100 chars AND is first in thread
-                config.prompt_plan_enabled 
-                    && cause_msg.content.len() > 100
+                cause_msg.content.len() > 100
                     && cause_msg.thread_sequence == 0
             }
         }
         _ => {
             // Unknown mode — fall back to auto behavior
-            if complexity == crate::context_builder::Complexity::Simple {
+            if cause_msg.msg_type == "kanban" || cause_msg.msg_type == "cron" {
+                true
+            } else if complexity == crate::context_builder::Complexity::Simple {
                 false
             } else {
-                config.prompt_plan_enabled 
-                    && cause_msg.content.len() > 100
+                cause_msg.content.len() > 100
                     && cause_msg.thread_sequence == 0
             }
         }
     };
 
     let plan_content: Option<String> = if should_plan {
-        let max_iter = config.prompt_graph_iterations.max(1); // at least 1
+        let max_iter = 0; // one-shot, no refinement iterations
         let max_tokens = config.prompt_plan_max_tokens;
         let mut last_plan: Option<String> = None;
-        let mut accepted = false;
         let mut json_failure_count: u32 = 0;
         let mut json_error_msg: Option<String> = None;
 
@@ -1082,16 +1072,6 @@ async fn process_thread(
                 Ok(resp) => {
                     merge_usage(&mut cumulative_usage, resp.usage.clone());
                     let content = resp.content;
-
-                    // Check if the LLM accepted the plan (refinement mode)
-                    if content.trim() == "PLAN_ACCEPTED" {
-                        info!(
-                            "[plan] Plan accepted after {} iteration(s) for thread {}",
-                            iter, thread.id
-                        );
-                        accepted = true;
-                        break;
-                    }
 
                     info!(
                         "[plan] Generated plan for thread {} ({} chars, iteration {}/{})",
@@ -1158,7 +1138,6 @@ async fn process_thread(
                                             }
                                         }
                                     }
-                                    json_error_msg = None;
                                 } else {
                                     // JSON valid but missing "steps" field
                                     json_failure_count += 1;
@@ -1201,10 +1180,8 @@ async fn process_thread(
 
                     last_plan = Some(content);
 
-                    // If no refinement iterations configured, one shot is enough
-                    if config.prompt_graph_iterations == 0 {
-                        break;
-                    }
+                    // One-shot: no refinement iterations — plan is final
+                    break;
                 }
                 Err(e) => {
                     warn!("[plan] Failed to generate plan for thread {}: {:?}", thread.id, e);
@@ -1213,16 +1190,7 @@ async fn process_thread(
             }
         }
 
-        if accepted {
-            last_plan
-        } else {
-            // If we have a last plan (even if not explicitly accepted), use it
-            if last_plan.is_some() {
-                last_plan
-            } else {
-                None
-            }
-        }
+        last_plan
     } else {
         None
     };
