@@ -210,6 +210,15 @@ impl ApiMode {
 // Configuration
 // ---------------------------------------------------------------------------
 
+/// Resolve LLM API key: provider-specific key → DEEPSEEK_API_KEY → LLM_API_KEY → panic
+pub fn resolve_llm_api_key(provider_key: Option<&str>) -> String {
+    provider_key
+        .map(|k| k.to_string())
+        .filter(|k| !k.is_empty())
+        .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok().filter(|k| !k.is_empty()))
+        .unwrap_or_else(|| std::env::var("LLM_API_KEY").expect("LLM_API_KEY must be set"))
+}
+
 /// Configuration loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct LLMConfig {
@@ -251,11 +260,9 @@ impl LLMConfig {
             "deepseek" => {
                 // Backward compat: DEEPSEEK_API_KEY is the legacy env var
                 // for the deepseek provider, registered via provider plugin.
-                std::env::var("DEEPSEEK_API_KEY")
-                    .or_else(|_| std::env::var("LLM_API_KEY"))
-                    .unwrap_or_default()
+                resolve_llm_api_key(None)
             }
-            _ => std::env::var("LLM_API_KEY").unwrap_or_default(),
+            _ => resolve_llm_api_key(None),
         };
 
         Self {

@@ -18,6 +18,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
+use crate::llm::resolve_llm_api_key;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -372,9 +374,7 @@ pub fn enrich_plugin(row: &PluginRegistryRow) -> PluginDetail {
         let provider_api_key_var = format!("{}_API_KEY", name_upper);
         for field in &config_schema {
             if field.key == "api_key" && !resolved.contains_key("api_key") {
-                let env_val = std::env::var(&provider_api_key_var)
-                    .or_else(|_| std::env::var("LLM_API_KEY"))
-                    .unwrap_or_default();
+                let env_val = resolve_llm_api_key(Some(&std::env::var(&provider_api_key_var).unwrap_or_default()));
                 if !env_val.is_empty() {
                     resolved.insert("api_key".to_string(), env_val);
                 }
@@ -499,10 +499,11 @@ pub async fn refresh_plugin_models(pool: &PgPool, name: &str) -> Result<Option<P
         had_refresh = true;
 
         // Resolve API key: try {NAME}_API_KEY, then LLM_API_KEY
-        let api_key = std::env::var(format!("{}_API_KEY", name.to_uppercase().replace('-', "_")))
-            .ok()
-            .filter(|k| !k.is_empty())
-            .or_else(|| std::env::var("LLM_API_KEY").ok().filter(|k| !k.is_empty()));
+        let provider_key = std::env::var(format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))).unwrap_or_default();
+        let api_key = {
+            let key = resolve_llm_api_key(Some(&provider_key));
+            if key.is_empty() { None } else { Some(key) }
+        };
 
         match fetch_enum_values(&refresh_url, api_key.as_deref()).await {
             Ok(values) => {

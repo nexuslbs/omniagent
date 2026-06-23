@@ -5,7 +5,6 @@ pub mod thread;
 
 pub use action::Action;
 pub use channel::Channel;
-pub use channel::ChannelStop;
 pub use message::Message;
 pub use message::MessageNew;
 pub use thread::Thread;

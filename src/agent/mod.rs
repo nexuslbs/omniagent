@@ -25,7 +25,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::db::types as queries;
 use crate::db::types::CompleteThreadStats;
-use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
+use crate::llm::{resolve_llm_api_key, ChatMessage, CompletionRequest, LLMClient, Usage};
 use crate::models::{Channel, Message, MessageNew, Thread};
 use crate::platform::queue::OutboundEnvelope;
 use crate::platform::enqueue_notification;
@@ -93,19 +93,15 @@ impl AgentConfig {
     /// - `MAX_ITERATIONS` — Max agent turns per thread before skipping (default: 60)
     pub fn from_env() -> Result<Self> {
         Ok(Self {
-            llm_api_key: std::env::var("LLM_API_KEY")
-                .or_else(|_| {
-                    let provider = std::env::var("LLM_PROVIDER").unwrap_or_default();
-                    if provider.is_empty() {
-                        return Err(std::env::VarError::NotPresent);
-                    }
-                    let provider_key = format!(
-                        "{}_API_KEY",
-                        provider.to_uppercase().replace('-', "_")
-                    );
-                    std::env::var(&provider_key)
-                })
-                .unwrap_or_default(),
+            llm_api_key: {
+                let provider = std::env::var("LLM_PROVIDER").unwrap_or_default();
+                let provider_key = if provider.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"))
+                };
+                resolve_llm_api_key(Some(&std::env::var(&provider_key).unwrap_or_default()))
+            },
             llm_model: std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4".to_string()),
             llm_provider: std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string()),
             llm_base_url: std::env::var("LLM_BASE_URL").unwrap_or_default(),

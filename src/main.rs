@@ -8,6 +8,7 @@ use tracing_subscriber::EnvFilter;
 
 mod agent;
 mod commands;
+mod complexity;
 mod config;
 mod context_builder;
 mod db;
@@ -26,6 +27,12 @@ mod subtask;
 mod vectorizer;
 
 /// OmniAgent — autonomous agent system with Postgres, pgvector, MCP tools.
+
+/// Read an environment variable with a fallback default value.
+fn env_or_default(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "omniagent", about = "OmniAgent — autonomous agent system")]
 struct Cli {
@@ -65,7 +72,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Determine data directory (default: /opt/data)
-    let data_dir = std::env::var("OMNI_DATA_DIR").unwrap_or_else(|_| "/opt/data".to_string());
+    let data_dir = env_or_default("OMNI_DATA_DIR", "/opt/data");
 
     match cli.command.unwrap_or(Command::Server) {
         Command::Server => run_server().await,
@@ -96,18 +103,18 @@ async fn run_server() -> Result<()> {
     tracing::info!("Database migrations completed");
 
     // Sync plugins from disk after migrations
-    let data_dir = std::env::var("OMNI_DATA_DIR").unwrap_or_else(|_| "/opt/data".to_string());
-    let _workspace_dir = std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
+    let data_dir = env_or_default("OMNI_DATA_DIR", "/opt/data");
+    let _workspace_dir = env_or_default("WORKSPACE_DIR", "/opt/workspace");
     if let Err(e) = plugin::sync_plugins_from_disk(&pool, &data_dir).await {
         tracing::warn!("Plugin sync failed (non-fatal): {:?}", e);
     }
 
     // Determine data directory (default: /opt/data)
-    let data_dir = std::env::var("OMNI_DATA_DIR").unwrap_or_else(|_| "/opt/data".to_string());
+    let data_dir = env_or_default("OMNI_DATA_DIR", "/opt/data");
     tracing::info!("Data directory: {}", data_dir);
 
     // Determine workspace directory (default: /opt/workspace)
-    let workspace_dir = std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
+    let workspace_dir = env_or_default("WORKSPACE_DIR", "/opt/workspace");
     tracing::info!("Workspace directory: {}", workspace_dir);
 
     // Build agent config from environment
@@ -1141,7 +1148,7 @@ async fn handle_channel_command<R: std::io::BufRead + Unpin>(
                 };
 
                 // 1b. Show available profiles from filesystem
-                let data_dir = std::env::var("OMNI_DATA_DIR").unwrap_or_else(|_| "/opt/data".to_string());
+                let data_dir = env_or_default("OMNI_DATA_DIR", "/opt/data");
                 let profile_registry = crate::profile::ProfileRegistry::new(&data_dir);
                 let profile_names = profile_registry.list_names();
 

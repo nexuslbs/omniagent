@@ -34,7 +34,7 @@ use anyhow::{Context, Result};
 use tracing::{error, info};
 
 use crate::db::types as queries;
-use crate::llm::{ChatMessage, CompletionRequest, LLMClient};
+use crate::llm::{resolve_llm_api_key, ChatMessage, CompletionRequest, LLMClient};
 use crate::mcp::{AppContext, McpRegistry, McpToolCall};
 use crate::prompt_builder::{build_planning_prompt, build_system_prompt, MemoryStore, PlanningPromptParams};
 
@@ -481,19 +481,9 @@ async fn prompt_preview_handler(
             "deepseek" => "https://api.deepseek.com/v1".to_string(),
             _ => String::new(),
         });
-        let api_key = std::env::var("LLM_API_KEY")
-            .or_else(|_| {
-                // AgentConfig::from_env() fallback — {PROVIDER}_API_KEY
-                if provider_name.is_empty() {
-                    return Err(std::env::VarError::NotPresent);
-                }
-                let provider_key = format!(
-                    "{}_API_KEY",
-                    provider_name.to_uppercase().replace('-', "_")
-                );
-                std::env::var(&provider_key)
-            })
-            .unwrap_or_default();
+        let api_key = resolve_llm_api_key(Some(&std::env::var(
+            format!("{}_API_KEY", provider_name.to_uppercase().replace('-', "_"))
+        ).unwrap_or_default()));
         let api_mode = crate::llm::ApiMode::resolve(&provider_name, &model_name);
 
         let llm_config = crate::llm::LLMConfig {

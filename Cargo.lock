@@ -1301,7 +1301,6 @@ dependencies = [
  "futures",
  "glob",
  "once_cell",
- "pgvector",
  "reqwest",
  "serde",
  "serde_json",
@@ -1314,8 +1313,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "url",
- "uuid",
  "walkdir",
 ]
 
@@ -1408,15 +1405,6 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
-
-[[package]]
-name = "pgvector"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3673cba5b9a124916096a423b806a9f29620972c6c97b08db5f2053e9428b481"
-dependencies = [
- "sqlx",
-]
 
 [[package]]
 name = "pin-project-lite"
@@ -2520,9 +2508,7 @@ version = "1.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "144d6b123cef80b301b8f72a9e2ca4370ddec21950d0a103dd22c437006d2db7"
 dependencies = [
- "getrandom 0.4.2",
  "js-sys",
- "serde_core",
  "wasm-bindgen",
 ]
 

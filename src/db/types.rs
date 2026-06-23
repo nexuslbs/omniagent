@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use sql_forge::sql_forge;
 use sqlx::PgPool;
 
-use crate::models::{Action, Channel, ChannelStop, Message, MessageNew, Thread};
+use crate::models::{Action, Channel, Message, MessageNew, Thread};
 use crate::agent::AgentConfig;
 
 // ---------------------------------------------------------------------------
@@ -195,32 +195,7 @@ impl TryFrom<ChannelDb> for Channel {
 // ChannelStop DB struct (for SELECT results) — unchanged
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct ChannelStopDb {
-    pub id: i64,
-    pub channel_id: i64,
-    pub stopped_at: Option<String>,
-}
-
-impl TryFrom<ChannelStopDb> for ChannelStop {
-    type Error = anyhow::Error;
-
-    fn try_from(db: ChannelStopDb) -> Result<Self, Self::Error> {
-        Ok(Self {
-            id: db.id,
-            channel_id: db.channel_id,
-            stopped_at: db
-                .stopped_at
-                .as_deref()
-                .unwrap_or("")
-                .parse::<DateTime<Utc>>()
-                .map_err(|e| anyhow::anyhow!("Invalid timestamp '{}': {}", db.stopped_at.as_deref().unwrap_or("?"), e))?,
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
+/// A channel with all its editable metadata, enriched for the dashboard.
 // Summary DB struct (for SELECT results) — unchanged
 // ---------------------------------------------------------------------------
 
@@ -424,56 +399,13 @@ fn resolve_max_plan(global_mode: &str) -> String {
 /// - `PLANNING_COMPLEXITY_KEYWORDS` (default comma-separated list)
 ///
 /// Returns one of: "prompt_only", "auto_plan", "auto_subtasks".
-fn classify_complexity_for_planning(content: &str, _msg_type: &str) -> String {
-    let trimmed = content.trim();
-    let char_len = trimmed.len();
-    let word_count = trimmed.split_whitespace().count();
+fn classify_complexity_for_planning(content: &str, msg_type: &str) -> String {
+    use crate::complexity::{classify_complexity, Complexity};
 
-    // Read thresholds from env (cached at thread creation)
-    let simple_max: usize = std::env::var("PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS")
-        .unwrap_or_else(|_| "60".to_string())
-        .parse()
-        .unwrap_or(60);
-    let standard_max: usize = std::env::var("PLANNING_COMPLEXITY_STANDARD_MAX_CHARS")
-        .unwrap_or_else(|_| "200".to_string())
-        .parse()
-        .unwrap_or(200);
-
-    // Simple: short / greeting messages
-    if char_len < simple_max || word_count <= 3 {
-        let lower = trimmed.to_lowercase();
-        let greetings = [
-            "hi", "hello", "hey", "ok", "okay", "k", "thanks", "ty", "thx",
-            "\u{1f44d}", "\u{1f64f}", "done", "yes", "no", "good", "great",
-        ];
-        if word_count <= 2 || greetings.iter().any(|g| lower.contains(g)) {
-            return "prompt_only".to_string();
-        }
-    }
-
-    // Complex: action keywords or substantial length
-    let keywords_raw = std::env::var("PLANNING_COMPLEXITY_KEYWORDS")
-        .unwrap_or_else(|_| {
-            "implement,refactor,redesign,architecture,create,build,design,develop,\
-             migrate,restructure,overhaul,rewrite,configure,set up,deploy,integrate,\
-             add feature,fix bug,resolve issue,multi-step,complex"
-                .to_string()
-        });
-    let complex_keywords: Vec<&str> = keywords_raw.split(',').map(|s| s.trim()).collect();
-
-    let lower = trimmed.to_lowercase();
-    let is_complex_keyword = complex_keywords.iter().any(|kw| lower.contains(kw));
-    let has_substantive_length = char_len > standard_max;
-
-    if is_complex_keyword || has_substantive_length {
-        return "auto_subtasks".to_string();
-    }
-
-    // Standard — use global PLANNING_MODE (simple plan by default)
-    let global_mode = std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_subtasks".to_string());
-    match global_mode.as_str() {
-        "auto_plan" | "auto_subtasks" | "always" => "auto_plan".to_string(),
-        _ => "auto_plan".to_string(),
+    match classify_complexity(content, msg_type, None) {
+        Complexity::Simple => "prompt_only".to_string(),
+        Complexity::Standard => "auto_plan".to_string(),
+        Complexity::Complex => "auto_subtasks".to_string(),
     }
 }
 

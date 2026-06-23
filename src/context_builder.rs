@@ -270,74 +270,6 @@ impl ContextBuilder {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Query classification
-// ── Query complexity classification ─────────────────────────────
-
-/// Complexity tier for a user message — determines planning depth and tooling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Complexity {
-    /// Greeting, acknowledgment, simple command — skip planning, execute directly.
-    Simple,
-    /// Standard request — plan as configured.
-    Standard,
-    /// Complex multi-step task (implement, refactor, design, kanban/cron) — plan + auto-subtasks.
-    Complex,
-}
-
-/// Classify a message into a complexity tier.
-///
-/// Simple: < 60 chars, greeting words, acknowledgment.
-/// Complex: contains implement/refactor/design/architecture/create/build keywords,
-///           or is a kanban/cron task with substantive content.
-/// Standard: everything else.
-pub fn classify_complexity(content: &str, msg_type: &str, metadata_word_count: Option<usize>) -> Complexity {
-    let trimmed = content.trim();
-    let char_len = trimmed.len();
-    let word_count = trimmed.split_whitespace().count();
-
-    // Simple: short messages, greetings, acknowledgments
-    if char_len < 60 || word_count <= 3 {
-        let lower = trimmed.to_lowercase();
-        let greetings = ["hi", "hello", "hey", "ok", "okay", "k", "thanks", "ty", "thx", "👍", "🙏", "done", "yes", "no", "good", "great"];
-        if greetings.iter().any(|g| lower.contains(g)) || word_count <= 2 {
-            return Complexity::Simple;
-        }
-    }
-
-    // Complex: specific action keywords or kanban/cron tasks with content
-    let lower = trimmed.to_lowercase();
-    let complex_keywords = [
-        "implement", "refactor", "redesign", "architecture", "create", "build",
-        "design", "develop", "migrate", "restructure", "overhaul", "rewrite",
-        "configure", "set up", "deploy", "integrate", "add feature",
-        "fix bug", "resolve issue", "multi-step", "complex",
-    ];
-    let is_complex_keyword = complex_keywords.iter().any(|kw| lower.contains(kw));
-
-    // Kanban/cron tasks with a body longer than a title
-    let is_structured_task = (msg_type == "kanban" || msg_type == "cron")
-        && metadata_word_count.map(|c| c > 10).unwrap_or(false);
-
-    let has_substantive_length = char_len > 200;
-
-    if is_complex_keyword || is_structured_task || has_substantive_length {
-        return Complexity::Complex;
-    }
-
-    Complexity::Standard
-}
-
-// Old classifier kept for backward compat
-fn classify_query(_content: &str) -> (&'static str, bool) {
-    // Simple heuristic: queries longer than 15 words likely need retrieval
-    let word_count = _content.split_whitespace().count();
-    if word_count > 15 {
-        ("complex_query", true)
-    } else {
-        ("simple_message", false)
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Full context assembly for a thread
@@ -390,7 +322,8 @@ pub async fn build_thread_context(
     let mut builder = ContextBuilder::new().with_budget(config.prompt_budget);
 
     // Classify the user message to determine retrieval needs
-    let (_query_class, needs_retrieval) = classify_query(config.cause_content);
+    let word_count = config.cause_content.split_whitespace().count();
+    let needs_retrieval = word_count > 15;
 
     // Determine retrieval aggressiveness
     let use_retrieval = needs_retrieval && config.auto_retrieval_enabled;
