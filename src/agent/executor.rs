@@ -343,16 +343,14 @@ pub async fn process_thread(
                 },
             );
 
-            let planning_messages = if let Some(ref err) = json_error_msg {
-                vec![
-                    ChatMessage::system(&planning_prompt),
-                    ChatMessage::system(err),
-                ]
-            } else {
-                vec![
-                    ChatMessage::system(&planning_prompt),
-                ]
-            };
+            let mut planning_messages = vec![ChatMessage::system(&planning_prompt)];
+            if let Some(ref err) = json_error_msg {
+                planning_messages.push(ChatMessage::system(err));
+            }
+            // Inject the task template so the plan is aware of the instructions
+            if let Some(ref ts) = template_section {
+                planning_messages.push(ChatMessage::system(ts));
+            }
 
             let plan_request = CompletionRequest {
                 messages: planning_messages,
@@ -1168,7 +1166,7 @@ pub async fn process_thread(
 
         let summary_request = CompletionRequest {
             messages: summary_msgs,
-            max_tokens: 512,
+            max_tokens: 2048,
             temperature: 0.3,
             stream: false,
             tools: None,
