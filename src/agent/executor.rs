@@ -1188,12 +1188,18 @@ pub async fn process_thread(
                     })
                 });
                 info!(
-                    "[summary] Generated summary for thread {} ({} chars, limit_reached={})",
+                    "[summary] Generated summary for thread {} ({} chars, reasoning={}, limit_reached={})",
                     thread.id,
                     resp.content.len(),
+                    resp.reasoning.as_ref().map(|r| r.len()).unwrap_or(0),
                     limit_reached,
                 );
-                (resp.content, tokens)
+                let text = if resp.content.trim().is_empty() {
+                    resp.reasoning.clone().unwrap_or_default()
+                } else {
+                    resp.content
+                };
+                (text, tokens)
             }
             Err(e) => {
                 warn!("[summary] Failed to generate summary for thread {}: {:?}", thread.id, e);
