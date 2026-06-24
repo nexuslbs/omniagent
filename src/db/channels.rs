@@ -291,6 +291,41 @@ pub async fn update_channel_model(
     provider: Option<&str>,
     model: Option<&str>,
 ) -> anyhow::Result<()> {
+    // Guard: internal cron/kanban channels should not have explicit provider/model
+    // set — they must inherit from profile/env so that channel-level config doesn't
+    // accidentally override the intended model.  Passing empty string (reset) is
+    // still allowed since that clears the override.
+    if let Some(p) = provider {
+        if !p.is_empty() {
+            let ch = get_channel_by_id(pool, channel_id).await?;
+            if let Some(ch) = ch {
+                if ch.platform.as_deref() == Some("cron") || ch.platform.as_deref() == Some("kanban") {
+                    anyhow::bail!(
+                        "Cannot set provider on channel '{}' (platform={:?}) — \
+                         internal channels must inherit from profile/env defaults. \
+                         Use an empty string to reset to NULL instead.",
+                        ch.name, ch.platform
+                    );
+                }
+            }
+        }
+    }
+    if let Some(m) = model {
+        if !m.is_empty() {
+            let ch = get_channel_by_id(pool, channel_id).await?;
+            if let Some(ch) = ch {
+                if ch.platform.as_deref() == Some("cron") || ch.platform.as_deref() == Some("kanban") {
+                    anyhow::bail!(
+                        "Cannot set model on channel '{}' (platform={:?}) — \
+                         internal channels must inherit from profile/env defaults. \
+                         Use an empty string to reset to NULL instead.",
+                        ch.name, ch.platform
+                    );
+                }
+            }
+        }
+    }
+
     // Build a dynamic UPDATE using COALESCE to preserve existing values
     // for any parameter that is None.
     let set_provider = provider.map(|p| {
