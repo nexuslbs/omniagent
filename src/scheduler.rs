@@ -1058,7 +1058,8 @@ pub async fn setup_knowledge_pipeline(
 
     // Defaults
     let schedule = schedule.unwrap_or_else(|| "0 */6 * * *".to_string());
-    let prompt = prompt.unwrap_or_else(|| "Execute the Knowledge Pipeline according to the task template above.".to_string());
+    let default_prompt = "RUN these SQL queries:\nSELECT id, name FROM channels WHERE closed = false;\nSELECT channel_id, COUNT(*)::int as cnt FROM summaries GROUP BY channel_id;\nSELECT id, profile FROM threads WHERE status='completed' AND created_at > NOW() - INTERVAL '7 days';\n\nTHEN call actions_relevance_indexer\nTHEN call actions_hindsight_populator\nTHEN produce a summary\n\nONLY available tools: query_database, actions_relevance_indexer, actions_hindsight_populator. Do not explore.".to_string();
+    let prompt = prompt.unwrap_or(default_prompt);
 
     let existing = sqlx::query_scalar::<_, String>(
         r#"SELECT id FROM cron_jobs WHERE name = 'knowledge-pipeline' LIMIT 1"#,
@@ -1089,8 +1090,8 @@ pub async fn setup_knowledge_pipeline(
 
     sql_forge!(
         r#"
-        INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, mode, instruction_file, planning_mode, enabled, active)
-        VALUES (:id, 'knowledge-pipeline', 'Knowledge Pipeline', :schedule, :prompt, :skills, 'agentic', 'knowledge-pipeline', 'auto_subtasks', true, true)
+        INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, mode, instruction_file, planning_mode, profile, enabled, active)
+        VALUES (:id, 'knowledge-pipeline', 'Knowledge Pipeline', :schedule, :prompt, :skills, 'agentic', '', 'prompt_only', 'pipeline', true, true)
         "#,
         ( :id = &id, :schedule = &schedule, :prompt = &prompt, :skills = &skills_json )
     )
@@ -1115,6 +1116,16 @@ fn ensure_knowledge_pipeline_template(data_dir: &str) -> Result<(), String> {
     let template_path = template_dir.join("knowledge-pipeline.md");
 
     if template_path.exists() {
+        // Also ensure pipeline profile has the template (idempotent)
+        let pipeline_dir = Path::new(data_dir)
+            .join("profiles")
+            .join("pipeline")
+            .join("templates");
+        let pipeline_path = pipeline_dir.join("knowledge-pipeline.md");
+        if !pipeline_path.exists() {
+            let _ = fs::create_dir_all(&pipeline_dir);
+            let _ = fs::write(&pipeline_path, DEFAULT_KNOWLEDGE_PIPELINE_TEMPLATE);
+        }
         return Ok(());
     }
 
@@ -1122,114 +1133,7 @@ fn ensure_knowledge_pipeline_template(data_dir: &str) -> Result<(), String> {
     fs::create_dir_all(&template_dir)
         .map_err(|e| format!("Failed to create templates directory: {}", e))?;
 
-    let content = r#"# Knowledge Pipeline
-
-## Overview
-
-You are executing the Knowledge Pipeline — a periodic maintenance task that processes all channels, groups threads by profile, updates wiki/skills from important conversations, runs relevance indexing, and populates hindsight memory.
-
-The pipeline has 6 steps. Execute them **in order**. If a step encounters an error, mark its subtask as `error` and CONTINUE to the next step. Never abort the entire pipeline due to a single step failure.
-
----
-
-## Subtask Management Protocol
-
-This thread runs with subtask mode enabled. You MUST:
-
-1. **At start**: Create one subtask per pipeline step using `manage_subtasks(action="add", description="Step Name", priority=M)`
-2. **As you complete each step**: `manage_subtasks(action="update", subtask_id=ID, status="completed")`
-3. **If a step fails**: `manage_subtasks(action="update", subtask_id=ID, status="error")` — then continue to the next step
-4. **At the end**: Call `manage_subtasks(action="list")` to verify final state
-5. **Final verdict**:
-   - ALL subtasks `completed` → mark thread as **success**
-   - Any subtask `error` → mark thread as **completed_with_errors** (partial success)
-   - No subtasks created → mark thread as **failed** (no work was done)
-
----
-
-## Pipeline Steps
-
-### Step 1: Scan Channels
-
-1. Use `list_channels(status="open", closed=false)` to get all active channels
-2. For each channel:
-   - If channel has a `current_profile` that is set, note the profile name
-   - If channel has no profile (empty/null), it uses the system default
-3. Group channels by profile — the pipeline runs once per distinct profile
-4. Log: how many channels found, how many distinct profiles
-
-### Step 2: Collect Completed Threads
-
-For each distinct profile:
-1. Query threads completed in the last 24 hours:
-   `SELECT * FROM threads WHERE profile = :profile AND status = 'completed' AND updated_at > NOW() - INTERVAL '24 hours'`
-2. Use `db_query` MCP tool or a raw SQL query
-3. Also collect threads with `completed_with_errors` status (partial successes)
-4. Group threads by channel_id for context
-5. Log thread count per profile
-
-### Step 3: Analyze Conversations (per thread)
-
-For each thread:
-1. **Review messages** — read the thread's messages to understand the conversation flow
-2. **Extract lessons**:
-   - What problem was solved?
-   - What approach worked?
-   - What approach failed?
-   - What new information was discovered?
-3. **Rate importance**: 1-5 scale (1=throwaway, 5=critical reference)
-4. **Suggest action**:
-   - Importance 1-2: no action (log and forget)
-   - Importance 3: add to wiki as a minor note
-   - Importance 4: create/update a wiki page or skill
-   - Importance 5: create/update wiki page + update MEMORY.md
-
-### Step 4: Update Wiki & Skills
-
-For threads rated 3+:
-1. **Wiki update**:
-   - Create or update a wiki page with the extracted knowledge
-   - Use `write_obsidian_note(profile="default", path="Raw/Knowledge/{topic}.md", ...)` or a raw file write
-   - Follow Karpathy method: YAML frontmatter (created, updated, tags, type), atomic notes, [[wikilinks]]
-   - For non-obvious topics, update the wiki index (`index.md`) and changelog (`log.md`)
-
-2. **Skill update** (if a repeatable workflow was discovered):
-   - Create or update a skill file
-   - Skills live at `{data_dir}/skills/{name}/SKILL.md`
-   - Use the skill_manage tool or write the file directly
-
-### Step 5: Run Relevance Indexer
-
-1. Execute the relevance indexer:
-   - Action: `builtin_relevance_indexer`
-   - This updates the relevance index across all profiles
-2. Verify it ran successfully by checking logs or status
-
-### Step 6: Run Hindsight Populator
-
-1. Execute hindsight memory population:
-   - Action: `builtin_hindsight_populator`
-   - This processes new objective facts and generates subjective memories
-2. Verify it ran by checking the summary or status
-
----
-
-## Completion Report
-
-At the end, produce a summary:
-
-**Knowledge Pipeline — Run Summary**
-
-- Channels scanned: N (X distinct profiles)
-- Threads processed: N
-  - By profile: profile1: N, profile2: N
-- Wiki updates: N pages created/updated
-- Skills created/updated: N
-- Relevance indexer: ✅/❌
-- Hindsight populator: ✅/❌
-- Duration: Xm Ys
-- Status: Success / Completed with errors / Failed
-"#;
+    let content = "RUN these SQL queries:\nSELECT id, name FROM channels WHERE closed = false;\nSELECT channel_id, COUNT(*)::int as cnt FROM summaries GROUP BY channel_id;\nSELECT id, profile FROM threads WHERE status='completed' AND created_at > NOW() - INTERVAL '7 days';\n\nTHEN call actions_relevance_indexer\nTHEN call actions_hindsight_populator\nTHEN produce a summary\n\nONLY available tools: query_database, actions_relevance_indexer, actions_hindsight_populator. Do not explore.";
 
     fs::write(&template_path, content)
         .map_err(|e| format!("Failed to write template: {}", e))?;

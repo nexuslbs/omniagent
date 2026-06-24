@@ -356,7 +356,7 @@ VALUES ('cron_abc123', 'hourly-report', 'Hourly Report', '0 * * * *', 'Generate 
 |-------|-------------|
 | `channel_id` | Channel to fire in (NULL = default cron channel) |
 | `profile` | Profile to use (NULL = channel's current_profile) |
-| `schedule` | 5-field Linux cron expression (min hour day month weekday) |
+| `schedule` | 5-field Linux cron expression (min hour day month weekday) — the scheduler internally prepends `0` (second=0) for the `cron` crate |
 | `prompt` | The message content to execute |
 | `mode` | Execution mode: `agentic` (default), `direct`, or `action` |
 | `direct_task_type` | Task type for `direct` mode (e.g., `kanban_dispatcher`) |
