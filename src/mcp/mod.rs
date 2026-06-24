@@ -64,6 +64,10 @@ pub struct AppContext {
     /// Per-platform outbound delivery senders.  Each platform gets its own
     /// mpsc channel so that a slow/failing platform never blocks others.
     pub platform_senders: HashMap<String, OutboundSender>,
+    /// Current thread ID being executed (set by `process_thread` before the
+    /// tool-calling loop so MCP tools can auto-detect context without the LLM
+    /// having to pass `thread_id` explicitly).
+    pub current_thread_id: Option<i64>,
 }
 
 impl AppContext {
@@ -89,6 +93,7 @@ impl AppContext {
             qdrant_url,
             memory_store: Arc::new(memory_store),
             platform_senders,
+            current_thread_id: None,
         }
     }
 }

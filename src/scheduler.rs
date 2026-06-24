@@ -1136,10 +1136,10 @@ The pipeline has 6 steps. Execute them **in order**. If a step encounters an err
 
 This thread runs with subtask mode enabled. You MUST:
 
-1. **At start**: Create one subtask per pipeline step using `manage_subtasks(thread_id=N, action="add", description="Step Name", priority=M)`
-2. **As you complete each step**: `manage_subtasks(thread_id=N, action="update", subtask_id=ID, status="completed")`
-3. **If a step fails**: `manage_subtasks(thread_id=N, action="update", subtask_id=ID, status="error")` — then continue to the next step
-4. **At the end**: Call `manage_subtasks(thread_id=N, action="list")` to verify final state
+1. **At start**: Create one subtask per pipeline step using `manage_subtasks(action="add", description="Step Name", priority=M)`
+2. **As you complete each step**: `manage_subtasks(action="update", subtask_id=ID, status="completed")`
+3. **If a step fails**: `manage_subtasks(action="update", subtask_id=ID, status="error")` — then continue to the next step
+4. **At the end**: Call `manage_subtasks(action="list")` to verify final state
 5. **Final verdict**:
    - ALL subtasks `completed` → mark thread as **success**
    - Any subtask `error` → mark thread as **completed_with_errors** (partial success)

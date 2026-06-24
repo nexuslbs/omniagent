@@ -15,7 +15,7 @@ pub fn manage_subtasks_tool() -> McpTool {
             "properties": {
                 "thread_id": {
                     "type": "integer",
-                    "description": "Required. The thread ID to manage subtasks for."
+                    "description": "Optional. The thread ID to manage subtasks for. If omitted, the current thread is used."
                 },
                 "action": {
                     "type": "string",
@@ -40,12 +40,16 @@ pub fn manage_subtasks_tool() -> McpTool {
                     "description": "Subtask priority (for 'add', default: 0). Higher = more important."
                 }
             },
-            "required": ["thread_id", "action"]
+            "required": ["action"]
         }),
         handler: Arc::new(|args: Value, ctx: AppContext| -> Result<McpToolResult> {
-            let thread_id = args["thread_id"]
-                .as_i64()
-                .ok_or_else(|| anyhow::anyhow!("Missing or invalid required argument: 'thread_id'"))?;
+            let thread_id = if let Some(id) = args["thread_id"].as_i64() {
+                id
+            } else if let Some(id) = ctx.current_thread_id {
+                id
+            } else {
+                anyhow::bail!("'thread_id' is required when not running within a thread context");
+            };
 
             let action = args["action"]
                 .as_str()

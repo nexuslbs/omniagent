@@ -610,7 +610,8 @@ This will:
 | `PORT` | `8080` | HTTP port |
 || `DELETE_AFTER_DAYS` | `30` | Message retention period |
 || `SUMMARY_WINDOW` | `10` | Half-window size for channel summarization |
-|| `SUMMARY_TOKENS` | `2048` | Max tokens for summary/interrupted LLM responses |
+|| `CHANNEL_SUMMARY_TOKENS` | `4096` | Max tokens for channel-level summary generation |
+|| `THREAD_SUMMARY_TOKENS` | `2048` | Max tokens for per-thread end-of-execution summary |
 || `MCP_SERVERS_CONFIG` | — | External MCP servers config file path |
 | `VECTORIZE_MESSAGES` | `false` | Enable message embedding generation |
 | `VECTORIZE_WIKI` | `false` | Enable wiki embedding generation |

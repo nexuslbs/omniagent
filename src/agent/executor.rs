@@ -722,11 +722,10 @@ pub async fn process_thread(
                         .collect();
                     let feedback = format!(
                         "[Subtask Required] You cannot end this thread while subtasks are still pending. \
-                         BEFORE writing your final answer, call `manage_subtasks(thread_id={}, action=\"update\", subtask_id=N, status=\"completed\")` \
+                         BEFORE writing your final answer, call `manage_subtasks(action=\"update\", subtask_id=N, status=\"completed\")` \
                          for each subtask you've already finished. If any subtask is no longer needed, use status=\"cancelled\".\n\n\
                          Remaining unfinished subtasks:\n{}\n\n\
                          You will be retried (attempt {}/{}) — use this chance to manage them.",
-                        thread.id,
                         names.join("\n"),
                         unfinished_subtask_retries,
                         std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(3u32),
@@ -943,7 +942,9 @@ pub async fn process_thread(
             };
 
             let tool_start = std::time::Instant::now();
-            let result = cfg.mcp.execute(&mcp_call, cfg.ctx.clone()).await;
+            let mut tool_ctx = cfg.ctx.clone();
+            tool_ctx.current_thread_id = Some(thread.id);
+            let result = cfg.mcp.execute(&mcp_call, tool_ctx).await;
             let tool_elapsed_ms = tool_start.elapsed().as_millis() as i32;
 
             match result {
@@ -1035,9 +1036,9 @@ pub async fn process_thread(
                     if pending_count > 0 {
                         let reminder = format!(
                             "[Progress Check] You've made {} tool call rounds without updating your subtasks. \
-                             If you've completed any steps, call `manage_subtasks(thread_id={}, action=\"update\", subtask_id=N, status=\"completed\")` \
+                             If you've completed any steps, call `manage_subtasks(action=\"update\", subtask_id=N, status=\"completed\")` \
                              for each finished subtask now. This keeps progress accurate.",
-                            calls_since_subtask_management, thread.id,
+                            calls_since_subtask_management,
                         );
                         messages.push(ChatMessage::system(&reminder));
                         calls_since_subtask_management = 0;
@@ -1166,7 +1167,7 @@ pub async fn process_thread(
 
         let summary_request = CompletionRequest {
             messages: summary_msgs,
-            max_tokens: cfg.config.summary_tokens,
+            max_tokens: cfg.config.thread_summary_tokens,
             temperature: 0.3,
             stream: false,
             tools: None,

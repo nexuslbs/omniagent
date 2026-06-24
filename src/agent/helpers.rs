@@ -576,7 +576,7 @@ pub async fn check_and_generate_summary(
             ChatMessage::system(&system_summarizer_prompt),
             ChatMessage::user(&summary_prompt),
         ],
-        max_tokens: config.summary_tokens,
+        max_tokens: config.channel_summary_tokens,
         temperature: 0.2, // lower temperature for factual consistency
         stream: false,
         tools: None,

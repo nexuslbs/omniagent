@@ -322,14 +322,25 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
             },
         ),
         (
-            "SUMMARY_TOKENS".into(),
-            get_env_or_default("SUMMARY_TOKENS", "4096"),
+            "CHANNEL_SUMMARY_TOKENS".into(),
+            get_env_or_default("CHANNEL_SUMMARY_TOKENS", "4096"),
             SettingMeta {
                 field_type: "number".into(),
-                description: "Maximum tokens for summary generation".into(),
+                description: "Maximum tokens for channel-level summary generation".into(),
                 options: None,
                 readonly: false,
                 default: Some("4096".into()),
+            },
+        ),
+        (
+            "THREAD_SUMMARY_TOKENS".into(),
+            get_env_or_default("THREAD_SUMMARY_TOKENS", "2048"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Maximum tokens for per-thread end-of-execution summary".into(),
+                options: None,
+                readonly: false,
+                default: Some("2048".into()),
             },
         ),
         // ── LLM Provider ──
@@ -479,7 +490,8 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             "SUMMARIZE_AFTER_DAYS"
             | "DELETE_AFTER_DAYS"
             | "SUMMARY_WINDOW"
-            | "SUMMARY_TOKENS"
+            | "CHANNEL_SUMMARY_TOKENS"
+            | "THREAD_SUMMARY_TOKENS"
             | "MEMORY_MAX_CHARS"
             | "USER_MAX_CHARS" => "memory",
             "LLM_PROVIDER"
@@ -566,7 +578,8 @@ pub async fn update_settings_handler(
         "SUMMARIZE_AFTER_DAYS",
         "DELETE_AFTER_DAYS",
         "SUMMARY_WINDOW",
-        "SUMMARY_TOKENS",
+        "CHANNEL_SUMMARY_TOKENS",
+        "THREAD_SUMMARY_TOKENS",
         "MEMORY_MAX_CHARS",
         "USER_MAX_CHARS",
         "LLM_PROVIDER",

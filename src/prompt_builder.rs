@@ -501,9 +501,9 @@ Aim for 3-6 steps. Do NOT include fallback approaches, alternatives, or continge
 — if the chosen path fails at execution time, the execution phase will adapt naturally.
 
 IMPORTANT: Each step in "steps" will be automatically converted into a tracked subtask.
-During execution, you MUST call `manage_subtasks(thread_id, action="update", subtask_id=N, status="completed")`
-for each step as you finish it, or `manage_subtasks(thread_id, action="update", subtask_id=N, status="cancelled")`
-if a step becomes irrelevant. Use `manage_subtasks(thread_id, action="list")` to see current state.
+During execution, you MUST call `manage_subtasks(action="update", subtask_id=N, status="completed")`
+for each step as you finish it, or `manage_subtasks(action="update", subtask_id=N, status="cancelled")`
+if a step becomes irrelevant. Use `manage_subtasks(action="list")` to see current state.
 If you reach the end of execution with any subtask still pending, the thread will be marked as FAILED.
 
 Do NOT execute any tools or produce code — only plan.
@@ -635,12 +635,12 @@ pub fn format_subtask_section(subtasks: &[ThreadSubtask], thread_id: i64) -> Opt
     // Build the subtask management instruction block
     let management_instruction = if subtasks.iter().any(|s| s.status == SubtaskStatus::Pending) {
         "\n\n## Subtask Tracking Rules\n\
-         You MUST call `manage_subtasks(thread_id, action=\"update\", subtask_id=N, status=\"completed\")` \
+         You MUST call `manage_subtasks(action=\"update\", subtask_id=N, status=\"completed\")` \
          each time you finish a subtask.\n\
-         If a subtask becomes irrelevant, call `manage_subtasks(thread_id, action=\"update\", subtask_id=N, status=\"cancelled\")`.\n\
-         If a subtask encounters an unrecoverable error, call `manage_subtasks(thread_id, action=\"update\", subtask_id=N, status=\"error\")` \
+         If a subtask becomes irrelevant, call `manage_subtasks(action=\"update\", subtask_id=N, status=\"cancelled\")`.\n\
+         If a subtask encounters an unrecoverable error, call `manage_subtasks(action=\"update\", subtask_id=N, status=\"error\")` \
          and continue to the next subtask — do NOT abort the entire thread.\n\
-         Use `manage_subtasks(thread_id, action=\"list\")` to refresh the current state at any point.\n\
+         Use `manage_subtasks(action=\"list\")` to refresh the current state at any point.\n\
          Before delivering your final answer, ALL subtasks must be either `completed`, `cancelled`, or `error` — \
          never leave any subtask in `pending` status."
             .to_string()

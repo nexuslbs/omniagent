@@ -23,8 +23,10 @@ pub struct AgentConfig {
     /// Number of threads per half-window for summary generation.
     /// A summary is generated every 2*summary_window completed threads.
     pub summary_window: u32,
-    /// Max tokens for the summary generation LLM call.
-    pub summary_tokens: u32,
+    /// Max tokens for the channel-level summary generation LLM call.
+    pub channel_summary_tokens: u32,
+    /// Max tokens for the per-thread end-of-execution summary LLM call.
+    pub thread_summary_tokens: u32,
     /// Days before old messages and summaries are deleted.
     pub delete_after_days: u32,
     /// Max output tokens for the planning LLM call.
@@ -140,7 +142,11 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "10".to_string())
                 .parse()
                 .unwrap_or(10),
-            summary_tokens: std::env::var("SUMMARY_TOKENS")
+            channel_summary_tokens: std::env::var("CHANNEL_SUMMARY_TOKENS")
+                .unwrap_or_else(|_| "4096".to_string())
+                .parse()
+                .unwrap_or(4096),
+            thread_summary_tokens: std::env::var("THREAD_SUMMARY_TOKENS")
                 .unwrap_or_else(|_| "2048".to_string())
                 .parse()
                 .unwrap_or(2048),

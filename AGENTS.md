@@ -195,9 +195,10 @@ So for the `deepseek` plugin, it checks `DEEPSEEK_API_KEY` first, then `LLM_API_
 - A summary is generated every `2*SUMMARY_WINDOW` completed seq-0 (thread-root) messages per channel
 - The window slides by `SUMMARY_WINDOW`, so summaries overlap by half a window
 - The last summary for a channel is always included in LLM context as a High-priority block
-- Summary generation uses a separate LLM call with `SUMMARY_TOKENS` max tokens (default 4096)
+- Summary generation uses a separate LLM call with `CHANNEL_SUMMARY_TOKENS` max tokens (default 4096)
+- Per-thread end-of-execution summaries use `THREAD_SUMMARY_TOKENS` (default 2048)
 - Old summaries are deleted alongside old messages via the daily cleanup task
-- Config env vars: `SUMMARY_WINDOW` (default 10), `SUMMARY_TOKENS` (default 4096), `DELETE_AFTER_DAYS` (default 30)
+- Config env vars: `SUMMARY_WINDOW` (default 10), `CHANNEL_SUMMARY_TOKENS` (default 4096), `THREAD_SUMMARY_TOKENS` (default 2048), `DELETE_AFTER_DAYS` (default 30)
 
 ### Planning Mode Resolution
 
