@@ -376,9 +376,9 @@ Cron jobs support the same planning modes as channels, selectable from the dashb
 | Value | Resolution | Use Case |
 |-------|-----------|----------|
 | Empty (Default) | Complexity-based classification | Simple prompts don't waste tokens on planning |
-| `no_plan` | `prompt_only` — no planning or subtasks | Scripted prompts that don't need decomposition |
-| `simple_plan` | `auto_plan` — single planning step | Moderate prompts needing one planning pass |
-| `plan_with_subtasks` | `auto_subtasks` — full subtask decomposition | Complex multi-step pipelines (e.g., Knowledge Pipeline) |
+| `prompt_only` | No planning or subtasks | Scripted prompts that don't need decomposition |
+| `auto_plan` | Single planning step | Moderate prompts needing one planning pass |
+| `auto_subtasks` | Full subtask decomposition | Complex multi-step pipelines (e.g., Knowledge Pipeline) |
 
 Cron planning mode has **highest priority** in the resolution chain: cron job → channel → kanban → default.
 
@@ -514,8 +514,8 @@ Planning mode controls how the agent approaches a thread — whether it plans ah
 
 The planning mode is resolved in this order (first non-empty wins):
 
-1. **Channel `planning_mode`** — set on the `channels` table. If non-empty, it **overrides everything** below. This lets you force a mode for an entire channel (e.g., always plan for a research channel).
-2. **Task/Job `planning_mode`** — for cron jobs (`cron_jobs.planning_mode`). Special keywords `no_plan` → `prompt_only`, `max_plan` → highest mode enabled globally.
+1. **Task/Job `planning_mode`** — for cron jobs (`cron_jobs.planning_mode`). When non-empty, it overrides everything below. Can be `prompt_only`, `auto_plan`, `auto_subtasks`, or empty (→ complexity-based default).
+2. **Channel `planning_mode`** — set on the `channels` table. Override for an entire channel.
 3. **Kanban tasks** — always resolve to the max plan mode currently available (`max_plan` logic based on global `PLANNING_MODE`). Kanban tasks never go through complexity classification.
 4. **User / Cron default** — classified by prompt **complexity** (see below). Falls through to the global `PLANNING_MODE` env var.
 
@@ -603,7 +603,9 @@ This will:
 | `DEEPSEEK_BASE_URL` | *default* | DeepSeek API endpoint base URL |
 | `MAX_TOKENS` | `4096` | Max response tokens |
 | `TEMPERATURE` | `0.7` | Sampling temperature |
-| `MAX_ITERATIONS` | `60` | Max agent turns per thread |
+| `MAX_ITERATIONS_NO_PLAN` | `5` | Max agent turns for `prompt_only` mode |
+| `MAX_ITERATIONS_SIMPLE_PLAN` | `10` | Max agent turns for `auto_plan` mode |
+| `MAX_ITERATIONS_COMPLEX_PLAN` | `25` | Max agent turns for `auto_subtasks` mode |
 | `HOST` | `0.0.0.0` | HTTP bind address |
 | `PORT` | `8080` | HTTP port |
 | `DELETE_AFTER_DAYS` | `30` | Message retention period |

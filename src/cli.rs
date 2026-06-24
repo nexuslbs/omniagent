@@ -186,7 +186,7 @@ pub async fn run_cli(channel_name: String, profile_name: String, model: Option<S
                 #[derive(Debug, sqlx::FromRow, Clone)]
                 struct NewChannelRow {
                     id: i64,
-                    #[allow(dead_code)]
+                    #[expect(dead_code)]
                     name: String,
                 }
 
@@ -519,7 +519,7 @@ async fn get_or_create_thread(pool: &PgPool, p: ThreadLookupParams) -> Result<i6
 
     // Find the latest completed thread for this channel
     #[derive(Debug, sqlx::FromRow)]
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     struct LastThread {
         thread_id: Option<i64>,
         id: i64,
@@ -576,6 +576,7 @@ async fn get_or_create_thread(pool: &PgPool, p: ThreadLookupParams) -> Result<i6
         msg_subtype: None,
         processing_time_ms: None,
         token_usage: None,
+        iteration_number: 0,
     };
     let saved = queries::create_message(pool, &root_msg).await?;
     Ok(saved.thread_id)
@@ -640,13 +641,11 @@ async fn poll_for_response(
     use tokio::time::{sleep, Duration};
 
     #[derive(Debug, sqlx::FromRow)]
-    #[allow(dead_code)]
     struct MessageContentOnly {
         content: String,
     }
 
     #[derive(Debug, sqlx::FromRow)]
-    #[allow(dead_code)]
     struct ResponseMsg {
         id: i64,
         thread_id: i64,

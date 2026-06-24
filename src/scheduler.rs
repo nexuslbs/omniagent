@@ -154,6 +154,7 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
                         msg_subtype: Some(cron_name),
                         processing_time_ms: None,
                         token_usage: None,
+                        iteration_number: 0,
                     };
                     queries::create_message(ctx.pool, &msg).await?;
                 }
@@ -520,6 +521,7 @@ async fn report_action_failure(
         msg_subtype: Some(cron_name.clone()),
         processing_time_ms: None,
         token_usage: None,
+        iteration_number: 0,
     };
     queries::create_message(pool, &msg0).await?;
 
@@ -538,6 +540,7 @@ async fn report_action_failure(
         msg_subtype: err_subtype,
         processing_time_ms: None,
         token_usage: None,
+        iteration_number: 0,
     };
     queries::create_message(pool, &msg1).await?;
 
@@ -948,6 +951,7 @@ pub async fn fire_cron_job_by_id(
                         msg_subtype: Some(cron_name),
                         processing_time_ms: None,
                         token_usage: None,
+                        iteration_number: 0,
                     };
                     queries::create_message(pool, &msg).await?;
                 }

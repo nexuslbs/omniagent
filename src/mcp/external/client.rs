@@ -86,7 +86,6 @@ impl CircuitBreaker {
     }
 
     /// Get the current state (for diagnostics).
-    #[allow(dead_code)]
     pub fn state(&self) -> CircuitState {
         self.state.lock().expect("circuit state lock poisoned").state.clone()
     }
@@ -248,10 +247,8 @@ pub struct StdioMcpClient {
     process: StdMutex<Option<Child>>,
     next_id: AtomicU64,
     tools: StdMutex<Vec<McpExternalTool>>,
-    #[allow(dead_code)]
     circuit: CircuitBreaker,
     connected: StdMutex<bool>,
-    #[allow(dead_code)]
     last_error: StdMutex<Option<String>>,
 }
 
@@ -494,10 +491,8 @@ pub struct HttpMcpClient {
     client: reqwest::blocking::Client,
     next_id: AtomicU64,
     tools: Vec<McpExternalTool>,
-    #[allow(dead_code)]
     circuit: CircuitBreaker,
     connected: bool,
-    #[allow(dead_code)]
     last_error: Option<String>,
 }
 

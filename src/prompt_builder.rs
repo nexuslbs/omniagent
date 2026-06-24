@@ -414,11 +414,11 @@ pub fn build_system_prompt(
 /// Parameters for [`build_planning_prompt`].
 pub struct PlanningPromptParams<'a> {
     pub platform: &'a str,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub profile_name: &'a str,
     pub user_message: &'a str,
     pub plan_iteration: u32,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub max_iterations: u32,
     pub previous_plan: Option<&'a str>,
     pub use_json_plan: bool,

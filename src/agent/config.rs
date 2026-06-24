@@ -30,6 +30,27 @@ pub struct AgentConfig {
     /// Max output tokens for the planning LLM call.
     pub prompt_plan_max_tokens: u32,
 
+    // Context management / token explosion prevention
+    /// Soft char budget for the prompt. When exceeded, condense every STATE_BLOCK_UPDATE_INTERVAL turns.
+    pub prompt_char_budget_soft: usize,
+    /// Hard char budget for the prompt. When exceeded, condense before ANY LLM call to bring below soft.
+    #[expect(dead_code)]
+    pub prompt_char_budget_hard: usize,
+    /// Max chars for old messages after condensation (metadata block stays).
+    pub old_message_char_budget: usize,
+    /// How often (in iterations) to condense when soft budget is exceeded.
+    pub state_block_update_interval: u32,
+    /// How many full assistant→tool cycles to keep verbatim during condensation.
+    pub condense_keep_turns: usize,
+    /// Token budget — soft threshold for condensation (uses tiktoken for accurate counting).
+    pub prompt_token_budget_soft: usize,
+    /// Token budget — hard threshold, condense before any LLM call (uses tiktoken).
+    pub prompt_token_budget_hard: usize,
+    /// tiktoken encoding/model name ("gpt-4", "cl100k_base", "o200k_base").
+    pub tokenizer_encoding: String,
+    /// Multiplier to account for provider tokenizer mismatch with tiktoken.
+    pub prompt_token_safety_factor: f64,
+
     // Infrastructure config (merged from former config::Config)
     pub database_url: String,
     pub database_readonly_url: String,
@@ -131,6 +152,44 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "2048".to_string())
                 .parse()
                 .unwrap_or(2048),
+
+            // Context management thresholds
+            prompt_char_budget_soft: std::env::var("PROMPT_CHAR_BUDGET_SOFT")
+                .unwrap_or_else(|_| "350000".to_string())
+                .parse()
+                .unwrap_or(350000),
+            prompt_char_budget_hard: std::env::var("PROMPT_CHAR_BUDGET_HARD")
+                .unwrap_or_else(|_| "500000".to_string())
+                .parse()
+                .unwrap_or(500000),
+            old_message_char_budget: std::env::var("OLD_MESSAGE_CHAR_BUDGET")
+                .unwrap_or_else(|_| "100000".to_string())
+                .parse()
+                .unwrap_or(100000),
+            state_block_update_interval: std::env::var("STATE_BLOCK_UPDATE_INTERVAL")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()
+                .unwrap_or(5),
+            condense_keep_turns: std::env::var("CONDENSE_KEEP_TURNS")
+                .unwrap_or_else(|_| "2".to_string())
+                .parse()
+                .unwrap_or(2),
+            
+            // Token-based budgets (use tiktoken for accurate counting)
+            prompt_token_budget_soft: std::env::var("PROMPT_TOKEN_BUDGET_SOFT")
+                .unwrap_or_else(|_| "200000".to_string())
+                .parse()
+                .unwrap_or(200000),
+            prompt_token_budget_hard: std::env::var("PROMPT_TOKEN_BUDGET_HARD")
+                .unwrap_or_else(|_| "350000".to_string())
+                .parse()
+                .unwrap_or(350000),
+            tokenizer_encoding: std::env::var("TOKENIZER_ENCODING")
+                .unwrap_or_else(|_| "gpt-4".to_string()),
+            prompt_token_safety_factor: std::env::var("PROMPT_TOKEN_SAFETY_FACTOR")
+                .unwrap_or_else(|_| "15.0".to_string())
+                .parse()
+                .unwrap_or(15.0),
 
             // Infrastructure config (merged from former config::Config)
             database_url: std::env::var("DATABASE_URL")

@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
+use tracing::warn;
 
 pub mod provider_config;
 
@@ -53,9 +54,8 @@ impl fmt::Display for ProviderId {
 /// Provider defaults loaded from plugin manifests (plugins/providers/*/plugin.json).
 #[derive(Debug, Clone)]
 pub struct ProviderMetadata {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub name: String,
-    #[allow(dead_code)]
     pub default_base_url: String,
     pub api_mode: String,
 }
@@ -147,7 +147,6 @@ pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::ne
     map
 });
 
-#[allow(dead_code)]
 /// Resolve the default base URL for a provider from the plugin metadata.
 pub fn resolve_default_base_url(provider_name: &str) -> String {
     PROVIDER_METADATA
@@ -404,7 +403,7 @@ pub struct CompletionResponse {
 /// streaming-chunk and non-streaming formats.
 #[derive(Debug, Deserialize)]
 struct OpenAiResponse {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     id: Option<String>,
     /// `"chat.completion"` (non-streaming) or `"chat.completion.chunk"` (streaming).
     object: Option<String>,
@@ -421,10 +420,10 @@ struct OpenAiChoice {
     /// Present in streaming chunks.
     #[serde(default)]
     delta: Option<OpenAiDelta>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     #[serde(default)]
     finish_reason: Option<String>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     #[serde(default)]
     index: u32,
 }
@@ -439,6 +438,10 @@ struct OpenAiMessage {
     /// Tool calls requested by the model (OpenAI function calling format).
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallData>>,
+    /// Refusal message — some providers return this instead of content
+    /// when the model refuses to respond (e.g., content filter).
+    #[serde(default)]
+    refusal: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -587,12 +590,19 @@ impl LLMClient {
             .next()
             .context("OpenAI response has no choices")?;
 
+        let finish_reason = choice.finish_reason.clone().unwrap_or_default();
+
         let content = choice
             .message
             .as_ref()
             .and_then(|m| m.content.clone())
             .or_else(|| choice.delta.as_ref().and_then(|d| d.content.clone()))
             .unwrap_or_default();
+
+        let refusal = choice
+            .message
+            .as_ref()
+            .and_then(|m| m.refusal.clone());
 
         let reasoning = choice
             .message
@@ -610,6 +620,37 @@ impl LLMClient {
             .as_ref()
             .and_then(|m| m.tool_calls.clone())
             .unwrap_or_default();
+
+        // Diagnostic: if we got no content/reasoning/tools but the API reports
+        // completion tokens, or there's a refusal field, log it to understand
+        // what the provider returned.
+        if content.is_empty() && tool_calls.is_empty() && reasoning.is_none() {
+            let has_refusal = refusal.as_ref().map(|r| !r.is_empty()).unwrap_or(false);
+            let prompt_tokens = response.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0);
+            let completion_tokens = response.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0);
+            if completion_tokens > 0 || has_refusal {
+                warn!(
+                    "[llm] Response has no content/reasoning/tools but has completion_tokens={}, refusal={:?}, finish_reason={}, prompt_tokens={}",
+                    completion_tokens, refusal, finish_reason, prompt_tokens,
+                );
+            }
+        }
+
+        // If a refusal was returned, surface it as content so the user sees the reason
+        // instead of an empty response error.
+        let content = if content.is_empty() && tool_calls.is_empty() {
+            if let Some(ref r) = refusal {
+                if !r.is_empty() {
+                    format!("[Model Refusal] {}", r)
+                } else {
+                    content
+                }
+            } else {
+                content
+            }
+        } else {
+            content
+        };
 
         Ok(CompletionResponse {
             content,

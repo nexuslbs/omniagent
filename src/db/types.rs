@@ -105,6 +105,7 @@ pub struct MessageDb {
     pub created_at: Option<String>,
     pub token_usage: Option<String>,
     pub processing_time_ms: Option<i32>,
+    pub iteration_number: i32,
 }
 
 impl TryFrom<MessageDb> for Message {
@@ -132,6 +133,7 @@ impl TryFrom<MessageDb> for Message {
                 .map_err(|e| anyhow::anyhow!("Invalid timestamp '{}': {}", db.created_at.as_deref().unwrap_or("?"), e))?,
             token_usage: db.token_usage.as_deref().map(|s| serde_json::from_str(s).unwrap_or_default()),
             processing_time_ms: db.processing_time_ms,
+            iteration_number: db.iteration_number,
         })
     }
 }
@@ -198,11 +200,11 @@ impl TryFrom<ChannelDb> for Channel {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SummaryDb {
     pub id: i64,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub channel_id: i64,
     pub next_thread_id: i64,
     pub content: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub created_at: Option<String>,
 }
 
@@ -212,12 +214,12 @@ pub struct SummaryDb {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SubscriptionDb {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub id: i64,
     pub channel_id: i64,
     pub subscriber_platform: String,
     pub subscriber_resource: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub created_at: Option<String>,
 }
 
@@ -239,13 +241,13 @@ pub struct CreateThreadParams {
 /// Stats for completing a thread.
 #[derive(Debug, Clone)]
 pub struct CompleteThreadStats {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub input_tokens: i32,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub cached_tokens: i32,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub output_tokens: i32,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub duration_ms: i32,
 }
 
@@ -280,7 +282,7 @@ pub struct CreateChannelParams {
 
 /// Old channel info returned by `update_channel_platform`.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub struct OldChannelInfo {
     pub old_platform: Option<String>,
     pub old_resource_identifier: Option<String>,
@@ -304,9 +306,9 @@ pub struct ChannelStatus {
 pub struct ChannelSeq0Message {
     pub id: i64,
     pub content: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub role: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub msg_type: String,
 }
 
@@ -316,16 +318,16 @@ pub struct ChannelSeq0Message {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ChannelUsageStats {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub channel_id: i64,
     pub channel_name: String,
     pub model: Option<String>,
     pub total_input_tokens: Option<i64>,
     pub total_cached_tokens: Option<i64>,
     pub total_output_tokens: Option<i64>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub total_threads: Option<i64>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub total_duration_ms: Option<i64>,
 }
 
@@ -440,6 +442,7 @@ pub struct Message {
     pub created_at: DateTime<Utc>,
     pub processing_time_ms: Option<i32>,
     pub token_usage: Option<serde_json::Value>,
+    pub iteration_number: i32,
 }
 
 /// Payload for creating a new message (without server-assigned fields).
@@ -458,6 +461,7 @@ pub struct MessageNew {
     pub msg_subtype: Option<String>,
     pub processing_time_ms: Option<i32>,
     pub token_usage: Option<serde_json::Value>,
+    pub iteration_number: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -482,7 +486,7 @@ pub struct Thread {
     pub planning_mode: String,
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadNew {
     pub cause: String,

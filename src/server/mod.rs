@@ -336,7 +336,7 @@ struct PromptPreviewRequest {
 }
 
 #[derive(Serialize)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct PromptPreviewResponse {
     system_prompt: String,
     messages: Vec<serde_json::Value>,

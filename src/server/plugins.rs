@@ -32,7 +32,6 @@ pub(crate) struct InstallUrlRequest {
 }
 
 #[derive(Serialize)]
-#[allow(dead_code)]
 struct ApiResponse<T: Serialize> {
     success: bool,
     data: Option<T>,
@@ -40,7 +39,7 @@ struct ApiResponse<T: Serialize> {
 }
 
 impl<T: Serialize> ApiResponse<T> {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     fn ok(data: T) -> Json<Self> {
         Json(Self {
             success: true,
@@ -51,7 +50,7 @@ impl<T: Serialize> ApiResponse<T> {
 }
 
 /// Helper to create an error response for list/detail endpoints.
-#[allow(dead_code)]
+#[expect(dead_code)]
 fn err_response(msg: impl Into<String>) -> Json<ApiResponse<serde_json::Value>> {
     Json(ApiResponse {
         success: false,
@@ -61,7 +60,7 @@ fn err_response(msg: impl Into<String>) -> Json<ApiResponse<serde_json::Value>> 
 }
 
 /// Build the plugin management router, reusing the main server's state.
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub fn plugin_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/plugins", get(list_plugins_handler))

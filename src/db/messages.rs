@@ -17,19 +17,19 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> anyhow::Result<M
         INSERT INTO messages (
             thread_id, role, content, thread_sequence, external_id,
             metadata, embedding, summary_text, is_summary,
-            msg_type, msg_subtype, processing_time_ms, token_usage
+            msg_type, msg_subtype, processing_time_ms, token_usage, iteration_number
         )
         VALUES (:thread_id, :role, :content, :thread_sequence, NULLIF(:external_id, '')::text,
             :metadata, NULLIF(:embedding, '')::text, NULLIF(:summary_text, '')::text, :is_summary,
-            :msg_type, NULLIF(:msg_subtype, '')::text, NULLIF(:processing_time_ms, -1)::int, NULLIF(:token_usage, 'null')::jsonb)
+            :msg_type, NULLIF(:msg_subtype, '')::text, NULLIF(:processing_time_ms, -1)::int, NULLIF(:token_usage, 'null')::jsonb, :iteration_number)
         RETURNING
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
             msg_type, msg_subtype,
-            token_usage::text AS "token_usage", processing_time_ms,
+            token_usage::text AS "token_usage", processing_time_ms, iteration_number,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         "#,
-        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :processing_time_ms = msg.processing_time_ms.unwrap_or(-1), :token_usage = &token_usage_val.to_string() )
+        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :processing_time_ms = msg.processing_time_ms.unwrap_or(-1), :token_usage = &token_usage_val.to_string(), :iteration_number = msg.iteration_number )
     )
     .fetch_one(pool)
     .await?;
@@ -49,7 +49,7 @@ pub async fn get_recent_thread_messages(
         SELECT
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
-            msg_type, msg_subtype,
+            msg_type, msg_subtype, iteration_number,
             token_usage::text AS "token_usage", processing_time_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages
@@ -81,7 +81,7 @@ pub async fn search_messages_text(
         SELECT
             m.id, m.thread_id, m.role, m.content, m.thread_sequence, m.external_id,
             m.metadata::text AS "metadata", m.embedding, m.summary_text, m.is_summary,
-            m.msg_type, m.msg_subtype,
+            m.msg_type, m.msg_subtype, m.iteration_number,
             m.token_usage::text AS "token_usage", m.processing_time_ms,
             COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages m
@@ -257,6 +257,7 @@ pub async fn get_latest_seq0_message(
             created_at: chrono::Utc::now(),
             processing_time_ms: None,
             token_usage: None,
+            iteration_number: 0,
         })),
         None => Ok(None),
     }
@@ -288,7 +289,7 @@ pub async fn get_thread_messages(
         SELECT
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
-            msg_type, msg_subtype,
+            msg_type, msg_subtype, iteration_number,
             token_usage::text AS "token_usage", processing_time_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages

@@ -222,7 +222,7 @@ pub async fn get_channel_by_platform_and_resource(
 ///
 /// Returns the old platform and resource_identifier values so callers can
 /// notify the old platform that the channel is no longer active there.
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub async fn update_channel_platform(
     pool: &PgPool,
     channel_id: i64,

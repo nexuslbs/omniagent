@@ -55,7 +55,7 @@ pub async fn set_thread_system(pool: &PgPool, thread_id: i64) -> anyhow::Result<
 
 /// Set a thread's status to 'failed' (terminal — action execution failure).
 /// These threads should never be picked up by the executor.
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> anyhow::Result<()> {
     sql_forge!(
         "UPDATE threads SET status = 'failed', terminal = true WHERE id = :id",
@@ -210,19 +210,19 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> an
         INSERT INTO messages (
             thread_id, role, content, thread_sequence, external_id,
             metadata, embedding, summary_text, is_summary,
-            msg_type, msg_subtype, processing_time_ms, token_usage
+            msg_type, msg_subtype, processing_time_ms, token_usage, iteration_number
         )
         VALUES (:thread_id, :role, :content, :thread_sequence, NULLIF(:external_id, '')::text,
             :metadata, NULLIF(:embedding, '')::text, NULLIF(:summary_text, '')::text, :is_summary,
-            :msg_type, NULLIF(:msg_subtype, '')::text, NULLIF(:processing_time_ms, -1)::int, NULLIF(:token_usage, 'null')::jsonb)
+            :msg_type, NULLIF(:msg_subtype, '')::text, NULLIF(:processing_time_ms, -1)::int, NULLIF(:token_usage, 'null')::jsonb, :iteration_number)
         RETURNING
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
             msg_type, msg_subtype,
-            token_usage::text AS "token_usage", processing_time_ms,
+            token_usage::text AS "token_usage", processing_time_ms, iteration_number,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         "#,
-        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :processing_time_ms = msg.processing_time_ms.unwrap_or(-1), :token_usage = &token_usage_val.to_string() )
+        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :processing_time_ms = msg.processing_time_ms.unwrap_or(-1), :token_usage = &token_usage_val.to_string(), :iteration_number = msg.iteration_number )
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -342,6 +342,7 @@ pub async fn create_thread_with_cause(
         msg_subtype: p.msg_subtype,
         processing_time_ms: None,
         token_usage: None,
+        iteration_number: 0,
     };
 
     let saved = create_cause_and_set_pending(pool, &msg).await?;
@@ -510,7 +511,7 @@ pub async fn get_cause_message(pool: &PgPool, thread_id: i64) -> anyhow::Result<
         SELECT
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
-            msg_type, msg_subtype,
+            msg_type, msg_subtype, iteration_number,
             token_usage::text AS "token_usage", processing_time_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages

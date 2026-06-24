@@ -114,7 +114,6 @@ impl TelegramBotClient {
     }
 
     /// Delete a message.
-    #[allow(dead_code)]
     async fn delete_message(&self, chat_id: &str, message_id: i64) -> Result<()> {
         let body = serde_json::json!({
             "chat_id": chat_id,
@@ -141,7 +140,6 @@ impl TelegramBotClient {
     /// Poll `getUpdates` for new messages since the given offset.
     /// Returns a list of Telegram Update objects.
     /// The `offset` is the last processed `update_id` + 1 (paging mechanism).
-    #[allow(dead_code)]
     async fn get_updates(&self, offset: Option<i64>, timeout_secs: u32) -> Result<Vec<serde_json::Value>> {
         let mut body = serde_json::json!({
             "timeout": timeout_secs,
@@ -447,7 +445,6 @@ async fn fetch_unsent_messages(
 /// inform the user that the chat is not configured.
 ///
 /// **Disabled by default** — enable via `TELEGRAM_POLLING_ENABLED=true`.
-#[allow(dead_code)]
 async fn inbound_polling_loop(
     bot: TelegramBotClient,
     pool: PgPool,
@@ -704,7 +701,6 @@ async fn handle_telegram_model_command(
 /// 1. Connect to the WS endpoint using tokio-tungstenite.
 /// 2. Read JSON frames and convert them into inbound message inserts.
 /// 3. Reconnect on disconnection with exponential backoff.
-#[allow(dead_code)]
 async fn inbound_websocket_loop(
     _pool: PgPool,
     _db_channel_id: i64,

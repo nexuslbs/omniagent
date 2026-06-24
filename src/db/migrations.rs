@@ -9,6 +9,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     phase_5_planning_and_search(pool).await?;
     phase_6_vector_and_secrets(pool).await?;
     phase_7_seed_actions(pool).await?;
+    phase_8_iteration_number(pool).await?;
     Ok(())
 }
 
@@ -978,5 +979,16 @@ async fn phase_7_seed_actions(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    Ok(())
+}
+
+/// Phase 8: Add iteration_number column to messages table for tracking
+/// per-LLM-call iteration within the tool-calling loop.
+async fn phase_8_iteration_number(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"ALTER TABLE messages ADD COLUMN IF NOT EXISTS iteration_number INT NOT NULL DEFAULT 0;"#,
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }

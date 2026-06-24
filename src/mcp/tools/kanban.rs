@@ -10,14 +10,14 @@ use chrono::{DateTime, Utc};
 #[derive(Debug, FromRow)]
 struct KanbanTaskRow {
     id: String,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     display_id: Option<i64>,
     title: String,
     body: Option<String>,
     status: String,
     priority: Option<i32>,
     assignee: Option<String>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     template: Option<String>,
     created_at: Option<DateTime<Utc>>,
     updated_at: Option<DateTime<Utc>>,

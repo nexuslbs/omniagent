@@ -40,6 +40,11 @@ cargo sqlx prepare -- --bin omniagent
 - Use `anyhow::Result` for fallible functions
 - Use `tracing` (info/warn/error) for logging, never `println!`
 
+### Lint Attributes: Use `#[expect(...)]` not `#[allow(...)]`
+Prefer `#[expect(dead_code)]` over `#[allow(dead_code)]`. The `expect` attribute produces a compiler warning when the lint no longer applies (i.e., the dead code became used), making it self-cleaning — you know to remove it. `#[allow]` silently hides the lint forever, even after the suppression is no longer needed.
+
+This applies to ALL lint types, not just `dead_code`: if you must suppress a lint, use `#[expect(lint_name)]` so the compiler tells you when the suppression is stale.
+
 ### Module Structure
 - `src/db/types.rs` — All DB queries
 - `src/agent/mod.rs` — Agent loop, message processing
@@ -214,7 +219,7 @@ Planning mode is resolved **at thread creation time** and stamped on `threads.pl
 
 **Priority chain** (first non-empty wins):
 1. Task `planning_mode` — cron job planning mode (highest — overrides channel)
-   - Valid values: empty (→ default), `no_plan` (→ `prompt_only`), `simple_plan` (→ `auto_plan`), `plan_with_subtasks` (→ `auto_subtasks`), `max_plan` (→ max of global)
+   - Valid values: empty (→ complexity-based default), `prompt_only`, `auto_plan`, `auto_subtasks`
 2. Channel `planning_mode` — override for the entire channel
    - Valid values: empty (→ default), `prompt_only`, `auto_plan`, `auto_subtasks`, `never` (→ `prompt_only`), `always` (→ `auto_subtasks`)
 3. Kanban tasks — always `resolve_max_plan(global_mode)` (no complexity classification)
@@ -231,6 +236,24 @@ Planning mode is resolved **at thread creation time** and stamped on `threads.pl
 - `prompt_only` → `max_iterations_no_plan` (default 5)
 - `auto_plan` → `max_iterations_simple_plan` (default 10)
 - `auto_subtasks`/`always` → `max_iterations_complex_plan` (default 25)
+
+The per-`process_message` cap was previously hardcoded to 12 (`remaining.clamp(0, 12)`). It now uses the full remaining budget from the MAX_ITERATIONS_* settings directly (`remaining.max(0)`), so a single user message can consume all remaining iterations for the thread.
+
+**When the iteration limit is reached**, the thread is marked `interrupted` (not `failed`). Instead of a hardcoded message, the executor calls the LLM to generate a summary that includes:
+- The iteration count (`{current_iter}/{iter_limit}`)
+- What was accomplished
+- What remains to be done
+
+The LLM summary is saved as the only post-loop message (type `summary`, subtype `interrupted`, `is_summary=true`).
+
+### Cron Schedule Format
+
+Cron expressions use **5-field Linux format** (`min hour day month weekday`). The scheduler prepends `"0 "` (second=0) for the `cron` crate (which expects 6-field). Both `create_cron_job` and `update_cron_job` MCP tools validate exactly 5 fields.
+
+Examples:
+- `0 * * * *` — every hour
+- `*/15 * * * *` — every 15 minutes
+- `0 9 * * 1-5` — weekdays at 9am
 
 ### Provider/Model Stamping and Validation
 

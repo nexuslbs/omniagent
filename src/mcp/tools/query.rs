@@ -84,7 +84,6 @@ use crate::vectorizer::{HashVectorizer, Vectorizer, vector_to_string};
 // ── Result structs ─────────────────────────────────────────────────────────
 
 #[derive(Debug, FromRow)]
-#[allow(dead_code)]
 struct MessageResult {
     id: i64,
     role: String,

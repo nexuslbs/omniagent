@@ -5,7 +5,7 @@ use crate::agent::config::{AgentContext};
 use crate::agent::helpers;
 use crate::db::types as queries;
 use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
-use crate::llm::{ChatMessage, CompletionRequest};
+use crate::llm::{ChatMessage, CompletionRequest, Usage};
 use crate::mcp::McpToolCall;
 use crate::mcp::{truncate_content, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
 use crate::prompt_builder::{format_subtask_section, PlanningPromptParams};
@@ -37,6 +37,9 @@ pub async fn process_thread(
         .await
         .unwrap_or(0);
 
+    // Track per-message sequence number within the thread
+    let mut next_seq = cause_msg.thread_sequence + 1;
+
     // 3. Read profile, provider, model from the thread (not from messages)
     let profile_name = thread.profile.clone();
     let provider_name = thread.provider.clone();
@@ -53,7 +56,7 @@ pub async fn process_thread(
                 "Invalid configuration: profile='{}', provider={:?}, model={:?} — profile name is empty. Set a profile on the channel or thread.",
                 profile_name, provider_name, model_name
             ),
-            thread_sequence: cause_msg.thread_sequence + 1,
+            thread_sequence: { let v = next_seq; next_seq += 1; v },
             external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
             metadata: serde_json::json!({
                 "error_type": "configuration",
@@ -65,6 +68,7 @@ pub async fn process_thread(
             msg_subtype: Some("no-profile".to_string()),
             processing_time_ms: None,
             token_usage: None,
+            iteration_number: 0,
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
         let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
@@ -84,7 +88,7 @@ pub async fn process_thread(
                 "Invalid configuration: profile='{}' does not exist.",
                 profile_name
             ),
-            thread_sequence: cause_msg.thread_sequence + 1,
+            thread_sequence: { let v = next_seq; next_seq += 1; v },
             external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
             metadata: serde_json::json!({
                 "error_type": "configuration",
@@ -97,6 +101,7 @@ pub async fn process_thread(
             msg_subtype: Some("invalid-profile".to_string()),
             processing_time_ms: None,
             token_usage: None,
+            iteration_number: 0,
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
         let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
@@ -112,7 +117,7 @@ pub async fn process_thread(
                 "Invalid configuration: provider is not set on thread {}. Ensure the thread has a provider stamped at creation time. Check channel.current_provider, profile provider, or LLM_PROVIDER env var.",
                 thread.id
             ),
-            thread_sequence: cause_msg.thread_sequence + 1,
+            thread_sequence: { let v = next_seq; next_seq += 1; v },
             external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
             metadata: serde_json::json!({
                 "error_type": "configuration",
@@ -125,6 +130,7 @@ pub async fn process_thread(
             msg_subtype: Some("no-provider".to_string()),
             processing_time_ms: None,
             token_usage: None,
+            iteration_number: 0,
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
         let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
@@ -144,7 +150,7 @@ pub async fn process_thread(
                 "Invalid configuration: model is not set on thread {}. Ensure the thread has a model stamped at creation time. Check channel.current_model, profile model, or LLM_MODEL env var.",
                 thread.id
             ),
-            thread_sequence: cause_msg.thread_sequence + 1,
+            thread_sequence: { let v = next_seq; next_seq += 1; v },
             external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
             metadata: serde_json::json!({
                 "error_type": "configuration",
@@ -157,6 +163,7 @@ pub async fn process_thread(
             msg_subtype: Some("no-model".to_string()),
             processing_time_ms: None,
             token_usage: None,
+            iteration_number: 0,
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
         let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
@@ -288,6 +295,7 @@ pub async fn process_thread(
     // Track cumulative token usage across all LLM calls
     let mut cumulative_usage: Option<crate::llm::Usage> = None;
     let mut force_failed: bool = false;
+    let mut current_iter: i32 = 0;
 
     // ── Planning Phase ──
     // Read planning_mode from thread (single source of truth, resolved at creation time)
@@ -383,7 +391,7 @@ pub async fn process_thread(
                         thread_id: thread.id,
                         role: "agent".to_string(),
                         content: content.clone(),
-                        thread_sequence: cause_msg.thread_sequence + 1,
+                        thread_sequence: { let v = next_seq; next_seq += 1; v },
                         external_id: None,
                         metadata: serde_json::json!({
                             "plan_iteration": iter,
@@ -396,6 +404,7 @@ pub async fn process_thread(
                         msg_subtype: Some("markdown".to_string()),
                         processing_time_ms: plan_duration_ms,
                         token_usage: plan_token_usage,
+                        iteration_number: 1,
                     };
                     match queries::create_message(&cfg.pool, &plan_msg).await {
                         Ok(_) => {},
@@ -527,12 +536,13 @@ pub async fn process_thread(
     // 6. Tool-calling loop — max iterations controls total LLM calls
     let iter_limit = queries::max_iterations_for_planning_mode(&cfg.config, &thread.planning_mode) as i32;
     let remaining = iter_limit - current_msg_count;
-    let max_llm_calls = remaining.clamp(0, 25) as u32; // safety cap — 25 max
+    let max_llm_calls = remaining.max(0) as u32; // use the actual configured iteration limit
     let mut final_content = String::new();
     let mut final_reasoning: Option<String> = None;
     let mut final_tool_call: bool = false;
     let mut limit_reached: bool = false;
-    let mut current_iter = current_msg_count;
+    let mut last_response_usage: Option<Usage> = None;
+    current_iter = 1; // plan was iteration 1
     let mut unfinished_subtask_retries: u32 = 0;
     let mut calls_since_subtask_management: u32 = 0;
 
@@ -548,8 +558,122 @@ pub async fn process_thread(
             ));
         }
 
-        // Layer 3: prune old tool results from conversation history if over budget
-        helpers::prune_old_tool_results(&mut messages);
+        // ── Context management: budget enforcement ──
+        // Soft budget exceeded → condense every state_block_update_interval turns
+        // Hard budget exceeded → condense before ANY LLM call, bring below soft
+        //
+        // Uses tiktoken BPE tokenizer for accurate token counting instead of
+        // character-based estimation (which had ~30% JSON overhead error margin).
+        
+        let prompt_token_soft = cfg.config.prompt_token_budget_soft;
+        let prompt_token_hard = cfg.config.prompt_token_budget_hard;
+        let old_msg_budget = cfg.config.old_message_char_budget;
+        let keep_turns = cfg.config.condense_keep_turns;
+        let state_interval = cfg.config.state_block_update_interval as i32;
+        let tokenizer_enc = &cfg.config.tokenizer_encoding;
+        
+        // Count actual tokens using tiktoken (fast BPE, no network calls),
+        // then apply safety factor to account for provider tokenizer mismatch.
+        // Include tool definitions in the count since they add 200-300K tokens.
+        let token_tools = if tools_def.is_empty() { None } else { Some(tools_def.as_slice()) };
+        let raw_tokens = helpers::count_tokens(&messages, tokenizer_enc, token_tools);
+        let safety_factor = cfg.config.prompt_token_safety_factor;
+        let current_tokens = (raw_tokens as f64 * safety_factor) as usize;
+        
+        // Log token count every 5 iterations for diagnostics
+        if current_iter % 5 == 0 || current_tokens > 50000 {
+            info!(
+                "[context] Iteration {}: ~{} raw tokens (×{:.1} factor = {} effective) in {} messages (soft: {}, hard: {})",
+                current_iter, raw_tokens, safety_factor, current_tokens, messages.len(), prompt_token_soft, prompt_token_hard,
+            );
+        }
+        
+        let needs_hard_condense = current_tokens > prompt_token_hard;
+        let needs_soft_condense = current_tokens > prompt_token_soft 
+            && state_interval > 0 
+            && current_iter % state_interval == 0;
+        
+        if needs_hard_condense || needs_soft_condense {
+            // Use the char budget for the condense_messages function's safety
+            // check (which compares system message CHARS, not tokens).
+            let condense_char_soft = cfg.config.prompt_char_budget_soft;
+            
+            match helpers::condense_messages(
+                std::mem::take(&mut messages),
+                old_msg_budget,
+                keep_turns,
+                condense_char_soft,
+            ) {
+                Ok(condensed) => {
+                    let condensed_raw = helpers::count_tokens(&condensed, tokenizer_enc, token_tools);
+                    let condensed_tokens = (condensed_raw as f64 * safety_factor) as usize;
+                    let saved = current_tokens.saturating_sub(condensed_tokens);
+                    messages = condensed;
+                    
+                    // If hard budget triggered, verify we're now below soft
+                    let after_raw = helpers::count_tokens(&messages, tokenizer_enc, token_tools);
+                    let after_tokens = (after_raw as f64 * safety_factor) as usize;
+                    if needs_hard_condense && after_tokens > prompt_token_soft {
+                        // Second pass with more aggressive settings
+                        // Use the configured keep_turns (not hardcoded 1) so the
+                        // escalation is actually more aggressive than the first pass.
+                        let aggressive_keep = if keep_turns > 0 { keep_turns - 1 } else { 0_usize };
+                        match helpers::condense_messages(
+                            std::mem::take(&mut messages),
+                            old_msg_budget / 2, // halve the old message budget
+                            aggressive_keep,    // at most keep_turns-1, but at least 0
+                            condense_char_soft,
+                        ) {
+                            Ok(tighter) => {
+                                let tighter_raw = helpers::count_tokens(&tighter, tokenizer_enc, token_tools);
+                                let tighter_tokens = (tighter_raw as f64 * safety_factor) as usize;
+                                messages = tighter;
+                                if tighter_tokens > prompt_token_soft {
+                                    warn!(
+                                        "[context] Hard condensation could not bring prompt below soft budget: {} effective tokens (budget: {})",
+                                        tighter_tokens, prompt_token_soft
+                                    );
+                                    // Last resort: strip the task template from system messages.
+                                    // By late iterations the model already knows the task.
+                                    let pre_strip = messages.len();
+                                    messages.retain(|m| {
+                                        !(m.role == "system" && m.content.contains("=== Task Template ==="))
+                                    });
+                                    let stripped = pre_strip - messages.len();
+                                    if stripped > 0 {
+                                        info!("[context] Stripped {} task template system messages to reduce context", stripped);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("[context] Second-pass condensation failed: {}", e);
+                            }
+                        }
+                    }
+                    
+                    info!(
+                        "[context] Condensed prompt: {} effective tokens [raw: {}] → {} effective tokens [raw: {}] (saved {}, iteration {})",
+                        current_tokens, raw_tokens,
+                        condensed_tokens, condensed_raw,
+                        saved,
+                        current_iter,
+                    );
+                }
+                Err(e) => {
+                    // Safety check failed — system messages too large
+                    error!("[context] Condensation aborted: {}", e);
+                    force_failed = true;
+                    final_content = format!("Task failed: {}", e);
+                    break;
+                }
+            }
+        }
+
+        // Layer 3: iteration-aware tool result pruning
+        helpers::prune_old_tool_results(&mut messages, current_iter as u32);
+        
+        // Layer 4: compact old assistant tool_calls JSON (only keep recent turns)
+        helpers::compact_old_assistant_messages(&mut messages, keep_turns);
 
         // ── LLM completion call ──
 
@@ -576,6 +700,7 @@ pub async fn process_thread(
 
         // Track cumulative token usage
         helpers::merge_usage(&mut cumulative_usage, response.usage.clone());
+        last_response_usage = response.usage.clone();
 
         // Store reasoning if present
         if response.reasoning.is_some() {
@@ -640,7 +765,56 @@ pub async fn process_thread(
 
             // Normal text response — all subtasks done (or subtask mode off)
             final_content = if response.content.is_empty() {
-                response.reasoning.clone().unwrap_or_default()
+                // When both content and reasoning are empty (e.g. context too large
+                // caused the LLM to return nothing), produce a fallback error message
+                // and force the thread to fail.
+                // Note: DeepSeek with reasoning always returns reasoning=Some(...),
+                // even when the reasoning string is empty, so we must check the
+                // content of reasoning too, not just whether it's Some/None.
+                let reasoning_empty = response.reasoning.as_ref()
+                    .map(|r| r.trim().is_empty())
+                    .unwrap_or(true); // None means empty too
+
+                // Check if the response has meaningful completion_tokens but empty
+                // content — indicates a content filter or provider-side stripping.
+                let has_completion = response.usage.as_ref()
+                    .map(|u| u.completion_tokens > 0)
+                    .unwrap_or(false);
+
+                if reasoning_empty && has_completion {
+                    // The API reports generated tokens but returned empty content.
+                    // This indicates content was filtered/stripped (provider safety filter).
+                    // Log it and produce a clear error rather than hiding it.
+                    let prompt_toks = response.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0);
+                    let comp_toks = response.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0);
+                    warn!(
+                        "[executor] LLM returned empty content with {} completion tokens (prompt: {}) — likely content filter",
+                        comp_toks, prompt_toks,
+                    );
+                }
+
+                if reasoning_empty && enable_subtasks {
+                    let pending_subtasks = match crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
+                        Ok(list) => list.into_iter().filter(|st| st.status == "pending" || st.status == "in_progress").collect::<Vec<_>>(),
+                        Err(_) => Vec::new(),
+                    };
+                    force_failed = true; // empty response — thread must fail
+                    if pending_subtasks.is_empty() {
+                        "The LLM returned an empty response with no pending subtasks — likely caused by context explosion.".to_string()
+                    } else {
+                        format!(
+                            "The LLM returned an empty response. The following subtasks were never completed:\n{}",
+                            pending_subtasks.iter().map(|st| format!("- #{}: {} ({})", st.id, st.description, st.status)).collect::<Vec<_>>().join("\n"),
+                        )
+                    }
+                } else if reasoning_empty {
+                    // No subtask mode, but content AND reasoning are both empty
+                    force_failed = true; // empty response — thread must fail
+                    "The LLM returned an empty response — likely caused by context explosion.".to_string()
+                } else {
+                    // Reasoning has actual content — use it
+                    response.reasoning.clone().unwrap_or_default()
+                }
             } else {
                 response.content
             };
@@ -651,6 +825,19 @@ pub async fn process_thread(
         // If iterations will equal the max after this call, flag interruption
         if current_iter >= iter_limit {
             limit_reached = true;
+            // Produce content from the last tool calls so final_content is
+            // non-empty — prevents a false "empty response" detection when
+            // the iteration budget runs out while the LLM was making tools.
+            if !response.tool_calls.is_empty() {
+                let tool_names: Vec<String> = response.tool_calls.iter()
+                    .map(|tc| tc.function.name.clone())
+                    .collect();
+                final_content = format!(
+                    "Iteration limit reached. Last tool calls issued: {}. The task was interrupted before completion.",
+                    tool_names.join(", "),
+                );
+                final_tool_call = false;
+            }
             break;
         }
 
@@ -683,7 +870,7 @@ pub async fn process_thread(
                 thread_id: thread.id,
                 role: "agent".to_string(),
                 content: multi_content,
-                thread_sequence: cause_msg.thread_sequence + 1,
+                thread_sequence: { let v = next_seq; next_seq += 1; v },
                 external_id: None,
                 metadata: serde_json::json!({}),
                 embedding: None,
@@ -693,6 +880,7 @@ pub async fn process_thread(
                 msg_subtype: None,
                 processing_time_ms: tool_duration_ms,
                 token_usage: tool_token_usage.clone(),
+                iteration_number: current_iter as i32,
             };
             match helpers::persist_or_abort(&cfg.pool, &multi_msg, thread.id).await {
                 helpers::CreateMessageResult::FkViolation => {
@@ -725,7 +913,7 @@ pub async fn process_thread(
                 thread_id: thread.id,
                 role: "agent".to_string(),
                 content: tool_args,
-                thread_sequence: cause_msg.thread_sequence + 1,
+                thread_sequence: { let v = next_seq; next_seq += 1; v },
                 external_id: None,
                 metadata: serde_json::json!({}),
                 embedding: None,
@@ -735,6 +923,7 @@ pub async fn process_thread(
                 msg_subtype: Some(tool_name.clone()),
                 processing_time_ms: tool_ptime,
                 token_usage: tool_tu,
+                iteration_number: current_iter as i32,
             };
             match helpers::persist_or_abort(&cfg.pool, &tool_call_msg, thread.id).await {
                 helpers::CreateMessageResult::FkViolation => {
@@ -769,7 +958,7 @@ pub async fn process_thread(
                         thread_id: thread.id,
                         role: "agent".to_string(),
                         content: content.clone(),
-                        thread_sequence: cause_msg.thread_sequence + 1,
+                        thread_sequence: { let v = next_seq; next_seq += 1; v },
                         external_id: None,
                         metadata: serde_json::json!({}),
                         embedding: None,
@@ -779,6 +968,7 @@ pub async fn process_thread(
                         msg_subtype: Some(tool_name.clone()),
                         processing_time_ms: Some(tool_elapsed_ms),
                         token_usage: None,
+                        iteration_number: current_iter as i32,
                     };
                     match helpers::persist_or_abort(&cfg.pool, &tool_result_msg, thread.id).await {
                         helpers::CreateMessageResult::FkViolation => anyhow::bail!("FK violation — thread {} no longer exists", thread.id),
@@ -800,7 +990,7 @@ pub async fn process_thread(
                         thread_id: thread.id,
                         role: "agent".to_string(),
                         content: err_msg.clone(),
-                        thread_sequence: cause_msg.thread_sequence + 1,
+                        thread_sequence: { let v = next_seq; next_seq += 1; v },
                         external_id: None,
                         metadata: serde_json::json!({}),
                         embedding: None,
@@ -810,6 +1000,7 @@ pub async fn process_thread(
                         msg_subtype: Some(tool_name.clone()),
                         processing_time_ms: Some(tool_elapsed_ms),
                         token_usage: None,
+                        iteration_number: current_iter as i32,
                     };
                     match helpers::persist_or_abort(&cfg.pool, &tool_result_msg, thread.id).await {
                         helpers::CreateMessageResult::FkViolation => anyhow::bail!("FK violation — thread {} no longer exists", thread.id),
@@ -862,6 +1053,13 @@ pub async fn process_thread(
     if final_content.is_empty() && !final_tool_call {
         final_content =
             "I've completed the requested operations using my available tools.".to_string();
+    } else if final_content.is_empty() && final_tool_call {
+        // The loop exhausted all iterations while the LLM was still issuing tool
+        // calls — no final answer was produced. Mark as failed with a clear message
+        // rather than a misleading "empty_response" error.
+        final_content = "The task ran out of iterations while still processing tools — no final answer was produced.".to_string();
+        force_failed = true;
+        limit_reached = true;
     }
 
     // 7. Serialize cumulative token usage
@@ -905,7 +1103,7 @@ pub async fn process_thread(
                 thread_id: thread.id,
                 role: "agent".to_string(),
                 content: reasoning_text.clone(),
-                thread_sequence: cause_msg.thread_sequence + 1,
+                thread_sequence: { let v = next_seq; next_seq += 1; v },
                 external_id: None,
                 metadata: serde_json::json!({
                     "context": evidence_metadata["context"],
@@ -917,7 +1115,15 @@ pub async fn process_thread(
                 msg_type: "reasoning".to_string(),
                 msg_subtype: None,
                 processing_time_ms: None,
-                token_usage: None,
+                token_usage: last_response_usage.as_ref().map(|u| {
+                    serde_json::json!({
+                        "prompt_tokens": u.prompt_tokens,
+                        "completion_tokens": u.completion_tokens,
+                        "cached_tokens": u.cached_tokens,
+                        "reasoning_tokens": u.reasoning_tokens,
+                    })
+                }),
+                iteration_number: current_iter as i32,
             };
             let reasoning_saved = queries::create_message(&cfg.pool, &reasoning_msg).await?;
             helpers::enqueue_delivery(
@@ -930,67 +1136,14 @@ pub async fn process_thread(
         }
     }
 
-    // 9. Save the main agent response
+    // 9. Save the main agent response (when limit_reached, generate LLM summary instead)
     let agent_elapsed_ms = start_time.elapsed().as_millis() as i32;
     let is_empty_response = final_content.trim().is_empty();
-    let agent_msg_type = if is_empty_response {
-        "error".to_string()
-    } else if limit_reached {
-        "message".to_string()
-    } else {
-        "summary".to_string()
-    };
-    let agent_content = if is_empty_response {
-        format!(
-            "The LLM returned an empty response. The task failed.\n\
-             Possible causes: token explosion (context too large), provider error, or LLM output limits.\n\
-             Prompt tokens used in this turn: {}",
-            token_usage_json.as_ref()
-                .and_then(|u| u.get("prompt_tokens"))
-                .and_then(|v| v.as_i64())
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        )
-    } else {
-        final_content.clone()
-    };
-    let agent_msg = MessageNew {
-        thread_id: thread.id,
-        role: "agent".to_string(),
-        content: agent_content,
-        thread_sequence: cause_msg.thread_sequence + 1,
-        external_id: None,
-        metadata: serde_json::json!({
-            "context": evidence_metadata["context"],
-            "grounding": evidence_metadata["grounding"],
-        }),
-        embedding: None,
-        summary_text: None,
-        is_summary: !limit_reached && !is_empty_response,
-        msg_type: agent_msg_type,
-        msg_subtype: if is_empty_response { Some("empty_response".to_string()) } else { None },
-        processing_time_ms: Some(agent_elapsed_ms),
-        token_usage: token_usage_json.clone(),
-    };
 
-    let saved = queries::create_message(&cfg.pool, &agent_msg).await?;
-
-    helpers::enqueue_delivery(
-        &cfg.ctx,
-        &saved,
-        &channel,
-        thread,
-        cause_msg.external_id.clone(),
-    ).await;
-
-    // ── Summary generation (only when interrupted / iteration limit reached) ──
-    // When the thread completed normally, the agent's final message IS the summary
-    // (the prompt instructs it to end with a summary). No separate LLM call needed.
-    if limit_reached {
-        // Strip tool results from summary context — the summary only needs
-        // the conversation flow (user requests + agent responses), not raw tool
-        // outputs. This keeps summary tokens low and avoids silent failures
-        // from oversized context windows.
+    let saved = if limit_reached {
+        // ── Summary generation (when interrupted / iteration limit reached) ──
+        // Generate an LLM summary that reports what was accomplished and what remains.
+        // This replaces the hardcoded message so the summary is the only output.
         let mut summary_msgs: Vec<ChatMessage> = messages
             .iter()
             .filter(|m| m.role != "tool")
@@ -1005,10 +1158,13 @@ pub async fn process_thread(
                 cloned
             })
             .collect();
-        summary_msgs.push(ChatMessage::system(
-            "The iteration limit was reached so the task may be incomplete. \
-             Summarize what was accomplished and inform the user they can request to continue.",
-        ));
+        let iter_summary = format!(
+            "The iteration limit ({}/{}) was reached so the task may be incomplete. \
+             Summarize what was accomplished (including what the agent did and found) and what remains to be done. \
+             Inform the user they can request to continue.",
+            current_iter, iter_limit,
+        );
+        summary_msgs.push(ChatMessage::system(&iter_summary));
 
         let summary_request = CompletionRequest {
             messages: summary_msgs,
@@ -1050,35 +1206,99 @@ pub async fn process_thread(
             thread_id: thread.id,
             role: "agent".to_string(),
             content: summary_text,
-            thread_sequence: cause_msg.thread_sequence + 2,
+            thread_sequence: { let v = next_seq; next_seq += 1; v },
             external_id: None,
             metadata: serde_json::json!({}),
             embedding: None,
             summary_text: None,
             is_summary: true,
             msg_type: "summary".to_string(),
-            msg_subtype: None,
+            msg_subtype: Some("interrupted".to_string()),
             processing_time_ms: Some(summary_elapsed_ms),
             token_usage: summary_token_usage,
+            iteration_number: current_iter as i32,
         };
 
-        match queries::create_message(&cfg.pool, &summary_msg).await {
-            Ok(summary_saved) => {
-                info!("[summary] Saved summary message for thread {}", thread.id,);
-                helpers::enqueue_delivery(
-                    &cfg.ctx,
-                    &summary_saved,
-                    &channel,
-                    thread,
-                    cause_msg.external_id.clone(),
-                ).await;
-            }
-            Err(e) => warn!(
-                "[summary] Failed to save summary for thread {}: {:?}",
-                thread.id, e
-            ),
-        }
-    }
+        let summary_saved = queries::create_message(&cfg.pool, &summary_msg).await?;
+        info!("[summary] Saved summary message for thread {}", thread.id);
+        helpers::enqueue_delivery(
+            &cfg.ctx,
+            &summary_saved,
+            &channel,
+            thread,
+            cause_msg.external_id.clone(),
+        ).await;
+        summary_saved
+    } else if is_empty_response {
+        let agent_content = format!(
+            "The LLM returned an empty response. The task failed.\n\
+             Possible causes: token explosion (context too large), provider error, or LLM output limits.\n\
+             Prompt tokens used in this turn: {}",
+            token_usage_json.as_ref()
+                .and_then(|u| u.get("prompt_tokens"))
+                .and_then(|v| v.as_i64())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        let agent_msg = MessageNew {
+            thread_id: thread.id,
+            role: "agent".to_string(),
+            content: agent_content,
+            thread_sequence: { let v = next_seq; next_seq += 1; v },
+            external_id: None,
+            metadata: serde_json::json!({
+                "context": evidence_metadata["context"],
+                "grounding": evidence_metadata["grounding"],
+            }),
+            embedding: None,
+            summary_text: None,
+            is_summary: false,
+            msg_type: "error".to_string(),
+            msg_subtype: Some("empty_response".to_string()),
+            processing_time_ms: Some(agent_elapsed_ms),
+            token_usage: token_usage_json.clone(),
+            iteration_number: current_iter as i32,
+        };
+        let saved = queries::create_message(&cfg.pool, &agent_msg).await?;
+        helpers::enqueue_delivery(
+            &cfg.ctx,
+            &saved,
+            &channel,
+            thread,
+            cause_msg.external_id.clone(),
+        ).await;
+        saved
+    } else {
+        // Normal completion — the agent's final message IS the summary
+        let agent_msg = MessageNew {
+            thread_id: thread.id,
+            role: "agent".to_string(),
+            content: final_content.clone(),
+            thread_sequence: { let v = next_seq; next_seq += 1; v },
+            external_id: None,
+            metadata: serde_json::json!({
+                "context": evidence_metadata["context"],
+                "grounding": evidence_metadata["grounding"],
+            }),
+            embedding: None,
+            summary_text: None,
+            is_summary: true,
+            msg_type: "summary".to_string(),
+            msg_subtype: None,
+            processing_time_ms: Some(agent_elapsed_ms),
+            token_usage: token_usage_json.clone(),
+            iteration_number: current_iter as i32,
+        };
+        let saved = queries::create_message(&cfg.pool, &agent_msg).await?;
+        helpers::enqueue_delivery(
+            &cfg.ctx,
+            &saved,
+            &channel,
+            thread,
+            cause_msg.external_id.clone(),
+        ).await;
+        saved
+    };
     // Define final status before potential early return
     let final_status = if force_failed {
         "failed"
