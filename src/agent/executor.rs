@@ -198,6 +198,7 @@ pub async fn process_thread(
                         let status = match row.status.as_str() {
                             "completed" => crate::prompt_builder::SubtaskStatus::Completed,
                             "cancelled" => crate::prompt_builder::SubtaskStatus::Cancelled,
+                            "error" => crate::prompt_builder::SubtaskStatus::Error,
                             _ => crate::prompt_builder::SubtaskStatus::Pending,
                         };
                         crate::prompt_builder::ThreadSubtask {
@@ -931,10 +932,32 @@ pub async fn process_thread(
 
     // 9. Save the main agent response
     let agent_elapsed_ms = start_time.elapsed().as_millis() as i32;
+    let is_empty_response = final_content.trim().is_empty();
+    let agent_msg_type = if is_empty_response {
+        "error".to_string()
+    } else if limit_reached {
+        "message".to_string()
+    } else {
+        "summary".to_string()
+    };
+    let agent_content = if is_empty_response {
+        format!(
+            "The LLM returned an empty response. The task failed.\n\
+             Possible causes: token explosion (context too large), provider error, or LLM output limits.\n\
+             Prompt tokens used in this turn: {}",
+            token_usage_json.as_ref()
+                .and_then(|u| u.get("prompt_tokens"))
+                .and_then(|v| v.as_i64())
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        )
+    } else {
+        final_content.clone()
+    };
     let agent_msg = MessageNew {
         thread_id: thread.id,
         role: "agent".to_string(),
-        content: final_content,
+        content: agent_content,
         thread_sequence: cause_msg.thread_sequence + 1,
         external_id: None,
         metadata: serde_json::json!({
@@ -943,9 +966,9 @@ pub async fn process_thread(
         }),
         embedding: None,
         summary_text: None,
-        is_summary: !limit_reached,
-        msg_type: if limit_reached { "message".to_string() } else { "summary".to_string() },
-        msg_subtype: None,
+        is_summary: !limit_reached && !is_empty_response,
+        msg_type: agent_msg_type,
+        msg_subtype: if is_empty_response { Some("empty_response".to_string()) } else { None },
         processing_time_ms: Some(agent_elapsed_ms),
         token_usage: token_usage_json.clone(),
     };

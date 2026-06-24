@@ -8,6 +8,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     phase_4_indexes_and_columns(pool).await?;
     phase_5_planning_and_search(pool).await?;
     phase_6_vector_and_secrets(pool).await?;
+    phase_7_seed_actions(pool).await?;
     Ok(())
 }
 
@@ -764,6 +765,15 @@ async fn phase_4_indexes_and_columns(pool: &PgPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO actions (id, name, tool_name, params, is_builtin)
+        VALUES ('builtin_setup_knowledge_pipeline', 'Setup Knowledge Pipeline', 'actions_setup_knowledge_pipeline', '{}', true)
+        ON CONFLICT (id) DO NOTHING;
+        "#,
+    )
+    .execute(pool)
+    .await?;
 
     // ── Add silent column to cron_jobs table ──
     sqlx::query(
@@ -948,6 +958,21 @@ async fn phase_6_vector_and_secrets(pool: &PgPool) -> Result<()> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_secret_versions_secret_id
         ON secret_versions(secret_id);
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Phase 7: Seed additional built-in actions (idempotent — runs every startup).
+async fn phase_7_seed_actions(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO actions (id, name, tool_name, params, is_builtin)
+        VALUES ('builtin_setup_knowledge_pipeline', 'Setup Knowledge Pipeline', 'actions_setup_knowledge_pipeline', '{}', true)
+        ON CONFLICT (id) DO NOTHING;
         "#,
     )
     .execute(pool)

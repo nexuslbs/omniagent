@@ -120,21 +120,45 @@ pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
 /// Each subdirectory under `plugins/mcp/` is expected to optionally contain
 /// an `mcp-config.json` file that defines one or more MCP server configurations.
 /// This allows MCP servers to be packaged as self-contained plugins.
+///
+/// Scans two locations:
+/// 1. `{data_dir}/plugins/mcp/` — installed/data-level plugins
+/// 2. `./plugins/mcp/` relative to CWD — project/workspace-level plugins
 pub fn discover_plugin_servers(data_dir: &str) -> Vec<McpServerConfig> {
+    let mut servers = Vec::new();
+
+    // Scan data_dir/plugins/mcp (installed/data-level plugins)
     let plugins_dir = format!("{}/plugins/mcp", data_dir);
     let plugins_path = std::path::Path::new(&plugins_dir);
+    if plugins_path.exists() && plugins_path.is_dir() {
+        servers.extend(scan_plugin_servers(&plugins_dir));
+    } else if let Ok(cwd) = std::env::current_dir() {
+        // Fallback: scan ./plugins/mcp relative to CWD for backward compatibility
+        // Only used when the canonical data_dir path doesn't exist, to avoid
+        // duplicate server registrations when both directories have configs.
+        let cwd_plugins = cwd.join("plugins").join("mcp");
+        if cwd_plugins.exists() && cwd_plugins.is_dir() {
+            servers.extend(scan_plugin_servers(&cwd_plugins.to_string_lossy()));
+        }
+    }
 
+    servers
+}
+
+/// Scan a single `plugins/mcp/` directory for `mcp-config.json` files.
+fn scan_plugin_servers(plugins_dir: &str) -> Vec<McpServerConfig> {
+    let plugins_path = std::path::Path::new(plugins_dir);
     if !plugins_path.exists() || !plugins_path.is_dir() {
         return vec![];
     }
 
     let mut servers = Vec::new();
+    tracing::info!("Scanning for MCP plugin configs in: {}", plugins_dir);
 
-    // Scan subdirectories
     let entries = match std::fs::read_dir(plugins_path) {
         Ok(entries) => entries,
         Err(e) => {
-            tracing::warn!("Failed to read plugins/mcp directory {}: {:?}", plugins_dir, e);
+            tracing::warn!("Failed to read MCP plugin directory {}: {:?}", plugins_dir, e);
             return vec![];
         }
     };

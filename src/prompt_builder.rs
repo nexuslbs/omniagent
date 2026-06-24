@@ -563,6 +563,7 @@ pub enum SubtaskStatus {
     InProgress,
     Completed,
     Cancelled,
+    Error,
 }
 
 /// A single subtask in a thread's execution plan.
@@ -621,6 +622,7 @@ pub fn format_subtask_section(subtasks: &[ThreadSubtask], thread_id: i64) -> Opt
             SubtaskStatus::InProgress => "🔄",
             SubtaskStatus::Pending => "⏳",
             SubtaskStatus::Cancelled => "❌",
+            SubtaskStatus::Error => "💥",
         };
         let current_marker = if subtask.status == SubtaskStatus::InProgress {
             "  ← current"
@@ -636,8 +638,10 @@ pub fn format_subtask_section(subtasks: &[ThreadSubtask], thread_id: i64) -> Opt
          You MUST call `manage_subtasks(thread_id, action=\"update\", subtask_id=N, status=\"completed\")` \
          each time you finish a subtask.\n\
          If a subtask becomes irrelevant, call `manage_subtasks(thread_id, action=\"update\", subtask_id=N, status=\"cancelled\")`.\n\
+         If a subtask encounters an unrecoverable error, call `manage_subtasks(thread_id, action=\"update\", subtask_id=N, status=\"error\")` \
+         and continue to the next subtask — do NOT abort the entire thread.\n\
          Use `manage_subtasks(thread_id, action=\"list\")` to refresh the current state at any point.\n\
-         Before delivering your final answer, ALL subtasks must be either `completed` or `cancelled` — \
+         Before delivering your final answer, ALL subtasks must be either `completed`, `cancelled`, or `error` — \
          never leave any subtask in `pending` status."
             .to_string()
     } else {

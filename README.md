@@ -347,7 +347,7 @@ Cron jobs are scheduled tasks that execute on a recurring schedule. Each job can
 
 -- Or directly in SQL:
 INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, channel_id, profile)
-VALUES ('cron_abc123', 'hourly-report', 'Hourly Report', '0 0 * * * * *', 'Generate the hourly report', 1, 'research');
+VALUES ('cron_abc123', 'hourly-report', 'Hourly Report', '0 * * * *', 'Generate the hourly report', 1, 'research');
 ```
 
 ### Fields
@@ -356,7 +356,7 @@ VALUES ('cron_abc123', 'hourly-report', 'Hourly Report', '0 0 * * * * *', 'Gener
 |-------|-------------|
 | `channel_id` | Channel to fire in (NULL = default cron channel) |
 | `profile` | Profile to use (NULL = channel's current_profile) |
-| `schedule` | 7-field quartz cron expression |
+| `schedule` | 5-field Linux cron expression (min hour day month weekday) |
 | `prompt` | The message content to execute |
 | `mode` | Execution mode: `agentic` (default), `direct`, or `action` |
 | `direct_task_type` | Task type for `direct` mode (e.g., `kanban_dispatcher`) |
@@ -366,11 +366,42 @@ VALUES ('cron_abc123', 'hourly-report', 'Hourly Report', '0 0 * * * * *', 'Gener
 
 ### Execution Modes
 
-- **`agentic`** (default): Normal cron agent execution — the prompt is sent to the LLM for processing, with full tool access and reasoning.
-- **`direct`**: Bypasses the LLM and runs a specific task directly. Currently supports:
-  - `kanban_dispatcher`: Moves kanban tasks from `todo` to `ready` status (ordered by priority then position), triggering execution of their body as the prompt.
-  - `relevance_indexer`: Scans wiki files and regenerates the relevant-index.md based on recency and reference counts.
-- **`action`**: Executes a registered action from the `actions` table (user-defined or built-in). The action's MCP tool is called with its saved parameters. No LLM call is made — the action runs as a direct Rust function or MCP tool invocation.
+- **`agentic`** (default): Normal cron agent execution — the prompt is sent to the LLM for processing, with full tool access and reasoning. When `instruction_file` is set, the template content is injected as a "Task Template" block before the prompt.
+- **`action`**: Executes a registered action from the `actions` table (user-defined or built-in). The action's MCP tool is called with its saved parameters. No LLM call is made — the action runs as a direct Rust function or MCP tool invocation. Optional `silent` mode suppresses thread creation on success (only creates error threads).
+
+### Cron Planning Mode
+
+Cron jobs support the same planning modes as channels, selectable from the dashboard UI:
+
+| Value | Resolution | Use Case |
+|-------|-----------|----------|
+| Empty (Default) | Complexity-based classification | Simple prompts don't waste tokens on planning |
+| `no_plan` | `prompt_only` — no planning or subtasks | Scripted prompts that don't need decomposition |
+| `simple_plan` | `auto_plan` — single planning step | Moderate prompts needing one planning pass |
+| `plan_with_subtasks` | `auto_subtasks` — full subtask decomposition | Complex multi-step pipelines (e.g., Knowledge Pipeline) |
+
+Cron planning mode has **highest priority** in the resolution chain: cron job → channel → kanban → default.
+
+The planning mode is resolved at thread creation time via `resolve_thread_planning_mode_with_content()` and stamped on `threads.planning_mode`. For backward compatibility, the `max_plan` value is still accepted and resolves to the maximum plan mode enabled globally.
+
+### Knowledge Pipeline
+
+The Knowledge Pipeline is a periodic maintenance cron that runs 6 steps:
+
+1. **Per-channel summarization** — cross-thread summaries for channels with enough new completed threads
+2. **Wiki/skill update from messages** — groups completed threads by profile, extracts durable knowledge, updates wiki pages and skills
+3. **Wiki relevance indexing** — scores wiki files by recency and reference count, updates `relevant-index.md`
+4. **Skill relevance indexing** — same scoring for skill files, writes `relevant-skills-index.md`
+5. **Hindsight population** — batch-retains new messages into omniagent-hindsight (skipped if disabled)
+6. **Hindsight consolidation** — triggers the consolidation pipeline (skipped if disabled)
+
+**Setup:** Run the `Setup Knowledge Pipeline` action (built-in, idempotent). Creates a cron job with:
+- Schedule: `0 */6 * * *` (every 6 hours, configurable)
+- Mode: `agentic`
+- Planning mode: `max_plan` (enables subtask decomposition)
+- Instruction file: `knowledge-pipeline.md` (templates in `profiles/<name>/templates/`)
+
+The template is loaded from `<data_dir>/profiles/default/templates/knowledge-pipeline.md` and injected as a task template into the agent's prompt. Sub-task mode (`auto_subtasks`) ensures each step is tracked; errors on individual steps don't abort the entire pipeline (use the `error` subtask status).
 
 ### Scheduler
 

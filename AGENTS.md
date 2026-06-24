@@ -213,8 +213,10 @@ Planning mode is resolved **at thread creation time** and stamped on `threads.pl
 | `always` | Legacy alias for `auto_subtasks` |
 
 **Priority chain** (first non-empty wins):
-1. Channel `planning_mode` — absolute override for the entire channel
-2. Task `planning_mode` — cron jobs; `no_plan` → `prompt_only`, `max_plan` → resolve_max(global)
+1. Task `planning_mode` — cron job planning mode (highest — overrides channel)
+   - Valid values: empty (→ default), `no_plan` (→ `prompt_only`), `simple_plan` (→ `auto_plan`), `plan_with_subtasks` (→ `auto_subtasks`), `max_plan` (→ max of global)
+2. Channel `planning_mode` — override for the entire channel
+   - Valid values: empty (→ default), `prompt_only`, `auto_plan`, `auto_subtasks`, `never` (→ `prompt_only`), `always` (→ `auto_subtasks`)
 3. Kanban tasks — always `resolve_max_plan(global_mode)` (no complexity classification)
 4. User/Cron default — `classify_complexity_for_planning()` via content heuristics
 

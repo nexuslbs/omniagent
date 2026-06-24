@@ -32,8 +32,8 @@ pub fn manage_subtasks_tool() -> McpTool {
                 },
                 "status": {
                     "type": "string",
-                    "description": "New status for the subtask (for 'update': pending, completed, cancelled)",
-                    "enum": ["pending", "completed", "cancelled"]
+                    "description": "New status for the subtask (for 'update': pending, completed, cancelled, error)",
+                    "enum": ["pending", "completed", "cancelled", "error"]
                 },
                 "priority": {
                     "type": "integer",
@@ -96,6 +96,7 @@ pub fn manage_subtasks_tool() -> McpTool {
                                 "completed_count": counts.completed_count,
                                 "pending_count": counts.pending_count,
                                 "cancelled_count": counts.cancelled_count,
+                                "error_count": counts.error_count,
                                 "subtasks": subtasks_json,
                                 "message": format!("Subtask added: {}", description),
                             });
@@ -134,6 +135,7 @@ pub fn manage_subtasks_tool() -> McpTool {
                                 "completed_count": counts.completed_count,
                                 "pending_count": counts.pending_count,
                                 "cancelled_count": counts.cancelled_count,
+                                "error_count": counts.error_count,
                                 "subtasks": subtasks_json,
                             });
 
@@ -152,9 +154,9 @@ pub fn manage_subtasks_tool() -> McpTool {
                             let mut updated_any = false;
 
                             if let Some(status) = args["status"].as_str() {
-                                let valid_statuses = ["pending", "completed", "cancelled"];
+                                let valid_statuses = ["pending", "completed", "cancelled", "error"];
                                 if !valid_statuses.contains(&status) {
-                                    anyhow::bail!("Invalid status '{}'. Must be one of: pending, completed, cancelled", status);
+                                    anyhow::bail!("Invalid status '{}'. Must be one of: pending, completed, cancelled, error", status);
                                 }
                                 let rows = subtask::update_subtask_status(&pool, subtask_id, status).await?;
                                 if rows == 0 {
@@ -203,6 +205,7 @@ pub fn manage_subtasks_tool() -> McpTool {
                                 "completed_count": counts.completed_count,
                                 "pending_count": counts.pending_count,
                                 "cancelled_count": counts.cancelled_count,
+                                "error_count": counts.error_count,
                                 "subtasks": subtasks_json,
                                 "message": format!("Subtask {} updated successfully", subtask_id),
                             });
@@ -250,6 +253,7 @@ pub fn manage_subtasks_tool() -> McpTool {
                                 "completed_count": counts.completed_count,
                                 "pending_count": counts.pending_count,
                                 "cancelled_count": counts.cancelled_count,
+                                "error_count": counts.error_count,
                                 "subtasks": subtasks_json,
                                 "message": format!("Subtask {} deleted", subtask_id),
                             });
@@ -275,6 +279,7 @@ pub fn manage_subtasks_tool() -> McpTool {
                                 "completed_count": counts.completed_count,
                                 "pending_count": counts.pending_count,
                                 "cancelled_count": counts.cancelled_count,
+                                "error_count": counts.error_count,
                             });
 
                             Ok(McpToolResult {

@@ -13,12 +13,13 @@
 //! - `PUT /actions/:id` — update an action
 //! - `DELETE /actions/:id` — delete an action
 //! - `POST /actions/:id/run` — execute an action (call its MCP tool)
+//! - `POST /run-cron/{schedule_id}` — manually trigger a cron job (proxied from dashboard)
 
 mod settings;
 mod secrets;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post, put, delete},
@@ -117,6 +118,8 @@ pub async fn start_server(config: ServerConfig) -> Result<()> {
         .route("/settings", put(settings::update_settings_handler))
         // ── Secrets routes ──
         .merge(secrets::secrets_router())
+        // ── Cron run endpoint ──
+        .route("/run-cron/{schedule_id}", post(run_cron_handler))
         .with_state(app_state);
 
     let addr = format!("{}:{}", config.host, config.port);
@@ -346,12 +349,10 @@ async fn prompt_preview_handler(
     Json(body): Json<PromptPreviewRequest>,
 ) -> impl IntoResponse {
     let channel = match queries::get_channel_by_name(&state.pool, &channel_name).await {
-        Ok(Some(ch)) => ch,
+        Ok(Some(ch)) => Some(ch),
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": format!("Channel '{}' not found", channel_name) })),
-            );
+            // Channel not found — build system prompt using the default profile
+            None
         }
         Err(e) => {
             error!("Failed to look up channel '{}': {:?}", channel_name, e);
@@ -362,32 +363,33 @@ async fn prompt_preview_handler(
         }
     };
 
-    let profile_name = if channel.current_profile.is_empty() {
-        "default"
-    } else {
-        &channel.current_profile
+    let profile_name = match channel.as_ref() {
+        Some(ch) if !ch.current_profile.is_empty() => &ch.current_profile,
+        _ => "default",
     };
 
     let profile_path = format!("{}/profiles/{}", state.data_dir, profile_name);
     let mut memory_store = MemoryStore::new(&profile_path);
     memory_store.load_from_disk();
 
-    let platform = channel.platform.as_deref().unwrap_or("");
+    let platform = channel.as_ref().and_then(|c| c.platform.as_deref()).unwrap_or("");
     let system_prompt = build_system_prompt(&memory_store, platform, None, profile_name);
 
     let mut messages = vec![
         serde_json::json!({ "role": "system", "content": system_prompt }),
     ];
 
-    // Add recent seq-0 messages from the same channel (last 5)
-    match queries::get_recent_channel_seq0_messages(&state.pool, channel.id, 5).await {
-        Ok(msgs) if !msgs.is_empty() => {
-            let recent_text: String = msgs.iter().rev().map(|msg| {
-                format!("[msg {}] {}", msg.id, msg.content.chars().take(200).collect::<String>())
-            }).collect::<Vec<_>>().join("\n");
-            messages.push(serde_json::json!({ "role": "system", "content": format!("Recent conversations in this channel:\n{}", recent_text) }));
+    // Add recent seq-0 messages from the same channel (last 5), if channel exists
+    if let Some(ch) = &channel {
+        match queries::get_recent_channel_seq0_messages(&state.pool, ch.id, 5).await {
+            Ok(msgs) if !msgs.is_empty() => {
+                let recent_text: String = msgs.iter().rev().map(|msg| {
+                    format!("[msg {}] {}", msg.id, msg.content.chars().take(200).collect::<String>())
+                }).collect::<Vec<_>>().join("\n");
+                messages.push(serde_json::json!({ "role": "system", "content": format!("Recent conversations in this channel:\n{}", recent_text) }));
+            }
+            _ => {}
         }
-        _ => {}
     }
 
     // Add skills from profile
@@ -423,7 +425,10 @@ async fn prompt_preview_handler(
         let prof = profile_registry.get(profile_name).cloned()
             .unwrap_or_else(|| crate::profile::Profile::default(profile_name));
 
-        let provider_name = match channel.current_provider.clone()
+        let ch_provider = channel.as_ref().and_then(|ch| ch.current_provider.clone());
+        let ch_model = channel.as_ref().and_then(|ch| ch.current_model.clone());
+
+        let provider_name = match ch_provider
             .filter(|s| !s.is_empty())
             .or_else(|| prof.provider.clone().filter(|s| !s.is_empty()))
             .or_else(|| std::env::var("LLM_PROVIDER").ok().filter(|s| !s.is_empty()))
@@ -439,7 +444,7 @@ async fn prompt_preview_handler(
             }
         };
 
-        let model_name = match channel.current_model.clone()
+        let model_name = match ch_model
             .filter(|s| !s.is_empty())
             .or_else(|| prof.model.clone().filter(|s| !s.is_empty()))
             .or_else(|| std::env::var("LLM_MODEL").ok().filter(|s| !s.is_empty()))
@@ -733,6 +738,53 @@ async fn list_mcp_tools_handler(
         })
         .collect();
     Json(serde_json::json!(tools))
+}
+
+/// POST /run-cron/{schedule_id} — manually trigger a cron job (fire immediately).
+///
+/// This reuses the scheduler's internal thread-creation logic so manual runs
+/// go through exactly the same code path as scheduled ticks.
+///
+/// Query params:
+///   force=true — run even if the job is not enabled
+///
+/// Returns the created thread_id.
+async fn run_cron_handler(
+    Path(schedule_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let force = params.get("force").map(|s| s == "true").unwrap_or(false);
+
+    match crate::scheduler::fire_cron_job_by_id(
+        &state.pool,
+        &state.data_dir,
+        &state.mcp_registry,
+        &state.app_context,
+        &schedule_id,
+        force,
+    )
+    .await
+    {
+        Ok(thread_id) => {
+            info!(
+                "[run-cron] Successfully fired cron job '{}', thread {}",
+                schedule_id, thread_id
+            );
+            Json(serde_json::json!({
+                "success": true,
+                "thread_id": thread_id,
+            }))
+        }
+        Err(e) => {
+            error!("[run-cron] Failed to fire cron job '{}': {:?}", schedule_id, e);
+            let msg = format!("{:#}", e);
+            Json(serde_json::json!({
+                "success": false,
+                "error": msg,
+            }))
+        }
+    }
 }
 
 /// GET /api/context/{channel_name} — preview section [3] Context, read-only.

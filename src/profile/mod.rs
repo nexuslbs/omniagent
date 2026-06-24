@@ -73,6 +73,7 @@ pub const ALL_KNOWN_TOOLS: &[&str] = &[
     "actions_kanban_dispatcher",
     "actions_relevance_indexer",
     "actions_hindsight_populator",
+    "actions_setup_knowledge_pipeline",
 ];
 
 /// Schema for profiles/<name>/config.json

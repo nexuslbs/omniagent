@@ -13,6 +13,7 @@ pub fn tools() -> Vec<McpTool> {
         kanban_dispatcher_tool(),
         relevance_indexer_tool(),
         hindsight_populator_tool(),
+        setup_knowledge_pipeline_tool(),
     ]
 }
 
@@ -89,6 +90,57 @@ fn hindsight_populator_tool() -> McpTool {
                 call_id: "".to_string(),
                 content: "Hindsight populator triggered".to_string(),
                 is_error: false,
+            })
+        }),
+    }
+}
+
+fn setup_knowledge_pipeline_tool() -> McpTool {
+    McpTool {
+        name: "actions_setup_knowledge_pipeline".to_string(),
+        description: "Create the Knowledge Pipeline cron job (idempotent). Sets up a periodic maintenance pipeline that summarizes channels, updates wiki/skills from thread messages, runs relevance indexing, and populates hindsight memory. Accepts optional schedule and prompt overrides (default: every 6 hours).".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "schedule": {
+                    "type": "string",
+                    "description": "Optional cron schedule expression (default: '0 */6 * * *' = every 6 hours)"
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Optional prompt override (default: 'Execute the Knowledge Pipeline according to the task template above.')"
+                }
+            },
+            "required": []
+        }),
+        handler: Arc::new(|args: Value, ctx: AppContext| -> Result<McpToolResult> {
+            let pool = ctx.pool.clone();
+            let data_dir = ctx.data_dir.clone();
+            let schedule = args.get("schedule").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let prompt = args.get("prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+            tokio::task::block_in_place(|| {
+                let handle = tokio::runtime::Handle::current();
+                handle.block_on(async {
+                    match crate::scheduler::setup_knowledge_pipeline(&pool, &data_dir, schedule, prompt).await {
+                        Ok(()) => {
+                            tracing::info!("[actions] Knowledge pipeline cron created/verified");
+                            Ok(McpToolResult {
+                                call_id: "".to_string(),
+                                content: "Knowledge Pipeline cron job created or already exists. It will run every 6 hours (default) to summarize channels, update wiki/skills, run relevance indexing, and populate hindsight.".to_string(),
+                                is_error: false,
+                            })
+                        }
+                        Err(e) => {
+                            tracing::error!("[actions] Knowledge pipeline setup failed: {:?}", e);
+                            Ok(McpToolResult {
+                                call_id: "".to_string(),
+                                content: format!("Failed to create Knowledge Pipeline: {}", e),
+                                is_error: true,
+                            })
+                        }
+                    }
+                })
             })
         }),
     }

@@ -39,7 +39,7 @@ struct CronJobDueRow {
 }
 
 /// Shared context for action execution and reporting.
-struct ActionContext<'a> {
+pub(crate) struct ActionContext<'a> {
     pool: &'a PgPool,
     data_dir: &'a str,
     mcp_registry: &'a McpRegistry,
@@ -452,6 +452,11 @@ async fn resolve_and_execute_action(
                 .map_err(|e| format!("{:#}", e));
             (name, r)
         }
+        "builtin_setup_knowledge_pipeline" => {
+            let name = "Setup Knowledge Pipeline".to_string();
+            let r = setup_knowledge_pipeline(ctx.pool, ctx.data_dir, None, None).await;
+            (name, r)
+        }
         other => {
             match queries::get_action(ctx.pool, other).await {
                 Ok(Some(action)) => {
@@ -736,8 +741,11 @@ pub async fn run_kanban_dispatcher(pool: &PgPool, data_dir: &str) -> Result<()> 
 }
 
 /// Parse a cron expression and compute the next run after `now`.
+/// The expression is expected in 5-field Linux format (min hour day month weekday).
+/// We prepend "0 " (second=0) to convert to 6-field for the `cron` crate.
 fn calculate_next_run(expression: &str, now: &DateTime<Utc>) -> DateTime<Utc> {
-    match Schedule::from_str(expression) {
+    let cron_expr = format!("0 {}", expression);
+    match Schedule::from_str(&cron_expr) {
         Ok(schedule) => {
             if let Some(next) = schedule.after(now).next() {
                 next
@@ -830,6 +838,400 @@ fn extract_error_code(err_msg: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Fire a cron job by schedule_id — used by the HTTP run-cron endpoint.
+/// This reuses the same scheduler logic (channel resolution, profile/provider/model resolution,
+/// thread creation) so the manual Run button goes through exactly the same code path as the
+/// scheduled tick.
+pub async fn fire_cron_job_by_id(
+    pool: &PgPool,
+    data_dir: &str,
+    mcp_registry: &McpRegistry,
+    app_context: &AppContext,
+    schedule_id: &str,
+    force: bool,
+) -> anyhow::Result<i64> {
+    let jobs: Vec<CronJobDueRow> = sql_forge!(
+        CronJobDueRow,
+        r#"
+        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id, silent, instruction_file, planning_mode
+        FROM cron_jobs
+        WHERE id = :id
+        LIMIT 1
+        "#,
+        ( :id = schedule_id )
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let job = jobs.into_iter().next().ok_or_else(|| {
+        anyhow::anyhow!("Cron job '{}' not found", schedule_id)
+    })?;
+
+    // Check active status (skip if force)
+    let active: bool = sql_forge!(
+        scalar bool,
+        r#"SELECT active FROM cron_jobs WHERE id = :id"#,
+        ( :id = schedule_id )
+    )
+    .fetch_one(pool)
+    .await?;
+
+    if !active && !force {
+        anyhow::bail!("Job '{}' is not active. Use force=true to run anyway.", schedule_id);
+    }
+
+    let now = Utc::now();
+    let display_name = if job.display_name.is_empty() {
+        job.name.as_deref().unwrap_or("cron-job")
+    } else {
+        &job.display_name
+    };
+
+    let job_mode = job.mode.as_deref().unwrap_or("agentic");
+
+    // Action mode
+    if job_mode == "action" {
+        if let Some(ref action_id) = job.action_id {
+            let cron_channel = ensure_cron_channel(pool).await?;
+            let thread = queries::create_thread(
+                pool,
+                "cron",
+                cron_channel.id,
+                "cron",
+                queries::CreateThreadParams {
+                    provider: None,
+                    model: None,
+                    task_id: None,
+                    schedule_task_id: Some(job.id.clone()),
+                    planning_mode: job.planning_mode.clone(),
+                },
+            )
+            .await?;
+
+            // Execute the action via the scheduler's internal action logic
+            let action_ctx = ActionContext {
+                pool,
+                data_dir,
+                mcp_registry,
+                app_context,
+                job: &job,
+                display_name,
+            };
+            let (action_name, exec_result) = resolve_and_execute_action(
+                &action_ctx,
+                action_id,
+            ).await;
+
+            match exec_result {
+                Ok(()) => {
+                    let cron_name = job.name.clone().unwrap_or_default();
+                    let metadata = serde_json::json!({
+                        "cron_job_id": job.id,
+                        "cron_job_name": job.name,
+                        "cron_display_name": display_name,
+                        "scheduled_at": job.schedule,
+                    });
+                    queries::set_thread_system(pool, thread.id).await?;
+                    let msg = queries::MessageNew {
+                        thread_id: thread.id,
+                        role: "system".to_string(),
+                        content: action_name,
+                        thread_sequence: 0,
+                        external_id: Some(format!("cron:{}:{}", job.id, now.timestamp())),
+                        metadata,
+                        embedding: None,
+                        summary_text: None,
+                        is_summary: false,
+                        msg_type: "cron".to_string(),
+                        msg_subtype: Some(cron_name),
+                        processing_time_ms: None,
+                        token_usage: None,
+                    };
+                    queries::create_message(pool, &msg).await?;
+                }
+                Err(err_msg) => {
+                    report_action_failure(pool, ReportActionFailureParams {
+                        job: &job,
+                        display_name,
+                        action_name: &action_name,
+                        err_msg,
+                        thread_id: thread.id,
+                        now_ts: now.timestamp(),
+                    }).await?;
+                }
+            }
+        }
+        return Ok(0); // action mode doesn't create an agent thread
+    }
+
+    // Agentic mode — same logic as the scheduler tick
+    let channel = if let Some(cid) = job.channel_id {
+        match queries::find_channel_by_id(pool, cid).await {
+            Ok(Some(ch)) => ch,
+            _ => ensure_cron_channel(pool).await?
+        }
+    } else {
+        ensure_cron_channel(pool).await?
+    };
+
+    let profile_name = if let Some(ref p) = job.profile {
+        p.clone()
+    } else {
+        channel.current_profile.clone()
+    };
+
+    let profile_registry = crate::profile::ProfileRegistry::new(data_dir);
+    let prof = profile_registry.get(&profile_name).cloned().unwrap_or_else(|| {
+        crate::profile::Profile::default("default")
+    });
+
+    let resolved = resolve_thread_config(
+        job.profile.as_deref(),
+        &channel.current_profile,
+        channel.current_provider.as_deref(),
+        channel.current_model.as_deref(),
+        prof.provider.as_deref(),
+        prof.model.as_deref(),
+    );
+    let (provider, model) = match resolved {
+        Some(cfg) => (Some(cfg.provider), Some(cfg.model)),
+        None => (None, None),
+    };
+
+    let subtype = job.name.clone().unwrap_or_default();
+    let prompt_content = job.prompt.clone().unwrap_or_default();
+    let (thread, _created) = queries::create_thread_with_cause(
+        pool,
+        "cron",
+        channel.id,
+        &profile_name,
+        queries::ThreadCauseParams {
+            provider,
+            model,
+            task_id: None,
+            schedule_task_id: Some(job.id.clone()),
+            content: prompt_content,
+            external_id: Some(format!("cron:{}:{}", job.id, now.timestamp())),
+            metadata: serde_json::json!({
+                "cron_job_id": job.id,
+                "cron_job_name": job.name,
+                "cron_display_name": display_name,
+                "scheduled_at": job.schedule,
+                "channel_id": channel.id,
+                "profile": profile_name,
+                "instruction_file": job.instruction_file.as_deref().unwrap_or(""),
+            }),
+            msg_type: "cron".to_string(),
+            msg_subtype: Some(subtype),
+            task_planning_mode: job.planning_mode.clone(),
+        },
+    )
+    .await?;
+
+    info!(
+        "[cron-run] Created thread {} for job '{}' (manual run)",
+        thread.id, display_name
+    );
+
+    Ok(thread.id)
+}
+
+/// Set up the Knowledge Pipeline cron job (idempotent).
+/// Creates a cron job that loads the knowledge-pipeline template and runs
+/// the periodic maintenance pipeline.
+///
+/// - `schedule`: Optional cron schedule (default: `0 */6 * * *` = every 6 hours)
+/// - `prompt`: Optional prompt override (default: "Execute the Knowledge Pipeline according to the task template above.")
+pub async fn setup_knowledge_pipeline(
+    pool: &PgPool,
+    data_dir: &str,
+    schedule: Option<String>,
+    prompt: Option<String>,
+) -> Result<(), String> {
+    use sql_forge::sql_forge;
+
+    // Defaults
+    let schedule = schedule.unwrap_or_else(|| "0 */6 * * *".to_string());
+    let prompt = prompt.unwrap_or_else(|| "Execute the Knowledge Pipeline according to the task template above.".to_string());
+
+    let existing = sqlx::query_scalar::<_, String>(
+        r#"SELECT id FROM cron_jobs WHERE name = 'knowledge-pipeline' LIMIT 1"#,
+    )
+    .fetch_optional(pool)
+    .await;
+
+    // If we can't query or already exists, skip creation (idempotent)
+    if existing.as_ref().ok().and_then(|v| v.as_ref()).is_some() || existing.is_err() {
+        // Template may already exist; still ensure it's on disk (idempotent)
+        let _ = ensure_knowledge_pipeline_template(data_dir);
+        return Ok(());
+    }
+
+    // 1. Ensure the template file exists on disk
+    if let Err(e) = ensure_knowledge_pipeline_template(data_dir) {
+        tracing::warn!("[knowledge-pipeline] Failed to write template: {}", e);
+    }
+
+    // 2. Create the cron job — no channel_id or profile set; the scheduler
+    //    resolves the default cron channel at runtime, matching dashboard behavior.
+    let id = format!("knowledge-pipeline-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos());
+
+    let skills_json = serde_json::json!(["knowledge-pipeline"]).to_string();
+
+    sql_forge!(
+        r#"
+        INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, mode, instruction_file, planning_mode, enabled, active)
+        VALUES (:id, 'knowledge-pipeline', 'Knowledge Pipeline', :schedule, :prompt, :skills, 'agentic', 'knowledge-pipeline', 'auto_subtasks', true, true)
+        "#,
+        ( :id = &id, :schedule = &schedule, :prompt = &prompt, :skills = &skills_json )
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to create cron job: {}", e))?;
+
+    tracing::info!("[knowledge-pipeline] Created cron job with id={}", id);
+    Ok(())
+}
+
+/// Ensure the knowledge-pipeline.md template file exists on disk.
+fn ensure_knowledge_pipeline_template(data_dir: &str) -> Result<(), String> {
+    use std::fs;
+    use std::path::Path;
+
+    let template_dir = Path::new(data_dir)
+        .join("profiles")
+        .join("default")
+        .join("templates");
+
+    let template_path = template_dir.join("knowledge-pipeline.md");
+
+    if template_path.exists() {
+        return Ok(());
+    }
+
+    // Create the templates directory if it doesn't exist
+    fs::create_dir_all(&template_dir)
+        .map_err(|e| format!("Failed to create templates directory: {}", e))?;
+
+    let content = r#"# Knowledge Pipeline
+
+## Overview
+
+You are executing the Knowledge Pipeline — a periodic maintenance task that processes all channels, groups threads by profile, updates wiki/skills from important conversations, runs relevance indexing, and populates hindsight memory.
+
+The pipeline has 6 steps. Execute them **in order**. If a step encounters an error, mark its subtask as `error` and CONTINUE to the next step. Never abort the entire pipeline due to a single step failure.
+
+---
+
+## Subtask Management Protocol
+
+This thread runs with subtask mode enabled. You MUST:
+
+1. **At start**: Create one subtask per pipeline step using `manage_subtasks(thread_id=N, action="add", description="Step Name", priority=M)`
+2. **As you complete each step**: `manage_subtasks(thread_id=N, action="update", subtask_id=ID, status="completed")`
+3. **If a step fails**: `manage_subtasks(thread_id=N, action="update", subtask_id=ID, status="error")` — then continue to the next step
+4. **At the end**: Call `manage_subtasks(thread_id=N, action="list")` to verify final state
+5. **Final verdict**:
+   - ALL subtasks `completed` → mark thread as **success**
+   - Any subtask `error` → mark thread as **completed_with_errors** (partial success)
+   - No subtasks created → mark thread as **failed** (no work was done)
+
+---
+
+## Pipeline Steps
+
+### Step 1: Scan Channels
+
+1. Use `list_channels(status="open", closed=false)` to get all active channels
+2. For each channel:
+   - If channel has a `current_profile` that is set, note the profile name
+   - If channel has no profile (empty/null), it uses the system default
+3. Group channels by profile — the pipeline runs once per distinct profile
+4. Log: how many channels found, how many distinct profiles
+
+### Step 2: Collect Completed Threads
+
+For each distinct profile:
+1. Query threads completed in the last 24 hours:
+   `SELECT * FROM threads WHERE profile = :profile AND status = 'completed' AND updated_at > NOW() - INTERVAL '24 hours'`
+2. Use `db_query` MCP tool or a raw SQL query
+3. Also collect threads with `completed_with_errors` status (partial successes)
+4. Group threads by channel_id for context
+5. Log thread count per profile
+
+### Step 3: Analyze Conversations (per thread)
+
+For each thread:
+1. **Review messages** — read the thread's messages to understand the conversation flow
+2. **Extract lessons**:
+   - What problem was solved?
+   - What approach worked?
+   - What approach failed?
+   - What new information was discovered?
+3. **Rate importance**: 1-5 scale (1=throwaway, 5=critical reference)
+4. **Suggest action**:
+   - Importance 1-2: no action (log and forget)
+   - Importance 3: add to wiki as a minor note
+   - Importance 4: create/update a wiki page or skill
+   - Importance 5: create/update wiki page + update MEMORY.md
+
+### Step 4: Update Wiki & Skills
+
+For threads rated 3+:
+1. **Wiki update**:
+   - Create or update a wiki page with the extracted knowledge
+   - Use `write_obsidian_note(profile="default", path="Raw/Knowledge/{topic}.md", ...)` or a raw file write
+   - Follow Karpathy method: YAML frontmatter (created, updated, tags, type), atomic notes, [[wikilinks]]
+   - For non-obvious topics, update the wiki index (`index.md`) and changelog (`log.md`)
+
+2. **Skill update** (if a repeatable workflow was discovered):
+   - Create or update a skill file
+   - Skills live at `{data_dir}/skills/{name}/SKILL.md`
+   - Use the skill_manage tool or write the file directly
+
+### Step 5: Run Relevance Indexer
+
+1. Execute the relevance indexer:
+   - Action: `builtin_relevance_indexer`
+   - This updates the relevance index across all profiles
+2. Verify it ran successfully by checking logs or status
+
+### Step 6: Run Hindsight Populator
+
+1. Execute hindsight memory population:
+   - Action: `builtin_hindsight_populator`
+   - This processes new objective facts and generates subjective memories
+2. Verify it ran by checking the summary or status
+
+---
+
+## Completion Report
+
+At the end, produce a summary:
+
+**Knowledge Pipeline — Run Summary**
+
+- Channels scanned: N (X distinct profiles)
+- Threads processed: N
+  - By profile: profile1: N, profile2: N
+- Wiki updates: N pages created/updated
+- Skills created/updated: N
+- Relevance indexer: ✅/❌
+- Hindsight populator: ✅/❌
+- Duration: Xm Ys
+- Status: Success / Completed with errors / Failed
+"#;
+
+    fs::write(&template_path, content)
+        .map_err(|e| format!("Failed to write template: {}", e))?;
+
+    tracing::info!("[knowledge-pipeline] Created template file at {:?}", template_path);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1053,8 +1455,8 @@ mod tests {
     #[test]
     fn test_calculate_next_run_valid() {
         let now = Utc::now();
-        // 6-field cron: sec min hour day-of-month month day-of-week
-        let next = calculate_next_run("0 */5 * * * *", &now);
+        // Standard cron: every 5 minutes
+        let next = calculate_next_run("*/5 * * * *", &now);
         assert!(next > now, "next run must be after now");
         // Must produce a value different from the invalid-fallback (now + 1h)
         let fallback = now + chrono::Duration::hours(1);
@@ -1097,8 +1499,8 @@ mod tests {
     #[test]
     fn test_calculate_next_run_daily() {
         let now = Utc::now();
-        // 7-field quartz: 0 0 9 * * * *
-        let next = calculate_next_run("0 0 9 * * * *", &now);
+        // 5-field: daily at 09:00
+        let next = calculate_next_run("0 9 * * *", &now);
         assert!(next > now, "daily cron must produce a future timestamp");
         let diff = next - now;
         assert!(
@@ -1111,8 +1513,8 @@ mod tests {
     #[test]
     fn test_calculate_next_run_hourly() {
         let now = Utc::now();
-        // 6-field: fire at minute 0 of every hour
-        let next = calculate_next_run("0 0 * * * *", &now);
+        // 5-field: fire at minute 0 of every hour
+        let next = calculate_next_run("0 * * * *", &now);
         assert!(next > now);
         let diff = next - now;
         assert!(

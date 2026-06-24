@@ -67,15 +67,15 @@ pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> anyhow::Result<
 }
 
 // ── Planning mode resolution ──────────────────────────────────
-
 /// Resolve what planning_mode to stamp on a thread at creation time.
 ///
-/// Priority:
-/// 1. Channel planning_mode (column on channels table) — overrides everything
-/// 2. Task-level planning_mode (for cron tasks: "no_plan" -> "prompt_only",
-///    "max_plan" -> max of global mode)
-/// 3. Kanban tasks always get the max plan mode currently enabled
-/// 4. Default: "prompt_only"
+// priority: cron job → channel → kanban → default
+//
+// Priority chain:
+// 1. Cron job with explicit planning_mode (highest — overrides channel)
+// 2. Channel planning_mode
+// 3. Kanban tasks always get the max plan mode currently enabled
+// 4. Default: "prompt_only"
 ///
 /// External callers use this directly only when building a thread manually.
 /// For normal use, call [`create_thread_with_cause`] which resolves the mode
@@ -86,18 +86,14 @@ pub fn resolve_thread_planning_mode(
     msg_type: &str,
     global_planning_mode: &str,
 ) -> String {
-    // 1. Channel override (absolute — overrides everything)
-    if !channel_planning_mode.is_empty() {
-        return normalize_task_planning_mode(channel_planning_mode);
+    // 1. Cron task with explicit mode (highest priority — cron > channel)
+    if msg_type == "cron" && !task_planning_mode.is_empty() {
+        return resolve_cron_planning_mode(task_planning_mode, global_planning_mode);
     }
 
-    // 2. Cron task with explicit mode
-    if msg_type == "cron" && !task_planning_mode.is_empty() {
-        match task_planning_mode {
-            "no_plan" => return "prompt_only".to_string(),
-            "max_plan" => return resolve_max_plan(global_planning_mode),
-            other => return normalize_task_planning_mode(other),
-        }
+    // 2. Channel override
+    if !channel_planning_mode.is_empty() {
+        return normalize_task_planning_mode(channel_planning_mode);
     }
 
     // 3. Kanban — always use max plan mode currently enabled
@@ -120,18 +116,14 @@ fn resolve_thread_planning_mode_with_content(
     global_planning_mode: &str,
     content: &str,
 ) -> String {
-    // 1. Channel override (absolute — overrides everything)
-    if !channel_planning_mode.is_empty() {
-        return normalize_task_planning_mode(channel_planning_mode);
+    // 1. Cron task with explicit mode (highest priority — cron > channel)
+    if msg_type == "cron" && !task_planning_mode.is_empty() {
+        return resolve_cron_planning_mode(task_planning_mode, global_planning_mode);
     }
 
-    // 2. Cron task with explicit mode
-    if msg_type == "cron" && !task_planning_mode.is_empty() {
-        match task_planning_mode {
-            "no_plan" => return "prompt_only".to_string(),
-            "max_plan" => return resolve_max_plan(global_planning_mode),
-            other => return normalize_task_planning_mode(other),
-        }
+    // 2. Channel override
+    if !channel_planning_mode.is_empty() {
+        return normalize_task_planning_mode(channel_planning_mode);
     }
 
     // 3. Kanban — always use max plan mode currently enabled
@@ -152,8 +144,25 @@ fn normalize_task_planning_mode(mode: &str) -> String {
     }
 }
 
+/// Resolve a cron task planning mode to a canonical planning mode value.
+/// Supports:
+/// - `"no_plan"` → `"prompt_only"` (no planning)
+/// - `"simple_plan"` → `"auto_plan"` (single planning step)
+/// - `"plan_with_subtasks"` → `"auto_subtasks"` (full subtask decomposition)
+/// - `"max_plan"` → max of global mode (backward compat)
+/// - anything else → pass through (allows direct values like "auto_subtasks")
+fn resolve_cron_planning_mode(task_mode: &str, global_mode: &str) -> String {
+    match task_mode {
+        "no_plan" => "prompt_only".to_string(),
+        "simple_plan" => "auto_plan".to_string(),
+        "plan_with_subtasks" => "auto_subtasks".to_string(),
+        "max_plan" => resolve_max_plan(global_mode),
+        other => normalize_task_planning_mode(other),
+    }
+}
+
 /// Calculate the maximum plan mode that should be used based on the
-/// global PLANNING_MODE setting. Kanban tasks always use this.
+/// global PLANNING_MODE setting. Kanban tasks and max_plan cron jobs use this.
 fn resolve_max_plan(global_mode: &str) -> String {
     match global_mode {
         "auto_subtasks" | "always" => "auto_subtasks".to_string(),

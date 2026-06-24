@@ -28,6 +28,7 @@ pub struct SubtaskCounts {
     pub completed_count: i64,
     pub pending_count: i64,
     pub cancelled_count: i64,
+    pub error_count: i64,
     pub total_count: i64,
 }
 
@@ -37,6 +38,7 @@ struct SubtaskCountRow {
     completed_count: Option<i64>,
     pending_count: Option<i64>,
     cancelled_count: Option<i64>,
+    error_count: Option<i64>,
     total_count: Option<i64>,
 }
 
@@ -184,6 +186,7 @@ pub async fn get_subtask_counts(pool: &PgPool, thread_id: i64) -> anyhow::Result
             COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0)::bigint AS completed_count,
             COALESCE(SUM(CASE WHEN status = 'pending'   THEN 1 ELSE 0 END), 0)::bigint AS pending_count,
             COALESCE(SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END), 0)::bigint AS cancelled_count,
+            COALESCE(SUM(CASE WHEN status = 'error'    THEN 1 ELSE 0 END), 0)::bigint AS error_count,
             COUNT(*)::bigint AS total_count
         FROM thread_subtasks
         WHERE thread_id = :thread_id
@@ -197,6 +200,7 @@ pub async fn get_subtask_counts(pool: &PgPool, thread_id: i64) -> anyhow::Result
         completed_count: row.completed_count.unwrap_or(0),
         pending_count: row.pending_count.unwrap_or(0),
         cancelled_count: row.cancelled_count.unwrap_or(0),
+        error_count: row.error_count.unwrap_or(0),
         total_count: row.total_count.unwrap_or(0),
     })
 }

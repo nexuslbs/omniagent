@@ -41,7 +41,7 @@ pub fn create_cron_job_tool() -> McpTool {
                 },
                 "schedule": {
                     "type": "string",
-                    "description": "Cron schedule expression in 7-field quartz format (sec min hour day month weekday year). Examples: '0 0 9 * * 1-5 *' for weekdays at 9am, '0 0 * * * * *' every hour"
+                    "description": "Cron schedule expression in 5-field Linux format (min hour day month weekday). Examples: '0 9 * * 1-5' for weekdays at 9am, '0 * * * *' every hour"
                 },
                 "prompt": {
                     "type": "string",
@@ -101,17 +101,19 @@ pub fn create_cron_job_tool() -> McpTool {
             if schedule.is_empty() {
                 anyhow::bail!("Schedule must not be empty");
             }
-            // Validate cron expression: must be 7-field quartz format
+            // Validate cron expression: must be 5-field Linux format
             {
                 let fields: Vec<&str> = schedule.split_whitespace().collect();
-                if fields.len() != 7 {
+                if fields.len() != 5 {
                     anyhow::bail!(
-                        "Invalid cron expression '{}': expected 7 fields (sec min hour day month weekday year), got {} fields. \
-                         Use 7-field quartz format, e.g. '0 0 9 * * 1-5 *' for weekdays at 9am, '* * * * * * *' for every second",
+                        "Invalid cron expression '{}': expected 5 fields (min hour day month weekday), got {} fields. \
+                         Use 5-field Linux format, e.g. '0 9 * * 1-5' for weekdays at 9am, '0 * * * *' every hour",
                         schedule, fields.len()
                     );
                 }
-                if let Err(e) = cron::Schedule::from_str(schedule) {
+                // Prepend "0 " (second field) for the cron crate (6-field)
+                let cron_expr = format!("0 {}", schedule);
+                if let Err(e) = cron::Schedule::from_str(&cron_expr) {
                     anyhow::bail!("Invalid cron expression '{}': {}", schedule, e);
                 }
             }
@@ -386,17 +388,19 @@ pub fn update_cron_job_tool() -> McpTool {
                         sql_forge!("UPDATE cron_jobs SET display_name = :val, updated_at = NOW() WHERE name = :name", ( :val = val, :name = &name_owned )).execute(&pool).await?;
                     }
                     if let Some(val) = args["schedule"].as_str() {
-                        // Validate cron expression: must be 7-field quartz format
+                        // Validate cron expression: must be 5-field Linux format
                         {
                             let fields: Vec<&str> = val.split_whitespace().collect();
-                            if fields.len() != 7 {
+                            if fields.len() != 5 {
                                 anyhow::bail!(
-                                    "Invalid cron expression '{}': expected 7 fields (sec min hour day month weekday year), got {} fields. \
-                                     Use 7-field quartz format, e.g. '0 0 9 * * 1-5 *' for weekdays at 9am, '* * * * * * *' for every second",
+                                    "Invalid cron expression '{}': expected 5 fields (min hour day month weekday), got {} fields. \
+                                     Use 5-field Linux format, e.g. '0 9 * * 1-5' for weekdays at 9am, '0 * * * *' every hour",
                                     val, fields.len()
                                 );
                             }
-                            if let Err(e) = cron::Schedule::from_str(val) {
+                            // Prepend "0 " (second field) for the cron crate (6-field)
+                            let cron_expr = format!("0 {}", val);
+                            if let Err(e) = cron::Schedule::from_str(&cron_expr) {
                                 anyhow::bail!("Invalid cron expression '{}': {}", val, e);
                             }
                         }
