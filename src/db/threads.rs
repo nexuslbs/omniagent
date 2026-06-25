@@ -66,46 +66,7 @@ pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> anyhow::Result<
     Ok(())
 }
 
-// ── Planning mode resolution ──────────────────────────────────
-/// Resolve what planning_mode to stamp on a thread at creation time.
-///
-// priority: cron job → channel → kanban → default
-//
-// Priority chain:
-// 1. Cron job with explicit planning_mode (highest — overrides channel)
-// 2. Channel planning_mode
-// 3. Kanban tasks always get the max plan mode currently enabled
-// 4. Default: "prompt_only"
-///
-/// External callers use this directly only when building a thread manually.
-/// For normal use, call [`create_thread_with_cause`] which resolves the mode
-/// and creates the thread + cause message in one step.
-pub fn resolve_thread_planning_mode(
-    channel_planning_mode: &str,
-    task_planning_mode: &str,
-    msg_type: &str,
-    global_planning_mode: &str,
-) -> String {
-    // 1. Cron task with explicit mode (highest priority — cron > channel)
-    if msg_type == "cron" && !task_planning_mode.is_empty() {
-        return resolve_cron_planning_mode(task_planning_mode, global_planning_mode);
-    }
-
-    // 2. Channel override
-    if !channel_planning_mode.is_empty() {
-        return normalize_task_planning_mode(channel_planning_mode);
-    }
-
-    // 3. Kanban — always use max plan mode currently enabled
-    if msg_type == "kanban" {
-        return resolve_max_plan(global_planning_mode);
-    }
-
-    // 4. Default: no plan
-    "prompt_only".to_string()
-}
-
-/// Internal version of [`resolve_thread_planning_mode`] that also accepts the
+/// Internal version that also accepts the
 /// prompt content for complexity-based classification (user/cron default).
 /// Used internally by [`create_thread_with_cause`] — callers should not need
 /// to pass content directly.

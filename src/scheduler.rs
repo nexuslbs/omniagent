@@ -665,7 +665,7 @@ pub async fn run_kanban_dispatcher(pool: &PgPool, data_dir: &str) -> Result<()> 
             Some(cfg) => (cfg.provider, cfg.model),
             None => {
                 warn!(
-                    "[kanban-dispatcher] Could not resolve config for task '{}' — empty profile",
+                    "[kanban-dispatcher] Could not resolve config for task '{}' — empty profile or no default model for provider",
                     t.id
                 );
                 continue;
@@ -777,9 +777,10 @@ pub(crate) struct ResolvedThreadConfig {
 /// Resolve the profile, provider, and model for a thread using the chain:
 ///    profile_name: task/override → channel.current_profile
 ///    provider:     channel.current_provider → profile.provider → LLM_PROVIDER env
-///    model:        channel.current_model → profile.model → LLM_MODEL env
+///    model:        channel.current_model → profile.model → default_model
 ///
-/// Returns `None` when the resolved profile name is empty.
+/// `default_model` is the provider plugin's default model (resolved by caller).
+/// Returns `None` when the resolved profile name is empty, or no model resolved.
 pub(crate) fn resolve_thread_config(
     explicit_profile: Option<&str>,
     channel_profile: &str,
@@ -806,14 +807,14 @@ pub(crate) fn resolve_thread_config(
                 .unwrap_or_else(|_| "opencode-go".to_string())
         });
 
+    // Model: channel → profile → provider plugin default → error
     let model = channel_model
         .filter(|s| !s.is_empty())
         .or_else(|| profile_model.filter(|s| !s.is_empty()))
         .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            std::env::var("LLM_MODEL")
-                .unwrap_or_else(|_| "deepseek-v4-flash".to_string())
-        });
+        .or_else(|| crate::llm::resolve_default_model(&provider));
+
+    let model = model?; // Return None if no model resolved
 
     Some(ResolvedThreadConfig {
         profile_name,
@@ -1050,7 +1051,7 @@ pub async fn fire_cron_job_by_id(
 /// - `prompt`: Optional prompt override (default: "Execute the Knowledge Pipeline according to the task template above.")
 pub async fn setup_knowledge_pipeline(
     pool: &PgPool,
-    data_dir: &str,
+    _data_dir: &str,
     schedule: Option<String>,
     prompt: Option<String>,
 ) -> Result<(), String> {
@@ -1069,17 +1070,10 @@ pub async fn setup_knowledge_pipeline(
 
     // If we can't query or already exists, skip creation (idempotent)
     if existing.as_ref().ok().and_then(|v| v.as_ref()).is_some() || existing.is_err() {
-        // Template may already exist; still ensure it's on disk (idempotent)
-        let _ = ensure_knowledge_pipeline_template(data_dir);
         return Ok(());
     }
 
-    // 1. Ensure the template file exists on disk
-    if let Err(e) = ensure_knowledge_pipeline_template(data_dir) {
-        tracing::warn!("[knowledge-pipeline] Failed to write template: {}", e);
-    }
-
-    // 2. Create the cron job — no channel_id or profile set; the scheduler
+    // 1. Create the cron job — no channel_id or profile set; the scheduler
     //    resolves the default cron channel at runtime, matching dashboard behavior.
     let id = format!("knowledge-pipeline-{}", std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1104,43 +1098,6 @@ pub async fn setup_knowledge_pipeline(
 }
 
 /// Ensure the knowledge-pipeline.md template file exists on disk.
-fn ensure_knowledge_pipeline_template(data_dir: &str) -> Result<(), String> {
-    use std::fs;
-    use std::path::Path;
-
-    let template_dir = Path::new(data_dir)
-        .join("profiles")
-        .join("default")
-        .join("templates");
-
-    let template_path = template_dir.join("knowledge-pipeline.md");
-
-    if template_path.exists() {
-        // Also ensure pipeline profile has the template (idempotent)
-        let pipeline_dir = Path::new(data_dir)
-            .join("profiles")
-            .join("pipeline")
-            .join("templates");
-        let pipeline_path = pipeline_dir.join("knowledge-pipeline.md");
-        if !pipeline_path.exists() {
-            let _ = fs::create_dir_all(&pipeline_dir);
-            let _ = fs::write(&pipeline_path, "Execute the Knowledge Pipeline according to the task template above.");
-        }
-        return Ok(());
-    }
-
-    // Create the templates directory if it doesn't exist
-    fs::create_dir_all(&template_dir)
-        .map_err(|e| format!("Failed to create templates directory: {}", e))?;
-
-    let content = "RUN these SQL queries:\nSELECT id, name FROM channels WHERE closed = false;\nSELECT channel_id, COUNT(*)::int as cnt FROM summaries GROUP BY channel_id;\nSELECT id, profile FROM threads WHERE status='completed' AND created_at > NOW() - INTERVAL '7 days';\n\nTHEN call actions_relevance_indexer\nTHEN call actions_hindsight_populator\nTHEN produce a summary\n\nONLY available tools: query_database, actions_relevance_indexer, actions_hindsight_populator. Do not explore.";
-
-    fs::write(&template_path, content)
-        .map_err(|e| format!("Failed to write template: {}", e))?;
-
-    tracing::info!("[knowledge-pipeline] Created template file at {:?}", template_path);
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {

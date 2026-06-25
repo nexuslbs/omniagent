@@ -447,14 +447,14 @@ async fn prompt_preview_handler(
         let model_name = match ch_model
             .filter(|s| !s.is_empty())
             .or_else(|| prof.model.clone().filter(|s| !s.is_empty()))
-            .or_else(|| std::env::var("LLM_MODEL").ok().filter(|s| !s.is_empty()))
+            .or_else(|| crate::llm::resolve_default_model(&provider_name))
         {
             Some(m) => m,
             None => {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
-                        "error": "No LLM model configured — set LLM_MODEL env var or configure channel/model profile"
+                        "error": "No LLM model configured — channel, profile, or provider plugin default_model must define one"
                     })),
                 );
             }
@@ -479,13 +479,7 @@ async fn prompt_preview_handler(
 
         // Create LLM client — match how the agent resolves config
         // (AgentConfig::from_env() tries LLM_API_KEY, then {PROVIDER}_API_KEY).
-        let base_url = std::env::var("LLM_BASE_URL").unwrap_or_else(|_| match provider_name.as_str() {
-            "opencode-go" => "https://opencode.ai/zen/go/v1".to_string(),
-            "openai" => "https://api.openai.com/v1".to_string(),
-            "anthropic" => "https://api.anthropic.com/v1".to_string(),
-            "deepseek" => "https://api.deepseek.com/v1".to_string(),
-            _ => String::new(),
-        });
+        let base_url = crate::llm::resolve_default_base_url(&provider_name);
         let api_key = resolve_llm_api_key(Some(&std::env::var(
             format!("{}_API_KEY", provider_name.to_uppercase().replace('-', "_"))
         ).unwrap_or_default()));

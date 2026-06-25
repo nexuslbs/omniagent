@@ -36,44 +36,21 @@ pub struct Profile {
 /// Default context budget for profiles that don't specify one.
 pub const PROMPT_BUDGET_DEFAULT: usize = 15_000;
 
-/// The list of all known tools — used for multi-select in the dashboard.
-pub const ALL_KNOWN_TOOLS: &[&str] = &[
-    "filesystem_read",
-    "filesystem_write",
-    "filesystem_list",
-    "filesystem_search",
-    "filesystem_info",
-    "fetch",
-    "search_messages",
-    "search_wiki",
-    "create_skill",
+/// The list of core native tools — used for multi-select in the dashboard.
+/// External tools (MCP plugins installed via plugin_registry) are loaded
+/// dynamically at runtime and are not listed here.
+pub const CORE_TOOLS: &[&str] = &[
+    "create_cron_job",
+    "list_cron_jobs",
+    "delete_cron_job",
+    "update_cron_job",
     "create_kanban_task",
     "list_kanban_tasks",
     "update_kanban_task",
     "delete_kanban_task",
     "add_kanban_dependency",
     "remove_kanban_dependency",
-    "create_cron_job",
-    "list_cron_jobs",
-    "delete_cron_job",
-    "update_cron_job",
-    "promote_to_memory",
-    "list_memories",
-    "review_memories",
-    "manage_memory",
-    "get_metrics",
-    "query_database",
-    "compose",
-    "create_github_repo",
-    "clone_repo",
-    "commit_and_push",
-    "status",
     "plugin_manager",
-    "manage_subtasks",
-    "actions_kanban_dispatcher",
-    "actions_relevance_indexer",
-    "actions_hindsight_populator",
-    "actions_setup_knowledge_pipeline",
 ];
 
 /// Schema for profiles/<name>/config.json
@@ -95,7 +72,7 @@ impl Profile {
             api_key: None,
             max_tokens: None,
             temperature: None,
-            allowed_tools: ALL_KNOWN_TOOLS.iter().map(|s| s.to_string()).collect(),
+            allowed_tools: CORE_TOOLS.iter().map(|s| s.to_string()).collect(),
             auto_retrieval_enabled: true,
             retrieval_aggressiveness: 2,
             grounding_required: false,
@@ -231,11 +208,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_profile_has_all_tools() {
+    fn test_default_profile_has_core_tools() {
         let p = Profile::default("test");
-        assert!(p.allowed_tools.contains(&"filesystem_read".to_string()));
-        assert!(p.allowed_tools.contains(&"compose".to_string()));
-        assert_eq!(p.allowed_tools.len(), ALL_KNOWN_TOOLS.len());
+        assert!(p.allowed_tools.contains(&"create_cron_job".to_string()));
+        assert!(p.allowed_tools.contains(&"plugin_manager".to_string()));
+        assert_eq!(p.allowed_tools.len(), CORE_TOOLS.len());
     }
 
     #[test]

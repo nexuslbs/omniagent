@@ -38,7 +38,7 @@ pub async fn process_thread(
         .unwrap_or(0);
 
     // Track per-message sequence number within the thread
-    let mut next_seq = cause_msg.thread_sequence + 1;
+    let next_seq = cause_msg.thread_sequence + 1;
 
     // 3. Read profile, provider, model from the thread (not from messages)
     let profile_name = thread.profile.clone();
@@ -56,7 +56,7 @@ pub async fn process_thread(
                 "Invalid configuration: profile='{}', provider={:?}, model={:?} — profile name is empty. Set a profile on the channel or thread.",
                 profile_name, provider_name, model_name
             ),
-            thread_sequence: { let v = next_seq; next_seq += 1; v },
+            thread_sequence: { let v = next_seq; v },
             external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
             metadata: serde_json::json!({
                 "error_type": "configuration",
@@ -88,7 +88,7 @@ pub async fn process_thread(
                 "Invalid configuration: profile='{}' does not exist.",
                 profile_name
             ),
-            thread_sequence: { let v = next_seq; next_seq += 1; v },
+            thread_sequence: { let v = next_seq; v },
             external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
             metadata: serde_json::json!({
                 "error_type": "configuration",
@@ -117,7 +117,7 @@ pub async fn process_thread(
                 "Invalid configuration: provider is not set on thread {}. Ensure the thread has a provider stamped at creation time. Check channel.current_provider, profile provider, or LLM_PROVIDER env var.",
                 thread.id
             ),
-            thread_sequence: { let v = next_seq; next_seq += 1; v },
+            thread_sequence: { let v = next_seq; v },
             external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
             metadata: serde_json::json!({
                 "error_type": "configuration",
@@ -147,10 +147,10 @@ pub async fn process_thread(
             thread_id: thread.id,
             role: "system".to_string(),
             content: format!(
-                "Invalid configuration: model is not set on thread {}. Ensure the thread has a model stamped at creation time. Check channel.current_model, profile model, or LLM_MODEL env var.",
+                "Invalid configuration: model is not set on thread {}. Ensure the thread has a model stamped at creation time. Check channel.current_model, profile model, or provider plugin default_model.",
                 thread.id
             ),
-            thread_sequence: { let v = next_seq; next_seq += 1; v },
+            thread_sequence: { let v = next_seq; v },
             external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
             metadata: serde_json::json!({
                 "error_type": "configuration",
@@ -295,7 +295,7 @@ pub async fn process_thread(
     // Track cumulative token usage across all LLM calls
     let mut cumulative_usage: Option<crate::llm::Usage> = None;
     let mut force_failed: bool = false;
-    let mut current_iter: i32 = 0;
+    let mut current_iter: i32;
 
     // ── Planning Phase ──
     // Read planning_mode from thread (single source of truth, resolved at creation time)
@@ -389,7 +389,7 @@ pub async fn process_thread(
                         thread_id: thread.id,
                         role: "agent".to_string(),
                         content: content.clone(),
-                        thread_sequence: { let v = next_seq; next_seq += 1; v },
+                        thread_sequence: { let v = next_seq; v },
                         external_id: None,
                         metadata: serde_json::json!({
                             "plan_iteration": iter,
@@ -869,7 +869,7 @@ pub async fn process_thread(
                 thread_id: thread.id,
                 role: "agent".to_string(),
                 content: multi_content,
-                thread_sequence: { let v = next_seq; next_seq += 1; v },
+                thread_sequence: { let v = next_seq; v },
                 external_id: None,
                 metadata: serde_json::json!({}),
                 embedding: None,
@@ -912,7 +912,7 @@ pub async fn process_thread(
                 thread_id: thread.id,
                 role: "agent".to_string(),
                 content: tool_args,
-                thread_sequence: { let v = next_seq; next_seq += 1; v },
+                thread_sequence: { let v = next_seq; v },
                 external_id: None,
                 metadata: serde_json::json!({}),
                 embedding: None,
@@ -959,7 +959,7 @@ pub async fn process_thread(
                         thread_id: thread.id,
                         role: "agent".to_string(),
                         content: content.clone(),
-                        thread_sequence: { let v = next_seq; next_seq += 1; v },
+                        thread_sequence: { let v = next_seq; v },
                         external_id: None,
                         metadata: serde_json::json!({}),
                         embedding: None,
@@ -991,7 +991,7 @@ pub async fn process_thread(
                         thread_id: thread.id,
                         role: "agent".to_string(),
                         content: err_msg.clone(),
-                        thread_sequence: { let v = next_seq; next_seq += 1; v },
+                        thread_sequence: { let v = next_seq; v },
                         external_id: None,
                         metadata: serde_json::json!({}),
                         embedding: None,
@@ -1104,7 +1104,7 @@ pub async fn process_thread(
                 thread_id: thread.id,
                 role: "agent".to_string(),
                 content: reasoning_text.clone(),
-                thread_sequence: { let v = next_seq; next_seq += 1; v },
+                thread_sequence: { let v = next_seq; v },
                 external_id: None,
                 metadata: serde_json::json!({
                     "context": evidence_metadata["context"],
@@ -1213,7 +1213,7 @@ pub async fn process_thread(
             thread_id: thread.id,
             role: "agent".to_string(),
             content: summary_text,
-            thread_sequence: { let v = next_seq; next_seq += 1; v },
+            thread_sequence: { let v = next_seq; v },
             external_id: None,
             metadata: serde_json::json!({}),
             embedding: None,
@@ -1251,7 +1251,7 @@ pub async fn process_thread(
             thread_id: thread.id,
             role: "agent".to_string(),
             content: agent_content,
-            thread_sequence: { let v = next_seq; next_seq += 1; v },
+            thread_sequence: { let v = next_seq; v },
             external_id: None,
             metadata: serde_json::json!({
                 "context": evidence_metadata["context"],
@@ -1281,7 +1281,7 @@ pub async fn process_thread(
             thread_id: thread.id,
             role: "agent".to_string(),
             content: final_content.clone(),
-            thread_sequence: { let v = next_seq; next_seq += 1; v },
+            thread_sequence: { let v = next_seq; v },
             external_id: None,
             metadata: serde_json::json!({
                 "context": evidence_metadata["context"],

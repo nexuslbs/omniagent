@@ -312,7 +312,7 @@ When a message is created (seq-0), the `provider` and `model` fields are **stamp
 1. **Message** `profile` field (highest priority) — set per-message for cron/kanban tasks
 2. **Channel** `current_provider` / `current_model` / `current_profile`
 3. **Profile** `provider` / `model` (if set in the profile)
-4. **Environment variables** `LLM_PROVIDER` / `LLM_MODEL`
+4. **Environment variable** `LLM_PROVIDER` (model comes from provider plugin's `default_model`)
 5. **Built-in defaults** `opencode-go` / `deepseek-v4-flash`
 
 This happens at creation time for:
@@ -597,8 +597,6 @@ This will:
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant endpoint |
 | `LLM_API_KEY` | — | API key for LLM provider |
 | `LLM_PROVIDER` | `opencode-go` | Provider: `opencode-go`, `openai`, `anthropic`, `deepseek` |
-| `LLM_MODEL` | `deepseek-v4-flash` | Default LLM model |
-| `LLM_BASE_URL` | *per provider* | API endpoint URL |
 | `DEEPSEEK_API_KEY` | — | DeepSeek-specific API key |
 | `DEEPSEEK_BASE_URL` | *default* | DeepSeek API endpoint base URL |
 | `MAX_TOKENS` | `4096` | Max response tokens |
@@ -608,11 +606,11 @@ This will:
 | `MAX_ITERATIONS_COMPLEX_PLAN` | `25` | Max agent turns for `auto_subtasks` mode |
 | `HOST` | `0.0.0.0` | HTTP bind address |
 | `PORT` | `8080` | HTTP port |
-|| `DELETE_AFTER_DAYS` | `30` | Message retention period |
-|| `SUMMARY_WINDOW` | `10` | Half-window size for channel summarization |
-|| `CHANNEL_SUMMARY_TOKENS` | `4096` | Max tokens for channel-level summary generation |
-|| `THREAD_SUMMARY_TOKENS` | `2048` | Max tokens for per-thread end-of-execution summary |
-|| `MCP_SERVERS_CONFIG` | — | External MCP servers config file path |
+| `DELETE_AFTER_DAYS` | `30` | Message retention period |
+| `SUMMARY_WINDOW` | `10` | Half-window size for channel summarization |
+| `CHANNEL_SUMMARY_TOKENS` | `4096` | Max tokens for channel-level summary generation |
+| `THREAD_SUMMARY_TOKENS` | `2048` | Max tokens for per-thread end-of-execution summary |
+| `MCP_SERVERS_CONFIG` | — | External MCP servers config file path |
 | `VECTORIZE_MESSAGES` | `false` | Enable message embedding generation |
 | `VECTORIZE_WIKI` | `false` | Enable wiki embedding generation |
 | `MEMORY_MAX_CHARS` | `5000` | Max characters in MEMORY.md |
@@ -625,7 +623,7 @@ Environment variables are organized into categories:
 | Category | Variables |
 |----------|-----------|
 | **General** | `HOST`, `PORT`, `OMNI_DATA_DIR`, `QDRANT_URL`, `DELETE_AFTER_DAYS`, `MAX_ITERATIONS`, `MCP_SERVERS_CONFIG` |
-| **LLM** | `LLM_API_KEY`, `LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL`, `MAX_TOKENS`, `TEMPERATURE`, `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` |
+| **LLM** | `LLM_API_KEY`, `LLM_PROVIDER`, `MAX_TOKENS`, `TEMPERATURE`, `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` |
 | **Memory** | `MEMORY_MAX_CHARS`, `USER_MAX_CHARS` |
 | **Retrieval** | `VECTORIZE_MESSAGES`, `VECTORIZE_WIKI` |
 

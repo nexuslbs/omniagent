@@ -14,7 +14,6 @@ use std::collections::HashMap;
 
 pub mod external;
 pub mod queue;
-pub mod telegram;
 
 pub use queue::{OutboundEnvelope, OutboundReceiver, OutboundSender};
 use queue::outbound_channel;
@@ -99,46 +98,6 @@ impl PlatformRegistry {
 
         handles
     }
-}
-
-/// Parameters for [`claim_channel`].
-pub struct ClaimChannelParams<'a> {
-    pub channel_id: i64,
-    pub session_id: &'a str,
-    pub platform_name: &'a str,
-    pub senders: Option<&'a HashMap<String, OutboundSender>>,
-}
-
-/// Claim a channel for a session: update its resource_identifier and notify the
-/// old session (if any) via `enqueue_notification`.
-///
-/// This is a reusable helper for any platform (Telegram, CLI, etc.) that wants to
-/// reassign a channel to a new session.  Pass `senders = None` in contexts where
-/// platform outbound queues are not available (standalone CLI mode); the function
-/// will log a warning instead of sending a notification.
-pub async fn claim_channel(
-    pool: &PgPool,
-    p: ClaimChannelParams<'_>,
-) -> anyhow::Result<()> {
-    let old_rid =
-        crate::db::types::claim_channel_resource(pool, p.channel_id, p.session_id).await?;
-
-    if let Some(ref old) = old_rid {
-        if old != p.session_id {
-            let msg = "This CLI channel has been reassigned to a new session.";
-            if let Some(s) = p.senders {
-                enqueue_notification(s, p.platform_name, old, msg);
-            } else {
-                tracing::warn!(
-                    "Channel {} reassigned from '{}' to '{}' (no platform senders available)",
-                    p.channel_id,
-                    old,
-                    p.session_id,
-                );
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Enqueue a notification envelope to a platform's outbound queue.

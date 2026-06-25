@@ -343,13 +343,13 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 default: Some("2048".into()),
             },
         ),
-        // ── LLM Provider ──
+        // ── General (LLM Provider) ──
         (
             "LLM_PROVIDER".into(),
             get_env_or_default("LLM_PROVIDER", "opencode-go"),
             SettingMeta {
                 field_type: "select".into(),
-                description: "LLM provider backend".into(),
+                description: "Default LLM provider backend for channels without an explicit provider".into(),
                 options: Some(vec![
                     SettingOption { id: "opencode-go".into(), name: "OpenCode Go".into() },
                     SettingOption { id: "openai".into(), name: "OpenAI".into() },
@@ -358,28 +358,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 ]),
                 readonly: false,
                 default: Some("opencode-go".into()),
-            },
-        ),
-        (
-            "LLM_MODEL".into(),
-            get_env_or_default("LLM_MODEL", "deepseek-v4-flash"),
-            SettingMeta {
-                field_type: "text".into(),
-                description: "Model name (e.g. deepseek-v4-flash, gpt-4)".into(),
-                options: None,
-                readonly: false,
-                default: Some("deepseek-v4-flash".into()),
-            },
-        ),
-        (
-            "LLM_BASE_URL".into(),
-            get_env_or_default("LLM_BASE_URL", ""),
-            SettingMeta {
-                field_type: "text".into(),
-                description: "Base URL for the LLM API".into(),
-                options: None,
-                readonly: false,
-                default: None,
             },
         ),
         // API keys are now managed per-provider via the Providers page,
@@ -466,11 +444,6 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             settings: vec![],
         },
         SettingCategory {
-            name: "llm".into(),
-            label: "LLM Provider".into(),
-            settings: vec![],
-        },
-        SettingCategory {
             name: "system".into(),
             label: "System".into(),
             settings: vec![],
@@ -494,9 +467,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "THREAD_SUMMARY_TOKENS"
             | "MEMORY_MAX_CHARS"
             | "USER_MAX_CHARS" => "memory",
-            "LLM_PROVIDER"
-            | "LLM_MODEL"
-            | "LLM_BASE_URL" => "llm",
+            "LLM_PROVIDER" => "general",
             _ => "system",
         };
 
@@ -527,7 +498,7 @@ pub async fn get_settings_handler(
     .await
     .unwrap_or_default();
 
-    let defs: Vec<(String, String, SettingMeta)> = get_all_setting_definitions()
+    let mut defs: Vec<(String, String, SettingMeta)> = get_all_setting_definitions()
         .into_iter()
         .map(|(name, _default_value, meta)| {
             // Check .env first, then process env, then default
@@ -540,9 +511,43 @@ pub async fn get_settings_handler(
         })
         .collect();
 
+    // Enrich LLM_PROVIDER options with dynamically loaded provider plugins
+    if let Some((_, _, ref mut meta)) = defs.iter_mut().find(|(name, _, _)| name == "LLM_PROVIDER") {
+        enrich_provider_options(meta, &state.pool);
+    }
+
     Json(SettingsResponse {
         categories: categorize_settings(defs),
     })
+}
+
+/// Enrich LLM_PROVIDER setting options with dynamically loaded provider plugins.
+/// Falls back to hardcoded list if plugin_registry query fails.
+fn enrich_provider_options(
+    meta: &mut SettingMeta,
+    pool: &sqlx::PgPool,
+) {
+    // Query the plugin_registry for installed provider plugins
+    let providers = match tokio::task::block_in_place(|| {
+        let handle = tokio::runtime::Handle::current();
+        handle.block_on(async {
+            sqlx::query_as::<_, (String, String)>(
+                "SELECT name, COALESCE(manifest->>'description', name) as description FROM plugin_registry WHERE plugin_type = 'provider' AND status = 'enabled' ORDER BY name"
+            )
+            .fetch_all(pool)
+            .await
+        })
+    }) {
+        Ok(rows) if !rows.is_empty() => rows,
+        _ => return, // Fall back to hardcoded options
+    };
+
+    meta.options = Some(
+        providers
+            .into_iter()
+            .map(|(id, name)| SettingOption { id, name })
+            .collect(),
+    );
 }
 
 /// PUT /settings — update one or more settings and write to .env.
@@ -583,8 +588,6 @@ pub async fn update_settings_handler(
         "MEMORY_MAX_CHARS",
         "USER_MAX_CHARS",
         "LLM_PROVIDER",
-        "LLM_MODEL",
-        "LLM_BASE_URL",
     ]
     .into_iter()
     .collect();

@@ -369,15 +369,6 @@ pub async fn claim_channel_resource(
     Ok(old_rid)
 }
 
-/// Validate that a channel name contains only allowed characters.
-pub fn validate_channel_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 128
-        && name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-}
-
 // ---------------------------------------------------------------------------
 // Channel open/close/status queries
 // ---------------------------------------------------------------------------

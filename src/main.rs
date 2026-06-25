@@ -1,5 +1,4 @@
 use anyhow::Result;
-use clap::Parser;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -7,7 +6,6 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 mod agent;
-mod cli;
 mod commands;
 mod complexity;
 mod context_builder;
@@ -32,51 +30,12 @@ fn env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-#[derive(Parser, Debug)]
-#[command(name = "omniagent", about = "OmniAgent — autonomous agent system")]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Command>,
-}
-
-#[derive(clap::Subcommand, Debug)]
-enum Command {
-    /// Run the full server (default when no subcommand is given)
-    Server,
-    /// Interactive CLI client — sends messages to an agent channel
-    Cli {
-        /// Channel name for the CLI session
-        #[arg(long, default_value = "cli")]
-        channel: String,
-
-        /// Profile to use (default profile's model/provider if omitted)
-        #[arg(long, default_value = "default")]
-        profile: String,
-
-        /// Model override (use profile model if omitted)
-        #[arg(long)]
-        model: Option<String>,
-
-        /// Provider override (use profile provider if omitted)
-        #[arg(long)]
-        provider: Option<String>,
-    },
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load .env file if present
     dotenvy::dotenv().ok();
 
-    let cli = Cli::parse();
-
-    // Determine data directory (default: /opt/data)
-    let data_dir = env_or_default("OMNI_DATA_DIR", "/opt/data");
-
-    match cli.command.unwrap_or(Command::Server) {
-        Command::Server => run_server().await,
-        Command::Cli { channel, profile, model, provider } => cli::run_cli(channel, profile, model, provider, &data_dir).await,
-    }
+    run_server().await
 }
 
 // ── Server mode (original) ──────────────────────────────────────────────────
@@ -117,8 +76,7 @@ async fn run_server() -> Result<()> {
     tracing::info!("Workspace directory: {}", workspace_dir);
 
     tracing::info!(
-        "Agent config — model: {}, provider: {}, max_tokens: {}, temperature: {}",
-        cfg.llm_model,
+        "Agent config — provider: {}, max_tokens: {}, temperature: {}",
         cfg.llm_provider,
         cfg.max_tokens,
         cfg.temperature,
@@ -132,9 +90,6 @@ async fn run_server() -> Result<()> {
 
     // Create platform registry and register platforms
     let mut registry = platform::PlatformRegistry::new();
-
-    // Built-in Telegram platform (kept for backward compatibility)
-    registry.register(Box::new(crate::platform::telegram::TelegramPlatform::new()));
 
     // Load external platform plugins from config
     let external_plugins = platform::external::load_plugins_config(&data_dir);

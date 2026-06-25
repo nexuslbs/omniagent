@@ -96,25 +96,4 @@ pub async fn delete_old_summaries(
     Ok(result.rows_affected())
 }
 
-/// Get all summaries from a channel with id > since_id (for polling new summaries).
-pub async fn get_summaries_since(
-    pool: &PgPool,
-    channel_id: i64,
-    since_id: i64,
-) -> anyhow::Result<Vec<SummaryDb>> {
-    let rows: Vec<SummaryDb> = sql_forge!(
-        SummaryDb,
-        r#"
-        SELECT
-            id, channel_id, next_thread_id, content,
-            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
-        FROM summaries
-        WHERE channel_id = :channel_id AND id > :since_id
-        ORDER BY id ASC
-        "#,
-        ( :channel_id = channel_id, :since_id = since_id )
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(rows)
-}
+// (end of file)

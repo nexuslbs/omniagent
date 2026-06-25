@@ -3,10 +3,10 @@
 //! Providers are configured via environment variables:
 //! - `LLM_PROVIDER` — "opencode-go" (default), "openai", "anthropic"
 //! - `LLM_API_KEY` — API key
-//! - `LLM_BASE_URL` — Base URL for the API (default for each provider)
-//! - `LLM_MODEL` — Model name (e.g. "deepseek-v4-flash")
 //! - `LLM_MAX_TOKENS` — Max tokens (default: 8192)
 //! - `LLM_TEMPERATURE` — Temperature (default: 0.7)
+//!
+//! Default model and base URL come from the provider plugin manifest.
 //!
 //! OpenCode Go serves two API surfaces depending on the model:
 //! - `chat_completions` — OpenAI-compatible `/v1/chat/completions` (GLM, Kimi, DeepSeek)
@@ -21,8 +21,6 @@ use std::fmt;
 use std::path::Path;
 use tracing::warn;
 
-pub mod provider_config;
-
 // ---------------------------------------------------------------------------
 // Provider identification — String-based, extensible via plugin_registry
 // ---------------------------------------------------------------------------
@@ -31,7 +29,7 @@ pub mod provider_config;
 ///
 /// Custom provider names work out of the box; no enum variants needed.
 /// Resolution against the plugin_registry happens at config-time via
-/// `resolve_provider_config()`.
+/// `super::plugin` functions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderId(pub String);
 
@@ -58,6 +56,24 @@ pub struct ProviderMetadata {
     pub name: String,
     pub default_base_url: String,
     pub api_mode: String,
+    pub default_model: String,
+}
+
+/// Extract default_model from a provider plugin manifest's config_schema.
+/// Looks for a field with key="default_model" and reads its "default" value.
+fn extract_default_model(manifest: &serde_json::Value) -> String {
+    manifest
+        .get("config_schema")
+        .and_then(|schema| schema.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|field| {
+                    field.get("key").and_then(|k| k.as_str()) == Some("default_model")
+                })
+        })
+        .and_then(|field| field.get("default").and_then(|d| d.as_str()))
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Scan filesystem directories for provider plugin manifests and return a map.
@@ -107,10 +123,12 @@ fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("chat_completions")
                 .to_string();
+            let default_model = extract_default_model(&manifest);
             map.insert(name.clone(), ProviderMetadata {
                 name,
                 default_base_url,
                 api_mode,
+                default_model,
             });
         }
     }
@@ -136,11 +154,13 @@ pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::ne
             name: "opencode-go".to_string(),
             default_base_url: "https://opencode.ai/zen/go/v1".to_string(),
             api_mode: "dynamic".to_string(),
+            default_model: "deepseek-v4-flash".to_string(),
         });
         map.insert("deepseek".to_string(), ProviderMetadata {
             name: "deepseek".to_string(),
             default_base_url: "https://api.deepseek.com/v1".to_string(),
             api_mode: "chat_completions".to_string(),
+            default_model: "deepseek-v4-flash".to_string(),
         });
     }
 
@@ -153,6 +173,20 @@ pub fn resolve_default_base_url(provider_name: &str) -> String {
         .get(provider_name)
         .map(|m| m.default_base_url.clone())
         .unwrap_or_default()
+}
+
+/// Resolve the default model for a provider from the plugin metadata.
+/// Returns None if no default is found.
+pub fn resolve_default_model(provider_name: &str) -> Option<String> {
+    PROVIDER_METADATA
+        .get(provider_name)
+        .and_then(|m| {
+            if m.default_model.is_empty() {
+                None
+            } else {
+                Some(m.default_model.clone())
+            }
+        })
 }
 
 /// Resolve the API mode for a provider from the plugin metadata.
@@ -242,18 +276,13 @@ impl LLMConfig {
         let provider_name = std::env::var("LLM_PROVIDER")
             .unwrap_or_else(|_| "opencode-go".to_string());
 
-        let model = std::env::var("LLM_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".to_string());
-
         let provider = ProviderId::new(&provider_name);
-        let api_mode = ApiMode::resolve(&provider_name, &model);
+        let base_url = resolve_default_base_url(&provider_name);
+        let default_model = resolve_default_model(&provider_name)
+            .unwrap_or_else(|| "deepseek-v4-flash".to_string());
+        let model = default_model;
 
-        let base_url = std::env::var("LLM_BASE_URL").unwrap_or_else(|_| match provider_name.as_str() {
-            "opencode-go" => "https://opencode.ai/zen/go/v1".to_string(),
-            "openai" => "https://api.openai.com/v1".to_string(),
-            "anthropic" => "https://api.anthropic.com/v1".to_string(),
-            "deepseek" => "https://api.deepseek.com/v1".to_string(),
-            _ => String::new(),
-        });
+        let api_mode = ApiMode::resolve(&provider_name, &model);
 
         let api_key = match provider_name.as_str() {
             "deepseek" => {
@@ -281,8 +310,6 @@ impl LLMConfig {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
 // Chat / Completion types
 // ---------------------------------------------------------------------------
 
@@ -420,12 +447,10 @@ struct OpenAiChoice {
     /// Present in streaming chunks.
     #[serde(default)]
     delta: Option<OpenAiDelta>,
-    #[expect(dead_code)]
     #[serde(default)]
     finish_reason: Option<String>,
-    #[expect(dead_code)]
     #[serde(default)]
-    index: u32,
+    _index: u32,
 }
 
 #[derive(Debug, Deserialize)]

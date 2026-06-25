@@ -216,6 +216,7 @@ pub struct SummaryDb {
 pub struct SubscriptionDb {
     #[expect(dead_code)]
     pub id: i64,
+    #[expect(dead_code)]
     pub channel_id: i64,
     pub subscriber_platform: String,
     pub subscriber_resource: String,
@@ -310,25 +311,6 @@ pub struct ChannelSeq0Message {
     pub role: String,
     #[expect(dead_code)]
     pub msg_type: String,
-}
-
-// ---------------------------------------------------------------------------
-// Usage stats struct
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct ChannelUsageStats {
-    #[expect(dead_code)]
-    pub channel_id: i64,
-    pub channel_name: String,
-    pub model: Option<String>,
-    pub total_input_tokens: Option<i64>,
-    pub total_cached_tokens: Option<i64>,
-    pub total_output_tokens: Option<i64>,
-    #[expect(dead_code)]
-    pub total_threads: Option<i64>,
-    #[expect(dead_code)]
-    pub total_duration_ms: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -749,7 +731,6 @@ pub async fn delete_action(pool: &PgPool, id: &str) -> anyhow::Result<u64> {
 pub use crate::db::channels::*;
 pub use crate::db::kanban::*;
 pub use crate::db::messages::*;
-pub use crate::db::stats::*;
 pub use crate::db::subscriptions::*;
 pub use crate::db::summaries::*;
 pub use crate::db::threads::*;

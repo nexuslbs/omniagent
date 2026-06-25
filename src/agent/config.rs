@@ -7,9 +7,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub llm_api_key: String,
-    pub llm_model: String,
     pub llm_provider: String,
-    pub llm_base_url: String,
     pub max_tokens: u32,
     pub temperature: f32,
     #[expect(dead_code)]
@@ -93,9 +91,7 @@ impl AgentConfig {
     ///
     /// # Env vars
     /// - `LLM_API_KEY` — API key for the LLM provider
-    /// - `LLM_MODEL` — Model name (default: "gpt-4")
     /// - `LLM_PROVIDER` — Provider name (default: "openai")
-    /// - `LLM_BASE_URL` — Base URL for the API (optional per-provider default)
     /// - `MAX_TOKENS` — Max tokens per response (default: 4096)
     /// - `TEMPERATURE` — Sampling temperature (default: 0.7)
     /// - `SUMMARIZE_AFTER_DAYS` — Days before auto-summarization (default: 7)
@@ -111,9 +107,7 @@ impl AgentConfig {
                 };
                 resolve_llm_api_key(Some(&std::env::var(&provider_key).unwrap_or_default()))
             },
-            llm_model: std::env::var("LLM_MODEL").unwrap_or_else(|_| "gpt-4".to_string()),
             llm_provider: std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string()),
-            llm_base_url: std::env::var("LLM_BASE_URL").unwrap_or_default(),
             max_tokens: std::env::var("MAX_TOKENS")
                 .unwrap_or_else(|_| "4096".to_string())
                 .parse()

@@ -261,7 +261,7 @@ Examples:
 **Stamping at creation time** — When any seq-0 message is created (user message, cron job, kanban ready-task), `provider` and `model` are resolved and stamped on the **thread** using this chain:
 1. Channel `current_provider` / `current_model`
 2. Profile `provider` / `model`
-3. `LLM_PROVIDER` / `LLM_MODEL` env vars
+3. `LLM_PROVIDER` env var (model from provider plugin's `default_model`)
 4. Built-in defaults: `opencode-go` / `deepseek-v4-flash`
 
 **Validation at execution time** — In `process_thread()` (src/agent/mod.rs), before calling the LLM, four checks run:

@@ -63,12 +63,8 @@ impl Agent {
             } else {
                 config.llm_api_key.clone()
             },
-            base_url: if config.llm_base_url.is_empty() {
-                env_cfg.base_url
-            } else {
-                config.llm_base_url.clone()
-            },
-            model: config.llm_model.clone(),
+            base_url: env_cfg.base_url,
+            model: env_cfg.model,
             api_mode: env_cfg.api_mode,
             max_tokens: config.max_tokens,
             temperature: config.temperature,

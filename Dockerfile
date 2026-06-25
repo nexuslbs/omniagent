@@ -2,7 +2,7 @@
 # Source code is mounted as a volume; binary built on host with `cargo build --release`.
 # No docker cp needed — just build then `docker compose restart omniagent`.
 
-FROM rust:latest
+FROM rust:1.96.0
 
 # Install Docker CLI
 RUN apt-get update && apt-get install -y \
