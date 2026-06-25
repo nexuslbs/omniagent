@@ -784,6 +784,20 @@ async fn phase_4_indexes_and_columns(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ── Add archived column to kanban_tasks ──
+    sqlx::query(
+        r#"ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT false;"#,
+    )
+    .execute(pool)
+    .await?;
+
+    // ── Add position column to kanban_tasks ──
+    sqlx::query(
+        r#"ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS position INTEGER;"#,
+    )
+    .execute(pool)
+    .await?;
+
     // ── Add template column to kanban_tasks ──
     sqlx::query(
         r#"ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS template TEXT DEFAULT '';"#,
