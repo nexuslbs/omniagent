@@ -246,7 +246,7 @@ pub async fn upsert_plugin(
         PluginRegistryRow,
         r#"
         INSERT INTO plugin_registry (name, plugin_type, version, source, status, manifest, config)
-        VALUES (:name, :plugin_type, :version, :source, 'enabled', :manifest::jsonb, :config::jsonb)
+        VALUES (:name, :plugin_type, :version, :source, 'disabled', :manifest::jsonb, :config::jsonb)
         ON CONFLICT (name) DO UPDATE SET
             plugin_type = EXCLUDED.plugin_type,
             version = EXCLUDED.version,

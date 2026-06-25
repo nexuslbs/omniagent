@@ -60,7 +60,9 @@ pub struct ActionApi {
     pub created_at: String,
     /// Always empty string for YAML-based actions.
     pub updated_at: String,
-    /// Derived from `enabled && id starts with "builtin_"`.
+    /// Whether this action is enabled (can be executed).
+    pub enabled: bool,
+    /// Derived from `id starts with "builtin_"`.
     #[serde(default)]
     pub is_builtin: bool,
 }
@@ -97,6 +99,7 @@ pub fn load_actions(data_dir: &str) -> Result<Vec<ActionApi>> {
                 params: entry.params,
                 created_at: String::new(),
                 updated_at: String::new(),
+                enabled: entry.enabled,
                 is_builtin: id.starts_with("builtin_"),
             }
         })
@@ -107,9 +110,48 @@ pub fn load_actions(data_dir: &str) -> Result<Vec<ActionApi>> {
     Ok(result)
 }
 
-/// Get a single action by id.
+/// Load ALL actions from YAML (including disabled). For the dashboard list view.
+pub fn load_all_actions(data_dir: &str) -> Result<Vec<ActionApi>> {
+    let path = actions_path(data_dir);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let file: ActionsFile = serde_yaml::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+
+    let mut result: Vec<ActionApi> = file
+        .actions
+        .into_iter()
+        .map(|(id, entry)| {
+            let id_str = id.clone();
+            ActionApi {
+                id: id_str.clone(),
+                name: id_str,
+                tool_name: entry.tool_name,
+                params: entry.params,
+                created_at: String::new(),
+                updated_at: String::new(),
+                enabled: entry.enabled,
+                is_builtin: id.starts_with("builtin_"),
+            }
+        })
+        .collect();
+
+    result.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(result)
+}
+
+/// Get a single action by id (only enabled).
 pub fn get_action(data_dir: &str, id: &str) -> Result<Option<ActionApi>> {
     let actions = load_actions(data_dir)?;
+    Ok(actions.into_iter().find(|a| a.id == id))
+}
+
+/// Get a single action by id (including disabled). For dashboard operations.
+pub fn get_action_unfiltered(data_dir: &str, id: &str) -> Result<Option<ActionApi>> {
+    let actions = load_all_actions(data_dir)?;
     Ok(actions.into_iter().find(|a| a.id == id))
 }
 
@@ -185,6 +227,7 @@ pub fn add_action(data_dir: &str, id: &str, tool_name: &str, params: &serde_json
         params: params.clone(),
         created_at: String::new(),
         updated_at: String::new(),
+        enabled: true,
         is_builtin: false,
     })
 }
@@ -195,6 +238,7 @@ pub fn update_action(
     id: &str,
     tool_name: &str,
     params: &serde_json::Value,
+    enabled: Option<bool>,
 ) -> Result<ActionApi> {
     let mut actions = load_raw_actions(data_dir)?;
 
@@ -206,6 +250,10 @@ pub fn update_action(
 
     entry.tool_name = tool_name.to_string();
     entry.params = params.clone();
+    if let Some(e) = enabled {
+        entry.enabled = e;
+    }
+    let current_enabled = entry.enabled;
 
     save_actions_file(data_dir, actions)?;
 
@@ -216,6 +264,7 @@ pub fn update_action(
         params: params.clone(),
         created_at: String::new(),
         updated_at: String::new(),
+        enabled: current_enabled,
         is_builtin: false,
     })
 }

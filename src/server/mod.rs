@@ -290,12 +290,10 @@ async fn prompt_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let channel = match queries::get_channel_by_name(&state.pool, &channel_name).await {
-        Ok(Some(ch)) => ch,
+        Ok(Some(ch)) => Some(ch),
         Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                format!("Channel '{}' not found", channel_name),
-            );
+            // Channel not found — build system prompt using the default profile
+            None
         }
         Err(e) => {
             error!("Failed to look up channel '{}': {:?}", channel_name, e);
@@ -306,17 +304,16 @@ async fn prompt_handler(
         }
     };
 
-    let profile_name = if channel.current_profile.is_empty() {
-        "default"
-    } else {
-        &channel.current_profile
+    let profile_name = match channel.as_ref() {
+        Some(ch) if !ch.current_profile.is_empty() => &ch.current_profile,
+        _ => "default",
     };
 
     let profile_path = format!("{}/profiles/{}", state.data_dir, profile_name);
     let mut memory_store = MemoryStore::new(&profile_path);
     memory_store.load_from_disk();
 
-    let platform = channel.platform.as_deref().unwrap_or("");
+    let platform = channel.as_ref().and_then(|c| c.platform.as_deref()).unwrap_or("");
     let system_prompt = build_system_prompt(&memory_store, platform, None, profile_name);
 
     let result = format!(
@@ -546,6 +543,8 @@ struct UpdateActionRequest {
     tool_name: String,
     #[serde(default = "default_params")]
     params: serde_json::Value,
+    #[serde(default)]
+    enabled: Option<bool>,
 }
 
 fn default_params() -> serde_json::Value {
@@ -554,11 +553,11 @@ fn default_params() -> serde_json::Value {
 
 // ── Action handlers ──
 
-/// GET /actions — list all saved actions (from YAML).
+/// GET /actions — list all saved actions (from YAML), including disabled.
 async fn list_actions_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    match crate::actions::load_actions(&state.data_dir) {
+    match crate::actions::load_all_actions(&state.data_dir) {
         Ok(actions) => Json(serde_json::json!(actions)),
         Err(e) => {
             error!("Failed to list actions: {:?}", e);
@@ -591,7 +590,7 @@ async fn update_action_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateActionRequest>,
 ) -> impl IntoResponse {
-    match crate::actions::update_action(&state.data_dir, &id, &body.tool_name, &body.params) {
+    match crate::actions::update_action(&state.data_dir, &id, &body.tool_name, &body.params, body.enabled) {
         Ok(action) => Json(serde_json::json!(action)).into_response(),
         Err(e) => {
             error!("Failed to update action {}: {:?}", id, e);
@@ -618,7 +617,7 @@ async fn delete_action_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // First check if the action exists and is builtin
-    match crate::actions::get_action(&state.data_dir, &id) {
+    match crate::actions::get_action_unfiltered(&state.data_dir, &id) {
         Ok(Some(action)) => {
             if action.is_builtin {
                 return (
@@ -669,8 +668,8 @@ async fn run_action_handler(
     Path(id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    // 1. Look up the action from YAML
-    let action = match crate::actions::get_action(&state.data_dir, &id) {
+    // 1. Look up the action from YAML (including disabled, so we can error if disabled)
+    let action = match crate::actions::get_action_unfiltered(&state.data_dir, &id) {
         Ok(Some(a)) => a,
         Ok(None) => {
             return Json(serde_json::json!({
@@ -682,6 +681,14 @@ async fn run_action_handler(
             return Json(serde_json::json!({ "error": e.to_string() }));
         }
     };
+
+    // 2. Reject if the action is disabled
+    if !action.enabled {
+        return Json(serde_json::json!({
+            "error": format!("Action '{}' is disabled", action.name),
+            "is_error": true,
+        }));
+    }
 
     // 2. Create an MCP tool call with the stored params
     let mcp_call = McpToolCall {
