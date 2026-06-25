@@ -16,6 +16,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     phase_12_migrate_user_role(pool).await?;
     phase_13_migrate_actions_to_yaml(pool).await?;
     phase_14_channel_template_column(pool).await?;
+    phase_15_drop_plugin_registry(pool).await?;
     Ok(())
 }
 
@@ -1153,5 +1154,29 @@ async fn phase_14_channel_template_column(pool: &PgPool) -> Result<()> {
     .await?;
 
     tracing::info!("[migration] Phase 14 complete: template column added to channels");
+    Ok(())
+}
+
+/// Phase 15: Drop the plugin_registry table — plugin state is now managed via YAML files.
+async fn phase_15_drop_plugin_registry(pool: &PgPool) -> Result<()> {
+    // Drop the unique index first (if it exists)
+    sqlx::query(
+        r#"
+        DROP INDEX IF EXISTS idx_plugin_registry_name;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Drop the table
+    sqlx::query(
+        r#"
+        DROP TABLE IF EXISTS plugin_registry CASCADE;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!("[migration] Phase 15 complete: plugin_registry table dropped");
     Ok(())
 }

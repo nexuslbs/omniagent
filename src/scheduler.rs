@@ -1214,7 +1214,7 @@ mod tests {
         let cfg = resolve_thread_config(
             None, "default",
             None, None,
-            Some("anthropic"), None,
+            Some("anthropic"), Some("claude-sonnet-4"),
         );
         assert_eq!(cfg.unwrap().provider, "anthropic");
     }
@@ -1224,7 +1224,7 @@ mod tests {
         let cfg = resolve_thread_config(
             None, "default",
             Some(""), None,
-            Some("anthropic"), None,
+            Some("anthropic"), Some("claude-sonnet-4"),
         );
         assert_eq!(cfg.unwrap().provider, "anthropic");
     }

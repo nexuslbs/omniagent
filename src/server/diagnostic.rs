@@ -31,18 +31,21 @@ pub async fn check_db(
     }
 }
 
-/// Call plugin::list_plugins directly.
+/// Call plugins_yaml::list_plugins directly (YAML-based, no DB).
 pub async fn check_list_plugins(
     State(state): State<Arc<AppState>>,
 ) -> String {
     match tokio::time::timeout(
         Duration::from_secs(5),
-        crate::plugin::list_plugins(&state.pool),
+        tokio::task::spawn_blocking(move || {
+            crate::plugins_yaml::list_plugins(&state.data_dir)
+        }),
     )
     .await
     {
-        Ok(Ok(rows)) => format!("list_plugins ok: {} rows", rows.len()),
-        Ok(Err(e)) => format!("list_plugins error: {}", e),
+        Ok(Ok(Ok(details))) => format!("list_plugins ok: {} details", details.len()),
+        Ok(Ok(Err(e))) => format!("list_plugins error: {}", e),
+        Ok(Err(_)) => "list_plugins join error".to_string(),
         Err(_) => "list_plugins timeout after 5s".to_string(),
     }
 }
@@ -52,58 +55,51 @@ pub async fn check_enrich_json(
     State(state): State<Arc<AppState>>,
 ) -> String {
     let t0 = std::time::Instant::now();
-    let rows = match crate::plugin::list_plugins(&state.pool).await {
-        Ok(r) => r,
+    let details = match crate::plugins_yaml::list_plugins(&state.data_dir) {
+        Ok(d) => d,
         Err(e) => return format!("list error: {} ({}ms)", e, t0.elapsed().as_millis()),
     };
     let t1 = std::time::Instant::now();
 
-    // Enrich row by row with per-row timing
-    let mut details = Vec::new();
-    for (i, row) in rows.iter().enumerate() {
+    // Serialize to json with per-item timing
+    for (i, detail) in details.iter().enumerate() {
         let rt = std::time::Instant::now();
-        let detail = crate::plugin::enrich_plugin(row);
+        let _json = serde_json::to_value(detail);
         let elapsed = rt.elapsed();
         if elapsed.as_millis() > 50 {
-            return format!("HANG at row {}: enrich took {}ms", i, elapsed.as_millis());
+            return format!("HANG at item {}: serialize took {}ms", i, elapsed.as_millis());
         }
-        details.push(detail);
     }
-    let t2 = std::time::Instant::now();
-
-    // JSON construction
-    let _val = serde_json::json!({
-        "success": true,
-        "data": details
-    });
-    let t3 = std::time::Instant::now();
 
     format!(
-        "list={}ms enrich={}ms json={}ms total={}ms rows={}",
-        (t1 - t0).as_millis(),
-        (t2 - t1).as_millis(),
-        (t3 - t2).as_millis(),
-        t0.elapsed().as_millis(),
+        "enrich+json ok: {} details, list={}ms, total={}ms",
         details.len(),
+        t1.duration_since(t0).as_millis(),
+        t0.elapsed().as_millis()
     )
 }
 
-/// Read .env file using spawn_blocking (safe pattern).
+/// Check environment variables (for debugging env resolution).
 pub async fn check_env_read(
     State(state): State<Arc<AppState>>,
 ) -> String {
-    let env_path = state.env_path.clone();
-    match tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::task::spawn_blocking(move || {
-            std::fs::read_to_string(&env_path)
-        }),
-    )
-    .await
-    {
-        Ok(Ok(Ok(content))) => format!("env read ok: {} chars", content.len()),
-        Ok(Ok(Err(e))) => format!("env read io error: {}", e),
-        Ok(Err(e)) => format!("env read join error: {}", e),
-        Err(_) => "env read timeout after 5s".to_string(),
+    let vars = [
+        "OMNI_DATA_DIR",
+        "WORKSPACE_DIR",
+        "LLM_PROVIDER",
+        "LLM_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "OPENCODE_GO_API_KEY",
+        "HOST",
+        "PORT",
+    ];
+    let mut result = String::new();
+    for var in &vars {
+        let val = std::env::var(var).unwrap_or_else(|_| "(not set)".to_string());
+        result.push_str(&format!("{}={}\n", var, val));
     }
+    result.push_str(&format!("env_path={}\n", state.env_path));
+    result
 }

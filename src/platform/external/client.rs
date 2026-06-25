@@ -386,6 +386,7 @@ impl Platform for ExternalPlatformClient {
                                                         if inbound.text.starts_with("//model") {
                                                             let reply = handle_external_model_command(
                                                                 &pool,
+                                                                &self.data_dir,
                                                                 channel.id,
                                                                 &inbound.text,
                                                             ).await;
@@ -547,6 +548,7 @@ impl Platform for ExternalPlatformClient {
 /// Returns the reply text to deliver back to the user.
 async fn handle_external_model_command(
     pool: &sqlx::PgPool,
+    data_dir: &str,
     channel_id: i64,
     text: &str,
 ) -> String {
@@ -572,7 +574,7 @@ async fn handle_external_model_command(
             // Validate provider if provided
             if let Some(ref p) = provider {
                 if !p.is_empty() {
-                    if let Err(e) = crate::commands::validate_provider(pool, p).await {
+                    if let Err(e) = crate::commands::validate_provider(data_dir, p) {
                         return format!("Error: {}", e);
                     }
                 }

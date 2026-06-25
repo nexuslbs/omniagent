@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 use omniagent::{
-    agent, db, mcp, platform, plugin, server, scheduler, vectorizer,
+    agent, db, mcp, platform, server, scheduler, vectorizer,
 };
 
 /// OmniAgent — autonomous agent system with Postgres, pgvector, MCP tools.
@@ -45,13 +45,6 @@ async fn run_server() -> Result<()> {
     // Run migrations
     db::migrations::run(&pool).await?;
     tracing::info!("Database migrations completed");
-
-    // Sync plugins from disk after migrations
-    let data_dir = env_or_default("OMNI_DATA_DIR", "/opt/data");
-    let _workspace_dir = env_or_default("WORKSPACE_DIR", "/opt/workspace");
-    if let Err(e) = plugin::sync_plugins_from_disk(&pool, &data_dir).await {
-        tracing::warn!("Plugin sync failed (non-fatal): {:?}", e);
-    }
 
     // Determine data directory (default: /opt/data)
     let data_dir = env_or_default("OMNI_DATA_DIR", "/opt/data");

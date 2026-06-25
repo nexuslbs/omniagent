@@ -1,24 +1,20 @@
-//! Plugin management system — types, DB queries, manifest loading, and disk sync.
+//! Plugin management system — manifest types, installer, and dynamic enum refresh.
 //!
-//! This module provides the backend infrastructure for managing plugins:
+//! This module provides:
 //! - Plugin manifest types (from plugin.json on disk)
-//! - Database CRUD operations (using sql_forge! macro)
-//! - Disk syncing (scanning plugin directories and upserting into DB)
-//! - Backward-compatible scanning of legacy config files
+//! - The installer module (install/uninstall/discover)
+//! - Dynamic enum cache for refreshing model lists from external APIs
+//!
+//! Plugin state (enabled/disabled + config) is managed via YAML files
+//! in the `plugins_yaml` module.
 
 pub mod installer;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use sql_forge::sql_forge;
-use sqlx::{FromRow, PgPool};
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Mutex;
-
-use crate::llm::resolve_llm_api_key;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -120,57 +116,6 @@ pub enum FieldType {
 }
 
 // ---------------------------------------------------------------------------
-// DB Row type
-// ---------------------------------------------------------------------------
-
-/// A row from the plugin_registry table.
-#[derive(Debug, Clone, FromRow, Serialize)]
-pub struct PluginRegistryRow {
-    pub id: i64,
-    pub name: String,
-    pub plugin_type: String,
-    pub version: String,
-    pub source: Option<String>,
-    pub status: String,
-    pub manifest: serde_json::Value,
-    pub config: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// Enriched plugin response for the API (includes parsed schema from manifest).
-#[derive(Debug, Clone, Serialize)]
-pub struct PluginDetail {
-    pub id: i64,
-    pub name: String,
-    pub plugin_type: String,
-    pub version: String,
-    pub source: Option<String>,
-    pub status: String,
-    pub manifest: serde_json::Value,
-    pub config: serde_json::Value,
-    pub config_schema: Vec<ConfigSchemaField>,
-    /// Resolved environment variables from the manifest's env block.
-    /// ${VAR} references are resolved against the process environment.
-    /// Merged with DB config: DB config values take precedence over env.
-    #[serde(default)]
-    pub resolved_env: HashMap<String, String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-/// Parameters for [`upsert_plugin`].
-#[derive(Debug, Clone)]
-pub struct UpsertPluginParams<'a> {
-    pub name: &'a str,
-    pub plugin_type: &'a str,
-    pub version: &'a str,
-    pub source: Option<&'a str>,
-    pub manifest: &'a serde_json::Value,
-    pub config: &'a serde_json::Value,
-}
-
-// ---------------------------------------------------------------------------
 // Default helpers
 // ---------------------------------------------------------------------------
 
@@ -199,427 +144,21 @@ pub fn load_manifest(path: &str) -> Result<PluginManifest> {
 }
 
 // ---------------------------------------------------------------------------
-// DB query functions (all use sql_forge! macro)
+// Dynamic enum refresh (refresh_url support) — cache shared with plugins_yaml
 // ---------------------------------------------------------------------------
 
-/// List all plugins in the registry.
-pub async fn list_plugins(pool: &PgPool) -> Result<Vec<PluginRegistryRow>> {
-    let rows: Vec<PluginRegistryRow> = sql_forge!(
-        PluginRegistryRow,
-        r#"
-        SELECT id, name, plugin_type, version, source, status, manifest, config,
-               created_at, updated_at
-        FROM plugin_registry
-        ORDER BY name ASC
-        "#
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to list plugins: {}", e))?;
-    Ok(rows)
+/// A cached set of dynamic enum values (e.g., model IDs from a /v1/models endpoint).
+pub struct DynamicEnumEntry {
+    pub values: Vec<String>,
+    pub fetched_at: std::time::Instant,
 }
 
-/// Get a single plugin by name.
-pub async fn get_plugin_by_name(pool: &PgPool, name: &str) -> Result<Option<PluginRegistryRow>> {
-    let row: Option<PluginRegistryRow> = sql_forge!(
-        PluginRegistryRow,
-        r#"
-        SELECT id, name, plugin_type, version, source, status, manifest, config,
-               created_at, updated_at
-        FROM plugin_registry
-        WHERE name = :name
-        "#,
-        ( :name = name )
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to get plugin '{}': {}", name, e))?;
-    Ok(row)
-}
-
-/// Upsert a plugin (INSERT ON CONFLICT UPDATE).
-pub async fn upsert_plugin(
-    pool: &PgPool,
-    p: UpsertPluginParams<'_>,
-) -> Result<PluginRegistryRow> {
-    let row: PluginRegistryRow = sql_forge!(
-        PluginRegistryRow,
-        r#"
-        INSERT INTO plugin_registry (name, plugin_type, version, source, status, manifest, config)
-        VALUES (:name, :plugin_type, :version, :source, 'disabled', :manifest::jsonb, :config::jsonb)
-        ON CONFLICT (name) DO UPDATE SET
-            plugin_type = EXCLUDED.plugin_type,
-            version = EXCLUDED.version,
-            source = EXCLUDED.source,
-            manifest = EXCLUDED.manifest,
-            updated_at = NOW()
-        RETURNING id, name, plugin_type, version, source, status, manifest, config,
-                  created_at, updated_at
-        "#,
-        ( :name = p.name,
-          :plugin_type = p.plugin_type,
-          :version = p.version,
-          :source = p.source.unwrap_or(""),
-          :manifest = p.manifest,
-          :config = p.config )
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to upsert plugin '{}': {}", p.name, e))?;
-    Ok(row)
-}
-
-/// Update only the config field of a plugin.
-pub async fn update_plugin_config(
-    pool: &PgPool,
-    name: &str,
-    config: &serde_json::Value,
-) -> Result<PluginRegistryRow> {
-    let row: PluginRegistryRow = sql_forge!(
-        PluginRegistryRow,
-        r#"
-        UPDATE plugin_registry
-        SET config = :config::jsonb, updated_at = NOW()
-        WHERE name = :name
-        RETURNING id, name, plugin_type, version, source, status, manifest, config,
-                  created_at, updated_at
-        "#,
-        ( :config = config, :name = name )
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to update config for plugin '{}': {}", name, e))?;
-    Ok(row)
-}
-
-/// Update only the status field of a plugin.
-pub async fn update_plugin_status(
-    pool: &PgPool,
-    name: &str,
-    status: &str,
-) -> Result<PluginRegistryRow> {
-    let row: PluginRegistryRow = sql_forge!(
-        PluginRegistryRow,
-        r#"
-        UPDATE plugin_registry
-        SET status = :status, updated_at = NOW()
-        WHERE name = :name
-        RETURNING id, name, plugin_type, version, source, status, manifest, config,
-                  created_at, updated_at
-        "#,
-        ( :status = status, :name = name )
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to update status for plugin '{}': {}", name, e))?;
-    Ok(row)
-}
-
-/// Delete a plugin from the registry by name.
-pub async fn delete_plugin(pool: &PgPool, name: &str) -> Result<bool> {
-    let result = sql_forge!(
-        "DELETE FROM plugin_registry WHERE name = :name",
-        ( :name = name )
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to delete plugin '{}': {}", name, e))?;
-    Ok(result.rows_affected() > 0)
-}
-
-/// Convert a PluginRegistryRow into a PluginDetail (enriched with parsed schema + resolved env).
-pub fn enrich_plugin(row: &PluginRegistryRow) -> PluginDetail {
-    let mut config_schema = row.manifest["config_schema"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| serde_json::from_value::<ConfigSchemaField>(v.clone()).ok())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    // Populate allowed_values from dynamic enum cache for fields with refresh_url
-    for field in config_schema.iter_mut() {
-        if let Some(ref url) = field.refresh_url {
-            let cache = DYNAMIC_ENUM_CACHE.lock().expect("dynamic enum cache lock poisoned");
-            if let Some(entry) = cache.get(url) {
-                if entry.fetched_at.elapsed() < DYNAMIC_ENUM_TTL {
-                    field.allowed_values = Some(entry.values.clone());
-                }
-            }
-        }
-    }
-
-    // Resolve env vars from manifest's env block, then merge DB config on top
-    let manifest_env = row.manifest["env"].as_object().cloned().unwrap_or_default();
-    let mut resolved = HashMap::new();
-    for (key, val) in &manifest_env {
-        let raw = val.as_str().unwrap_or("");
-        let resolved_val = resolve_env_var(raw);
-        resolved.insert(key.clone(), resolved_val);
-    }
-    // DB config overrides env vars
-    if let Some(db_config) = row.config.as_object() {
-        for (key, val) in db_config {
-            resolved.insert(
-                key.clone(),
-                val.as_str().map(|s| s.to_string()).unwrap_or_default(),
-            );
-        }
-    }
-
-    // For provider plugins, resolve api_key from process env as fallback for display
-    if row.plugin_type == "provider" {
-        let name_upper = row.name.to_uppercase().replace('-', "_");
-        let provider_api_key_var = format!("{}_API_KEY", name_upper);
-        for field in &config_schema {
-            if field.key == "api_key" && !resolved.contains_key("api_key") {
-                let env_val = resolve_llm_api_key(Some(&std::env::var(&provider_api_key_var).unwrap_or_default()));
-                if !env_val.is_empty() {
-                    resolved.insert("api_key".to_string(), env_val);
-                }
-                break;
-            }
-        }
-    }
-
-    PluginDetail {
-        id: row.id,
-        name: row.name.clone(),
-        plugin_type: row.plugin_type.clone(),
-        version: row.version.clone(),
-        source: row.source.clone(),
-        status: row.status.clone(),
-        manifest: row.manifest.clone(),
-        config: row.config.clone(),
-        config_schema,
-        resolved_env: resolved,
-        created_at: row.created_at,
-        updated_at: row.updated_at,
-    }
-}
-
-/// Resolve ${VAR} references in a string against the process environment.
-/// Unresolvable references are replaced with empty string.
-fn resolve_env_var(value: &str) -> String {
-    let mut result = value.to_string();
-    loop {
-        let before = result.clone();
-        while let Some(start) = result.find("${") {
-            if let Some(end) = result[start..].find('}') {
-                let var_name = &result[start + 2..start + end];
-                match std::env::var(var_name) {
-                    Ok(val) => {
-                        result.replace_range(start..start + end + 1, &val);
-                    }
-                    Err(_) => {
-                        // Var not set — replace with empty string
-                        result.replace_range(start..start + end + 1, "");
-                    }
-                }
-            } else {
-                break;
-            }
-        }
-        if result == before {
-            break;
-        }
-    }
-    result
-}
-
-// ---------------------------------------------------------------------------
-// Dynamic enum refresh (refresh_url support)
-// ---------------------------------------------------------------------------
-
-struct DynamicEnumEntry {
-    values: Vec<String>,
-    fetched_at: std::time::Instant,
-}
-
-static DYNAMIC_ENUM_CACHE: Lazy<Mutex<HashMap<String, DynamicEnumEntry>>> =
+/// Global cache of dynamically fetched enum values, keyed by refresh_url.
+pub static DYNAMIC_ENUM_CACHE: Lazy<Mutex<HashMap<String, DynamicEnumEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-const DYNAMIC_ENUM_TTL: std::time::Duration = std::time::Duration::from_secs(300); // 5 minutes
-
-/// Fetch model IDs from an OpenAI-compatible `/v1/models` endpoint and return them.
-/// If an `api_key` is provided, it's sent as a Bearer token in the Authorization header.
-async fn fetch_enum_values(url: &str, api_key: Option<&str>) -> Result<Vec<String>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .context("Failed to build HTTP client")?;
-    let mut req = client.get(url);
-    if let Some(key) = api_key {
-        req = req.header("Authorization", format!("Bearer {}", key));
-    }
-    let resp = req
-        .send()
-        .await
-        .with_context(|| format!("Failed to fetch {}", url))?;
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .with_context(|| format!("Failed to parse response from {}", url))?;
-
-    let mut values = Vec::new();
-    if let Some(data) = json["data"].as_array() {
-        for item in data {
-            if let Some(id) = item["id"].as_str() {
-                values.push(id.to_string());
-            }
-        }
-    }
-
-    if values.is_empty() {
-        anyhow::bail!("No model IDs found in response from {} (expected {{data: [{{id: ...}}]}})", url);
-    }
-
-    Ok(values)
-}
-
-/// Refresh dynamic enum values for a specific plugin by name.
-///
-/// Fetches from the plugin's `refresh_url` (if any), updates the in-memory cache,
-/// and returns the enriched plugin detail with fresh `allowed_values`.
-/// Returns `None` if the plugin has no `refresh_url` fields.
-pub async fn refresh_plugin_models(pool: &PgPool, name: &str) -> Result<Option<PluginDetail>> {
-    let row = get_plugin_by_name(pool, name)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Plugin '{}' not found", name))?;
-
-    let mut detail = enrich_plugin(&row);
-    let mut had_refresh = false;
-
-    for field in detail.config_schema.iter_mut() {
-        let refresh_url = match &field.refresh_url {
-            Some(url) if !url.is_empty() => url.clone(),
-            _ => continue,
-        };
-        had_refresh = true;
-
-        // Resolve API key: try {NAME}_API_KEY, then LLM_API_KEY
-        let provider_key = std::env::var(format!("{}_API_KEY", name.to_uppercase().replace('-', "_"))).unwrap_or_default();
-        let api_key = {
-            let key = resolve_llm_api_key(Some(&provider_key));
-            if key.is_empty() { None } else { Some(key) }
-        };
-
-        match fetch_enum_values(&refresh_url, api_key.as_deref()).await {
-            Ok(values) => {
-                field.allowed_values = Some(values.clone());
-                let mut cache = DYNAMIC_ENUM_CACHE.lock().expect("dynamic enum cache lock poisoned");
-                cache.insert(
-                    refresh_url,
-                    DynamicEnumEntry {
-                        values,
-                        fetched_at: std::time::Instant::now(),
-                    },
-                );
-            }
-            Err(e) => {
-                tracing::warn!("Failed to refresh dynamic enum from {}: {:#}", refresh_url, e);
-                // Keep existing allowed_values if fetch fails
-            }
-        }
-    }
-
-    Ok(if had_refresh { Some(detail) } else { None })
-}
-
-// ---------------------------------------------------------------------------
-// Disk sync
-// ---------------------------------------------------------------------------
-
-/// Scan plugin directories and upsert into DB.
-///
-/// Scans:
-/// - `<data_dir>/plugins/installed/<name>/plugin.json` — user-installed
-/// - `<workspace_dir>/plugins/<type>/<name>/plugin.json` — bundled/repo plugins
-///
-/// For backward compatibility, ALSO scans:
-/// - `<data_dir>/config/platforms.json` — existing platform config
-/// - `<data_dir>/config/mcp-servers.json` — existing MCP config
-///
-/// Removes DB entries for plugins that no longer exist on disk
-/// (unless source='bundled' and the plugin still exists in the repo dir).
-pub async fn sync_plugins_from_disk(pool: &PgPool, data_dir: &str) -> Result<()> {
-    tracing::info!("Syncing plugins from disk (data_dir: {})", data_dir);
-
-    let workspace_dir =
-        std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
-
-    // Discover all plugins from disk
-    let discovered = installer::discover_plugins(data_dir, &workspace_dir);
-
-    // Track names we've seen for cleanup
-    let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for (manifest, source_type, _base_path) in &discovered {
-        let manifest_json = serde_json::to_value(manifest)
-            .unwrap_or_else(|_| serde_json::json!({}));
-        let plugin_type_str = match manifest.plugin_type {
-            PluginType::Platform => "platform",
-            PluginType::Mcp => "mcp",
-            PluginType::Provider => "provider",
-        };
-
-        match upsert_plugin(
-            pool,
-            UpsertPluginParams {
-                name: &manifest.name,
-                plugin_type: plugin_type_str,
-                version: &manifest.version,
-                source: Some(source_type),
-                manifest: &manifest_json,
-                config: &serde_json::json!({}),
-            },
-        )
-        .await
-        {
-            Ok(row) => {
-                tracing::info!(
-                    "Synced plugin '{}' (type={}, source={})",
-                    row.name,
-                    row.plugin_type,
-                    source_type
-                );
-                seen_names.insert(manifest.name.clone());
-            }
-            Err(e) => {
-                tracing::warn!("Failed to upsert plugin '{}': {:?}", manifest.name, e);
-            }
-        }
-    }
-
-    // Remove DB entries for plugins that no longer exist on disk
-    let all_db_plugins = list_plugins(pool).await?;
-    for db_plugin in &all_db_plugins {
-        if seen_names.contains(&db_plugin.name) {
-            continue;
-        }
-        // Skip bundled plugins that still exist in the repo dir
-        if db_plugin.source.as_deref() == Some("bundled") {
-            let bundled_path = format!(
-                "{}/plugins/{}/{}",
-                workspace_dir, db_plugin.plugin_type, db_plugin.name
-            );
-            if Path::new(&bundled_path).exists() {
-                continue;
-            }
-        }
-        tracing::info!(
-            "Removing stale plugin '{}' from registry (no longer on disk)",
-            db_plugin.name
-        );
-        if let Err(e) = delete_plugin(pool, &db_plugin.name).await {
-            tracing::warn!("Failed to remove stale plugin '{}': {:?}", db_plugin.name, e);
-        }
-    }
-
-    tracing::info!("Plugin sync complete ({} plugins discovered)", discovered.len());
-    Ok(())
-}
+/// How long cached enum values are considered fresh (5 minutes).
+pub const DYNAMIC_ENUM_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -743,28 +282,5 @@ mod tests {
         assert_eq!(field.min, Some(8));
         assert_eq!(field.max, Some(128));
         assert_eq!(field.format, Some("password".to_string()));
-    }
-
-    #[test]
-    fn test_enrich_plugin_with_schema() {
-        let row = PluginRegistryRow {
-            id: 1,
-            name: "test".to_string(),
-            plugin_type: "mcp".to_string(),
-            version: "1.0.0".to_string(),
-            source: Some("bundled".to_string()),
-            status: "enabled".to_string(),
-            manifest: serde_json::json!({
-                "config_schema": [
-                    {"key": "key1", "label": "Key 1", "type": "string"}
-                ]
-            }),
-            config: serde_json::json!({}),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-        let detail = enrich_plugin(&row);
-        assert_eq!(detail.config_schema.len(), 1);
-        assert_eq!(detail.config_schema[0].key, "key1");
     }
 }

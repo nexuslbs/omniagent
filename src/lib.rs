@@ -11,6 +11,7 @@ pub mod llm;
 pub mod mcp;
 pub mod platform;
 pub mod plugin;
+pub mod plugins_yaml;
 pub mod profile;
 pub mod prompt_builder;
 pub mod relevance;

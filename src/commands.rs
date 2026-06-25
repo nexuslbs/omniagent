@@ -6,7 +6,7 @@
 use anyhow::Result;
 use sqlx::PgPool;
 
-use crate::plugin;
+use crate::plugins_yaml;
 use crate::db::types::Channel;
 
 // ---------------------------------------------------------------------------
@@ -120,21 +120,19 @@ pub fn parse_model_command(input: &str) -> Result<ModelCommand> {
     }
 }
 
-/// Validate that a provider name exists in the plugin_registry with plugin_type='provider'.
+/// Validate that a provider name exists and is enabled in the providers YAML file.
 /// Returns Ok(()) if valid, Err with a message if not found.
-pub async fn validate_provider(pool: &PgPool, provider_name: &str) -> Result<()> {
-    let row = plugin::get_plugin_by_name(pool, provider_name).await?;
-    match row {
-        Some(r) if r.plugin_type == "provider" => Ok(()),
-        Some(r) => anyhow::bail!(
-            "'{}' exists but is not a provider plugin (type={})",
-            provider_name,
-            r.plugin_type
-        ),
-        None => anyhow::bail!(
+pub fn validate_provider(data_dir: &str, provider_name: &str) -> Result<()> {
+    let provider_enabled = plugins_yaml::provider_exists_and_enabled(data_dir, provider_name)
+        .map_err(|e| anyhow::anyhow!("Failed to check provider: {}", e))?;
+
+    if provider_enabled {
+        Ok(())
+    } else {
+        anyhow::bail!(
             "Unknown provider '{}'. Register it as a provider plugin first.",
             provider_name
-        ),
+        )
     }
 }
 

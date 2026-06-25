@@ -328,7 +328,7 @@ mod tests {
     fn test_update() {
         let (_d, path) = test_data_dir();
         add_action(&path, "act", "tool_a", &serde_json::json!({"p": 1})).unwrap();
-        let updated = update_action(&path, "act", "tool_b", &serde_json::json!({"p": 2})).unwrap();
+        let updated = update_action(&path, "act", "tool_b", &serde_json::json!({"p": 2}), None).unwrap();
         assert_eq!(updated.tool_name, "tool_b");
 
         let loaded = get_action(&path, "act").unwrap().unwrap();
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn test_update_nonexistent_fails() {
         let (_d, path) = test_data_dir();
-        let r = update_action(&path, "nope", "tool", &serde_json::json!({}));
+        let r = update_action(&path, "nope", "tool", &serde_json::json!({}), None);
         assert!(r.is_err());
     }
 

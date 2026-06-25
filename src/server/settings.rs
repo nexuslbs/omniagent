@@ -16,6 +16,8 @@ use std::sync::Arc;
 
 use super::AppState;
 
+use crate::plugins_yaml;
+
 /// A single option for a select-type setting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingOption {
@@ -513,7 +515,7 @@ pub async fn get_settings_handler(
 
     // Enrich LLM_PROVIDER options with dynamically loaded provider plugins
     if let Some((_, _, ref mut meta)) = defs.iter_mut().find(|(name, _, _)| name == "LLM_PROVIDER") {
-        enrich_provider_options(meta, &state.pool);
+        enrich_provider_options(meta, &state.data_dir);
     }
 
     Json(SettingsResponse {
@@ -522,22 +524,12 @@ pub async fn get_settings_handler(
 }
 
 /// Enrich LLM_PROVIDER setting options with dynamically loaded provider plugins.
-/// Falls back to hardcoded list if plugin_registry query fails.
+/// Reads enabled providers from providers.yml.
 fn enrich_provider_options(
     meta: &mut SettingMeta,
-    pool: &sqlx::PgPool,
+    data_dir: &str,
 ) {
-    // Query the plugin_registry for installed provider plugins
-    let providers = match tokio::task::block_in_place(|| {
-        let handle = tokio::runtime::Handle::current();
-        handle.block_on(async {
-            sqlx::query_as::<_, (String, String)>(
-                "SELECT name, COALESCE(manifest->>'description', name) as description FROM plugin_registry WHERE plugin_type = 'provider' AND status = 'enabled' ORDER BY name"
-            )
-            .fetch_all(pool)
-            .await
-        })
-    }) {
+    let providers = match plugins_yaml::get_enabled_providers(data_dir) {
         Ok(rows) if !rows.is_empty() => rows,
         _ => return, // Fall back to hardcoded options
     };
