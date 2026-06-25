@@ -1,0 +1,7 @@
+{
+  "name": "docker-compose",
+  "version": "0.1.0",
+  "type": "mcp",
+  "description": "Docker compose tools — run compose commands (up, down, ps, logs, exec)",
+  "config_schema": []
+}

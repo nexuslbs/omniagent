@@ -1,0 +1,13 @@
+{
+  "servers": [
+    {
+      "name": "fetch",
+      "transport": "stdio",
+      "command": "python3",
+      "args": ["plugins/mcp/fetch/server.py"],
+      "timeout_secs": 60,
+      "max_retries": 2,
+      "allowed_tools": ["*"]
+    }
+  ]
+}

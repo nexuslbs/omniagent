@@ -57,6 +57,8 @@ pub struct AppContext {
     pub pool: PgPool,
     pub readonly_pool: PgPool,
     pub data_dir: String,
+    /// Workspace directory for path validation (used by external MCP servers).
+    #[expect(dead_code)]
     pub workspace_dir: String,
     pub qdrant_url: Option<String>,
     /// Read-only memory store (MEMORY.md + USER.md) for system prompt injection.
@@ -194,24 +196,16 @@ impl McpRegistry {
 pub fn default_registry(ctx: &AppContext) -> McpRegistry {
     let mut registry = McpRegistry::new();
 
-    // Filesystem tools
-    registry.register(tools::filesystem::read_tool());
-    registry.register(tools::filesystem::write_tool());
-    registry.register(tools::filesystem::list_tool());
-    registry.register(tools::filesystem::search_tool());
-    registry.register(tools::filesystem::info_tool());
+    // ── Built-in tools are loaded from external MCP servers via plugins/mcp/ ──
+    // The following tools have been externalized to subprocess MCP servers:
+    //   fetch, filesystem, docker-compose, skills
+    // External servers are auto-discovered via load_servers_config() below.
 
-    // HTTP fetch tool
-    registry.register(tools::fetch::fetch_tool());
-
-    // Search tools
+    // Search tools (DB-dependent — stay as built-in until externalized)
     registry.register(tools::search::search_messages_tool(ctx));
     registry.register(tools::search::search_wiki_tool(ctx));
 
-    // Skill creation tool
-    registry.register(tools::skills::create_skill_tool());
-
-    // Kanban tools
+    // Kanban tools (DB-dependent)
     registry.register(tools::kanban::create_kanban_task_tool());
     registry.register(tools::kanban::list_kanban_tasks_tool());
     registry.register(tools::kanban::update_kanban_task_tool());
@@ -219,26 +213,23 @@ pub fn default_registry(ctx: &AppContext) -> McpRegistry {
     registry.register(tools::kanban::add_kanban_dependency_tool());
     registry.register(tools::kanban::remove_kanban_dependency_tool());
 
-    // Cron tools
+    // Cron tools (DB-dependent)
     registry.register(tools::cron::create_cron_job_tool());
     registry.register(tools::cron::list_cron_jobs_tool());
     registry.register(tools::cron::delete_cron_job_tool());
     registry.register(tools::cron::update_cron_job_tool());
 
-    // Memory tools
+    // Memory tools (DB-dependent)
     registry.register(tools::memory::promote_to_memory_tool());
     registry.register(tools::memory::list_memories_tool());
     registry.register(tools::memory::review_memories_tool());
     registry.register(tools::memory::manage_memory_tool());
 
-    // Metrics tool
+    // Metrics tool (DB-dependent)
     registry.register(tools::metrics::get_metrics_tool());
 
-    // Database query tool (read-only)
+    // Database query tool (DB-dependent)
     registry.register(tools::query::query_database_tool(ctx));
-
-    // Docker compose tool
-    registry.register(tools::docker::compose_tool());
 
     // Git/GitHub tools
     registry.register(tools::git::create_github_repo_tool());
@@ -257,7 +248,7 @@ pub fn default_registry(ctx: &AppContext) -> McpRegistry {
         registry.register(action_tool);
     }
 
-    // External MCP servers (load from config, best-effort)
+    // External MCP servers (load from config + plugins/mcp/, best-effort)
     let external_tools = external::client::initialize_external_tools(&ctx.data_dir);
     for tool in external_tools {
         registry.register(tool);

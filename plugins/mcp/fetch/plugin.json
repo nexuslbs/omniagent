@@ -1,0 +1,7 @@
+{
+  "name": "fetch",
+  "version": "0.1.0",
+  "type": "mcp",
+  "description": "HTTP GET tool — fetch web pages and API responses",
+  "config_schema": []
+}

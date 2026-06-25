@@ -1,0 +1,7 @@
+{
+  "name": "skills",
+  "version": "0.1.0",
+  "type": "mcp",
+  "description": "Skills tool — create reusable task procedure skills",
+  "config_schema": []
+}

@@ -1,0 +1,13 @@
+{
+  "servers": [
+    {
+      "name": "docker-compose",
+      "transport": "stdio",
+      "command": "python3",
+      "args": ["plugins/mcp/docker-compose/server.py"],
+      "timeout_secs": 310,
+      "max_retries": 1,
+      "allowed_tools": ["*"]
+    }
+  ]
+}
