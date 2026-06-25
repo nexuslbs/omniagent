@@ -864,7 +864,7 @@ pub async fn process_thread(
         if is_multi_tool {
             let multi_content = response.tool_calls
                 .iter()
-                .map(|tc| format!("{}: {}", tc.function.name, tc.function.arguments))
+                .map(|tc| format!("{}: {}", cfg.mcp.qualified_name(&tc.function.name), tc.function.arguments))
                 .collect::<Vec<_>>()
                 .join("\n");
             let multi_msg = MessageNew {
@@ -921,7 +921,7 @@ pub async fn process_thread(
                 summary_text: None,
                 is_summary: false,
                 msg_type: "tool".to_string(),
-                msg_subtype: Some(tool_name.clone()),
+                msg_subtype: Some(cfg.mcp.qualified_name(&tool_name)),
                 processing_time_ms: tool_ptime,
                 token_usage: tool_tu,
                 iteration_number: current_iter as i32,
@@ -968,7 +968,7 @@ pub async fn process_thread(
                         summary_text: None,
                         is_summary: false,
                         msg_type: "tool-result".to_string(),
-                        msg_subtype: Some(tool_name.clone()),
+                        msg_subtype: Some(cfg.mcp.qualified_name(&tool_name)),
                         processing_time_ms: Some(tool_elapsed_ms),
                         token_usage: None,
                         iteration_number: current_iter as i32,
@@ -1000,7 +1000,7 @@ pub async fn process_thread(
                         summary_text: None,
                         is_summary: false,
                         msg_type: "tool-result".to_string(),
-                        msg_subtype: Some(tool_name.clone()),
+                        msg_subtype: Some(cfg.mcp.qualified_name(&tool_name)),
                         processing_time_ms: Some(tool_elapsed_ms),
                         token_usage: None,
                         iteration_number: current_iter as i32,

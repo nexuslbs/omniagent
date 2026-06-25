@@ -148,6 +148,7 @@ pub trait McpServerClient: Send + Sync {
                 name,
                 description,
                 input_schema: schema,
+                server_name: Some(server_name.clone()),
                 handler: Arc::new(move |args: Value, _ctx: crate::mcp::AppContext| {
                     if !circuit.is_allowed() {
                         return Ok(McpToolResult {
@@ -650,8 +651,29 @@ pub fn initialize_external_tools(data_dir: &str) -> Vec<McpTool> {
     let configs = crate::mcp::external::config::load_servers_config(data_dir);
     let mut all_tools = Vec::new();
 
+    // Load enabled/disabled state from tools.yml
+    let tool_entries = match crate::plugins_yaml::load_raw(
+        data_dir,
+        &crate::plugins_yaml::PluginYamlType::Tool,
+    ) {
+        Ok(e) => e,
+        Err(_) => std::collections::BTreeMap::new(),
+    };
+
     for cfg in configs {
         let server_name = cfg.name.clone();
+
+        // Check if this server is disabled in tools.yml
+        if let Some(entry) = tool_entries.get(&server_name) {
+            if !entry.enabled {
+                tracing::info!(
+                    "Skipping disabled MCP server '{}' (set enabled: true in tools.yml to enable)",
+                    server_name
+                );
+                continue;
+            }
+        }
+        // If not in tools.yml, default to enabled (new/discovered server)
         let mut client = create_client(cfg);
 
         match client.initialize() {

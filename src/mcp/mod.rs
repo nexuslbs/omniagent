@@ -105,6 +105,7 @@ pub struct McpTool {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    pub server_name: Option<String>,
     pub handler: Arc<dyn Fn(Value, AppContext) -> Result<McpToolResult> + Send + Sync>,
 }
 
@@ -142,6 +143,20 @@ impl McpRegistry {
             .values()
             .filter(|t| allowed_names.contains(&t.name))
             .collect()
+    }
+
+    /// Get the qualified name for a tool: `server_name:name` if it has a server,
+    /// or just `name` for built-in tools and unknown tools.
+    pub fn qualified_name(&self, name: &str) -> String {
+        if let Some(tool) = self.tools.get(name) {
+            if let Some(ref sn) = tool.server_name {
+                format!("{}:{}", sn, name)
+            } else {
+                name.to_string()
+            }
+        } else {
+            name.to_string()
+        }
     }
 
     /// Execute a tool call.
@@ -196,15 +211,34 @@ impl McpRegistry {
 pub fn default_registry(ctx: &AppContext) -> McpRegistry {
     let mut registry = McpRegistry::new();
 
+    // Load enabled/disabled state from tools.yml
+    let tool_entries = crate::plugins_yaml::load_raw(
+        &ctx.data_dir,
+        &crate::plugins_yaml::PluginYamlType::Tool,
+    )
+    .unwrap_or_default();
+
     // ── Built-in tools are loaded from external MCP servers via plugins/mcp/ ──
     // All DB-dependent tools have been externalized to subprocess MCP servers:
     //   fetch, filesystem, docker-compose, skills (Python stdio)
     //   cron, kanban, search, memory, git, query, metrics, subtasks, plugin-manager (Rust stdio)
     // External servers are auto-discovered via load_servers_config() below.
     // The only remaining built-in tools are system actions that call internal Rust functions.
-    // Actions tools (built-in system actions)
+    // Actions tools (built-in system actions) — gated by tools.yml
     for action_tool in crate::mcp::tools::actions::tools() {
-        registry.register(action_tool);
+        let enabled = tool_entries
+            .get(&action_tool.name)
+            .map(|e| e.enabled)
+            // Built-in tools not in tools.yml are disabled by default
+            .unwrap_or(false);
+        if enabled {
+            registry.register(action_tool);
+        } else {
+            tracing::info!(
+                "Skipping disabled built-in tool '{}' — enable in tools.yml",
+                action_tool.name
+            );
+        }
     }
 
     // External MCP servers (load from config + plugins/mcp/, best-effort)

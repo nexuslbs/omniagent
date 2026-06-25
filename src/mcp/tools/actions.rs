@@ -26,6 +26,7 @@ fn kanban_dispatcher_tool() -> McpTool {
             "properties": {},
             "required": []
         }),
+        server_name: None,
         handler: Arc::new(|_args: Value, ctx: AppContext| -> Result<McpToolResult> {
             let pool = ctx.pool.clone();
             let data_dir = ctx.data_dir.clone();
@@ -52,6 +53,7 @@ fn relevance_indexer_tool() -> McpTool {
             "properties": {},
             "required": []
         }),
+        server_name: None,
         handler: Arc::new(|_args: Value, ctx: AppContext| -> Result<McpToolResult> {
             let pool = ctx.pool.clone();
             let data_dir = ctx.data_dir.clone();
@@ -78,6 +80,7 @@ fn hindsight_populator_tool() -> McpTool {
             "properties": {},
             "required": []
         }),
+        server_name: None,
         handler: Arc::new(|_args: Value, ctx: AppContext| -> Result<McpToolResult> {
             let pool = ctx.pool.clone();
             let data_dir = ctx.data_dir.clone();
@@ -113,6 +116,7 @@ fn setup_knowledge_pipeline_tool() -> McpTool {
             },
             "required": []
         }),
+        server_name: None,
         handler: Arc::new(|args: Value, ctx: AppContext| -> Result<McpToolResult> {
             let pool = ctx.pool.clone();
             let data_dir = ctx.data_dir.clone();

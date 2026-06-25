@@ -24,6 +24,10 @@ use crate::plugin::{ConfigSchemaField, PluginManifest, PluginType};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginYamlEntry {
     pub enabled: bool,
+    /// If true, this plugin ships with omniagent (its handler is compiled in or bundled).
+    /// Built-in tools are disabled by default when not present in the YAML file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<bool>,
     #[serde(default = "default_config")]
     pub config: serde_json::Value,
 }
@@ -219,7 +223,13 @@ pub fn set_entry(
     config: serde_json::Value,
 ) -> Result<PluginYamlEntry> {
     let mut entries = load_raw(data_dir, pt)?;
-    let entry = PluginYamlEntry { enabled, config };
+    // Preserve existing builtin flag if the entry already exists
+    let existing_builtin = entries.get(name).and_then(|e| e.builtin);
+    let entry = PluginYamlEntry {
+        enabled,
+        builtin: existing_builtin.or(Some(false)),
+        config,
+    };
     entries.insert(name.to_string(), entry.clone());
     save_file(data_dir, pt, entries)?;
     Ok(entry)
@@ -291,13 +301,82 @@ fn resolve_env_var(value: &str) -> String {
     result
 }
 
+/// Return virtual manifests for built-in action tools that live in omniagent's
+/// compiled binary (not on disk as plugin.json).
+fn builtin_mcp_manifests() -> Vec<PluginManifest> {
+    vec![
+        PluginManifest {
+            name: "actions_kanban_dispatcher".to_string(),
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::Mcp,
+            description: Some("Trigger the kanban dispatcher — picks up pending kanban tasks and creates agent threads for them.".to_string()),
+            entrypoint: None,
+            capabilities: None,
+            config_schema: vec![],
+            env: std::collections::HashMap::new(),
+            default_base_url: None,
+            api_mode: None,
+        },
+        PluginManifest {
+            name: "actions_relevance_indexer".to_string(),
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::Mcp,
+            description: Some("Trigger the relevance indexer — scans wiki files and updates the relevant-index.md based on recency and reference count.".to_string()),
+            entrypoint: None,
+            capabilities: None,
+            config_schema: vec![],
+            env: std::collections::HashMap::new(),
+            default_base_url: None,
+            api_mode: None,
+        },
+        PluginManifest {
+            name: "actions_hindsight_populator".to_string(),
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::Mcp,
+            description: Some("Trigger the hindsight populator — queries recent messages from the database and retains them into the omniagent-hindsight persistent memory store for future recall.".to_string()),
+            entrypoint: None,
+            capabilities: None,
+            config_schema: vec![],
+            env: std::collections::HashMap::new(),
+            default_base_url: None,
+            api_mode: None,
+        },
+        PluginManifest {
+            name: "actions_setup_knowledge_pipeline".to_string(),
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::Mcp,
+            description: Some("Create the Knowledge Pipeline cron job (idempotent). Sets up a periodic maintenance pipeline that summarizes channels, updates wiki/skills from thread messages, runs relevance indexing, and populates hindsight memory.".to_string()),
+            entrypoint: None,
+            capabilities: None,
+            config_schema: vec![],
+            env: std::collections::HashMap::new(),
+            default_base_url: None,
+            api_mode: None,
+        },
+    ]
+}
+
+/// Check if a tool name corresponds to a built-in action tool (compiled into omniagent).
+pub fn is_builtin_mcp_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "actions_kanban_dispatcher"
+            | "actions_relevance_indexer"
+            | "actions_hindsight_populator"
+            | "actions_setup_knowledge_pipeline"
+    )
+}
+
 /// Build a `PluginDetail` from a disk manifest and YAML state.
 fn build_plugin_detail(
     manifest: &PluginManifest,
     source: &str,
     yaml_entry: Option<&PluginYamlEntry>,
 ) -> PluginDetail {
-    let enabled = yaml_entry.map(|e| e.enabled).unwrap_or(true);
+    let enabled = yaml_entry
+        .map(|e| e.enabled)
+        // built-in tools are disabled by default when not present in YAML
+        .unwrap_or_else(|| source != "built-in");
     let config = yaml_entry
         .map(|e| e.config.clone())
         .unwrap_or(serde_json::json!({}));
@@ -403,6 +482,18 @@ pub fn list_plugins(data_dir: &str) -> Result<Vec<PluginDetail>> {
         results.push(build_plugin_detail(manifest, source, yaml_entry));
     }
 
+    // Inject built-in action tools (compiled into omniagent, no disk plugin.json)
+    for manifest in builtin_mcp_manifests() {
+        if !results.iter().any(|r| r.name == manifest.name) {
+            let yaml_entry = tool_entries.get(&manifest.name);
+            results.push(build_plugin_detail(
+                &manifest,
+                "built-in",
+                yaml_entry,
+            ));
+        }
+    }
+
     // Sort by name for deterministic ordering
     results.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(results)
@@ -428,6 +519,20 @@ pub fn get_plugin(data_dir: &str, name: &str) -> Result<Option<PluginDetail>> {
                 PluginYamlType::Provider => provider_entries.get(&manifest.name),
             };
             return Ok(Some(build_plugin_detail(manifest, source, yaml_entry)));
+        }
+    }
+
+    // Fallback: check built-in action tools
+    if is_builtin_mcp_tool(name) {
+        let yaml_entry = tool_entries.get(name);
+        for manifest in builtin_mcp_manifests() {
+            if manifest.name == name {
+                return Ok(Some(build_plugin_detail(
+                    &manifest,
+                    "built-in",
+                    yaml_entry,
+                )));
+            }
         }
     }
 
@@ -501,6 +606,10 @@ pub fn get_disk_plugin_type(data_dir: &str, name: &str) -> Result<Option<String>
             };
             return Ok(Some(type_str.to_string()));
         }
+    }
+    // Fallback: check built-in action tools
+    if is_builtin_mcp_tool(name) {
+        return Ok(Some("mcp".to_string()));
     }
     Ok(None)
 }
