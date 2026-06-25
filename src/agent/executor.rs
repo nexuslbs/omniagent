@@ -33,7 +33,7 @@ pub async fn process_thread(
     // The claim_thread function already set status='processing' and started_at=NOW()
 
     // 2. Get current message count for this thread
-    let current_msg_count = queries::count_thread_messages(&cfg.pool, thread.id)
+    let _current_msg_count = queries::count_thread_messages(&cfg.pool, thread.id)
         .await
         .unwrap_or(0);
 
@@ -533,14 +533,16 @@ pub async fn process_thread(
 
     // 6. Tool-calling loop — max iterations controls total LLM calls
     let iter_limit = queries::max_iterations_for_planning_mode(&cfg.config, &thread.planning_mode) as i32;
-    let remaining = iter_limit - current_msg_count;
-    let max_llm_calls = remaining.max(0) as u32; // use the actual configured iteration limit
+    // The plan phase consumed 1 iteration (if it ran). Subtract it so the
+    // tool-calling loop gets the remaining budget.
+    let plan_consumed = if should_plan { 1 } else { 0 };
+    let max_llm_calls = (iter_limit - plan_consumed).max(0) as u32;
     let mut final_content = String::new();
     let mut final_reasoning: Option<String> = None;
     let mut final_tool_call: bool = false;
     let mut limit_reached: bool = false;
     let mut last_response_usage: Option<Usage> = None;
-    current_iter = 1; // plan was iteration 1
+    current_iter = plan_consumed; // 0 for prompt_only, 1 if plan already ran
     let mut unfinished_subtask_retries: u32 = 0;
     let mut calls_since_subtask_management: u32 = 0;
 
@@ -1054,10 +1056,10 @@ pub async fn process_thread(
             "I've completed the requested operations using my available tools.".to_string();
     } else if final_content.is_empty() && final_tool_call {
         // The loop exhausted all iterations while the LLM was still issuing tool
-        // calls — no final answer was produced. Mark as failed with a clear message
-        // rather than a misleading "empty_response" error.
+        // calls — no final answer was produced. Set limit_reached (interrupted)
+        // rather than force_failed so the thread is correctly marked as
+        // interrupted (can be resumed) instead of failed (dead end).
         final_content = "The task ran out of iterations while still processing tools — no final answer was produced.".to_string();
-        force_failed = true;
         limit_reached = true;
     }
 
@@ -1316,7 +1318,9 @@ pub async fn process_thread(
     // Post-loop subtask enforcement: if any subtasks remain pending/in_progress
     // after the tool-calling loop ends (regardless of why it ended), fail the thread.
     // Subtasks must only be marked completed/cancelled by the LLM via manage_subtasks tool.
-    if enable_subtasks && !force_failed && final_status == "completed" {
+    // Exception: if the iteration limit was reached, unfinished subtasks are expected
+    // — keep the interrupted status rather than downgrading to failed.
+    if enable_subtasks && !force_failed && !limit_reached && final_status == "completed" {
         if let Ok(post_subtasks) = crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
             let unfinished: Vec<_> = post_subtasks.iter()
                 .filter(|st| st.status == "pending" || st.status == "in_progress")

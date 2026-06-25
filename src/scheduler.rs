@@ -1058,7 +1058,7 @@ pub async fn setup_knowledge_pipeline(
 
     // Defaults
     let schedule = schedule.unwrap_or_else(|| "0 */6 * * *".to_string());
-    let default_prompt = "RUN these SQL queries:\nSELECT id, name FROM channels WHERE closed = false;\nSELECT channel_id, COUNT(*)::int as cnt FROM summaries GROUP BY channel_id;\nSELECT id, profile FROM threads WHERE status='completed' AND created_at > NOW() - INTERVAL '7 days';\n\nTHEN call actions_relevance_indexer\nTHEN call actions_hindsight_populator\nTHEN produce a summary\n\nONLY available tools: query_database, actions_relevance_indexer, actions_hindsight_populator. Do not explore.".to_string();
+    let default_prompt = "# Knowledge Pipeline\n\nYou have only 10 iterations. Follow exactly in order.\n\n## Step 1 (iteration 1)\nquery_database({\"operation\": \"query\", \"sql\": \"SELECT id, name FROM channels WHERE closed = false;\"})\n\n## Step 2 (iteration 2)\nquery_database({\"operation\": \"query\", \"sql\": \"SELECT channel_id, COUNT(*)::int as cnt FROM summaries GROUP BY channel_id;\"})\n\n## Step 3 (iteration 3)\nquery_database({\"operation\": \"query\", \"sql\": \"SELECT id, profile FROM threads WHERE status='completed' AND created_at > NOW() - INTERVAL '7 days';\"})\n\n## Step 4 (iteration 4)\nactions_relevance_indexer — call directly, no inputs needed.\n\n## Step 5 (iteration 5)\nactions_hindsight_populator — call directly, no inputs needed. If it fails, continue to Step 6.\n\n## Step 6 (iterations 6-10)\nProduce a brief summary of the 3 query results + the 2 actions called.\n\n## CRITICAL RULES\n- Do NOT use: search_thread_messages, search_channel_prompts, search_messages, filesystem_list, search_wiki, manage_subtasks\n- Only 10 iterations total. Budget them tightly.\n- If a query fails, retry ONCE. If still fails, skip and continue.\n- After all steps, output the final summary. That is your last action.".to_string();
     let prompt = prompt.unwrap_or(default_prompt);
 
     let existing = sqlx::query_scalar::<_, String>(
@@ -1124,7 +1124,7 @@ fn ensure_knowledge_pipeline_template(data_dir: &str) -> Result<(), String> {
         let pipeline_path = pipeline_dir.join("knowledge-pipeline.md");
         if !pipeline_path.exists() {
             let _ = fs::create_dir_all(&pipeline_dir);
-            let _ = fs::write(&pipeline_path, DEFAULT_KNOWLEDGE_PIPELINE_TEMPLATE);
+            let _ = fs::write(&pipeline_path, "Execute the Knowledge Pipeline according to the task template above.");
         }
         return Ok(());
     }
