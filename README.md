@@ -366,7 +366,7 @@ VALUES ('cron_abc123', 'hourly-report', 'Hourly Report', '0 * * * *', 'Generate 
 
 ### Execution Modes
 
-- **`agentic`** (default): Normal cron agent execution — the prompt is sent to the LLM for processing, with full tool access and reasoning. When `instruction_file` is set, the template content is injected as a "Task Template" block before the prompt.
+- **`agentic`** (default): Normal cron agent execution — the prompt is sent to the LLM for processing, with full tool access and reasoning. When `template` is set, the template content is injected as a "Task Template" block before the prompt.
 - **`action`**: Executes a registered action from the `actions` table (user-defined or built-in). The action's MCP tool is called with its saved parameters. No LLM call is made — the action runs as a direct Rust function or MCP tool invocation. Optional `silent` mode suppresses thread creation on success (only creates error threads).
 
 ### Cron Planning Mode

@@ -809,9 +809,9 @@ async fn phase_4_indexes_and_columns(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // ── Add instruction_file column to cron_jobs ──
+    // ── Add template column to cron_jobs ──
     sqlx::query(
-        r#"ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS instruction_file TEXT DEFAULT '';"#,
+        r#"ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS template TEXT DEFAULT '';"#,
     )
     .execute(pool)
     .await?;

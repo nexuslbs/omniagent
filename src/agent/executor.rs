@@ -244,7 +244,7 @@ pub async fn process_thread(
                 .filter(|s| !s.is_empty())
                 .or_else(|| {
                     cause_msg.metadata
-                        .get("instruction_file")
+                        .get("template")
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.is_empty())
                 });

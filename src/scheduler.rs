@@ -34,7 +34,7 @@ struct CronJobDueRow {
     mode: Option<String>,
     action_id: Option<String>,
     silent: Option<bool>,
-    instruction_file: Option<String>,
+    template: Option<String>,
     planning_mode: String,
 }
 
@@ -325,7 +325,7 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
                     "scheduled_at": job.schedule,
                     "channel_id": channel.id,
                     "profile": profile_name,
-                    "instruction_file": job.instruction_file.as_deref().unwrap_or(""),
+                    "template": job.template.as_deref().unwrap_or(""),
                 }),
                 msg_type: "cron".to_string(),
                 msg_subtype: Some(subtype),
@@ -367,7 +367,7 @@ async fn fetch_due_jobs(pool: &PgPool) -> Result<Vec<CronJobDueRow>> {
     let rows: Vec<CronJobDueRow> = sql_forge!(
         CronJobDueRow,
         r#"
-        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id, silent, instruction_file, planning_mode
+        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id, silent, template, planning_mode
         FROM cron_jobs
         WHERE enabled = true
           AND active = true
@@ -872,7 +872,7 @@ pub async fn fire_cron_job_by_id(
     let jobs: Vec<CronJobDueRow> = sql_forge!(
         CronJobDueRow,
         r#"
-        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id, silent, instruction_file, planning_mode
+        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id, silent, template, planning_mode
         FROM cron_jobs
         WHERE id = :id
         LIMIT 1
@@ -1039,7 +1039,7 @@ pub async fn fire_cron_job_by_id(
                 "scheduled_at": job.schedule,
                 "channel_id": channel.id,
                 "profile": profile_name,
-                "instruction_file": job.instruction_file.as_deref().unwrap_or(""),
+                "template": job.template.as_deref().unwrap_or(""),
             }),
             msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
@@ -1127,7 +1127,7 @@ pub async fn setup_knowledge_pipeline(
 
     sql_forge!(
         r#"
-        INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, mode, instruction_file, planning_mode, profile, enabled, active)
+        INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, mode, template, planning_mode, profile, enabled, active)
         VALUES (:id, 'knowledge-pipeline', 'Knowledge Pipeline', :schedule, :prompt, :skills, 'agentic', '', 'prompt_only', 'pipeline', true, true)
         "#,
         ( :id = &id, :schedule = &schedule, :prompt = &prompt, :skills = &skills_json )

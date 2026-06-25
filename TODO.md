@@ -10,10 +10,10 @@
 - [x] Bench: saves ~600 chars/tokens per turn — immediate token reduction
 
 #### Templates for Kanban & Cron Tasks
-- [x] **Migration:** Add `template TEXT` to `kanban_tasks`, `instruction_file TEXT` to `cron_jobs`
+- [x] **Migration:** Add `template TEXT` to `kanban_tasks`, `template TEXT` to `cron_jobs`
 - [x] **Template loader:** `load_template(data_dir, profile, template_name)` in `prompt_builder.rs`
 - [x] **Kanban dispatcher (scheduler.rs):** Fetch `template` from task, store in cause message metadata
-- [x] **Cron scheduler (scheduler.rs):** Fetch `instruction_file` from job, store in cause message metadata
+- [x] **Cron scheduler (scheduler.rs):** Fetch `template` from job, store in cause message metadata
 - [x] **process_thread (agent/mod.rs):** If cause is kanban/cron with template metadata, load template and inject as system message
 - [x] **Template example:** Created `code-improvement.md` sample at `/opt/data/profiles/default/templates/`
 - [x] **MCP tool (kanban.rs):** Added `template` parameter to `create_kanban_task` tool
@@ -42,7 +42,7 @@
 - [x] Impact: Richer cross-session memory retrieval
 
 ### 🔲 Future Ideas
-- [ ] Cron editing tool (mcp) — add `template`/`instruction_file` field to cron edit UI
+- [ ] Cron editing tool (mcp) — add `template`/`template` field to cron edit UI
 - [ ] Kanban task editing tool (mcp) — add `template` field update
 - [ ] Template listing/management MCP tool
 - [ ] Dashboard UI for template management
