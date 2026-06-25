@@ -15,6 +15,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     phase_11_rename_tool_result_msg_type(pool).await?;
     phase_12_migrate_user_role(pool).await?;
     phase_13_migrate_actions_to_yaml(pool).await?;
+    phase_14_channel_template_column(pool).await?;
     Ok(())
 }
 
@@ -1137,5 +1138,20 @@ async fn phase_13_migrate_actions_to_yaml(pool: &PgPool) -> Result<()> {
         .await?;
 
     tracing::info!("[migration] Phase 13 complete: actions table dropped, FK removed");
+    Ok(())
+}
+
+/// Phase 14: Add template column to channels table.
+async fn phase_14_channel_template_column(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        ALTER TABLE channels
+        ADD COLUMN IF NOT EXISTS template TEXT DEFAULT ''
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!("[migration] Phase 14 complete: template column added to channels");
     Ok(())
 }

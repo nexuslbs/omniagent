@@ -23,6 +23,7 @@ pub async fn find_all_channels(pool: &PgPool) -> anyhow::Result<Vec<Channel>> {
             readonly,
             COALESCE(closed, false) as "closed",
             '{}'::text AS "metadata",
+            COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
         FROM channels
@@ -49,8 +50,8 @@ pub async fn get_channel_by_name(pool: &PgPool, name: &str) -> anyhow::Result<Op
             readonly,
             COALESCE(closed, false) as "closed",
             '{}'::text AS "metadata",
-            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
+            COALESCE(template, '') AS "template",
+            COALESCE(TO_CHAR(created_at
         FROM channels
         WHERE name = :name
         "#,
@@ -80,6 +81,7 @@ pub async fn get_channel_by_platform_name(
             readonly,
             COALESCE(closed, false) as "closed",
             '{}'::text AS "metadata",
+            COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
         FROM channels
@@ -110,6 +112,7 @@ pub async fn find_channel_by_id(
             readonly,
             COALESCE(closed, false) as "closed",
             '{}'::text AS "metadata",
+            COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
         FROM channels
@@ -138,6 +141,7 @@ pub async fn get_channel_by_id(pool: &PgPool, channel_id: i64) -> anyhow::Result
             readonly,
             COALESCE(closed, false) as "closed",
             COALESCE(metadata::text, '{}') AS "metadata",
+            COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
         FROM channels
@@ -171,6 +175,7 @@ pub async fn create_channel(
             readonly,
             COALESCE(closed, false) as "closed",
             COALESCE(metadata::text, '{}') AS "metadata",
+            COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
         "#,
@@ -201,6 +206,7 @@ pub async fn get_channel_by_platform_and_resource(
             readonly,
             COALESCE(closed, false) as "closed",
             COALESCE(metadata::text, '{}') AS "metadata",
+            COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
         FROM channels
@@ -244,6 +250,7 @@ pub async fn update_channel_platform(
             readonly,
             COALESCE(closed, false) as "closed",
             '{}'::text AS "metadata",
+            COALESCE(template, '') AS "template",
             ''::text AS "created_at",
             ''::text AS "updated_at"
         FROM channels
@@ -410,6 +417,7 @@ pub async fn is_channel_closed(pool: &PgPool, channel_id: i64) -> anyhow::Result
             readonly,
             COALESCE(closed, false) as "closed",
             '{}'::text AS "metadata",
+            COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
         FROM channels

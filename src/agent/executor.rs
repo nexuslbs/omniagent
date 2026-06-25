@@ -234,10 +234,10 @@ pub async fn process_thread(
         }
     };
 
-    // 4b. Load template from cause message metadata (for kanban/cron tasks)
+    // 4b. Load template from cause message metadata (for kanban/cron/user tasks)
     let template_section: Option<String> = {
         let msg_type = cause_msg.msg_type.as_str();
-        if msg_type == "kanban" || msg_type == "cron" {
+        if msg_type == "kanban" || msg_type == "cron" || msg_type == "user" {
             let template_name = cause_msg.metadata
                 .get("template")
                 .and_then(|v| v.as_str())

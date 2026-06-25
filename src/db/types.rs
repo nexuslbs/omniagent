@@ -156,6 +156,7 @@ pub struct ChannelDb {
     pub readonly: bool,
     pub closed: Option<bool>,
     pub metadata: Option<String>,
+    pub template: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
 }
@@ -177,6 +178,7 @@ impl TryFrom<ChannelDb> for Channel {
             readonly: db.readonly,
             closed: db.closed.unwrap_or(false),
             metadata: db.metadata.as_deref().map(|s| serde_json::from_str(s).unwrap_or_default()).unwrap_or_default(),
+            template: db.template.filter(|t| !t.is_empty()),
             created_at: db
                 .created_at
                 .as_deref()
@@ -337,6 +339,7 @@ pub struct Channel {
     pub readonly: bool,
     pub closed: bool,
     pub metadata: serde_json::Value,
+    pub template: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -356,6 +359,7 @@ impl Default for Channel {
             readonly: false,
             closed: false,
             metadata: serde_json::Value::Object(serde_json::Map::new()),
+            template: None,
             created_at: DateTime::from_timestamp(0, 0).unwrap_or(DateTime::UNIX_EPOCH),
             updated_at: DateTime::from_timestamp(0, 0).unwrap_or(DateTime::UNIX_EPOCH),
         }

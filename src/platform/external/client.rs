@@ -445,9 +445,17 @@ impl Platform for ExternalPlatformClient {
                                                                 schedule_task_id: None,
                                                                 content: inbound.text.clone(),
                                                                 external_id: Some(inbound.external_id),
-                                                                metadata: inbound.metadata,
-                                                                msg_type: "message".to_string(),
-                                                                msg_subtype: None,
+                                                                metadata: {
+                                                                    let mut meta = inbound.metadata.clone();
+                                                                    if let Some(ref t) = channel.template {
+                                                                        if !t.is_empty() {
+                                                                            meta["template"] = serde_json::json!(t);
+                                                                        }
+                                                                    }
+                                                                    meta
+                                                                },
+                                                                msg_type: "user".to_string(),
+                                                                msg_subtype: Some(plugin_name.clone()),
                                                                 task_planning_mode: String::new(),
                                                             },
                                                         ).await {
