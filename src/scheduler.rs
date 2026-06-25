@@ -1021,7 +1021,7 @@ pub async fn fire_cron_job_by_id(
     let prompt_content = job.prompt.clone().unwrap_or_default();
     let (thread, _created) = queries::create_thread_with_cause(
         pool,
-        "system",
+        "user",
         channel.id,
         &profile_name,
         queries::ThreadCauseParams {
