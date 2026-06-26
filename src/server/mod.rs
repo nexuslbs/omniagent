@@ -836,7 +836,7 @@ async fn context_preview_handler(
 
     // Build context — same function the agent uses
     let qdrant_url = std::env::var("QDRANT_URL").ok();
-    let (context_text, _meta) = crate::context_builder::build_thread_context(
+    let (context_text, meta) = crate::context_builder::build_thread_context(
         &state.pool,
         &crate::context_builder::ThreadContextIdentifiers {
             thread_id,
@@ -854,7 +854,7 @@ async fn context_preview_handler(
         },
     ).await;
 
-    (StatusCode::OK, Json(serde_json::json!({ "context": context_text })))
+    (StatusCode::OK, Json(serde_json::json!({ "context": context_text, "timings": meta.step_timings_ms })))
 }
 
 #[cfg(test)]

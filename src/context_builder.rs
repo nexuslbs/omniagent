@@ -120,6 +120,9 @@ pub struct ContextAssemblyMeta {
     pub dropped_blocks: Vec<String>,
     /// Total assembled character count.
     pub total_chars: usize,
+    /// Timing in milliseconds for each context assembly step.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub step_timings_ms: HashMap<String, u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +267,7 @@ impl ContextBuilder {
             block_counts,
             dropped_blocks,
             total_chars: result.len(),
+            step_timings_ms: HashMap::new(),
         };
 
         (result, meta)
@@ -318,7 +322,9 @@ pub async fn build_thread_context(
 ) -> (String, ContextAssemblyMeta) {
     use crate::db::types as queries;
     use crate::vectorizer::{vector_to_string, HashVectorizer, Vectorizer};
+    use std::time::Instant;
 
+    let mut timings: HashMap<String, u64> = HashMap::new();
     let mut builder = ContextBuilder::new().with_budget(config.prompt_budget);
 
     // Classify the user message to determine retrieval needs
@@ -334,6 +340,7 @@ pub async fn build_thread_context(
     };
 
     // Add recent thread messages as a high-priority context block
+    let _start_recent = Instant::now();
     match queries::get_recent_thread_messages(pool, ids.thread_id, 10).await {
         Ok(recent_msgs) => {
             if !recent_msgs.is_empty() {
@@ -359,6 +366,8 @@ pub async fn build_thread_context(
         }
     }
 
+    timings.insert("recent_thread_messages".to_string(), _start_recent.elapsed().as_millis() as u64);
+    let _start_summary = Instant::now();
     // Add last summary for this channel as high-priority context
     match queries::get_latest_summary(pool, ids.channel_id).await {
         Ok(Some(summary)) => {
@@ -396,6 +405,8 @@ pub async fn build_thread_context(
     }
 
     // Add profile skills as context
+    timings.insert("last_summary".to_string(), _start_summary.elapsed().as_millis() as u64);
+    let _start_skills = Instant::now();
     let skills_dir = format!("{}/profiles/{}/skills", config.data_dir, config.profile_name);
     match tokio::task::spawn_blocking(move || -> Vec<String> {
         let mut skills = Vec::new();
@@ -433,6 +444,7 @@ pub async fn build_thread_context(
 
     // ── RRF (Reciprocal Rank Fusion) helper ──
     // RRF combines multiple ranked result sets into a single fused ranking.
+    timings.insert("profile_skills".to_string(), _start_skills.elapsed().as_millis() as u64);
     // score(r) = Σ 1/(k + rank_i(r)) for each result set i
     const RRF_K: f64 = 60.0;
     const RRF_TEXT_WEIGHT: f64 = 1.0;
@@ -449,6 +461,7 @@ pub async fn build_thread_context(
         if !search_terms.is_empty() {
             let search_query = search_terms.join(" ");
 
+    let _start_search = Instant::now();
             // ── Hybrid message search (text + semantic fused via RRF) ──
             // Collect results from both sources, then fuse
             let text_msgs = queries::search_messages_text(pool, &search_query, ids.channel_id, 10).await
@@ -522,11 +535,13 @@ pub async fn build_thread_context(
                     &format!("Retrieved from past conversations (hybrid search):\n{}", retrieved),
                     4_000,  // increased budget for hybrid results
                 ));
+    timings.insert("hybrid_message_search".to_string(), _start_search.elapsed().as_millis() as u64);
             }
 
             // ── Hybrid wiki search (text + Qdrant semantic fused via RRF) ──
             // Collect results from both wiki text search and Qdrant, then fuse
             let wiki_dir = format!("{}/profiles/{}/wiki", config.data_dir, config.profile_name);
+            let _start_wiki = Instant::now();
             let wiki_text_results = queries::search_wiki_text(&wiki_dir, &search_query, 5);
 
             let qdrant_results = if aggressiveness >= 2 {
@@ -592,9 +607,11 @@ pub async fn build_thread_context(
                     4_000,  // increased from 2_000
                 ));
             }
+            timings.insert("wiki_search".to_string(), _start_wiki.elapsed().as_millis() as u64);
         }
     }
 
+    let _start_hindsight = Instant::now();
     // ── Hindsight memory recall ──
     // If hindsight is configured (via HINDSIGHT_URL env var), recall relevant past memories.
     if aggressiveness > 0 {
@@ -699,9 +716,14 @@ pub async fn build_thread_context(
                 }
             }
         }
+        timings.insert("hindsight_recall".to_string(), _start_hindsight.elapsed().as_millis() as u64);
     }
 
-    builder.assemble()
+    {
+    let (ctx_text, mut meta) = builder.assemble();
+    meta.step_timings_ms = timings;
+    (ctx_text, meta)
+}
 }
 
 // ---------------------------------------------------------------------------

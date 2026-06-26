@@ -107,7 +107,7 @@ fn setup_knowledge_pipeline_tool() -> McpTool {
             "properties": {
                 "schedule": {
                     "type": "string",
-                    "description": "Optional cron schedule expression (default: '0 */6 * * *' = every 6 hours)"
+                    "description": "Optional cron schedule expression in 5-field Linux format (minute hour day month weekday). Default: '0 */6 * * *' = every 6 hours. No leading seconds field."
                 },
                 "prompt": {
                     "type": "string",

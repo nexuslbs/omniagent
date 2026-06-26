@@ -5,7 +5,7 @@ Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP too
 ## Features
 
 | **Hindsight Memory** | Persistent cross-session memory via omniagent-hindsight, with automatic population from new messages and semantic recall in context assembly |
-| **Hindsight Populator** | Background action (deactivated by default) that retains messages into hindsight every 15 minutes. Activate via `UPDATE cron_jobs SET active = true WHERE id = 'hindsight_populator'` |
+| **Hindsight Populator** | Background action (deactivated by default) that retains messages into hindsight every 15 minutes. Activate via `UPDATE cron_jobs SET active = true WHERE id = 'hindsight_populator'`. Cron schedules use standard 5-field Linux format (minute hour day month weekday — the leading seconds field is not used). |
 
 ### 🧠 Context Builder & Grounding
 - **Priority-ranked prompt assembly** (`ContextBuilder`) — NeverTrim (system, MEMORY.md, subtasks) → High (thread messages) → Normal (tool defs) → Low (retrieved content)
