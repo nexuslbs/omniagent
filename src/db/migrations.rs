@@ -17,6 +17,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     phase_13_migrate_actions_to_yaml(pool).await?;
     phase_14_channel_template_column(pool).await?;
     phase_15_drop_plugin_registry(pool).await?;
+    phase_16_append_only_message_trigger(pool).await?;
     Ok(())
 }
 
@@ -1178,5 +1179,78 @@ async fn phase_15_drop_plugin_registry(pool: &PgPool) -> Result<()> {
     .await?;
 
     tracing::info!("[migration] Phase 15 complete: plugin_registry table dropped");
+    Ok(())
+}
+
+/// Phase 16: Messages are immutable after insert. Only `embedding_vec` (set by the
+/// background vectorizer) may be updated post-insert. Everything else — content, role,
+/// msg_type, provider, model, processing_time_ms, token_usage, profile, metadata, etc. —
+/// must be set correctly at message creation time and never changed.
+/// DELETE is always blocked. If a correction is needed, insert a new message.
+async fn phase_16_append_only_message_trigger(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION prevent_message_mutation()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            IF TG_OP = 'DELETE' THEN
+                RAISE EXCEPTION 'messages is append-only. Deletion of messages is not permitted.';
+            END IF;
+
+            -- Allow UPDATE only if only embedding_vec changed
+            IF NEW.embedding_vec IS DISTINCT FROM OLD.embedding_vec THEN
+                IF NEW.id = OLD.id
+                   AND NEW.role IS NOT DISTINCT FROM OLD.role
+                   AND NEW.content IS NOT DISTINCT FROM OLD.content
+                   AND NEW.thread_id IS NOT DISTINCT FROM OLD.thread_id
+                   AND NEW.thread_sequence IS NOT DISTINCT FROM OLD.thread_sequence
+                   AND NEW.external_id IS NOT DISTINCT FROM OLD.external_id
+                   AND NEW.metadata IS NOT DISTINCT FROM OLD.metadata
+                   AND NEW.embedding IS NOT DISTINCT FROM OLD.embedding
+                   AND NEW.summary_text IS NOT DISTINCT FROM OLD.summary_text
+                   AND NEW.is_summary IS NOT DISTINCT FROM OLD.is_summary
+                   AND NEW.msg_type IS NOT DISTINCT FROM OLD.msg_type
+                   AND NEW.msg_subtype IS NOT DISTINCT FROM OLD.msg_subtype
+                   AND NEW.iteration_number IS NOT DISTINCT FROM OLD.iteration_number
+                   AND NEW.iteration_count IS NOT DISTINCT FROM OLD.iteration_count
+                   AND NEW.profile IS NOT DISTINCT FROM OLD.profile
+                   AND NEW.provider IS NOT DISTINCT FROM OLD.provider
+                   AND NEW.model IS NOT DISTINCT FROM OLD.model
+                   AND NEW.processing_time_ms IS NOT DISTINCT FROM OLD.processing_time_ms
+                   AND NEW.token_usage IS NOT DISTINCT FROM OLD.token_usage
+                   AND NEW.iterations IS NOT DISTINCT FROM OLD.iterations
+                THEN
+                    RETURN NEW;
+                END IF;
+            END IF;
+
+            RAISE EXCEPTION 'messages is immutable after insert. Only embedding_vec may be updated (by vectorizer). Other columns cannot change.';
+        END;
+        $$ LANGUAGE plpgsql;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Drop old trigger (idempotent), create fresh
+    sqlx::query(
+        r#"
+        DROP TRIGGER IF EXISTS trg_messages_append_only ON messages;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TRIGGER trg_messages_append_only
+            BEFORE UPDATE OR DELETE ON messages
+            FOR EACH ROW EXECUTE FUNCTION prevent_message_mutation();
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!("[migration] Phase 16 complete: messages immutable — only embedding_vec is updatable");
     Ok(())
 }

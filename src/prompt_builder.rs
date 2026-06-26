@@ -95,7 +95,10 @@ A tool that fails consistently will not start working on the 5th try.\n\
 6. ACTION over exploration — when given a specific task to execute \
 (e.g. \"build a blog\", \"run docker compose\"), DO IT directly. \
 Do not search past messages for context you don't need. \
-Do not list the workspace repeatedly. Start writing code and building.\n\
+Do not list the workspace repeatedly. Start writing code and building. \
+**For build tasks: call docker_compose(build) then docker_compose(up -d) \
+in the same turn — do NOT read every file first.** \
+A docker build failure tells you exactly what's wrong; fix and rebuild.\\n\\\
 7. FINAL MESSAGE = SUMMARY: After all tool calls complete, your final text \
 response must be a concise summary of what was accomplished. Cover key results, \
 decisions, and any follow-up actions needed. This replaces the need for a \
@@ -352,18 +355,35 @@ pub fn build_system_prompt_parts(
     }
 
     // ── Volatile tier ──────────────────────────────────────────
-    let mut volatile_parts: Vec<String> = Vec::new();
-
+    //
+    // MEMORY.md and USER.md are loaded inside delimiter markers to signal
+    // that they are locked instructions, not optional context. This
+    // leverages the primacy effect — content with strong delimiter markers
+    // receives more attention from the model.
+    let mut locked_parts: Vec<String> = Vec::new();
     if let Some(mem_block) = memory_store.format_for_system_prompt("memory") {
-        volatile_parts.push(mem_block.to_string());
+        locked_parts.push(mem_block.to_string());
     }
     if let Some(user_block) = memory_store.format_for_system_prompt("user") {
-        volatile_parts.push(user_block.to_string());
+        locked_parts.push(user_block.to_string());
     }
+
+    let mut volatile_parts: Vec<String> = Vec::new();
+
+    if !locked_parts.is_empty() {
+        let locked_content = locked_parts.join("\n\n");
+        volatile_parts.push(format!(
+            "═══ LOCKED INSTRUCTIONS (FOLLOW EXACTLY) ═══\n{}",
+            locked_content
+        ));
+    }
+
+    // ── Reference context (below locked instructions, for reference only) ──
+    let mut ref_parts: Vec<String> = Vec::new();
 
     // Relevant wiki index (compact listing of most important wiki pages)
     if let Some(relevant_block) = memory_store.load_relevant_index() {
-        volatile_parts.push(relevant_block);
+        ref_parts.push(relevant_block);
     }
 
     // Timestamp line
@@ -372,12 +392,20 @@ pub fn build_system_prompt_parts(
     let timestamp_line = format!("Conversation started: {}", now.format("%A, %B %d, %Y"));
     // Try to add host info if available
     if let Ok(hostname) = env::var("HOSTNAME").or_else(|_| env::var("HOST")) {
-        volatile_parts.push(format!("Host: {}", hostname));
+        ref_parts.push(format!("Host: {}", hostname));
     }
     if let Ok(cwd) = env::current_dir() {
-        volatile_parts.push(format!("Working directory: {}", cwd.display()));
+        ref_parts.push(format!("Working directory: {}", cwd.display()));
     }
-    volatile_parts.push(timestamp_line);
+    ref_parts.push(timestamp_line);
+
+    if !ref_parts.is_empty() {
+        if ref_parts.len() == 1 {
+            volatile_parts.push(ref_parts.remove(0));
+        } else {
+            volatile_parts.push(ref_parts.join("\n\n"));
+        }
+    }
 
     PromptParts {
         stable: stable_parts

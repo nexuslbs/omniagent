@@ -107,6 +107,10 @@ pub async fn process_thread(
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
         let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
+        // Deliver the error message back to the user's platform
+        if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
+            helpers::enqueue_delivery(&cfg.ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
+        }
         return Ok(saved);
     }
 
@@ -640,16 +644,11 @@ pub async fn process_thread(
                                         "[context] Hard condensation could not bring prompt below soft budget: {} effective tokens (budget: {})",
                                         tighter_tokens, prompt_token_soft
                                     );
-                                    // Last resort: strip the task template from system messages.
-                                    // By late iterations the model already knows the task.
-                                    let pre_strip = messages.len();
-                                    messages.retain(|m| {
-                                        !(m.role == "system" && m.content.contains("=== Task Template ==="))
-                                    });
-                                    let stripped = pre_strip - messages.len();
-                                    if stripped > 0 {
-                                        info!("[context] Stripped {} task template system messages to reduce context", stripped);
-                                    }
+                                    // Template is NOT stripped — even a small template (~600 tokens)
+                                    // is critical for task instructions. Stripping it saves negligible
+                                    // context but loses the entire task specification.
+                                    // The context will self-resolve as old tool results get pruned
+                                    // in subsequent iterations.
                                 }
                             }
                             Err(e) => {
