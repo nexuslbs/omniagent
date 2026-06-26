@@ -219,8 +219,19 @@ pub fn resolve_env_vars(value: &str) -> String {
     let mut result = value.to_string();
     while let Some(start) = result.find("${") {
         if let Some(end) = result[start..].find('}') {
-            let var_name = &result[start + 2..start + end];
-            let env_val = std::env::var(var_name).unwrap_or_default();
+            let raw = &result[start + 2..start + end];
+            // Support ${VAR:-default} syntax
+            let (var_name, default_val) = if let Some(delim) = raw.find(":-") {
+                let var = &raw[..delim];
+                let default = &raw[delim + 2..];
+                (var, Some(default.to_string()))
+            } else {
+                (raw, None)
+            };
+            let env_val = std::env::var(var_name).ok()
+                .filter(|v| !v.is_empty())
+                .or(default_val)
+                .unwrap_or_default();
             result.replace_range(start..start + end + 1, &env_val);
         } else {
             break;
