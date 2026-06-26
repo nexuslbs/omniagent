@@ -366,9 +366,14 @@ pub fn discover_plugins(
             // The mcp-config.json server name typically matches the directory name
             // (e.g. directory "filesystem" → server name "filesystem").
             // Check if any existing plugin's base_path directory name matches.
+            // Normalize both sides by replacing hyphens with underscores for comparison
+            // (some directories use hyphens like "docker-compose" while server name
+            // uses underscores like "docker_compose").
             if let Some(parent_dir) = std::path::Path::new(base_path).parent() {
                 if let Some(dir_name) = parent_dir.file_name().and_then(|n| n.to_str()) {
-                    if dir_name == srv.name {
+                    let dir_normalized = dir_name.replace('-', "_");
+                    let srv_normalized = srv.name.replace('-', "_");
+                    if dir_normalized == srv_normalized || dir_name == srv.name {
                         return true;
                     }
                 }
