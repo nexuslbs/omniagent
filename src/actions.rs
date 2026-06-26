@@ -62,7 +62,7 @@ pub struct ActionApi {
     pub updated_at: String,
     /// Whether this action is enabled (can be executed).
     pub enabled: bool,
-    /// Derived from `id starts with "builtin_"`.
+    /// Derived from `id starts with "builtin_"` — kept for backward compat, always false for new actions.
     #[serde(default)]
     pub is_builtin: bool,
 }
@@ -100,7 +100,7 @@ pub fn load_actions(data_dir: &str) -> Result<Vec<ActionApi>> {
                 created_at: String::new(),
                 updated_at: String::new(),
                 enabled: entry.enabled,
-                is_builtin: id.starts_with("builtin_"),
+                is_builtin: false,
             }
         })
         .collect();
@@ -134,13 +134,13 @@ pub fn load_all_actions(data_dir: &str) -> Result<Vec<ActionApi>> {
                 created_at: String::new(),
                 updated_at: String::new(),
                 enabled: entry.enabled,
-                is_builtin: id.starts_with("builtin_"),
+                is_builtin: false,
             }
         })
         .collect();
 
     result.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(result)
+    Ok(result) 
 }
 
 /// Get a single action by id (only enabled).
@@ -207,10 +207,6 @@ pub fn add_action(data_dir: &str, id: &str, tool_name: &str, params: &serde_json
         anyhow::bail!("Action '{}' already exists", id);
     }
 
-    if id.starts_with("builtin_") {
-        anyhow::bail!("Cannot create action with 'builtin_' prefix");
-    }
-
     actions.insert(id.to_string(), ActionEntry {
         enabled: true,
         tool_name: tool_name.to_string(),
@@ -244,10 +240,6 @@ pub fn update_action(
 
     let entry = actions.get_mut(id).ok_or_else(|| anyhow::anyhow!("Action '{}' not found", id))?;
 
-    if id.starts_with("builtin_") {
-        anyhow::bail!("Cannot modify built-in action '{}'", id);
-    }
-
     entry.tool_name = tool_name.to_string();
     entry.params = params.clone();
     if let Some(e) = enabled {
@@ -272,10 +264,6 @@ pub fn update_action(
 /// Delete an action by id.
 pub fn delete_action(data_dir: &str, id: &str) -> Result<bool> {
     let mut actions = load_raw_actions(data_dir)?;
-
-    if id.starts_with("builtin_") {
-        anyhow::bail!("Cannot delete built-in action '{}'", id);
-    }
 
     let existed = actions.remove(id).is_some();
     if existed {
@@ -414,7 +402,7 @@ mod tests {
 
         let loaded = load_actions(&path).unwrap();
         assert_eq!(loaded.len(), 1);
-        assert!(loaded[0].is_builtin);
+        assert!(!loaded[0].is_builtin); // builtin flag removed — now always false
         assert_eq!(loaded[0].id, "builtin_test");
     }
 
