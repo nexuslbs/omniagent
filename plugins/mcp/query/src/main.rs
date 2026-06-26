@@ -35,7 +35,7 @@ struct MessageResult {
 // ── Operations ─────────────────────────────────────────────────────────────
 
 /// search_messages — semantic (vector embedding) search with optional channel filter.
-fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let query_text = args["query"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("'query' is required for search_messages"))?
@@ -46,144 +46,135 @@ fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, bool)>
     let hash_vec = HashVectorizer;
 
     let rows: Vec<MessageResult> = {
-        let handle = tokio::runtime::Handle::current();
-        handle.block_on(async {
-            let embedding = hash_vec.generate_embedding(&query_text).await;
-            let emb_str = vector_to_string(&embedding);
-            if let Some(cid) = channel_id {
-                sqlx::query_as::<_, MessageResult>(
-                    r#"
-                    WITH vector_candidates AS (
-                        SELECT m.id, m.created_at,
-                               (m.embedding_vec <=> $2::vector(1536)) AS distance_raw
-                        FROM messages m
-                        JOIN threads t ON t.id = m.thread_id
-                        WHERE t.channel_id = $1
-                          AND m.embedding_vec IS NOT NULL
-                          AND m.role IN ('user', 'agent')
-                        ORDER BY m.embedding_vec <=> $2::vector(1536)
-                        LIMIT 100
-                    )
-                    SELECT
-                        m.id, m.role, m.content, m.msg_type, m.msg_subtype,
-                        m.thread_id, m.thread_sequence,
-                        COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
+        let embedding = hash_vec.generate_embedding(&query_text).await;
+        let emb_str = vector_to_string(&embedding);
+        if let Some(cid) = channel_id {
+            sqlx::query_as::<_, MessageResult>(
+                r#"
+                WITH vector_candidates AS (
+                    SELECT m.id, m.created_at,
+                           (m.embedding_vec <=> $2::vector(1536)) AS distance_raw
                     FROM messages m
-                    JOIN vector_candidates vc ON vc.id = m.id
-                    ORDER BY vc.distance_raw * (1 + EXTRACT(EPOCH FROM (NOW() - vc.created_at)) / 86400)
-                    LIMIT $3
-                    "#,
+                    JOIN threads t ON t.id = m.thread_id
+                    WHERE t.channel_id = $1
+                      AND m.embedding_vec IS NOT NULL
+                      AND m.role IN ('user', 'agent')
+                    ORDER BY m.embedding_vec <=> $2::vector(1536)
+                    LIMIT 100
                 )
-                .bind(cid)
-                .bind(&emb_str)
-                .bind(limit)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| anyhow::anyhow!(e))
-            } else {
-                sqlx::query_as::<_, MessageResult>(
-                    r#"
-                    WITH vector_candidates AS (
-                        SELECT m.id, m.created_at,
-                               (m.embedding_vec <=> $1::vector(1536)) AS distance_raw
-                        FROM messages m
-                        WHERE m.embedding_vec IS NOT NULL
-                          AND m.role IN ('user', 'agent')
-                        ORDER BY m.embedding_vec <=> $1::vector(1536)
-                        LIMIT 100
-                    )
-                    SELECT
-                        m.id, m.role, m.content, m.msg_type, m.msg_subtype,
-                        m.thread_id, m.thread_sequence,
-                        COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
+                SELECT
+                    m.id, m.role, m.content, m.msg_type, m.msg_subtype,
+                    m.thread_id, m.thread_sequence,
+                    COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
+                FROM messages m
+                JOIN vector_candidates vc ON vc.id = m.id
+                ORDER BY vc.distance_raw * (1 + EXTRACT(EPOCH FROM (NOW() - vc.created_at)) / 86400)
+                LIMIT $3
+                "#,
+            )
+            .bind(cid)
+            .bind(&emb_str)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+        } else {
+            sqlx::query_as::<_, MessageResult>(
+                r#"
+                WITH vector_candidates AS (
+                    SELECT m.id, m.created_at,
+                           (m.embedding_vec <=> $1::vector(1536)) AS distance_raw
                     FROM messages m
-                    JOIN vector_candidates vc ON vc.id = m.id
-                    ORDER BY vc.distance_raw * (1 + EXTRACT(EPOCH FROM (NOW() - vc.created_at)) / 86400)
-                    LIMIT $2
-                    "#,
+                    WHERE m.embedding_vec IS NOT NULL
+                      AND m.role IN ('user', 'agent')
+                    ORDER BY m.embedding_vec <=> $1::vector(1536)
+                    LIMIT 100
                 )
-                .bind(&emb_str)
-                .bind(limit)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| anyhow::anyhow!(e))
-            }
-        })
+                SELECT
+                    m.id, m.role, m.content, m.msg_type, m.msg_subtype,
+                    m.thread_id, m.thread_sequence,
+                    COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
+                FROM messages m
+                JOIN vector_candidates vc ON vc.id = m.id
+                ORDER BY vc.distance_raw * (1 + EXTRACT(EPOCH FROM (NOW() - vc.created_at)) / 86400)
+                LIMIT $2
+                "#,
+            )
+            .bind(&emb_str)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+        }
     }?;
 
     Ok(format_results("search_messages", &rows, rows.len() as i64))
 }
 
 /// search_thread_messages — all messages from a thread (sql_forge! validated).
-fn handle_search_thread_messages(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_search_thread_messages(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let thread_id = args["thread_id"]
         .as_i64()
         .ok_or_else(|| anyhow::anyhow!("'thread_id' is required for search_thread_messages"))?;
     let limit = args["limit"].as_i64().unwrap_or(100).min(200);
 
     let rows: Vec<MessageResult> = {
-        let handle = tokio::runtime::Handle::current();
-        handle.block_on(async {
-            sql_forge!(
-                MessageResult,
-                r#"
-                SELECT
-                    id, role, content, msg_type, msg_subtype,
-                    thread_id, thread_sequence,
-                    COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
-                FROM messages
-                WHERE thread_id = :thread_id
-                ORDER BY thread_sequence ASC, created_at ASC
-                LIMIT :limit
-                "#,
-                ( :thread_id = thread_id, :limit = limit )
-            )
-            .fetch_all(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
-        })
+        sql_forge!(
+            MessageResult,
+            r#"
+            SELECT
+                id, role, content, msg_type, msg_subtype,
+                thread_id, thread_sequence,
+                COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
+            FROM messages
+            WHERE thread_id = :thread_id
+            ORDER BY thread_sequence ASC, created_at ASC
+            LIMIT :limit
+            "#,
+            ( :thread_id = thread_id, :limit = limit )
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
     }?;
 
     Ok(format_results("search_thread_messages", &rows, rows.len() as i64))
 }
 
 /// search_channel_prompts — all seq-0 (prompt) messages from a channel (sql_forge!).
-fn handle_search_channel_prompts(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_search_channel_prompts(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let channel_id = args["channel_id"]
         .as_i64()
         .ok_or_else(|| anyhow::anyhow!("'channel_id' is required for search_channel_prompts"))?;
     let limit = args["limit"].as_i64().unwrap_or(10).min(50);
 
     let results: Vec<MessageResult> = {
-        let handle = tokio::runtime::Handle::current();
-        handle.block_on(async {
-            sql_forge!(
-                MessageResult,
-                r#"
-                SELECT
-                    m.id, m.role, m.content, m.msg_type, m.msg_subtype,
-                    m.thread_id, m.thread_sequence,
-                    COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
-                FROM messages m
-                JOIN threads t ON t.id = m.thread_id
-                WHERE t.channel_id = :channel_id
-                  AND m.thread_sequence = 0
-                ORDER BY id DESC
-                LIMIT :limit
-                "#,
-                ( :channel_id = channel_id, :limit = limit )
-            )
-            .fetch_all(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
-        })
+        sql_forge!(
+            MessageResult,
+            r#"
+            SELECT
+                m.id, m.role, m.content, m.msg_type, m.msg_subtype,
+                m.thread_id, m.thread_sequence,
+                COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
+            FROM messages m
+            JOIN threads t ON t.id = m.thread_id
+            WHERE t.channel_id = :channel_id
+              AND m.thread_sequence = 0
+            ORDER BY id DESC
+            LIMIT :limit
+            "#,
+            ( :channel_id = channel_id, :limit = limit )
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
     }?;
 
     Ok(format_results("search_channel_prompts", &results, results.len() as i64))
 }
 
 /// query — direct SQL (runtime only, must be SELECT).
-fn handle_query(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_query(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let sql_owned = args["sql"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("'sql' is required for query operation"))?
@@ -199,40 +190,37 @@ fn handle_query(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     }
 
     let results: Vec<serde_json::Value> = {
-        let handle = tokio::runtime::Handle::current();
-        handle.block_on(async {
-            let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.as_str()))
-                .fetch_all(pool)
-                .await
-                .map_err(|e| anyhow::anyhow!("Query failed: {e}"))?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.as_str()))
+            .fetch_all(pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("Query failed: {e}"))?;
 
-            let mut json_rows: Vec<serde_json::Value> = Vec::new();
-            for row in &rows {
-                let mut map = serde_json::Map::new();
-                for (i, col) in row.columns().iter().enumerate() {
-                    let name = col.name();
-                    let value: serde_json::Value = if let Ok(s) = row.try_get::<&str, _>(i) {
-                        serde_json::Value::String(s.to_string())
-                    } else if let Ok(n) = row.try_get::<i64, _>(i) {
-                        serde_json::json!(n)
-                    } else if let Ok(n) = row.try_get::<f64, _>(i) {
-                        serde_json::json!(n)
-                    } else if let Ok(b) = row.try_get::<bool, _>(i) {
-                        serde_json::json!(b)
-                    } else {
-                        row.try_get::<Option<String>, _>(i)
-                            .ok()
-                            .flatten()
-                            .map(serde_json::Value::String)
-                            .unwrap_or(serde_json::Value::Null)
-                    };
-                    map.insert(name.to_string(), value);
-                }
-                json_rows.push(serde_json::Value::Object(map));
+        let mut json_rows: Vec<serde_json::Value> = Vec::new();
+        for row in &rows {
+            let mut map = serde_json::Map::new();
+            for (i, col) in row.columns().iter().enumerate() {
+                let name = col.name();
+                let value: serde_json::Value = if let Ok(s) = row.try_get::<&str, _>(i) {
+                    serde_json::Value::String(s.to_string())
+                } else if let Ok(n) = row.try_get::<i64, _>(i) {
+                    serde_json::json!(n)
+                } else if let Ok(n) = row.try_get::<f64, _>(i) {
+                    serde_json::json!(n)
+                } else if let Ok(b) = row.try_get::<bool, _>(i) {
+                    serde_json::json!(b)
+                } else {
+                    row.try_get::<Option<String>, _>(i)
+                        .ok()
+                        .flatten()
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null)
+                };
+                map.insert(name.to_string(), value);
             }
-            Ok::<_, anyhow::Error>(json_rows)
-        })
-    }?;
+            json_rows.push(serde_json::Value::Object(map));
+        }
+        json_rows
+    };
 
     let output = serde_json::to_string_pretty(&results)?;
     Ok((output, false))
@@ -240,16 +228,16 @@ fn handle_query(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 
 // ── Dispatch ───────────────────────────────────────────────────────────────
 
-fn handle_query_database(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_query_database(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let operation = args["operation"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'operation' argument"))?;
 
     match operation {
-        "search_messages" => handle_search_messages(pool, args),
-        "search_thread_messages" => handle_search_thread_messages(pool, args),
-        "search_channel_prompts" => handle_search_channel_prompts(pool, args),
-        "query" => handle_query(pool, args),
+        "search_messages" => handle_search_messages(pool, args).await,
+        "search_thread_messages" => handle_search_thread_messages(pool, args).await,
+        "search_channel_prompts" => handle_search_channel_prompts(pool, args).await,
+        "query" => handle_query(pool, args).await,
         other => anyhow::bail!("Unknown operation: '{}'", other),
     }
 }
@@ -322,7 +310,7 @@ async fn main() -> Result<()> {
     let pool = Arc::new(pool);
 
     let p_query = pool.clone();
-    let query_handler: ToolHandler = Box::new(move |args: &Value| handle_query_database(&p_query, args));
+    let query_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_query_database(&p_query, &args).await }));
 
     let tools = vec![
         McpToolEntry {

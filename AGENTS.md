@@ -205,31 +205,50 @@ So for the `deepseek` plugin, it checks `DEEPSEEK_API_KEY` first, then `LLM_API_
 Planning mode is resolved **at thread creation time** and stamped on `threads.planning_mode`.
 
 **Source locations:**
-- **Resolution:** `src/db/types.rs` — `resolve_thread_planning_mode()` (simple), `resolve_thread_planning_mode_with_content()` (complexity-based), `classify_complexity_for_planning()` (threshold logic)
-- **Max iterations:** `src/db/types.rs` — `max_iterations_for_planning_mode()` maps mode → iteration cap
+- **Resolution:** `src/db/threads.rs` — `resolve_thread_planning_mode_with_content()` (core logic), `classify_complexity_for_planning()` (threshold logic), `resolve_cron_planning_mode()`, `resolve_max_plan()`
+- **Max iterations:** `src/db/threads.rs` — `max_iterations_for_planning_mode()` maps mode → iteration cap
 - **Prompt injection:** `src/prompt_builder.rs` — planning instructions injected based on `thread.planning_mode`
 - **Table columns:** `threads.planning_mode` (runtime truth), `channels.planning_mode` (per-channel override), `cron_jobs.planning_mode` (per-job override)
 
 **Modes:**
+
 | Value | Meaning |
 |-------|---------|
 | `prompt_only` | No planning — LLM responds immediately |
 | `auto_plan` | Single planning step before responding |
-| `auto_subtasks` | Full subtask decomposition (default) |
+| `auto_subtasks` | Full subtask decomposition (only when explicitly configured — see below) |
 | `always` | Legacy alias for `auto_subtasks` |
 
+**When is `auto_subtasks` available?**
+
+`auto_subtasks` (full subtask decomposition) is **not** the default. It is only available when explicitly configured in one of these ways:
+
+- **Global `PLANNING_MODE` env var** set to `auto_subtasks` or `plan with subtasks`
+- **Channel** `planning_mode` set to `auto_subtasks` or `always`
+- **Cron job** `planning_mode` set to `plan_with_subtasks` or `auto_subtasks`
+- **Kanban tasks** — always use the max plan mode derived from the global `PLANNING_MODE` (so if global is `auto_subtasks`, kanban gets `auto_subtasks`)
+- **Task-level explicit override** (for cron jobs and kanban tasks)
+
+If none of these explicitly enables it, the complexity-based classification caps at `auto_plan` — it will never spontaneously promote to `auto_subtasks`.
+
 **Priority chain** (first non-empty wins):
-1. Task `planning_mode` — cron job planning mode (highest — overrides channel)
-   - Valid values: empty (→ complexity-based default), `prompt_only`, `auto_plan`, `auto_subtasks`
-2. Channel `planning_mode` — override for the entire channel
+
+1. **Cron task** `planning_mode` — highest priority, overrides channel and global
+   - Valid values: empty (→ complexity-based default), `no_plan` (→ `prompt_only`), `simple_plan` (→ `auto_plan`), `plan_with_subtasks` (→ `auto_subtasks`), `max_plan` (→ `resolve_max_plan(global_mode)`), or direct canonical values
+2. **Channel** `planning_mode` — override for the entire channel
    - Valid values: empty (→ default), `prompt_only`, `auto_plan`, `auto_subtasks`, `never` (→ `prompt_only`), `always` (→ `auto_subtasks`)
-3. Kanban tasks — always `resolve_max_plan(global_mode)` (no complexity classification)
-4. User/Cron default — `classify_complexity_for_planning()` via content heuristics
+3. **Kanban tasks** — always `resolve_max_plan(global_mode)` (no complexity classification)
+4. **User / Cron default** — `classify_complexity_for_planning()` via content heuristics (see below)
 
 **Complexity classification (`classify_complexity_for_planning`):**
-- Simple: `char_len < SIMPLE_MAX (60) || word_count ≤ 3 + greeting` → `prompt_only`
-- Complex: `char_len > STANDARD_MAX (200) || action keywords match` → `auto_subtasks`
-- Standard: `auto_plan` (via global `PLANNING_MODE` env var)
+
+The classifier evaluates prompt content against threshold heuristics and returns a canonical planning mode. The outcome is **capped by the resolved planning mode context** — `auto_subtasks` is only returned when the global `PLANNING_MODE` or an explicit task/channel setting has enabled it.
+
+| Complexity Level | Criteria | Resulting Mode |
+|---|---|---|
+| **Simple** | `char_len < SIMPLE_MAX (60)` or `word_count ≤ 3 + greeting` | `prompt_only` — no planning needed |
+| **Standard** | Everything between Simple and Complex | `auto_plan` — single planning step |
+| **Complex** | `char_len > STANDARD_MAX (200)` or action keywords match | `auto_subtasks` **iff** the resolved planning mode context permits it (global `PLANNING_MODE` is `auto_subtasks`, or an explicit task/channel/cron setting enables it); otherwise caps at `auto_plan` |
 
 **Env vars:** `PLANNING_MODE`, `PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS`, `PLANNING_COMPLEXITY_STANDARD_MAX_CHARS`, `PLANNING_COMPLEXITY_KEYWORDS` — all adjustable via `/settings` endpoint.
 
@@ -386,3 +405,80 @@ SELECT t.id, t.status, t.cause, c.name as ch,
 FROM threads t JOIN channels c ON t.channel_id = c.id
 WHERE t.channel_id = <ch_id> ORDER BY t.id;"
 ```
+
+### block_in_place Anti-Pattern
+
+`tokio::task::block_in_place()` blocks the calling thread, preventing the tokio worker from making progress on other tasks. This should be avoided in async code.
+
+**Affected location:**
+
+`plugins/mcp/util/src/lib.rs:324` — `handle_tools_call()` in `mcp_server_util`:
+
+```rust
+let (text, is_error) = match tokio::task::block_in_place(|| (entry.handler)(args)) {
+```
+
+This wraps a synchronous handler call in `block_in_place()` inside an async function. The handler type is `Box<dyn Fn(&Value) -> Result<(String, bool)> + Send + Sync>` — a synchronous closure.
+
+**Why it's problematic:**
+- `block_in_place()` tells tokio to hand off the current worker to a replacement thread, but the sync handler still runs on the same OS thread, preventing that worker from polling other tasks.
+- If the sync handler blocks on I/O (e.g., a database query or HTTP call), the entire worker thread is stalled.
+- The `block_in_place()` primitive exists for bridging sync code into async — but only when the sync code will block for less than a few microseconds. Long-running sync handlers stall the runtime.
+
+**The fix:**
+
+Use **async handlers** (`BoxFuture`) instead of synchronous closures, allowing the MCP server to `await` the handler without blocking:
+
+```rust
+// Async handler type:
+pub type AsyncToolHandler = Box<dyn Fn(Value) -> BoxFuture<'static, Result<(String, bool)>> + Send + Sync>;
+
+// In handle_tools_call:
+let (text, is_error) = match (entry.handler)(args).await {
+    Ok(result) => result,
+    Err(e) => { ... }
+};
+```
+
+Alternatively, if the handler must remain synchronous, wrap it with `tokio::task::spawn_blocking()` instead of `block_in_place()`:
+
+```rust
+let (text, is_error) = match tokio::task::spawn_blocking(move || (entry.handler)(args)).await {
+    Ok(Ok(result)) => result,
+    Ok(Err(e)) => { ... }
+    Err(e) => { ... }  // panic in handler
+};
+```
+
+**Note:** The main `McpRegistry::execute()` method in `src/mcp/mod.rs:193` already uses the correct pattern (`spawn_blocking`). Only `mcp_server_util::handle_tools_call()` uses `block_in_place`.
+
+### MCP Server Timeouts
+
+External MCP servers have multiple timeout layers configured through `McpServerConfig` (defined in `src/mcp/external/config.rs`):
+
+| Timeout Layer | Default | Config Field | Description |
+|---|---|---|---|
+| **Up / Restart** | 300s (5 min) | _(process lifecycle)_ | Time to wait for an MCP server subprocess to start up and respond to the `initialize` handshake. If the server doesn't respond within this window, it's considered dead and gets restarted. |
+| **Exec / Run** | 600s (10 min) | `timeout_secs` | Time to wait for a single tool call (`tools/call`) to complete. Long-running tools (e.g., filesystem operations, Docker containers, searches) may need this. |
+| **Circuit breaker cooldown** | 30s | _(hardcoded)_ | After N consecutive failures (default 3), the circuit breaker opens. After 30s it transitions to HalfOpen, allowing one probe request. |
+
+**Specifiable by the agent:** The `timeout_secs` field in `McpServerConfig` is configurable per-server via the `mcp-servers.json` config file:
+
+```json
+{
+  "servers": [
+    {
+      "name": "my-server",
+      "transport": "stdio",
+      "command": "python3",
+      "args": ["server.py"],
+      "timeout_secs": 600,
+      "max_retries": 5
+    }
+  ]
+}
+```
+
+The config file can be specified via `MCP_SERVERS_CONFIG` env var or placed at `<data_dir>/config/mcp-servers.json`. Environment variable references (`${VAR}` and `${VAR:-default}`) are supported in all string fields.
+
+For **built-in MCP plugins** (those under `plugins/mcp/`), their `mcp-config.json` files are auto-discovered and merged. These plugins use the `mcp_server_util` framework (see block_in_place anti-pattern above) which reads requests via async stdin and dispatches to sync handlers. The timeout for these built-in plugins is inherited from the parent omniagent process's lifecycle — there is no per-call timeout within the plugin itself.

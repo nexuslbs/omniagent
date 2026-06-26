@@ -185,9 +185,7 @@ pub trait McpServerClient: Send + Sync {
                         });
                     }
 
-                    let inner_result = tokio::task::block_in_place(|| {
-                        call_tool_direct(&sn, &tn, &args)
-                    });
+                    let inner_result = call_tool_direct(&sn, &tn, &args);
                     match inner_result {
                         Ok(res) => {
                             circuit.record_success();

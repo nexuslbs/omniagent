@@ -4,7 +4,6 @@
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashMap;
 
 /// Static secret patterns. Uses once_cell::sync::Lazy for zero-cost init.
 static SECRET_PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {

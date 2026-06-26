@@ -11,6 +11,8 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 // ---------------------------------------------------------------------------
@@ -140,8 +142,8 @@ pub struct ServerInfo {
     pub version: String,
 }
 
-/// Handler function type — receives tool arguments, returns result text + error flag.
-pub type ToolHandler = Box<dyn Fn(&Value) -> Result<(String, bool)> + Send + Sync>;
+/// Handler function type — receives owned tool arguments, returns a future with result text + error flag.
+pub type ToolHandler = Box<dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<(String, bool)>> + Send>> + Send + Sync>;
 
 /// A registered tool definition + handler.
 pub struct McpToolEntry {
@@ -320,8 +322,8 @@ async fn handle_tools_call<W: AsyncWriteExt + Unpin>(
         }
     };
 
-    let args = params.arguments.as_ref().unwrap_or(&serde_json::Value::Null);
-    let (text, is_error) = match tokio::task::block_in_place(|| (entry.handler)(args)) {
+    let args = params.arguments.clone().unwrap_or(serde_json::Value::Null);
+    let (text, is_error) = match (entry.handler)(args).await {
         Ok(result) => result,
         Err(e) => {
             send_error(writer, req_id, -32603, format!("Handler error: {e}")).await?;

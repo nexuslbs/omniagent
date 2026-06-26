@@ -40,7 +40,7 @@ struct KanbanTaskRow {
 // Tool: create_kanban_task
 // ---------------------------------------------------------------------------
 
-fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let title = args["title"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'title'"))?;
@@ -66,40 +66,35 @@ fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
         ));
     }
 
-    let handle = tokio::runtime::Handle::current();
-    let id = handle.block_on(async {
-        let id = format!("task_{:x}", {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        });
+    let id = format!("task_{:x}", {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    });
 
-        // Resolve channel_id: if not provided, find the default cron channel
-        let resolved_channel_id = if let Some(cid) = channel_id_arg {
-            cid
-        } else {
-            match db::types::get_channel_by_platform_name(pool, "cron", "cron").await {
-                Ok(Some(ch)) => ch.id,
-                _ => anyhow::bail!(
-                    "No default cron channel found. Create a channel with platform='cron' and name='cron' first."
-                ),
-            }
-        };
+    // Resolve channel_id: if not provided, find the default cron channel
+    let resolved_channel_id = if let Some(cid) = channel_id_arg {
+        cid
+    } else {
+        match db::types::get_channel_by_platform_name(pool, "cron", "cron").await {
+            Ok(Some(ch)) => ch.id,
+            _ => anyhow::bail!(
+                "No default cron channel found. Create a channel with platform='cron' and name='cron' first."
+            ),
+        }
+    };
 
-        sql_forge!(
-            r#"
-            INSERT INTO kanban_tasks (id, title, body, status, priority, assignee, channel_id, profile, template)
-            VALUES (:id, :title, :body, :status, :priority, :assignee, :channel_id, NULLIF(:profile, '')::text, :template)
-            "#,
-            ( :id = &id, :title = title, :body = body, :status = status, :priority = priority, :assignee = assignee, :channel_id = resolved_channel_id, :profile = profile.as_deref().unwrap_or(""), :template = template )
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create kanban task: {}", e))?;
-
-        Ok::<_, anyhow::Error>(id)
-    })?;
+    sql_forge!(
+        r#"
+        INSERT INTO kanban_tasks (id, title, body, status, priority, assignee, channel_id, profile, template)
+        VALUES (:id, :title, :body, :status, :priority, :assignee, :channel_id, NULLIF(:profile, '')::text, :template)
+        "#,
+        ( :id = &id, :title = title, :body = body, :status = status, :priority = priority, :assignee = assignee, :channel_id = resolved_channel_id, :profile = profile.as_deref().unwrap_or(""), :template = template )
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create kanban task: {}", e))?;
 
     Ok((format!("Kanban task '{}' created with id '{}' and status '{}'", title, id, status), false))
 }
@@ -108,41 +103,38 @@ fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Tool: list_kanban_tasks
 // ---------------------------------------------------------------------------
 
-fn handle_list(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_list(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let status_filter = args["status"].as_str().map(|s| s.to_string());
 
-    let handle = tokio::runtime::Handle::current();
-    let result: Vec<KanbanTaskRow> = handle.block_on(async {
-        if let Some(ref status) = status_filter {
-            sql_forge!(
-                KanbanTaskRow,
-                r#"
-                SELECT id, display_id, title, body, status, priority, assignee, template, created_at, updated_at
-                FROM kanban_tasks
-                WHERE status = :status
-                ORDER BY priority DESC, created_at DESC
-                "#,
-                ( :status = status )
-            )
-            .fetch_all(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to list kanban tasks: {}", e))
-        } else {
-            sql_forge!(
-                KanbanTaskRow,
-                r#"
-                SELECT id, display_id, title, body, status, priority, assignee, template, created_at, updated_at
-                FROM kanban_tasks
-                WHERE 1 = :_one
-                ORDER BY status, priority DESC, created_at DESC
-                "#,
-                ( :_one = 1i32 )
-            )
-            .fetch_all(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to list kanban tasks: {}", e))
-        }
-    })?;
+    let result: Vec<KanbanTaskRow> = if let Some(ref status) = status_filter {
+        sql_forge!(
+            KanbanTaskRow,
+            r#"
+            SELECT id, display_id, title, body, status, priority, assignee, template, created_at, updated_at
+            FROM kanban_tasks
+            WHERE status = :status
+            ORDER BY priority DESC, created_at DESC
+            "#,
+            ( :status = status )
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list kanban tasks: {}", e))?
+    } else {
+        sql_forge!(
+            KanbanTaskRow,
+            r#"
+            SELECT id, display_id, title, body, status, priority, assignee, template, created_at, updated_at
+            FROM kanban_tasks
+            WHERE 1 = :_one
+            ORDER BY status, priority DESC, created_at DESC
+            "#,
+            ( :_one = 1i32 )
+        )
+        .fetch_all(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list kanban tasks: {}", e))?
+    };
 
     if result.is_empty() {
         return Ok(("_No kanban tasks found._".to_string(), false));
@@ -196,109 +188,104 @@ fn handle_list(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Tool: update_kanban_task
 // ---------------------------------------------------------------------------
 
-fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let id = args["id"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'id'"))?;
 
     let id_clone = id.to_string();
 
-    let handle = tokio::runtime::Handle::current();
-    handle.block_on(async {
-        // Check task exists
-        let exists: bool = sql_forge!(
-            scalar i64,
-            "SELECT COUNT(*) FROM kanban_tasks WHERE id = :id",
-            ( :id = &id_clone )
+    // Check task exists
+    let exists: bool = sql_forge!(
+        scalar i64,
+        "SELECT COUNT(*) FROM kanban_tasks WHERE id = :id",
+        ( :id = &id_clone )
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to check task existence: {e}"))?
+        > 0;
+
+    if !exists {
+        anyhow::bail!("Kanban task '{id_clone}' not found");
+    }
+
+    // Apply individual UPDATEs per provided field
+    if let Some(title) = args["title"].as_str() {
+        if title.is_empty() {
+            anyhow::bail!("Task title must not be empty");
+        }
+        sql_forge!(
+            "UPDATE kanban_tasks SET title = :val, updated_at = NOW() WHERE id = :id",
+            ( :val = title, :id = &id_clone )
         )
-        .fetch_one(pool)
+        .execute(pool)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to check task existence: {e}"))?
-            > 0;
-
-        if !exists {
-            anyhow::bail!("Kanban task '{id_clone}' not found");
+        .map_err(|e| anyhow::anyhow!("Failed to update title: {e}"))?;
+    }
+    if args.get("body").is_some() {
+        let body = args["body"].as_str().unwrap_or("");
+        sql_forge!(
+            "UPDATE kanban_tasks SET body = :val, updated_at = NOW() WHERE id = :id",
+            ( :val = body, :id = &id_clone )
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update body: {e}"))?;
+    }
+    if let Some(status) = args["status"].as_str() {
+        let valid_statuses = ["backlog", "todo", "ready", "running", "review", "done", "blocked"];
+        if !valid_statuses.contains(&status) {
+            anyhow::bail!("Invalid status '{status}'");
         }
-
-        // Apply individual UPDATEs per provided field
-        if let Some(title) = args["title"].as_str() {
-            if title.is_empty() {
-                anyhow::bail!("Task title must not be empty");
-            }
-            sql_forge!(
-                "UPDATE kanban_tasks SET title = :val, updated_at = NOW() WHERE id = :id",
-                ( :val = title, :id = &id_clone )
-            )
-            .execute(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update title: {e}"))?;
-        }
-        if args.get("body").is_some() {
-            let body = args["body"].as_str().unwrap_or("");
-            sql_forge!(
-                "UPDATE kanban_tasks SET body = :val, updated_at = NOW() WHERE id = :id",
-                ( :val = body, :id = &id_clone )
-            )
-            .execute(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update body: {e}"))?;
-        }
-        if let Some(status) = args["status"].as_str() {
-            let valid_statuses = ["backlog", "todo", "ready", "running", "review", "done", "blocked"];
-            if !valid_statuses.contains(&status) {
-                anyhow::bail!("Invalid status '{status}'");
-            }
-            sql_forge!(
-                "UPDATE kanban_tasks SET status = :val, updated_at = NOW() WHERE id = :id",
-                ( :val = status, :id = &id_clone )
-            )
-            .execute(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update status: {e}"))?;
-        }
-        if args.get("priority").is_some() {
-            let priority = args["priority"].as_i64().unwrap_or(0) as i32;
-            sql_forge!(
-                "UPDATE kanban_tasks SET priority = :val, updated_at = NOW() WHERE id = :id",
-                ( :val = priority, :id = &id_clone )
-            )
-            .execute(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update priority: {e}"))?;
-        }
-        if args.get("assignee").is_some() {
-            let assignee = args["assignee"].as_str().unwrap_or("");
-            sql_forge!(
-                "UPDATE kanban_tasks SET assignee = :val, updated_at = NOW() WHERE id = :id",
-                ( :val = assignee, :id = &id_clone )
-            )
-            .execute(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update assignee: {e}"))?;
-        }
-        if args.get("channel_id").is_some() {
-            let cid = args["channel_id"].as_i64().unwrap_or(0);
-            sql_forge!(
-                "UPDATE kanban_tasks SET channel_id = :val, updated_at = NOW() WHERE id = :id",
-                ( :val = cid, :id = &id_clone )
-            )
-            .execute(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update channel_id: {e}"))?;
-        }
-        if args.get("profile").is_some() {
-            let profile = args["profile"].as_str().unwrap_or("");
-            sql_forge!(
-                "UPDATE kanban_tasks SET profile = NULLIF(:val, '')::text, updated_at = NOW() WHERE id = :id",
-                ( :val = profile, :id = &id_clone )
-            )
-            .execute(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update profile: {e}"))?;
-        }
-
-        Ok::<_, anyhow::Error>(())
-    })?;
+        sql_forge!(
+            "UPDATE kanban_tasks SET status = :val, updated_at = NOW() WHERE id = :id",
+            ( :val = status, :id = &id_clone )
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update status: {e}"))?;
+    }
+    if args.get("priority").is_some() {
+        let priority = args["priority"].as_i64().unwrap_or(0) as i32;
+        sql_forge!(
+            "UPDATE kanban_tasks SET priority = :val, updated_at = NOW() WHERE id = :id",
+            ( :val = priority, :id = &id_clone )
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update priority: {e}"))?;
+    }
+    if args.get("assignee").is_some() {
+        let assignee = args["assignee"].as_str().unwrap_or("");
+        sql_forge!(
+            "UPDATE kanban_tasks SET assignee = :val, updated_at = NOW() WHERE id = :id",
+            ( :val = assignee, :id = &id_clone )
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update assignee: {e}"))?;
+    }
+    if args.get("channel_id").is_some() {
+        let cid = args["channel_id"].as_i64().unwrap_or(0);
+        sql_forge!(
+            "UPDATE kanban_tasks SET channel_id = :val, updated_at = NOW() WHERE id = :id",
+            ( :val = cid, :id = &id_clone )
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update channel_id: {e}"))?;
+    }
+    if args.get("profile").is_some() {
+        let profile = args["profile"].as_str().unwrap_or("");
+        sql_forge!(
+            "UPDATE kanban_tasks SET profile = NULLIF(:val, '')::text, updated_at = NOW() WHERE id = :id",
+            ( :val = profile, :id = &id_clone )
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update profile: {e}"))?;
+    }
 
     Ok((format!("Kanban task '{}' updated successfully", id), false))
 }
@@ -307,23 +294,20 @@ fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Tool: delete_kanban_task
 // ---------------------------------------------------------------------------
 
-fn handle_delete(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_delete(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let id = args["id"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'id'"))?;
 
     let id_clone = id.to_string();
 
-    let handle = tokio::runtime::Handle::current();
-    let deleted = handle.block_on(async {
-        sql_forge!(
-            "DELETE FROM kanban_tasks WHERE id = :id",
-            ( :id = &id_clone )
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to delete kanban task: {}", e))
-    })?;
+    let deleted = sql_forge!(
+        "DELETE FROM kanban_tasks WHERE id = :id",
+        ( :id = &id_clone )
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to delete kanban task: {}", e))?;
 
     if deleted.rows_affected() == 0 {
         return Err(anyhow::anyhow!("Kanban task '{}' not found", id));
@@ -336,7 +320,7 @@ fn handle_delete(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Tool: add_kanban_dependency
 // ---------------------------------------------------------------------------
 
-fn handle_add_dependency(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_add_dependency(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let task_id = args["task_id"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'task_id'"))?;
@@ -351,35 +335,30 @@ fn handle_add_dependency(pool: &PgPool, args: &Value) -> Result<(String, bool)> 
     let task_id_clone = task_id.to_string();
     let depends_on_id_clone = depends_on_id.to_string();
 
-    let handle = tokio::runtime::Handle::current();
-    handle.block_on(async {
-        let exists: i64 = sql_forge!(
-            scalar i64,
-            "SELECT COUNT(*) FROM kanban_tasks WHERE id IN (:tid, :did)",
-            ( :tid = &task_id_clone, :did = &depends_on_id_clone )
-        )
-        .fetch_one(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to verify tasks: {e}"))?;
+    let exists: i64 = sql_forge!(
+        scalar i64,
+        "SELECT COUNT(*) FROM kanban_tasks WHERE id IN (:tid, :did)",
+        ( :tid = &task_id_clone, :did = &depends_on_id_clone )
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to verify tasks: {e}"))?;
 
-        if exists != 2 {
-            anyhow::bail!("One or both kanban tasks not found");
-        }
+    if exists != 2 {
+        anyhow::bail!("One or both kanban tasks not found");
+    }
 
-        sql_forge!(
-            r#"
-            INSERT INTO kanban_task_dependencies (task_id, depends_on_id)
-            VALUES (:task_id, :depends_on_id)
-            ON CONFLICT (task_id, depends_on_id) DO NOTHING
-            "#,
-            ( :task_id = &task_id_clone, :depends_on_id = &depends_on_id_clone )
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to add dependency: {e}"))?;
-
-        Ok::<_, anyhow::Error>(())
-    })?;
+    sql_forge!(
+        r#"
+        INSERT INTO kanban_task_dependencies (task_id, depends_on_id)
+        VALUES (:task_id, :depends_on_id)
+        ON CONFLICT (task_id, depends_on_id) DO NOTHING
+        "#,
+        ( :task_id = &task_id_clone, :depends_on_id = &depends_on_id_clone )
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to add dependency: {e}"))?;
 
     Ok((
         format!("Dependency added: '{}' now depends on '{}'", task_id, depends_on_id),
@@ -391,7 +370,7 @@ fn handle_add_dependency(pool: &PgPool, args: &Value) -> Result<(String, bool)> 
 // Tool: remove_kanban_dependency
 // ---------------------------------------------------------------------------
 
-fn handle_remove_dependency(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_remove_dependency(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let task_id = args["task_id"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'task_id'"))?;
@@ -402,22 +381,17 @@ fn handle_remove_dependency(pool: &PgPool, args: &Value) -> Result<(String, bool
     let task_id_clone = task_id.to_string();
     let depends_on_id_clone = depends_on_id.to_string();
 
-    let handle = tokio::runtime::Handle::current();
-    handle.block_on(async {
-        let result = sql_forge!(
-            "DELETE FROM kanban_task_dependencies WHERE task_id = :task_id AND depends_on_id = :depends_on_id",
-            ( :task_id = &task_id_clone, :depends_on_id = &depends_on_id_clone )
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to remove dependency: {e}"))?;
+    let result = sql_forge!(
+        "DELETE FROM kanban_task_dependencies WHERE task_id = :task_id AND depends_on_id = :depends_on_id",
+        ( :task_id = &task_id_clone, :depends_on_id = &depends_on_id_clone )
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to remove dependency: {e}"))?;
 
-        if result.rows_affected() == 0 {
-            anyhow::bail!("Dependency not found between '{}' and '{}'", task_id, depends_on_id);
-        }
-
-        Ok::<_, anyhow::Error>(())
-    })?;
+    if result.rows_affected() == 0 {
+        anyhow::bail!("Dependency not found between '{}' and '{}'", task_id, depends_on_id);
+    }
 
     Ok((
         format!("Dependency removed between '{}' and '{}'", task_id, depends_on_id),
@@ -439,24 +413,24 @@ async fn main() -> Result<()> {
 
     // Wrap each handler to capture a clone of the pool
     let p_create = pool.clone();
-    let create_handler: ToolHandler = Box::new(move |args: &Value| handle_create(&p_create, args));
+    let create_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_create(&p_create, &args).await }));
 
     let p_list = pool.clone();
-    let list_handler: ToolHandler = Box::new(move |args: &Value| handle_list(&p_list, args));
+    let list_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_list(&p_list, &args).await }));
 
     let p_update = pool.clone();
-    let update_handler: ToolHandler = Box::new(move |args: &Value| handle_update(&p_update, args));
+    let update_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_update(&p_update, &args).await }));
 
     let p_delete = pool.clone();
-    let delete_handler: ToolHandler = Box::new(move |args: &Value| handle_delete(&p_delete, args));
+    let delete_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_delete(&p_delete, &args).await }));
 
     let p_add_dep = pool.clone();
     let add_dep_handler: ToolHandler =
-        Box::new(move |args: &Value| handle_add_dependency(&p_add_dep, args));
+        Box::new(move |args: Value| Box::pin(async move { handle_add_dependency(&p_add_dep, &args).await }));
 
     let p_rm_dep = pool.clone();
     let rm_dep_handler: ToolHandler =
-        Box::new(move |args: &Value| handle_remove_dependency(&p_rm_dep, args));
+        Box::new(move |args: Value| Box::pin(async move { handle_remove_dependency(&p_rm_dep, &args).await }));
 
     let tools = vec![
         McpToolEntry {

@@ -16,7 +16,7 @@ use std::sync::Arc;
 // Tool: create_cron_job
 // ---------------------------------------------------------------------------
 
-fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let name = args["name"].as_str().unwrap_or("");
     let schedule = args["schedule"].as_str().unwrap_or("");
     let prompt = args["prompt"].as_str();
@@ -74,30 +74,25 @@ fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
         serde_json::json!(parts)
     };
 
-    let handle = tokio::runtime::Handle::current();
-    handle.block_on(async {
-        let resolved_channel_id = if let Some(cid) = channel_id_arg {
-            cid
-        } else {
-            match db::types::get_channel_by_platform_name(pool, "cron", "cron").await {
-                Ok(Some(ch)) => ch.id,
-                _ => anyhow::bail!("No default cron channel found. Create a channel with platform='cron' and name='cron' first."),
-            }
-        };
+    let resolved_channel_id = if let Some(cid) = channel_id_arg {
+        cid
+    } else {
+        match db::types::get_channel_by_platform_name(pool, "cron", "cron").await {
+            Ok(Some(ch)) => ch.id,
+            _ => anyhow::bail!("No default cron channel found. Create a channel with platform='cron' and name='cron' first."),
+        }
+    };
 
-        sql_forge!(
-            r#"
-            INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, channel_id, profile, mode, action_id, silent)
-            VALUES (:id, :name, :display_name, :schedule, NULLIF(:prompt, '')::text, :skills, :channel_id, NULLIF(:profile, '')::text, :mode, NULLIF(:action_id, '')::text, :silent)
-            "#,
-            ( :id = &id, :name = name, :display_name = display_name, :schedule = schedule, :prompt = prompt.unwrap_or(""), :skills = skills_json.to_string(), :channel_id = resolved_channel_id, :profile = profile_arg.unwrap_or(""), :mode = mode, :action_id = action_id.unwrap_or(""), :silent = silent.unwrap_or(false) )
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create cron job: {}", e))?;
-
-        Ok::<_, anyhow::Error>(())
-    })?;
+    sql_forge!(
+        r#"
+        INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, channel_id, profile, mode, action_id, silent)
+        VALUES (:id, :name, :display_name, :schedule, NULLIF(:prompt, '')::text, :skills, :channel_id, NULLIF(:profile, '')::text, :mode, NULLIF(:action_id, '')::text, :silent)
+        "#,
+        ( :id = &id, :name = name, :display_name = display_name, :schedule = schedule, :prompt = prompt.unwrap_or(""), :skills = skills_json.to_string(), :channel_id = resolved_channel_id, :profile = profile_arg.unwrap_or(""), :mode = mode, :action_id = action_id.unwrap_or(""), :silent = silent.unwrap_or(false) )
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to create cron job: {}", e))?;
 
     Ok((format!("✅ Created cron job **{}** (`{}`)", display_name, name), false))
 }
@@ -126,22 +121,19 @@ struct CronJobRow {
     silent: Option<bool>,
 }
 
-fn handle_list(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
-    let handle = tokio::runtime::Handle::current();
-    let rows: Vec<CronJobRow> = handle.block_on(async {
-        sql_forge!(
-            CronJobRow,
-            r#"
-            SELECT id, name, schedule, prompt, enabled, active, mode, action_id,
-                   last_run_at, next_run_at, created_at, silent
-            FROM cron_jobs
-            ORDER BY created_at DESC
-            "#,
-        )
-        .fetch_all(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to list cron jobs: {}", e))
-    })?;
+async fn handle_list(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
+    let rows: Vec<CronJobRow> = sql_forge!(
+        CronJobRow,
+        r#"
+        SELECT id, name, schedule, prompt, enabled, active, mode, action_id,
+               last_run_at, next_run_at, created_at, silent
+        FROM cron_jobs
+        ORDER BY created_at DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to list cron jobs: {}", e))?;
 
     if rows.is_empty() {
         return Ok(("_No cron jobs configured._".to_string(), false));
@@ -168,22 +160,19 @@ fn handle_list(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
 // Tool: delete_cron_job
 // ---------------------------------------------------------------------------
 
-fn handle_delete(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_delete(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let job_id = args["job_id"].as_str().unwrap_or("");
     if job_id.is_empty() {
         return Err(anyhow::anyhow!("Missing required argument: 'job_id'"));
     }
 
-    let handle = tokio::runtime::Handle::current();
-    handle.block_on(async {
-        sql_forge!(
-            r#"DELETE FROM cron_jobs WHERE id = :job_id"#,
-            ( :job_id = job_id )
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to delete cron job: {}", e))
-    })?;
+    sql_forge!(
+        r#"DELETE FROM cron_jobs WHERE id = :job_id"#,
+        ( :job_id = job_id )
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to delete cron job: {}", e))?;
 
     Ok((format!("🗑️ Deleted cron job `{}`", job_id), false))
 }
@@ -192,54 +181,49 @@ fn handle_delete(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Tool: update_cron_job
 // ---------------------------------------------------------------------------
 
-fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let job_id = args["job_id"].as_str().unwrap_or("");
     if job_id.is_empty() {
         return Err(anyhow::anyhow!("Missing required argument: 'job_id'"));
     }
 
-    let handle = tokio::runtime::Handle::current();
-    handle.block_on(async {
-        // Build UPDATE with only the fields that are provided
-        if let Some(schedule) = args["schedule"].as_str() {
-            // Validate 5-field cron
-            let fields: Vec<&str> = schedule.split_whitespace().collect();
-            if fields.len() != 5 {
-                anyhow::bail!("Invalid cron expression '{}': expected 5 fields", schedule);
-            }
-            let cron_expr = format!("0 {}", schedule);
-            cron::Schedule::from_str(&cron_expr)
-                .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", schedule, e))?;
+    // Build UPDATE with only the fields that are provided
+    if let Some(schedule) = args["schedule"].as_str() {
+        // Validate 5-field cron
+        let fields: Vec<&str> = schedule.split_whitespace().collect();
+        if fields.len() != 5 {
+            anyhow::bail!("Invalid cron expression '{}': expected 5 fields", schedule);
+        }
+        let cron_expr = format!("0 {}", schedule);
+        cron::Schedule::from_str(&cron_expr)
+            .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", schedule, e))?;
 
-            sql_forge!(
-                r#"UPDATE cron_jobs SET schedule = :schedule, updated_at = NOW() WHERE id = :job_id"#,
-                ( :schedule = schedule, :job_id = job_id )
-            )
-            .execute(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update cron job schedule: {}", e))?;
-        }
-        if let Some(prompt) = args["prompt"].as_str() {
-            sql_forge!(
-                r#"UPDATE cron_jobs SET prompt = NULLIF(:prompt, '')::text, mode = 'agentic', updated_at = NOW() WHERE id = :job_id"#,
-                ( :prompt = prompt, :job_id = job_id )
-            )
-            .execute(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update cron job prompt: {}", e))?;
-        }
-        if let Some(active) = args["active"].as_bool() {
-            sql_forge!(
-                r#"UPDATE cron_jobs SET active = :active, updated_at = NOW() WHERE id = :job_id"#,
-                ( :active = active, :job_id = job_id )
-            )
-            .execute(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update cron job active: {}", e))?;
-        }
-
-        Ok::<_, anyhow::Error>(())
-    })?;
+        sql_forge!(
+            r#"UPDATE cron_jobs SET schedule = :schedule, updated_at = NOW() WHERE id = :job_id"#,
+            ( :schedule = schedule, :job_id = job_id )
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update cron job schedule: {}", e))?;
+    }
+    if let Some(prompt) = args["prompt"].as_str() {
+        sql_forge!(
+            r#"UPDATE cron_jobs SET prompt = NULLIF(:prompt, '')::text, mode = 'agentic', updated_at = NOW() WHERE id = :job_id"#,
+            ( :prompt = prompt, :job_id = job_id )
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update cron job prompt: {}", e))?;
+    }
+    if let Some(active) = args["active"].as_bool() {
+        sql_forge!(
+            r#"UPDATE cron_jobs SET active = :active, updated_at = NOW() WHERE id = :job_id"#,
+            ( :active = active, :job_id = job_id )
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update cron job active: {}", e))?;
+    }
 
     Ok((format!("✅ Updated cron job `{}`", job_id), false))
 }
@@ -258,13 +242,13 @@ async fn main() -> Result<()> {
 
     // Wrap each handler to capture a clone of the pool
     let p_cron = pool.clone();
-    let create_handler: ToolHandler = Box::new(move |args: &Value| handle_create(&p_cron, args));
+    let create_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_create(&p_cron, &args).await }));
     let p_list = pool.clone();
-    let list_handler: ToolHandler = Box::new(move |args: &Value| handle_list(&p_list, args));
+    let list_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_list(&p_list, &args).await }));
     let p_del = pool.clone();
-    let delete_handler: ToolHandler = Box::new(move |args: &Value| handle_delete(&p_del, args));
+    let delete_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_delete(&p_del, &args).await }));
     let p_upd = pool.clone();
-    let update_handler: ToolHandler = Box::new(move |args: &Value| handle_update(&p_upd, args));
+    let update_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_update(&p_upd, &args).await }));
 
     let tools = vec![
         McpToolEntry {

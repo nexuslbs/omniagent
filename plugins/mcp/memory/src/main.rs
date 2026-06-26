@@ -511,16 +511,16 @@ async fn main() -> Result<()> {
 
     // Wrap each handler to capture clones of data_dir
     let dd_promote = data_dir.clone();
-    let promote_handler: ToolHandler = Box::new(move |args: &Value| handle_promote(&dd_promote, args));
+    let promote_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_promote(&dd_promote, &args).await }));
 
     let dd_list = data_dir.clone();
-    let list_handler: ToolHandler = Box::new(move |args: &Value| handle_list(&dd_list, args));
+    let list_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_list(&dd_list, &args).await }));
 
     let dd_review = data_dir.clone();
-    let review_handler: ToolHandler = Box::new(move |args: &Value| handle_review(&dd_review, args));
+    let review_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_review(&dd_review, &args).await }));
 
     let dd_manage = data_dir.clone();
-    let manage_handler: ToolHandler = Box::new(move |args: &Value| handle_manage(&dd_manage, args));
+    let manage_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_manage(&dd_manage, &args).await }));
 
     let tools = vec![
         McpToolEntry {

@@ -30,13 +30,10 @@ fn data_dir() -> String {
 // Tool: plugin_manager — list
 // ---------------------------------------------------------------------------
 
-fn handle_list(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
-    let handle = tokio::runtime::Handle::current();
-    let rows = handle.block_on(async {
-        plugin::list_plugins(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to list plugins: {}", e))
-    })?;
+async fn handle_list(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
+    let rows = plugin::list_plugins(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to list plugins: {}", e))?;
 
     let details: Vec<plugin::PluginDetail> =
         rows.iter().map(|r| plugin::enrich_plugin(r)).collect();
@@ -49,7 +46,7 @@ fn handle_list(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
 // Tool: plugin_manager — install
 // ---------------------------------------------------------------------------
 
-fn handle_install(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_install(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let url = args["url"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument for install: 'url'"))?;
@@ -65,31 +62,22 @@ fn handle_install(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
         plugin::PluginType::Provider => "provider",
     };
 
-    let handle = tokio::runtime::Handle::current();
-    let row = handle.block_on(async {
-        plugin::upsert_plugin(
-            pool,
-            plugin::UpsertPluginParams {
-                name: &manifest.name,
-                plugin_type: plugin_type_str,
-                version: &manifest.version,
-                source: Some(url),
-                manifest: &manifest_json,
-                config: &serde_json::json!({}),
-            },
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to register plugin in DB: {}", e))
-    })?;
-
-    let detail = plugin::enrich_plugin(&row);
-    let output = serde_json::to_string_pretty(&detail)?;
+    let row = plugin::upsert_plugin(
+        pool,
+        plugin::UpsertPluginParams {
+            name: &manifest.name,
+            plugin_type: plugin_type_str,
+            version: &manifest.version,
+            source: Some(url),
+            manifest: &manifest_json,
+            config: &serde_json::json!({}),
+        },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to register plugin in DB: {}", e))?;
 
     Ok((
-        format!(
-            "Plugin '{}' version {} installed successfully.\n\n{}",
-            manifest.name, manifest.version, output
-        ),
+        format!("Plugin '{}' installed successfully (id: {})", manifest.name, row.id),
         false,
     ))
 }
@@ -98,136 +86,115 @@ fn handle_install(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Tool: plugin_manager — uninstall
 // ---------------------------------------------------------------------------
 
-fn handle_uninstall(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_uninstall(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let name = args["name"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Missing required argument for uninstall: 'name'"))?;
+        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'name'"))?;
 
-    // Remove from database
-    let handle = tokio::runtime::Handle::current();
-    let deleted = handle.block_on(async {
-        plugin::delete_plugin(pool, name)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to delete plugin from DB: {}", e))
-    })?;
+    let deleted = plugin::delete_plugin(pool, name)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to delete plugin: {}", e))?;
 
-    // Remove from disk
-    let dir = data_dir();
-    let disk_result = plugin::installer::uninstall(name, &dir);
-
-    let mut parts = vec![];
     if deleted {
-        parts.push("Removed from registry".to_string());
+        Ok((format!("Plugin '{}' uninstalled successfully.", name), false))
     } else {
-        parts.push("Not found in registry".to_string());
+        Ok((format!("Plugin '{}' not found.", name), false))
     }
-    match disk_result {
-        Ok(_) => parts.push("Removed from disk".to_string()),
-        Err(e) => parts.push(format!("Disk removal note: {}", e)),
-    }
-
-    Ok((format!("Plugin '{}': {}", name, parts.join("; ")), false))
 }
 
 // ---------------------------------------------------------------------------
 // Tool: plugin_manager — enable
 // ---------------------------------------------------------------------------
 
-fn handle_enable(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_enable(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let name = args["name"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Missing required argument for enable: 'name'"))?;
+        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'name'"))?;
 
-    let handle = tokio::runtime::Handle::current();
-    let row = handle.block_on(async {
-        plugin::update_plugin_status(pool, name, "enabled")
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to enable plugin: {}", e))
-    })?;
+    let row = plugin::update_plugin_status(pool, name, true)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to enable plugin: {}", e))?;
 
-    Ok((
-        format!(
-            "Plugin '{}' enabled (current status: {})",
-            name, row.status
-        ),
-        false,
-    ))
+    if let Some(r) = row {
+        Ok((format!("Plugin '{}' enabled (id: {}).", r.name, r.id), false))
+    } else {
+        Ok((format!("Plugin '{}' not found.", name), false))
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Tool: plugin_manager — disable
 // ---------------------------------------------------------------------------
 
-fn handle_disable(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_disable(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let name = args["name"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Missing required argument for disable: 'name'"))?;
+        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'name'"))?;
 
-    let handle = tokio::runtime::Handle::current();
-    let row = handle.block_on(async {
-        plugin::update_plugin_status(pool, name, "disabled")
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to disable plugin: {}", e))
-    })?;
+    let row = plugin::update_plugin_status(pool, name, false)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to disable plugin: {}", e))?;
 
-    Ok((
-        format!(
-            "Plugin '{}' disabled (current status: {})",
-            name, row.status
-        ),
-        false,
-    ))
+    if let Some(r) = row {
+        Ok((format!("Plugin '{}' disabled (id: {}).", r.name, r.id), false))
+    } else {
+        Ok((format!("Plugin '{}' not found.", name), false))
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Tool: plugin_manager — config
 // ---------------------------------------------------------------------------
 
-fn handle_config(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_config(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let name = args["name"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Missing required argument for config: 'name'"))?;
+        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'name'"))?;
+    let config = args.get("config")
+        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'config'"))?;
 
-    let config = args
-        .get("config")
-        .ok_or_else(|| anyhow::anyhow!("Missing required argument for config: 'config'"))?;
+    let row = plugin::update_plugin_config(pool, name, config)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update plugin config: {}", e))?;
 
-    let handle = tokio::runtime::Handle::current();
-    let row = handle.block_on(async {
-        plugin::update_plugin_config(pool, name, config)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update plugin config: {}", e))
-    })?;
-
-    let detail = plugin::enrich_plugin(&row);
-    let output = serde_json::to_string_pretty(&detail)?;
-
-    Ok((
-        format!("Plugin '{}' config updated.\n\n{}", name, output),
-        false,
-    ))
+    if let Some(r) = row {
+        Ok((
+            format!(
+                "Plugin '{}' config updated (id: {}). Current config: {}",
+                r.name,
+                r.id,
+                serde_json::to_string_pretty(&r.config)?
+            ),
+            false,
+        ))
+    } else {
+        Ok((format!("Plugin '{}' not found.", name), false))
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Main dispatch
+// Tool: plugin_manager — main dispatch
 // ---------------------------------------------------------------------------
 
-fn handle_plugin_manager(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_plugin_manager(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let action = args["action"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'action'"))?;
 
     match action {
-        "list" => handle_list(pool, args),
-        "install" => handle_install(pool, args),
-        "uninstall" => handle_uninstall(pool, args),
-        "enable" => handle_enable(pool, args),
-        "disable" => handle_disable(pool, args),
-        "config" => handle_config(pool, args),
-        _ => anyhow::bail!(
-            "Unknown action '{}'. Valid actions: list, install, uninstall, enable, disable, config",
-            action
-        ),
+        "list" => handle_list(pool, args).await,
+        "install" => handle_install(pool, args).await,
+        "uninstall" => handle_uninstall(pool, args).await,
+        "enable" => handle_enable(pool, args).await,
+        "disable" => handle_disable(pool, args).await,
+        "config" => handle_config(pool, args).await,
+        _ => Ok((
+            format!(
+                "Unknown action '{}'. Valid actions: list, install, uninstall, enable, disable, config",
+                action
+            ),
+            true,
+        )),
     }
 }
 
@@ -237,46 +204,41 @@ fn handle_plugin_manager(pool: &PgPool, args: &Value) -> Result<(String, bool)> 
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url =
-        std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
-    let pool = omniagent::db::connect(&database_url)
+    let pool = plugin::create_pool()
         .await
-        .context("Failed to connect to database")?;
+        .context("Failed to create database pool")?;
     let pool = Arc::new(pool);
 
     let p = pool.clone();
-    let handler: ToolHandler = Box::new(move |args: &Value| handle_plugin_manager(&p, args));
+
+    let handler: ToolHandler = Box::new(move |args: Value| {
+        let p_inner = p.clone();
+        Box::pin(async move { handle_plugin_manager(&p_inner, &args).await })
+    });
 
     let tools = vec![McpToolEntry {
         def: McpToolDef {
             name: "plugin_manager".to_string(),
-            description:
-                "Manage plugins: list, install, uninstall, enable, disable, or update config. \
-                 Use action='list' to see all plugins. \
-                 Use action='install' with a url to install from a tarball/zip. \
-                 Use action='uninstall' with a name to remove a plugin. \
-                 Use action='enable' or 'disable' with a name to toggle plugin status. \
-                 Use action='config' with a name and config object to update plugin settings."
-                    .to_string(),
+            description: "Manage plugins: list, install, uninstall, enable, disable, or configure.".to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "description": "Action to perform: list, install, uninstall, enable, disable, config",
-                        "enum": ["list", "install", "uninstall", "enable", "disable", "config"]
+                        "enum": ["list", "install", "uninstall", "enable", "disable", "config"],
+                        "description": "Action to perform"
                     },
                     "name": {
                         "type": "string",
-                        "description": "Plugin name (required for all actions except list)"
+                        "description": "Plugin name (required for all except list)"
                     },
                     "url": {
                         "type": "string",
-                        "description": "Download URL for install action (.tar.gz, .tgz, or .zip)"
+                        "description": "Plugin URL (required for install)"
                     },
                     "config": {
                         "type": "object",
-                        "description": "Configuration object for config action"
+                        "description": "Config object (required for config action)"
                     }
                 },
                 "required": ["action"]
@@ -287,7 +249,7 @@ async fn main() -> Result<()> {
 
     let server_info = ServerInfo {
         name: "mcp-server-plugin-manager".to_string(),
-        version: "0.1.0".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
     };
 
     run_server(server_info, tools).await

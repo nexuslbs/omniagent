@@ -202,30 +202,18 @@ async fn count_corrections(
 // Tool: get_metrics
 // ---------------------------------------------------------------------------
 
-fn handle_get_metrics(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_get_metrics(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let hours = args.get("hours").and_then(|v| v.as_i64()).unwrap_or(24);
     let profile = args.get("profile").and_then(|v| v.as_str());
     let profile_owned = profile.map(|s| s.to_string()).unwrap_or_default();
 
-    let handle = tokio::runtime::Handle::current();
-    let (usage, total_responses, grounded_responses, retrieval_count, correction_count) =
-        handle.block_on(async {
-            let usage = aggregate_metrics(pool, hours, &profile_owned).await?;
-            let (total_responses, grounded_responses) =
-                count_grounded_responses(pool, hours, &profile_owned).await?;
-            let retrieval_count =
-                count_retrieval_events(pool, hours, &profile_owned).await?;
-            let correction_count =
-                count_corrections(pool, hours, &profile_owned).await?;
-
-            Ok::<_, anyhow::Error>((
-                usage,
-                total_responses,
-                grounded_responses,
-                retrieval_count,
-                correction_count,
-            ))
-        })?;
+    let usage = aggregate_metrics(pool, hours, &profile_owned).await?;
+    let (total_responses, grounded_responses) =
+        count_grounded_responses(pool, hours, &profile_owned).await?;
+    let retrieval_count =
+        count_retrieval_events(pool, hours, &profile_owned).await?;
+    let correction_count =
+        count_corrections(pool, hours, &profile_owned).await?;
 
     let mut report = format!(
         "# Agent Metrics Report\n\nPeriod: **last {} hour(s)**\n\n",

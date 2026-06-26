@@ -123,9 +123,8 @@ fn setup_knowledge_pipeline_tool() -> McpTool {
             let schedule = args.get("schedule").and_then(|v| v.as_str()).map(|s| s.to_string());
             let prompt = args.get("prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
 
-            tokio::task::block_in_place(|| {
-                let handle = tokio::runtime::Handle::current();
-                handle.block_on(async {
+            let handle = tokio::runtime::Handle::current();
+            handle.block_on(async {
                     match crate::scheduler::setup_knowledge_pipeline(&pool, &data_dir, schedule, prompt).await {
                         Ok(()) => {
                             tracing::info!("[actions] Knowledge pipeline cron created/verified");
@@ -145,7 +144,6 @@ fn setup_knowledge_pipeline_tool() -> McpTool {
                         }
                     }
                 })
-            })
         }),
     }
 }
