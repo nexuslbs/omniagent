@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, mode, template, planning_mode, profile, enabled, active)\n        VALUES ($1, 'knowledge-pipeline', 'Knowledge Pipeline', $2, $3, $4, 'agentic', '', 'prompt_only', 'pipeline', true, true)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c29c3e930c562b5191ac44c3043b37b173d4d42eb17a36a5ba780efac1275774"
+}
