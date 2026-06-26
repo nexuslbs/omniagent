@@ -15,8 +15,13 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && apt-get install -y docker-ce-cli docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
+# Install sqlx-cli for compile-time query verification against the live database
+RUN cargo install sqlx-cli --version 0.9.0
+
 WORKDIR /app
 
 # Build and run — builds inside the container on the compose network,
 # where postgres is reachable at postgres:5432 for sql_forge compile-time checks.
-CMD ["bash", "-c", "SQLX_OFFLINE=true cargo build --release && exec ./target/release/omniagent"]
+# Regenerates the query cache against the live database before building.
+# If prepare fails (e.g. first run before migrations), falls back to offline cache.
+CMD ["bash", "-c", "cargo sqlx prepare -- --lib 2>&1 | head -5 || true; cargo build --release && exec ./target/release/omniagent"]
