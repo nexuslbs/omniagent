@@ -15,6 +15,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tracing::{error, info};
 
+use crate::err_str;
 use crate::plugin;
 use crate::plugins_yaml;
 use crate::server::AppState;
@@ -42,8 +43,14 @@ pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
         .route("/api/plugins/{name}/config", post(update_config_handler))
         .route("/api/plugins/{name}/enable", post(enable_plugin_handler))
         .route("/api/plugins/{name}/disable", post(disable_plugin_handler))
-        .route("/api/plugins/{name}/reinstall", post(reinstall_plugin_handler))
-        .route("/api/plugins/{name}/refresh-models", post(refresh_models_handler))
+        .route(
+            "/api/plugins/{name}/reinstall",
+            post(reinstall_plugin_handler),
+        )
+        .route(
+            "/api/plugins/{name}/refresh-models",
+            post(refresh_models_handler),
+        )
         .route("/api/plugins/{name}", delete(delete_plugin_handler))
         .route("/api/plugins/install-url", post(install_url_handler))
 }
@@ -53,28 +60,30 @@ pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
 // ---------------------------------------------------------------------------
 
 /// GET /api/plugins — list all plugins (discover from disk + YAML overrides).
-pub(crate) async fn list_plugins_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let data_dir = state.data_dir.clone();
-    match tokio::task::spawn_blocking(move || {
-        plugins_yaml::list_plugins(&data_dir)
-    })
-    .await
-    .unwrap_or_else(|e| Err(anyhow::anyhow!("Task join error: {}", e)))
+    match tokio::task::spawn_blocking(move || plugins_yaml::list_plugins(&data_dir))
+        .await
+        .unwrap_or_else(|e| Err(err_str!("Task join error: {}", e)))
     {
-        Ok(details) => {
-            (StatusCode::OK, Json(serde_json::json!({
+        Ok(details) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
                 "success": true,
                 "data": details
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
         Err(e) => {
             error!("Failed to list plugins: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "success": false,
-                "error": format!("Failed to list plugins: {}", e)
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to list plugins: {}", e)
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -86,30 +95,36 @@ pub(crate) async fn get_plugin_handler(
 ) -> impl IntoResponse {
     let data_dir = state.data_dir.clone();
     let name_clone = name.clone();
-    match tokio::task::spawn_blocking(move || {
-        plugins_yaml::get_plugin(&data_dir, &name_clone)
-    })
-    .await
-    .unwrap_or_else(|e| Err(anyhow::anyhow!("Task join error: {}", e)))
+    match tokio::task::spawn_blocking(move || plugins_yaml::get_plugin(&data_dir, &name_clone))
+        .await
+        .unwrap_or_else(|e| Err(err_str!("Task join error: {}", e)))
     {
-        Ok(Some(detail)) => {
-            (StatusCode::OK, Json(serde_json::json!({
+        Ok(Some(detail)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
                 "success": true,
                 "data": detail
-            }))).into_response()
-        }
-        Ok(None) => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            })),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
                 "success": false,
                 "error": "Plugin not found"
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
         Err(e) => {
             error!("Failed to get plugin '{}': {:?}", name, e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "success": false,
-                "error": format!("Failed to get plugin: {}", e)
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to get plugin: {}", e)
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -124,16 +139,24 @@ pub(crate) async fn update_config_handler(
     let yaml_type = match plugins_yaml::get_disk_plugin_type(&state.data_dir, &name) {
         Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
         Ok(None) => {
-            return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "success": false,
-                "error": "Plugin not found"
-            }))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "Plugin not found"
+                })),
+            )
+                .into_response();
         }
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "success": false,
-                "error": format!("Failed to determine plugin type: {}", e)
-            }))).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to determine plugin type: {}", e)
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -152,7 +175,8 @@ pub(crate) async fn update_config_handler(
                         let api_key_owned = api_key_val.to_string();
                         let result = tokio::task::spawn_blocking(move || {
                             let content = std::fs::read_to_string(&env_path).unwrap_or_default();
-                            let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+                            let mut lines: Vec<String> =
+                                content.lines().map(|l| l.to_string()).collect();
 
                             let mut found = false;
                             for line in lines.iter_mut() {
@@ -169,7 +193,8 @@ pub(crate) async fn update_config_handler(
 
                             let new_content = lines.join("\n") + "\n";
                             std::fs::write(&env_path, new_content).ok();
-                        }).await;
+                        })
+                        .await;
 
                         if result.is_ok() {
                             std::env::set_var(&env_key, api_key_val);
@@ -184,37 +209,53 @@ pub(crate) async fn update_config_handler(
             match plugins_yaml::get_plugin(&state.data_dir, &name) {
                 Ok(Some(detail)) => {
                     info!("Updated config for plugin '{}'", name);
-                    (StatusCode::OK, Json(serde_json::json!({
-                        "success": true,
-                        "data": detail
-                    }))).into_response()
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "success": true,
+                            "data": detail
+                        })),
+                    )
+                        .into_response()
                 }
-                Ok(None) => {
-                    (StatusCode::NOT_FOUND, Json(serde_json::json!({
+                Ok(None) => (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
                         "success": false,
                         "error": "Plugin not found after update"
-                    }))).into_response()
-                }
-                Err(e) => {
-                    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                    })),
+                )
+                    .into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
                         "success": false,
                         "error": format!("Failed to read plugin after update: {}", e)
-                    }))).into_response()
-                }
+                    })),
+                )
+                    .into_response(),
             }
         }
         Err(e) => {
             if e.to_string().contains("not found") {
-                (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                    "success": false,
-                    "error": "Plugin not found"
-                }))).into_response()
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": "Plugin not found"
+                    })),
+                )
+                    .into_response()
             } else {
                 error!("Failed to update config for plugin '{}': {:?}", name, e);
-                (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                    "success": false,
-                    "error": format!("Failed to update config: {}", e)
-                }))).into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to update config: {}", e)
+                    })),
+                )
+                    .into_response()
             }
         }
     }
@@ -228,10 +269,14 @@ pub(crate) async fn enable_plugin_handler(
     let yaml_type = match plugins_yaml::get_disk_plugin_type(&state.data_dir, &name) {
         Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
         _ => {
-            return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "success": false,
-                "error": "Plugin not found"
-            }))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "Plugin not found"
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -243,29 +288,37 @@ pub(crate) async fn enable_plugin_handler(
         true,
         serde_json::json!({}),
     ) {
-        Ok(_entry) => {
-            match plugins_yaml::get_plugin(&state.data_dir, &name) {
-                Ok(Some(detail)) => {
-                    info!("Enabled plugin '{}'", name);
-                    (StatusCode::OK, Json(serde_json::json!({
+        Ok(_entry) => match plugins_yaml::get_plugin(&state.data_dir, &name) {
+            Ok(Some(detail)) => {
+                info!("Enabled plugin '{}'", name);
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
                         "success": true,
                         "data": detail
-                    }))).into_response()
-                }
-                _ => {
-                    (StatusCode::OK, Json(serde_json::json!({
-                        "success": true,
-                        "data": { "name": name, "status": "enabled" }
-                    }))).into_response()
-                }
+                    })),
+                )
+                    .into_response()
             }
-        }
+            _ => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "data": { "name": name, "status": "enabled" }
+                })),
+            )
+                .into_response(),
+        },
         Err(e) => {
             error!("Failed to enable plugin '{}': {:?}", name, e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "success": false,
-                "error": format!("Failed to enable plugin: {}", e)
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to enable plugin: {}", e)
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -278,10 +331,14 @@ pub(crate) async fn disable_plugin_handler(
     let yaml_type = match plugins_yaml::get_disk_plugin_type(&state.data_dir, &name) {
         Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
         _ => {
-            return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "success": false,
-                "error": "Plugin not found"
-            }))).into_response();
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "Plugin not found"
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -293,29 +350,37 @@ pub(crate) async fn disable_plugin_handler(
         false,
         serde_json::json!({}),
     ) {
-        Ok(_entry) => {
-            match plugins_yaml::get_plugin(&state.data_dir, &name) {
-                Ok(Some(detail)) => {
-                    info!("Disabled plugin '{}'", name);
-                    (StatusCode::OK, Json(serde_json::json!({
+        Ok(_entry) => match plugins_yaml::get_plugin(&state.data_dir, &name) {
+            Ok(Some(detail)) => {
+                info!("Disabled plugin '{}'", name);
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
                         "success": true,
                         "data": detail
-                    }))).into_response()
-                }
-                _ => {
-                    (StatusCode::OK, Json(serde_json::json!({
-                        "success": true,
-                        "data": { "name": name, "status": "disabled" }
-                    }))).into_response()
-                }
+                    })),
+                )
+                    .into_response()
             }
-        }
+            _ => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "data": { "name": name, "status": "disabled" }
+                })),
+            )
+                .into_response(),
+        },
         Err(e) => {
             error!("Failed to disable plugin '{}': {:?}", name, e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "success": false,
-                "error": format!("Failed to disable plugin: {}", e)
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to disable plugin: {}", e)
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -328,23 +393,31 @@ pub(crate) async fn reinstall_plugin_handler(
     match plugins_yaml::get_plugin(&state.data_dir, &name) {
         Ok(Some(detail)) => {
             info!("Reinstalled plugin '{}'", name);
-            (StatusCode::OK, Json(serde_json::json!({
-                "success": true,
-                "data": detail
-            }))).into_response()
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "data": detail
+                })),
+            )
+                .into_response()
         }
-        Ok(None) => {
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
                 "success": false,
                 "error": format!("Plugin '{}' not found on disk after re-scan", name)
-            }))).into_response()
-        }
-        Err(e) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
                 "success": false,
                 "error": format!("Error checking plugin after reinstall: {}", e)
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -355,7 +428,9 @@ pub(crate) async fn refresh_models_handler(
 ) -> impl IntoResponse {
     match plugins_yaml::refresh_plugin_models(&state.data_dir, &name).await {
         Ok(Some(detail)) => {
-            let model_count = detail.config_schema.iter()
+            let model_count = detail
+                .config_schema
+                .iter()
                 .filter(|f| f.allowed_values.is_some())
                 .map(|f| f.allowed_values.as_ref().map(|v| v.len()).unwrap_or(0))
                 .sum::<usize>();
@@ -363,24 +438,34 @@ pub(crate) async fn refresh_models_handler(
                 "Refreshed dynamic models for plugin '{}' ({} models)",
                 name, model_count
             );
-            (StatusCode::OK, Json(serde_json::json!({
-                "success": true,
-                "data": detail
-            }))).into_response()
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "data": detail
+                })),
+            )
+                .into_response()
         }
-        Ok(None) => {
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+        Ok(None) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
                 "success": false,
                 "error": format!("Plugin '{}' has no refresh_url fields", name)
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
         Err(e) => {
             let msg = format!("Failed to refresh models for plugin '{}': {}", name, e);
             error!("{}", msg);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "success": false,
-                "error": msg
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": msg
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -407,16 +492,24 @@ pub(crate) async fn delete_plugin_handler(
 
     if removed {
         info!("Deleted plugin '{}'", name);
-        (StatusCode::OK, Json(serde_json::json!({
-            "success": true,
-            "data": {"deleted": true}
-        }))).into_response()
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "success": true,
+                "data": {"deleted": true}
+            })),
+        )
+            .into_response()
     } else {
         // Even if not in YAML, try to uninstall from disk
-        (StatusCode::OK, Json(serde_json::json!({
-            "success": true,
-            "data": {"deleted": true}
-        }))).into_response()
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "success": true,
+                "data": {"deleted": true}
+            })),
+        )
+            .into_response()
     }
 }
 
@@ -432,10 +525,14 @@ pub(crate) async fn install_url_handler(
         Ok(m) => m,
         Err(e) => {
             error!("Failed to install plugin from {}: {:?}", body.url, e);
-            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                "success": false,
-                "error": format!("Installation failed: {}", e)
-            }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Installation failed: {}", e)
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -448,35 +545,48 @@ pub(crate) async fn install_url_handler(
         true,
         serde_json::json!({}),
     ) {
-        Ok(_entry) => {
-            match plugins_yaml::get_plugin(&state.data_dir, &manifest.name) {
-                Ok(Some(detail)) => {
-                    info!(
-                        "Successfully installed plugin '{}' version {} from {}",
-                        manifest.name, manifest.version, body.url
-                    );
-                    (StatusCode::CREATED, Json(serde_json::json!({
+        Ok(_entry) => match plugins_yaml::get_plugin(&state.data_dir, &manifest.name) {
+            Ok(Some(detail)) => {
+                info!(
+                    "Successfully installed plugin '{}' version {} from {}",
+                    manifest.name, manifest.version, body.url
+                );
+                (
+                    StatusCode::CREATED,
+                    Json(serde_json::json!({
                         "success": true,
                         "data": detail
-                    }))).into_response()
-                }
-                _ => {
-                    info!(
-                        "Successfully installed plugin '{}' version {} from {}",
-                        manifest.name, manifest.version, body.url
-                    );
-                    (StatusCode::CREATED, Json(serde_json::json!({
-                        "success": true
-                    }))).into_response()
-                }
+                    })),
+                )
+                    .into_response()
             }
-        }
+            _ => {
+                info!(
+                    "Successfully installed plugin '{}' version {} from {}",
+                    manifest.name, manifest.version, body.url
+                );
+                (
+                    StatusCode::CREATED,
+                    Json(serde_json::json!({
+                        "success": true
+                    })),
+                )
+                    .into_response()
+            }
+        },
         Err(e) => {
-            error!("Installed plugin from disk but failed to register in YAML: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-                "success": false,
-                "error": format!("Plugin extracted but YAML registration failed: {}", e)
-            }))).into_response()
+            error!(
+                "Installed plugin from disk but failed to register in YAML: {:?}",
+                e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Plugin extracted but YAML registration failed: {}", e)
+                })),
+            )
+                .into_response()
         }
     }
 }

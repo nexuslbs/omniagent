@@ -173,10 +173,8 @@ impl ProfileRegistry {
     /// Ensure the default profile exists.
     fn ensure_default(&mut self) {
         if !self.profiles.contains_key("default") {
-            self.profiles.insert(
-                "default".to_string(),
-                Profile::default("default"),
-            );
+            self.profiles
+                .insert("default".to_string(), Profile::default("default"));
         }
     }
 

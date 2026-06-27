@@ -5,7 +5,8 @@
 //! - Uninstalling (removing plugin directory)
 //! - Discovering plugins from disk
 
-use anyhow::{Context, Result};
+use crate::error::{Error, AppResult, ErrorContext};
+use crate::err_msg;
 use std::path::Path;
 
 use crate::plugin::{load_manifest, PluginManifest, PluginType};
@@ -18,12 +19,12 @@ use crate::plugin::{load_manifest, PluginManifest, PluginType};
 ///
 /// Uses `reqwest::blocking::get` to download and shell commands (tar, unzip) to extract.
 /// Returns the parsed PluginManifest from the extracted plugin.json.
-pub fn install_from_url(url: &str, data_dir: &str) -> Result<PluginManifest> {
+pub fn install_from_url(url: &str, data_dir: &str) -> AppResult<PluginManifest> {
     let response = reqwest::blocking::get(url)
-        .with_context(|| format!("Failed to download plugin from {}", url))?;
+        .ctx(format!("Failed to download plugin from {}", url))?;
 
     if !response.status().is_success() {
-        anyhow::bail!(
+        err_msg!(
             "Failed to download plugin from {}: HTTP {}",
             url,
             response.status()
@@ -32,16 +33,19 @@ pub fn install_from_url(url: &str, data_dir: &str) -> Result<PluginManifest> {
 
     let bytes = response
         .bytes()
-        .with_context(|| format!("Failed to read response body from {}", url))?;
+        .ctx(format!("Failed to read response body from {}", url))?;
 
     // Create a temp directory for extraction using a unique name under /tmp
-    let temp_id = format!("omniagent-plugin-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos());
+    let temp_id = format!(
+        "omniagent-plugin-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
     let temp_path = std::path::PathBuf::from("/tmp").join(&temp_id);
     std::fs::create_dir_all(&temp_path)
-        .with_context(|| format!("Failed to create temp directory at {:?}", temp_path))?;
+        .ctx(format!("Failed to create temp directory at {:?}", temp_path))?;
 
     // Cleanup on drop (if still present)
     let temp_path_clone = temp_path.clone();
@@ -59,7 +63,12 @@ pub fn install_from_url(url: &str, data_dir: &str) -> Result<PluginManifest> {
     result
 }
 
-fn install_from_url_inner(url: &str, bytes: &[u8], temp_path: &std::path::Path, data_dir: &str) -> Result<PluginManifest> {
+fn install_from_url_inner(
+    url: &str,
+    bytes: &[u8],
+    temp_path: &std::path::Path,
+    data_dir: &str,
+) -> AppResult<PluginManifest> {
     // Determine file extension to choose extraction method
     let url_lower = url.to_lowercase();
     let archive_path;
@@ -67,7 +76,7 @@ fn install_from_url_inner(url: &str, bytes: &[u8], temp_path: &std::path::Path, 
     if url_lower.ends_with(".tar.gz") || url_lower.ends_with(".tgz") {
         archive_path = temp_path.join("plugin.tar.gz");
         std::fs::write(&archive_path, &bytes)
-            .with_context(|| "Failed to write downloaded archive to temp dir")?;
+            .ctx("Failed to write downloaded archive to temp dir")?;
 
         // Extract using tar
         let status = std::process::Command::new("tar")
@@ -76,15 +85,15 @@ fn install_from_url_inner(url: &str, bytes: &[u8], temp_path: &std::path::Path, 
             .arg("-C")
             .arg(&temp_path)
             .status()
-            .context("Failed to execute tar command")?;
+            .ctx("Failed to execute tar command")?;
 
         if !status.success() {
-            anyhow::bail!("tar extraction failed with status: {}", status);
+            err_msg!("tar extraction failed with status: {}", status);
         }
     } else if url_lower.ends_with(".zip") {
         archive_path = temp_path.join("plugin.zip");
         std::fs::write(&archive_path, &bytes)
-            .with_context(|| "Failed to write downloaded archive to temp dir")?;
+            .ctx("Failed to write downloaded archive to temp dir")?;
 
         // Extract using unzip
         let status = std::process::Command::new("unzip")
@@ -93,13 +102,13 @@ fn install_from_url_inner(url: &str, bytes: &[u8], temp_path: &std::path::Path, 
             .arg("-d")
             .arg(&temp_path)
             .status()
-            .context("Failed to execute unzip command")?;
+            .ctx("Failed to execute unzip command")?;
 
         if !status.success() {
-            anyhow::bail!("unzip extraction failed with status: {}", status);
+            err_msg!("unzip extraction failed with status: {}", status);
         }
     } else {
-        anyhow::bail!(
+        err_msg!(
             "Unsupported archive format in URL '{}'. Supported: .tar.gz, .tgz, .zip",
             url
         );
@@ -115,30 +124,39 @@ fn install_from_url_inner(url: &str, bytes: &[u8], temp_path: &std::path::Path, 
 
     // Remove existing if present
     if install_path.exists() {
-        std::fs::remove_dir_all(install_path)
-            .with_context(|| format!("Failed to remove existing plugin directory: {}", install_dir))?;
+        std::fs::remove_dir_all(install_path).ctx(format!(
+            "Failed to remove existing plugin directory: {}",
+            install_dir
+        ))?;
     }
 
     // Create parent directories
-    let parent = install_path.parent()
-        .with_context(|| format!("Install path has no parent: {}", install_dir))?;
+    let parent = install_path
+        .parent()
+        .ok_or_else(|| Error::Message(format!("Install path has no parent: {}", install_dir)))?;
     std::fs::create_dir_all(parent)
-        .with_context(|| format!("Failed to create parent directories for: {}", install_dir))?;
+        .ctx(format!("Failed to create parent directories for: {}", install_dir))?;
 
     // Copy the extracted plugin directory to the install location
-    let extracted_dir = Path::new(&plugin_json).parent()
-        .with_context(|| format!("Plugin JSON path has no parent: {}", plugin_json))?;
+    let extracted_dir = Path::new(&plugin_json)
+        .parent()
+        .ok_or_else(|| Error::Message(format!("Plugin JSON path has no parent: {}", plugin_json)))?;
     let copy_result = copy_dir_recursive(extracted_dir, install_path);
     if let Err(e) = copy_result {
         // Clean up on failure
         let _ = std::fs::remove_dir_all(install_path);
-        return Err(e).context(format!("Failed to copy plugin to install directory: {}", install_dir));
+        return Err(e).ctx(format!(
+            "Failed to copy plugin to install directory: {}",
+            install_dir
+        ));
     }
 
     // Verify the installed manifest
     let installed_manifest_path = format!("{}/plugin.json", install_dir);
-    let manifest = load_manifest(&installed_manifest_path)
-        .with_context(|| format!("Failed to verify installed plugin manifest at: {}", installed_manifest_path))?;
+    let manifest = load_manifest(&installed_manifest_path).ctx(format!(
+        "Failed to verify installed plugin manifest at: {}",
+        installed_manifest_path
+    ))?;
 
     tracing::info!(
         "Installed plugin '{}' version {} from {}",
@@ -151,13 +169,13 @@ fn install_from_url_inner(url: &str, bytes: &[u8], temp_path: &std::path::Path, 
 }
 
 /// Recursively copy a directory.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+fn copy_dir_recursive(src: &Path, dst: &Path) -> AppResult<()> {
     if !src.is_dir() {
-        anyhow::bail!("Source is not a directory: {:?}", src);
+        err_msg!("Source is not a directory: {:?}", src);
     }
     if !dst.exists() {
         std::fs::create_dir_all(dst)
-            .with_context(|| format!("Failed to create directory: {:?}", dst))?;
+            .ctx(format!("Failed to create directory: {:?}", dst))?;
     }
 
     for entry in std::fs::read_dir(src)? {
@@ -170,14 +188,14 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)
-                .with_context(|| format!("Failed to copy {:?} to {:?}", src_path, dst_path))?;
+                .ctx(format!("Failed to copy {:?} to {:?}", src_path, dst_path))?;
         }
     }
     Ok(())
 }
 
 /// Find the first plugin.json in a directory tree (searches top-level and one level deep).
-fn find_plugin_json(dir: &Path) -> Result<String> {
+fn find_plugin_json(dir: &Path) -> AppResult<String> {
     // Check if plugin.json exists at the top level
     let top_level = dir.join("plugin.json");
     if top_level.exists() {
@@ -197,10 +215,7 @@ fn find_plugin_json(dir: &Path) -> Result<String> {
         }
     }
 
-    anyhow::bail!(
-        "No plugin.json found in extracted archive at: {:?}",
-        dir
-    );
+    err_msg!("No plugin.json found in extracted archive at: {:?}", dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -208,27 +223,20 @@ fn find_plugin_json(dir: &Path) -> Result<String> {
 // ---------------------------------------------------------------------------
 
 /// Remove a plugin directory from `<data_dir>/plugins/installed/<name>/`.
-pub fn uninstall(name: &str, data_dir: &str) -> Result<()> {
+pub fn uninstall(name: &str, data_dir: &str) -> AppResult<()> {
     let install_dir = format!("{}/plugins/installed/{}", data_dir, name);
     let path = Path::new(&install_dir);
 
     if !path.exists() {
-        anyhow::bail!(
-            "Plugin '{}' is not installed at: {}",
-            name,
-            install_dir
-        );
+        err_msg!("Plugin '{}' is not installed at: {}", name, install_dir);
     }
 
     if !path.is_dir() {
-        anyhow::bail!(
-            "Plugin path is not a directory: {}",
-            install_dir
-        );
+        err_msg!("Plugin path is not a directory: {}", install_dir);
     }
 
     std::fs::remove_dir_all(path)
-        .with_context(|| format!("Failed to remove plugin directory: {}", install_dir))?;
+        .ctx(format!("Failed to remove plugin directory: {}", install_dir))?;
 
     tracing::info!("Uninstalled plugin '{}'", name);
     Ok(())
@@ -268,7 +276,11 @@ pub fn discover_plugins(
                         results.push((manifest, "installed".to_string(), path_str));
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to load installed plugin manifest at {}: {:?}", path_str, e);
+                        tracing::warn!(
+                            "Failed to load installed plugin manifest at {}: {:?}",
+                            path_str,
+                            e
+                        );
                     }
                 }
             }
@@ -338,7 +350,11 @@ pub fn discover_plugins(
                         let manifest = match load_manifest(&path_str) {
                             Ok(m) => m,
                             Err(e) => {
-                                tracing::warn!("Failed to load data_dir plugin manifest at {}: {:?}", path_str, e);
+                                tracing::warn!(
+                                    "Failed to load data_dir plugin manifest at {}: {:?}",
+                                    path_str,
+                                    e
+                                );
                                 continue;
                             }
                         };
@@ -436,7 +452,11 @@ mod tests {
         let workspace_dir = tempfile::tempdir().unwrap();
 
         // Create an installed plugin
-        let plugin_dir = data_dir.path().join("plugins").join("installed").join("my-plugin");
+        let plugin_dir = data_dir
+            .path()
+            .join("plugins")
+            .join("installed")
+            .join("my-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         let manifest_content = r#"{
             "name": "my-plugin",
@@ -461,9 +481,16 @@ mod tests {
     #[test]
     fn test_find_plugin_json_top_level() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("plugin.json"), r#"{"name":"test","type":"mcp","entrypoint":{"command":"test"}}"#).unwrap();
+        std::fs::write(
+            dir.path().join("plugin.json"),
+            r#"{"name":"test","type":"mcp","entrypoint":{"command":"test"}}"#,
+        )
+        .unwrap();
         let found = find_plugin_json(dir.path()).unwrap();
-        assert_eq!(found, dir.path().join("plugin.json").to_string_lossy().to_string());
+        assert_eq!(
+            found,
+            dir.path().join("plugin.json").to_string_lossy().to_string()
+        );
     }
 
     #[test]
@@ -471,9 +498,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let nested = dir.path().join("plugin-dir");
         std::fs::create_dir(&nested).unwrap();
-        std::fs::write(nested.join("plugin.json"), r#"{"name":"test","type":"mcp","entrypoint":{"command":"test"}}"#).unwrap();
+        std::fs::write(
+            nested.join("plugin.json"),
+            r#"{"name":"test","type":"mcp","entrypoint":{"command":"test"}}"#,
+        )
+        .unwrap();
         let found = find_plugin_json(dir.path()).unwrap();
-        assert_eq!(found, nested.join("plugin.json").to_string_lossy().to_string());
+        assert_eq!(
+            found,
+            nested.join("plugin.json").to_string_lossy().to_string()
+        );
     }
 
     #[test]

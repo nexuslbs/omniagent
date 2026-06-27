@@ -37,22 +37,16 @@ static CONFIG: OnceLock<HindsightConfig> = OnceLock::new();
 
 fn config() -> &'static HindsightConfig {
     CONFIG.get_or_init(|| HindsightConfig {
-        url: std::env::var("HINDSIGHT_URL")
-            .unwrap_or_else(|_| "http://hindsight:8888".to_string()),
-        bank_id: std::env::var("HINDSIGHT_BANK")
-            .unwrap_or_else(|_| "omniagent".to_string()),
+        url: std::env::var("HINDSIGHT_URL").unwrap_or_else(|_| "http://hindsight:8888".to_string()),
+        bank_id: std::env::var("HINDSIGHT_BANK").unwrap_or_else(|_| "omniagent".to_string()),
         limit: std::env::var("HINDSIGHT_LIMIT")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(5),
-        budget: std::env::var("HINDSIGHT_BUDGET")
-            .unwrap_or_else(|_| "low".to_string()),
-        tags: std::env::var("HINDSIGHT_TAGS")
-            .unwrap_or_else(|_| "from_user".to_string()),
-        tags_match: std::env::var("HINDSIGHT_TAGS_MATCH")
-            .unwrap_or_else(|_| "any".to_string()),
-        types: std::env::var("HINDSIGHT_TYPES")
-            .unwrap_or_else(|_| "world".to_string()),
+        budget: std::env::var("HINDSIGHT_BUDGET").unwrap_or_else(|_| "low".to_string()),
+        tags: std::env::var("HINDSIGHT_TAGS").unwrap_or_else(|_| "from_user".to_string()),
+        tags_match: std::env::var("HINDSIGHT_TAGS_MATCH").unwrap_or_else(|_| "any".to_string()),
+        types: std::env::var("HINDSIGHT_TYPES").unwrap_or_else(|_| "world".to_string()),
         timeout_secs: std::env::var("HINDSIGHT_TIMEOUT")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -64,17 +58,29 @@ fn config() -> &'static HindsightConfig {
 
 fn recall_url() -> String {
     let c = config();
-    format!("{}/v1/default/banks/{}/memories/recall", c.url.trim_end_matches('/'), c.bank_id)
+    format!(
+        "{}/v1/default/banks/{}/memories/recall",
+        c.url.trim_end_matches('/'),
+        c.bank_id
+    )
 }
 
 fn retain_url() -> String {
     let c = config();
-    format!("{}/v1/default/banks/{}/memories", c.url.trim_end_matches('/'), c.bank_id)
+    format!(
+        "{}/v1/default/banks/{}/memories",
+        c.url.trim_end_matches('/'),
+        c.bank_id
+    )
 }
 
 fn reflect_url() -> String {
     let c = config();
-    format!("{}/v1/default/banks/{}/reflect", c.url.trim_end_matches('/'), c.bank_id)
+    format!(
+        "{}/v1/default/banks/{}/reflect",
+        c.url.trim_end_matches('/'),
+        c.bank_id
+    )
 }
 
 fn parse_comma_separated(s: &str) -> Option<Vec<String>> {
@@ -87,7 +93,11 @@ fn parse_comma_separated(s: &str) -> Option<Vec<String>> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    if items.is_empty() { None } else { Some(items) }
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
 }
 
 /// Build an HTTP client with the configured timeout.
@@ -122,19 +132,19 @@ async fn handle_recall(args: Value) -> Result<(String, bool)> {
         .unwrap_or_else(|| serde_json::json!(c.budget));
 
     // Tags: parse from args["tags"] if present, else from config
-    let tags = args["tags"].as_str()
+    let tags = args["tags"]
+        .as_str()
         .and_then(|s| parse_comma_separated(s))
         .or_else(|| parse_comma_separated(&c.tags));
     if let Some(ref t) = tags {
         payload["tags"] = serde_json::json!(t);
-        let tags_match = args["tags_match"]
-            .as_str()
-            .unwrap_or(&c.tags_match);
+        let tags_match = args["tags_match"].as_str().unwrap_or(&c.tags_match);
         payload["tags_match"] = serde_json::json!(tags_match);
     }
 
     // Types: parse from args["types"] if present, else from config
-    let types = args["types"].as_str()
+    let types = args["types"]
+        .as_str()
         .and_then(|s| parse_comma_separated(s))
         .or_else(|| parse_comma_separated(&c.types));
     if let Some(ref t) = types {
@@ -146,57 +156,51 @@ async fn handle_recall(args: Value) -> Result<(String, bool)> {
         Err(e) => return Ok((format!("Failed to build HTTP client: {}", e), true)),
     };
 
-    match client
-        .post(&recall_url())
-        .json(&payload)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<Value>().await {
-                Ok(data) => {
-                    let memories = data["results"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default();
-                    if memories.is_empty() {
-                        Ok(("No relevant memories found.".to_string(), false))
-                    } else {
-                        let text: String = memories
-                            .iter()
-                            .filter_map(|m| {
-                                let text = m["text"].as_str()?;
-                                let tags = m["tags"].as_array()
-                                    .map(|a| a.iter()
+    match client.post(&recall_url()).json(&payload).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
+            Ok(data) => {
+                let memories = data["results"].as_array().cloned().unwrap_or_default();
+                if memories.is_empty() {
+                    Ok(("No relevant memories found.".to_string(), false))
+                } else {
+                    let text: String = memories
+                        .iter()
+                        .filter_map(|m| {
+                            let text = m["text"].as_str()?;
+                            let tags = m["tags"]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
                                         .filter_map(|t| t.as_str())
                                         .collect::<Vec<_>>()
-                                        .join(", "))
-                                    .unwrap_or_default();
-                                Some(format!("[{}] {}", tags, text))
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n---\n");
-                        Ok((format!(
+                                        .join(", ")
+                                })
+                                .unwrap_or_default();
+                            Some(format!("[{}] {}", tags, text))
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n---\n");
+                    Ok((
+                        format!(
                             "## Hindsight Memories ({} results):\n\n{}",
                             memories.len(),
                             text
-                        ), false))
-                    }
+                        ),
+                        false,
+                    ))
                 }
-                Err(e) => Ok((
-                    format!("Failed to parse hindsight response: {}", e),
-                    true,
-                )),
             }
-        }
+            Err(e) => Ok((format!("Failed to parse hindsight response: {}", e), true)),
+        },
         Ok(resp) => Ok((
-            format!("Hindsight returned HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()),
+            format!(
+                "Hindsight returned HTTP {}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            ),
             true,
         )),
-        Err(e) => Ok((
-            format!("Hindsight request failed: {}", e),
-            true,
-        )),
+        Err(e) => Ok((format!("Hindsight request failed: {}", e), true)),
     }
 }
 
@@ -235,23 +239,19 @@ async fn handle_retain(args: Value) -> Result<(String, bool)> {
         Err(e) => return Ok((format!("Failed to build HTTP client: {}", e), true)),
     };
 
-    match client
-        .post(&retain_url())
-        .json(&payload)
-        .send()
-        .await
-    {
+    match client.post(&retain_url()).json(&payload).send().await {
         Ok(resp) if resp.status().is_success() => {
             Ok(("Memory retained successfully.".to_string(), false))
         }
         Ok(resp) => Ok((
-            format!("Retain returned HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()),
+            format!(
+                "Retain returned HTTP {}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            ),
             true,
         )),
-        Err(e) => Ok((
-            format!("Retain request failed: {}", e),
-            true,
-        )),
+        Err(e) => Ok((format!("Retain request failed: {}", e), true)),
     }
 }
 
@@ -271,32 +271,23 @@ async fn handle_reflect(args: Value) -> Result<(String, bool)> {
         Err(e) => return Ok((format!("Failed to build HTTP client: {}", e), true)),
     };
 
-    match client
-        .post(&reflect_url())
-        .json(&payload)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            match resp.json::<Value>().await {
-                Ok(data) => {
-                    let text = data["text"].as_str().unwrap_or("No reflection");
-                    Ok((format!("## Hindsight Reflection:\n\n{}", text), false))
-                }
-                Err(e) => Ok((
-                    format!("Failed to parse reflect response: {}", e),
-                    true,
-                )),
+    match client.post(&reflect_url()).json(&payload).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
+            Ok(data) => {
+                let text = data["text"].as_str().unwrap_or("No reflection");
+                Ok((format!("## Hindsight Reflection:\n\n{}", text), false))
             }
-        }
+            Err(e) => Ok((format!("Failed to parse reflect response: {}", e), true)),
+        },
         Ok(resp) => Ok((
-            format!("Reflect returned HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()),
+            format!(
+                "Reflect returned HTTP {}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            ),
             true,
         )),
-        Err(e) => Ok((
-            format!("Reflect request failed: {}", e),
-            true,
-        )),
+        Err(e) => Ok((format!("Reflect request failed: {}", e), true)),
     }
 }
 

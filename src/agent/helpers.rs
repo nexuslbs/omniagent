@@ -5,9 +5,9 @@ use crate::agent::config::AgentConfig;
 use crate::db::types as queries;
 use crate::db::types::{Channel, CompleteThreadStats, Message, MessageNew, Thread};
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
-use crate::mcp::{AppContext};
-use crate::platform::queue::OutboundEnvelope;
+use crate::mcp::AppContext;
 use crate::platform::enqueue_notification;
+use crate::platform::queue::OutboundEnvelope;
 
 /// Merge cumulative usage with a new usage value.
 pub fn merge_usage(cumulative: &mut Option<Usage>, new_usage: Option<Usage>) {
@@ -27,9 +27,9 @@ pub fn merge_usage(cumulative: &mut Option<Usage>, new_usage: Option<Usage>) {
 /// Check if a database error is a foreign key violation (PostgreSQL code 23503).
 /// These indicate the thread was deleted or the FK constraint was broken —
 /// the thread should be marked as failed rather than retried.
-fn is_fk_violation(e: &anyhow::Error) -> bool {
-    if let Some(sqlx::Error::Database(ref dberr)) = e.downcast_ref::<sqlx::Error>() {
-            return dberr.code().as_deref() == Some("23503");
+fn is_fk_violation(e: &crate::error::Error) -> bool {
+    if let crate::error::Error::Sqlx(sqlx::Error::Database(ref dberr)) = e {
+        return dberr.code().as_deref() == Some("23503");
     }
     false
 }
@@ -39,7 +39,7 @@ fn is_fk_violation(e: &anyhow::Error) -> bool {
 pub enum CreateMessageResult {
     Success(Message),
     FkViolation,
-    OtherError(anyhow::Error),
+    OtherError(crate::error::Error),
 }
 
 pub async fn persist_or_abort(
@@ -55,7 +55,18 @@ pub async fn persist_or_abort(
                 thread_id
             );
             // Mark the thread as failed
-            let _ = queries::complete_thread(pool, thread_id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
+            let _ = queries::complete_thread(
+                pool,
+                thread_id,
+                "failed",
+                CompleteThreadStats {
+                    input_tokens: 0,
+                    cached_tokens: 0,
+                    output_tokens: 0,
+                    duration_ms: 0,
+                },
+            )
+            .await;
             CreateMessageResult::FkViolation
         }
         Err(e) => CreateMessageResult::OtherError(e),
@@ -65,15 +76,19 @@ pub async fn persist_or_abort(
 /// Estimate the total character count of all messages in the conversation.
 /// This is a rough proxy for prompt tokens (~4 chars per token).
 pub fn estimate_chars(messages: &[ChatMessage]) -> usize {
-    messages.iter().map(|m| {
-        let mut len = m.content.len();
-        if let Some(ref calls) = m.tool_calls {
-            for tc in calls {
-                len += tc.function.name.len() + tc.function.arguments.len() + 50; // overhead
+    messages
+        .iter()
+        .map(|m| {
+            let mut len = m.content.len();
+            if let Some(ref calls) = m.tool_calls {
+                for tc in calls {
+                    len += tc.function.name.len() + tc.function.arguments.len() + 50;
+                    // overhead
+                }
             }
-        }
-        len
-    }).sum()
+            len
+        })
+        .sum()
 }
 
 /// Count the actual token count of messages by serializing to JSON and
@@ -86,7 +101,11 @@ pub fn estimate_chars(messages: &[ChatMessage]) -> usize {
 /// When `tools` is provided, those tool definitions are included in the
 /// serialized JSON so the token count reflects the full API request
 /// (messages + tool schemas/descriptions), not just the message list.
-pub fn count_tokens(messages: &[ChatMessage], encoding: &str, tools: Option<&[serde_json::Value]>) -> usize {
+pub fn count_tokens(
+    messages: &[ChatMessage],
+    encoding: &str,
+    tools: Option<&[serde_json::Value]>,
+) -> usize {
     // Serialize messages to the JSON format the API receives.
     // When tools are present, wrap in a full request mock to capture
     // the tool definition tokens (which can add 200-300K tokens).
@@ -107,7 +126,10 @@ pub fn count_tokens(messages: &[ChatMessage], encoding: &str, tools: Option<&[se
     let json = match json {
         Ok(j) => j,
         Err(e) => {
-            warn!("[tokens] Failed to serialize messages for token counting: {}", e);
+            warn!(
+                "[tokens] Failed to serialize messages for token counting: {}",
+                e
+            );
             return estimate_chars(messages);
         }
     };
@@ -121,7 +143,10 @@ pub fn count_tokens(messages: &[ChatMessage], encoding: &str, tools: Option<&[se
     let bpe = match tiktoken_rs::get_bpe_from_model(encoding) {
         Ok(bpe) => bpe,
         Err(e) => {
-            warn!("[tokens] Failed to load BPE encoding '{}': {} — falling back to char estimate", encoding, e);
+            warn!(
+                "[tokens] Failed to load BPE encoding '{}': {} — falling back to char estimate",
+                encoding, e
+            );
             return estimate_chars(messages);
         }
     };
@@ -129,7 +154,7 @@ pub fn count_tokens(messages: &[ChatMessage], encoding: &str, tools: Option<&[se
     // Count tokens (includes special tokens like <|im_start|>, <|im_end|>)
     let tokens = bpe.encode_with_special_tokens(&json);
     let count = tokens.len();
-    
+
     // info!("[tokens] Counted {} tokens for {} messages using '{}' encoding", count, messages.len(), encoding);
     count
 }
@@ -157,10 +182,10 @@ pub fn prune_old_tool_results(messages: &mut [ChatMessage], current_iter: u32) {
 
     // Determine truncation level based on iteration
     let (max_body_chars, compact_mode) = match current_iter {
-        0..=5 => (usize::MAX, false),       // no pruning
-        6..=10 => (1000, false),             // moderate truncation
-        11..=15 => (300, false),             // aggressive truncation
-        _ => (0, true),                      // zero content — just the label
+        0..=5 => (usize::MAX, false), // no pruning
+        6..=10 => (1000, false),      // moderate truncation
+        11..=15 => (300, false),      // aggressive truncation
+        _ => (0, true),               // zero content — just the label
     };
 
     for msg in messages.iter_mut().take(keep_from) {
@@ -169,13 +194,15 @@ pub fn prune_old_tool_results(messages: &mut [ChatMessage], current_iter: u32) {
                 let tool_name = msg.name.as_deref().unwrap_or("unknown");
                 msg.content = format!(
                     "[Tool result for `{}` — {} total chars, omitted]",
-                    tool_name, msg.content.len()
+                    tool_name,
+                    msg.content.len()
                 );
             } else if msg.content.len() > max_body_chars {
                 let preview: String = msg.content.chars().take(200).collect();
                 msg.content = format!(
                     "[Pruned tool result — was {} chars] {}",
-                    msg.content.len(), preview
+                    msg.content.len(),
+                    preview
                 );
             }
         }
@@ -198,7 +225,8 @@ pub fn prune_old_tool_results(messages: &mut [ChatMessage], current_iter: u32) {
 pub fn compact_old_assistant_messages(messages: &mut Vec<ChatMessage>, keep_recent: usize) {
     loop {
         // Find all tool-calling assistant message positions
-        let tool_indices: Vec<usize> = messages.iter()
+        let tool_indices: Vec<usize> = messages
+            .iter()
             .enumerate()
             .filter(|(_, m)| m.role == "assistant" && m.tool_calls.is_some())
             .map(|(i, _)| i)
@@ -212,7 +240,8 @@ pub fn compact_old_assistant_messages(messages: &mut Vec<ChatMessage>, keep_rece
         // Process from the end so removal doesn't shift remaining indices
         for &idx in tool_indices.iter().take(compact_up_to).rev() {
             if let Some(ref calls) = messages[idx].tool_calls {
-                let summary: Vec<String> = calls.iter()
+                let summary: Vec<String> = calls
+                    .iter()
                     .map(|tc| format!("{}()", tc.function.name))
                     .collect();
 
@@ -268,30 +297,50 @@ pub fn build_message_metadata_block(messages: &[ChatMessage], offset: usize) -> 
         return String::new();
     }
 
-    let entries: Vec<String> = messages.iter().enumerate().map(|(i, msg)| {
-        let idx = offset + i;
-        let role_short = match msg.role.as_str() {
-            "assistant" => {
-                if msg.tool_calls.is_some() { "tool_call" } else { "assistant" }
-            }
-            "tool" => "tool-result",
-            "system" => "system",
-            "cause" => "cause",
-            other => other,
-        };
-        let meta = if msg.tool_calls.is_some() {
-            let names: Vec<&str> = msg.tool_calls.as_ref()
-                .map(|calls| calls.iter().map(|tc| tc.function.name.as_str()).collect())
-                .unwrap_or_default();
-            format!(" — {}", names.join(", "))
-        } else if !msg.content.is_empty() && msg.content.len() < 200 {
-            format!(" — {}", msg.content)
-        } else {
-            String::new()
-        };
-        format!("#{} {} {} ({}{})", idx, role_short, msg.content.len(),
-            if meta.is_empty() { "" } else { &meta[..meta.len().min(200)] }, "")
-    }).collect();
+    let entries: Vec<String> = messages
+        .iter()
+        .enumerate()
+        .map(|(i, msg)| {
+            let idx = offset + i;
+            let role_short = match msg.role.as_str() {
+                "assistant" => {
+                    if msg.tool_calls.is_some() {
+                        "tool_call"
+                    } else {
+                        "assistant"
+                    }
+                }
+                "tool" => "tool-result",
+                "system" => "system",
+                "cause" => "cause",
+                other => other,
+            };
+            let meta = if msg.tool_calls.is_some() {
+                let names: Vec<&str> = msg
+                    .tool_calls
+                    .as_ref()
+                    .map(|calls| calls.iter().map(|tc| tc.function.name.as_str()).collect())
+                    .unwrap_or_default();
+                format!(" — {}", names.join(", "))
+            } else if !msg.content.is_empty() && msg.content.len() < 200 {
+                format!(" — {}", msg.content)
+            } else {
+                String::new()
+            };
+            format!(
+                "#{} {} {} ({}{})",
+                idx,
+                role_short,
+                msg.content.len(),
+                if meta.is_empty() {
+                    ""
+                } else {
+                    &meta[..meta.len().min(200)]
+                },
+                ""
+            )
+        })
+        .collect();
 
     format!("==== Old Messages Compacted ====\nMessages {}–{} have been condensed. Query with query_database if full content is needed.\n{}\n",
         offset,
@@ -319,14 +368,13 @@ pub fn condense_messages(
     soft_budget: usize,
 ) -> Result<Vec<ChatMessage>, String> {
     // 1. Separate system messages from conversation
-    let system_msgs: Vec<ChatMessage> = messages.iter()
+    let system_msgs: Vec<ChatMessage> = messages
+        .iter()
         .filter(|m| m.role == "system")
         .cloned()
         .collect();
 
-    let conv_msgs: Vec<&ChatMessage> = messages.iter()
-        .filter(|m| m.role != "system")
-        .collect();
+    let conv_msgs: Vec<&ChatMessage> = messages.iter().filter(|m| m.role != "system").collect();
 
     // 2. Safety check: always-keep portion too large?
     let system_chars: usize = system_msgs.iter().map(|m| m.content.len()).sum();
@@ -395,12 +443,17 @@ pub fn condense_messages(
 
     // 6. If old messages still exceed the old_msg_budget, progressively trim
     //    the metadata block and what's kept of the old messages
-    let conv_start = condensed.iter().position(|m| m.role != "system")
+    let conv_start = condensed
+        .iter()
+        .position(|m| m.role != "system")
         .unwrap_or(condensed.len());
 
     if conv_start < condensed.len() {
         // Estimate how many chars the old messages (after system) take
-        let old_part: usize = condensed[conv_start..].iter().map(|m| m.content.len()).sum();
+        let old_part: usize = condensed[conv_start..]
+            .iter()
+            .map(|m| m.content.len())
+            .sum();
         if old_part > old_msg_budget {
             // Trim oldest messages before the last `keep_turns` turns
             // (re-scan in the condensed list)
@@ -458,20 +511,19 @@ pub async fn check_and_generate_summary(
     };
 
     // 2. Fetch completed threads since the last summary
-    let completed_threads = match queries::get_completed_seq0_threads_since(
-        pool, channel_id, since_id, trigger_count,
-    )
-    .await
-    {
-        Ok(threads) => threads,
-        Err(e) => {
-            warn!(
-                "[thread-summary] Failed to fetch completed threads for channel {}: {:?}",
-                channel_id, e
-            );
-            return;
-        }
-    };
+    let completed_threads =
+        match queries::get_completed_seq0_threads_since(pool, channel_id, since_id, trigger_count)
+            .await
+        {
+            Ok(threads) => threads,
+            Err(e) => {
+                warn!(
+                    "[thread-summary] Failed to fetch completed threads for channel {}: {:?}",
+                    channel_id, e
+                );
+                return;
+            }
+        };
 
     if (completed_threads.len() as i64) < trigger_count {
         // Not enough threads yet
@@ -588,7 +640,10 @@ pub async fn check_and_generate_summary(
                 "[thread-summary] Generated summary for channel {} ({} chars, {} tokens)",
                 channel_id,
                 resp.content.len(),
-                resp.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0),
+                resp.usage
+                    .as_ref()
+                    .map(|u| u.completion_tokens)
+                    .unwrap_or(0),
             );
             resp.content
         }
@@ -676,7 +731,9 @@ pub async fn enqueue_delivery(
         if !secrets.is_empty() {
             tracing::warn!(
                 "⚠️ SECRET LEAK DETECTED in message {} ({}): {:?}",
-                saved.id, saved.msg_type, secrets.iter().map(|s| s.pattern).collect::<Vec<_>>()
+                saved.id,
+                saved.msg_type,
+                secrets.iter().map(|s| s.pattern).collect::<Vec<_>>()
             );
             crate::safety::redact_secrets(&envelope_content)
         } else {
@@ -698,7 +755,11 @@ pub async fn enqueue_delivery(
     };
 
     if let Err(e) = sender.try_send(envelope) {
-        tracing::warn!("Failed to enqueue delivery for message {}: {:?}", saved.id, e);
+        tracing::warn!(
+            "Failed to enqueue delivery for message {}: {:?}",
+            saved.id,
+            e
+        );
     }
 
     // If this is a summary, also deliver to all subscribers of this channel

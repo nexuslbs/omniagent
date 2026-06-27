@@ -7,7 +7,7 @@
 //! - Scores each file by recency (mtime) + reference count (from messages table)
 //! - Writes `relevant-index.md` (max ~1000 chars)
 
-use anyhow::Result;
+use crate::error::AppResult;
 use sha2::{Digest, Sha256};
 use sql_forge::sql_forge;
 use sqlx::PgPool;
@@ -66,10 +66,13 @@ struct WikiFile {
 
 /// Run the relevance indexer for all profiles found in the data directory.
 /// Called by the scheduler as a direct-mode task.
-pub async fn run_relevance_indexer(pool: &PgPool, data_dir: &str) -> Result<()> {
+pub async fn run_relevance_indexer(pool: &PgPool, data_dir: &str) -> AppResult<()> {
     let profiles_dir: PathBuf = [data_dir, "profiles"].iter().collect();
     if !profiles_dir.exists() {
-        info!("[relevance-indexer] No profiles directory at {:?}, skipping", profiles_dir);
+        info!(
+            "[relevance-indexer] No profiles directory at {:?}, skipping",
+            profiles_dir
+        );
         return Ok(());
     }
 
@@ -101,8 +104,10 @@ pub async fn run_relevance_indexer(pool: &PgPool, data_dir: &str) -> Result<()> 
 }
 
 /// Index one profile's wiki.
-async fn index_profile(pool: &PgPool, data_dir: &str, profile_name: &str) -> Result<()> {
-    let wiki_dir: PathBuf = [data_dir, "profiles", profile_name, "wiki"].iter().collect();
+async fn index_profile(pool: &PgPool, data_dir: &str, profile_name: &str) -> AppResult<()> {
+    let wiki_dir: PathBuf = [data_dir, "profiles", profile_name, "wiki"]
+        .iter()
+        .collect();
     if !wiki_dir.exists() {
         return Ok(()); // No wiki directory — nothing to do.
     }
@@ -122,7 +127,10 @@ async fn index_profile(pool: &PgPool, data_dir: &str, profile_name: &str) -> Res
     collect_wiki_files(&mut ctx, &wiki_dir)?;
 
     if files.is_empty() {
-        info!("[relevance-indexer] No wiki files found for profile '{}'", profile_name);
+        info!(
+            "[relevance-indexer] No wiki files found for profile '{}'",
+            profile_name
+        );
         return Ok(());
     }
 
@@ -137,17 +145,24 @@ async fn index_profile(pool: &PgPool, data_dir: &str, profile_name: &str) -> Res
     }
 
     // Sort by score descending
-    files.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    files.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Update cache with new scores
     for file in &files {
-        cache.insert(file.rel_path.clone(), CacheEntry {
-            checksum: file.checksum.clone(),
-            score: file.score,
-            ref_count: file.ref_count,
-            mtime_secs: file.mtime_secs,
-            computed_at: chrono::Utc::now().to_rfc3339(),
-        });
+        cache.insert(
+            file.rel_path.clone(),
+            CacheEntry {
+                checksum: file.checksum.clone(),
+                score: file.score,
+                ref_count: file.ref_count,
+                mtime_secs: file.mtime_secs,
+                computed_at: chrono::Utc::now().to_rfc3339(),
+            },
+        );
     }
     save_cache(&cache_path, &cache)?;
 
@@ -178,7 +193,7 @@ struct CollectWikiFilesCtx<'a> {
     cache_path: &'a Path,
 }
 
-fn collect_wiki_files(ctx: &mut CollectWikiFilesCtx<'_>, dir: &Path) -> Result<()> {
+fn collect_wiki_files(ctx: &mut CollectWikiFilesCtx<'_>, dir: &Path) -> AppResult<()> {
     if ctx.files.len() >= MAX_FILES {
         return Ok(());
     }
@@ -201,11 +216,17 @@ fn collect_wiki_files(ctx: &mut CollectWikiFilesCtx<'_>, dir: &Path) -> Result<(
             continue;
         }
 
-        if !path.extension().and_then(|e| e.to_str()) .map(|e| e.eq_ignore_ascii_case("md")) .unwrap_or(false) {
+        if !path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.eq_ignore_ascii_case("md"))
+            .unwrap_or(false)
+        {
             continue;
         }
 
-        let rel_path = path.strip_prefix(ctx.root)
+        let rel_path = path
+            .strip_prefix(ctx.root)
             .ok()
             .and_then(|p| p.to_str())
             .map(|s| s.to_string());
@@ -221,7 +242,10 @@ fn collect_wiki_files(ctx: &mut CollectWikiFilesCtx<'_>, dir: &Path) -> Result<(
         };
 
         let mtime_secs = match metadata.modified() {
-            Ok(t) => t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs(),
+            Ok(t) => t
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
             Err(_) => 0,
         };
 
@@ -298,7 +322,10 @@ async fn collect_reference_counts(
                 counts.insert(file.rel_path.clone(), row.count.unwrap_or(0) as u64);
             }
             Err(e) => {
-                warn!("[relevance-indexer] Failed to count references for '{}': {:?}", file.rel_path, e);
+                warn!(
+                    "[relevance-indexer] Failed to count references for '{}': {:?}",
+                    file.rel_path, e
+                );
                 counts.insert(file.rel_path.clone(), 0);
             }
         }
@@ -312,15 +339,20 @@ async fn collect_reference_counts(
 fn compute_score(file: &WikiFile, now_secs: u64) -> f64 {
     // Recency score: 0-50 points based on how recently modified
     let age_secs = now_secs.saturating_sub(file.mtime_secs);
-    let recency_score = if age_secs < 3600 {          // < 1 hour
+    let recency_score = if age_secs < 3600 {
+        // < 1 hour
         50.0
-    } else if age_secs < 86400 {                      // < 1 day
+    } else if age_secs < 86400 {
+        // < 1 day
         40.0
-    } else if age_secs < 604800 {                     // < 1 week
+    } else if age_secs < 604800 {
+        // < 1 week
         30.0
-    } else if age_secs < 2_592_000 {                  // < 1 month
+    } else if age_secs < 2_592_000 {
+        // < 1 month
         20.0
-    } else if age_secs < 7_776_000 {                  // < 3 months
+    } else if age_secs < 7_776_000 {
+        // < 3 months
         10.0
     } else {
         5.0
@@ -341,7 +373,10 @@ fn generate_output(files: &[WikiFile]) -> String {
 
     for file in files.iter().take(MAX_ENTRIES) {
         let line = if file.score > 0.0 {
-            format!("- [{}]({}) — score: {:.0}\n", file.rel_path, file.rel_path, file.score)
+            format!(
+                "- [{}]({}) — score: {:.0}\n",
+                file.rel_path, file.rel_path, file.score
+            )
         } else {
             format!("- [{}]({})\n", file.rel_path, file.rel_path)
         };
@@ -368,12 +403,13 @@ fn load_cache(path: &Path) -> HashMap<String, CacheEntry> {
         return HashMap::new();
     }
     match fs::read_to_string(path) {
-        Ok(content) => {
-            serde_json::from_str(&content).unwrap_or_else(|e| {
-                warn!("[relevance-indexer] Failed to parse cache, starting fresh: {:?}", e);
-                HashMap::new()
-            })
-        }
+        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|e| {
+            warn!(
+                "[relevance-indexer] Failed to parse cache, starting fresh: {:?}",
+                e
+            );
+            HashMap::new()
+        }),
         Err(e) => {
             warn!("[relevance-indexer] Failed to read cache: {:?}", e);
             HashMap::new()
@@ -381,7 +417,7 @@ fn load_cache(path: &Path) -> HashMap<String, CacheEntry> {
     }
 }
 
-fn save_cache(path: &Path, cache: &HashMap<String, CacheEntry>) -> Result<()> {
+fn save_cache(path: &Path, cache: &HashMap<String, CacheEntry>) -> AppResult<()> {
     let content = serde_json::to_string_pretty(cache)?;
     fs::write(path, content)?;
     Ok(())
@@ -506,13 +542,16 @@ mod tests {
 
         let cache_path = dir.join("test-cache.json");
         let mut cache: HashMap<String, CacheEntry> = HashMap::new();
-        cache.insert("Architecture.md".into(), CacheEntry {
-            checksum: "abc".into(),
-            score: 90.0,
-            ref_count: 10,
-            mtime_secs: 1000,
-            computed_at: "now".into(),
-        });
+        cache.insert(
+            "Architecture.md".into(),
+            CacheEntry {
+                checksum: "abc".into(),
+                score: 90.0,
+                ref_count: 10,
+                mtime_secs: 1000,
+                computed_at: "now".into(),
+            },
+        );
 
         save_cache(&cache_path, &cache).unwrap();
         let loaded = load_cache(&cache_path);

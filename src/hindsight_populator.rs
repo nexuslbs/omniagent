@@ -5,12 +5,13 @@
 //! Designed for cron scheduling via the scheduler's builtin action dispatch
 //! or manual triggering via the MCP tool.
 
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::fs;
 use std::path::PathBuf;
 use tracing::{info, warn};
+
+use crate::error::{AppResult, ErrorContext};
 
 /// Watermark file stores the last processed message ID so we don't re-process.
 const WATERMARK_FILE: &str = "hindsight_watermark.json";
@@ -42,7 +43,7 @@ struct MessageRow {
 }
 
 /// Run the hindsight populator: query new messages, retain them, update watermark.
-pub async fn run_hindsight_populator(pool: &PgPool, data_dir: &str) -> Result<String> {
+pub async fn run_hindsight_populator(pool: &PgPool, data_dir: &str) -> AppResult<String> {
     info!("[hindsight-populator] Starting run");
 
     // ── Resolve hindsight URL ──
@@ -53,7 +54,10 @@ pub async fn run_hindsight_populator(pool: &PgPool, data_dir: &str) -> Result<St
 
     // ── Configure the bank (retain scope settings) ──
     if let Err(e) = configure_bank(&hindsight_url).await {
-        warn!("[hindsight-populator] Bank config failed (non-fatal): {:?}", e);
+        warn!(
+            "[hindsight-populator] Bank config failed (non-fatal): {:?}",
+            e
+        );
     }
 
     // ── Read watermark to find where we left off ──
@@ -104,7 +108,7 @@ pub async fn run_hindsight_populator(pool: &PgPool, data_dir: &str) -> Result<St
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .context("Failed to build HTTP client")?;
+        .ctx("Failed to build HTTP client")?;
 
     // Process in sub-batches of 50
     for chunk in items.chunks(50) {
@@ -118,12 +122,7 @@ pub async fn run_hindsight_populator(pool: &PgPool, data_dir: &str) -> Result<St
             "async": false,  // wait for completion so we can track watermark
         });
 
-        match client
-            .post(&retain_url)
-            .json(&payload)
-            .send()
-            .await
-        {
+        match client.post(&retain_url).json(&payload).send().await {
             Ok(resp) if resp.status().is_success() => {
                 let batch_count = chunk.len();
                 info!("[hindsight-populator] Retained {} memories", batch_count);
@@ -154,7 +153,10 @@ pub async fn run_hindsight_populator(pool: &PgPool, data_dir: &str) -> Result<St
 
     // ── Trigger consolidation (best-effort) ──
     if let Err(e) = trigger_consolidation(&hindsight_url).await {
-        warn!("[hindsight-populator] Consolidation trigger failed (non-fatal): {:?}", e);
+        warn!(
+            "[hindsight-populator] Consolidation trigger failed (non-fatal): {:?}",
+            e
+        );
     }
 
     let summary = format!(
@@ -171,21 +173,24 @@ fn format_hindsight_content(msg: &MessageRow) -> String {
     match msg.msg_type.as_str() {
         "tool" | "tool-result" | "multi-tool" => {
             let tool_name = msg.msg_subtype.as_deref().unwrap_or("unknown");
-            let preview = msg.content.chars().take(MAX_CONTENT_CHARS).collect::<String>();
+            let preview = msg
+                .content
+                .chars()
+                .take(MAX_CONTENT_CHARS)
+                .collect::<String>();
             format!("[Tool: {}] {}", tool_name, preview)
         }
-        _ => {
-            msg.content.chars().take(MAX_CONTENT_CHARS).collect::<String>()
-        }
+        _ => msg
+            .content
+            .chars()
+            .take(MAX_CONTENT_CHARS)
+            .collect::<String>(),
     }
 }
 
 /// Build tags for a message based on its type and role.
 fn build_tags(msg: &MessageRow) -> Vec<String> {
-    let mut tags = vec![
-        msg.role.clone(),
-        msg.msg_type.clone(),
-    ];
+    let mut tags = vec![msg.role.clone(), msg.msg_type.clone()];
 
     if let Some(ref subtype) = msg.msg_subtype {
         tags.push(subtype.clone());
@@ -204,7 +209,7 @@ fn build_tags(msg: &MessageRow) -> Vec<String> {
 }
 
 /// Query new messages from the DB after the given watermark ID.
-async fn query_new_messages(pool: &PgPool, last_id: i64) -> Result<Vec<MessageRow>> {
+async fn query_new_messages(pool: &PgPool, last_id: i64) -> AppResult<Vec<MessageRow>> {
     // We query with msg_type filtering — exclude low-signal types:
     // - 'cron' (cron job metadata)
     // - 'tool_call' (the LLM's tool call instructions, not results)
@@ -225,18 +230,20 @@ async fn query_new_messages(pool: &PgPool, last_id: i64) -> Result<Vec<MessageRo
     .bind(BATCH_SIZE as i64)
     .fetch_all(pool)
     .await
-    .context("Failed to query new messages")?;
+    .ctx("Failed to query new messages")?;
 
     Ok(rows
         .into_iter()
-        .map(|(id, role, content, msg_type, msg_subtype, created_at)| MessageRow {
-            id,
-            role,
-            content,
-            msg_type,
-            msg_subtype,
-            created_at,
-        })
+        .map(
+            |(id, role, content, msg_type, msg_subtype, created_at)| MessageRow {
+                id,
+                role,
+                content,
+                msg_type,
+                msg_subtype,
+                created_at,
+            },
+        )
         .collect())
 }
 
@@ -246,31 +253,29 @@ fn read_watermark(path: &PathBuf) -> Option<i64> {
         return None;
     }
     match fs::read_to_string(path) {
-        Ok(content) => {
-            serde_json::from_str::<Watermark>(&content)
-                .ok()
-                .map(|w| w.last_message_id)
-        }
+        Ok(content) => serde_json::from_str::<Watermark>(&content)
+            .ok()
+            .map(|w| w.last_message_id),
         Err(_) => None,
     }
 }
 
 /// Update the watermark file with the latest processed message ID.
-fn update_watermark(path: &PathBuf, last_message_id: i64) -> Result<()> {
+fn update_watermark(path: &PathBuf, last_message_id: i64) -> AppResult<()> {
     let now_iso = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let watermark = Watermark {
         last_message_id,
         last_run_at: now_iso,
     };
-    let content = serde_json::to_string_pretty(&watermark)
-        .context("Failed to serialize watermark")?;
+    let content =
+        serde_json::to_string_pretty(&watermark).ctx("Failed to serialize watermark")?;
     fs::write(path, &content)
-        .with_context(|| format!("Failed to write watermark to {}", path.display()))?;
+        .ctx(format!("Failed to write watermark to {}", path.display()))?;
     Ok(())
 }
 
 /// Configure the hindsight bank: set retain scope, custom instructions, etc.
-async fn configure_bank(hindsight_url: &str) -> Result<()> {
+async fn configure_bank(hindsight_url: &str) -> AppResult<()> {
     let config_url = format!(
         "{}/v1/default/banks/{}/config",
         hindsight_url.trim_end_matches('/'),
@@ -281,7 +286,7 @@ async fn configure_bank(hindsight_url: &str) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .context("Failed to build HTTP client for config")?;
+        .ctx("Failed to build HTTP client for config")?;
 
     // Set bank overrides — skip tool output dumps, use fast strategy
     let updates = serde_json::json!({
@@ -291,12 +296,7 @@ async fn configure_bank(hindsight_url: &str) -> Result<()> {
         }
     });
 
-    match client
-        .patch(&config_url)
-        .json(&updates)
-        .send()
-        .await
-    {
+    match client.patch(&config_url).json(&updates).send().await {
         Ok(resp) if resp.status().is_success() => {
             info!("[hindsight-populator] Bank config updated successfully");
             Ok(())
@@ -309,7 +309,11 @@ async fn configure_bank(hindsight_url: &str) -> Result<()> {
                 info!("[hindsight-populator] Bank not found, will be auto-created on first retain");
                 return Ok(());
             }
-            warn!("[hindsight-populator] Bank config update returned HTTP {}: {}", status, &body[..body.len().min(200)]);
+            warn!(
+                "[hindsight-populator] Bank config update returned HTTP {}: {}",
+                status,
+                &body[..body.len().min(200)]
+            );
             Ok(()) // non-fatal
         }
         Err(e) => {
@@ -320,7 +324,7 @@ async fn configure_bank(hindsight_url: &str) -> Result<()> {
 }
 
 /// Trigger consolidation on the hindsight bank (best-effort).
-async fn trigger_consolidation(hindsight_url: &str) -> Result<()> {
+async fn trigger_consolidation(hindsight_url: &str) -> AppResult<()> {
     let consolidate_url = format!(
         "{}/v1/default/banks/{}/consolidate",
         hindsight_url.trim_end_matches('/'),
@@ -330,7 +334,7 @@ async fn trigger_consolidation(hindsight_url: &str) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .context("Failed to build HTTP client for consolidation")?;
+        .ctx("Failed to build HTTP client for consolidation")?;
 
     match client.post(&consolidate_url).send().await {
         Ok(resp) if resp.status().is_success() => {
@@ -345,7 +349,10 @@ async fn trigger_consolidation(hindsight_url: &str) -> Result<()> {
             Ok(())
         }
         Err(e) => {
-            warn!("[hindsight-populator] Consolidation request failed: {:?}", e);
+            warn!(
+                "[hindsight-populator] Consolidation request failed: {:?}",
+                e
+            );
             Ok(())
         }
     }

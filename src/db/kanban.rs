@@ -1,9 +1,15 @@
 use serde::{Deserialize, Serialize};
 use sql_forge::sql_forge;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
+
+use crate::error::AppResult;
 
 /// Update a kanban task's status by task_id.
-pub async fn update_kanban_status(pool: &PgPool, task_id: &str, status: &str) -> anyhow::Result<()> {
+pub async fn update_kanban_status(
+    pool: &PgPool,
+    task_id: &str,
+    status: &str,
+) -> AppResult<()> {
     sql_forge!(
         "UPDATE kanban_tasks SET status = :status, updated_at = NOW() WHERE id = :id",
         ( :status = status, :id = task_id )
@@ -15,12 +21,7 @@ pub async fn update_kanban_status(pool: &PgPool, task_id: &str, status: &str) ->
 
 // ── Kanban History ──
 
-/// Escape a string literal for safe SQL embedding (single quotes only).
-fn sql_escape(s: &str) -> String {
-    s.replace('\'', "''")
-}
-
-/// Insert a kanban_history record using raw executor.
+/// Insert a kanban_history record using sql_forge! with bound parameters.
 pub async fn insert_kanban_history(
     pool: &PgPool,
     task_id: &str,
@@ -28,30 +29,23 @@ pub async fn insert_kanban_history(
     initial_board: Option<&str>,
     final_board: Option<&str>,
     previous_values: Option<serde_json::Value>,
-) -> anyhow::Result<()> {
-    let initial = sql_escape(initial_board.unwrap_or(""));
-    let final_b = sql_escape(final_board.unwrap_or(""));
-    let pv_str = previous_values
-        .as_ref()
-        .map(|v| v.to_string())
-        .unwrap_or_else(|| "null".to_string());
+) -> AppResult<()> {
+    let pv = previous_values.unwrap_or(serde_json::Value::Null);
 
-    let sql = format!(
-        "INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values) \
-         VALUES ('{}', '{}', NULLIF('{}', '')::text, NULLIF('{}', '')::text, '{}'::jsonb)",
-        sql_escape(task_id),
-        sql_escape(action),
-        initial,
-        final_b,
-        pv_str.replace('\'', "''"),
-    );
-
-    sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
+    sql_forge!(
+        r#"
+        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values)
+        VALUES (:task_id, :action, NULLIF(:initial_board, '')::text, NULLIF(:final_board, '')::text, :previous_values::jsonb)
+        "#,
+        ( :task_id = task_id, :action = action, :initial_board = initial_board.unwrap_or(""), :final_board = final_board.unwrap_or(""), :previous_values = &pv )
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
 /// Fetch a single kanban task row by id.
-pub async fn get_kanban_task(pool: &PgPool, task_id: &str) -> anyhow::Result<Option<KanbanTaskDb>> {
+pub async fn get_kanban_task(pool: &PgPool, task_id: &str) -> AppResult<Option<KanbanTaskDb>> {
     let rows = sql_forge!(
         KanbanTaskDb,
         r#"
@@ -102,52 +96,30 @@ pub struct KanbanHistoryParams {
     pub offset: Option<i64>,
 }
 
-/// List kanban history with optional filters.
+/// List kanban history with optional filters — fully parameterized via sql_forge!.
 pub async fn list_kanban_history(
     pool: &PgPool,
     params: &KanbanHistoryParams,
-) -> anyhow::Result<Vec<KanbanHistoryRow>> {
+) -> AppResult<Vec<KanbanHistoryRow>> {
     let limit: i64 = params.limit.unwrap_or(50).max(0).min(500);
     let offset: i64 = params.offset.unwrap_or(0).max(0);
+    let task_id_filter = params.task_id.as_deref().unwrap_or("");
+    let action_filter = params.action.as_deref().unwrap_or("");
 
-    let mut where_clauses = Vec::new();
-    if let Some(ref tid) = params.task_id {
-        if !tid.is_empty() {
-            where_clauses.push(format!("kanban_task_id = '{}'", sql_escape(tid)));
-        }
-    }
-    if let Some(ref act) = params.action {
-        if !act.is_empty() {
-            where_clauses.push(format!("action = '{}'", sql_escape(act)));
-        }
-    }
-
-    let where_sql = if where_clauses.is_empty() {
-        String::from("1=1")
-    } else {
-        where_clauses.join(" AND ")
-    };
-
-    let sql = format!(
-        "SELECT id, kanban_task_id, action, initial_board, final_board, \
-         created_at::text AS created_at \
-         FROM kanban_history WHERE {} \
-         ORDER BY id DESC LIMIT {} OFFSET {}",
-        where_sql, limit, offset,
-    );
-
-    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(pool).await?;
-    Ok(rows
-        .iter()
-        .map(|r| {
-            KanbanHistoryRow {
-                id: r.get("id"),
-                kanban_task_id: r.get("kanban_task_id"),
-                action: r.get("action"),
-                initial_board: r.get("initial_board"),
-                final_board: r.get("final_board"),
-                created_at: r.get("created_at"),
-            }
-        })
-        .collect())
+    let rows: Vec<KanbanHistoryRow> = sql_forge!(
+        KanbanHistoryRow,
+        r#"
+        SELECT id, kanban_task_id, action, initial_board, final_board,
+               created_at::text AS created_at
+        FROM kanban_history
+        WHERE (:task_id = '' OR kanban_task_id = :task_id)
+          AND (:action = '' OR action = :action)
+        ORDER BY id DESC
+        LIMIT :limit OFFSET :offset
+        "#,
+        ( :task_id = task_id_filter, :action = action_filter, :limit = limit, :offset = offset )
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }

@@ -1,13 +1,11 @@
-use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
-use omniagent::{
-    agent, db, mcp, platform, server, scheduler, vectorizer,
-};
+use omniagent::{agent, db, mcp, platform, scheduler, server, vectorizer};
+use omniagent::error::{AppResult, Error};
 
 /// OmniAgent — autonomous agent system with Postgres, pgvector, MCP tools.
 
@@ -17,7 +15,7 @@ fn env_or_default(key: &str, default: &str) -> String {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> AppResult<()> {
     // Load .env file if present
     dotenvy::dotenv().ok();
 
@@ -26,10 +24,12 @@ async fn main() -> Result<()> {
 
 // ── Server mode (original) ──────────────────────────────────────────────────
 
-async fn run_server() -> Result<()> {
-    // Initialize tracing
+async fn run_server() -> AppResult<()> {
+    // Initialize tracing — JSON format for journald -> Vector -> Loki -> Grafana
     tracing_subscriber::fmt()
+        .json()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_writer(std::io::stdout)
         .init();
 
     tracing::info!("OmniAgent starting...");
@@ -43,7 +43,7 @@ async fn run_server() -> Result<()> {
     tracing::info!("Connected to PostgreSQL");
 
     // Run migrations
-    db::migrations::run(&pool).await?;
+    db::migrations::run(&pool).await.map_err(|e| Error::Message(format!("Migration failed: {}", e)))?;
     tracing::info!("Database migrations completed");
 
     // Determine data directory (default: /opt/data)
@@ -83,7 +83,10 @@ async fn run_server() -> Result<()> {
             plugin_config.command,
             plugin_config.args.join(" ")
         );
-        let client = platform::external::client::ExternalPlatformClient::new(plugin_config.clone(), &data_dir);
+        let client = platform::external::client::ExternalPlatformClient::new(
+            plugin_config.clone(),
+            &data_dir,
+        );
         registry.register(Box::new(client));
     }
 
@@ -100,7 +103,7 @@ async fn run_server() -> Result<()> {
         Some(cfg.qdrant_url.clone()),
         platform_senders,
     );
-    let mcp = mcp::default_registry(&ctx);
+    let mcp = mcp::default_registry(&ctx).await;
 
     // Build the agent with MCP context
     let agent = agent::Agent::new(pool.clone(), cfg.clone(), mcp.clone(), ctx.clone());

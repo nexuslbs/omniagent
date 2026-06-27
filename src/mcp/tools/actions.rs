@@ -4,7 +4,6 @@
 //! Tools: actions:kanban_dispatcher, actions:relevance_indexer,
 //!        actions:hindsight_populator, actions:setup_knowledge_pipeline
 
-use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -31,18 +30,20 @@ fn kanban_dispatcher_tool() -> McpTool {
             "required": [],
         }),
         server_name: Some("actions".to_string()),
-        handler: Arc::new(|_: Value, ctx: AppContext| -> Result<McpToolResult> {
-            let pool = ctx.pool.clone();
-            let data_dir = ctx.data_dir.clone();
-            tokio::spawn(async move {
-                if let Err(e) = crate::scheduler::run_kanban_dispatcher(&pool, &data_dir).await {
-                    tracing::error!("[actions] kanban_dispatcher failed: {:?}", e);
-                }
-            });
-            Ok(McpToolResult {
-                call_id: String::new(),
-                content: "Kanban dispatcher triggered".to_string(),
-                is_error: false,
+        handler: Arc::new(|_: Value, ctx: AppContext| {
+            Box::pin(async move {
+                let pool = ctx.pool.clone();
+                let data_dir = ctx.data_dir.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::scheduler::run_kanban_dispatcher(&pool, &data_dir).await {
+                        tracing::error!("[actions] kanban_dispatcher failed: {:?}", e);
+                    }
+                });
+                Ok(McpToolResult {
+                    call_id: String::new(),
+                    content: "Kanban dispatcher triggered".to_string(),
+                    is_error: false,
+                })
             })
         }),
     }
@@ -58,18 +59,20 @@ fn relevance_indexer_tool() -> McpTool {
             "required": [],
         }),
         server_name: Some("actions".to_string()),
-        handler: Arc::new(|_: Value, ctx: AppContext| -> Result<McpToolResult> {
-            let pool = ctx.pool.clone();
-            let data_dir = ctx.data_dir.clone();
-            tokio::spawn(async move {
-                if let Err(e) = crate::relevance::run_relevance_indexer(&pool, &data_dir).await {
-                    tracing::error!("[actions] relevance_indexer failed: {:?}", e);
-                }
-            });
-            Ok(McpToolResult {
-                call_id: String::new(),
-                content: "Relevance indexer triggered".to_string(),
-                is_error: false,
+        handler: Arc::new(|_: Value, ctx: AppContext| {
+            Box::pin(async move {
+                let pool = ctx.pool.clone();
+                let data_dir = ctx.data_dir.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::relevance::run_relevance_indexer(&pool, &data_dir).await {
+                        tracing::error!("[actions] relevance_indexer failed: {:?}", e);
+                    }
+                });
+                Ok(McpToolResult {
+                    call_id: String::new(),
+                    content: "Relevance indexer triggered".to_string(),
+                    is_error: false,
+                })
             })
         }),
     }
@@ -85,18 +88,20 @@ fn hindsight_populator_tool() -> McpTool {
             "required": [],
         }),
         server_name: Some("actions".to_string()),
-        handler: Arc::new(|_: Value, ctx: AppContext| -> Result<McpToolResult> {
-            let pool = ctx.pool.clone();
-            let data_dir = ctx.data_dir.clone();
-            tokio::spawn(async move {
-                if let Err(e) = crate::hindsight_populator::run_hindsight_populator(&pool, &data_dir).await {
-                    tracing::error!("[actions] hindsight_populator failed: {:?}", e);
-                }
-            });
-            Ok(McpToolResult {
-                call_id: String::new(),
-                content: "Hindsight populator triggered".to_string(),
-                is_error: false,
+        handler: Arc::new(|_: Value, ctx: AppContext| {
+            Box::pin(async move {
+                let pool = ctx.pool.clone();
+                let data_dir = ctx.data_dir.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = crate::hindsight_populator::run_hindsight_populator(&pool, &data_dir).await {
+                        tracing::error!("[actions] hindsight_populator failed: {:?}", e);
+                    }
+                });
+                Ok(McpToolResult {
+                    call_id: String::new(),
+                    content: "Hindsight populator triggered".to_string(),
+                    is_error: false,
+                })
             })
         }),
     }
@@ -121,14 +126,13 @@ fn setup_knowledge_pipeline_tool() -> McpTool {
             "required": [],
         }),
         server_name: Some("actions".to_string()),
-        handler: Arc::new(|args: Value, ctx: AppContext| -> Result<McpToolResult> {
-            let pool = ctx.pool.clone();
-            let data_dir = ctx.data_dir.clone();
-            let schedule = args.get("schedule").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let prompt = args.get("prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
+        handler: Arc::new(|args: Value, ctx: AppContext| {
+            Box::pin(async move {
+                let pool = ctx.pool.clone();
+                let data_dir = ctx.data_dir.clone();
+                let schedule = args.get("schedule").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let prompt = args.get("prompt").and_then(|v| v.as_str()).map(|s| s.to_string());
 
-            let handle = tokio::runtime::Handle::current();
-            handle.block_on(async {
                 match crate::scheduler::setup_knowledge_pipeline(&pool, &data_dir, schedule, prompt).await {
                     Ok(()) => {
                         tracing::info!("[actions] Knowledge pipeline cron created/verified");

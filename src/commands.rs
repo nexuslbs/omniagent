@@ -3,11 +3,13 @@
 //! Provides a unified parsing + validation layer so that CLI, Telegram,
 //! and external platform plugins all use the same logic.
 
-use anyhow::Result;
+use crate::error::{AppResult, Error};
+use crate::err_msg;
+use sql_forge::sql_forge;
 use sqlx::PgPool;
 
-use crate::plugins_yaml;
 use crate::db::types::Channel;
+use crate::plugins_yaml;
 
 // ---------------------------------------------------------------------------
 // ModelCommand — parsed result
@@ -25,10 +27,7 @@ pub enum ModelAction {
     },
     /// Reset (clear to NULL) provider and/or model.
     /// `true` means clear that field.
-    Reset {
-        provider: bool,
-        model: bool,
-    },
+    Reset { provider: bool, model: bool },
 }
 
 /// Parsed `/model` command.
@@ -46,9 +45,10 @@ pub struct ModelCommand {
 ///   `//model reset`                  → Reset both
 ///   `//model reset provider`         → Reset provider only
 ///   `//model reset model`            → Reset model only
-pub fn parse_model_command(input: &str) -> Result<ModelCommand> {
+pub fn parse_model_command(input: &str) -> AppResult<ModelCommand> {
     let trimmed = input.trim();
-    let rest = trimmed.strip_prefix("//model")
+    let rest = trimmed
+        .strip_prefix("//model")
         .or_else(|| trimmed.strip_prefix("/model"))
         .or_else(|| trimmed.strip_prefix("$model"))
         .unwrap_or(trimmed)
@@ -89,7 +89,7 @@ pub fn parse_model_command(input: &str) -> Result<ModelCommand> {
                 });
             }
             _ => {
-                anyhow::bail!(
+                err_msg!(
                     "Unknown reset target '{}'. Use: $model reset, $model reset provider, $model reset model",
                     target
                 );
@@ -113,23 +113,21 @@ pub fn parse_model_command(input: &str) -> Result<ModelCommand> {
             },
         }),
         _ => {
-            anyhow::bail!(
-                "Usage: //model [provider] [model] | //model reset [provider|model]"
-            );
+            err_msg!("Usage: //model [provider] [model] | //model reset [provider|model]");
         }
     }
 }
 
 /// Validate that a provider name exists and is enabled in the providers YAML file.
 /// Returns Ok(()) if valid, Err with a message if not found.
-pub fn validate_provider(data_dir: &str, provider_name: &str) -> Result<()> {
+pub fn validate_provider(data_dir: &str, provider_name: &str) -> AppResult<()> {
     let provider_enabled = plugins_yaml::provider_exists_and_enabled(data_dir, provider_name)
-        .map_err(|e| anyhow::anyhow!("Failed to check provider: {}", e))?;
+        .map_err(|e| Error::Message(format!("Failed to check provider: {}", e)))?;
 
     if provider_enabled {
         Ok(())
     } else {
-        anyhow::bail!(
+        err_msg!(
             "Unknown provider '{}'. Register it as a provider plugin first.",
             provider_name
         )
@@ -137,12 +135,11 @@ pub fn validate_provider(data_dir: &str, provider_name: &str) -> Result<()> {
 }
 
 /// Format a status line showing the current provider/model for a channel.
-pub fn format_model_status(
-    provider: Option<&str>,
-    model: Option<&str>,
-) -> String {
-    let provider_str = provider.unwrap_or("(not set — will use profile default or LLM_PROVIDER env var)");
-    let model_str = model.unwrap_or("(not set — will use profile default or provider plugin default_model)");
+pub fn format_model_status(provider: Option<&str>, model: Option<&str>) -> String {
+    let provider_str =
+        provider.unwrap_or("(not set — will use profile default or LLM_PROVIDER env var)");
+    let model_str =
+        model.unwrap_or("(not set — will use profile default or provider plugin default_model)");
     format!(
         "Current channel configuration:\n  Provider: {}\n  Model:    {}",
         provider_str, model_str
@@ -159,15 +156,16 @@ pub struct NewCommand;
 
 #[allow(dead_code)]
 /// Parse a `/new` command text. Valid form: `/new` (no arguments).
-pub fn parse_new_command(input: &str) -> Result<NewCommand> {
+pub fn parse_new_command(input: &str) -> AppResult<NewCommand> {
     let trimmed = input.trim();
-    let rest = trimmed.strip_prefix("//new")
+    let rest = trimmed
+        .strip_prefix("//new")
         .or_else(|| trimmed.strip_prefix("/new"))
         .or_else(|| trimmed.strip_prefix("$new"))
         .unwrap_or(trimmed)
         .trim();
     if !rest.is_empty() {
-        anyhow::bail!("Usage: /new (no arguments)");
+        err_msg!("Usage: /new (no arguments)");
     }
     Ok(NewCommand)
 }
@@ -193,9 +191,10 @@ pub enum ChannelCommand {
 ///   `/channel`        → Show
 ///   `/channel list`   → List
 ///   `/channel <name>` → Switch
-pub fn parse_channel_command(input: &str) -> Result<ChannelCommand> {
+pub fn parse_channel_command(input: &str) -> AppResult<ChannelCommand> {
     let trimmed = input.trim();
-    let rest = trimmed.strip_prefix("//channel")
+    let rest = trimmed
+        .strip_prefix("//channel")
         .or_else(|| trimmed.strip_prefix("/channel"))
         .or_else(|| trimmed.strip_prefix("$channel"))
         .unwrap_or(trimmed)
@@ -231,9 +230,10 @@ pub enum ProfileCommand {
 ///   `/profile`           → Show
 ///   `/profile <name>`    → Set
 ///   `/profile reset`     → Reset
-pub fn parse_profile_command(input: &str) -> Result<ProfileCommand> {
+pub fn parse_profile_command(input: &str) -> AppResult<ProfileCommand> {
     let trimmed = input.trim();
-    let rest = trimmed.strip_prefix("//profile")
+    let rest = trimmed
+        .strip_prefix("//profile")
         .or_else(|| trimmed.strip_prefix("/profile"))
         .or_else(|| trimmed.strip_prefix("$profile"))
         .unwrap_or(trimmed)
@@ -258,7 +258,7 @@ pub async fn handle_new_external(
     pool: &PgPool,
     platform: &str,
     resource_identifier: &str,
-) -> Result<Channel> {
+) -> AppResult<Channel> {
     // Generate a name based on platform and resource
     let name = format!(
         "{}-{}",
@@ -281,27 +281,20 @@ pub async fn handle_new_external(
 }
 
 /// Set the profile on a channel by updating `current_profile`.
-pub async fn handle_profile_set(
-    pool: &PgPool,
-    channel_id: i64,
-    profile_name: &str,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE channels SET current_profile = $1, updated_at = NOW() WHERE id = $2"
+pub async fn handle_profile_set(pool: &PgPool, channel_id: i64, profile_name: &str) -> AppResult<()> {
+    sql_forge!(
+        "UPDATE channels SET current_profile = :profile_name, updated_at = NOW() WHERE id = :channel_id",
+        ( :profile_name = profile_name, :channel_id = channel_id )
     )
-    .bind(profile_name)
-    .bind(channel_id)
     .execute(pool)
     .await?;
     Ok(())
 }
 
 /// List channels by platform.
-pub async fn handle_channel_list(
-    pool: &PgPool,
-    platform: &str,
-) -> Result<Vec<Channel>> {
-    let rows: Vec<crate::db::types::ChannelDb> = sqlx::query_as::<_, crate::db::types::ChannelDb>(
+pub async fn handle_channel_list(pool: &PgPool, platform: &str) -> AppResult<Vec<Channel>> {
+    let rows: Vec<crate::db::types::ChannelDb> = sql_forge!(
+        crate::db::types::ChannelDb,
         r#"
         SELECT
             id, name,
@@ -313,17 +306,20 @@ pub async fn handle_channel_list(
             readonly,
             COALESCE(closed, false) as "closed",
             '{}'::text AS "metadata",
+            COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
         FROM channels
-        WHERE platform = $1
+        WHERE platform = :platform
         ORDER BY name ASC
-        "#
+        "#,
+        ( :platform = platform )
     )
-    .bind(platform)
     .fetch_all(pool)
     .await?;
-    rows.into_iter().map(|r| r.try_into().map_err(anyhow::Error::from)).collect()
+    rows.into_iter()
+        .map(|r| r.try_into().map_err(|e| Error::Message(format!("Channel conversion failed: {}", e))))
+        .collect()
 }
 
 #[cfg(test)]

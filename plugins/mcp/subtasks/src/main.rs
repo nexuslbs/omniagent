@@ -34,17 +34,20 @@ async fn handle_add(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let current = subtask::get_current_subtask(pool, thread_id).await?;
     let all = subtask::list_subtasks(pool, thread_id).await?;
 
-    let subtasks_json: Vec<Value> = all.iter().map(|s| {
-        serde_json::json!({
-            "id": s.id,
-            "thread_id": s.thread_id,
-            "description": s.description,
-            "status": s.status,
-            "priority": s.priority.unwrap_or(0),
-            "created_at": s.created_at,
-            "updated_at": s.updated_at,
+    let subtasks_json: Vec<Value> = all
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "thread_id": s.thread_id,
+                "description": s.description,
+                "status": s.status,
+                "priority": s.priority.unwrap_or(0),
+                "created_at": s.created_at,
+                "updated_at": s.updated_at,
+            })
         })
-    }).collect();
+        .collect();
 
     let output = serde_json::json!({
         "current_subtask": current.map(|s| serde_json::json!({
@@ -77,17 +80,20 @@ async fn handle_list(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let counts = subtask::get_subtask_counts(pool, thread_id).await?;
     let current = subtask::get_current_subtask(pool, thread_id).await?;
 
-    let subtasks_json: Vec<Value> = all.iter().map(|s| {
-        serde_json::json!({
-            "id": s.id,
-            "thread_id": s.thread_id,
-            "description": s.description,
-            "status": s.status,
-            "priority": s.priority.unwrap_or(0),
-            "created_at": s.created_at,
-            "updated_at": s.updated_at,
+    let subtasks_json: Vec<Value> = all
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "thread_id": s.thread_id,
+                "description": s.description,
+                "status": s.status,
+                "priority": s.priority.unwrap_or(0),
+                "created_at": s.created_at,
+                "updated_at": s.updated_at,
+            })
         })
-    }).collect();
+        .collect();
 
     let output = serde_json::json!({
         "current_subtask": current.map(|s| serde_json::json!({
@@ -125,7 +131,10 @@ async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     if let Some(status) = args["status"].as_str() {
         let valid_statuses = ["pending", "completed", "cancelled", "error"];
         if !valid_statuses.contains(&status) {
-            anyhow::bail!("Invalid status '{}'. Must be one of: pending, completed, cancelled, error", status);
+            anyhow::bail!(
+                "Invalid status '{}'. Must be one of: pending, completed, cancelled, error",
+                status
+            );
         }
         let rows = subtask::update_subtask_status(pool, subtask_id, status).await?;
         if rows == 0 {
@@ -152,17 +161,20 @@ async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let current = subtask::get_current_subtask(pool, thread_id).await?;
     let all = subtask::list_subtasks(pool, thread_id).await?;
 
-    let subtasks_json: Vec<Value> = all.iter().map(|s| {
-        serde_json::json!({
-            "id": s.id,
-            "thread_id": s.thread_id,
-            "description": s.description,
-            "status": s.status,
-            "priority": s.priority.unwrap_or(0),
-            "created_at": s.created_at,
-            "updated_at": s.updated_at,
+    let subtasks_json: Vec<Value> = all
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "thread_id": s.thread_id,
+                "description": s.description,
+                "status": s.status,
+                "priority": s.priority.unwrap_or(0),
+                "created_at": s.created_at,
+                "updated_at": s.updated_at,
+            })
         })
-    }).collect();
+        .collect();
 
     let output = serde_json::json!({
         "current_subtask": current.map(|s| serde_json::json!({
@@ -204,17 +216,20 @@ async fn handle_delete(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let current = subtask::get_current_subtask(pool, thread_id).await?;
     let all = subtask::list_subtasks(pool, thread_id).await?;
 
-    let subtasks_json: Vec<Value> = all.iter().map(|s| {
-        serde_json::json!({
-            "id": s.id,
-            "thread_id": s.thread_id,
-            "description": s.description,
-            "status": s.status,
-            "priority": s.priority.unwrap_or(0),
-            "created_at": s.created_at,
-            "updated_at": s.updated_at,
+    let subtasks_json: Vec<Value> = all
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "thread_id": s.thread_id,
+                "description": s.description,
+                "status": s.status,
+                "priority": s.priority.unwrap_or(0),
+                "created_at": s.created_at,
+                "updated_at": s.updated_at,
+            })
         })
-    }).collect();
+        .collect();
 
     let output = serde_json::json!({
         "current_subtask": current.map(|s| serde_json::json!({
@@ -268,23 +283,29 @@ async fn handle_get_counts(pool: &PgPool, args: &Value) -> Result<(String, bool)
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url =
-        std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
-    let pool = omniagent::db::connect(&database_url).await
+    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
+    let pool = omniagent::db::connect(&database_url)
+        .await
         .context("Failed to connect to database")?;
     let pool = Arc::new(pool);
 
     // Wrap each handler to capture a clone of the pool
     let p_add = pool.clone();
-    let add_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_add(&p_add, &args).await }));
+    let add_handler: ToolHandler =
+        Box::new(move |args: Value| Box::pin(async move { handle_add(&p_add, &args).await }));
     let p_list = pool.clone();
-    let list_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_list(&p_list, &args).await }));
+    let list_handler: ToolHandler =
+        Box::new(move |args: Value| Box::pin(async move { handle_list(&p_list, &args).await }));
     let p_upd = pool.clone();
-    let update_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_update(&p_upd, &args).await }));
+    let update_handler: ToolHandler =
+        Box::new(move |args: Value| Box::pin(async move { handle_update(&p_upd, &args).await }));
     let p_del = pool.clone();
-    let delete_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_delete(&p_del, &args).await }));
+    let delete_handler: ToolHandler =
+        Box::new(move |args: Value| Box::pin(async move { handle_delete(&p_del, &args).await }));
     let p_cnt = pool.clone();
-    let counts_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_get_counts(&p_cnt, &args).await }));
+    let counts_handler: ToolHandler = Box::new(move |args: Value| {
+        Box::pin(async move { handle_get_counts(&p_cnt, &args).await })
+    });
 
     let tools = vec![
         McpToolEntry {

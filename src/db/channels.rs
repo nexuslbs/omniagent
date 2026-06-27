@@ -4,12 +4,13 @@ use sqlx::PgPool;
 use crate::db::types::{
     Channel, ChannelDb, ChannelSeq0Message, ChannelStatus, CreateChannelParams, OldChannelInfo,
 };
+use crate::error::AppResult;
 
 // ---------------------------------------------------------------------------
 // Channel query functions
 // ---------------------------------------------------------------------------
 
-pub async fn find_all_channels(pool: &PgPool) -> anyhow::Result<Vec<Channel>> {
+pub async fn find_all_channels(pool: &PgPool) -> AppResult<Vec<Channel>> {
     let rows: Vec<ChannelDb> = sql_forge!(
         ChannelDb,
         r#"
@@ -36,7 +37,7 @@ pub async fn find_all_channels(pool: &PgPool) -> anyhow::Result<Vec<Channel>> {
     rows.into_iter().map(|r| r.try_into()).collect()
 }
 
-pub async fn get_channel_by_name(pool: &PgPool, name: &str) -> anyhow::Result<Option<Channel>> {
+pub async fn get_channel_by_name(pool: &PgPool, name: &str) -> AppResult<Option<Channel>> {
     let row: Option<ChannelDb> = sql_forge!(
         ChannelDb,
         r#"
@@ -68,7 +69,7 @@ pub async fn get_channel_by_platform_name(
     pool: &PgPool,
     platform: &str,
     name: &str,
-) -> anyhow::Result<Option<Channel>> {
+) -> AppResult<Option<Channel>> {
     let row: Option<ChannelDb> = sql_forge!(
         ChannelDb,
         r#"
@@ -96,10 +97,7 @@ pub async fn get_channel_by_platform_name(
     row.map(|r| r.try_into()).transpose()
 }
 
-pub async fn find_channel_by_id(
-    pool: &PgPool,
-    channel_id: i64,
-) -> anyhow::Result<Option<Channel>> {
+pub async fn find_channel_by_id(pool: &PgPool, channel_id: i64) -> AppResult<Option<Channel>> {
     let row: Option<ChannelDb> = sql_forge!(
         ChannelDb,
         r#"
@@ -128,7 +126,7 @@ pub async fn find_channel_by_id(
 }
 
 /// Get a channel by id, including its actual metadata (not hardcoded '{}').
-pub async fn get_channel_by_id(pool: &PgPool, channel_id: i64) -> anyhow::Result<Option<Channel>> {
+pub async fn get_channel_by_id(pool: &PgPool, channel_id: i64) -> AppResult<Option<Channel>> {
     let row: Option<ChannelDb> = sql_forge!(
         ChannelDb,
         r#"
@@ -155,10 +153,7 @@ pub async fn get_channel_by_id(pool: &PgPool, channel_id: i64) -> anyhow::Result
     row.map(|r| r.try_into()).transpose()
 }
 
-pub async fn create_channel(
-    pool: &PgPool,
-    p: CreateChannelParams,
-) -> anyhow::Result<Channel> {
+pub async fn create_channel(pool: &PgPool, p: CreateChannelParams) -> AppResult<Channel> {
     let row: ChannelDb = sql_forge!(
         ChannelDb,
         r#"
@@ -193,7 +188,7 @@ pub async fn get_channel_by_platform_and_resource(
     pool: &PgPool,
     platform: &str,
     resource_identifier: &str,
-) -> anyhow::Result<Option<Channel>> {
+) -> AppResult<Option<Channel>> {
     let row: Option<ChannelDb> = sql_forge!(
         ChannelDb,
         r#"
@@ -236,7 +231,7 @@ pub async fn update_channel_platform(
     new_platform: &str,
     new_resource_identifier: &str,
     new_external_id: &str,
-) -> anyhow::Result<OldChannelInfo> {
+) -> AppResult<OldChannelInfo> {
     // Query old values first
     let old: Option<ChannelDb> = sql_forge!(
         ChannelDb,
@@ -264,7 +259,11 @@ pub async fn update_channel_platform(
 
     let old_platform = old.as_ref().and_then(|c| {
         let p = c.platform.as_deref().unwrap_or("");
-        if p.is_empty() { None } else { Some(p.to_string()) }
+        if p.is_empty() {
+            None
+        } else {
+            Some(p.to_string())
+        }
     });
     let old_resource_identifier = old.as_ref().and_then(|c| c.resource_identifier.clone());
 
@@ -298,53 +297,50 @@ pub async fn update_channel_model(
     channel_id: i64,
     provider: Option<&str>,
     model: Option<&str>,
-) -> anyhow::Result<()> {
-    // Build a dynamic UPDATE using COALESCE to preserve existing values
-    // for any parameter that is None.
-    let set_provider = provider.map(|p| {
-        if p.is_empty() {
-            "NULL::text".to_string()
-        } else {
-            format!("'{}'", p.replace('\'', "''"))
+) -> AppResult<()> {
+    match (provider, model) {
+        (Some(p), Some(m)) => {
+            sql_forge!(
+                r#"
+                UPDATE channels
+                SET current_provider = NULLIF(:provider, '')::text,
+                    current_model = NULLIF(:model, '')::text,
+                    updated_at = NOW()
+                WHERE id = :id
+                "#,
+                ( :provider = p, :model = m, :id = channel_id )
+            )
+            .execute(pool)
+            .await?;
         }
-    });
-    let set_model = model.map(|m| {
-        if m.is_empty() {
-            "NULL::text".to_string()
-        } else {
-            format!("'{}'", m.replace('\'', "''"))
+        (Some(p), None) => {
+            sql_forge!(
+                r#"
+                UPDATE channels
+                SET current_provider = NULLIF(:provider, '')::text,
+                    updated_at = NOW()
+                WHERE id = :id
+                "#,
+                ( :provider = p, :id = channel_id )
+            )
+            .execute(pool)
+            .await?;
         }
-    });
-
-    let provider_sql = set_provider
-        .map(|v| format!("current_provider = {}", v))
-        .unwrap_or_default();
-    let model_sql = set_model
-        .map(|v| format!("current_model = {}", v))
-        .unwrap_or_default();
-
-    let mut sets = Vec::new();
-    if !provider_sql.is_empty() {
-        sets.push(provider_sql);
+        (None, Some(m)) => {
+            sql_forge!(
+                r#"
+                UPDATE channels
+                SET current_model = NULLIF(:model, '')::text,
+                    updated_at = NOW()
+                WHERE id = :id
+                "#,
+                ( :model = m, :id = channel_id )
+            )
+            .execute(pool)
+            .await?;
+        }
+        (None, None) => {}
     }
-    if !model_sql.is_empty() {
-        sets.push(model_sql);
-    }
-
-    if sets.is_empty() {
-        return Ok(());
-    }
-
-    let sql = format!(
-        "UPDATE channels SET {}, updated_at = NOW() WHERE id = $1",
-        sets.join(", ")
-    );
-
-    sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(channel_id)
-        .execute(pool)
-        .await?;
-
     Ok(())
 }
 
@@ -355,7 +351,7 @@ pub async fn claim_channel_resource(
     pool: &PgPool,
     channel_id: i64,
     session_id: &str,
-) -> anyhow::Result<Option<String>> {
+) -> AppResult<Option<String>> {
     // Get old resource_identifier first
     let old = find_channel_by_id(pool, channel_id).await?;
     let old_rid = old.and_then(|c| c.resource_identifier.filter(|r| !r.is_empty()));
@@ -382,7 +378,7 @@ pub async fn claim_channel_resource(
 // ---------------------------------------------------------------------------
 
 /// Close a channel — sets closed=true and skips pending/processing threads.
-pub async fn close_channel(pool: &PgPool, channel_id: i64) -> anyhow::Result<()> {
+pub async fn close_channel(pool: &PgPool, channel_id: i64) -> AppResult<()> {
     sql_forge!(
         "UPDATE channels SET closed = true, updated_at = NOW() WHERE id = :id",
         ( :id = channel_id )
@@ -393,7 +389,7 @@ pub async fn close_channel(pool: &PgPool, channel_id: i64) -> anyhow::Result<()>
 }
 
 /// Open a channel — sets closed=false so the supervisor spawns a handler.
-pub async fn open_channel(pool: &PgPool, channel_id: i64) -> anyhow::Result<()> {
+pub async fn open_channel(pool: &PgPool, channel_id: i64) -> AppResult<()> {
     sql_forge!(
         "UPDATE channels SET closed = false, updated_at = NOW() WHERE id = :id",
         ( :id = channel_id )
@@ -404,7 +400,7 @@ pub async fn open_channel(pool: &PgPool, channel_id: i64) -> anyhow::Result<()> 
 }
 
 /// Check if a channel is closed.
-pub async fn is_channel_closed(pool: &PgPool, channel_id: i64) -> anyhow::Result<bool> {
+pub async fn is_channel_closed(pool: &PgPool, channel_id: i64) -> AppResult<bool> {
     let row: Option<ChannelDb> = sql_forge!(
         ChannelDb,
         r#"
@@ -433,7 +429,10 @@ pub async fn is_channel_closed(pool: &PgPool, channel_id: i64) -> anyhow::Result
 }
 
 /// Get channel status with thread counts.
-pub async fn get_channel_status(pool: &PgPool, channel_id: i64) -> anyhow::Result<Option<ChannelStatus>> {
+pub async fn get_channel_status(
+    pool: &PgPool,
+    channel_id: i64,
+) -> AppResult<Option<ChannelStatus>> {
     let ch = find_channel_by_id(pool, channel_id).await?;
     let ch = match ch {
         Some(c) => c,
@@ -479,7 +478,7 @@ pub async fn get_recent_channel_seq0_messages(
     pool: &PgPool,
     channel_id: i64,
     limit: i64,
-) -> anyhow::Result<Vec<ChannelSeq0Message>> {
+) -> AppResult<Vec<ChannelSeq0Message>> {
     let rows: Vec<ChannelSeq0Message> = sql_forge!(
         ChannelSeq0Message,
         r#"

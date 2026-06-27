@@ -7,16 +7,17 @@
 //! channel) so that a slow or failing platform never blocks delivery to
 //! healthy ones.
 
-use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::PgPool;
 use std::collections::HashMap;
 
+use crate::error::AppResult;
+
 pub mod external;
 pub mod queue;
 
-pub use queue::{OutboundEnvelope, OutboundReceiver, OutboundSender};
 use queue::outbound_channel;
+pub use queue::{OutboundEnvelope, OutboundReceiver, OutboundSender};
 
 /// A platform that can receive messages from external sources and send
 /// responses back to them.
@@ -27,10 +28,10 @@ pub trait Platform: Send + Sync {
     /// Start the listener loop for this platform.
     ///
     /// `receiver` is the platform's dedicated outbound delivery queue.
-    async fn start(&self, pool: PgPool, receiver: OutboundReceiver) -> Result<()>;
+    async fn start(&self, pool: PgPool, receiver: OutboundReceiver) -> AppResult<()>;
 
     #[allow(dead_code)]
-    async fn send_response(&self, pool: &PgPool, message_id: i64) -> Result<()>;
+    async fn send_response(&self, pool: &PgPool, message_id: i64) -> AppResult<()>;
 }
 
 /// Registry that holds all registered platform implementations.

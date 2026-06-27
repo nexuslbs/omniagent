@@ -2,7 +2,6 @@
 //!
 //! Each subtask belongs to a thread and tracks a single actionable item
 //! with status: pending, completed, cancelled.
-use anyhow::Result;
 use sql_forge::sql_forge;
 use sqlx::PgPool;
 
@@ -68,7 +67,12 @@ pub async fn add_subtask(
     .fetch_one(pool)
     .await?;
 
-    tracing::info!("Added subtask {} to thread {}: {}", row.id, thread_id, description);
+    tracing::info!(
+        "Added subtask {} to thread {}: {}",
+        row.id,
+        thread_id,
+        description
+    );
     Ok(row)
 }
 

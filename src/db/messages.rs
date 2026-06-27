@@ -2,15 +2,18 @@ use sql_forge::sql_forge;
 use sqlx::PgPool;
 
 use crate::db::types::{Message, MessageDb, MessageNew};
+use crate::error::AppResult;
 
 // ---------------------------------------------------------------------------
 // Message query functions — simplified, no per-thread fields
 // ---------------------------------------------------------------------------
 
 /// Insert a new message (no status/channel/provider/model — those are on the thread).
-pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> anyhow::Result<Message> {
-    let metadata_val: serde_json::Value = serde_json::from_str(&msg.metadata.to_string()).unwrap_or_default();
-    let token_usage_val: serde_json::Value = msg.token_usage.clone().unwrap_or(serde_json::Value::Null);
+pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> AppResult<Message> {
+    let metadata_val: serde_json::Value =
+        serde_json::from_str(&msg.metadata.to_string()).unwrap_or_default();
+    let token_usage_val: serde_json::Value =
+        msg.token_usage.clone().unwrap_or(serde_json::Value::Null);
     let row: MessageDb = sql_forge!(
         MessageDb,
         r#"
@@ -42,7 +45,7 @@ pub async fn get_recent_thread_messages(
     pool: &PgPool,
     thread_id: i64,
     limit: i64,
-) -> anyhow::Result<Vec<Message>> {
+) -> AppResult<Vec<Message>> {
     let rows: Vec<MessageDb> = sql_forge!(
         MessageDb,
         r#"
@@ -73,7 +76,7 @@ pub async fn search_messages_text(
     query: &str,
     channel_id: i64,
     limit: i64,
-) -> anyhow::Result<Vec<Message>> {
+) -> AppResult<Vec<Message>> {
     let pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
     let rows: Vec<MessageDb> = sql_forge!(
         MessageDb,
@@ -104,7 +107,7 @@ pub async fn search_messages_text(
 pub async fn find_messages_without_embeddings(
     pool: &PgPool,
     limit: usize,
-) -> anyhow::Result<Vec<crate::vectorizer::MessageEmbeddingRow>> {
+) -> AppResult<Vec<crate::vectorizer::MessageEmbeddingRow>> {
     let rows: Vec<crate::vectorizer::MessageEmbeddingRow> = sql_forge!(
         crate::vectorizer::MessageEmbeddingRow,
         r#"
@@ -128,7 +131,7 @@ pub async fn update_message_embedding(
     pool: &PgPool,
     message_id: i64,
     embedding_string: &str,
-) -> anyhow::Result<()> {
+) -> AppResult<()> {
     // Update both the TEXT column (for backward compat / Phase 2 migration) and
     // the native vector column (for HNSW-indexed two-stage search).
     // The vector cast is safe because embedding_string is always in `[0.1,0.2,...]` format.
@@ -166,7 +169,7 @@ pub async fn search_messages_semantic(
     embedding_str: &str,
     channel_id: i64,
     limit: i64,
-) -> anyhow::Result<Vec<Message>> {
+) -> AppResult<Vec<Message>> {
     let rows: Vec<MessageDb> = sqlx::query_as(
         r#"
         WITH vector_candidates AS (
@@ -204,7 +207,7 @@ pub async fn search_messages_semantic(
 pub async fn delete_old_messages(
     pool: &PgPool,
     before: chrono::DateTime<chrono::Utc>,
-) -> anyhow::Result<u64> {
+) -> AppResult<u64> {
     let result = sql_forge!(
         "DELETE FROM messages WHERE created_at < :cutoff",
         ( :cutoff = before )
@@ -219,24 +222,25 @@ pub async fn delete_old_messages(
 pub async fn get_latest_seq0_message(
     pool: &PgPool,
     channel_id: i64,
-) -> anyhow::Result<Option<Message>> {
+) -> AppResult<Option<Message>> {
     #[derive(Debug, sqlx::FromRow)]
     struct IdContent {
         id: i64,
         content: String,
     }
-    let row: Option<IdContent> = sqlx::query_as(
+    let row: Option<IdContent> = sql_forge!(
+        IdContent,
         r#"
         SELECT m.id, m.content
         FROM messages m
         JOIN threads t ON t.id = m.thread_id
-        WHERE t.channel_id = $1
+        WHERE t.channel_id = :channel_id
           AND m.thread_sequence = 0
         ORDER BY m.id DESC
         LIMIT 1
         "#,
+        ( :channel_id = channel_id )
     )
-    .bind(channel_id)
     .fetch_optional(pool)
     .await?;
 
@@ -264,25 +268,20 @@ pub async fn get_latest_seq0_message(
 }
 
 /// Get the thread ID for a given message.
-pub async fn get_message_thread(
-    pool: &PgPool,
-    message_id: i64,
-) -> anyhow::Result<Option<i64>> {
-    let row: Option<(i64,)> = sqlx::query_as(
-        "SELECT thread_id FROM messages WHERE id = $1",
+pub async fn get_message_thread(pool: &PgPool, message_id: i64) -> AppResult<Option<i64>> {
+    let thread_id: Option<i64> = sql_forge!(
+        scalar i64,
+        "SELECT thread_id FROM messages WHERE id = :id",
+        ( :id = message_id )
     )
-    .bind(message_id)
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| r.0))
+    Ok(thread_id)
 }
 
 /// Get all messages for a given thread, ordered by thread_sequence ASC.
-pub async fn get_thread_messages(
-    pool: &PgPool,
-    thread_id: i64,
-) -> anyhow::Result<Vec<MessageDb>> {
+pub async fn get_thread_messages(pool: &PgPool, thread_id: i64) -> AppResult<Vec<MessageDb>> {
     let rows: Vec<MessageDb> = sql_forge!(
         MessageDb,
         r#"

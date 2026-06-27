@@ -105,7 +105,9 @@ pub struct ToolCapabilities {
     pub list_changed: bool,
 }
 
-fn is_false(b: &bool) -> bool { !b }
+fn is_false(b: &bool) -> bool {
+    !b
+}
 
 // ---------------------------------------------------------------------------
 // MCP Tools
@@ -150,9 +152,7 @@ pub enum ToolContent {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "resource")]
-    Resource {
-        resource: ResourceContent,
-    },
+    Resource { resource: ResourceContent },
 }
 
 /// A resource embedded in tool output.
@@ -185,16 +185,19 @@ pub fn build_initialize_request(id: u64) -> String {
         jsonrpc: "2.0".to_string(),
         id: Some(id),
         method: "initialize".to_string(),
-        params: Some(serde_json::to_value(InitializeParams {
-            protocol_version: MCP_PROTOCOL_VERSION.to_string(),
-            capabilities: ClientCapabilities {
-                tools: Some(serde_json::Map::new()),
-            },
-            client_info: Implementation {
-                name: "omniagent".to_string(),
-                version: "0.1.0".to_string(),
-            },
-        }).unwrap_or_default()),
+        params: Some(
+            serde_json::to_value(InitializeParams {
+                protocol_version: MCP_PROTOCOL_VERSION.to_string(),
+                capabilities: ClientCapabilities {
+                    tools: Some(serde_json::Map::new()),
+                },
+                client_info: Implementation {
+                    name: "omniagent".to_string(),
+                    version: "0.1.0".to_string(),
+                },
+            })
+            .unwrap_or_default(),
+        ),
     };
     serde_json::to_string(&req).unwrap_or_default()
 }
@@ -226,10 +229,13 @@ pub fn build_call_tool_request(id: u64, name: &str, arguments: &Value) -> String
         jsonrpc: "2.0".to_string(),
         id: Some(id),
         method: "tools/call".to_string(),
-        params: Some(serde_json::to_value(CallToolParams {
-            name: name.to_string(),
-            arguments: Some(arguments.clone()),
-        }).unwrap_or_default()),
+        params: Some(
+            serde_json::to_value(CallToolParams {
+                name: name.to_string(),
+                arguments: Some(arguments.clone()),
+            })
+            .unwrap_or_default(),
+        ),
     };
     serde_json::to_string(&req).unwrap_or_default()
 }

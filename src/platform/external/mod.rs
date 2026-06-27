@@ -15,6 +15,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::error::AppResult;
+use crate::err_str;
+
 // ---------------------------------------------------------------------------
 // Config types
 // ---------------------------------------------------------------------------
@@ -40,8 +43,12 @@ pub struct PlatformPluginConfig {
     pub max_retries: u32,
 }
 
-fn default_enabled() -> bool { true }
-fn default_max_retries() -> u32 { 3 }
+fn default_enabled() -> bool {
+    true
+}
+fn default_max_retries() -> u32 {
+    3
+}
 
 /// Collection of platform plugin configurations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,19 +90,11 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
                     results = config.platforms;
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Failed to parse platforms config from {}: {:?}",
-                        path,
-                        e
-                    );
+                    tracing::warn!("Failed to parse platforms config from {}: {:?}", path, e);
                 }
             },
             Err(e) => {
-                tracing::warn!(
-                    "Failed to read platforms config from {}: {:?}",
-                    path,
-                    e
-                );
+                tracing::warn!("Failed to read platforms config from {}: {:?}", path, e);
             }
         }
     } else {
@@ -130,7 +129,8 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
                                 max_retries: 3,
                             };
                             // Override legacy entry with same name
-                            if let Some(pos) = results.iter().position(|p| p.name == manifest.name) {
+                            if let Some(pos) = results.iter().position(|p| p.name == manifest.name)
+                            {
                                 tracing::info!(
                                     "Platform plugin '{}' overridden by installed manifest",
                                     manifest.name
@@ -201,15 +201,9 @@ pub struct PluginRequest {
 #[serde(untagged)]
 pub enum PluginResponse {
     /// Successful response.
-    Success {
-        id: u64,
-        result: Value,
-    },
+    Success { id: u64, result: Value },
     /// Error response.
-    Error {
-        id: u64,
-        error: PluginError,
-    },
+    Error { id: u64, error: PluginError },
 }
 
 /// Error payload from a platform plugin.
@@ -389,9 +383,9 @@ pub fn build_delete_request(id: u64, params: &DeleteParams) -> String {
 // ---------------------------------------------------------------------------
 
 /// Parse a JSON response line from a plugin.
-pub fn parse_response(line: &str) -> anyhow::Result<PluginResponse> {
+pub fn parse_response(line: &str) -> AppResult<PluginResponse> {
     serde_json::from_str(line)
-        .map_err(|e| anyhow::anyhow!("Failed to parse plugin response: {}", e))
+        .map_err(|e| err_str!("Failed to parse plugin response: {}", e))
 }
 
 // ---------------------------------------------------------------------------

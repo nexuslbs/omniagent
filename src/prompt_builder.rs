@@ -26,9 +26,15 @@ pub fn load_template(data_dir: &str, profile_name: &str, template_name: &str) ->
     if template_name.is_empty() {
         return None;
     }
-    let path: PathBuf = [data_dir, "profiles", profile_name, "templates", template_name]
-        .iter()
-        .collect();
+    let path: PathBuf = [
+        data_dir,
+        "profiles",
+        profile_name,
+        "templates",
+        template_name,
+    ]
+    .iter()
+    .collect();
     // Try with .md extension if not already present
     let path = if path.extension().is_some() {
         path
@@ -202,7 +208,8 @@ impl MemoryStore {
                 Ok(raw) => {
                     let hash = format!("{:x}", Sha256::digest(raw.as_bytes()));
                     // Compare against expected hash from sidecar file
-                    let expected = Self::read_expected_hash(&self.memories_dir.join("MEMORY.md.sha256"));
+                    let expected =
+                        Self::read_expected_hash(&self.memories_dir.join("MEMORY.md.sha256"));
                     let valid = expected.as_ref().map_or(true, |e| e == &hash);
                     if !valid {
                         tracing::warn!(
@@ -224,7 +231,13 @@ impl MemoryStore {
 
         self.snapshot.insert(
             "memory".to_string(),
-            self.render_block("memory", &memory_entries, memory_max_chars(), memory_hash.as_deref(), hash_valid),
+            self.render_block(
+                "memory",
+                &memory_entries,
+                memory_max_chars(),
+                memory_hash.as_deref(),
+                hash_valid,
+            ),
         );
         self.snapshot.insert(
             "user".to_string(),
@@ -237,7 +250,10 @@ impl MemoryStore {
         if !path.exists() {
             return None;
         }
-        fs::read_to_string(path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
 
     /// Write the current SHA-256 hash of MEMORY.md to the sidecar file.
@@ -269,7 +285,9 @@ impl MemoryStore {
             Some(ref p) => p.clone(),
             None => return None,
         };
-        let wiki_index_path = PathBuf::from(&profile_path).join("wiki").join("relevant-index.md");
+        let wiki_index_path = PathBuf::from(&profile_path)
+            .join("wiki")
+            .join("relevant-index.md");
         if !wiki_index_path.exists() {
             return None;
         }
@@ -285,7 +303,11 @@ impl MemoryStore {
                 ))
             }
             Err(e) => {
-                tracing::warn!("Failed to read relevant-index.md {:?}: {}", wiki_index_path, e);
+                tracing::warn!(
+                    "Failed to read relevant-index.md {:?}: {}",
+                    wiki_index_path,
+                    e
+                );
                 None
             }
         }
@@ -315,7 +337,14 @@ impl MemoryStore {
         }
     }
 
-    fn render_block(&self, target: &str, entries: &[String], limit: usize, hash: Option<&str>, hash_valid: bool) -> String {
+    fn render_block(
+        &self,
+        target: &str,
+        entries: &[String],
+        limit: usize,
+        hash: Option<&str>,
+        hash_valid: bool,
+    ) -> String {
         if entries.is_empty() {
             return String::new();
         }
@@ -518,10 +547,7 @@ pub struct PlanningPromptParams<'a> {
 ///
 /// The user message is included as a reference so the LLM can scope its
 /// plan appropriately, but it does NOT execute any tools here.
-pub fn build_planning_prompt(
-    memory_store: &MemoryStore,
-    p: PlanningPromptParams<'_>,
-) -> String {
+pub fn build_planning_prompt(memory_store: &MemoryStore, p: PlanningPromptParams<'_>) -> String {
     // Base system identity — everything except tool guidance since
     // planning doesn't execute tools.
     let identity = DEFAULT_AGENT_IDENTITY;
@@ -543,7 +569,10 @@ pub fn build_planning_prompt(
     // Timestamp
     use chrono::Utc;
     let now = Utc::now();
-    volatile_parts.push(format!("Conversation started: {}", now.format("%A, %B %d, %Y")));
+    volatile_parts.push(format!(
+        "Conversation started: {}",
+        now.format("%A, %B %d, %Y")
+    ));
 
     // Build the planning instruction
     let is_refinement = p.plan_iteration > 0 && p.previous_plan.is_some();
@@ -612,7 +641,8 @@ time, the execution phase will adapt naturally.
 Format your plan as structured markdown with sections.
 Do NOT execute any tools or produce code — only plan.
 
-The user's request is provided below as a reference."#.to_string()
+The user's request is provided below as a reference."#
+            .to_string()
     };
 
     let volatile = volatile_parts
@@ -693,11 +723,18 @@ pub fn format_subtask_section(subtasks: &[ThreadSubtask], thread_id: i64) -> Opt
     }
 
     // Find the current (in_progress) subtask
-    let current_idx = subtasks.iter().position(|s| s.status == SubtaskStatus::InProgress);
+    let current_idx = subtasks
+        .iter()
+        .position(|s| s.status == SubtaskStatus::InProgress);
     let current_name = current_idx.and_then(|idx| {
         let s = &subtasks[idx];
         // Use total_steps from the current subtask for display
-        Some(format!("{}  (step {} of {})", s.name, idx + 1, s.total_steps))
+        Some(format!(
+            "{}  (step {} of {})",
+            s.name,
+            idx + 1,
+            s.total_steps
+        ))
     });
 
     // Build the step list
@@ -715,7 +752,13 @@ pub fn format_subtask_section(subtasks: &[ThreadSubtask], thread_id: i64) -> Opt
         } else {
             ""
         };
-        steps.push_str(&format!("  {}. {} {}{}\n", i + 1, emoji, subtask.name, current_marker));
+        steps.push_str(&format!(
+            "  {}. {} {}{}\n",
+            i + 1,
+            emoji,
+            subtask.name,
+            current_marker
+        ));
     }
 
     // Build the subtask management instruction block

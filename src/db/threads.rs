@@ -3,9 +3,11 @@ use sqlx::PgPool;
 
 use crate::agent::AgentConfig;
 use crate::db::types::{
-    CompleteThreadStats, CreateThreadParams, Message, MessageDb, MessageNew, Thread, ThreadDb,
-    ThreadCauseParams,
+    CompleteThreadStats, CreateThreadParams, Message, MessageDb, MessageNew, Thread,
+    ThreadCauseParams, ThreadDb,
 };
+use crate::error::{Error, AppResult};
+use crate::err_msg;
 
 // ---------------------------------------------------------------------------
 // Thread query functions
@@ -18,10 +20,13 @@ pub async fn create_thread(
     channel_id: i64,
     profile: &str,
     p: CreateThreadParams,
-) -> anyhow::Result<Thread> {
+) -> AppResult<Thread> {
     // Validate cause — must be 'user' or 'system'
     if cause != "user" && cause != "system" {
-        anyhow::bail!("Invalid thread cause '{}': must be 'user' or 'system'", cause);
+        err_msg!(
+            "Invalid thread cause '{}': must be 'user' or 'system'",
+            cause
+        );
     }
     let row: ThreadDb = sql_forge!(
         ThreadDb,
@@ -47,7 +52,7 @@ pub async fn create_thread(
 
 /// Set a thread's status to 'system' (terminal — init messages like /start).
 /// These threads should never be picked up by the executor.
-pub async fn set_thread_system(pool: &PgPool, thread_id: i64) -> anyhow::Result<()> {
+pub async fn set_thread_system(pool: &PgPool, thread_id: i64) -> AppResult<()> {
     sql_forge!(
         "UPDATE threads SET status = 'system', terminal = true WHERE id = :id",
         ( :id = thread_id )
@@ -60,7 +65,7 @@ pub async fn set_thread_system(pool: &PgPool, thread_id: i64) -> anyhow::Result<
 /// Set a thread's status to 'failed' (terminal — action execution failure).
 /// These threads should never be picked up by the executor.
 #[allow(dead_code)]
-pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> anyhow::Result<()> {
+pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> AppResult<()> {
     sql_forge!(
         "UPDATE threads SET status = 'failed', terminal = true WHERE id = :id",
         ( :id = thread_id )
@@ -165,10 +170,15 @@ pub fn max_iterations_for_planning_mode(config: &AgentConfig, planning_mode: &st
 }
 
 /// Create the seq-0 (cause) message and set the thread to pending in a single transaction.
-pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> anyhow::Result<Message> {
+pub async fn create_cause_and_set_pending(
+    pool: &PgPool,
+    msg: &MessageNew,
+) -> AppResult<Message> {
     let mut tx = pool.begin().await?;
-    let metadata_val: serde_json::Value = serde_json::from_str(&msg.metadata.to_string()).unwrap_or_default();
-    let token_usage_val: serde_json::Value = msg.token_usage.clone().unwrap_or(serde_json::Value::Null);
+    let metadata_val: serde_json::Value =
+        serde_json::from_str(&msg.metadata.to_string()).unwrap_or_default();
+    let token_usage_val: serde_json::Value =
+        msg.token_usage.clone().unwrap_or(serde_json::Value::Null);
     let saved: MessageDb = sql_forge!(
         MessageDb,
         r#"
@@ -252,19 +262,21 @@ pub async fn create_thread_with_cause(
     channel_id: i64,
     profile: &str,
     p: ThreadCauseParams,
-) -> anyhow::Result<(Thread, Message)> {
+) -> AppResult<(Thread, Message)> {
     // Validate cause — must be 'user' or 'system'
     if cause != "user" && cause != "system" {
-        anyhow::bail!("Invalid thread cause '{}': must be 'user' or 'system'", cause);
+        err_msg!(
+            "Invalid thread cause '{}': must be 'user' or 'system'",
+            cause
+        );
     }
     // 1. Get channel for its planning_mode override and current_* fields
     let channel = crate::db::channels::get_channel_by_id(pool, channel_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Channel {} not found", channel_id))?;
+        .ok_or_else(|| Error::Message(format!("Channel {} not found", channel_id)))?;
 
     // 2. Get global PLANNING_MODE
-    let global_mode =
-        std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_plan".to_string());
+    let global_mode = std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_plan".to_string());
 
     // 3. Resolve planning mode (internal — uses content for complexity classification)
     let channel_pm = channel
@@ -323,7 +335,7 @@ pub async fn create_thread_with_cause(
 pub async fn find_pending_threads_by_channel(
     pool: &PgPool,
     channel_id: i64,
-) -> anyhow::Result<Vec<Thread>> {
+) -> AppResult<Vec<Thread>> {
     let rows: Vec<ThreadDb> = sql_forge!(
         ThreadDb,
         r#"
@@ -372,7 +384,7 @@ pub async fn complete_thread(
     thread_id: i64,
     status: &str,
     _stats: CompleteThreadStats,
-) -> anyhow::Result<()> {
+) -> AppResult<()> {
     sql_forge!(
         r#"
         UPDATE threads
@@ -409,7 +421,7 @@ pub async fn complete_thread(
 }
 
 /// Set all pending/processing threads for a channel to 'skipped'.
-pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> anyhow::Result<u64> {
+pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u64> {
     // Mark all pending/processing threads as skipped
     let result = sql_forge!(
         "UPDATE threads SET status = 'skipped', ended_at = NOW(), terminal = true WHERE channel_id = :channel_id AND status IN ('pending', 'processing') AND NOT terminal",
@@ -445,7 +457,7 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> anyhow::Res
 }
 
 /// Skip a single pending/processing thread by setting its status to 'skipped'.
-pub async fn skip_thread(pool: &PgPool, thread_id: i64) -> anyhow::Result<u64> {
+pub async fn skip_thread(pool: &PgPool, thread_id: i64) -> AppResult<u64> {
     let result = sql_forge!(
         "UPDATE threads SET status = 'skipped', ended_at = NOW() WHERE id = :id AND status IN ('pending', 'processing')",
         ( :id = thread_id )
@@ -457,7 +469,7 @@ pub async fn skip_thread(pool: &PgPool, thread_id: i64) -> anyhow::Result<u64> {
 }
 
 /// Count messages in a thread.
-pub async fn count_thread_messages(pool: &PgPool, thread_id: i64) -> anyhow::Result<i32> {
+pub async fn count_thread_messages(pool: &PgPool, thread_id: i64) -> AppResult<i32> {
     let count: Option<i64> = sql_forge!(
         scalar Option<i64>,
         "SELECT COUNT(*) FROM messages WHERE thread_id = :thread_id",
@@ -471,7 +483,7 @@ pub async fn count_thread_messages(pool: &PgPool, thread_id: i64) -> anyhow::Res
 
 /// Get the maximum thread_sequence in a thread (for computing the next sequence).
 /// Returns 0 if the thread has no messages.
-pub async fn get_max_thread_sequence(pool: &PgPool, thread_id: i64) -> anyhow::Result<i32> {
+pub async fn get_max_thread_sequence(pool: &PgPool, thread_id: i64) -> AppResult<i32> {
     let max_seq: Option<i32> = sql_forge!(
         scalar Option<i32>,
         "SELECT MAX(thread_sequence) FROM messages WHERE thread_id = :thread_id",
@@ -484,7 +496,7 @@ pub async fn get_max_thread_sequence(pool: &PgPool, thread_id: i64) -> anyhow::R
 }
 
 /// Skip all pending/processing threads on startup.
-pub async fn skip_all_pending_threads(pool: &PgPool) -> anyhow::Result<u64> {
+pub async fn skip_all_pending_threads(pool: &PgPool) -> AppResult<u64> {
     let result = sql_forge!(
         r#"
         UPDATE threads
@@ -499,7 +511,7 @@ pub async fn skip_all_pending_threads(pool: &PgPool) -> anyhow::Result<u64> {
 }
 
 /// Get the cause message (first message, role='cause') for a thread.
-pub async fn get_cause_message(pool: &PgPool, thread_id: i64) -> anyhow::Result<Option<Message>> {
+pub async fn get_cause_message(pool: &PgPool, thread_id: i64) -> AppResult<Option<Message>> {
     let row: Option<MessageDb> = sql_forge!(
         MessageDb,
         r#"
@@ -530,7 +542,7 @@ pub async fn get_completed_seq0_threads_since(
     channel_id: i64,
     since_id: i64,
     limit: i64,
-) -> anyhow::Result<Vec<ThreadDb>> {
+) -> AppResult<Vec<ThreadDb>> {
     let rows: Vec<ThreadDb> = sql_forge!(
         ThreadDb,
         r#"

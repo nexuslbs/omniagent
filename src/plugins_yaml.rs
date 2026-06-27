@@ -7,14 +7,14 @@
 //! Reads happen on every access (no caching — files are tiny, parsing is ~50µs).
 //! Writes are atomic: write to `.tmp` → fsync → rename.
 
-use anyhow::{Context, Result};
+use crate::error::{Error, AppResult, ErrorContext};
+use crate::err_msg;
+use crate::plugin::{ConfigSchemaField, PluginManifest, PluginType};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-
-use crate::plugin::{ConfigSchemaField, PluginManifest, PluginType};
 
 // ---------------------------------------------------------------------------
 // YAML types
@@ -141,15 +141,15 @@ fn file_path(data_dir: &str, pt: &PluginYamlType) -> PathBuf {
 // ---------------------------------------------------------------------------
 
 /// Load the raw entries map from a YAML file, or return an empty map if file doesn't exist.
-pub fn load_raw(data_dir: &str, pt: &PluginYamlType) -> Result<BTreeMap<String, PluginYamlEntry>> {
+pub fn load_raw(data_dir: &str, pt: &PluginYamlType) -> AppResult<BTreeMap<String, PluginYamlEntry>> {
     let path = file_path(data_dir, pt);
     if !path.exists() {
         return Ok(BTreeMap::new());
     }
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).ctx(format!("Failed to read {}", path.display()))?;
     let file: PluginYamlFile = serde_yaml::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+        .ctx(format!("Failed to parse {}", path.display()))?;
 
     let section_name = pt.file_name();
     let entries = match section_name {
@@ -162,7 +162,11 @@ pub fn load_raw(data_dir: &str, pt: &PluginYamlType) -> Result<BTreeMap<String, 
 }
 
 /// Save entries to a YAML file (atomic write: .tmp → fsync → rename).
-fn save_file(data_dir: &str, pt: &PluginYamlType, entries: BTreeMap<String, PluginYamlEntry>) -> Result<()> {
+fn save_file(
+    data_dir: &str,
+    pt: &PluginYamlType,
+    entries: BTreeMap<String, PluginYamlEntry>,
+) -> AppResult<()> {
     let path = file_path(data_dir, pt);
     let tmp_path = path.with_extension("yml.tmp");
 
@@ -183,23 +187,25 @@ fn save_file(data_dir: &str, pt: &PluginYamlType, entries: BTreeMap<String, Plug
             tools: None,
             providers: Some(entries),
         },
-        _ => anyhow::bail!("Unknown plugin YAML type: {}", pt.file_name()),
+        _ => err_msg!("Unknown plugin YAML type: {}", pt.file_name()),
     };
 
-    let yaml = serde_yaml::to_string(&file)
-        .context("Failed to serialize plugin YAML")?;
+    let yaml = serde_yaml::to_string(&file).ctx("Failed to serialize plugin YAML")?;
 
     {
         let mut f = fs::File::create(&tmp_path)
-            .with_context(|| format!("Failed to create {}", tmp_path.display()))?;
+            .ctx(format!("Failed to create {}", tmp_path.display()))?;
         f.write_all(yaml.as_bytes())
-            .with_context(|| format!("Failed to write {}", tmp_path.display()))?;
+            .ctx(format!("Failed to write {}", tmp_path.display()))?;
         f.sync_all()
-            .with_context(|| format!("Failed to fsync {}", tmp_path.display()))?;
+            .ctx(format!("Failed to fsync {}", tmp_path.display()))?;
     }
 
-    fs::rename(&tmp_path, &path)
-        .with_context(|| format!("Failed to rename {} -> {}", tmp_path.display(), path.display()))?;
+    fs::rename(&tmp_path, &path).ctx(format!(
+        "Failed to rename {} -> {}",
+        tmp_path.display(),
+        path.display()
+    ))?;
 
     Ok(())
 }
@@ -209,7 +215,11 @@ fn save_file(data_dir: &str, pt: &PluginYamlType, entries: BTreeMap<String, Plug
 // ---------------------------------------------------------------------------
 
 /// Get a single entry from a YAML file by plugin name.
-pub fn get_entry(data_dir: &str, pt: &PluginYamlType, name: &str) -> Result<Option<PluginYamlEntry>> {
+pub fn get_entry(
+    data_dir: &str,
+    pt: &PluginYamlType,
+    name: &str,
+) -> AppResult<Option<PluginYamlEntry>> {
     let entries = load_raw(data_dir, pt)?;
     Ok(entries.get(name).cloned())
 }
@@ -221,7 +231,7 @@ pub fn set_entry(
     name: &str,
     enabled: bool,
     config: serde_json::Value,
-) -> Result<PluginYamlEntry> {
+) -> AppResult<PluginYamlEntry> {
     let mut entries = load_raw(data_dir, pt)?;
     // Preserve existing builtin flag if the entry already exists
     let existing_builtin = entries.get(name).and_then(|e| e.builtin);
@@ -236,11 +246,16 @@ pub fn set_entry(
 }
 
 /// Set only the enabled/disabled status of a plugin.
-pub fn set_enabled(data_dir: &str, pt: &PluginYamlType, name: &str, enabled: bool) -> Result<PluginYamlEntry> {
+pub fn set_enabled(
+    data_dir: &str,
+    pt: &PluginYamlType,
+    name: &str,
+    enabled: bool,
+) -> AppResult<PluginYamlEntry> {
     let mut entries = load_raw(data_dir, pt)?;
     let entry = entries
         .get_mut(name)
-        .ok_or_else(|| anyhow::anyhow!("Plugin '{}' not found in YAML", name))?;
+        .ok_or_else(|| Error::Message(format!("Plugin '{}' not found in YAML", name)))?;
     entry.enabled = enabled;
     let result = entry.clone();
     save_file(data_dir, pt, entries)?;
@@ -248,11 +263,16 @@ pub fn set_enabled(data_dir: &str, pt: &PluginYamlType, name: &str, enabled: boo
 }
 
 /// Update only the config of a plugin.
-pub fn update_config(data_dir: &str, pt: &PluginYamlType, name: &str, config: serde_json::Value) -> Result<PluginYamlEntry> {
+pub fn update_config(
+    data_dir: &str,
+    pt: &PluginYamlType,
+    name: &str,
+    config: serde_json::Value,
+) -> AppResult<PluginYamlEntry> {
     let mut entries = load_raw(data_dir, pt)?;
     let entry = entries
         .get_mut(name)
-        .ok_or_else(|| anyhow::anyhow!("Plugin '{}' not found in YAML", name))?;
+        .ok_or_else(|| Error::Message(format!("Plugin '{}' not found in YAML", name)))?;
     entry.config = config;
     let result = entry.clone();
     save_file(data_dir, pt, entries)?;
@@ -260,7 +280,7 @@ pub fn update_config(data_dir: &str, pt: &PluginYamlType, name: &str, config: se
 }
 
 /// Remove a plugin entry from a YAML file.
-pub fn remove_entry(data_dir: &str, pt: &PluginYamlType, name: &str) -> Result<bool> {
+pub fn remove_entry(data_dir: &str, pt: &PluginYamlType, name: &str) -> AppResult<bool> {
     let mut entries = load_raw(data_dir, pt)?;
     let existed = entries.remove(name).is_some();
     if existed {
@@ -477,7 +497,11 @@ fn build_plugin_detail(
         plugin_type: plugin_type_str.to_string(),
         version: manifest.version.clone(),
         source: Some(source.to_string()),
-        status: if enabled { "enabled".to_string() } else { "disabled".to_string() },
+        status: if enabled {
+            "enabled".to_string()
+        } else {
+            "disabled".to_string()
+        },
         manifest: manifest_value,
         config,
         config_schema,
@@ -492,7 +516,7 @@ fn build_plugin_detail(
 // ---------------------------------------------------------------------------
 
 /// List all plugins, combining disk discovery with YAML overrides.
-pub fn list_plugins(data_dir: &str) -> Result<Vec<PluginDetail>> {
+pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
     let workspace_dir =
         std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
     let discovered = crate::plugin::installer::discover_plugins(data_dir, &workspace_dir);
@@ -513,7 +537,12 @@ pub fn list_plugins(data_dir: &str) -> Result<Vec<PluginDetail>> {
         };
 
         let key = extract_plugin_key(manifest, source, base_path);
-        results.push(build_plugin_detail(manifest, source, yaml_entry, Some(&key)));
+        results.push(build_plugin_detail(
+            manifest,
+            source,
+            yaml_entry,
+            Some(&key),
+        ));
     }
 
     // Inject built-in action tools (compiled into omniagent, no disk plugin.json)
@@ -535,7 +564,7 @@ pub fn list_plugins(data_dir: &str) -> Result<Vec<PluginDetail>> {
 }
 
 /// Get a single plugin by name, combining disk discovery with YAML state.
-pub fn get_plugin(data_dir: &str, name: &str) -> Result<Option<PluginDetail>> {
+pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>> {
     let workspace_dir =
         std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
     let discovered = crate::plugin::installer::discover_plugins(data_dir, &workspace_dir);
@@ -554,7 +583,12 @@ pub fn get_plugin(data_dir: &str, name: &str) -> Result<Option<PluginDetail>> {
                 PluginYamlType::Provider => provider_entries.get(&manifest.name),
             };
             let key = extract_plugin_key(manifest, source, base_path);
-            return Ok(Some(build_plugin_detail(manifest, source, yaml_entry, Some(&key))));
+            return Ok(Some(build_plugin_detail(
+                manifest,
+                source,
+                yaml_entry,
+                Some(&key),
+            )));
         }
     }
 
@@ -577,7 +611,7 @@ pub fn get_plugin(data_dir: &str, name: &str) -> Result<Option<PluginDetail>> {
 }
 
 /// Get enabled provider names for the settings API.
-pub fn get_enabled_providers(data_dir: &str) -> Result<Vec<(String, String)>> {
+pub fn get_enabled_providers(data_dir: &str) -> AppResult<Vec<(String, String)>> {
     let entries = load_raw(data_dir, &PluginYamlType::Provider)?;
 
     let workspace_dir =
@@ -607,7 +641,10 @@ pub fn get_enabled_providers(data_dir: &str) -> Result<Vec<(String, String)>> {
         if !entries.contains_key(&manifest.name) {
             providers.push((
                 manifest.name.clone(),
-                manifest.description.clone().unwrap_or_else(|| manifest.name.clone()),
+                manifest
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| manifest.name.clone()),
             ));
         }
     }
@@ -617,7 +654,7 @@ pub fn get_enabled_providers(data_dir: &str) -> Result<Vec<(String, String)>> {
 }
 
 /// Check if a provider exists and is enabled.
-pub fn provider_exists_and_enabled(data_dir: &str, name: &str) -> Result<bool> {
+pub fn provider_exists_and_enabled(data_dir: &str, name: &str) -> AppResult<bool> {
     let entries = load_raw(data_dir, &PluginYamlType::Provider)?;
     if let Some(entry) = entries.get(name) {
         return Ok(entry.enabled);
@@ -626,11 +663,13 @@ pub fn provider_exists_and_enabled(data_dir: &str, name: &str) -> Result<bool> {
     let workspace_dir =
         std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
     let discovered = crate::plugin::installer::discover_plugins(data_dir, &workspace_dir);
-    Ok(discovered.iter().any(|(m, _, _)| m.name == name && m.plugin_type == PluginType::Provider))
+    Ok(discovered
+        .iter()
+        .any(|(m, _, _)| m.name == name && m.plugin_type == PluginType::Provider))
 }
 
 /// Get a provider's plugin type from disk discovery.
-pub fn get_disk_plugin_type(data_dir: &str, name: &str) -> Result<Option<String>> {
+pub fn get_disk_plugin_type(data_dir: &str, name: &str) -> AppResult<Option<String>> {
     let workspace_dir =
         std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
     let discovered = crate::plugin::installer::discover_plugins(data_dir, &workspace_dir);
@@ -652,11 +691,14 @@ pub fn get_disk_plugin_type(data_dir: &str, name: &str) -> Result<Option<String>
 }
 
 /// Get a plugin's manifest (PluginManifest) from disk discovery.
-pub fn get_disk_manifest(data_dir: &str, name: &str) -> Result<Option<PluginManifest>> {
+pub fn get_disk_manifest(data_dir: &str, name: &str) -> AppResult<Option<PluginManifest>> {
     let workspace_dir =
         std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
     let discovered = crate::plugin::installer::discover_plugins(data_dir, &workspace_dir);
-    Ok(discovered.into_iter().find(|(m, _, _)| m.name == name).map(|(m, _, _)| m))
+    Ok(discovered
+        .into_iter()
+        .find(|(m, _, _)| m.name == name)
+        .map(|(m, _, _)| m))
 }
 
 // ---------------------------------------------------------------------------
@@ -665,11 +707,11 @@ pub fn get_disk_manifest(data_dir: &str, name: &str) -> Result<Option<PluginMani
 
 /// Fetch model IDs from an OpenAI-compatible `/v1/models` endpoint and return them.
 /// If an `api_key` is provided, it's sent as a Bearer token in the Authorization header.
-pub async fn fetch_enum_values(url: &str, api_key: Option<&str>) -> Result<Vec<String>> {
+pub async fn fetch_enum_values(url: &str, api_key: Option<&str>) -> AppResult<Vec<String>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .context("Failed to build HTTP client")?;
+        .ctx("Failed to build HTTP client")?;
     let mut req = client.get(url);
     if let Some(key) = api_key {
         req = req.header("Authorization", format!("Bearer {}", key));
@@ -677,11 +719,11 @@ pub async fn fetch_enum_values(url: &str, api_key: Option<&str>) -> Result<Vec<S
     let resp = req
         .send()
         .await
-        .with_context(|| format!("Failed to fetch {}", url))?;
+        .ctx(format!("Failed to fetch {}", url))?;
     let json: serde_json::Value = resp
         .json()
         .await
-        .with_context(|| format!("Failed to parse response from {}", url))?;
+        .ctx(format!("Failed to parse response from {}", url))?;
 
     let mut values = Vec::new();
     if let Some(data) = json["data"].as_array() {
@@ -693,7 +735,7 @@ pub async fn fetch_enum_values(url: &str, api_key: Option<&str>) -> Result<Vec<S
     }
 
     if values.is_empty() {
-        anyhow::bail!(
+        err_msg!(
             "No model IDs found in response from {} (expected {{data: [{{id: ...}}]}})",
             url
         );
@@ -707,9 +749,9 @@ pub async fn fetch_enum_values(url: &str, api_key: Option<&str>) -> Result<Vec<S
 /// Fetches from the plugin's `refresh_url` (if any), updates the in-memory cache,
 /// and returns the enriched plugin detail with fresh `allowed_values`.
 /// Returns `None` if the plugin has no `refresh_url` fields.
-pub async fn refresh_plugin_models(data_dir: &str, name: &str) -> Result<Option<PluginDetail>> {
+pub async fn refresh_plugin_models(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>> {
     let detail = get_plugin(data_dir, name)?
-        .ok_or_else(|| anyhow::anyhow!("Plugin '{}' not found", name))?;
+        .ok_or_else(|| Error::Message(format!("Plugin '{}' not found", name)))?;
 
     // Re-parse config_schema from the manifest to get mutable fields
     let manifest_value = &detail.manifest;
@@ -929,7 +971,9 @@ providers:
         set_entry(&path, &pt, "p2", false, serde_json::json!({})).unwrap();
 
         // Verify no .tmp file remains
-        let tmp = PathBuf::from(&path).join(pt.yaml_file()).with_extension("yml.tmp");
+        let tmp = PathBuf::from(&path)
+            .join(pt.yaml_file())
+            .with_extension("yml.tmp");
         assert!(!tmp.exists());
 
         // Verify file is valid YAML

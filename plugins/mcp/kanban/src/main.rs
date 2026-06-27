@@ -8,11 +8,11 @@ use anyhow::{Context, Result};
 use mcp_server_util::*;
 use omniagent::db;
 use serde_json::Value;
-use unicode_normalization::UnicodeNormalization;
 use sql_forge::sql_forge;
 use sqlx::PgPool;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use unicode_normalization::UnicodeNormalization;
 
 use chrono::{DateTime, Utc};
 use sqlx::FromRow;
@@ -51,9 +51,16 @@ async fn insert_history(
     final_board: Option<&str>,
     previous_values: Option<serde_json::Value>,
 ) -> Result<()> {
-    db::kanban::insert_kanban_history(pool, task_id, action, initial_board, final_board, previous_values)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to insert kanban history: {e}"))
+    db::kanban::insert_kanban_history(
+        pool,
+        task_id,
+        action,
+        initial_board,
+        final_board,
+        previous_values,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to insert kanban history: {e}"))
 }
 
 /// Build a JSON with the current task fields for previous_values.
@@ -90,7 +97,9 @@ async fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let template = args["template"].as_str().unwrap_or("");
 
     // Validate status
-    let valid_statuses = ["backlog", "todo", "ready", "running", "review", "done", "blocked"];
+    let valid_statuses = [
+        "backlog", "todo", "ready", "running", "review", "done", "blocked",
+    ];
     if !valid_statuses.contains(&status) {
         return Err(anyhow::anyhow!(
             "Invalid status '{}'. Must be one of: backlog, todo, ready, running, review, done, blocked",
@@ -148,7 +157,13 @@ async fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     // ── Kanban history: record creation ──
     insert_history(pool, &id, "created", None, Some(status), None).await?;
 
-    Ok((format!("Kanban task '{}' created with id '{}' and status '{}'", title, id, status), false))
+    Ok((
+        format!(
+            "Kanban task '{}' created with id '{}' and status '{}'",
+            title, id, status
+        ),
+        false,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +245,8 @@ async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let id_clone = id.to_string();
 
     // Fetch the task before update to record previous_values
-    let before = db::kanban::get_kanban_task(pool, &id_clone).await
+    let before = db::kanban::get_kanban_task(pool, &id_clone)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to fetch task before update: {e}"))?;
 
     let before_row = match before {
@@ -272,7 +288,9 @@ async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
         .map_err(|e| anyhow::anyhow!("Failed to update body: {e}"))?;
     }
     if let Some(status) = args["status"].as_str() {
-        let valid_statuses = ["backlog", "todo", "ready", "running", "review", "done", "blocked"];
+        let valid_statuses = [
+            "backlog", "todo", "ready", "running", "review", "done", "blocked",
+        ];
         if !valid_statuses.contains(&status) {
             anyhow::bail!("Invalid status '{status}'");
         }
@@ -454,7 +472,10 @@ async fn handle_add_dependency(pool: &PgPool, args: &Value) -> Result<(String, b
     .map_err(|e| anyhow::anyhow!("Failed to add dependency: {e}"))?;
 
     Ok((
-        format!("Dependency added: '{}' now depends on '{}'", task_id, depends_on_id),
+        format!(
+            "Dependency added: '{}' now depends on '{}'",
+            task_id, depends_on_id
+        ),
         false,
     ))
 }
@@ -483,11 +504,18 @@ async fn handle_remove_dependency(pool: &PgPool, args: &Value) -> Result<(String
     .map_err(|e| anyhow::anyhow!("Failed to remove dependency: {e}"))?;
 
     if result.rows_affected() == 0 {
-        anyhow::bail!("Dependency not found between '{}' and '{}'", task_id, depends_on_id);
+        anyhow::bail!(
+            "Dependency not found between '{}' and '{}'",
+            task_id,
+            depends_on_id
+        );
     }
 
     Ok((
-        format!("Dependency removed between '{}' and '{}'", task_id, depends_on_id),
+        format!(
+            "Dependency removed between '{}' and '{}'",
+            task_id, depends_on_id
+        ),
         false,
     ))
 }

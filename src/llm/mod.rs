@@ -13,12 +13,15 @@
 //! - `anthropic_messages` — Anthropic-compatible `/v1/messages` (MiniMax, Qwen 3.7)
 //!   API mode is auto-detected from the model name.
 
-use anyhow::{Context, Result};
+use crate::error::{Error, ErrorContext, AppResult};
+use crate::err_msg;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tracing::warn;
 
 // ---------------------------------------------------------------------------
@@ -67,9 +70,7 @@ fn extract_default_model(manifest: &serde_json::Value) -> String {
         .and_then(|schema| schema.as_array())
         .and_then(|arr| {
             arr.iter()
-                .find(|field| {
-                    field.get("key").and_then(|k| k.as_str()) == Some("default_model")
-                })
+                .find(|field| field.get("key").and_then(|k| k.as_str()) == Some("default_model"))
         })
         .and_then(|field| field.get("default").and_then(|d| d.as_str()))
         .unwrap_or("")
@@ -109,7 +110,11 @@ fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
             if plugin_type != "provider" {
                 continue;
             }
-            let name = manifest.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = manifest
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if name.is_empty() {
                 continue;
             }
@@ -124,12 +129,15 @@ fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
                 .unwrap_or("chat_completions")
                 .to_string();
             let default_model = extract_default_model(&manifest);
-            map.insert(name.clone(), ProviderMetadata {
-                name,
-                default_base_url,
-                api_mode,
-                default_model,
-            });
+            map.insert(
+                name.clone(),
+                ProviderMetadata {
+                    name,
+                    default_base_url,
+                    api_mode,
+                    default_model,
+                },
+            );
         }
     }
     map
@@ -139,7 +147,8 @@ fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
 /// Scans development sources first (plugins/providers/), then installed
 /// plugins (data/plugins/installed/). Installed plugins override bundled ones.
 pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::new(|| {
-    let workspace_dir = std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
+    let workspace_dir =
+        std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
     let data_dir = std::env::var("OMNI_DATA_DIR").unwrap_or_else(|_| "/opt/data".to_string());
 
     let bundled = format!("{}/plugins/providers", workspace_dir);
@@ -150,18 +159,24 @@ pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::ne
 
     // If no providers found, add minimal builtin defaults as last resort
     if map.is_empty() {
-        map.insert("opencode-go".to_string(), ProviderMetadata {
-            name: "opencode-go".to_string(),
-            default_base_url: "https://opencode.ai/zen/go/v1".to_string(),
-            api_mode: "dynamic".to_string(),
-            default_model: "deepseek-v4-flash".to_string(),
-        });
-        map.insert("deepseek".to_string(), ProviderMetadata {
-            name: "deepseek".to_string(),
-            default_base_url: "https://api.deepseek.com/v1".to_string(),
-            api_mode: "chat_completions".to_string(),
-            default_model: "deepseek-v4-flash".to_string(),
-        });
+        map.insert(
+            "opencode-go".to_string(),
+            ProviderMetadata {
+                name: "opencode-go".to_string(),
+                default_base_url: "https://opencode.ai/zen/go/v1".to_string(),
+                api_mode: "dynamic".to_string(),
+                default_model: "deepseek-v4-flash".to_string(),
+            },
+        );
+        map.insert(
+            "deepseek".to_string(),
+            ProviderMetadata {
+                name: "deepseek".to_string(),
+                default_base_url: "https://api.deepseek.com/v1".to_string(),
+                api_mode: "chat_completions".to_string(),
+                default_model: "deepseek-v4-flash".to_string(),
+            },
+        );
     }
 
     map
@@ -178,15 +193,13 @@ pub fn resolve_default_base_url(provider_name: &str) -> String {
 /// Resolve the default model for a provider from the plugin metadata.
 /// Returns None if no default is found.
 pub fn resolve_default_model(provider_name: &str) -> Option<String> {
-    PROVIDER_METADATA
-        .get(provider_name)
-        .and_then(|m| {
-            if m.default_model.is_empty() {
-                None
-            } else {
-                Some(m.default_model.clone())
-            }
-        })
+    PROVIDER_METADATA.get(provider_name).and_then(|m| {
+        if m.default_model.is_empty() {
+            None
+        } else {
+            Some(m.default_model.clone())
+        }
+    })
 }
 
 /// Resolve the API mode for a provider from the plugin metadata.
@@ -248,7 +261,11 @@ pub fn resolve_llm_api_key(provider_key: Option<&str>) -> String {
     provider_key
         .map(|k| k.to_string())
         .filter(|k| !k.is_empty())
-        .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok().filter(|k| !k.is_empty()))
+        .or_else(|| {
+            std::env::var("DEEPSEEK_API_KEY")
+                .ok()
+                .filter(|k| !k.is_empty())
+        })
         .unwrap_or_else(|| std::env::var("LLM_API_KEY").expect("LLM_API_KEY must be set"))
 }
 
@@ -273,8 +290,8 @@ impl LLMConfig {
     ///
     /// Panics if `LLM_PROVIDER` contains an unrecognised value.
     pub fn from_env() -> Self {
-        let provider_name = std::env::var("LLM_PROVIDER")
-            .unwrap_or_else(|_| "opencode-go".to_string());
+        let provider_name =
+            std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "opencode-go".to_string());
 
         let provider = ProviderId::new(&provider_name);
         let base_url = resolve_default_base_url(&provider_name);
@@ -310,6 +327,86 @@ impl LLMConfig {
         }
     }
 }
+// ---------------------------------------------------------------------------
+// Per-provider throttling — limits concurrent API requests per provider
+// ---------------------------------------------------------------------------
+
+/// Per-provider concurrency throttler using semaphores.
+///
+/// Limits how many concurrent LLM API requests can be in-flight for a
+/// given provider name (e.g. "deepseek", "anthropic", "openai").
+///
+/// Pre-populated from [`PROVIDER_METADATA`] at construction time so that
+/// every known provider gets its own semaphore. Unknown providers fall
+/// back to no throttling (permit is acquired but immediately released).
+#[derive(Clone)]
+pub struct ProviderThrottle {
+    inner: Arc<HashMap<String, Arc<Semaphore>>>,
+    max_permits: usize,
+}
+
+impl ProviderThrottle {
+    /// Default maximum concurrent requests per provider.
+    pub const DEFAULT_MAX_CONCURRENT: usize = 5;
+
+    /// Create a new throttle with the default limit (5) per provider.
+    pub fn new() -> Self {
+        Self::with_max_permits(Self::DEFAULT_MAX_CONCURRENT)
+    }
+
+    /// Create a new throttle with a custom max concurrent limit per provider.
+    pub fn with_max_permits(max: usize) -> Self {
+        let mut map = HashMap::new();
+
+        // Pre-populate from known provider metadata
+        for name in PROVIDER_METADATA.keys() {
+            map.entry(name.clone())
+                .or_insert_with(|| Arc::new(Semaphore::new(max)));
+        }
+
+        // Ensure well-known providers are present even if metadata is missing
+        for name in &["deepseek", "anthropic", "openai", "opencode-go"] {
+            let n = name.to_string();
+            if !map.contains_key(&n) {
+                map.insert(n, Arc::new(Semaphore::new(max)));
+            }
+        }
+
+        Self {
+            inner: Arc::new(map),
+            max_permits: max,
+        }
+    }
+
+    /// Acquire a permit for the given provider, waiting if necessary.
+    ///
+    /// Returns `None` if the provider is unknown (no throttling applied).
+    /// The returned permit is held for the lifetime of the returned guard;
+    /// when dropped, the semaphore slot is released.
+    pub async fn acquire(&self, provider: &str) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        let sem = self.inner.get(provider)?;
+        Some(sem.acquire().await.ok()?)
+    }
+
+    /// Returns the configured max permits per provider.
+    #[allow(dead_code)]
+    pub fn max_permits(&self) -> usize {
+        self.max_permits
+    }
+
+    /// Returns the number of available permits for a given provider.
+    #[allow(dead_code)]
+    pub fn available_permits(&self, provider: &str) -> Option<u32> {
+        self.inner.get(provider).map(|s| s.available_permits() as u32)
+    }
+}
+
+impl Default for ProviderThrottle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // Chat / Completion types
 // ---------------------------------------------------------------------------
 
@@ -521,6 +618,8 @@ struct AnthropicUsage {
 pub struct LLMClient {
     pub config: LLMConfig,
     client: reqwest::Client,
+    /// Per-provider concurrency throttle (limits concurrent API requests).
+    throttle: ProviderThrottle,
 }
 
 impl LLMClient {
@@ -530,15 +629,40 @@ impl LLMClient {
             .timeout(std::time::Duration::from_secs(300)) // 5 minutes
             .build()
             .expect("Failed to build reqwest Client");
-        Self { config, client }
+        Self {
+            config,
+            client,
+            throttle: ProviderThrottle::new(),
+        }
+    }
+
+    /// Create a new client with a custom per-provider throttle.
+    pub fn new_with_throttle(config: LLMConfig, throttle: ProviderThrottle) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300)) // 5 minutes
+            .build()
+            .expect("Failed to build reqwest Client");
+        Self {
+            config,
+            client,
+            throttle,
+        }
     }
 
     /// Send a completion request and return the response.
     ///
     /// Dispatches to the appropriate provider-specific implementation based on
     /// `self.config.provider` and `self.config.api_mode`.
-    pub async fn completion(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+    ///
+    /// Before making the API call, a per-provider throttle permit is acquired
+    /// to limit concurrent requests to the same provider.
+    pub async fn completion(&self, request: CompletionRequest) -> AppResult<CompletionResponse> {
         let start = std::time::Instant::now();
+
+        // Acquire a per-provider throttle permit before making the request.
+        // The permit is held for the entire duration of the API call.
+        let _permit = self.throttle.acquire(&self.config.provider.0).await;
+
         let mut resp = match self.config.api_mode {
             ApiMode::ChatCompletions => self.completion_openai(request).await,
             ApiMode::AnthropicMessages => self.completion_anthropic(request).await,
@@ -551,7 +675,7 @@ impl LLMClient {
     // OpenAI-compatible (covers opencode-go + vanilla OpenAI)
     // -----------------------------------------------------------------------
 
-    async fn completion_openai(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+    async fn completion_openai(&self, request: CompletionRequest) -> AppResult<CompletionResponse> {
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
@@ -586,34 +710,34 @@ impl LLMClient {
             .json(&body)
             .send()
             .await
-            .context("Failed to send OpenAI-compatible completion request")?;
+            .ctx("Failed to send OpenAI-compatible completion request")?;
 
         let status = resp.status();
-        let resp_text = resp.text().await.context("Failed to read response body")?;
+        let resp_text = resp.text().await.ctx("Failed to read response body")?;
 
         if !status.is_success() {
-            anyhow::bail!("OpenAI-compatible API returned {status}: {resp_text}",);
+            err_msg!("OpenAI-compatible API returned {status}: {resp_text}");
         }
 
         let parsed: OpenAiResponse = serde_json::from_str(&resp_text)
-            .with_context(|| format!("Failed to parse OpenAI response: {resp_text}"))?;
+            .ctx(format!("Failed to parse OpenAI response: {resp_text}"))?;
 
         Self::extract_from_openai_response(parsed)
     }
 
-    fn extract_from_openai_response(response: OpenAiResponse) -> Result<CompletionResponse> {
+    fn extract_from_openai_response(response: OpenAiResponse) -> AppResult<CompletionResponse> {
         match response.object.as_deref() {
             Some("chat.completion.chunk") => Self::extract_openai_streaming(response),
             _ => Self::extract_openai_nonstreaming(response), // includes `chat.completion` and unknown
         }
     }
 
-    fn extract_openai_nonstreaming(response: OpenAiResponse) -> Result<CompletionResponse> {
+    fn extract_openai_nonstreaming(response: OpenAiResponse) -> AppResult<CompletionResponse> {
         let choice = response
             .choices
             .into_iter()
             .next()
-            .context("OpenAI response has no choices")?;
+            .ok_or_else(|| Error::Message("OpenAI response has no choices".to_string()))?;
 
         let finish_reason = choice.finish_reason.clone().unwrap_or_default();
 
@@ -624,10 +748,7 @@ impl LLMClient {
             .or_else(|| choice.delta.as_ref().and_then(|d| d.content.clone()))
             .unwrap_or_default();
 
-        let refusal = choice
-            .message
-            .as_ref()
-            .and_then(|m| m.refusal.clone());
+        let refusal = choice.message.as_ref().and_then(|m| m.refusal.clone());
 
         let reasoning = choice
             .message
@@ -651,8 +772,16 @@ impl LLMClient {
         // what the provider returned.
         if content.is_empty() && tool_calls.is_empty() && reasoning.is_none() {
             let has_refusal = refusal.as_ref().map(|r| !r.is_empty()).unwrap_or(false);
-            let prompt_tokens = response.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0);
-            let completion_tokens = response.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0);
+            let prompt_tokens = response
+                .usage
+                .as_ref()
+                .map(|u| u.prompt_tokens)
+                .unwrap_or(0);
+            let completion_tokens = response
+                .usage
+                .as_ref()
+                .map(|u| u.completion_tokens)
+                .unwrap_or(0);
             if completion_tokens > 0 || has_refusal {
                 warn!(
                     "[llm] Response has no content/reasoning/tools but has completion_tokens={}, refusal={:?}, finish_reason={}, prompt_tokens={}",
@@ -686,7 +815,7 @@ impl LLMClient {
         })
     }
 
-    fn extract_openai_streaming(response: OpenAiResponse) -> Result<CompletionResponse> {
+    fn extract_openai_streaming(response: OpenAiResponse) -> AppResult<CompletionResponse> {
         // For streaming chunks, concatenate all deltas.
         let mut content = String::new();
         let mut reasoning: Option<String> = None;
@@ -715,7 +844,7 @@ impl LLMClient {
     // Anthropic Messages API
     // -----------------------------------------------------------------------
 
-    async fn completion_anthropic(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+    async fn completion_anthropic(&self, request: CompletionRequest) -> AppResult<CompletionResponse> {
         let url = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
 
         // Convert our ChatMessages to Anthropic's format.
@@ -775,20 +904,20 @@ impl LLMClient {
             .json(&body)
             .send()
             .await
-            .context("Failed to send Anthropic completion request")?;
+            .ctx("Failed to send Anthropic completion request")?;
 
         let status = resp.status();
         let resp_text = resp
             .text()
             .await
-            .context("Failed to read Anthropic response body")?;
+            .ctx("Failed to read Anthropic response body")?;
 
         if !status.is_success() {
-            anyhow::bail!("Anthropic API returned {status}: {resp_text}");
+            err_msg!("Anthropic API returned {status}: {resp_text}");
         }
 
         let parsed: AnthropicResponse = serde_json::from_str(&resp_text)
-            .with_context(|| format!("Failed to parse Anthropic response: {resp_text}"))?;
+            .ctx(format!("Failed to parse Anthropic response: {resp_text}"))?;
 
         // Extract text and thinking from content blocks
         let mut content = String::new();

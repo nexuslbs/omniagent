@@ -146,7 +146,7 @@ impl Default for ContextBuilder {
     fn default() -> Self {
         Self {
             blocks: Vec::new(),
-            budget: 8_000, // default context budget ~8K chars
+            budget: 8_000,         // default context budget ~8K chars
             output_reserve: 2_000, // reserve ~2K chars for output
         }
     }
@@ -274,7 +274,6 @@ impl ContextBuilder {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Full context assembly for a thread
 // ---------------------------------------------------------------------------
@@ -361,7 +360,10 @@ pub async fn build_thread_context(
                         builder.add_block(ContextBlock::new(
                             "recent_thread_messages",
                             BlockPriority::High,
-                            &format!("Recent conversation history (current thread):\n{}", thread_content),
+                            &format!(
+                                "Recent conversation history (current thread):\n{}",
+                                thread_content
+                            ),
                             2_500,
                         ));
                     }
@@ -371,7 +373,10 @@ pub async fn build_thread_context(
                 tracing::warn!("Failed to retrieve thread context: {:?}", e);
             }
         }
-        timings.insert("recent_thread_messages".to_string(), _start_recent.elapsed().as_millis() as u64);
+        timings.insert(
+            "recent_thread_messages".to_string(),
+            _start_recent.elapsed().as_millis() as u64,
+        );
     }
 
     let _start_summary = Instant::now();
@@ -391,11 +396,23 @@ pub async fn build_thread_context(
                 ));
 
                 // Also include threads completed after the last summary, if any
-                match queries::get_completed_seq0_threads_since(pool, ids.channel_id, summary.next_thread_id, 5).await {
+                match queries::get_completed_seq0_threads_since(
+                    pool,
+                    ids.channel_id,
+                    summary.next_thread_id,
+                    5,
+                )
+                .await
+                {
                     Ok(roots) if !roots.is_empty() => {
                         let roots_content: String = roots
                             .iter()
-                            .map(|t| format!("[Thread #{} by {}]: cause message available", t.id, t.cause))
+                            .map(|t| {
+                                format!(
+                                    "[Thread #{} by {}]: cause message available",
+                                    t.id, t.cause
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .join("\n---\n");
                         builder.add_block(ContextBlock::new(
@@ -412,10 +429,16 @@ pub async fn build_thread_context(
                 // No summary yet for this channel — OK, just skip
             }
         }
-        timings.insert("last_summary".to_string(), _start_summary.elapsed().as_millis() as u64);
+        timings.insert(
+            "last_summary".to_string(),
+            _start_summary.elapsed().as_millis() as u64,
+        );
     }
     let _start_skills = Instant::now();
-    let skills_dir = format!("{}/profiles/{}/skills", config.data_dir, config.profile_name);
+    let skills_dir = format!(
+        "{}/profiles/{}/skills",
+        config.data_dir, config.profile_name
+    );
     match tokio::task::spawn_blocking(move || -> Vec<String> {
         let mut skills = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&skills_dir) {
@@ -423,7 +446,10 @@ pub async fn build_thread_context(
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("md") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
-                        let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+                        let name = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("unknown");
                         let first_line = content.lines().next().unwrap_or("").trim();
                         let desc = if first_line.starts_with('#') {
                             first_line.trim_start_matches('#').trim()
@@ -452,7 +478,10 @@ pub async fn build_thread_context(
 
     // ── RRF (Reciprocal Rank Fusion) helper ──
     // RRF combines multiple ranked result sets into a single fused ranking.
-    timings.insert("profile_skills".to_string(), _start_skills.elapsed().as_millis() as u64);
+    timings.insert(
+        "profile_skills".to_string(),
+        _start_skills.elapsed().as_millis() as u64,
+    );
     // score(r) = Σ 1/(k + rank_i(r)) for each result set i
     const RRF_K: f64 = 60.0;
     const RRF_TEXT_WEIGHT: f64 = 1.0;
@@ -460,7 +489,8 @@ pub async fn build_thread_context(
 
     // Add retrieved past messages + wiki if retrieval is indicated
     if aggressiveness > 0 {
-        let search_terms: Vec<&str> = config.cause_content
+        let search_terms: Vec<&str> = config
+            .cause_content
             .split_whitespace()
             .filter(|w| w.len() > 4)
             .take(5)
@@ -469,16 +499,18 @@ pub async fn build_thread_context(
         if !search_terms.is_empty() {
             let search_query = search_terms.join(" ");
 
-    let _start_search = Instant::now();
+            let _start_search = Instant::now();
             // ── Hybrid message search (text + semantic fused via RRF) ──
             // Collect results from both sources, then fuse
-            let text_msgs = queries::search_messages_text(pool, &search_query, ids.channel_id, 10).await
+            let text_msgs = queries::search_messages_text(pool, &search_query, ids.channel_id, 10)
+                .await
                 .unwrap_or_default();
             let semantic_msgs = if aggressiveness >= 2 {
                 let hash_vec = HashVectorizer;
                 let query_embedding = hash_vec.generate_embedding(&search_query).await;
                 let emb_str = vector_to_string(&query_embedding);
-                queries::search_messages_semantic(pool, &emb_str, ids.channel_id, 10).await
+                queries::search_messages_semantic(pool, &emb_str, ids.channel_id, 10)
+                    .await
                     .unwrap_or_default()
             } else {
                 vec![]
@@ -501,11 +533,10 @@ pub async fn build_thread_context(
                 }
                 // Sort by score descending, then deduplicate by ID
                 let mut scored_ids: Vec<(i64, f64)> = scores.into_iter().collect();
-                scored_ids.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                let top_ids: std::collections::HashSet<i64> = scored_ids.into_iter()
-                    .take(5)
-                    .map(|(id, _)| id)
-                    .collect();
+                scored_ids
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let top_ids: std::collections::HashSet<i64> =
+                    scored_ids.into_iter().take(5).map(|(id, _)| id).collect();
                 // Collect messages in RRF order, preferring text result when available
                 let mut seen = std::collections::HashSet::new();
                 let mut fused: Vec<crate::db::types::Message> = Vec::new();
@@ -521,29 +552,33 @@ pub async fn build_thread_context(
                 let retrieved: String = fused_msgs
                     .iter()
                     .map(|m| {
-                        let content = if m.msg_type == "tool" || m.msg_type == "tool-result" || m.msg_type == "multi-tool" {
+                        let content = if m.msg_type == "tool"
+                            || m.msg_type == "tool-result"
+                            || m.msg_type == "multi-tool"
+                        {
                             let tool_name = m.msg_subtype.as_deref().unwrap_or("unknown");
                             let preview = m.content.chars().take(100).collect::<String>();
                             format!("[Tool: {}] {}", tool_name, preview)
                         } else {
                             m.content.chars().take(500).collect::<String>()
                         };
-                        format!(
-                            "[{} msg_id={}]: {}",
-                            m.role,
-                            m.id,
-                            content,
-                        )
+                        format!("[{} msg_id={}]: {}", m.role, m.id, content,)
                     })
                     .collect::<Vec<_>>()
                     .join("\n---\n");
                 builder.add_block(ContextBlock::new(
                     "retrieved_past_messages",
                     BlockPriority::Low,
-                    &format!("Retrieved from past conversations (hybrid search):\n{}", retrieved),
-                    4_000,  // increased budget for hybrid results
+                    &format!(
+                        "Retrieved from past conversations (hybrid search):\n{}",
+                        retrieved
+                    ),
+                    4_000, // increased budget for hybrid results
                 ));
-    timings.insert("hybrid_message_search".to_string(), _start_search.elapsed().as_millis() as u64);
+                timings.insert(
+                    "hybrid_message_search".to_string(),
+                    _start_search.elapsed().as_millis() as u64,
+                );
             }
 
             // ── Hybrid wiki search (text + Qdrant semantic fused via RRF) ──
@@ -556,7 +591,8 @@ pub async fn build_thread_context(
                 if let Some(qdrant) = config.qdrant_url {
                     let hash_vec = HashVectorizer;
                     let wiki_embedding = hash_vec.generate_embedding(&search_query).await;
-                    queries::search_wiki_qdrant(qdrant, &wiki_embedding, 5).await
+                    queries::search_wiki_qdrant(qdrant, &wiki_embedding, 5)
+                        .await
                         .unwrap_or_default()
                 } else {
                     vec![]
@@ -569,7 +605,8 @@ pub async fn build_thread_context(
             let fused_wiki: Vec<(String, String, String)> = if qdrant_results.is_empty() {
                 wiki_text_results
             } else {
-                let mut wiki_scores: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+                let mut wiki_scores: std::collections::HashMap<String, f64> =
+                    std::collections::HashMap::new();
                 // Track which items we include (top N by fused score)
                 for (rank, (path, _title, _snippet)) in wiki_text_results.iter().enumerate() {
                     let score = RRF_TEXT_WEIGHT / (RRF_K + rank as f64 + 1.0);
@@ -581,8 +618,10 @@ pub async fn build_thread_context(
                 }
                 // Sort by score descending
                 let mut scored_wiki: Vec<(String, f64)> = wiki_scores.into_iter().collect();
-                scored_wiki.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                let top_paths: std::collections::HashSet<String> = scored_wiki.into_iter()
+                scored_wiki
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let top_paths: std::collections::HashSet<String> = scored_wiki
+                    .into_iter()
                     .take(4)
                     .map(|(path, _)| path)
                     .collect();
@@ -590,9 +629,11 @@ pub async fn build_thread_context(
                 let mut seen = std::collections::HashSet::new();
                 let mut fused: Vec<(String, String, String)> = Vec::new();
                 // Build an iterator over both result sets as (path, title, snippet)
-                let text_iter = wiki_text_results.iter()
+                let text_iter = wiki_text_results
+                    .iter()
                     .map(|(p, t, s)| (p.as_str(), t.as_str(), s.as_str()));
-                let qdrant_iter = qdrant_results.iter()
+                let qdrant_iter = qdrant_results
+                    .iter()
                     .map(|(p, t, _)| (p.as_str(), t.as_str(), "semantic match"));
                 for (path, title, snippet) in text_iter.chain(qdrant_iter) {
                     if top_paths.contains(path) && seen.insert(path.to_string()) {
@@ -612,18 +653,21 @@ pub async fn build_thread_context(
                     "retrieved_wiki_text",
                     BlockPriority::Low,
                     &format!("Wiki references (hybrid search):\n{}", wiki_text),
-                    4_000,  // increased from 2_000
+                    4_000, // increased from 2_000
                 ));
             }
-            timings.insert("wiki_search".to_string(), _start_wiki.elapsed().as_millis() as u64);
+            timings.insert(
+                "wiki_search".to_string(),
+                _start_wiki.elapsed().as_millis() as u64,
+            );
         }
     }
 
     {
-    let (ctx_text, mut meta) = builder.assemble();
-    meta.step_timings_ms = timings;
-    (ctx_text, meta)
-}
+        let (ctx_text, mut meta) = builder.assemble();
+        meta.step_timings_ms = timings;
+        (ctx_text, meta)
+    }
 }
 
 // ---------------------------------------------------------------------------

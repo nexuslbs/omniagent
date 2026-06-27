@@ -59,11 +59,17 @@ pub struct UpdateSecretRequest {
 // ---------------------------------------------------------------------------
 
 fn ok_json<T: Serialize>(data: T) -> (StatusCode, Json<serde_json::Value>) {
-    (StatusCode::OK, Json(serde_json::json!({ "success": true, "data": data })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "success": true, "data": data })),
+    )
 }
 
 fn err_json(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (status, Json(serde_json::json!({ "success": false, "error": msg })))
+    (
+        status,
+        Json(serde_json::json!({ "success": false, "error": msg })),
+    )
 }
 
 fn fmt_ts(ts: &chrono::DateTime<chrono::Utc>) -> String {
@@ -88,15 +94,23 @@ pub fn secrets_router() -> Router<Arc<AppState>> {
 // ---------------------------------------------------------------------------
 
 /// GET /api/secrets — list all secrets with current values.
-async fn list_secrets_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let rows = match sqlx::query_as::<_, (i64, String, String, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+async fn list_secrets_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let rows = match sqlx::query_as::<
+        _,
+        (
+            i64,
+            String,
+            String,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(
         r#"
         SELECT id, name, field_type, current_value, created_at, updated_at
         FROM secrets
         ORDER BY name ASC
-        "#
+        "#,
     )
     .fetch_all(&state.pool)
     .await
@@ -110,14 +124,16 @@ async fn list_secrets_handler(
 
     let secrets: Vec<SecretEntry> = rows
         .into_iter()
-        .map(|(id, name, field_type, current_value, created_at, updated_at)| SecretEntry {
-            id,
-            name,
-            field_type,
-            current_value,
-            created_at: fmt_ts(&created_at),
-            updated_at: fmt_ts(&updated_at),
-        })
+        .map(
+            |(id, name, field_type, current_value, created_at, updated_at)| SecretEntry {
+                id,
+                name,
+                field_type,
+                current_value,
+                created_at: fmt_ts(&created_at),
+                updated_at: fmt_ts(&updated_at),
+            },
+        )
         .collect();
 
     ok_json(secrets)
@@ -133,7 +149,10 @@ async fn create_secret_handler(
         return err_json(StatusCode::BAD_REQUEST, "Name is required");
     }
     if name.len() > 255 {
-        return err_json(StatusCode::BAD_REQUEST, "Name must be 255 characters or fewer");
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            "Name must be 255 characters or fewer",
+        );
     }
     let field_type = match body.field_type.as_str() {
         "text" => "text",
@@ -141,12 +160,22 @@ async fn create_secret_handler(
         _ => "password",
     };
 
-    match sqlx::query_as::<_, (i64, String, String, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
+    match sqlx::query_as::<
+        _,
+        (
+            i64,
+            String,
+            String,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(
         r#"
         INSERT INTO secrets (name, field_type, current_value)
         VALUES ($1, $2, $3)
         RETURNING id, name, field_type, current_value, created_at, updated_at
-        "#
+        "#,
     )
     .bind(&name)
     .bind(field_type)
@@ -168,7 +197,10 @@ async fn create_secret_handler(
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("unique") || msg.contains("duplicate") {
-                err_json(StatusCode::CONFLICT, "A secret with this name already exists")
+                err_json(
+                    StatusCode::CONFLICT,
+                    "A secret with this name already exists",
+                )
             } else {
                 error!("Failed to create secret: {:?}", e);
                 err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create secret")
@@ -189,7 +221,7 @@ async fn update_secret_handler(
         SELECT id, name, field_type, current_value
         FROM secrets
         WHERE name = $1
-        "#
+        "#,
     )
     .bind(&name)
     .fetch_optional(&state.pool)
@@ -219,7 +251,7 @@ async fn update_secret_handler(
         let max_ver: Option<(i32,)> = sqlx::query_as(
             r#"
             SELECT COALESCE(MAX(version_number), 0) FROM secret_versions WHERE secret_id = $1
-            "#
+            "#,
         )
         .bind(secret_id)
         .fetch_optional(&mut *tx)
@@ -232,7 +264,7 @@ async fn update_secret_handler(
             r#"
             INSERT INTO secret_versions (secret_id, version_number, value)
             VALUES ($1, $2, $3)
-            "#
+            "#,
         )
         .bind(secret_id)
         .bind(next_ver)
@@ -242,7 +274,10 @@ async fn update_secret_handler(
         {
             let _ = tx.rollback().await;
             error!("Failed to version old value for '{}': {:?}", name, e);
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to version old value");
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to version old value",
+            );
         }
     }
 
@@ -253,7 +288,7 @@ async fn update_secret_handler(
         SET current_value = $1, updated_at = NOW()
         WHERE id = $2
         RETURNING field_type, current_value, updated_at
-        "#
+        "#,
     )
     .bind(&body.value)
     .bind(secret_id)
@@ -290,22 +325,18 @@ async fn list_versions_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // First get the secret id
-    let secret_id: Option<(i64,)> = match sqlx::query_as(
-        r#"SELECT id FROM secrets WHERE name = $1"#
-    )
-    .bind(&name)
-    .fetch_optional(&state.pool)
-    .await
-    {
-        Ok(Some(row)) => Some(row),
-        Ok(None) => return err_json(StatusCode::NOT_FOUND, "Secret not found"),
-        Err(e) => {
-            error!("Failed to find secret '{}': {:?}", name, e);
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
-        }
-    };
-
-    let (sid,) = secret_id.unwrap();
+    let secret_id = match sqlx::query_as::<_, (i64,)>(r#"SELECT id FROM secrets WHERE name = $1"#)
+            .bind(&name)
+            .fetch_optional(&state.pool)
+            .await
+        {
+            Ok(Some(row)) => row.0,
+            Ok(None) => return err_json(StatusCode::NOT_FOUND, "Secret not found"),
+            Err(e) => {
+                error!("Failed to find secret '{}': {:?}", name, e);
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
+            }
+        };
 
     let rows = match sqlx::query_as::<_, (i64, i32, String, chrono::DateTime<chrono::Utc>)>(
         r#"
@@ -313,9 +344,9 @@ async fn list_versions_handler(
         FROM secret_versions
         WHERE secret_id = $1
         ORDER BY version_number DESC
-        "#
+        "#,
     )
-    .bind(sid)
+    .bind(secret_id)
     .fetch_all(&state.pool)
     .await
     {

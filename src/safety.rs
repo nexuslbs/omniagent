@@ -9,20 +9,45 @@ use regex::Regex;
 static SECRET_PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
     vec![
         // API keys: OpenAI, Anthropic, DeepSeek, etc.
-        (Regex::new(r"(?i)\b(sk-[a-zA-Z0-9]{20,})\b").unwrap(), "API key"),
+        (
+            Regex::new(r"(?i)\b(sk-[a-zA-Z0-9]{20,})\b").expect("built-in regex should be valid"),
+            "API key",
+        ),
         // JWT / Bearer tokens
-        (Regex::new(r"(?i)\b(eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})\b").unwrap(), "JWT token"),
+        (
+            Regex::new(r"(?i)\b(eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})\b")
+                .expect("built-in regex should be valid"),
+            "JWT token",
+        ),
         // Database connection strings
-        (Regex::new(r"(?i)(postgres://[^:***@]+@)").unwrap(), "PostgreSQL connection string"),
-        (Regex::new(r"(?i)(mysql://[^:***@]+@)").unwrap(), "MySQL connection string"),
+        (
+            Regex::new(r"(?i)(postgres://[^@]+@)").expect("built-in regex should be valid"),
+            "PostgreSQL connection string",
+        ),
+        (
+            Regex::new(r"(?i)(mysql://[^:***@]+@)").expect("built-in regex should be valid"),
+            "MySQL connection string",
+        ),
         // AWS keys
-        (Regex::new(r"(?i)\b(AKIA[0-9A-Z]{16})\b").unwrap(), "AWS access key"),
+        (
+            Regex::new(r"(?i)\b(AKIA[0-9A-Z]{16})\b").expect("built-in regex should be valid"),
+            "AWS access key",
+        ),
         // Private keys
-        (Regex::new(r"-----BEGIN\s?(RSA|EC|DSA|OPENSSH)?\s?PRIVATE KEY-----").unwrap(), "Private key"),
+        (
+            Regex::new(r"-----BEGIN\s?(RSA|EC|DSA|OPENSSH)?\s?PRIVATE KEY-----").expect("built-in regex should be valid"),
+            "Private key",
+        ),
         // Slack/Hub tokens
-        (Regex::new(r"(?i)\b(xox[baprs]-[0-9a-z]{10,})\b").unwrap(), "Slack token"),
+        (
+            Regex::new(r"(?i)\b(xox[baprs]-[0-9a-z]{10,})\b").expect("built-in regex should be valid"),
+            "Slack token",
+        ),
         // Generic: long base64 strings that look like tokens
-        (Regex::new(r"\b([a-zA-Z0-9+/]{40,}={0,2})\b").unwrap(), "Potential token"),
+        (
+            Regex::new(r"\b([a-zA-Z0-9+/]{40,}={0,2})\b").expect("built-in regex should be valid"),
+            "Potential token",
+        ),
     ]
 });
 
@@ -88,7 +113,9 @@ mod tests {
 
     #[test]
     fn test_detect_jwt() {
-        let matches = scan_for_secrets("token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3j6Z5NkQv7A");
+        let matches = scan_for_secrets(
+            "token: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3j6Z5NkQv7A",
+        );
         assert!(!matches.is_empty());
         assert!(matches.iter().any(|m| m.pattern == "JWT token"));
     }
@@ -97,7 +124,9 @@ mod tests {
     fn test_detect_postgres_url() {
         let matches = scan_for_secrets("postgres://user:supersecret@localhost:5432/db");
         assert!(!matches.is_empty());
-        assert!(matches.iter().any(|m| m.pattern == "PostgreSQL connection string"));
+        assert!(matches
+            .iter()
+            .any(|m| m.pattern == "PostgreSQL connection string"));
     }
 
     #[test]

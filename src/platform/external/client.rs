@@ -11,7 +11,8 @@ use crate::platform::external::{
     InitializeResult, PlatformPluginConfig, PluginResponse,
 };
 use crate::platform::{OutboundReceiver, Platform};
-use anyhow::{Context, Result};
+use crate::error::{Error, AppResult, ErrorContext};
+use crate::err_str;
 use async_trait::async_trait;
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -106,7 +107,7 @@ impl ExternalPlatformClient {
     }
 
     /// Spawn the plugin subprocess and return handles.
-    async fn spawn_plugin(&self) -> Result<(Child, ChildStdin, tokio::process::ChildStdout)> {
+    async fn spawn_plugin(&self) -> AppResult<(Child, ChildStdin, tokio::process::ChildStdout)> {
         tracing::info!(
             "Spawning platform plugin '{}': {} {}",
             self.config.name,
@@ -128,16 +129,16 @@ impl ExternalPlatformClient {
 
         let mut child = command
             .spawn()
-            .with_context(|| format!("Failed to spawn platform plugin '{}'", self.config.name))?;
+            .ctx(format!("Failed to spawn platform plugin '{}'", self.config.name))?;
 
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to capture stdin for platform plugin"))?;
+            .ok_or_else(|| err_str!("Failed to capture stdin for platform plugin"))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout for platform plugin"))?;
+            .ok_or_else(|| err_str!("Failed to capture stdout for platform plugin"))?;
 
         Ok((child, stdin, stdout))
     }
@@ -147,7 +148,7 @@ impl ExternalPlatformClient {
         &self,
         stdin: &mut ChildStdin,
         stdout: &mut tokio::process::ChildStdout,
-    ) -> Result<InitializeResult> {
+    ) -> AppResult<InitializeResult> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req = build_initialize_request(id);
         tracing::debug!("Sending initialize request to '{}'", self.config.name);
@@ -166,7 +167,7 @@ impl ExternalPlatformClient {
         match response {
             PluginResponse::Success { result, .. } => {
                 let init_result: InitializeResult =
-                    serde_json::from_value(result).context("Failed to parse initialize result")?;
+                    serde_json::from_value(result).ctx("Failed to parse initialize result")?;
                 tracing::info!(
                     "Platform plugin '{}' initialized: name={}, inbound={}, outbound={}",
                     self.config.name,
@@ -174,14 +175,18 @@ impl ExternalPlatformClient {
                     init_result.capabilities.inbound,
                     init_result.capabilities.outbound,
                 );
-                *self.plugin_name.lock().expect("plugin name lock poisoned") = Some(init_result.name.clone());
-                *self.capabilities.lock().expect("capabilities lock poisoned") = Some((
+                *self.plugin_name.lock().map_err(|_| Error::LockPoisoned)? =
+                    Some(init_result.name.clone());
+                *self
+                    .capabilities
+                    .lock()
+                    .map_err(|_| Error::LockPoisoned)? = Some((
                     init_result.capabilities.inbound,
                     init_result.capabilities.outbound,
                 ));
                 Ok(init_result)
             }
-            PluginResponse::Error { error, .. } => Err(anyhow::anyhow!(
+            PluginResponse::Error { error, .. } => Err(err_str!(
                 "Plugin '{}' initialize error ({}): {}",
                 self.config.name,
                 error.code,
@@ -197,7 +202,7 @@ impl Platform for ExternalPlatformClient {
         &self.config.name
     }
 
-    async fn start(&self, pool: PgPool, mut receiver: OutboundReceiver) -> Result<()> {
+    async fn start(&self, pool: PgPool, mut receiver: OutboundReceiver) -> AppResult<()> {
         tracing::info!("Starting external platform plugin '{}'", self.config.name);
 
         // Spawn the plugin subprocess
@@ -223,8 +228,8 @@ impl Platform for ExternalPlatformClient {
         let plugin_name = self
             .plugin_name
             .lock()
-            .expect("plugin name lock poisoned")
-            .clone()
+            .ok()
+            .and_then(|p| p.clone())
             .unwrap_or_else(|| self.config.name.clone());
 
         tracing::info!("Platform plugin '{}' entering main loop", plugin_name);
@@ -252,7 +257,7 @@ impl Platform for ExternalPlatformClient {
 
                     // Check circuit breaker
                     {
-                        let circuit = self.circuit.lock().expect("circuit lock poisoned");
+                        let circuit = self.circuit.lock().map_err(|_| Error::LockPoisoned)?;
                         if !circuit.is_allowed() {
                             tracing::warn!(
                                 "Circuit breaker open for plugin '{}', dropping envelope {}",
@@ -289,20 +294,23 @@ impl Platform for ExternalPlatformClient {
                     // Write request (no lock held across await since stdin is local)
                     if let Err(e) = stdin.write_all(req.as_bytes()).await {
                         tracing::error!("Failed to write to plugin '{}' stdin: {:?}", plugin_name, e);
-                        let mut circuit = self.circuit.lock().expect("circuit lock poisoned");
-                        circuit.record_failure();
+                        if let Ok(mut circuit) = self.circuit.lock() {
+                            circuit.record_failure();
+                        }
                         continue;
                     }
                     if let Err(e) = stdin.write_all(b"\n").await {
                         tracing::error!("Failed to write newline to plugin '{}' stdin: {:?}", plugin_name, e);
-                        let mut circuit = self.circuit.lock().expect("circuit lock poisoned");
-                        circuit.record_failure();
+                        if let Ok(mut circuit) = self.circuit.lock() {
+                            circuit.record_failure();
+                        }
                         continue;
                     }
                     if let Err(e) = stdin.flush().await {
                         tracing::error!("Failed to flush plugin '{}' stdin: {:?}", plugin_name, e);
-                        let mut circuit = self.circuit.lock().expect("circuit lock poisoned");
-                        circuit.record_failure();
+                        if let Ok(mut circuit) = self.circuit.lock() {
+                            circuit.record_failure();
+                        }
                         continue;
                     }
                 }
@@ -324,8 +332,9 @@ impl Platform for ExternalPlatformClient {
                             if let Ok(response) = parse_response(&trimmed) {
                                 match response {
                                     PluginResponse::Success { .. } => {
-                                        let mut circuit = self.circuit.lock().expect("circuit lock poisoned");
-                                        circuit.record_success();
+                                        if let Ok(mut circuit) = self.circuit.lock() {
+                                            circuit.record_success();
+                                        }
                                     }
                                     PluginResponse::Error { error, .. } => {
                                         tracing::warn!(
@@ -334,8 +343,9 @@ impl Platform for ExternalPlatformClient {
                                             error.code,
                                             error.message
                                         );
-                                        let mut circuit = self.circuit.lock().expect("circuit lock poisoned");
-                                        circuit.record_failure();
+                                        if let Ok(mut circuit) = self.circuit.lock() {
+                                            circuit.record_failure();
+                                        }
                                     }
                                 }
                                 continue;
@@ -522,9 +532,12 @@ impl Platform for ExternalPlatformClient {
 
         // Cleanup: stdin/stdout are dropped when they go out of scope,
         // which closes the pipes. Kill the child process (outside the lock).
-        let child_to_kill = {
-            let mut process_guard = self.process.lock().expect("process lock poisoned");
-            process_guard.take()
+        let child_to_kill = match self.process.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(_) => {
+                tracing::warn!("process lock poisoned during cleanup");
+                None
+            }
         };
         if let Some(mut child) = child_to_kill {
             let _ = child.kill().await;
@@ -535,7 +548,7 @@ impl Platform for ExternalPlatformClient {
         Ok(())
     }
 
-    async fn send_response(&self, _pool: &PgPool, _message_id: i64) -> Result<()> {
+    async fn send_response(&self, _pool: &PgPool, _message_id: i64) -> AppResult<()> {
         tracing::debug!(
             "send_response called on external platform '{}' — no-op",
             self.config.name
@@ -582,7 +595,14 @@ async fn handle_external_model_command(
 
             let update_provider = provider.as_deref();
             let update_model = model.as_deref();
-            if let Err(e) = crate::db::types::update_channel_model(pool, channel_id, update_provider, update_model).await {
+            if let Err(e) = crate::db::types::update_channel_model(
+                pool,
+                channel_id,
+                update_provider,
+                update_model,
+            )
+            .await
+            {
                 return format!("Error updating channel: {}", e);
             }
 
@@ -596,7 +616,14 @@ async fn handle_external_model_command(
         crate::commands::ModelAction::Reset { provider, model } => {
             let update_provider = if provider { Some("") } else { None };
             let update_model = if model { Some("") } else { None };
-            if let Err(e) = crate::db::types::update_channel_model(pool, channel_id, update_provider, update_model).await {
+            if let Err(e) = crate::db::types::update_channel_model(
+                pool,
+                channel_id,
+                update_provider,
+                update_model,
+            )
+            .await
+            {
                 return format!("Error resetting channel: {}", e);
             }
 
@@ -674,7 +701,8 @@ async fn handle_external_channel_command(
             }
             let mut result = format!("Channels for platform '{}':\n", plugin_name);
             for (i, ch) in channels.iter().enumerate() {
-                let current_mark = if ch.resource_identifier.as_deref() == Some(resource_identifier) {
+                let current_mark = if ch.resource_identifier.as_deref() == Some(resource_identifier)
+                {
                     " ← current"
                 } else {
                     ""
@@ -690,16 +718,29 @@ async fn handle_external_channel_command(
             result
         }
         crate::commands::ChannelCommand::Switch(ref name) => {
-            let channel = match crate::db::types::get_channel_by_platform_name(pool, plugin_name, name).await {
-                Ok(Some(ch)) => ch,
-                Ok(None) => return format!("Channel '{}' not found for platform '{}'.", name, plugin_name),
-                Err(e) => return format!("Error looking up channel: {}", e),
-            };
+            let channel =
+                match crate::db::types::get_channel_by_platform_name(pool, plugin_name, name).await
+                {
+                    Ok(Some(ch)) => ch,
+                    Ok(None) => {
+                        return format!(
+                            "Channel '{}' not found for platform '{}'.",
+                            name, plugin_name
+                        )
+                    }
+                    Err(e) => return format!("Error looking up channel: {}", e),
+                };
             // Claim the channel by updating resource_identifier
-            if let Err(e) = crate::db::types::claim_channel_resource(pool, channel.id, resource_identifier).await {
+            if let Err(e) =
+                crate::db::types::claim_channel_resource(pool, channel.id, resource_identifier)
+                    .await
+            {
                 return format!("Error claiming channel: {}", e);
             }
-            format!("Switched to channel '{}' (id={}).", channel.name, channel.id)
+            format!(
+                "Switched to channel '{}' (id={}).",
+                channel.name, channel.id
+            )
         }
     }
 }
@@ -746,13 +787,17 @@ async fn handle_external_profile_command(
                     profile_registry.list_names().join(", ")
                 );
             }
-            if let Err(e) = crate::commands::handle_profile_set(pool, current_channel.id, name).await {
+            if let Err(e) =
+                crate::commands::handle_profile_set(pool, current_channel.id, name).await
+            {
                 return format!("Error setting profile: {}", e);
             }
             format!("Profile set to '{}'.", name)
         }
         crate::commands::ProfileCommand::Reset => {
-            if let Err(e) = crate::commands::handle_profile_set(pool, current_channel.id, "default").await {
+            if let Err(e) =
+                crate::commands::handle_profile_set(pool, current_channel.id, "default").await
+            {
                 return format!("Error resetting profile: {}", e);
             }
             "Profile reset to 'default'.".to_string()

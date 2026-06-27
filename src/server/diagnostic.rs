@@ -1,27 +1,20 @@
 //! Diagnostic endpoints for isolating the hang issue.
 
-use axum::{
-    extract::State,
-};
+use super::AppState;
+use axum::extract::State;
 use std::sync::Arc;
 use std::time::Duration;
-use super::AppState;
 
 /// Test endpoint that uses State but returns immediately — no DB calls.
-pub async fn check_state(
-    State(_state): State<Arc<AppState>>,
-) -> &'static str {
+pub async fn check_state(State(_state): State<Arc<AppState>>) -> &'static str {
     "state ok"
 }
 
 /// Test DB pool — simple query with a short timeout.
-pub async fn check_db(
-    State(state): State<Arc<AppState>>,
-) -> String {
+pub async fn check_db(State(state): State<Arc<AppState>>) -> String {
     match tokio::time::timeout(
         Duration::from_secs(5),
-        sqlx::query_scalar::<_, i32>("SELECT 1")
-            .fetch_one(&state.pool),
+        sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.pool),
     )
     .await
     {
@@ -32,14 +25,10 @@ pub async fn check_db(
 }
 
 /// Call plugins_yaml::list_plugins directly (YAML-based, no DB).
-pub async fn check_list_plugins(
-    State(state): State<Arc<AppState>>,
-) -> String {
+pub async fn check_list_plugins(State(state): State<Arc<AppState>>) -> String {
     match tokio::time::timeout(
         Duration::from_secs(5),
-        tokio::task::spawn_blocking(move || {
-            crate::plugins_yaml::list_plugins(&state.data_dir)
-        }),
+        tokio::task::spawn_blocking(move || crate::plugins_yaml::list_plugins(&state.data_dir)),
     )
     .await
     {
@@ -51,9 +40,7 @@ pub async fn check_list_plugins(
 }
 
 /// Test: enrich + json construction (isolating the hang)
-pub async fn check_enrich_json(
-    State(state): State<Arc<AppState>>,
-) -> String {
+pub async fn check_enrich_json(State(state): State<Arc<AppState>>) -> String {
     let t0 = std::time::Instant::now();
     let details = match crate::plugins_yaml::list_plugins(&state.data_dir) {
         Ok(d) => d,
@@ -67,7 +54,11 @@ pub async fn check_enrich_json(
         let _json = serde_json::to_value(detail);
         let elapsed = rt.elapsed();
         if elapsed.as_millis() > 50 {
-            return format!("HANG at item {}: serialize took {}ms", i, elapsed.as_millis());
+            return format!(
+                "HANG at item {}: serialize took {}ms",
+                i,
+                elapsed.as_millis()
+            );
         }
     }
 
@@ -80,9 +71,7 @@ pub async fn check_enrich_json(
 }
 
 /// Check environment variables (for debugging env resolution).
-pub async fn check_env_read(
-    State(state): State<Arc<AppState>>,
-) -> String {
+pub async fn check_env_read(State(state): State<Arc<AppState>>) -> String {
     let vars = [
         "OMNI_DATA_DIR",
         "WORKSPACE_DIR",

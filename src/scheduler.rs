@@ -8,7 +8,8 @@
 //! - If 0 rows affected, another tick already claimed it → skip
 //! - After firing, `running` is cleared and timestamps updated
 
-use anyhow::Result;
+use crate::error::{Error, AppResult};
+use crate::err_msg;
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use sql_forge::sql_forge;
@@ -19,8 +20,8 @@ use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
 use crate::db::types as queries;
-use crate::mcp::{AppContext, McpRegistry, McpToolCall};
 use crate::db::types::MessageNew;
+use crate::mcp::{AppContext, McpRegistry, McpToolCall};
 
 #[derive(Debug, FromRow)]
 struct CronJobDueRow {
@@ -59,7 +60,12 @@ struct ReportActionFailureParams<'a> {
 }
 
 /// Spawn the cron scheduler loop as a background task.
-pub fn spawn(pool: PgPool, data_dir: String, mcp_registry: McpRegistry, app_context: AppContext) -> tokio::task::JoinHandle<()> {
+pub fn spawn(
+    pool: PgPool,
+    data_dir: String,
+    mcp_registry: McpRegistry,
+    app_context: AppContext,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         info!("[cron-scheduler] Starting cron scheduler loop");
 
@@ -73,7 +79,12 @@ pub fn spawn(pool: PgPool, data_dir: String, mcp_registry: McpRegistry, app_cont
 }
 
 /// One tick: find due jobs, claim one atomically, fire it, release.
-async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_context: &AppContext) -> Result<()> {
+async fn tick(
+    pool: &PgPool,
+    data_dir: &str,
+    mcp_registry: &McpRegistry,
+    app_context: &AppContext,
+) -> AppResult<()> {
     let jobs = fetch_due_jobs(pool).await?;
 
     for job in jobs {
@@ -123,11 +134,8 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
             action_id: &str,
             thread_id: i64,
             now_ts: i64,
-        ) -> anyhow::Result<()> {
-            let (action_name, exec_result) = resolve_and_execute_action(
-                &ctx,
-                action_id,
-            ).await;
+        ) -> AppResult<()> {
+            let (action_name, exec_result) = resolve_and_execute_action(&ctx, action_id).await;
 
             match exec_result {
                 Ok(()) => {
@@ -159,14 +167,18 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
                     queries::create_message(ctx.pool, &msg).await?;
                 }
                 Err(err_msg) => {
-                    report_action_failure(ctx.pool, ReportActionFailureParams {
-                        job: ctx.job,
-                        display_name: ctx.display_name,
-                        action_name: &action_name,
-                        err_msg,
-                        thread_id,
-                        now_ts,
-                    }).await?;
+                    report_action_failure(
+                        ctx.pool,
+                        ReportActionFailureParams {
+                            job: ctx.job,
+                            display_name: ctx.display_name,
+                            action_name: &action_name,
+                            err_msg,
+                            thread_id,
+                            now_ts,
+                        },
+                    )
+                    .await?;
                 }
             }
 
@@ -187,10 +199,8 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
                         job: &job,
                         display_name,
                     };
-                    let (action_name, exec_result) = resolve_and_execute_action(
-                        &action_ctx,
-                        action_id,
-                    ).await;
+                    let (action_name, exec_result) =
+                        resolve_and_execute_action(&action_ctx, action_id).await;
 
                     if let Err(err_msg) = exec_result {
                         // Action failed — now create thread + report error
@@ -209,14 +219,18 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
                             },
                         )
                         .await?;
-                        report_action_failure(pool, ReportActionFailureParams {
-                            job: &job,
-                            display_name,
-                            action_name: &action_name,
-                            err_msg,
-                            thread_id: thread.id,
-                            now_ts: now.timestamp(),
-                        }).await?;
+                        report_action_failure(
+                            pool,
+                            ReportActionFailureParams {
+                                job: &job,
+                                display_name,
+                                action_name: &action_name,
+                                err_msg,
+                                thread_id: thread.id,
+                                now_ts: now.timestamp(),
+                            },
+                        )
+                        .await?;
                     }
                     // Success: nothing to do, no thread created
                 } else {
@@ -246,8 +260,12 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
                             job: &job,
                             display_name,
                         },
-                        action_id, thread.id, now.timestamp(),
-                    ).await {
+                        action_id,
+                        thread.id,
+                        now.timestamp(),
+                    )
+                    .await
+                    {
                         error!(
                             "[cron-scheduler] Action reporting failed for job '{}': {:?}",
                             display_name, e
@@ -285,9 +303,10 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
 
         // Resolve provider+model for stamping on the thread
         let profile_registry = crate::profile::ProfileRegistry::new(data_dir);
-        let prof = profile_registry.get(&profile_name).cloned().unwrap_or_else(|| {
-            crate::profile::Profile::default("default")
-        });
+        let prof = profile_registry
+            .get(&profile_name)
+            .cloned()
+            .unwrap_or_else(|| crate::profile::Profile::default("default"));
 
         // Use the shared resolution function for provider and model
         let resolved = resolve_thread_config(
@@ -363,7 +382,7 @@ async fn tick(pool: &PgPool, data_dir: &str, mcp_registry: &McpRegistry, app_con
 }
 
 /// Fetch enabled jobs whose next_run_at is due (null or ≤ now).
-async fn fetch_due_jobs(pool: &PgPool) -> Result<Vec<CronJobDueRow>> {
+async fn fetch_due_jobs(pool: &PgPool) -> AppResult<Vec<CronJobDueRow>> {
     let rows: Vec<CronJobDueRow> = sql_forge!(
         CronJobDueRow,
         r#"
@@ -389,7 +408,7 @@ async fn release_job(
     job_id: &str,
     last_run: &DateTime<Utc>,
     next_run: &DateTime<Utc>,
-) -> Result<()> {
+) -> AppResult<()> {
     sql_forge!(
         r#"
         UPDATE cron_jobs
@@ -408,19 +427,25 @@ async fn release_job(
 }
 
 /// Ensure a cron channel exists (upsert on conflict).
-async fn ensure_cron_channel(pool: &PgPool) -> Result<crate::db::types::Channel> {
+async fn ensure_cron_channel(pool: &PgPool) -> AppResult<crate::db::types::Channel> {
     // First try to find existing cron channel
-    if let Ok(Some(ch)) = queries::get_channel_by_platform_and_resource(pool, "cron", "cron-session").await {
+    if let Ok(Some(ch)) =
+        queries::get_channel_by_platform_and_resource(pool, "cron", "cron-session").await
+    {
         return Ok(ch);
     }
-    queries::create_channel(pool, queries::CreateChannelParams {
-        name: "cron-session".to_string(),
-        platform: "cron".to_string(),
-        external_id: "cron-default".to_string(),
-        cause: "cron".to_string(),
-        resource_identifier: "cron-session".to_string(),
-    }).await
-        .map_err(|e| anyhow::anyhow!("Failed to create cron channel: {:#}", e))
+    queries::create_channel(
+        pool,
+        queries::CreateChannelParams {
+            name: "cron-session".to_string(),
+            platform: "cron".to_string(),
+            external_id: "cron-default".to_string(),
+            cause: "cron".to_string(),
+            resource_identifier: "cron-session".to_string(),
+        },
+    )
+    .await
+    .map_err(|e| Error::Message(format!("Failed to create cron channel: {:#}", e)))
 }
 
 /// Resolve and execute an action, returning (action_name, result).
@@ -467,16 +492,30 @@ async fn resolve_and_execute_action(
                         name: action.tool_name.clone(),
                         arguments: action.params.clone(),
                     };
-                    let r = match ctx.mcp_registry.execute(&call, ctx.app_context.clone()).await {
+                    let r = match ctx
+                        .mcp_registry
+                        .execute(&call, ctx.app_context.clone())
+                        .await
+                    {
                         Ok(result) => {
-                            if result.is_error { Err(result.content) } else { Ok(()) }
+                            if result.is_error {
+                                Err(result.content)
+                            } else {
+                                Ok(())
+                            }
                         }
                         Err(e) => Err(format!("{:#}", e)),
                     };
                     (action.name, r)
                 }
-                Ok(None) => (other.to_string(), Err(format!("Action '{}' not found", other))),
-                Err(e) => (other.to_string(), Err(format!("YAML lookup failed: {:#}", e))),
+                Ok(None) => (
+                    other.to_string(),
+                    Err(format!("Action '{}' not found", other)),
+                ),
+                Err(e) => (
+                    other.to_string(),
+                    Err(format!("YAML lookup failed: {:#}", e)),
+                ),
             }
         }
     }
@@ -486,7 +525,7 @@ async fn resolve_and_execute_action(
 async fn report_action_failure(
     pool: &PgPool,
     p: ReportActionFailureParams<'_>,
-) -> anyhow::Result<()> {
+) -> AppResult<()> {
     let cron_name = p.job.name.clone().unwrap_or_default();
     let err_subtype = if let Some(code) = extract_error_code(&p.err_msg) {
         Some(code)
@@ -551,7 +590,7 @@ async fn report_action_failure(
 /// Run the kanban_dispatcher: move all 'todo' tasks to 'ready' by creating
 /// threads and messages for each, respecting dependencies and ordering by
 /// priority DESC, position ASC.
-pub async fn run_kanban_dispatcher(pool: &PgPool, data_dir: &str) -> Result<()> {
+pub async fn run_kanban_dispatcher(pool: &PgPool, data_dir: &str) -> AppResult<()> {
     #[derive(Debug, FromRow)]
     struct TodoTaskRow {
         id: String,
@@ -616,7 +655,10 @@ pub async fn run_kanban_dispatcher(pool: &PgPool, data_dir: &str) -> Result<()> 
             match queries::get_channel_by_platform_name(pool, "kanban", "kanban").await {
                 Ok(Some(ch)) => ch.id,
                 _ => {
-                    warn!("[kanban-dispatcher] No default cron channel found, skipping task '{}'", t.id);
+                    warn!(
+                        "[kanban-dispatcher] No default cron channel found, skipping task '{}'",
+                        t.id
+                    );
                     continue;
                 }
             }
@@ -635,10 +677,7 @@ pub async fn run_kanban_dispatcher(pool: &PgPool, data_dir: &str) -> Result<()> 
         };
 
         // Resolve profile: task → channel → default
-        let profile_name = t
-            .profile
-            .clone()
-            .unwrap_or(channel.current_profile.clone());
+        let profile_name = t.profile.clone().unwrap_or(channel.current_profile.clone());
         if profile_name.is_empty() {
             warn!(
                 "[kanban-dispatcher] No profile resolved for task '{}' (channel {})",
@@ -649,9 +688,10 @@ pub async fn run_kanban_dispatcher(pool: &PgPool, data_dir: &str) -> Result<()> 
 
         // Resolve provider+model: channel → profile → env vars
         let profile_registry = crate::profile::ProfileRegistry::new(data_dir);
-        let prof = profile_registry.get(&profile_name).cloned().unwrap_or_else(|| {
-            crate::profile::Profile::default("default")
-        });
+        let prof = profile_registry
+            .get(&profile_name)
+            .cloned()
+            .unwrap_or_else(|| crate::profile::Profile::default("default"));
 
         let resolved = resolve_thread_config(
             t.profile.as_deref(),
@@ -738,7 +778,9 @@ pub async fn run_kanban_dispatcher(pool: &PgPool, data_dir: &str) -> Result<()> 
 
     info!(
         "[kanban-dispatcher] Dispatched {} tasks ({} skipped due to deps, {} total todo)",
-        dispatched, skipped_deps, tasks.len()
+        dispatched,
+        skipped_deps,
+        tasks.len()
     );
 
     Ok(())
@@ -816,8 +858,7 @@ pub(crate) fn resolve_thread_config(
         .or_else(|| profile_provider.filter(|s| !s.is_empty()))
         .map(|s| s.to_string())
         .unwrap_or_else(|| {
-            std::env::var("LLM_PROVIDER")
-                .unwrap_or_else(|_| "opencode-go".to_string())
+            std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "opencode-go".to_string())
         });
 
     // Model: channel → profile → provider plugin default → error
@@ -868,7 +909,7 @@ pub async fn fire_cron_job_by_id(
     app_context: &AppContext,
     schedule_id: &str,
     force: bool,
-) -> anyhow::Result<i64> {
+) -> AppResult<i64> {
     let jobs: Vec<CronJobDueRow> = sql_forge!(
         CronJobDueRow,
         r#"
@@ -882,9 +923,10 @@ pub async fn fire_cron_job_by_id(
     .fetch_all(pool)
     .await?;
 
-    let job = jobs.into_iter().next().ok_or_else(|| {
-        anyhow::anyhow!("Cron job '{}' not found", schedule_id)
-    })?;
+    let job = jobs
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::Message(format!("Cron job '{}' not found", schedule_id)))?;
 
     // Check active status (skip if force)
     let active: bool = sql_forge!(
@@ -896,7 +938,7 @@ pub async fn fire_cron_job_by_id(
     .await?;
 
     if !active && !force {
-        anyhow::bail!("Job '{}' is not active. Use force=true to run anyway.", schedule_id);
+        err_msg!("Job '{}' is not active. Use force=true to run anyway.", schedule_id);
     }
 
     let now = Utc::now();
@@ -936,10 +978,8 @@ pub async fn fire_cron_job_by_id(
                 job: &job,
                 display_name,
             };
-            let (action_name, exec_result) = resolve_and_execute_action(
-                &action_ctx,
-                action_id,
-            ).await;
+            let (action_name, exec_result) =
+                resolve_and_execute_action(&action_ctx, action_id).await;
 
             match exec_result {
                 Ok(()) => {
@@ -970,14 +1010,18 @@ pub async fn fire_cron_job_by_id(
                     queries::create_message(pool, &msg).await?;
                 }
                 Err(err_msg) => {
-                    report_action_failure(pool, ReportActionFailureParams {
-                        job: &job,
-                        display_name,
-                        action_name: &action_name,
-                        err_msg,
-                        thread_id: thread.id,
-                        now_ts: now.timestamp(),
-                    }).await?;
+                    report_action_failure(
+                        pool,
+                        ReportActionFailureParams {
+                            job: &job,
+                            display_name,
+                            action_name: &action_name,
+                            err_msg,
+                            thread_id: thread.id,
+                            now_ts: now.timestamp(),
+                        },
+                    )
+                    .await?;
                 }
             }
         }
@@ -988,7 +1032,7 @@ pub async fn fire_cron_job_by_id(
     let channel = if let Some(cid) = job.channel_id {
         match queries::find_channel_by_id(pool, cid).await {
             Ok(Some(ch)) => ch,
-            _ => ensure_cron_channel(pool).await?
+            _ => ensure_cron_channel(pool).await?,
         }
     } else {
         ensure_cron_channel(pool).await?
@@ -1001,9 +1045,10 @@ pub async fn fire_cron_job_by_id(
     };
 
     let profile_registry = crate::profile::ProfileRegistry::new(data_dir);
-    let prof = profile_registry.get(&profile_name).cloned().unwrap_or_else(|| {
-        crate::profile::Profile::default("default")
-    });
+    let prof = profile_registry
+        .get(&profile_name)
+        .cloned()
+        .unwrap_or_else(|| crate::profile::Profile::default("default"));
 
     let resolved = resolve_thread_config(
         job.profile.as_deref(),
@@ -1118,10 +1163,13 @@ pub async fn setup_knowledge_pipeline(
 
     // 1. Create the cron job — no channel_id or profile set; the scheduler
     //    resolves the default cron channel at runtime, matching dashboard behavior.
-    let id = format!("knowledge-pipeline-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos());
+    let id = format!(
+        "knowledge-pipeline-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
 
     let skills_json = serde_json::json!(["knowledge-pipeline"]).to_string();
 
@@ -1152,48 +1200,35 @@ mod tests {
         let cfg = resolve_thread_config(
             Some("task-profile"),
             "channel-profile",
-            None, None, None, None,
+            None,
+            None,
+            None,
+            None,
         );
         assert_eq!(cfg.unwrap().profile_name, "task-profile");
     }
 
     #[test]
     fn test_profile_from_channel_when_task_none() {
-        let cfg = resolve_thread_config(
-            None,
-            "channel-profile",
-            None, None, None, None,
-        );
+        let cfg = resolve_thread_config(None, "channel-profile", None, None, None, None);
         assert_eq!(cfg.unwrap().profile_name, "channel-profile");
     }
 
     #[test]
     fn test_profile_from_channel_when_task_empty() {
-        let cfg = resolve_thread_config(
-            Some(""),
-            "channel-profile",
-            None, None, None, None,
-        );
+        let cfg = resolve_thread_config(Some(""), "channel-profile", None, None, None, None);
         assert_eq!(cfg.unwrap().profile_name, "channel-profile");
     }
 
     #[test]
     fn test_profile_empty_returns_none() {
-        let cfg = resolve_thread_config(
-            None,
-            "",
-            None, None, None, None,
-        );
+        let cfg = resolve_thread_config(None, "", None, None, None, None);
         assert!(cfg.is_none());
     }
 
     #[test]
     fn test_profile_empty_channel_with_empty_task_returns_none() {
-        let cfg = resolve_thread_config(
-            Some(""),
-            "",
-            None, None, None, None,
-        );
+        let cfg = resolve_thread_config(Some(""), "", None, None, None, None);
         assert!(cfg.is_none());
     }
 
@@ -1202,9 +1237,12 @@ mod tests {
     #[test]
     fn test_provider_from_channel() {
         let cfg = resolve_thread_config(
-            None, "default",
-            Some("deepseek"), None,
-            Some("anthropic"), None,
+            None,
+            "default",
+            Some("deepseek"),
+            None,
+            Some("anthropic"),
+            None,
         );
         assert_eq!(cfg.unwrap().provider, "deepseek");
     }
@@ -1212,9 +1250,12 @@ mod tests {
     #[test]
     fn test_provider_falls_back_to_profile() {
         let cfg = resolve_thread_config(
-            None, "default",
-            None, None,
-            Some("anthropic"), Some("claude-sonnet-4"),
+            None,
+            "default",
+            None,
+            None,
+            Some("anthropic"),
+            Some("claude-sonnet-4"),
         );
         assert_eq!(cfg.unwrap().provider, "anthropic");
     }
@@ -1222,9 +1263,12 @@ mod tests {
     #[test]
     fn test_provider_skip_empty_channel() {
         let cfg = resolve_thread_config(
-            None, "default",
-            Some(""), None,
-            Some("anthropic"), Some("claude-sonnet-4"),
+            None,
+            "default",
+            Some(""),
+            None,
+            Some("anthropic"),
+            Some("claude-sonnet-4"),
         );
         assert_eq!(cfg.unwrap().provider, "anthropic");
     }
@@ -1232,9 +1276,12 @@ mod tests {
     #[test]
     fn test_provider_channel_overrides_profile() {
         let cfg = resolve_thread_config(
-            None, "default",
-            Some("deepseek"), None,
-            Some("anthropic"), None,
+            None,
+            "default",
+            Some("deepseek"),
+            None,
+            Some("anthropic"),
+            None,
         );
         assert_eq!(cfg.unwrap().provider, "deepseek");
     }
@@ -1244,40 +1291,38 @@ mod tests {
     #[test]
     fn test_model_from_channel() {
         let cfg = resolve_thread_config(
-            None, "default",
-            None, Some("deepseek-v4-flash"),
-            None, Some("claude-3"),
+            None,
+            "default",
+            None,
+            Some("deepseek-v4-flash"),
+            None,
+            Some("claude-3"),
         );
         assert_eq!(cfg.unwrap().model, "deepseek-v4-flash");
     }
 
     #[test]
     fn test_model_falls_back_to_profile() {
-        let cfg = resolve_thread_config(
-            None, "default",
-            None, None,
-            None, Some("claude-3"),
-        );
+        let cfg = resolve_thread_config(None, "default", None, None, None, Some("claude-3"));
         assert_eq!(cfg.unwrap().model, "claude-3");
     }
 
     #[test]
     fn test_model_channel_overrides_profile() {
         let cfg = resolve_thread_config(
-            None, "default",
-            None, Some("deepseek-v4-flash"),
-            None, Some("claude-3"),
+            None,
+            "default",
+            None,
+            Some("deepseek-v4-flash"),
+            None,
+            Some("claude-3"),
         );
         assert_eq!(cfg.unwrap().model, "deepseek-v4-flash");
     }
 
     #[test]
     fn test_model_skip_empty_channel() {
-        let cfg = resolve_thread_config(
-            None, "default",
-            None, Some(""),
-            None, Some("claude-3"),
-        );
+        let cfg = resolve_thread_config(None, "default", None, Some(""), None, Some("claude-3"));
         assert_eq!(cfg.unwrap().model, "claude-3");
     }
 
@@ -1288,8 +1333,10 @@ mod tests {
         let cfg = resolve_thread_config(
             Some("my-profile"),
             "channel-profile",
-            Some("deepseek"), Some("deepseek-v4-flash"),
-            None, None,
+            Some("deepseek"),
+            Some("deepseek-v4-flash"),
+            None,
+            None,
         );
         let c = cfg.unwrap();
         assert_eq!(c.profile_name, "my-profile");
@@ -1300,9 +1347,12 @@ mod tests {
     #[test]
     fn test_full_fallback_all_from_channel() {
         let cfg = resolve_thread_config(
-            None, "chan-profile",
-            Some("deepseek"), Some("deepseek-v4-flash"),
-            None, None,
+            None,
+            "chan-profile",
+            Some("deepseek"),
+            Some("deepseek-v4-flash"),
+            None,
+            None,
         );
         let c = cfg.unwrap();
         assert_eq!(c.profile_name, "chan-profile");
@@ -1313,9 +1363,12 @@ mod tests {
     #[test]
     fn test_full_fallback_all_from_profile() {
         let cfg = resolve_thread_config(
-            None, "prof-profile",
-            None, None,
-            Some("anthropic"), Some("claude-3"),
+            None,
+            "prof-profile",
+            None,
+            None,
+            Some("anthropic"),
+            Some("claude-3"),
         );
         let c = cfg.unwrap();
         assert_eq!(c.profile_name, "prof-profile");
@@ -1327,9 +1380,12 @@ mod tests {
     fn test_provider_and_model_fallthrough_together() {
         // Both come from channel, ignoring profile values
         let cfg = resolve_thread_config(
-            None, "default",
-            Some("deepseek"), Some("deepseek-v4-flash"),
-            Some("anthropic"), Some("claude-3"),
+            None,
+            "default",
+            Some("deepseek"),
+            Some("deepseek-v4-flash"),
+            Some("anthropic"),
+            Some("claude-3"),
         );
         let c = cfg.unwrap();
         assert_eq!(c.provider, "deepseek");
@@ -1343,17 +1399,19 @@ mod tests {
         // Simulates the scenario that caused the bug:
         // thread created with provider=None, model=None should be rejected
         // by the agent's validation (tested via the resolve function contract)
-        let cfg = resolve_thread_config(
-            None, "default",
-            None, None,
-            None, None,
-        );
+        let cfg = resolve_thread_config(None, "default", None, None, None, None);
         // resolve_thread_config always returns Some as long as profile is non-empty
         // (it falls back to env vars). The *agent* checks thread.provider directly.
         let c = cfg.unwrap();
         // The strings should come from env var fallbacks (not None/empty)
-        assert!(!c.provider.is_empty(), "provider must not be empty even after full fallback");
-        assert!(!c.model.is_empty(), "model must not be empty even after full fallback");
+        assert!(
+            !c.provider.is_empty(),
+            "provider must not be empty even after full fallback"
+        );
+        assert!(
+            !c.model.is_empty(),
+            "model must not be empty even after full fallback"
+        );
     }
 
     // ─── calculate_next_run ───────────────────────────────────────────────

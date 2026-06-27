@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use crate::error::{AppResult, ErrorContext};
 use crate::llm::resolve_llm_api_key;
 use crate::mcp::{AppContext, McpRegistry};
 use sqlx::PgPool;
@@ -96,7 +96,7 @@ impl AgentConfig {
     /// - `TEMPERATURE` — Sampling temperature (default: 0.7)
     /// - `SUMMARIZE_AFTER_DAYS` — Days before auto-summarization (default: 7)
     /// - `MAX_ITERATIONS` — Max agent turns per thread before skipping (default: 60)
-    pub fn from_env() -> Result<Self> {
+    pub fn from_env() -> AppResult<Self> {
         Ok(Self {
             llm_api_key: {
                 let provider = std::env::var("LLM_PROVIDER").unwrap_or_default();
@@ -175,7 +175,7 @@ impl AgentConfig {
                 .parse()
                 .unwrap_or(4)
                 .max(1),
-            
+
             // Token-based budgets (use tiktoken for accurate counting)
             prompt_token_budget_soft: std::env::var("PROMPT_TOKEN_BUDGET_SOFT")
                 .unwrap_or_else(|_| "200000".to_string())
@@ -193,19 +193,18 @@ impl AgentConfig {
                 .unwrap_or(15.0),
 
             // Infrastructure config (merged from former config::Config)
-            database_url: std::env::var("DATABASE_URL")
-                .context("DATABASE_URL must be set")?,
-            database_readonly_url: std::env::var("DATABASE_READONLY_URL")
-                .unwrap_or_else(|_| std::env::var("DATABASE_URL")
-                    .unwrap_or_else(|_| "postgres://localhost:5432/omniagent".to_string())),
+            database_url: std::env::var("DATABASE_URL").ctx("DATABASE_URL must be set")?,
+            database_readonly_url: std::env::var("DATABASE_READONLY_URL").unwrap_or_else(|_| {
+                std::env::var("DATABASE_URL")
+                    .unwrap_or_else(|_| "postgres://localhost:5432/omniagent".to_string())
+            }),
             qdrant_url: std::env::var("QDRANT_URL")
                 .unwrap_or_else(|_| "http://localhost:6333".to_string()),
-            host: std::env::var("HOST")
-                .unwrap_or_else(|_| "0.0.0.0".to_string()),
+            host: std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: std::env::var("PORT")
                 .unwrap_or_else(|_| "8080".to_string())
                 .parse()
-                .context("PORT must be a valid number")?,
+                .ctx("PORT must be a valid number")?,
             vectorize_messages: std::env::var("VECTORIZE_MESSAGES")
                 .unwrap_or_else(|_| "false".to_string())
                 .parse::<bool>()
@@ -214,27 +213,27 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "false".to_string())
                 .parse::<bool>()
                 .unwrap_or(false),
-            messages_vectorization_method:
-                std::env::var("MESSAGES_VECTORIZATION_METHOD").unwrap_or_else(|_| "local".to_string()),
+            messages_vectorization_method: std::env::var("MESSAGES_VECTORIZATION_METHOD")
+                .unwrap_or_else(|_| "local".to_string()),
             messages_vectorization_api_url: std::env::var("MESSAGES_VECTORIZATION_API_URL").ok(),
             messages_vectorization_interval_secs: std::env::var("MESSAGES_VECTORIZATION_INTERVAL")
                 .unwrap_or_else(|_| "3600".to_string())
                 .parse()
-                .context("MESSAGES_VECTORIZATION_INTERVAL must be a valid number")?,
+                .ctx("MESSAGES_VECTORIZATION_INTERVAL must be a valid number")?,
             messages_vectorization_protocol: std::env::var("MESSAGES_VECTORIZATION_PROTOCOL")
                 .unwrap_or_else(|_| "openai".to_string()),
             messages_vectorization_api_key: std::env::var("MESSAGES_VECTORIZATION_API_KEY").ok(),
-            messages_vectorization_api_model:
-                std::env::var("MESSAGES_VECTORIZATION_API_MODEL").ok(),
-            wiki_vectorization_method:
-                std::env::var("WIKI_VECTORIZATION_METHOD").unwrap_or_else(|_| "local".to_string()),
+            messages_vectorization_api_model: std::env::var("MESSAGES_VECTORIZATION_API_MODEL")
+                .ok(),
+            wiki_vectorization_method: std::env::var("WIKI_VECTORIZATION_METHOD")
+                .unwrap_or_else(|_| "local".to_string()),
             wiki_vectorization_api_url: std::env::var("WIKI_VECTORIZATION_API_URL").ok(),
             wiki_vectorization_interval_secs: std::env::var("WIKI_VECTORIZATION_INTERVAL")
                 .unwrap_or_else(|_| "3600".to_string())
                 .parse()
-                .context("WIKI_VECTORIZATION_INTERVAL must be a valid number")?,
-            wiki_vectorization_protocol:
-                std::env::var("WIKI_VECTORIZATION_PROTOCOL").unwrap_or_else(|_| "openai".to_string()),
+                .ctx("WIKI_VECTORIZATION_INTERVAL must be a valid number")?,
+            wiki_vectorization_protocol: std::env::var("WIKI_VECTORIZATION_PROTOCOL")
+                .unwrap_or_else(|_| "openai".to_string()),
             wiki_vectorization_api_key: std::env::var("WIKI_VECTORIZATION_API_KEY").ok(),
             wiki_vectorization_api_model: std::env::var("WIKI_VECTORIZATION_API_MODEL").ok(),
         })

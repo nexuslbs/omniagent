@@ -138,7 +138,11 @@ async fn handle_search_thread_messages(pool: &PgPool, args: &Value) -> Result<(S
         .map_err(|e| anyhow::anyhow!(e))
     }?;
 
-    Ok(format_results("search_thread_messages", &rows, rows.len() as i64))
+    Ok(format_results(
+        "search_thread_messages",
+        &rows,
+        rows.len() as i64,
+    ))
 }
 
 /// search_channel_prompts — all seq-0 (prompt) messages from a channel (sql_forge!).
@@ -170,7 +174,11 @@ async fn handle_search_channel_prompts(pool: &PgPool, args: &Value) -> Result<(S
         .map_err(|e| anyhow::anyhow!(e))
     }?;
 
-    Ok(format_results("search_channel_prompts", &results, results.len() as i64))
+    Ok(format_results(
+        "search_channel_prompts",
+        &results,
+        results.len() as i64,
+    ))
 }
 
 /// query — direct SQL (runtime only, must be SELECT).
@@ -261,7 +269,12 @@ fn format_results(operation: &str, results: &[MessageResult], total_count: i64) 
 
     for r in results {
         let preview = if r.content.len() > 300 {
-            let truncate_to = r.content.char_indices().nth(300).map(|(i, _)| i).unwrap_or(r.content.len());
+            let truncate_to = r
+                .content
+                .char_indices()
+                .nth(300)
+                .map(|(i, _)| i)
+                .unwrap_or(r.content.len());
             format!("{}...", &r.content[..truncate_to])
         } else {
             r.content.clone()
@@ -302,15 +315,16 @@ fn format_results(operation: &str, results: &[MessageResult], total_count: i64) 
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url =
-        std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
+    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
     let pool = db::connect(&database_url)
         .await
         .context("Failed to connect to database")?;
     let pool = Arc::new(pool);
 
     let p_query = pool.clone();
-    let query_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_query_database(&p_query, &args).await }));
+    let query_handler: ToolHandler = Box::new(move |args: Value| {
+        Box::pin(async move { handle_query_database(&p_query, &args).await })
+    });
 
     let tools = vec![
         McpToolEntry {

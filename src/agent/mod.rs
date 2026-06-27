@@ -16,11 +16,11 @@ pub mod config;
 pub mod executor;
 pub mod helpers;
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use sqlx::PgPool;
 use sql_forge::sql_forge;
 use sqlx::FromRow;
+use sqlx::PgPool;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
@@ -119,7 +119,8 @@ impl Agent {
                 if let std::collections::hash_map::Entry::Vacant(e) = tokens.entry(channel_id) {
                     // Skip spawning if the channel is closed — it will be spawned
                     // when the channel is opened via the /open endpoint
-                    if let Ok(true) = queries::is_channel_closed(&agent_ctx.pool, channel_id).await {
+                    if let Ok(true) = queries::is_channel_closed(&agent_ctx.pool, channel_id).await
+                    {
                         continue;
                     }
 
@@ -150,12 +151,10 @@ impl Agent {
             for &channel_id in &stopped_ids {
                 if let Some(token) = tokens.get(&channel_id) {
                     if !token.is_cancelled() {
-                        if let Ok(true) = queries::is_channel_closed(&agent_ctx.pool, channel_id).await
+                        if let Ok(true) =
+                            queries::is_channel_closed(&agent_ctx.pool, channel_id).await
                         {
-                            info!(
-                                "Channel {} has been closed, cancelling handler",
-                                channel_id
-                            );
+                            info!("Channel {} has been closed, cancelling handler", channel_id);
                             token.cancel();
                         }
                     }
@@ -187,11 +186,7 @@ impl Agent {
 ///
 /// The loop exits cleanly when the cancellation token is triggered or
 /// when the channel is marked as stopped in the database.
-async fn channel_handler(
-    cfg: AgentContext,
-    channel_id: i64,
-    cancel: CancellationToken,
-) {
+async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: CancellationToken) {
     info!("Channel handler started for channel {}", channel_id);
 
     loop {
@@ -364,7 +359,7 @@ async fn channel_handler(
 /// On startup, find any threads that are still `processing` and mark them as `failed`.
 /// Also skip all pending/processing threads.
 /// Returns the number of recovered threads.
-pub async fn skip_on_startup(pool: &PgPool) -> anyhow::Result<u64> {
+pub async fn skip_on_startup(pool: &PgPool) -> crate::error::AppResult<u64> {
     // Debug: check specific message 122 still works (for backward compat)
     #[derive(Debug, FromRow)]
     struct MsgRow {
@@ -382,10 +377,7 @@ pub async fn skip_on_startup(pool: &PgPool) -> anyhow::Result<u64> {
 
     match &specific {
         Ok(row) => {
-            info!(
-                "[startup] DEBUG message {}: type={}",
-                row.id, row.msg_type
-            );
+            info!("[startup] DEBUG message {}: type={}", row.id, row.msg_type);
         }
         Err(e) => {
             info!("[startup] DEBUG message 122 not found: {}", e);

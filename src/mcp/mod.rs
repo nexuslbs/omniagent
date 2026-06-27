@@ -1,9 +1,11 @@
-use anyhow::Result;
 use serde_json::Value;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::error::{AppResult, Error};
 use crate::platform::OutboundSender;
 
 /// Truncate content to `max_chars` bytes (safe UTF-8 boundary).
@@ -99,6 +101,11 @@ impl AppContext {
         }
     }
 }
+
+/// Async handler type for MCP tool execution.
+pub type McpToolHandler =
+    Arc<dyn Fn(Value, AppContext) -> Pin<Box<dyn Future<Output = AppResult<McpToolResult>> + Send>> + Send + Sync>;
+
 /// A registered MCP tool.
 #[derive(Clone)]
 pub struct McpTool {
@@ -106,7 +113,7 @@ pub struct McpTool {
     pub description: String,
     pub input_schema: Value,
     pub server_name: Option<String>,
-    pub handler: Arc<dyn Fn(Value, AppContext) -> Result<McpToolResult> + Send + Sync>,
+    pub handler: McpToolHandler,
 }
 
 /// Registry of all available MCP tools.
@@ -151,7 +158,10 @@ impl McpRegistry {
             5
         } else if name.starts_with("kanban") || name.starts_with("cron") {
             10
-        } else if name.starts_with("commit_and_push") || name.starts_with("create_github") || name.starts_with("clone_repo") {
+        } else if name.starts_with("commit_and_push")
+            || name.starts_with("create_github")
+            || name.starts_with("clone_repo")
+        {
             0
         } else {
             4
@@ -183,16 +193,14 @@ impl McpRegistry {
         }
     }
 
-    /// Execute a tool call.
-    pub async fn execute(&self, call: &McpToolCall, ctx: AppContext) -> Result<McpToolResult> {
+    /// Execute a tool call — directly awaits the async handler (no spawn_blocking).
+    pub async fn execute(&self, call: &McpToolCall, ctx: AppContext) -> AppResult<McpToolResult> {
         let tool = self
             .get(&call.name)
-            .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", call.name))?
+            .ok_or_else(|| Error::Message(format!("Unknown tool: {}", call.name)))?
             .clone();
         let args = call.arguments.clone();
-        tokio::task::spawn_blocking(move || (tool.handler)(args, ctx))
-            .await
-            .map_err(|e| anyhow::anyhow!("Tool handler panicked: {}", e))?
+        (tool.handler)(args, ctx).await
     }
 
     /// Build the OpenAI-compatible tools array for the LLM.
@@ -232,15 +240,13 @@ impl McpRegistry {
 }
 
 /// Initialize the default MCP registry with all built-in tools.
-pub fn default_registry(ctx: &AppContext) -> McpRegistry {
+pub async fn default_registry(ctx: &AppContext) -> McpRegistry {
     let mut registry = McpRegistry::new();
 
     // Load enabled/disabled state from tools.yml
-    let tool_entries = crate::plugins_yaml::load_raw(
-        &ctx.data_dir,
-        &crate::plugins_yaml::PluginYamlType::Tool,
-    )
-    .unwrap_or_default();
+    let tool_entries =
+        crate::plugins_yaml::load_raw(&ctx.data_dir, &crate::plugins_yaml::PluginYamlType::Tool)
+            .unwrap_or_default();
 
     // ── Built-in tools are loaded from external MCP servers via plugins/mcp/ ──
     // All DB-dependent tools have been externalized to subprocess MCP servers:
@@ -266,7 +272,7 @@ pub fn default_registry(ctx: &AppContext) -> McpRegistry {
     }
 
     // External MCP servers (load from config + plugins/mcp/, best-effort)
-    let external_tools = external::client::initialize_external_tools(&ctx.data_dir);
+    let external_tools = external::client::initialize_external_tools(&ctx.data_dir).await;
     for tool in external_tools {
         registry.register(tool);
     }

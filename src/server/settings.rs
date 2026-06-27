@@ -455,7 +455,9 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
     for (name, value, meta) in defs {
         let cat_name = match name.as_str() {
             "MAX_TOKENS" | "TEMPERATURE" | "LLM_MAX_TOKENS" => "general",
-            "MAX_ITERATIONS_NO_PLAN" | "MAX_ITERATIONS_SIMPLE_PLAN" | "MAX_ITERATIONS_COMPLEX_PLAN" => "general",
+            "MAX_ITERATIONS_NO_PLAN"
+            | "MAX_ITERATIONS_SIMPLE_PLAN"
+            | "MAX_ITERATIONS_COMPLEX_PLAN" => "general",
             "PLANNING_MODE"
             | "PROMPT_PLAN_MAX_TOKENS"
             | "MAX_UNFINISHED_SUBTASK_RETRIES"
@@ -489,16 +491,12 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
 // ── Handlers ──
 
 /// GET /settings — return all settings organized by category.
-pub async fn get_settings_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<SettingsResponse> {
+pub async fn get_settings_handler(State(state): State<Arc<AppState>>) -> Json<SettingsResponse> {
     // Reload .env file to get current values, then merge with defaults
     let env_path = state.env_path.clone();
-    let env_vars = tokio::task::spawn_blocking(move || {
-        load_env_file(&env_path)
-    })
-    .await
-    .unwrap_or_default();
+    let env_vars = tokio::task::spawn_blocking(move || load_env_file(&env_path))
+        .await
+        .unwrap_or_default();
 
     let mut defs: Vec<(String, String, SettingMeta)> = get_all_setting_definitions()
         .into_iter()
@@ -514,7 +512,8 @@ pub async fn get_settings_handler(
         .collect();
 
     // Enrich LLM_PROVIDER options with dynamically loaded provider plugins
-    if let Some((_, _, ref mut meta)) = defs.iter_mut().find(|(name, _, _)| name == "LLM_PROVIDER") {
+    if let Some((_, _, ref mut meta)) = defs.iter_mut().find(|(name, _, _)| name == "LLM_PROVIDER")
+    {
         enrich_provider_options(meta, &state.data_dir);
     }
 
@@ -525,10 +524,7 @@ pub async fn get_settings_handler(
 
 /// Enrich LLM_PROVIDER setting options with dynamically loaded provider plugins.
 /// Reads enabled providers from providers.yml.
-fn enrich_provider_options(
-    meta: &mut SettingMeta,
-    data_dir: &str,
-) {
+fn enrich_provider_options(meta: &mut SettingMeta, data_dir: &str) {
     let providers = match plugins_yaml::get_enabled_providers(data_dir) {
         Ok(rows) if !rows.is_empty() => rows,
         _ => return, // Fall back to hardcoded options
@@ -555,11 +551,9 @@ pub async fn update_settings_handler(
     }
 
     let env_path_read = state.env_path.clone();
-    let mut env_vars = tokio::task::spawn_blocking(move || {
-        load_env_file(&env_path_read)
-    })
-    .await
-    .unwrap_or_default();
+    let mut env_vars = tokio::task::spawn_blocking(move || load_env_file(&env_path_read))
+        .await
+        .unwrap_or_default();
 
     // Known writable setting names for validation
     let writable_keys: std::collections::HashSet<&str> = [
@@ -605,11 +599,9 @@ pub async fn update_settings_handler(
     }
 
     let env_path_write = state.env_path.clone();
-    match tokio::task::spawn_blocking(move || {
-        write_env_file(&env_path_write, &env_vars)
-    })
-    .await
-    .unwrap_or(Err("spawn_blocking failed".to_string()))
+    match tokio::task::spawn_blocking(move || write_env_file(&env_path_write, &env_vars))
+        .await
+        .unwrap_or(Err("spawn_blocking failed".to_string()))
     {
         Ok(()) => {
             tracing::info!("Settings updated: {:?}", applied);

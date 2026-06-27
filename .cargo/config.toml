@@ -1,5 +1,5 @@
 # Cargo configuration for omniagent
 # Enable offline mode for sqlx compile-time checks (uses .sqlx/ cache)
 [env]
-SQLX_OFFLINE = "false"
+SQLX_OFFLINE = "true"
 SQL_FORGE_DB_TYPE = "sqlx::Postgres"

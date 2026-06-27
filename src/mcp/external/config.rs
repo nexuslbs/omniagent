@@ -7,9 +7,10 @@
 //! Each server has a name, transport type (stdio or http), and
 //! server-specific settings (command/args for stdio, url for http).
 
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use crate::error::{AppResult, ErrorContext};
 
 /// Supported MCP transport types.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -49,9 +50,15 @@ pub struct McpServerConfig {
     pub allowed_tools: Vec<String>,
 }
 
-fn default_timeout() -> u64 { 30 }
-fn default_max_retries() -> u32 { 3 }
-fn default_allowed_tools() -> Vec<String> { vec!["*".to_string()] }
+fn default_timeout() -> u64 {
+    30
+}
+fn default_max_retries() -> u32 {
+    3
+}
+fn default_allowed_tools() -> Vec<String> {
+    vec!["*".to_string()]
+}
 
 /// Collection of external MCP server configurations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,30 +80,30 @@ pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
     let mut all_servers = Vec::new();
 
     // Try config file first
-    let config_path = std::env::var("MCP_SERVERS_CONFIG")
-        .ok()
-        .or_else(|| {
-            let default = format!("{}/config/mcp-servers.json", data_dir);
-            let path = std::path::Path::new(&default);
-            if path.exists() { Some(default) } else { None }
-        });
+    let config_path = std::env::var("MCP_SERVERS_CONFIG").ok().or_else(|| {
+        let default = format!("{}/config/mcp-servers.json", data_dir);
+        let path = std::path::Path::new(&default);
+        if path.exists() {
+            Some(default)
+        } else {
+            None
+        }
+    });
 
     match config_path {
-        Some(path) => {
-            match read_config_file(&path) {
-                Ok(config) => {
-                    tracing::info!(
-                        "Loaded {} external MCP server(s) from {}",
-                        config.servers.len(),
-                        path
-                    );
-                    all_servers.extend(config.servers);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load MCP servers config from {}: {:?}", path, e);
-                }
+        Some(path) => match read_config_file(&path) {
+            Ok(config) => {
+                tracing::info!(
+                    "Loaded {} external MCP server(s) from {}",
+                    config.servers.len(),
+                    path
+                );
+                all_servers.extend(config.servers);
             }
-        }
+            Err(e) => {
+                tracing::warn!("Failed to load MCP servers config from {}: {:?}", path, e);
+            }
+        },
         None => {
             tracing::info!("No MCP servers config file found (set MCP_SERVERS_CONFIG env var)");
         }
@@ -158,7 +165,11 @@ fn scan_plugin_servers(plugins_dir: &str) -> Vec<McpServerConfig> {
     let entries = match std::fs::read_dir(plugins_path) {
         Ok(entries) => entries,
         Err(e) => {
-            tracing::warn!("Failed to read MCP plugin directory {}: {:?}", plugins_dir, e);
+            tracing::warn!(
+                "Failed to read MCP plugin directory {}: {:?}",
+                plugins_dir,
+                e
+            );
             return vec![];
         }
     };
@@ -198,9 +209,9 @@ fn scan_plugin_servers(plugins_dir: &str) -> Vec<McpServerConfig> {
 }
 
 /// Read and parse the MCP servers config file (JSON or YAML).
-fn read_config_file(path: &str) -> Result<McpServersConfig> {
+fn read_config_file(path: &str) -> AppResult<McpServersConfig> {
     let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read MCP servers config: {}", path))?;
+        .ctx(format!("Failed to read MCP servers config: {}", path))?;
 
     // Try JSON first
     if let Ok(config) = serde_json::from_str::<McpServersConfig>(&content) {
@@ -208,8 +219,12 @@ fn read_config_file(path: &str) -> Result<McpServersConfig> {
     }
 
     // Fallback: try YAML
-    let config: McpServersConfig = serde_yaml::from_str(&content)
-        .with_context(|| format!("Failed to parse MCP servers config (tried JSON and YAML): {}", path))?;
+    let config: McpServersConfig = serde_yaml::from_str(&content).ctx(
+        format!(
+            "Failed to parse MCP servers config (tried JSON and YAML): {}",
+            path
+        )
+    )?;
     Ok(config)
 }
 
@@ -228,7 +243,8 @@ pub fn resolve_env_vars(value: &str) -> String {
             } else {
                 (raw, None)
             };
-            let env_val = std::env::var(var_name).ok()
+            let env_val = std::env::var(var_name)
+                .ok()
                 .filter(|v| !v.is_empty())
                 .or(default_val)
                 .unwrap_or_default();

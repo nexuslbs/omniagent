@@ -119,11 +119,7 @@ async fn count_grounded_responses(
 }
 
 /// Count retrieval events (how often search tools were called).
-async fn count_retrieval_events(
-    pool: &PgPool,
-    hours: i64,
-    profile_filter: &str,
-) -> Result<i64> {
+async fn count_retrieval_events(pool: &PgPool, hours: i64, profile_filter: &str) -> Result<i64> {
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours);
 
     let count: Option<i64> = sql_forge!(
@@ -149,11 +145,7 @@ async fn count_retrieval_events(
 }
 
 /// Count user corrections (proxies for hallucination).
-async fn count_corrections(
-    pool: &PgPool,
-    hours: i64,
-    profile_filter: &str,
-) -> Result<i64> {
+async fn count_corrections(pool: &PgPool, hours: i64, profile_filter: &str) -> Result<i64> {
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(hours);
 
     // Look for user messages containing correction keywords after an agent message
@@ -210,10 +202,8 @@ async fn handle_get_metrics(pool: &PgPool, args: &Value) -> Result<(String, bool
     let usage = aggregate_metrics(pool, hours, &profile_owned).await?;
     let (total_responses, grounded_responses) =
         count_grounded_responses(pool, hours, &profile_owned).await?;
-    let retrieval_count =
-        count_retrieval_events(pool, hours, &profile_owned).await?;
-    let correction_count =
-        count_corrections(pool, hours, &profile_owned).await?;
+    let retrieval_count = count_retrieval_events(pool, hours, &profile_owned).await?;
+    let correction_count = count_corrections(pool, hours, &profile_owned).await?;
 
     let mut report = format!(
         "# Agent Metrics Report\n\nPeriod: **last {} hour(s)**\n\n",
@@ -335,12 +325,11 @@ async fn main() -> Result<()> {
     let tools = vec![McpToolEntry {
         def: McpToolDef {
             name: "get_metrics".to_string(),
-            description:
-                "Report agent performance metrics: token usage, latency, message counts, \
+            description: "Report agent performance metrics: token usage, latency, message counts, \
                  groundedness rate, retrieval hit rate, and hallucination proxy metrics. \
                  All metrics are aggregated from the messages table and can be filtered \
                  by time window and profile."
-                    .to_string(),
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

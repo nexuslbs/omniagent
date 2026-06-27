@@ -37,7 +37,7 @@ pub struct ThreadDb {
 }
 
 impl TryFrom<ThreadDb> for Thread {
-    type Error = anyhow::Error;
+    type Error = crate::error::Error;
 
     fn try_from(db: ThreadDb) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -57,10 +57,19 @@ impl TryFrom<ThreadDb> for Thread {
                 .as_deref()
                 .unwrap_or("")
                 .parse::<DateTime<Utc>>()
-                .map_err(|e| anyhow::anyhow!("Invalid timestamp '{}': {}", db.created_at.as_deref().unwrap_or("?"), e))?,
+                .map_err(|e| {
+                    crate::error::Error::Message(format!(
+                        "Invalid timestamp '{}': {}",
+                        db.created_at.as_deref().unwrap_or("?"),
+                        e
+                    ))
+                })?,
             started_at: if let Some(ref s) = db.started_at {
                 if !s.is_empty() {
-                    Some(s.parse::<DateTime<Utc>>().map_err(|e| anyhow::anyhow!("Invalid timestamp '{}': {}", s, e))?)
+                    Some(
+                        s.parse::<DateTime<Utc>>()
+                            .map_err(|e| crate::error::Error::Message(format!("Invalid timestamp '{}': {}", s, e)))?,
+                    )
                 } else {
                     None
                 }
@@ -69,7 +78,10 @@ impl TryFrom<ThreadDb> for Thread {
             },
             ended_at: if let Some(ref s) = db.ended_at {
                 if !s.is_empty() {
-                    Some(s.parse::<DateTime<Utc>>().map_err(|e| anyhow::anyhow!("Invalid timestamp '{}': {}", s, e))?)
+                    Some(
+                        s.parse::<DateTime<Utc>>()
+                            .map_err(|e| crate::error::Error::Message(format!("Invalid timestamp '{}': {}", s, e)))?,
+                    )
                 } else {
                     None
                 }
@@ -109,7 +121,7 @@ pub struct MessageDb {
 }
 
 impl TryFrom<MessageDb> for Message {
-    type Error = anyhow::Error;
+    type Error = crate::error::Error;
 
     fn try_from(db: MessageDb) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -119,7 +131,11 @@ impl TryFrom<MessageDb> for Message {
             content: db.content,
             thread_sequence: db.thread_sequence,
             external_id: db.external_id,
-            metadata: db.metadata.as_deref().map(|s| serde_json::from_str(s).unwrap_or_default()).unwrap_or_default(),
+            metadata: db
+                .metadata
+                .as_deref()
+                .map(|s| serde_json::from_str(s).unwrap_or_default())
+                .unwrap_or_default(),
             embedding: db.embedding,
             summary_text: db.summary_text,
             is_summary: db.is_summary,
@@ -130,8 +146,17 @@ impl TryFrom<MessageDb> for Message {
                 .as_deref()
                 .unwrap_or("")
                 .parse::<DateTime<Utc>>()
-                .map_err(|e| anyhow::anyhow!("Invalid timestamp '{}': {}", db.created_at.as_deref().unwrap_or("?"), e))?,
-            token_usage: db.token_usage.as_deref().map(|s| serde_json::from_str(s).unwrap_or_default()),
+                .map_err(|e| {
+                    crate::error::Error::Message(format!(
+                        "Invalid timestamp '{}': {}",
+                        db.created_at.as_deref().unwrap_or("?"),
+                        e
+                    ))
+                })?,
+            token_usage: db
+                .token_usage
+                .as_deref()
+                .map(|s| serde_json::from_str(s).unwrap_or_default()),
             processing_time_ms: db.processing_time_ms,
             iteration_number: db.iteration_number,
         })
@@ -162,7 +187,7 @@ pub struct ChannelDb {
 }
 
 impl TryFrom<ChannelDb> for Channel {
-    type Error = anyhow::Error;
+    type Error = crate::error::Error;
 
     fn try_from(db: ChannelDb) -> Result<Self, Self::Error> {
         Ok(Self {
@@ -177,20 +202,36 @@ impl TryFrom<ChannelDb> for Channel {
             current_provider: db.current_provider,
             readonly: db.readonly,
             closed: db.closed.unwrap_or(false),
-            metadata: db.metadata.as_deref().map(|s| serde_json::from_str(s).unwrap_or_default()).unwrap_or_default(),
+            metadata: db
+                .metadata
+                .as_deref()
+                .map(|s| serde_json::from_str(s).unwrap_or_default())
+                .unwrap_or_default(),
             template: db.template.filter(|t| !t.is_empty()),
             created_at: db
                 .created_at
                 .as_deref()
                 .unwrap_or("")
                 .parse::<DateTime<Utc>>()
-                .map_err(|e| anyhow::anyhow!("Invalid timestamp '{}': {}", db.created_at.as_deref().unwrap_or("?"), e))?,
+                .map_err(|e| {
+                    crate::error::Error::Message(format!(
+                        "Invalid timestamp '{}': {}",
+                        db.created_at.as_deref().unwrap_or("?"),
+                        e
+                    ))
+                })?,
             updated_at: db
                 .updated_at
                 .as_deref()
                 .unwrap_or("")
                 .parse::<DateTime<Utc>>()
-                .map_err(|e| anyhow::anyhow!("Invalid timestamp '{}': {}", db.updated_at.as_deref().unwrap_or("?"), e))?,
+                .map_err(|e| {
+                    crate::error::Error::Message(format!(
+                        "Invalid timestamp '{}': {}",
+                        db.updated_at.as_deref().unwrap_or("?"),
+                        e
+                    ))
+                })?,
         })
     }
 }
@@ -446,7 +487,11 @@ pub struct ThreadNew {
 // ---------------------------------------------------------------------------
 
 /// Search wiki markdown files by text content.
-pub fn search_wiki_text(wiki_dir: &str, query: &str, limit: usize) -> Vec<(String, String, String)> {
+pub fn search_wiki_text(
+    wiki_dir: &str,
+    query: &str,
+    limit: usize,
+) -> Vec<(String, String, String)> {
     use std::fs;
     let query_lower = query.to_lowercase();
 
@@ -467,20 +512,32 @@ pub fn search_wiki_text(wiki_dir: &str, query: &str, limit: usize) -> Vec<(Strin
         .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file() && e.path().extension().map(|ext| ext == "md").unwrap_or(false));
+        .filter(|e| {
+            e.file_type().is_file() && e.path().extension().map(|ext| ext == "md").unwrap_or(false)
+        });
 
     for entry in walker {
         let path = entry.path();
-        let relative = path.strip_prefix(wiki_dir).unwrap_or(path).display().to_string();
+        let relative = path
+            .strip_prefix(wiki_dir)
+            .unwrap_or(path)
+            .display()
+            .to_string();
         let content = match fs::read_to_string(path) {
             Ok(c) => c,
             Err(_) => continue,
         };
 
-        let title = content.lines()
+        let title = content
+            .lines()
             .find(|l| l.starts_with("# "))
             .map(|l| l.trim_start_matches("# ").to_string())
-            .unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().to_string());
+            .unwrap_or_else(|| {
+                path.file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            });
         // Count how many unique terms match at least one line
         let content_lower = content.to_lowercase();
         let match_count = search_terms
@@ -515,7 +572,8 @@ pub fn search_wiki_text(wiki_dir: &str, query: &str, limit: usize) -> Vec<(Strin
     scored.sort_by_key(|b| std::cmp::Reverse(b.2));
     scored.truncate(limit);
 
-    scored.into_iter()
+    scored
+        .into_iter()
         .map(|(path, title, _score, snippet)| (path, title, snippet))
         .collect()
 }
@@ -525,7 +583,7 @@ pub async fn search_wiki_qdrant(
     qdrant_url: &str,
     embedding: &[f32],
     limit: usize,
-) -> anyhow::Result<Vec<(String, String, f64)>> {
+) -> crate::error::AppResult<Vec<(String, String, f64)>> {
     use serde_json::json;
 
     let client = reqwest::Client::new();
@@ -540,12 +598,12 @@ pub async fn search_wiki_qdrant(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("Qdrant search request failed: {}", e))?;
+        .map_err(|e| crate::error::Error::Message(format!("Qdrant search request failed: {}", e)))?;
 
     let body: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| anyhow::anyhow!("Qdrant search response parse failed: {}", e))?;
+        .map_err(|e| crate::error::Error::Message(format!("Qdrant search response parse failed: {}", e)))?;
 
     let mut results = Vec::new();
     if let Some(points) = body["result"].as_array() {

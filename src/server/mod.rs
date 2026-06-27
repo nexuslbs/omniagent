@@ -15,14 +15,15 @@
 //! - `POST /actions/:id/run` — execute an action (call its MCP tool)
 //! - `POST /run-cron/{schedule_id}` — manually trigger a cron job (proxied from dashboard)
 
-mod settings;
 mod secrets;
+mod settings;
 
+use crate::error::{AppResult, ErrorContext};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, put, delete},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -31,16 +32,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use anyhow::{Context, Result};
 use tracing::{error, info};
 
 use crate::db::types as queries;
 use crate::llm::{resolve_llm_api_key, ChatMessage, CompletionRequest, LLMClient};
 use crate::mcp::{AppContext, McpRegistry, McpToolCall};
-use crate::prompt_builder::{build_planning_prompt, build_system_prompt, MemoryStore, PlanningPromptParams};
+use crate::prompt_builder::{
+    build_planning_prompt, build_system_prompt, MemoryStore, PlanningPromptParams,
+};
 
-pub mod plugins;
 mod diagnostic;
+pub mod plugins;
 /// Shared application state for the HTTP server.
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -68,7 +70,7 @@ pub struct ServerConfig {
 }
 
 /// Start the HTTP server on the given host and port.
-pub async fn start_server(config: ServerConfig) -> Result<()> {
+pub async fn start_server(config: ServerConfig) -> AppResult<()> {
     let app_state = Arc::new(AppState {
         pool: config.pool,
         cancel_tokens: config.cancel_tokens,
@@ -89,7 +91,10 @@ pub async fn start_server(config: ServerConfig) -> Result<()> {
         .route("/open/{channel_id}", get(open_handler))
         .route("/status/{channel_id}", get(status_handler))
         .route("/prompt/{channel_name}", get(prompt_handler))
-        .route("/prompt-preview/{channel_name}", post(prompt_preview_handler))
+        .route(
+            "/prompt-preview/{channel_name}",
+            post(prompt_preview_handler),
+        )
         .route("/actions", get(list_actions_handler))
         .route("/actions", post(create_action_handler))
         .route("/actions/{id}", put(update_action_handler))
@@ -102,18 +107,45 @@ pub async fn start_server(config: ServerConfig) -> Result<()> {
         .route("/api/plugins/ping", get(|| async { "pong" }))
         .route("/api/plugins/check-state", get(diagnostic::check_state))
         .route("/api/plugins/check-db", get(diagnostic::check_db))
-        .route("/api/plugins/check-list", get(diagnostic::check_list_plugins))
+        .route(
+            "/api/plugins/check-list",
+            get(diagnostic::check_list_plugins),
+        )
         .route("/api/plugins/check-env", get(diagnostic::check_env_read))
-        .route("/api/plugins/check-enrich", get(diagnostic::check_enrich_json))
+        .route(
+            "/api/plugins/check-enrich",
+            get(diagnostic::check_enrich_json),
+        )
         .route("/api/plugins", get(plugins::list_plugins_handler))
         .route("/api/plugins/{name}", get(plugins::get_plugin_handler))
-        .route("/api/plugins/{name}/config", post(plugins::update_config_handler))
-        .route("/api/plugins/{name}/enable", post(plugins::enable_plugin_handler))
-        .route("/api/plugins/{name}/disable", post(plugins::disable_plugin_handler))
-        .route("/api/plugins/{name}/reinstall", post(plugins::reinstall_plugin_handler))
-        .route("/api/plugins/{name}/refresh-models", post(plugins::refresh_models_handler))
-        .route("/api/plugins/{name}", delete(plugins::delete_plugin_handler))
-        .route("/api/plugins/install-url", post(plugins::install_url_handler))
+        .route(
+            "/api/plugins/{name}/config",
+            post(plugins::update_config_handler),
+        )
+        .route(
+            "/api/plugins/{name}/enable",
+            post(plugins::enable_plugin_handler),
+        )
+        .route(
+            "/api/plugins/{name}/disable",
+            post(plugins::disable_plugin_handler),
+        )
+        .route(
+            "/api/plugins/{name}/reinstall",
+            post(plugins::reinstall_plugin_handler),
+        )
+        .route(
+            "/api/plugins/{name}/refresh-models",
+            post(plugins::refresh_models_handler),
+        )
+        .route(
+            "/api/plugins/{name}",
+            delete(plugins::delete_plugin_handler),
+        )
+        .route(
+            "/api/plugins/install-url",
+            post(plugins::install_url_handler),
+        )
         // ── Settings routes ──
         .route("/settings", get(settings::get_settings_handler))
         .route("/settings", put(settings::update_settings_handler))
@@ -130,11 +162,11 @@ pub async fn start_server(config: ServerConfig) -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .context("Failed to bind HTTP server address")?;
+        .ctx("Failed to bind HTTP server address")?;
 
     axum::serve(listener, app)
         .await
-        .context("HTTP server exited with error")?;
+        .ctx("HTTP server exited with error")?;
 
     Ok(())
 }
@@ -160,7 +192,10 @@ async fn stop_handler(
             count
         }
         Err(e) => {
-            error!("Stop: failed to skip threads for channel {}: {:?}", channel_id, e);
+            error!(
+                "Stop: failed to skip threads for channel {}: {:?}",
+                channel_id, e
+            );
             0
         }
     };
@@ -214,7 +249,10 @@ async fn close_handler(
             count
         }
         Err(e) => {
-            error!("Close: failed to skip threads for channel {}: {:?}", channel_id, e);
+            error!(
+                "Close: failed to skip threads for channel {}: {:?}",
+                channel_id, e
+            );
             0
         }
     };
@@ -233,7 +271,10 @@ async fn close_handler(
     let mut tokens = state.cancel_tokens.lock().await;
     let has_handler = if let Some(token) = tokens.remove(&channel_id) {
         token.cancel();
-        info!("Close: cancelled processing task for channel {}", channel_id);
+        info!(
+            "Close: cancelled processing task for channel {}",
+            channel_id
+        );
         true
     } else {
         false
@@ -302,7 +343,10 @@ async fn status_handler(
             "channel_id": channel_id,
         })),
         Err(e) => {
-            error!("Status: failed to get status for channel {}: {:?}", channel_id, e);
+            error!(
+                "Status: failed to get status for channel {}: {:?}",
+                channel_id, e
+            );
             Json(serde_json::json!({
                 "status": "error",
                 "error": e.to_string(),
@@ -342,7 +386,10 @@ async fn prompt_handler(
     let mut memory_store = MemoryStore::new(&profile_path);
     memory_store.load_from_disk();
 
-    let platform = channel.as_ref().and_then(|c| c.platform.as_deref()).unwrap_or("");
+    let platform = channel
+        .as_ref()
+        .and_then(|c| c.platform.as_deref())
+        .unwrap_or("");
     let system_prompt = build_system_prompt(&memory_store, platform, None, profile_name);
 
     let result = format!(
@@ -398,12 +445,13 @@ async fn prompt_preview_handler(
     let mut memory_store = MemoryStore::new(&profile_path);
     memory_store.load_from_disk();
 
-    let platform = channel.as_ref().and_then(|c| c.platform.as_deref()).unwrap_or("");
+    let platform = channel
+        .as_ref()
+        .and_then(|c| c.platform.as_deref())
+        .unwrap_or("");
     let system_prompt = build_system_prompt(&memory_store, platform, None, profile_name);
 
-    let mut messages = vec![
-        serde_json::json!({ "role": "system", "content": &system_prompt }),
-    ];
+    let mut messages = vec![serde_json::json!({ "role": "system", "content": &system_prompt })];
 
     // ── Build the [3] Context section using the same logic as the agent ──
     // Uses the latest thread in the channel (if any) with the preview prompt
@@ -413,7 +461,9 @@ async fn prompt_preview_handler(
         if let Ok(Some(latest)) = queries::get_latest_seq0_message(&state.pool, ch.id).await {
             if let Ok(Some(tid)) = queries::get_message_thread(&state.pool, latest.id).await {
                 let profile_registry = crate::profile::ProfileRegistry::new(&state.data_dir);
-                let prof = profile_registry.get(profile_name).cloned()
+                let prof = profile_registry
+                    .get(profile_name)
+                    .cloned()
                     .unwrap_or_else(|| crate::profile::Profile::default(profile_name));
                 let qdrant_url = std::env::var("QDRANT_URL").ok();
 
@@ -429,12 +479,15 @@ async fn prompt_preview_handler(
                         profile_name,
                         data_dir: &state.data_dir,
                         qdrant_url: qdrant_url.as_deref(),
-                        prompt_budget: prof.prompt_budget.unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
+                        prompt_budget: prof
+                            .prompt_budget
+                            .unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
                         auto_retrieval_enabled: prof.auto_retrieval_enabled,
                         retrieval_aggressiveness: prof.retrieval_aggressiveness,
                         task_context: false,
                     },
-                ).await;
+                )
+                .await;
 
                 if !context_text.is_empty() {
                     messages.push(serde_json::json!({
@@ -452,7 +505,9 @@ async fn prompt_preview_handler(
     let plan = if body.plan {
         // Resolve provider/model: channel > profile > env
         let profile_registry = crate::profile::ProfileRegistry::new(&state.data_dir);
-        let prof = profile_registry.get(profile_name).cloned()
+        let prof = profile_registry
+            .get(profile_name)
+            .cloned()
             .unwrap_or_else(|| crate::profile::Profile::default(profile_name));
 
         let ch_provider = channel.as_ref().and_then(|ch| ch.current_provider.clone());
@@ -510,9 +565,13 @@ async fn prompt_preview_handler(
         // Create LLM client — match how the agent resolves config
         // (AgentConfig::from_env() tries LLM_API_KEY, then {PROVIDER}_API_KEY).
         let base_url = crate::llm::resolve_default_base_url(&provider_name);
-        let api_key = resolve_llm_api_key(Some(&std::env::var(
-            format!("{}_API_KEY", provider_name.to_uppercase().replace('-', "_"))
-        ).unwrap_or_default()));
+        let api_key = resolve_llm_api_key(Some(
+            &std::env::var(format!(
+                "{}_API_KEY",
+                provider_name.to_uppercase().replace('-', "_")
+            ))
+            .unwrap_or_default(),
+        ));
         let api_mode = crate::llm::ApiMode::resolve(&provider_name, &model_name);
 
         let llm_config = crate::llm::LLMConfig {
@@ -542,7 +601,9 @@ async fn prompt_preview_handler(
             }
             Err(e) => {
                 let err_msg = format!("Planning failed: {}", e);
-                messages.push(serde_json::json!({ "role": "agent", "msg_type": "plan", "content": err_msg }));
+                messages.push(
+                    serde_json::json!({ "role": "agent", "msg_type": "plan", "content": err_msg }),
+                );
                 Some(err_msg)
             }
         }
@@ -587,9 +648,7 @@ fn default_params() -> serde_json::Value {
 // ── Action handlers ──
 
 /// GET /actions — list all saved actions (from YAML), including disabled.
-async fn list_actions_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+async fn list_actions_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     match crate::actions::load_all_actions(&state.data_dir) {
         Ok(actions) => Json(serde_json::json!(actions)),
         Err(e) => {
@@ -623,7 +682,13 @@ async fn update_action_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateActionRequest>,
 ) -> impl IntoResponse {
-    match crate::actions::update_action(&state.data_dir, &id, &body.tool_name, &body.params, body.enabled) {
+    match crate::actions::update_action(
+        &state.data_dir,
+        &id,
+        &body.tool_name,
+        &body.params,
+        body.enabled,
+    ) {
         Ok(action) => Json(serde_json::json!(action)).into_response(),
         Err(e) => {
             error!("Failed to update action {}: {:?}", id, e);
@@ -705,17 +770,18 @@ async fn run_action_handler(
     // 3. Execute via MCP registry
     let ctx = state.app_context.clone();
     match state.mcp_registry.execute(&mcp_call, ctx).await {
-        Ok(result) => {
-            Json(serde_json::json!({
-                "action_id": action.id,
-                "name": action.name,
-                "tool_name": action.tool_name,
-                "result": result.content,
-                "is_error": false,
-            }))
-        }
+        Ok(result) => Json(serde_json::json!({
+            "action_id": action.id,
+            "name": action.name,
+            "tool_name": action.tool_name,
+            "result": result.content,
+            "is_error": false,
+        })),
         Err(e) => {
-            error!("Failed to execute action {} (tool: {}): {:?}", action.id, action.tool_name, e);
+            error!(
+                "Failed to execute action {} (tool: {}): {:?}",
+                action.id, action.tool_name, e
+            );
             Json(serde_json::json!({
                 "action_id": action.id,
                 "name": action.name,
@@ -728,9 +794,7 @@ async fn run_action_handler(
 }
 
 /// GET /mcp/tools — list all registered MCP tools with their input schemas.
-async fn list_mcp_tools_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
+async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let tools: Vec<serde_json::Value> = state
         .mcp_registry
         .all()
@@ -784,7 +848,10 @@ async fn run_cron_handler(
             }))
         }
         Err(e) => {
-            error!("[run-cron] Failed to fire cron job '{}': {:?}", schedule_id, e);
+            error!(
+                "[run-cron] Failed to fire cron job '{}': {:?}",
+                schedule_id, e
+            );
             let msg = format!("{:#}", e);
             Json(serde_json::json!({
                 "success": false,
@@ -808,7 +875,9 @@ async fn context_preview_handler(
         Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": format!("Channel '{}' not found", channel_name) })),
+                Json(
+                    serde_json::json!({ "error": format!("Channel '{}' not found", channel_name) }),
+                ),
             );
         }
         Err(e) => {
@@ -828,7 +897,9 @@ async fn context_preview_handler(
 
     // Get the latest seq-0 message in this channel to use as the cause
     // (so retrieval/search context is based on real content).
-    let (cause_id, cause_content) = match queries::get_latest_seq0_message(&state.pool, channel.id).await {
+    let (cause_id, cause_content) = match queries::get_latest_seq0_message(&state.pool, channel.id)
+        .await
+    {
         Ok(Some(msg)) => (msg.id, msg.content),
         Ok(None) => {
             return (
@@ -837,7 +908,10 @@ async fn context_preview_handler(
             );
         }
         Err(e) => {
-            error!("Failed to get latest message for channel {}: {:?}", channel.id, e);
+            error!(
+                "Failed to get latest message for channel {}: {:?}",
+                channel.id, e
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": format!("Database error: {}", e) })),
@@ -865,7 +939,9 @@ async fn context_preview_handler(
 
     // Resolve profile
     let profile_registry = crate::profile::ProfileRegistry::new(&state.data_dir);
-    let prof = profile_registry.get(profile_name).cloned()
+    let prof = profile_registry
+        .get(profile_name)
+        .cloned()
         .unwrap_or_else(|| crate::profile::Profile::default(profile_name));
 
     // Build context — same function the agent uses
@@ -882,14 +958,20 @@ async fn context_preview_handler(
             profile_name,
             data_dir: &state.data_dir,
             qdrant_url: qdrant_url.as_deref(),
-            prompt_budget: prof.prompt_budget.unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
+            prompt_budget: prof
+                .prompt_budget
+                .unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
             auto_retrieval_enabled: prof.auto_retrieval_enabled,
             retrieval_aggressiveness: prof.retrieval_aggressiveness,
             task_context: false,
         },
-    ).await;
+    )
+    .await;
 
-    (StatusCode::OK, Json(serde_json::json!({ "context": context_text, "timings": meta.step_timings_ms })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "context": context_text, "timings": meta.step_timings_ms })),
+    )
 }
 
 // ── Kanban History handler ──
@@ -906,9 +988,11 @@ async fn list_kanban_history_handler(
         offset: params.offset,
     };
     match crate::db::kanban::list_kanban_history(&state.pool, &db_params).await {
-        Ok(rows) => {
-            (StatusCode::OK, Json(serde_json::json!({ "success": true, "data": rows }))).into_response()
-        }
+        Ok(rows) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "success": true, "data": rows })),
+        )
+            .into_response(),
         Err(e) => {
             error!("Failed to list kanban history: {:?}", e);
             (
@@ -986,7 +1070,10 @@ mod tests {
             "tool_name": "test_tool"
         });
         let result: Result<CreateActionRequest, _> = serde_json::from_value(json);
-        assert!(result.is_err(), "missing 'name' should fail deserialization");
+        assert!(
+            result.is_err(),
+            "missing 'name' should fail deserialization"
+        );
     }
 
     // ─── UpdateActionRequest serde ───────────────────────────────────────
@@ -1069,9 +1156,7 @@ mod tests {
     fn test_prompt_preview_response_serialize() {
         let resp = PromptPreviewResponse {
             system_prompt: "test system".to_string(),
-            messages: vec![
-                serde_json::json!({ "role": "system", "content": "test" }),
-            ],
+            messages: vec![serde_json::json!({ "role": "system", "content": "test" })],
             plan: Some("my plan".to_string()),
         };
         let json = serde_json::to_value(&resp).unwrap();

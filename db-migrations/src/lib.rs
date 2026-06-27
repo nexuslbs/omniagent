@@ -25,6 +25,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     phase_15_drop_plugin_registry(pool).await?;
     phase_16_append_only_message_trigger(pool).await?;
     phase_17_drop_message_provider_model(pool).await?;
+    phase_18_create_kanban_channel(pool).await?;
     Ok(())
 }
 
@@ -33,17 +34,17 @@ async fn phase_1_core_tables(pool: &PgPool) -> Result<()> {
     // Enable pgvector extension — wrapped in DO block so it doesn't fail
     // if pgvector isn't installed (optional vector support).
     sqlx::query(
-            r#"
+        r#"
             DO $$ BEGIN
                 CREATE EXTENSION IF NOT EXISTS vector;
             EXCEPTION
                 WHEN OTHERS THEN
                     -- vector extension not available, continue without it
             END $$;
-            "#
-        )
-        .execute(pool)
-        .await?;
+            "#,
+    )
+    .execute(pool)
+    .await?;
 
     // Create channels table
     sqlx::query(
@@ -273,7 +274,7 @@ async fn phase_3_feature_tables(pool: &PgPool) -> Result<()> {
         EXCEPTION
             WHEN duplicate_object THEN NULL;
         END $$;
-        "#
+        "#,
     )
     .execute(pool)
     .await?;
@@ -290,9 +291,11 @@ async fn phase_3_feature_tables(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await?;
 
-    sqlx::query("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO omniagent_readonly")
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO omniagent_readonly",
+    )
+    .execute(pool)
+    .await?;
 
     // ── Add channel_id and profile to kanban_tasks ──
     sqlx::query(
@@ -370,7 +373,7 @@ async fn phase_3_feature_tables(pool: &PgPool) -> Result<()> {
             started_at      TIMESTAMPTZ,
             ended_at        TIMESTAMPTZ
         );
-        "#
+        "#,
     )
     .execute(pool)
     .await?;
@@ -378,7 +381,7 @@ async fn phase_3_feature_tables(pool: &PgPool) -> Result<()> {
     sqlx::query(
         r#"
         CREATE INDEX IF NOT EXISTS idx_threads_channel_status ON threads(channel_id, status);
-        "#
+        "#,
     )
     .execute(pool)
     .await?;
@@ -448,14 +451,18 @@ async fn phase_3_feature_tables(pool: &PgPool) -> Result<()> {
                     DROP COLUMN IF EXISTS token_usage,
                     DROP COLUMN IF EXISTS iterations,
                     DROP COLUMN IF EXISTS iteration_count
-                "#
+                "#,
             )
             .execute(pool)
             .await?;
 
             // Drop old indexes
-            sqlx::query("DROP INDEX IF EXISTS idx_messages_channel_status").execute(pool).await?;
-            sqlx::query("DROP INDEX IF EXISTS idx_messages_profile").execute(pool).await?;
+            sqlx::query("DROP INDEX IF EXISTS idx_messages_channel_status")
+                .execute(pool)
+                .await?;
+            sqlx::query("DROP INDEX IF EXISTS idx_messages_profile")
+                .execute(pool)
+                .await?;
         }
     }
 
@@ -512,7 +519,7 @@ async fn phase_4_indexes_and_columns(pool: &PgPool) -> Result<()> {
         r#"
         ALTER TABLE channels
         ADD COLUMN IF NOT EXISTS closed BOOLEAN NOT NULL DEFAULT false
-        "#
+        "#,
     )
     .execute(pool)
     .await?;
@@ -526,7 +533,7 @@ async fn phase_4_indexes_and_columns(pool: &PgPool) -> Result<()> {
         EXCEPTION
             WHEN duplicate_table THEN NULL;
         END $$;
-        "#
+        "#,
     )
     .execute(pool)
     .await?;
@@ -536,7 +543,7 @@ async fn phase_4_indexes_and_columns(pool: &PgPool) -> Result<()> {
         r#"
         ALTER TABLE threads
         ADD COLUMN IF NOT EXISTS terminal BOOLEAN NOT NULL DEFAULT false
-        "#
+        "#,
     )
     .execute(pool)
     .await?;
@@ -729,11 +736,9 @@ async fn phase_4_indexes_and_columns(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Actions ID sequence ──
-    sqlx::query(
-        r#"CREATE SEQUENCE IF NOT EXISTS actions_id_seq START 1;"#,
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query(r#"CREATE SEQUENCE IF NOT EXISTS actions_id_seq START 1;"#)
+        .execute(pool)
+        .await?;
 
     // ── Add is_builtin column to actions table ──
     sqlx::query(
@@ -802,25 +807,19 @@ async fn phase_4_indexes_and_columns(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Add position column to kanban_tasks ──
-    sqlx::query(
-        r#"ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS position INTEGER;"#,
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query(r#"ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS position INTEGER;"#)
+        .execute(pool)
+        .await?;
 
     // ── Add template column to kanban_tasks ──
-    sqlx::query(
-        r#"ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS template TEXT DEFAULT '';"#,
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query(r#"ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS template TEXT DEFAULT '';"#)
+        .execute(pool)
+        .await?;
 
     // ── Add template column to cron_jobs ──
-    sqlx::query(
-        r#"ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS template TEXT DEFAULT '';"#,
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query(r#"ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS template TEXT DEFAULT '';"#)
+        .execute(pool)
+        .await?;
 
     Ok(())
 }
@@ -847,11 +846,9 @@ async fn phase_5_planning_and_search(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── GIN trigram index for ILIKE search performance ──
-    sqlx::query(
-        r#"CREATE EXTENSION IF NOT EXISTS pg_trgm;"#,
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query(r#"CREATE EXTENSION IF NOT EXISTS pg_trgm;"#)
+        .execute(pool)
+        .await?;
     sqlx::query(
         r#"
         CREATE INDEX IF NOT EXISTS idx_messages_content_trgm
@@ -879,11 +876,9 @@ async fn phase_5_planning_and_search(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Add previous_values column to kanban_history if missing ──
-    sqlx::query(
-        r#"ALTER TABLE kanban_history ADD COLUMN IF NOT EXISTS previous_values JSONB;"#,
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query(r#"ALTER TABLE kanban_history ADD COLUMN IF NOT EXISTS previous_values JSONB;"#)
+        .execute(pool)
+        .await?;
 
     Ok(())
 }
@@ -922,7 +917,10 @@ async fn phase_6_vector_and_secrets(pool: &PgPool) -> Result<()> {
         .await?;
         let backfilled = backfill_result.rows_affected();
         if backfilled > 0 {
-            tracing::info!("Backfilled {} embeddings into embedding_vec column", backfilled);
+            tracing::info!(
+                "Backfilled {} embeddings into embedding_vec column",
+                backfilled
+            );
         }
 
         // 3. Create HNSW index on the vector column for fast ANN search.
@@ -947,9 +945,7 @@ async fn phase_6_vector_and_secrets(pool: &PgPool) -> Result<()> {
 
         tracing::info!("pgvector HNSW index and embedding_vec column ready");
     } else {
-        tracing::warn!(
-            "pgvector extension not available — skipping HNSW index and vector column."
-        );
+        tracing::warn!("pgvector extension not available — skipping HNSW index and vector column.");
     }
 
     // ── Secrets for user-managed key/value store with versioning ──
@@ -1239,7 +1235,9 @@ async fn phase_16_append_only_message_trigger(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    tracing::info!("[migration] Phase 16 complete: messages immutable — only embedding_vec is updatable");
+    tracing::info!(
+        "[migration] Phase 16 complete: messages immutable — only embedding_vec is updatable"
+    );
     Ok(())
 }
 
@@ -1299,5 +1297,21 @@ async fn phase_17_drop_message_provider_model(pool: &PgPool) -> Result<()> {
     .await?;
 
     tracing::info!("[migration] Phase 17 complete: dropped provider/model from messages (now only on threads); trigger updated");
+    Ok(())
+}
+
+/// Phase 18: Create the 'kanban' channel if one doesn't exist yet.
+async fn phase_18_create_kanban_channel(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO channels (name, platform, external_id, resource_identifier, cause)
+        SELECT 'kanban', 'kanban', 'kanban', 'kanban', 'system'
+        WHERE NOT EXISTS (SELECT 1 FROM channels WHERE platform = 'kanban' AND name = 'kanban')
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!("[migration] Phase 18 complete: kanban channel created if not already present");
     Ok(())
 }

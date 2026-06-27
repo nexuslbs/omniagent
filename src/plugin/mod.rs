@@ -10,7 +10,8 @@
 
 pub mod installer;
 
-use anyhow::{Context, Result};
+use crate::error::{AppResult, ErrorContext};
+use crate::err_msg;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -132,13 +133,13 @@ pub fn default_transport() -> String {
 // ---------------------------------------------------------------------------
 
 /// Read and validate a plugin.json file from disk.
-pub fn load_manifest(path: &str) -> Result<PluginManifest> {
+pub fn load_manifest(path: &str) -> AppResult<PluginManifest> {
     let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read plugin manifest: {}", path))?;
+        .ctx(format!("Failed to read plugin manifest: {}", path))?;
     let manifest: PluginManifest = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse plugin manifest: {}", path))?;
+        .ctx(format!("Failed to parse plugin manifest: {}", path))?;
     if manifest.name.is_empty() {
-        anyhow::bail!("Plugin manifest has empty 'name' field: {}", path);
+        err_msg!("Plugin manifest has empty 'name' field: {}", path);
     }
     Ok(manifest)
 }
@@ -248,18 +249,42 @@ mod tests {
 
     #[test]
     fn test_parse_plugin_type() {
-        assert_eq!(serde_json::from_str::<PluginType>("\"platform\"").unwrap(), PluginType::Platform);
-        assert_eq!(serde_json::from_str::<PluginType>("\"mcp\"").unwrap(), PluginType::Mcp);
+        assert_eq!(
+            serde_json::from_str::<PluginType>("\"platform\"").unwrap(),
+            PluginType::Platform
+        );
+        assert_eq!(
+            serde_json::from_str::<PluginType>("\"mcp\"").unwrap(),
+            PluginType::Mcp
+        );
     }
 
     #[test]
     fn test_parse_field_type() {
-        assert_eq!(serde_json::from_str::<FieldType>("\"string\"").unwrap(), FieldType::String);
-        assert_eq!(serde_json::from_str::<FieldType>("\"secret\"").unwrap(), FieldType::Secret);
-        assert_eq!(serde_json::from_str::<FieldType>("\"boolean\"").unwrap(), FieldType::Boolean);
-        assert_eq!(serde_json::from_str::<FieldType>("\"integer\"").unwrap(), FieldType::Integer);
-        assert_eq!(serde_json::from_str::<FieldType>("\"enum\"").unwrap(), FieldType::Enum);
-        assert_eq!(serde_json::from_str::<FieldType>("\"multi_select\"").unwrap(), FieldType::MultiSelect);
+        assert_eq!(
+            serde_json::from_str::<FieldType>("\"string\"").unwrap(),
+            FieldType::String
+        );
+        assert_eq!(
+            serde_json::from_str::<FieldType>("\"secret\"").unwrap(),
+            FieldType::Secret
+        );
+        assert_eq!(
+            serde_json::from_str::<FieldType>("\"boolean\"").unwrap(),
+            FieldType::Boolean
+        );
+        assert_eq!(
+            serde_json::from_str::<FieldType>("\"integer\"").unwrap(),
+            FieldType::Integer
+        );
+        assert_eq!(
+            serde_json::from_str::<FieldType>("\"enum\"").unwrap(),
+            FieldType::Enum
+        );
+        assert_eq!(
+            serde_json::from_str::<FieldType>("\"multi_select\"").unwrap(),
+            FieldType::MultiSelect
+        );
     }
 
     #[test]

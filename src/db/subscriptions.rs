@@ -12,7 +12,7 @@ use crate::db::types::SubscriptionDb;
 pub async fn get_subscribers_for_channel(
     pool: &PgPool,
     channel_id: i64,
-) -> anyhow::Result<Vec<SubscriptionDb>> {
+) -> crate::error::AppResult<Vec<SubscriptionDb>> {
     let rows: Vec<SubscriptionDb> = sql_forge!(
         SubscriptionDb,
         r#"

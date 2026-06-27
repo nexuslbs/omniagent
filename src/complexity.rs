@@ -23,7 +23,11 @@ pub enum Complexity {
 ///           or is a kanban/cron task with substantive content,
 ///           or length > `standard_max` chars.
 /// Standard: everything else.
-pub fn classify_complexity(content: &str, msg_type: &str, metadata_word_count: Option<usize>) -> Complexity {
+pub fn classify_complexity(
+    content: &str,
+    msg_type: &str,
+    metadata_word_count: Option<usize>,
+) -> Complexity {
     let trimmed = content.trim();
     let char_len = trimmed.len();
     let word_count = trimmed.split_whitespace().count();
@@ -42,8 +46,22 @@ pub fn classify_complexity(content: &str, msg_type: &str, metadata_word_count: O
     if char_len < simple_max || word_count <= 3 {
         let lower = trimmed.to_lowercase();
         let greetings = [
-            "hi", "hello", "hey", "ok", "okay", "k", "thanks", "ty", "thx",
-            "\u{1f44d}", "\u{1f64f}", "done", "yes", "no", "good", "great",
+            "hi",
+            "hello",
+            "hey",
+            "ok",
+            "okay",
+            "k",
+            "thanks",
+            "ty",
+            "thx",
+            "\u{1f44d}",
+            "\u{1f64f}",
+            "done",
+            "yes",
+            "no",
+            "good",
+            "great",
         ];
         if word_count <= 2 || greetings.iter().any(|g| lower.contains(g)) {
             return Complexity::Simple;
@@ -52,13 +70,12 @@ pub fn classify_complexity(content: &str, msg_type: &str, metadata_word_count: O
 
     // Complex: specific action keywords or kanban/cron tasks with content
     let lower = trimmed.to_lowercase();
-    let keywords_raw = std::env::var("PLANNING_COMPLEXITY_KEYWORDS")
-        .unwrap_or_else(|_| {
-            "implement,refactor,redesign,architecture,create,build,design,develop,\
+    let keywords_raw = std::env::var("PLANNING_COMPLEXITY_KEYWORDS").unwrap_or_else(|_| {
+        "implement,refactor,redesign,architecture,create,build,design,develop,\
              migrate,restructure,overhaul,rewrite,configure,set up,deploy,integrate,\
              add feature,fix bug,resolve issue,multi-step,complex"
-                .to_string()
-        });
+            .to_string()
+    });
     let complex_keywords: Vec<&str> = keywords_raw.split(',').map(|s| s.trim()).collect();
 
     let is_complex_keyword = complex_keywords.iter().any(|kw| lower.contains(kw));

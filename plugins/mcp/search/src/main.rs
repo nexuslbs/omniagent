@@ -112,7 +112,10 @@ fn handle_search_wiki(args: &Value) -> Result<(String, bool)> {
 
     if !wiki_dir_path.exists() {
         return Ok((
-            format!("Wiki directory not found: {}. Is the profile correct?", wiki_dir),
+            format!(
+                "Wiki directory not found: {}. Is the profile correct?",
+                wiki_dir
+            ),
             false,
         ));
     }
@@ -147,7 +150,11 @@ fn handle_search_wiki(args: &Value) -> Result<(String, bool)> {
                                 .iter()
                                 .map(|l| {
                                     if l.len() > 100 {
-                                        let trunc_to = l.char_indices().nth(100).map(|(i, _)| i).unwrap_or(l.len());
+                                        let trunc_to = l
+                                            .char_indices()
+                                            .nth(100)
+                                            .map(|(i, _)| i)
+                                            .unwrap_or(l.len());
                                         &l[..trunc_to]
                                     } else {
                                         *l
@@ -203,9 +210,8 @@ async fn main() -> Result<()> {
         Box::pin(async move { handle_search_messages(&p, &args).await })
     });
 
-    let wiki_handler: ToolHandler = Box::new(move |args: Value| {
-        Box::pin(async move { handle_search_wiki(&args) })
-    });
+    let wiki_handler: ToolHandler =
+        Box::new(move |args: Value| Box::pin(async move { handle_search_wiki(&args) }));
 
     let tools = vec![
         McpToolEntry {

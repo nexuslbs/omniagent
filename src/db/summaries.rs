@@ -11,7 +11,7 @@ use crate::db::types::SummaryDb;
 pub async fn get_latest_summary(
     pool: &PgPool,
     channel_id: i64,
-) -> anyhow::Result<Option<SummaryDb>> {
+) -> crate::error::AppResult<Option<SummaryDb>> {
     let row: Option<SummaryDb> = sql_forge!(
         SummaryDb,
         r#"
@@ -37,7 +37,7 @@ pub async fn get_recent_summaries(
     pool: &PgPool,
     channel_id: i64,
     limit: i64,
-) -> anyhow::Result<Vec<SummaryDb>> {
+) -> crate::error::AppResult<Vec<SummaryDb>> {
     let rows: Vec<SummaryDb> = sql_forge!(
         SummaryDb,
         r#"
@@ -63,7 +63,7 @@ pub async fn create_summary(
     channel_id: i64,
     next_thread_id: i64,
     content: &str,
-) -> anyhow::Result<SummaryDb> {
+) -> crate::error::AppResult<SummaryDb> {
     let row: SummaryDb = sql_forge!(
         SummaryDb,
         r#"
@@ -85,7 +85,7 @@ pub async fn create_summary(
 pub async fn delete_old_summaries(
     pool: &PgPool,
     before: chrono::DateTime<chrono::Utc>,
-) -> anyhow::Result<u64> {
+) -> crate::error::AppResult<u64> {
     let result = sql_forge!(
         "DELETE FROM summaries WHERE created_at < :cutoff",
         ( :cutoff = before )

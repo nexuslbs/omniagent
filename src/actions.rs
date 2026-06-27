@@ -16,7 +16,8 @@
 //! Reads happen on every access (no caching — file is tiny, parsing is ~50µs).
 //! Writes are atomic: write to `.tmp` → fsync → rename.
 
-use anyhow::{Context, Result};
+use crate::error::{Error, AppResult, ErrorContext};
+use crate::err_msg;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -81,15 +82,15 @@ pub fn is_builtin_id(id: &str) -> bool {
 }
 
 /// Load all actions from the YAML file. Returns an empty vec if file doesn't exist.
-pub fn load_actions(data_dir: &str) -> Result<Vec<ActionApi>> {
+pub fn load_actions(data_dir: &str) -> AppResult<Vec<ActionApi>> {
     let path = actions_path(data_dir);
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).ctx(format!("Failed to read {}", path.display()))?;
     let file: ActionsFile = serde_yaml::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+        .ctx(format!("Failed to parse {}", path.display()))?;
 
     let mut result: Vec<ActionApi> = file
         .actions
@@ -118,15 +119,15 @@ pub fn load_actions(data_dir: &str) -> Result<Vec<ActionApi>> {
 }
 
 /// Load ALL actions from YAML (including disabled). For the dashboard list view.
-pub fn load_all_actions(data_dir: &str) -> Result<Vec<ActionApi>> {
+pub fn load_all_actions(data_dir: &str) -> AppResult<Vec<ActionApi>> {
     let path = actions_path(data_dir);
     if !path.exists() {
         return Ok(Vec::new());
     }
     let content =
-        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+        fs::read_to_string(&path).ctx(format!("Failed to read {}", path.display()))?;
     let file: ActionsFile = serde_yaml::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+        .ctx(format!("Failed to parse {}", path.display()))?;
 
     let mut result: Vec<ActionApi> = file
         .actions
@@ -152,13 +153,13 @@ pub fn load_all_actions(data_dir: &str) -> Result<Vec<ActionApi>> {
 }
 
 /// Get a single action by id (only enabled).
-pub fn get_action(data_dir: &str, id: &str) -> Result<Option<ActionApi>> {
+pub fn get_action(data_dir: &str, id: &str) -> AppResult<Option<ActionApi>> {
     let actions = load_actions(data_dir)?;
     Ok(actions.into_iter().find(|a| a.id == id))
 }
 
 /// Get a single action by id (including disabled). For dashboard operations.
-pub fn get_action_unfiltered(data_dir: &str, id: &str) -> Result<Option<ActionApi>> {
+pub fn get_action_unfiltered(data_dir: &str, id: &str) -> AppResult<Option<ActionApi>> {
     let actions = load_all_actions(data_dir)?;
     Ok(actions.into_iter().find(|a| a.id == id))
 }
@@ -171,56 +172,70 @@ pub fn action_exists(data_dir: &str, id: &str) -> bool {
 // ── Save ──
 
 /// Save all actions to the YAML file (atomic write: .tmp → fsync → rename).
-fn save_actions_file(data_dir: &str, actions: BTreeMap<String, ActionEntry>) -> Result<()> {
+fn save_actions_file(data_dir: &str, actions: BTreeMap<String, ActionEntry>) -> AppResult<()> {
     let file = ActionsFile { actions };
     let path = actions_path(data_dir);
     let tmp_path = path.with_extension("yml.tmp");
 
-    let yaml = serde_yaml::to_string(&file)
-        .context("Failed to serialize actions YAML")?;
+    let yaml = serde_yaml::to_string(&file).ctx("Failed to serialize actions YAML")?;
 
     {
         let mut f = fs::File::create(&tmp_path)
-            .with_context(|| format!("Failed to create {}", tmp_path.display()))?;
+            .ctx(format!("Failed to create {}", tmp_path.display()))?;
         f.write_all(yaml.as_bytes())
-            .with_context(|| format!("Failed to write {}", tmp_path.display()))?;
+            .ctx(format!("Failed to write {}", tmp_path.display()))?;
         f.sync_all()
-            .with_context(|| format!("Failed to fsync {}", tmp_path.display()))?;
+            .ctx(format!("Failed to fsync {}", tmp_path.display()))?;
     }
 
-    fs::rename(&tmp_path, &path)
-        .with_context(|| format!("Failed to rename {} -> {}", tmp_path.display(), path.display()))?;
+    fs::rename(&tmp_path, &path).ctx(format!(
+        "Failed to rename {} -> {}",
+        tmp_path.display(),
+        path.display()
+    ))?;
 
     Ok(())
 }
 
 /// Load the raw actions map from file, or return an empty map if file doesn't exist.
-fn load_raw_actions(data_dir: &str) -> Result<BTreeMap<String, ActionEntry>> {
+fn load_raw_actions(data_dir: &str) -> AppResult<BTreeMap<String, ActionEntry>> {
     let path = actions_path(data_dir);
     if !path.exists() {
         return Ok(BTreeMap::new());
     }
-    let content = fs::read_to_string(&path)
-        .with_context(|| format!("Failed to read {}", path.display()))?;
+    let content =
+        fs::read_to_string(&path).ctx(format!("Failed to read {}", path.display()))?;
     let file: ActionsFile = serde_yaml::from_str(&content)
-        .with_context(|| format!("Failed to parse {}", path.display()))?;
+        .ctx(format!("Failed to parse {}", path.display()))?;
     Ok(file.actions)
 }
 
 /// Add a new action (errors if id already exists).
-pub fn add_action(data_dir: &str, id: &str, tool_name: &str, params: &serde_json::Value) -> Result<ActionApi> {
+pub fn add_action(
+    data_dir: &str,
+    id: &str,
+    tool_name: &str,
+    params: &serde_json::Value,
+) -> AppResult<ActionApi> {
     let mut actions = load_raw_actions(data_dir)?;
 
-    if actions.contains_key(id) {
-        anyhow::bail!("Action '{}' already exists", id);
+    if id.starts_with("builtin_") {
+        err_msg!("Action id '{}' cannot start with 'builtin_' (reserved prefix)", id);
     }
 
-    actions.insert(id.to_string(), ActionEntry {
-        enabled: true,
-        tool_name: tool_name.to_string(),
-        params: params.clone(),
-        description: None,
-    });
+    if actions.contains_key(id) {
+        err_msg!("Action '{}' already exists", id);
+    }
+
+    actions.insert(
+        id.to_string(),
+        ActionEntry {
+            enabled: true,
+            tool_name: tool_name.to_string(),
+            params: params.clone(),
+            description: None,
+        },
+    );
 
     save_actions_file(data_dir, actions)?;
 
@@ -243,10 +258,12 @@ pub fn update_action(
     tool_name: &str,
     params: &serde_json::Value,
     enabled: Option<bool>,
-) -> Result<ActionApi> {
+) -> AppResult<ActionApi> {
     let mut actions = load_raw_actions(data_dir)?;
 
-    let entry = actions.get_mut(id).ok_or_else(|| anyhow::anyhow!("Action '{}' not found", id))?;
+    let entry = actions
+        .get_mut(id)
+        .ok_or_else(|| Error::Message(format!("Action '{}' not found", id)))?;
 
     entry.tool_name = tool_name.to_string();
     entry.params = params.clone();
@@ -270,7 +287,7 @@ pub fn update_action(
 }
 
 /// Delete an action by id.
-pub fn delete_action(data_dir: &str, id: &str) -> Result<bool> {
+pub fn delete_action(data_dir: &str, id: &str) -> AppResult<bool> {
     let mut actions = load_raw_actions(data_dir)?;
 
     let existed = actions.remove(id).is_some();
@@ -303,7 +320,13 @@ mod tests {
     #[test]
     fn test_add_and_load() {
         let (_d, path) = test_data_dir();
-        let a = add_action(&path, "test_action", "search_messages", &serde_json::json!({"query": "hello"})).unwrap();
+        let a = add_action(
+            &path,
+            "test_action",
+            "search_messages",
+            &serde_json::json!({"query": "hello"}),
+        )
+        .unwrap();
         assert_eq!(a.id, "test_action");
         assert_eq!(a.tool_name, "search_messages");
 
@@ -324,7 +347,8 @@ mod tests {
     fn test_update() {
         let (_d, path) = test_data_dir();
         add_action(&path, "act", "tool_a", &serde_json::json!({"p": 1})).unwrap();
-        let updated = update_action(&path, "act", "tool_b", &serde_json::json!({"p": 2}), None).unwrap();
+        let updated =
+            update_action(&path, "act", "tool_b", &serde_json::json!({"p": 2}), None).unwrap();
         assert_eq!(updated.tool_name, "tool_b");
 
         let loaded = get_action(&path, "act").unwrap().unwrap();
@@ -353,7 +377,7 @@ mod tests {
         assert!(add_action(&path, "builtin_foo", "tool", &serde_json::json!({})).is_err());
         // Add a non-builtin first
         add_action(&path, "builtin_foo", "tool", &serde_json::json!({})).ok(); // should fail silently via is_err
-        // Verify it wasn't added
+                                                                               // Verify it wasn't added
         assert!(load_actions(&path).unwrap().is_empty());
     }
 
@@ -362,18 +386,24 @@ mod tests {
         let (_d, path) = test_data_dir();
         // Manually write a file with a disabled action
         let mut actions = BTreeMap::new();
-        actions.insert("disabled_act".to_string(), ActionEntry {
-            enabled: false,
-            tool_name: "tool".to_string(),
-            params: serde_json::json!({}),
-            description: None,
-        });
-        actions.insert("enabled_act".to_string(), ActionEntry {
-            enabled: true,
-            tool_name: "tool2".to_string(),
-            params: serde_json::json!({}),
-            description: None,
-        });
+        actions.insert(
+            "disabled_act".to_string(),
+            ActionEntry {
+                enabled: false,
+                tool_name: "tool".to_string(),
+                params: serde_json::json!({}),
+                description: None,
+            },
+        );
+        actions.insert(
+            "enabled_act".to_string(),
+            ActionEntry {
+                enabled: true,
+                tool_name: "tool2".to_string(),
+                params: serde_json::json!({}),
+                description: None,
+            },
+        );
         save_actions_file(&path, actions).unwrap();
 
         let loaded = load_actions(&path).unwrap();
@@ -400,17 +430,20 @@ mod tests {
         let (_d, path) = test_data_dir();
         // Manually add a builtin-looking action to the file
         let mut actions = BTreeMap::new();
-        actions.insert("builtin_test".to_string(), ActionEntry {
-            enabled: true,
-            tool_name: "some_tool".to_string(),
-            params: serde_json::json!({}),
-            description: Some("Built-in test".to_string()),
-        });
+        actions.insert(
+            "builtin_test".to_string(),
+            ActionEntry {
+                enabled: true,
+                tool_name: "some_tool".to_string(),
+                params: serde_json::json!({}),
+                description: Some("Built-in test".to_string()),
+            },
+        );
         save_actions_file(&path, actions).unwrap();
 
         let loaded = load_actions(&path).unwrap();
         assert_eq!(loaded.len(), 1);
-        assert!(!loaded[0].is_builtin); // builtin flag removed — now always false
+        assert!(loaded[0].is_builtin); // builtin_ prefix detected
         assert_eq!(loaded[0].id, "builtin_test");
     }
 

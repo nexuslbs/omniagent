@@ -71,7 +71,10 @@ fn handle_promote(data_dir: &str, args: &Value) -> Result<(String, bool)> {
     let confidence = args["confidence"].as_str().unwrap_or("medium");
 
     if !valid_confidence(confidence) {
-        anyhow::bail!("Invalid confidence: '{}'. Must be one of: high, medium, low", confidence);
+        anyhow::bail!(
+            "Invalid confidence: '{}'. Must be one of: high, medium, low",
+            confidence
+        );
     }
 
     let source_message_ids: Vec<i64> = args["source_message_ids"]
@@ -81,17 +84,18 @@ fn handle_promote(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 
     let source_tool_outputs: Vec<String> = args["source_tool_outputs"]
         .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     let expires_in_days = args["expires_in_days"].as_i64().unwrap_or(30).max(1);
     let profile = args["profile"].as_str().unwrap_or("default");
 
     // Build the wiki path
-    let wiki_memories_dir = format!(
-        "{}/profiles/{}/wiki/Memory/Promoted",
-        data_dir, profile
-    );
+    let wiki_memories_dir = format!("{}/profiles/{}/wiki/Memory/Promoted", data_dir, profile);
     let dir_path = Path::new(&wiki_memories_dir);
     std::fs::create_dir_all(dir_path)
         .map_err(|e| anyhow::anyhow!("Failed to create memories directory: {}", e))?;
@@ -163,10 +167,7 @@ fn handle_list(data_dir: &str, args: &Value) -> Result<(String, bool)> {
     let profile = args["profile"].as_str().unwrap_or("default");
     let include_expired = args["include_expired"].as_bool().unwrap_or(false);
 
-    let wiki_memories_dir = format!(
-        "{}/profiles/{}/wiki/Memory/Promoted",
-        data_dir, profile
-    );
+    let wiki_memories_dir = format!("{}/profiles/{}/wiki/Memory/Promoted", data_dir, profile);
     let dir_path = Path::new(&wiki_memories_dir);
 
     if !dir_path.exists() {
@@ -244,10 +245,7 @@ fn handle_review(data_dir: &str, args: &Value) -> Result<(String, bool)> {
     let profile = args["profile"].as_str().unwrap_or("default");
     let expiring_soon_days = args["expiring_soon_days"].as_i64().unwrap_or(7).max(1);
 
-    let wiki_memories_dir = format!(
-        "{}/profiles/{}/wiki/Memory/Promoted",
-        data_dir, profile
-    );
+    let wiki_memories_dir = format!("{}/profiles/{}/wiki/Memory/Promoted", data_dir, profile);
     let dir_path = Path::new(&wiki_memories_dir);
 
     if !dir_path.exists() {
@@ -455,12 +453,14 @@ fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
                 .map(|s| s.as_str())
                 .collect();
             if kept.is_empty() {
-                std::fs::remove_file(&filepath)
-                    .map_err(|e| anyhow::anyhow!("Failed to remove {}: {}", filepath.display(), e))?;
+                std::fs::remove_file(&filepath).map_err(|e| {
+                    anyhow::anyhow!("Failed to remove {}: {}", filepath.display(), e)
+                })?;
             } else {
                 let new_content = kept.join(ENTRY_DELIMITER);
-                std::fs::write(&filepath, &new_content)
-                    .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", filepath.display(), e))?;
+                std::fs::write(&filepath, &new_content).map_err(|e| {
+                    anyhow::anyhow!("Failed to write {}: {}", filepath.display(), e)
+                })?;
             }
             Ok((
                 format!(
@@ -476,8 +476,9 @@ fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
         }
         "clean" => {
             if filepath.exists() {
-                std::fs::remove_file(&filepath)
-                    .map_err(|e| anyhow::anyhow!("Failed to remove {}: {}", filepath.display(), e))?;
+                std::fs::remove_file(&filepath).map_err(|e| {
+                    anyhow::anyhow!("Failed to remove {}: {}", filepath.display(), e)
+                })?;
             }
             Ok((
                 format!(
@@ -500,10 +501,8 @@ fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url =
-        std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
-    let data_dir =
-        std::env::var("DATA_DIR").context("DATA_DIR must be set")?;
+    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
+    let data_dir = std::env::var("DATA_DIR").context("DATA_DIR must be set")?;
 
     let _pool = db::connect(&database_url)
         .await
@@ -511,16 +510,23 @@ async fn main() -> Result<()> {
 
     // Wrap each handler to capture clones of data_dir
     let dd_promote = data_dir.clone();
-    let promote_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_promote(&dd_promote, &args).await }));
+    let promote_handler: ToolHandler = Box::new(move |args: Value| {
+        Box::pin(async move { handle_promote(&dd_promote, &args).await })
+    });
 
     let dd_list = data_dir.clone();
-    let list_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_list(&dd_list, &args).await }));
+    let list_handler: ToolHandler =
+        Box::new(move |args: Value| Box::pin(async move { handle_list(&dd_list, &args).await }));
 
     let dd_review = data_dir.clone();
-    let review_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_review(&dd_review, &args).await }));
+    let review_handler: ToolHandler = Box::new(move |args: Value| {
+        Box::pin(async move { handle_review(&dd_review, &args).await })
+    });
 
     let dd_manage = data_dir.clone();
-    let manage_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_manage(&dd_manage, &args).await }));
+    let manage_handler: ToolHandler = Box::new(move |args: Value| {
+        Box::pin(async move { handle_manage(&dd_manage, &args).await })
+    });
 
     let tools = vec![
         McpToolEntry {

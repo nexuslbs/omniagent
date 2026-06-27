@@ -1,7 +1,8 @@
-use anyhow::Result;
+use crate::error::AppResult;
+use crate::err_msg;
 use tracing::{error, info, warn};
 
-use crate::agent::config::{AgentContext};
+use crate::agent::config::AgentContext;
 use crate::agent::helpers;
 use crate::db::types as queries;
 use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
@@ -26,7 +27,7 @@ pub async fn process_thread(
     cfg: &AgentContext,
     thread: &Thread,
     cause_msg: &Message,
-) -> Result<Message> {
+) -> AppResult<Message> {
     let start_time = std::time::Instant::now();
 
     // 1. Mark the thread as 'processing' (already done by claim_thread, but verify)
@@ -39,7 +40,9 @@ pub async fn process_thread(
 
     // Track per-message sequence number within the thread
     // Query the max sequence so each new message gets a unique incrementing value.
-    let max_seq = queries::get_max_thread_sequence(&cfg.pool, thread.id).await.unwrap_or(0);
+    let max_seq = queries::get_max_thread_sequence(&cfg.pool, thread.id)
+        .await
+        .unwrap_or(0);
     let mut next_seq = max_seq + 1;
 
     // 3. Read profile, provider, model from the thread (not from messages)
@@ -73,10 +76,28 @@ pub async fn process_thread(
             iteration_number: 0,
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
-        let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
+        let _ = queries::complete_thread(
+            &cfg.pool,
+            thread.id,
+            "failed",
+            CompleteThreadStats {
+                input_tokens: 0,
+                cached_tokens: 0,
+                output_tokens: 0,
+                duration_ms: 0,
+            },
+        )
+        .await;
         // Deliver the error message back to the user's platform
         if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
-            helpers::enqueue_delivery(&cfg.ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
+            helpers::enqueue_delivery(
+                &cfg.ctx,
+                &saved,
+                &channel,
+                thread,
+                cause_msg.external_id.clone(),
+            )
+            .await;
         }
         return Ok(saved);
     }
@@ -90,8 +111,15 @@ pub async fn process_thread(
                 "Invalid configuration: profile='{}' does not exist.",
                 profile_name
             ),
-            thread_sequence: { let v = next_seq; v },
-            external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
+            thread_sequence: {
+                let v = next_seq;
+                v
+            },
+            external_id: Some(format!(
+                "validation-error:{}:{}",
+                thread.id,
+                chrono::Utc::now().timestamp()
+            )),
             metadata: serde_json::json!({
                 "error_type": "configuration",
                 "original_thread_id": thread.id,
@@ -106,10 +134,28 @@ pub async fn process_thread(
             iteration_number: 0,
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
-        let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
+        let _ = queries::complete_thread(
+            &cfg.pool,
+            thread.id,
+            "failed",
+            CompleteThreadStats {
+                input_tokens: 0,
+                cached_tokens: 0,
+                output_tokens: 0,
+                duration_ms: 0,
+            },
+        )
+        .await;
         // Deliver the error message back to the user's platform
         if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
-            helpers::enqueue_delivery(&cfg.ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
+            helpers::enqueue_delivery(
+                &cfg.ctx,
+                &saved,
+                &channel,
+                thread,
+                cause_msg.external_id.clone(),
+            )
+            .await;
         }
         return Ok(saved);
     }
@@ -139,10 +185,28 @@ pub async fn process_thread(
             iteration_number: 0,
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
-        let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
+        let _ = queries::complete_thread(
+            &cfg.pool,
+            thread.id,
+            "failed",
+            CompleteThreadStats {
+                input_tokens: 0,
+                cached_tokens: 0,
+                output_tokens: 0,
+                duration_ms: 0,
+            },
+        )
+        .await;
         // Deliver the error message back to the user's platform
         if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
-            helpers::enqueue_delivery(&cfg.ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
+            helpers::enqueue_delivery(
+                &cfg.ctx,
+                &saved,
+                &channel,
+                thread,
+                cause_msg.external_id.clone(),
+            )
+            .await;
         }
         return Ok(saved);
     }
@@ -172,18 +236,37 @@ pub async fn process_thread(
             iteration_number: 0,
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
-        let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
+        let _ = queries::complete_thread(
+            &cfg.pool,
+            thread.id,
+            "failed",
+            CompleteThreadStats {
+                input_tokens: 0,
+                cached_tokens: 0,
+                output_tokens: 0,
+                duration_ms: 0,
+            },
+        )
+        .await;
         // Deliver the error message back to the user's platform
         if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
-            helpers::enqueue_delivery(&cfg.ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
+            helpers::enqueue_delivery(
+                &cfg.ctx,
+                &saved,
+                &channel,
+                thread,
+                cause_msg.external_id.clone(),
+            )
+            .await;
         }
         return Ok(saved);
     }
 
     // Validation passed — load the profile for its settings (auto_retrieval_enabled, etc.)
-    let prof = profile_registry.get(&profile_name).cloned().unwrap_or_else(|| {
-        crate::profile::Profile::default(&profile_name)
-    });
+    let prof = profile_registry
+        .get(&profile_name)
+        .cloned()
+        .unwrap_or_else(|| crate::profile::Profile::default(&profile_name));
 
     // Use provider/model directly from the thread stamp (no fallback chain)
     let _provider_name = provider_name;
@@ -198,66 +281,74 @@ pub async fn process_thread(
     );
 
     // 4a. Inject subtask context if the thread has subtasks
-    let subtask_section: Option<String> = match crate::subtask::list_subtasks(&cfg.pool, thread.id).await
-    {
-        Ok(subtask_rows) => {
-            if subtask_rows.is_empty() {
-                None
-            } else {
-                let thread_subtasks: Vec<crate::prompt_builder::ThreadSubtask> = subtask_rows
-                    .iter()
-                    .enumerate()
-                    .map(|(i, row)| {
-                        let status = match row.status.as_str() {
-                            "completed" => crate::prompt_builder::SubtaskStatus::Completed,
-                            "cancelled" => crate::prompt_builder::SubtaskStatus::Cancelled,
-                            "error" => crate::prompt_builder::SubtaskStatus::Error,
-                            _ => crate::prompt_builder::SubtaskStatus::Pending,
-                        };
-                        crate::prompt_builder::ThreadSubtask {
-                            name: row.description.clone(),
-                            status,
-                            step_index: i,
-                            total_steps: subtask_rows.len(),
-                        }
-                    })
-                    .collect();
-                let section = format_subtask_section(&thread_subtasks, thread.id);
-                if section.is_some() {
-                    info!(
-                        "Injected subtask section into system prompt for thread {}",
-                        thread.id
-                    );
+    let subtask_section: Option<String> =
+        match crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
+            Ok(subtask_rows) => {
+                if subtask_rows.is_empty() {
+                    None
+                } else {
+                    let thread_subtasks: Vec<crate::prompt_builder::ThreadSubtask> = subtask_rows
+                        .iter()
+                        .enumerate()
+                        .map(|(i, row)| {
+                            let status = match row.status.as_str() {
+                                "completed" => crate::prompt_builder::SubtaskStatus::Completed,
+                                "cancelled" => crate::prompt_builder::SubtaskStatus::Cancelled,
+                                "error" => crate::prompt_builder::SubtaskStatus::Error,
+                                _ => crate::prompt_builder::SubtaskStatus::Pending,
+                            };
+                            crate::prompt_builder::ThreadSubtask {
+                                name: row.description.clone(),
+                                status,
+                                step_index: i,
+                                total_steps: subtask_rows.len(),
+                            }
+                        })
+                        .collect();
+                    let section = format_subtask_section(&thread_subtasks, thread.id);
+                    if section.is_some() {
+                        info!(
+                            "Injected subtask section into system prompt for thread {}",
+                            thread.id
+                        );
+                    }
+                    section
                 }
-                section
             }
-        }
-        Err(e) => {
-            warn!("Failed to query subtasks for thread {}: {:?}", thread.id, e);
-            None
-        }
-    };
+            Err(e) => {
+                warn!("Failed to query subtasks for thread {}: {:?}", thread.id, e);
+                None
+            }
+        };
 
     // 4b. Load template from cause message metadata (for kanban/cron/user tasks)
     let template_section: Option<String> = {
         let msg_type = cause_msg.msg_type.as_str();
         if msg_type == "kanban" || msg_type == "cron" || msg_type == "user" {
-            let template_name = cause_msg.metadata
+            let template_name = cause_msg
+                .metadata
                 .get("template")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .or_else(|| {
-                    cause_msg.metadata
+                    cause_msg
+                        .metadata
                         .get("template")
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.is_empty())
                 });
             if let Some(template) = template_name {
-                let content = crate::prompt_builder::load_template(&cfg.ctx.data_dir, &profile_name, template);
+                let content = crate::prompt_builder::load_template(
+                    &cfg.ctx.data_dir,
+                    &profile_name,
+                    template,
+                );
                 if let Some(ref tmpl) = content {
                     info!(
                         "Loaded template '{}' for thread {} ({} chars)",
-                        template, thread.id, tmpl.len()
+                        template,
+                        thread.id,
+                        tmpl.len()
                     );
                     Some(format!(
                         "=== Task Template ===\nThe following template provides structured guidance for this task type:\n\n{}",
@@ -289,12 +380,19 @@ pub async fn process_thread(
                 profile_name: &profile_name,
                 data_dir: &cfg.ctx.data_dir,
                 qdrant_url: cfg.ctx.qdrant_url.as_deref(),
-                prompt_budget: prof.prompt_budget.unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
+                prompt_budget: prof
+                    .prompt_budget
+                    .unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
                 auto_retrieval_enabled: prof.auto_retrieval_enabled,
-                retrieval_aggressiveness: if template_section.is_some() { prof.retrieval_aggressiveness.min(1) } else { prof.retrieval_aggressiveness },
+                retrieval_aggressiveness: if template_section.is_some() {
+                    prof.retrieval_aggressiveness.min(1)
+                } else {
+                    prof.retrieval_aggressiveness
+                },
                 task_context: template_section.is_some(),
             },
-        ).await;
+        )
+        .await;
         ctx_assembly_meta = Some(meta);
         context_text
     };
@@ -314,7 +412,9 @@ pub async fn process_thread(
     };
 
     // Fetch channel for delivery — cached for use throughout the function
-    let channel = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await?.unwrap_or_default();
+    let channel = queries::get_channel_by_id(&cfg.pool, thread.channel_id)
+        .await?
+        .unwrap_or_default();
 
     // Whether subtask creation and enforcement are enabled
     let enable_subtasks = planning_mode == "auto_subtasks";
@@ -340,7 +440,7 @@ pub async fn process_thread(
             let planning_prompt = crate::prompt_builder::build_planning_prompt(
                 &cfg.ctx.memory_store,
                 PlanningPromptParams {
-                    platform: "",   // platform
+                    platform: "", // platform
                     profile_name: &profile_name,
                     user_message: &cause_msg.content,
                     plan_iteration: iter,
@@ -396,7 +496,11 @@ pub async fn process_thread(
                         thread_id: thread.id,
                         role: "agent".to_string(),
                         content: content.clone(),
-                        thread_sequence: { let v = next_seq; next_seq += 1; v },
+                        thread_sequence: {
+                            let v = next_seq;
+                            next_seq += 1;
+                            v
+                        },
                         external_id: None,
                         metadata: serde_json::json!({
                             "plan_iteration": iter,
@@ -412,24 +516,39 @@ pub async fn process_thread(
                         iteration_number: 1,
                     };
                     match queries::create_message(&cfg.pool, &plan_msg).await {
-                        Ok(_) => {},
-                        Err(e) => warn!("[plan] Failed to persist plan for thread {}: {:?}", thread.id, e),
+                        Ok(_) => {}
+                        Err(e) => warn!(
+                            "[plan] Failed to persist plan for thread {}: {:?}",
+                            thread.id, e
+                        ),
                     }
 
                     // For complex tasks, auto-create subtasks from JSON plan content
                     if enable_subtasks && content.len() > 100 {
-                        let max_json_retries: u32 = std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+                        let max_json_retries: u32 = std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(3);
                         match serde_json::from_str::<serde_json::Value>(&content) {
                             Ok(plan_json) => {
-                                if let Some(steps) = plan_json.get("steps").and_then(|v| v.as_array()) {
+                                if let Some(steps) =
+                                    plan_json.get("steps").and_then(|v| v.as_array())
+                                {
                                     // Valid JSON with steps — create subtasks
                                     let total = steps.len().min(6);
                                     for (i, step_val) in steps.iter().enumerate().take(6) {
                                         if let Some(step) = step_val.as_str() {
-                                            let clean = step.trim().trim_end_matches(|c: char| c == '*' || c == '`').trim();
+                                            let clean = step
+                                                .trim()
+                                                .trim_end_matches(|c: char| c == '*' || c == '`')
+                                                .trim();
                                             if !clean.is_empty() {
                                                 let priority = (total - i) as i32;
-                                                if let Err(e) = crate::subtask::add_subtask(&cfg.pool, thread.id, clean, priority).await {
+                                                if let Err(e) = crate::subtask::add_subtask(
+                                                    &cfg.pool, thread.id, clean, priority,
+                                                )
+                                                .await
+                                                {
                                                     warn!("[plan] Failed to create subtask '{}': {:?}", clean, e);
                                                 } else {
                                                     info!("[plan] Created subtask '{}' for complex thread {}", clean, thread.id);
@@ -452,7 +571,7 @@ pub async fn process_thread(
                                          Attempt {}/{} — fix the JSON or the thread will fail.",
                                         json_failure_count, max_json_retries
                                     ));
-                                  last_plan = Some(content.clone());
+                                    last_plan = Some(content.clone());
                                     continue;
                                 }
                             }
@@ -471,7 +590,7 @@ pub async fn process_thread(
                                      Attempt {}/{} — fix the JSON or the thread will fail.",
                                     e, json_failure_count, max_json_retries
                                 ));
-                              last_plan = Some(content.clone());
+                                last_plan = Some(content.clone());
                                 continue;
                             }
                         }
@@ -483,7 +602,10 @@ pub async fn process_thread(
                     break;
                 }
                 Err(e) => {
-                    warn!("[plan] Failed to generate plan for thread {}: {:?}", thread.id, e);
+                    warn!(
+                        "[plan] Failed to generate plan for thread {}: {:?}",
+                        thread.id, e
+                    );
                     break;
                 }
             }
@@ -494,9 +616,7 @@ pub async fn process_thread(
         None
     };
 
-    let mut messages = vec![
-        ChatMessage::system(&system_prompt),
-    ];
+    let mut messages = vec![ChatMessage::system(&system_prompt)];
 
     // Inject task template FIRST (right after system prompt) — highest instruction priority
     // for template-backed tasks (kanban/cron with template).
@@ -543,7 +663,8 @@ pub async fn process_thread(
     let tools_def = cfg.mcp.to_openai_tools(&prof.allowed_tools);
 
     // 6. Tool-calling loop — max iterations controls total LLM calls
-    let iter_limit = queries::max_iterations_for_planning_mode(&cfg.config, &thread.planning_mode) as i32;
+    let iter_limit =
+        queries::max_iterations_for_planning_mode(&cfg.config, &thread.planning_mode) as i32;
     // The plan phase consumed 1 iteration (if it ran). Subtract it so the
     // tool-calling loop gets the remaining budget.
     let plan_consumed = if should_plan { 1 } else { 0 };
@@ -558,7 +679,7 @@ pub async fn process_thread(
     let mut calls_since_subtask_management: u32 = 0;
 
     for _turn in 0..max_llm_calls {
-        current_iter += 1;  // increment before each LLM call
+        current_iter += 1; // increment before each LLM call
 
         // If this LLM call will reach the iteration limit, hint to the model
         // to produce a final answer rather than more tool calls.
@@ -575,22 +696,26 @@ pub async fn process_thread(
         //
         // Uses tiktoken BPE tokenizer for accurate token counting instead of
         // character-based estimation (which had ~30% JSON overhead error margin).
-        
+
         let prompt_token_soft = cfg.config.prompt_token_budget_soft;
         let prompt_token_hard = cfg.config.prompt_token_budget_hard;
         let old_msg_budget = cfg.config.old_message_char_budget;
         let keep_turns = cfg.config.condense_keep_turns;
         let state_interval = cfg.config.state_block_update_interval as i32;
         let tokenizer_enc = &cfg.config.tokenizer_encoding;
-        
+
         // Count actual tokens using tiktoken (fast BPE, no network calls),
         // then apply safety factor to account for provider tokenizer mismatch.
         // Include tool definitions in the count since they add 200-300K tokens.
-        let token_tools = if tools_def.is_empty() { None } else { Some(tools_def.as_slice()) };
+        let token_tools = if tools_def.is_empty() {
+            None
+        } else {
+            Some(tools_def.as_slice())
+        };
         let raw_tokens = helpers::count_tokens(&messages, tokenizer_enc, token_tools);
         let safety_factor = cfg.config.prompt_token_safety_factor;
         let current_tokens = (raw_tokens as f64 * safety_factor) as usize;
-        
+
         // Log token count every 5 iterations for diagnostics
         if current_iter % 5 == 0 || current_tokens > 50000 {
             info!(
@@ -598,17 +723,17 @@ pub async fn process_thread(
                 current_iter, raw_tokens, safety_factor, current_tokens, messages.len(), prompt_token_soft, prompt_token_hard,
             );
         }
-        
+
         let needs_hard_condense = current_tokens > prompt_token_hard;
-        let needs_soft_condense = current_tokens > prompt_token_soft 
-            && state_interval > 0 
+        let needs_soft_condense = current_tokens > prompt_token_soft
+            && state_interval > 0
             && current_iter % state_interval == 0;
-        
+
         if needs_hard_condense || needs_soft_condense {
             // Use the char budget for the condense_messages function's safety
             // check (which compares system message CHARS, not tokens).
             let condense_char_soft = cfg.config.prompt_char_budget_soft;
-            
+
             match helpers::condense_messages(
                 std::mem::take(&mut messages),
                 old_msg_budget,
@@ -616,11 +741,12 @@ pub async fn process_thread(
                 condense_char_soft,
             ) {
                 Ok(condensed) => {
-                    let condensed_raw = helpers::count_tokens(&condensed, tokenizer_enc, token_tools);
+                    let condensed_raw =
+                        helpers::count_tokens(&condensed, tokenizer_enc, token_tools);
                     let condensed_tokens = (condensed_raw as f64 * safety_factor) as usize;
                     let saved = current_tokens.saturating_sub(condensed_tokens);
                     messages = condensed;
-                    
+
                     // If hard budget triggered, verify we're now below soft
                     let after_raw = helpers::count_tokens(&messages, tokenizer_enc, token_tools);
                     let after_tokens = (after_raw as f64 * safety_factor) as usize;
@@ -628,7 +754,11 @@ pub async fn process_thread(
                         // Second pass with more aggressive settings
                         // Use the configured keep_turns (not hardcoded 1) so the
                         // escalation is actually more aggressive than the first pass.
-                        let aggressive_keep = if keep_turns > 0 { keep_turns - 1 } else { 0_usize };
+                        let aggressive_keep = if keep_turns > 0 {
+                            keep_turns - 1
+                        } else {
+                            0_usize
+                        };
                         match helpers::condense_messages(
                             std::mem::take(&mut messages),
                             old_msg_budget / 2, // halve the old message budget
@@ -636,7 +766,8 @@ pub async fn process_thread(
                             condense_char_soft,
                         ) {
                             Ok(tighter) => {
-                                let tighter_raw = helpers::count_tokens(&tighter, tokenizer_enc, token_tools);
+                                let tighter_raw =
+                                    helpers::count_tokens(&tighter, tokenizer_enc, token_tools);
                                 let tighter_tokens = (tighter_raw as f64 * safety_factor) as usize;
                                 messages = tighter;
                                 if tighter_tokens > prompt_token_soft {
@@ -656,7 +787,7 @@ pub async fn process_thread(
                             }
                         }
                     }
-                    
+
                     info!(
                         "[context] Condensed prompt: {} effective tokens [raw: {}] → {} effective tokens [raw: {}] (saved {}, iteration {})",
                         current_tokens, raw_tokens,
@@ -677,7 +808,7 @@ pub async fn process_thread(
 
         // Layer 3: iteration-aware tool result pruning
         helpers::prune_old_tool_results(&mut messages, current_iter as u32);
-        
+
         // Layer 4: compact old assistant tool_calls JSON (only keep recent turns)
         helpers::compact_old_assistant_messages(&mut messages, keep_turns);
 
@@ -718,14 +849,25 @@ pub async fn process_thread(
             // Subtask enforcement: only when subtask mode is active
             if enable_subtasks {
                 // Check if all subtasks are completed/cancelled before allowing final answer
-                let pending_subtasks = match crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
-                    Ok(list) => list.into_iter().filter(|st| st.status == "pending" || st.status == "in_progress").collect::<Vec<_>>(),
-                    Err(_) => Vec::new(),
-                };
+                let pending_subtasks =
+                    match crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
+                        Ok(list) => list
+                            .into_iter()
+                            .filter(|st| st.status == "pending" || st.status == "in_progress")
+                            .collect::<Vec<_>>(),
+                        Err(_) => Vec::new(),
+                    };
 
-                if !pending_subtasks.is_empty() && unfinished_subtask_retries < std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(3u32) {
+                if !pending_subtasks.is_empty()
+                    && unfinished_subtask_retries
+                        < std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(3u32)
+                {
                     unfinished_subtask_retries += 1;
-                    let names: Vec<String> = pending_subtasks.iter()
+                    let names: Vec<String> = pending_subtasks
+                        .iter()
                         .map(|st| format!("#{}: {} ({})", st.id, st.description, st.status))
                         .collect();
                     let feedback = format!(
@@ -776,13 +918,17 @@ pub async fn process_thread(
                 // Note: DeepSeek with reasoning always returns reasoning=Some(...),
                 // even when the reasoning string is empty, so we must check the
                 // content of reasoning too, not just whether it's Some/None.
-                let reasoning_empty = response.reasoning.as_ref()
+                let reasoning_empty = response
+                    .reasoning
+                    .as_ref()
                     .map(|r| r.trim().is_empty())
                     .unwrap_or(true); // None means empty too
 
                 // Check if the response has meaningful completion_tokens but empty
                 // content — indicates a content filter or provider-side stripping.
-                let has_completion = response.usage.as_ref()
+                let has_completion = response
+                    .usage
+                    .as_ref()
                     .map(|u| u.completion_tokens > 0)
                     .unwrap_or(false);
 
@@ -790,8 +936,16 @@ pub async fn process_thread(
                     // The API reports generated tokens but returned empty content.
                     // This indicates content was filtered/stripped (provider safety filter).
                     // Log it and produce a clear error rather than hiding it.
-                    let prompt_toks = response.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0);
-                    let comp_toks = response.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0);
+                    let prompt_toks = response
+                        .usage
+                        .as_ref()
+                        .map(|u| u.prompt_tokens)
+                        .unwrap_or(0);
+                    let comp_toks = response
+                        .usage
+                        .as_ref()
+                        .map(|u| u.completion_tokens)
+                        .unwrap_or(0);
                     warn!(
                         "[executor] LLM returned empty content with {} completion tokens (prompt: {}) — likely content filter",
                         comp_toks, prompt_toks,
@@ -799,10 +953,14 @@ pub async fn process_thread(
                 }
 
                 if reasoning_empty && enable_subtasks {
-                    let pending_subtasks = match crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
-                        Ok(list) => list.into_iter().filter(|st| st.status == "pending" || st.status == "in_progress").collect::<Vec<_>>(),
-                        Err(_) => Vec::new(),
-                    };
+                    let pending_subtasks =
+                        match crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
+                            Ok(list) => list
+                                .into_iter()
+                                .filter(|st| st.status == "pending" || st.status == "in_progress")
+                                .collect::<Vec<_>>(),
+                            Err(_) => Vec::new(),
+                        };
                     force_failed = true; // empty response — thread must fail
                     if pending_subtasks.is_empty() {
                         "The LLM returned an empty response with no pending subtasks — likely caused by context explosion.".to_string()
@@ -815,7 +973,8 @@ pub async fn process_thread(
                 } else if reasoning_empty {
                     // No subtask mode, but content AND reasoning are both empty
                     force_failed = true; // empty response — thread must fail
-                    "The LLM returned an empty response — likely caused by context explosion.".to_string()
+                    "The LLM returned an empty response — likely caused by context explosion."
+                        .to_string()
                 } else {
                     // Reasoning has actual content — use it
                     response.reasoning.clone().unwrap_or_default()
@@ -834,7 +993,9 @@ pub async fn process_thread(
             // non-empty — prevents a false "empty response" detection when
             // the iteration budget runs out while the LLM was making tools.
             if !response.tool_calls.is_empty() {
-                let tool_names: Vec<String> = response.tool_calls.iter()
+                let tool_names: Vec<String> = response
+                    .tool_calls
+                    .iter()
                     .map(|tc| tc.function.name.clone())
                     .collect();
                 final_content = format!(
@@ -866,16 +1027,27 @@ pub async fn process_thread(
 
         // If multiple tool calls, persist a multi-tool message first (holds time/tokens)
         if is_multi_tool {
-            let multi_content = response.tool_calls
+            let multi_content = response
+                .tool_calls
                 .iter()
-                .map(|tc| format!("{}: {}", cfg.mcp.qualified_name(&tc.function.name), tc.function.arguments))
+                .map(|tc| {
+                    format!(
+                        "{}: {}",
+                        cfg.mcp.qualified_name(&tc.function.name),
+                        tc.function.arguments
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             let multi_msg = MessageNew {
                 thread_id: thread.id,
                 role: "agent".to_string(),
                 content: multi_content,
-                thread_sequence: { let v = next_seq; next_seq += 1; v },
+                thread_sequence: {
+                    let v = next_seq;
+                    next_seq += 1;
+                    v
+                },
                 external_id: None,
                 metadata: serde_json::json!({}),
                 embedding: None,
@@ -889,13 +1061,20 @@ pub async fn process_thread(
             };
             match helpers::persist_or_abort(&cfg.pool, &multi_msg, thread.id).await {
                 helpers::CreateMessageResult::FkViolation => {
-                    anyhow::bail!("FK violation — thread {} no longer exists", thread.id)
+                    err_msg!("FK violation — thread {} no longer exists", thread.id);
                 }
                 helpers::CreateMessageResult::OtherError(e) => {
                     error!("Failed to persist multi-tool message: {:?}", e)
                 }
                 helpers::CreateMessageResult::Success(saved) => {
-                    helpers::enqueue_delivery(&cfg.ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
+                    helpers::enqueue_delivery(
+                        &cfg.ctx,
+                        &saved,
+                        &channel,
+                        thread,
+                        cause_msg.external_id.clone(),
+                    )
+                    .await;
                 }
             }
         }
@@ -918,7 +1097,11 @@ pub async fn process_thread(
                 thread_id: thread.id,
                 role: "agent".to_string(),
                 content: tool_args,
-                thread_sequence: { let v = next_seq; next_seq += 1; v },
+                thread_sequence: {
+                    let v = next_seq;
+                    next_seq += 1;
+                    v
+                },
                 external_id: None,
                 metadata: serde_json::json!({}),
                 embedding: None,
@@ -932,13 +1115,20 @@ pub async fn process_thread(
             };
             match helpers::persist_or_abort(&cfg.pool, &tool_call_msg, thread.id).await {
                 helpers::CreateMessageResult::FkViolation => {
-                    anyhow::bail!("FK violation — thread {} no longer exists", thread.id)
+                    err_msg!("FK violation — thread {} no longer exists", thread.id);
                 }
                 helpers::CreateMessageResult::OtherError(e) => {
                     error!("Failed to persist tool call '{}': {:?}", tool_name, e)
                 }
                 helpers::CreateMessageResult::Success(saved) => {
-                    helpers::enqueue_delivery(&cfg.ctx, &saved, &channel, thread, cause_msg.external_id.clone()).await;
+                    helpers::enqueue_delivery(
+                        &cfg.ctx,
+                        &saved,
+                        &channel,
+                        thread,
+                        cause_msg.external_id.clone(),
+                    )
+                    .await;
                 }
             }
 
@@ -965,7 +1155,11 @@ pub async fn process_thread(
                         thread_id: thread.id,
                         role: "agent".to_string(),
                         content: content.clone(),
-                        thread_sequence: { let v = next_seq; next_seq += 1; v },
+                        thread_sequence: {
+                            let v = next_seq;
+                            next_seq += 1;
+                            v
+                        },
                         external_id: None,
                         metadata: serde_json::json!({}),
                         embedding: None,
@@ -978,8 +1172,12 @@ pub async fn process_thread(
                         iteration_number: current_iter as i32,
                     };
                     match helpers::persist_or_abort(&cfg.pool, &tool_result_msg, thread.id).await {
-                        helpers::CreateMessageResult::FkViolation => anyhow::bail!("FK violation — thread {} no longer exists", thread.id),
-                        helpers::CreateMessageResult::OtherError(e) => error!("Failed to persist tool result '{}': {:?}", tool_name, e),
+                        helpers::CreateMessageResult::FkViolation => {
+                            err_msg!("FK violation — thread {} no longer exists", thread.id);
+                        }
+                        helpers::CreateMessageResult::OtherError(e) => {
+                            error!("Failed to persist tool result '{}': {:?}", tool_name, e)
+                        }
                         helpers::CreateMessageResult::Success(_) => {}
                     }
 
@@ -997,7 +1195,11 @@ pub async fn process_thread(
                         thread_id: thread.id,
                         role: "agent".to_string(),
                         content: err_msg.clone(),
-                        thread_sequence: { let v = next_seq; next_seq += 1; v },
+                        thread_sequence: {
+                            let v = next_seq;
+                            next_seq += 1;
+                            v
+                        },
                         external_id: None,
                         metadata: serde_json::json!({}),
                         embedding: None,
@@ -1010,8 +1212,12 @@ pub async fn process_thread(
                         iteration_number: current_iter as i32,
                     };
                     match helpers::persist_or_abort(&cfg.pool, &tool_result_msg, thread.id).await {
-                        helpers::CreateMessageResult::FkViolation => anyhow::bail!("FK violation — thread {} no longer exists", thread.id),
-                        helpers::CreateMessageResult::OtherError(e2) => error!("Failed to persist tool error '{}': {:?}", tool_name, e2),
+                        helpers::CreateMessageResult::FkViolation => {
+                            err_msg!("FK violation — thread {} no longer exists", thread.id);
+                        }
+                        helpers::CreateMessageResult::OtherError(e2) => {
+                            error!("Failed to persist tool error '{}': {:?}", tool_name, e2)
+                        }
                         helpers::CreateMessageResult::Success(_) => {}
                     }
 
@@ -1028,7 +1234,9 @@ pub async fn process_thread(
         // rounds without managing subtasks, inject a gentle nudge.
         if enable_subtasks {
             // Check if any tool call in this round was manage_subtasks
-            let called_manage = response.tool_calls.iter()
+            let called_manage = response
+                .tool_calls
+                .iter()
                 .any(|tc| tc.function.name == "manage_subtasks");
             if called_manage {
                 calls_since_subtask_management = 0;
@@ -1038,7 +1246,8 @@ pub async fn process_thread(
 
             if calls_since_subtask_management >= 3 {
                 if let Ok(subtasks) = crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
-                    let pending_count = subtasks.iter()
+                    let pending_count = subtasks
+                        .iter()
                         .filter(|st| st.status == "pending" || st.status == "in_progress")
                         .count();
                     if pending_count > 0 {
@@ -1094,7 +1303,8 @@ pub async fn process_thread(
             }
         });
         if let Some(ref assembly) = ctx_assembly_meta {
-            meta["context"]["selected_message_ids"] = serde_json::json!(assembly.selected_message_ids);
+            meta["context"]["selected_message_ids"] =
+                serde_json::json!(assembly.selected_message_ids);
             meta["context"]["wiki_files"] = serde_json::json!(assembly.wiki_files);
             meta["context"]["block_counts"] = serde_json::json!(assembly.block_counts);
             meta["context"]["dropped_blocks"] = serde_json::json!(assembly.dropped_blocks);
@@ -1110,7 +1320,11 @@ pub async fn process_thread(
                 thread_id: thread.id,
                 role: "agent".to_string(),
                 content: reasoning_text.clone(),
-                thread_sequence: { let v = next_seq; next_seq += 1; v },
+                thread_sequence: {
+                    let v = next_seq;
+                    next_seq += 1;
+                    v
+                },
                 external_id: None,
                 metadata: serde_json::json!({
                     "context": evidence_metadata["context"],
@@ -1139,7 +1353,8 @@ pub async fn process_thread(
                 &channel,
                 thread,
                 cause_msg.external_id.clone(),
-            ).await;
+            )
+            .await;
         }
     }
 
@@ -1209,7 +1424,10 @@ pub async fn process_thread(
                 (text, tokens)
             }
             Err(e) => {
-                warn!("[summary] Failed to generate summary for thread {}: {:?}", thread.id, e);
+                warn!(
+                    "[summary] Failed to generate summary for thread {}: {:?}",
+                    thread.id, e
+                );
                 (format!("Summary generation failed: {}", e), None)
             }
         };
@@ -1240,7 +1458,8 @@ pub async fn process_thread(
             &channel,
             thread,
             cause_msg.external_id.clone(),
-        ).await;
+        )
+        .await;
         summary_saved
     } else if is_empty_response {
         let agent_content = format!(
@@ -1279,7 +1498,8 @@ pub async fn process_thread(
             &channel,
             thread,
             cause_msg.external_id.clone(),
-        ).await;
+        )
+        .await;
         saved
     } else {
         // Normal completion — the agent's final message IS the summary
@@ -1309,7 +1529,8 @@ pub async fn process_thread(
             &channel,
             thread,
             cause_msg.external_id.clone(),
-        ).await;
+        )
+        .await;
         saved
     };
     // Define final status before potential early return
@@ -1328,7 +1549,8 @@ pub async fn process_thread(
     // — keep the interrupted status rather than downgrading to failed.
     if enable_subtasks && !force_failed && !limit_reached && final_status == "completed" {
         if let Ok(post_subtasks) = crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
-            let unfinished: Vec<_> = post_subtasks.iter()
+            let unfinished: Vec<_> = post_subtasks
+                .iter()
                 .filter(|st| st.status == "pending" || st.status == "in_progress")
                 .collect();
             if !unfinished.is_empty() {
@@ -1351,7 +1573,18 @@ pub async fn process_thread(
         "completed"
     };
 
-    queries::complete_thread(&cfg.pool, thread.id, final_status, CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await?;
+    queries::complete_thread(
+        &cfg.pool,
+        thread.id,
+        final_status,
+        CompleteThreadStats {
+            input_tokens: 0,
+            cached_tokens: 0,
+            output_tokens: 0,
+            duration_ms: 0,
+        },
+    )
+    .await?;
 
     // If this thread is linked to a kanban task, update its status
     if let Some(ref task_id) = thread.task_id {

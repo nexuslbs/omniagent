@@ -11,11 +11,11 @@ pub mod summaries;
 pub mod threads;
 pub mod types;
 
-use anyhow::Result;
+use crate::error::AppResult;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
-pub async fn connect(database_url: &str) -> Result<PgPool> {
+pub async fn connect(database_url: &str) -> AppResult<PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(std::time::Duration::from_secs(30))

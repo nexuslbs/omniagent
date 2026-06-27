@@ -44,7 +44,11 @@ async fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     }
     let cron_expr = format!("0 {}", schedule);
     if let Err(e) = cron::Schedule::from_str(&cron_expr) {
-        return Err(anyhow::anyhow!("Invalid cron expression '{}': {}", schedule, e));
+        return Err(anyhow::anyhow!(
+            "Invalid cron expression '{}': {}",
+            schedule,
+            e
+        ));
     }
     if mode == "agentic" && prompt.unwrap_or("").is_empty() {
         return Err(anyhow::anyhow!("Prompt must not be empty for agentic mode"));
@@ -53,7 +57,10 @@ async fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
         return Err(anyhow::anyhow!("action_id is required for action mode"));
     }
     if mode != "agentic" && mode != "action" {
-        return Err(anyhow::anyhow!("Invalid mode '{}'. Must be 'agentic' or 'action'", mode));
+        return Err(anyhow::anyhow!(
+            "Invalid mode '{}'. Must be 'agentic' or 'action'",
+            mode
+        ));
     }
 
     let id = format!("cron_{:x}", {
@@ -94,15 +101,18 @@ async fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create cron job: {}", e))?;
 
-    Ok((format!("✅ Created cron job **{}** (`{}`)", display_name, name), false))
+    Ok((
+        format!("✅ Created cron job **{}** (`{}`)", display_name, name),
+        false,
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // Tool: list_cron_jobs
 // ---------------------------------------------------------------------------
 
-use sqlx::FromRow;
 use chrono::{DateTime, Utc};
+use sqlx::FromRow;
 
 #[derive(Debug, FromRow)]
 #[allow(dead_code)]
@@ -141,12 +151,28 @@ async fn handle_list(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
 
     let mut lines = vec!["**Cron Jobs:**".to_string()];
     for (i, row) in rows.iter().enumerate() {
-        let status = if row.active.unwrap_or(false) { "🟢" } else { "🔴" };
+        let status = if row.active.unwrap_or(false) {
+            "🟢"
+        } else {
+            "🔴"
+        };
         let name_display = row.name.as_deref().unwrap_or(&row.id);
         let mode_display = row.mode.as_deref().unwrap_or("agentic");
-        let last = row.last_run_at.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "never".to_string());
-        let next = row.next_run_at.map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_else(|| "unknown".to_string());
-        let prompt_preview = row.prompt.as_deref().unwrap_or("").chars().take(80).collect::<String>();
+        let last = row
+            .last_run_at
+            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "never".to_string());
+        let next = row
+            .next_run_at
+            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let prompt_preview = row
+            .prompt
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect::<String>();
         lines.push(format!(
             "{}. {} **{}** (`{}`)\n   - Schedule: `{}` | Mode: {} | Active: {}\n   - Last: {} | Next: {}\n   - Prompt: {}",
             i + 1, status, name_display, row.id, row.schedule, mode_display, status, last, next, prompt_preview
@@ -234,21 +260,25 @@ async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url =
-        std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
-    let pool = db::connect(&database_url).await
+    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
+    let pool = db::connect(&database_url)
+        .await
         .context("Failed to connect to database")?;
     let pool = Arc::new(pool);
 
     // Wrap each handler to capture a clone of the pool
     let p_cron = pool.clone();
-    let create_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_create(&p_cron, &args).await }));
+    let create_handler: ToolHandler =
+        Box::new(move |args: Value| Box::pin(async move { handle_create(&p_cron, &args).await }));
     let p_list = pool.clone();
-    let list_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_list(&p_list, &args).await }));
+    let list_handler: ToolHandler =
+        Box::new(move |args: Value| Box::pin(async move { handle_list(&p_list, &args).await }));
     let p_del = pool.clone();
-    let delete_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_delete(&p_del, &args).await }));
+    let delete_handler: ToolHandler =
+        Box::new(move |args: Value| Box::pin(async move { handle_delete(&p_del, &args).await }));
     let p_upd = pool.clone();
-    let update_handler: ToolHandler = Box::new(move |args: Value| Box::pin(async move { handle_update(&p_upd, &args).await }));
+    let update_handler: ToolHandler =
+        Box::new(move |args: Value| Box::pin(async move { handle_update(&p_upd, &args).await }));
 
     let tools = vec![
         McpToolEntry {

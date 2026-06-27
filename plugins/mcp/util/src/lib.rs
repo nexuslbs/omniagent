@@ -143,7 +143,9 @@ pub struct ServerInfo {
 }
 
 /// Handler function type — receives owned tool arguments, returns a future with result text + error flag.
-pub type ToolHandler = Box<dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<(String, bool)>> + Send>> + Send + Sync>;
+pub type ToolHandler = Box<
+    dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<(String, bool)>> + Send>> + Send + Sync,
+>;
 
 /// A registered tool definition + handler.
 pub struct McpToolEntry {
@@ -159,10 +161,7 @@ pub struct McpToolEntry {
 ///
 /// `server_info`: identity reported in initialize response.
 /// `tools`: list of (tool_def, handler) pairs.
-pub async fn run_server(
-    server_info: ServerInfo,
-    tools: Vec<McpToolEntry>,
-) -> Result<()> {
+pub async fn run_server(server_info: ServerInfo, tools: Vec<McpToolEntry>) -> Result<()> {
     // Initialize tracing — log to stderr
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -215,7 +214,13 @@ pub async fn run_server(
             }
             "tools/list" => {
                 if !initialized {
-                    send_error(&mut writer, req_id.unwrap_or(0), -32000, "Server not initialized").await?;
+                    send_error(
+                        &mut writer,
+                        req_id.unwrap_or(0),
+                        -32000,
+                        "Server not initialized",
+                    )
+                    .await?;
                     continue;
                 }
                 if let Some(id) = req_id {
@@ -224,27 +229,41 @@ pub async fn run_server(
             }
             "tools/call" => {
                 if !initialized {
-                    send_error(&mut writer, req_id.unwrap_or(0), -32000, "Server not initialized").await?;
+                    send_error(
+                        &mut writer,
+                        req_id.unwrap_or(0),
+                        -32000,
+                        "Server not initialized",
+                    )
+                    .await?;
                     continue;
                 }
                 if let Some(id) = req_id {
                     let params = request.params.unwrap_or_default();
-                    let call_params: CallToolParams =
-                        serde_json::from_value(params)
-                            .map_err(|e| anyhow::anyhow!("Invalid tools/call params: {e}"))?;
+                    let call_params: CallToolParams = serde_json::from_value(params)
+                        .map_err(|e| anyhow::anyhow!("Invalid tools/call params: {e}"))?;
                     handle_tools_call(&mut writer, id, &call_params, &index).await?;
                 }
             }
             _ => {
                 tracing::warn!("Unknown method: {method}");
                 if let Some(id) = req_id {
-                    send_error(&mut writer, id, -32601, format!("Method not found: {method}")).await?;
+                    send_error(
+                        &mut writer,
+                        id,
+                        -32601,
+                        format!("Method not found: {method}"),
+                    )
+                    .await?;
                 }
             }
         }
     }
 
-    tracing::info!("{} MCP server shutting down (stdin closed)", server_info.name);
+    tracing::info!(
+        "{} MCP server shutting down (stdin closed)",
+        server_info.name
+    );
     Ok(())
 }
 
@@ -260,7 +279,9 @@ async fn handle_initialize<W: AsyncWriteExt + Unpin>(
     let result = InitializeResult {
         protocol_version: MCP_PROTOCOL_VERSION.to_string(),
         capabilities: ServerCapabilities {
-            tools: Some(ToolCapabilities { list_changed: false }),
+            tools: Some(ToolCapabilities {
+                list_changed: false,
+            }),
         },
         server_info: Implementation {
             name: server_info.name.clone(),
@@ -317,7 +338,13 @@ async fn handle_tools_call<W: AsyncWriteExt + Unpin>(
     let entry = match index.get(&params.name) {
         Some(e) => e,
         None => {
-            send_error(writer, req_id, -32602, format!("Unknown tool: {}", params.name)).await?;
+            send_error(
+                writer,
+                req_id,
+                -32602,
+                format!("Unknown tool: {}", params.name),
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -347,7 +374,11 @@ async fn handle_tools_call<W: AsyncWriteExt + Unpin>(
     writer.write_all(b"\n").await?;
     writer.flush().await?;
 
-    tracing::info!("tools/call '{}' completed (is_error={})", params.name, is_error);
+    tracing::info!(
+        "tools/call '{}' completed (is_error={})",
+        params.name,
+        is_error
+    );
     Ok(())
 }
 

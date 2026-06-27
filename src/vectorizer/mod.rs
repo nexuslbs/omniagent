@@ -5,7 +5,6 @@
 //! local hash-based vectorizer (character trigram feature hashing, 1536
 //! dimensions) and an external API-based vectorizer.
 
-use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -14,6 +13,10 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
+
+use crate::error::{Error, ErrorContext, AppResult};
+use crate::err_msg;
+use crate::err_str;
 
 // ---------------------------------------------------------------------------
 // EmbeddingProtocol
@@ -29,15 +32,15 @@ pub enum EmbeddingProtocol {
 }
 
 impl FromStr for EmbeddingProtocol {
-    type Err = anyhow::Error;
+    type Err = Error;
 
-    fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> AppResult<Self> {
         match s.to_lowercase().as_str() {
             "openai" => Ok(Self::OpenAI),
             "gemini" => Ok(Self::Gemini),
             "cohere" => Ok(Self::Cohere),
             "jina" => Ok(Self::Jina),
-            _ => Err(anyhow::anyhow!(
+            _ => Err(err_str!(
                 "Unknown embedding protocol: {}. Expected one of: openai, gemini, cohere, jina",
                 s
             )),
@@ -111,7 +114,7 @@ impl EmbeddingProtocol {
     }
 
     /// Extract a single embedding vector from a protocol response.
-    pub fn extract_embedding(&self, response: &serde_json::Value) -> Result<Vec<f32>> {
+    pub fn extract_embedding(&self, response: &serde_json::Value) -> AppResult<Vec<f32>> {
         match self {
             Self::OpenAI | Self::Jina => {
                 let embedding = response
@@ -120,13 +123,13 @@ impl EmbeddingProtocol {
                     .and_then(|arr| arr.first())
                     .and_then(|first| first.get("embedding"))
                     .and_then(|e| e.as_array())
-                    .ok_or_else(|| anyhow::anyhow!("missing data[0].embedding in response"))?;
+                    .ok_or_else(|| err_str!("missing data[0].embedding in response"))?;
                 embedding
                     .iter()
                     .map(|v| {
                         v.as_f64()
                             .map(|f| f as f32)
-                            .ok_or_else(|| anyhow::anyhow!("non-numeric value in embedding"))
+                            .ok_or_else(|| err_str!("non-numeric value in embedding"))
                     })
                     .collect()
             }
@@ -135,13 +138,13 @@ impl EmbeddingProtocol {
                     .get("embedding")
                     .and_then(|e| e.get("values"))
                     .and_then(|v| v.as_array())
-                    .ok_or_else(|| anyhow::anyhow!("missing embedding.values in response"))?;
+                    .ok_or_else(|| err_str!("missing embedding.values in response"))?;
                 embedding
                     .iter()
                     .map(|v| {
                         v.as_f64()
                             .map(|f| f as f32)
-                            .ok_or_else(|| anyhow::anyhow!("non-numeric value in embedding"))
+                            .ok_or_else(|| err_str!("non-numeric value in embedding"))
                     })
                     .collect()
             }
@@ -151,13 +154,13 @@ impl EmbeddingProtocol {
                     .and_then(|e| e.as_array())
                     .and_then(|arr| arr.first())
                     .and_then(|first| first.as_array())
-                    .ok_or_else(|| anyhow::anyhow!("missing embeddings[0] in response"))?;
+                    .ok_or_else(|| err_str!("missing embeddings[0] in response"))?;
                 embedding
                     .iter()
                     .map(|v| {
                         v.as_f64()
                             .map(|f| f as f32)
-                            .ok_or_else(|| anyhow::anyhow!("non-numeric value in embedding"))
+                            .ok_or_else(|| err_str!("non-numeric value in embedding"))
                     })
                     .collect()
             }
@@ -343,11 +346,11 @@ struct WikiState {
 }
 
 impl WikiState {
-    fn load(path: &Path) -> Result<Self> {
+    fn load(path: &Path) -> AppResult<Self> {
         if path.exists() {
             let content =
-                std::fs::read_to_string(path).context("Failed to read vectorizer state file")?;
-            serde_json::from_str(&content).context("Failed to parse vectorizer state")
+                std::fs::read_to_string(path).ctx("Failed to read vectorizer state file")?;
+            serde_json::from_str(&content).ctx("Failed to parse vectorizer state")
         } else {
             Ok(Self {
                 files: std::collections::HashMap::new(),
@@ -355,12 +358,12 @@ impl WikiState {
         }
     }
 
-    fn save(&self, path: &Path) -> Result<()> {
+    fn save(&self, path: &Path) -> AppResult<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, content).context("Failed to write vectorizer state file")
+        std::fs::write(path, content).ctx("Failed to write vectorizer state file")
     }
 }
 
@@ -395,7 +398,7 @@ impl MessageVectorizer {
         }
     }
 
-    async fn process_batch(&self) -> Result<()> {
+    async fn process_batch(&self) -> AppResult<()> {
         let messages =
             super::db::types::find_messages_without_embeddings(&self.pool, self.config.batch_size)
                 .await?;
@@ -480,7 +483,7 @@ impl WikiVectorizer {
         }
     }
 
-    async fn ensure_collection(&self) -> Result<()> {
+    async fn ensure_collection(&self) -> AppResult<()> {
         let url = format!("{}/collections/wiki", self.qdrant_url);
         let body = serde_json::json!({
             "name": "wiki",
@@ -496,7 +499,7 @@ impl WikiVectorizer {
             .json(&body)
             .send()
             .await
-            .context("Failed to create Qdrant wiki collection")?;
+            .ctx("Failed to create Qdrant wiki collection")?;
 
         if resp.status().is_success() || resp.status().as_u16() == 409 {
             // 409 = already exists, which is fine
@@ -505,7 +508,7 @@ impl WikiVectorizer {
         } else {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            Err(anyhow::anyhow!(
+            Err(err_str!(
                 "Qdrant collection creation failed ({}): {}",
                 status,
                 text
@@ -513,7 +516,7 @@ impl WikiVectorizer {
         }
     }
 
-    async fn process_files(&self) -> Result<()> {
+    async fn process_files(&self) -> AppResult<()> {
         let state_path = Path::new(&self.state_path);
         let mut state = WikiState::load(state_path).unwrap_or(WikiState {
             files: std::collections::HashMap::new(),
@@ -569,7 +572,7 @@ impl WikiVectorizer {
 
             // Read file content
             let content = std::fs::read_to_string(path)
-                .with_context(|| format!("Failed to read wiki file: {}", path_str))?;
+                .ctx(format!("Failed to read wiki file: {}", path_str))?;
 
             // Strip frontmatter (YAML/TOML between --- delimiters)
             let body = strip_frontmatter(&content);
@@ -624,12 +627,12 @@ impl WikiVectorizer {
             .json(&payload)
             .send()
             .await
-            .context("Failed to upsert wiki points to Qdrant")?;
+            .ctx("Failed to upsert wiki points to Qdrant")?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("Qdrant upsert failed ({}): {}", status, text);
+            err_msg!("Qdrant upsert failed ({}): {}", status, text);
         }
 
         // Save updated state

@@ -77,7 +77,10 @@ async fn handle_install(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     .map_err(|e| anyhow::anyhow!("Failed to register plugin in DB: {}", e))?;
 
     Ok((
-        format!("Plugin '{}' installed successfully (id: {})", manifest.name, row.id),
+        format!(
+            "Plugin '{}' installed successfully (id: {})",
+            manifest.name, row.id
+        ),
         false,
     ))
 }
@@ -96,7 +99,10 @@ async fn handle_uninstall(pool: &PgPool, args: &Value) -> Result<(String, bool)>
         .map_err(|e| anyhow::anyhow!("Failed to delete plugin: {}", e))?;
 
     if deleted {
-        Ok((format!("Plugin '{}' uninstalled successfully.", name), false))
+        Ok((
+            format!("Plugin '{}' uninstalled successfully.", name),
+            false,
+        ))
     } else {
         Ok((format!("Plugin '{}' not found.", name), false))
     }
@@ -116,7 +122,10 @@ async fn handle_enable(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
         .map_err(|e| anyhow::anyhow!("Failed to enable plugin: {}", e))?;
 
     if let Some(r) = row {
-        Ok((format!("Plugin '{}' enabled (id: {}).", r.name, r.id), false))
+        Ok((
+            format!("Plugin '{}' enabled (id: {}).", r.name, r.id),
+            false,
+        ))
     } else {
         Ok((format!("Plugin '{}' not found.", name), false))
     }
@@ -136,7 +145,10 @@ async fn handle_disable(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
         .map_err(|e| anyhow::anyhow!("Failed to disable plugin: {}", e))?;
 
     if let Some(r) = row {
-        Ok((format!("Plugin '{}' disabled (id: {}).", r.name, r.id), false))
+        Ok((
+            format!("Plugin '{}' disabled (id: {}).", r.name, r.id),
+            false,
+        ))
     } else {
         Ok((format!("Plugin '{}' not found.", name), false))
     }
@@ -150,7 +162,8 @@ async fn handle_config(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let name = args["name"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'name'"))?;
-    let config = args.get("config")
+    let config = args
+        .get("config")
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'config'"))?;
 
     let row = plugin::update_plugin_config(pool, name, config)
@@ -219,7 +232,8 @@ async fn main() -> Result<()> {
     let tools = vec![McpToolEntry {
         def: McpToolDef {
             name: "plugin_manager".to_string(),
-            description: "Manage plugins: list, install, uninstall, enable, disable, or configure.".to_string(),
+            description: "Manage plugins: list, install, uninstall, enable, disable, or configure."
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
