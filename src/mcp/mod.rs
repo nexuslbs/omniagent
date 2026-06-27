@@ -199,7 +199,20 @@ impl McpRegistry {
         if let Some(tool) = self.get(&call.name) {
             let tool = tool.clone();
             let args = call.arguments.clone();
-            return (tool.handler)(args, ctx).await;
+            let result = (tool.handler)(args.clone(), ctx).await;
+            return match result {
+                Ok(r) => Ok(r),
+                Err(e) => {
+                    // Enrich error with tool's input_schema so the LLM can
+                    // self-correct invalid parameter names or missing fields.
+                    let schema_str = serde_json::to_string_pretty(&tool.input_schema)
+                        .unwrap_or_else(|_| "(unavailable)".to_string());
+                    Err(Error::Message(format!(
+                        "Tool '{}' failed: {}\n\nExpected parameters:\n{}",
+                        tool.name, e, schema_str
+                    )))
+                }
+            };
         }
         // Fuzzy match: find closest tool name by Levenshtein distance
         let mut candidates: Vec<(&str, usize)> = self
