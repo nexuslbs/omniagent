@@ -273,11 +273,13 @@ pub async fn process_thread(
     let _model_name = model_name;
 
     // 4. Build the initial message history with the structured system prompt
+    let tool_names: Vec<String> = cfg.mcp.all().iter().map(|t| t.name.clone()).collect();
     let system_prompt = crate::prompt_builder::build_system_prompt(
         &cfg.ctx.memory_store,
         "",   // platform — will be enriched from channel metadata in the future
         None, // system_message
         &profile_name,
+        &tool_names,
     );
 
     // 4a. Inject subtask context if the thread has subtasks
@@ -367,6 +369,9 @@ pub async fn process_thread(
 
     // 4c. Assemble additional context blocks via ContextBuilder
     let ctx_assembly_meta: Option<crate::context_builder::ContextAssemblyMeta>;
+    // For kanban/cron tasks, use task_context mode (skip conversation history, summaries)
+    // even when no template is loaded. The task body IS the primary context.
+    let is_task = cause_msg.msg_type == "kanban" || cause_msg.msg_type == "cron";
     let context_messages = {
         let (context_text, meta) = crate::context_builder::build_thread_context(
             &cfg.pool,
@@ -384,12 +389,12 @@ pub async fn process_thread(
                     .prompt_budget
                     .unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
                 auto_retrieval_enabled: prof.auto_retrieval_enabled,
-                retrieval_aggressiveness: if template_section.is_some() {
+                retrieval_aggressiveness: if is_task || template_section.is_some() {
                     prof.retrieval_aggressiveness.min(1)
                 } else {
                     prof.retrieval_aggressiveness
                 },
-                task_context: template_section.is_some(),
+                task_context: is_task || template_section.is_some(),
             },
         )
         .await;
@@ -448,6 +453,7 @@ pub async fn process_thread(
                     previous_plan: last_plan.as_deref(),
                     use_json_plan: enable_subtasks,
                 },
+                &tool_names,
             );
 
             let mut planning_messages = vec![ChatMessage::system(&planning_prompt)];

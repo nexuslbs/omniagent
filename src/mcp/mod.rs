@@ -195,12 +195,46 @@ impl McpRegistry {
 
     /// Execute a tool call — directly awaits the async handler (no spawn_blocking).
     pub async fn execute(&self, call: &McpToolCall, ctx: AppContext) -> AppResult<McpToolResult> {
-        let tool = self
-            .get(&call.name)
-            .ok_or_else(|| Error::Message(format!("Unknown tool: {}", call.name)))?
-            .clone();
-        let args = call.arguments.clone();
-        (tool.handler)(args, ctx).await
+        // Try exact match first
+        if let Some(tool) = self.get(&call.name) {
+            let tool = tool.clone();
+            let args = call.arguments.clone();
+            return (tool.handler)(args, ctx).await;
+        }
+        // Fuzzy match: find closest tool name by Levenshtein distance
+        let mut candidates: Vec<(&str, usize)> = self
+            .tools
+            .keys()
+            .map(|n| (n.as_str(), levenshtein_distance(&call.name, n)))
+            .collect();
+        candidates.sort_by_key(|&(_, dist)| dist);
+        let suggestion = candidates
+            .first()
+            .filter(|(_, dist)| *dist <= 3 && *dist < call.name.len())
+            .map(|(name, _)| *name);
+        if let Some(suggested) = suggestion {
+            // Execute the suggested tool instead
+            tracing::info!(
+                "Fuzzy-matched tool '{}' -> '{}'",
+                call.name,
+                suggested
+            );
+            if let Some(tool) = self.get(suggested) {
+                let tool = tool.clone();
+                let args = call.arguments.clone();
+                return (tool.handler)(args, ctx).await;
+            }
+        }
+        // No match found
+        let suggestion_msg = if let Some(s) = suggestion {
+            format!(". Did you mean '{}'?", s)
+        } else {
+            String::new()
+        };
+        Err(Error::Message(format!(
+            "Unknown tool: {}{}",
+            call.name, suggestion_msg
+        )))
     }
 
     /// Build the OpenAI-compatible tools array for the LLM.
@@ -278,4 +312,37 @@ pub async fn default_registry(ctx: &AppContext) -> McpRegistry {
     }
 
     registry
+}
+
+/// Compute Levenshtein distance between two strings (case-insensitive).
+/// Used for fuzzy-matching unknown tool names to registered tool names.
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a = a.to_lowercase();
+    let b = b.to_lowercase();
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let a_len = a_chars.len();
+    let b_len = b_chars.len();
+    // Early exit for empty strings
+    if a_len == 0 {
+        return b_len;
+    }
+    if b_len == 0 {
+        return a_len;
+    }
+    // Use two-row DP (optimized)
+    let mut prev: Vec<usize> = (0..=b_len).collect();
+    let mut curr: Vec<usize> = vec![0; b_len + 1];
+    for i in 1..=a_len {
+        curr[0] = i;
+        for j in 1..=b_len {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            curr[j] = std::cmp::min(
+                std::cmp::min(curr[j - 1] + 1, prev[j] + 1),
+                prev[j - 1] + cost,
+            );
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b_len]
 }

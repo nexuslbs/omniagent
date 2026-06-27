@@ -391,7 +391,8 @@ async fn prompt_handler(
         .as_ref()
         .and_then(|c| c.platform.as_deref())
         .unwrap_or("");
-    let parts = build_system_prompt_parts(&memory_store, platform, None, profile_name);
+    let tool_names: Vec<String> = state.mcp_registry.all().iter().map(|t| t.name.clone()).collect();
+    let parts = build_system_prompt_parts(&memory_store, platform, None, profile_name, &tool_names);
 
     // Build system prompt TEMPLATE — stable + context + volatile placeholders
     let mut segments: Vec<String> = Vec::new();
@@ -490,7 +491,8 @@ async fn prompt_preview_handler(
         .as_ref()
         .and_then(|c| c.platform.as_deref())
         .unwrap_or("");
-    let system_prompt = build_system_prompt(&memory_store, platform, None, profile_name);
+    let tool_names: Vec<String> = state.mcp_registry.all().iter().map(|t| t.name.clone()).collect();
+    let system_prompt = build_system_prompt(&memory_store, platform, None, profile_name, &tool_names);
 
     let mut messages = vec![serde_json::json!({ "role": "system", "content": &system_prompt })];
 
@@ -601,6 +603,7 @@ async fn prompt_preview_handler(
                 previous_plan: None,
                 use_json_plan: false, // preview route doesn't need JSON plan output
             },
+            &tool_names,
         );
 
         // Create LLM client — match how the agent resolves config

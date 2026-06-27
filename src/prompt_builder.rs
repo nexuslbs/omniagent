@@ -83,10 +83,47 @@ fn user_max_chars() -> usize {
 
 // ── Stable identity / guidance texts ────────────────────────────
 
-const DEFAULT_AGENT_IDENTITY: &str = "You are OmniAgent — precise, efficient, autonomous. \
-Your tools: filesystem (read/write/list), compose (docker build/up/exec/logs), \
-fetch (HTTP), search (messages/wiki), query_database (SQL), kanban, cron, git. \
-Use minimum roundtrips. If a tool fails, move on — don't retry more than twice.";
+/// Build the dynamic agent identity from the actual available tool names.
+/// This replaces the old hardcoded `DEFAULT_AGENT_IDENTITY` which could be wrong.
+fn build_dynamic_identity(tool_names: &[String]) -> String {
+    // Classify tool names into display groups
+    let _has_filesystem = tool_names.iter().any(|n| n.starts_with("filesystem"));
+    let has_docker = tool_names.iter().any(|n| n.starts_with("docker_"));
+    let has_fetch = tool_names.iter().any(|n| n == "fetch");
+    let has_search = tool_names.iter().any(|n| n.starts_with("search_"));
+    let has_query = tool_names.iter().any(|n| n.starts_with("query_"));
+    let has_kanban = tool_names.iter().any(|n| n.starts_with("kanban"));
+    let has_cron = tool_names.iter().any(|n| n.starts_with("cron"));
+    let has_git = tool_names.iter().any(|n| n.starts_with("commit") || n.starts_with("create_github") || n.starts_with("clone_repo") || n == "status");
+    let has_subtasks = tool_names.iter().any(|n| n.starts_with("manage_subtask"));
+    let has_skills = tool_names.iter().any(|n| n.starts_with("create_skill") || n.starts_with("list_skills"));
+    let has_plugin = tool_names.iter().any(|n| n == "plugin_manager" || n == "list_plugins");
+
+    let mut parts: Vec<&str> = vec!["filesystem (read/write/list)"];
+    if has_docker { parts.push("docker_compose (build/up/exec/logs/ps)"); }
+    if has_fetch { parts.push("fetch (HTTP)"); }
+    if has_search { parts.push("search (messages/wiki)"); }
+    if has_query { parts.push("query_database (SQL)"); }
+    if has_kanban { parts.push("kanban"); }
+    if has_cron { parts.push("cron"); }
+    if has_git { parts.push("git"); }
+    if has_subtasks { parts.push("manage_subtasks"); }
+    if has_skills { parts.push("skills"); }
+    if has_plugin { parts.push("plugin_manager"); }
+
+    // Build the tool names list for the prompt — ordered by priority
+    let tool_list = if parts.is_empty() {
+        tool_names.join(", ")
+    } else {
+        parts.join(", ")
+    };
+
+    format!(
+        "You are OmniAgent — precise, efficient, autonomous. \
+Your tools: {tool_list}. \
+Use minimum roundtrips. If a tool fails, move on — don't retry more than twice."
+    )
+}
 
 const TOOL_GUIDANCE: &str = "TOOL USE RULES (fail the task if you violate these):\n\
 1. PLAN before acting — decide ALL data needed in one shot.\n\
@@ -96,16 +133,18 @@ Fetch all 8 in a SINGLE tool-calling round.\n\
 Do not re-fetch with different query params, do not try alternative APIs for the same data. \
 The data you have is sufficient.\n\
 4. TRUST YOUR RESULTS — once you have data, move forward. Don't second-guess.\n\
-5. If a tool call returns an error, **move on immediately**. \
-Do not retry the same tool more than twice total. \
-A tool that fails consistently will not start working on the 5th try.\n\
+5. If a tool call returns an error for a **specific tool name**, \
+**never retry that same tool name more than twice total**. \
+A tool that fails consistently will not start working on the 5th try. \
+If you keep getting \"Unknown tool\" for a name, check that the exact tool name \
+exists in your available function list — the tool may have a slightly different name.\n\
 6. ACTION over exploration — when given a specific task to execute \
 (e.g. \"build a blog\", \"run docker compose\"), DO IT directly. \
 Do not search past messages for context you don't need. \
 Do not list the workspace repeatedly. Start writing code and building. \
 **For build tasks: call docker_compose(build) then docker_compose(up -d) \
 in the same turn — do NOT read every file first.** \
-A docker build failure tells you exactly what's wrong; fix and rebuild.\\n\\\
+A docker build failure tells you exactly what's wrong; fix and rebuild.\n\
 7. FINAL MESSAGE = SUMMARY: After all tool calls complete, your final text \
 response must be a concise summary of what was accomplished. Cover key results, \
 decisions, and any follow-up actions needed. This replaces the need for a \
@@ -399,18 +438,28 @@ impl MemoryStore {
 /// Build the three-tier system prompt dict.
 ///
 /// Returns a struct with `stable`, `context`, and `volatile` fields.
+const SKILLS_GUIDANCE: &str = "SKILLS (reusable workflows):\n\
+You have access to MCP skills — reusable step-by-step workflows for common \
+task types (building projects, research, deployment, etc.). \
+When your task matches a known pattern (\"build a blog\", \"deploy a container\", \
+\"research a topic\"), check if a relevant skill exists by calling the skill tool. \
+Follow the skill's numbered steps exactly. If a step fails, \
+move to the next step — do not retry the same failing step permanently.";
+
 pub fn build_system_prompt_parts(
     memory_store: &MemoryStore,
     platform: &str,
     system_message: Option<&str>,
     profile_name: &str,
+    tool_names: &[String],
 ) -> PromptParts {
     use std::env;
 
     // ── Stable tier ────────────────────────────────────────────
     let mut stable_parts: Vec<String> = vec![
-        DEFAULT_AGENT_IDENTITY.to_string(),
+        build_dynamic_identity(tool_names),
         TOOL_GUIDANCE.to_string(),
+        SKILLS_GUIDANCE.to_string(),
         GROUNDING_POLICY.to_string(),
         DB_SCHEMA.to_string(),
     ];
@@ -516,8 +565,9 @@ pub fn build_system_prompt(
     platform: &str,
     system_message: Option<&str>,
     profile_name: &str,
+    tool_names: &[String],
 ) -> String {
-    let parts = build_system_prompt_parts(memory_store, platform, system_message, profile_name);
+    let parts = build_system_prompt_parts(memory_store, platform, system_message, profile_name, tool_names);
     let segments: Vec<&str> = [&parts.stable, &parts.context, &parts.volatile]
         .into_iter()
         .filter(|s| !s.is_empty())
@@ -547,10 +597,9 @@ pub struct PlanningPromptParams<'a> {
 ///
 /// The user message is included as a reference so the LLM can scope its
 /// plan appropriately, but it does NOT execute any tools here.
-pub fn build_planning_prompt(memory_store: &MemoryStore, p: PlanningPromptParams<'_>) -> String {
-    // Base system identity — everything except tool guidance since
-    // planning doesn't execute tools.
-    let identity = DEFAULT_AGENT_IDENTITY;
+pub fn build_planning_prompt(memory_store: &MemoryStore, p: PlanningPromptParams<'_>, tool_names: &[String]) -> String {
+    // Base system identity — dynamically built from actual available tool names.
+    let identity = build_dynamic_identity(tool_names);
 
     // Memory + user profile
     let mut volatile_parts: Vec<String> = Vec::new();
@@ -863,9 +912,10 @@ mod tests {
         store.load_from_disk();
 
         let prompt =
-            build_system_prompt(&store, "telegram", Some("Custom system message"), "default");
+            build_system_prompt(&store, "telegram", Some("Custom system message"), "default", &[]);
         assert!(prompt.contains("OmniAgent"));
         assert!(prompt.contains("GROUNDING POLICY"));
+        assert!(prompt.contains("SKILLS"));
         assert!(prompt.contains("Test memory"));
         assert!(prompt.contains("Test user"));
         assert!(prompt.contains("Telegram"));
