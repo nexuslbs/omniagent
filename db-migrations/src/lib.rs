@@ -26,6 +26,28 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     phase_16_append_only_message_trigger(pool).await?;
     phase_17_drop_message_provider_model(pool).await?;
     phase_18_create_kanban_channel(pool).await?;
+    phase_19_drop_threads_task_id_fk(pool).await?;
+    Ok(())
+
+/// Phase 19: Drop the FK constraint from threads.task_id → kanban_tasks.id so task deletion isn't blocked.
+async fn phase_19_drop_threads_task_id_fk(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        DO $$ BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'threads_task_id_fkey'
+                  AND conrelid = 'threads'::regclass
+            ) THEN
+                ALTER TABLE threads DROP CONSTRAINT threads_task_id_fkey;
+            END IF;
+        END $$;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!("[migration] Phase 19 complete: dropped threads_task_id_fkey FK constraint");
     Ok(())
 }
 

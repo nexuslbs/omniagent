@@ -363,7 +363,7 @@ async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     }
 
     // ── Kanban history ──
-    // previous_values is ONLY stored for "edited" action (not move/archive/unarchive)
+    // previous_values is ONLY stored for "edited" and "deleted" actions (not move/archive/unarchive)
     let new_status = args["status"].as_str();
     let archived = args["archived"].as_bool();
 
