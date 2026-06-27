@@ -28,6 +28,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     phase_18_create_kanban_channel(pool).await?;
     phase_19_drop_threads_task_id_fk(pool).await?;
     Ok(())
+}
 
 /// Phase 19: Drop the FK constraint from threads.task_id → kanban_tasks.id so task deletion isn't blocked.
 async fn phase_19_drop_threads_task_id_fk(pool: &PgPool) -> Result<()> {

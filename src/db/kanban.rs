@@ -49,7 +49,7 @@ pub async fn get_kanban_task(pool: &PgPool, task_id: &str) -> AppResult<Option<K
     let rows = sql_forge!(
         KanbanTaskDb,
         r#"
-        SELECT id, title, body, status, priority, assignee, profile, template, archived, position, created_at, updated_at
+        SELECT id, title, body, status, priority, assignee, profile, template, archived, position, channel_id, planning_mode, created_at, updated_at
         FROM kanban_tasks
         WHERE id = :id
         "#,
@@ -72,6 +72,8 @@ pub struct KanbanTaskDb {
     pub template: Option<String>,
     pub archived: Option<bool>,
     pub position: Option<i32>,
+    pub channel_id: Option<String>,
+    pub planning_mode: Option<String>,
     pub created_at: Option<chrono::DateTime<chrono::Utc>>,
     pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
