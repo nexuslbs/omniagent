@@ -34,6 +34,7 @@ struct KanbanTaskRow {
     #[allow(dead_code)]
     template: Option<String>,
     created_at: Option<DateTime<Utc>>,
+    #[allow(dead_code)]
     updated_at: Option<DateTime<Utc>>,
 }
 
@@ -56,6 +57,7 @@ async fn insert_history(
 }
 
 /// Build a JSON with the current task fields for previous_values.
+#[allow(dead_code)]
 fn task_to_json(task: &KanbanTaskRow) -> serde_json::Value {
     serde_json::json!({
         "title": task.title,
@@ -591,7 +593,7 @@ async fn main() -> Result<()> {
         McpToolEntry {
             def: McpToolDef {
                 name: "list_kanban_tasks".to_string(),
-                description: "List kanban tasks grouped by status.",
+                description: "List kanban tasks grouped by status.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -607,7 +609,7 @@ async fn main() -> Result<()> {
         McpToolEntry {
             def: McpToolDef {
                 name: "update_kanban_task".to_string(),
-                description: "Update an existing kanban task. Only provided fields are updated. Status changes are recorded in history.",
+                description: "Update an existing kanban task. Only provided fields are updated. Status changes are recorded in history.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -657,7 +659,7 @@ async fn main() -> Result<()> {
         McpToolEntry {
             def: McpToolDef {
                 name: "delete_kanban_task".to_string(),
-                description: "Delete a kanban task. The deletion is recorded in history.",
+                description: "Delete a kanban task. The deletion is recorded in history.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -674,7 +676,7 @@ async fn main() -> Result<()> {
         McpToolEntry {
             def: McpToolDef {
                 name: "add_kanban_dependency".to_string(),
-                description: "Add a dependency between two kanban tasks.",
+                description: "Add a dependency between two kanban tasks.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -695,7 +697,7 @@ async fn main() -> Result<()> {
         McpToolEntry {
             def: McpToolDef {
                 name: "remove_kanban_dependency".to_string(),
-                description: "Remove a dependency between two kanban tasks.",
+                description: "Remove a dependency between two kanban tasks.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -716,5 +718,10 @@ async fn main() -> Result<()> {
     ];
 
     // Start the MCP server
-    McpServer::new(tools).run().await
+    let server_info = ServerInfo {
+        name: "mcp-server-kanban".to_string(),
+        version: "0.1.0".to_string(),
+    };
+
+    run_server(server_info, tools).await
 }

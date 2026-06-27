@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sql_forge::sql_forge;
-use sqlx::{Executor, PgPool, Row};
+use sqlx::{PgPool, Row};
 
 /// Update a kanban task's status by task_id.
 pub async fn update_kanban_status(pool: &PgPool, task_id: &str, status: &str) -> anyhow::Result<()> {
@@ -46,7 +46,7 @@ pub async fn insert_kanban_history(
         pv_str.replace('\'', "''"),
     );
 
-    pool.execute(&*sql).await?;
+    sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
     Ok(())
 }
 
@@ -136,7 +136,7 @@ pub async fn list_kanban_history(
         where_sql, limit, offset,
     );
 
-    let rows: Vec<sqlx::postgres::PgRow> = pool.fetch_all(&*sql).await?;
+    let rows: Vec<sqlx::postgres::PgRow> = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(pool).await?;
     Ok(rows
         .iter()
         .map(|r| {
