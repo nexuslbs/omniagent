@@ -683,6 +683,11 @@ pub async fn process_thread(
     current_iter = plan_consumed; // 0 for prompt_only, 1 if plan already ran
     let mut unfinished_subtask_retries: u32 = 0;
     let mut calls_since_subtask_management: u32 = 0;
+    // Track when condensation last occurred so soft-budget triggers use
+    // iteration-since-last-condense rather than a fixed modulo schedule.
+    // This prevents aggressive condensation on every Nth iteration even when
+    // the last condense just happened.
+    let mut last_condense_iteration: i32 = 0;
 
     for _turn in 0..max_llm_calls {
         current_iter += 1; // increment before each LLM call
@@ -733,7 +738,7 @@ pub async fn process_thread(
         let needs_hard_condense = current_tokens > prompt_token_hard;
         let needs_soft_condense = current_tokens > prompt_token_soft
             && state_interval > 0
-            && current_iter % state_interval == 0;
+            && (current_iter - last_condense_iteration) >= state_interval;
 
         if needs_hard_condense || needs_soft_condense {
             // Use the char budget for the condense_messages function's safety
@@ -810,6 +815,7 @@ pub async fn process_thread(
                     break;
                 }
             }
+            last_condense_iteration = current_iter;
         }
 
         // Layer 3: iteration-aware tool result pruning
@@ -1148,6 +1154,7 @@ pub async fn process_thread(
             let tool_start = std::time::Instant::now();
             let mut tool_ctx = cfg.ctx.clone();
             tool_ctx.current_thread_id = Some(thread.id);
+            tool_ctx.current_allowed_tools = prof.allowed_tools.clone();
             let result = cfg.mcp.execute(&mcp_call, tool_ctx).await;
             let tool_elapsed_ms = tool_start.elapsed().as_millis() as i32;
 

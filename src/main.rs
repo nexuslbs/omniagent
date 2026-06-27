@@ -95,7 +95,7 @@ async fn run_server() -> AppResult<()> {
 
     // Create AppContext and MCP registry
     let readonly_pool = db::connect(&cfg.database_readonly_url).await?;
-    let ctx = mcp::AppContext::new(
+    let mut ctx = mcp::AppContext::new(
         pool.clone(),
         readonly_pool,
         &data_dir,
@@ -103,7 +103,7 @@ async fn run_server() -> AppResult<()> {
         Some(cfg.qdrant_url.clone()),
         platform_senders,
     );
-    let mcp = mcp::default_registry(&ctx).await;
+    let mcp = mcp::default_registry(&mut ctx).await;
 
     // Build the agent with MCP context
     let agent = agent::Agent::new(pool.clone(), cfg.clone(), mcp.clone(), ctx.clone());
