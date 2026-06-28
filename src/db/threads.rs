@@ -552,7 +552,7 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
 /// Skip a single pending/processing thread by setting its status to 'skipped'.
 pub async fn skip_thread(pool: &PgPool, thread_id: i64) -> AppResult<u64> {
     let result = sql_forge!(
-        "UPDATE threads SET status = 'skipped', ended_at = NOW() WHERE id = :id AND status IN ('pending', 'processing')",
+        "UPDATE threads SET status = 'skipped', ended_at = NOW(), terminal = true WHERE id = :id AND status IN ('pending', 'processing')",
         ( :id = thread_id )
     )
     .execute(pool)

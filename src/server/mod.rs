@@ -32,6 +32,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+use crate::agent::helpers;
 use crate::db::types as queries;
 use crate::llm::{resolve_llm_api_key, ChatMessage, CompletionRequest, LLMClient};
 use crate::mcp::{AppContext, McpRegistry};
@@ -273,6 +274,29 @@ async fn stop_thread_handler(
     } else {
         false
     };
+
+    // 4. Send :o: reaction to the platform if the thread has a cause message with an external_id
+    if skipped > 0 {
+        if let Ok(Some(cause_msg)) = crate::db::threads::get_cause_message(&state.pool, thread_id).await {
+            if let Some(ref ext_id) = cause_msg.external_id {
+                if let Ok(Some(channel)) = crate::db::channels::get_channel_by_id(&state.pool, channel_id).await {
+                    if let (Some(ref platform), Some(ref resource)) = (channel.platform, channel.resource_identifier) {
+                        helpers::enqueue_reaction(
+                            &state.app_context,
+                            platform,
+                            resource,
+                            ext_id,
+                            ":o:",
+                        ).await;
+                        info!(
+                            "Stop-thread: sent :o: reaction for thread {} on {}",
+                            thread_id, platform
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     Json(serde_json::json!({
         "action": "stop-thread",
