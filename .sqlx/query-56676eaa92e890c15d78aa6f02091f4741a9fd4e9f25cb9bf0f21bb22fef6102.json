@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE threads SET status = 'skipped', ended_at = NOW() WHERE id = $1 AND status IN ('pending', 'processing')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "56676eaa92e890c15d78aa6f02091f4741a9fd4e9f25cb9bf0f21bb22fef6102"
+}

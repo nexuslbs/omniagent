@@ -39,6 +39,7 @@ use crate::prompt_builder::{
     build_planning_prompt, build_system_prompt, build_system_prompt_parts,
     MemoryStore, PlanningPromptParams,
 };
+use sql_forge::sql_forge;
 
 mod diagnostic;
 pub mod plugins;
@@ -508,14 +509,20 @@ async fn prompt_preview_handler(
                 let qdrant_url = std::env::var("QDRANT_URL").ok();
 
                 // Look up parent_id for context scoping (preview shows thread-isolated context)
-                let preview_parent_id: Option<i64> = sqlx::query_scalar(
-                    "SELECT parent_id FROM threads WHERE id = $1"
+                #[derive(Debug, sqlx::FromRow)]
+                struct PreviewParentRow {
+                    parent_id: Option<i64>,
+                }
+                let pp_row: Option<PreviewParentRow> = sql_forge!(
+                    PreviewParentRow,
+                    "SELECT parent_id FROM threads WHERE id = :id",
+                    ( :id = tid )
                 )
-                .bind(tid)
                 .fetch_optional(&state.pool)
                 .await
                 .ok()
                 .flatten();
+                let preview_parent_id = pp_row.and_then(|r| r.parent_id);
 
                 let (context_text, _meta) = crate::context_builder::build_thread_context(
                     &state.pool,
@@ -777,14 +784,20 @@ async fn context_preview_handler(
     // Build context — same function the agent uses
     let qdrant_url = std::env::var("QDRANT_URL").ok();
     // Look up parent_id for context scoping (preview shows thread-isolated context)
-    let preview_parent_id: Option<i64> = sqlx::query_scalar(
-        "SELECT parent_id FROM threads WHERE id = $1"
+    #[derive(Debug, sqlx::FromRow)]
+    struct PreviewParentRow {
+        parent_id: Option<i64>,
+    }
+    let pp_row: Option<PreviewParentRow> = sql_forge!(
+        PreviewParentRow,
+        "SELECT parent_id FROM threads WHERE id = :id",
+        ( :id = thread_id )
     )
-    .bind(thread_id)
     .fetch_optional(&state.pool)
     .await
     .ok()
     .flatten();
+    let preview_parent_id = pp_row.and_then(|r| r.parent_id);
     let (context_text, meta) = crate::context_builder::build_thread_context(
         &state.pool,
         &crate::context_builder::ThreadContextIdentifiers {
