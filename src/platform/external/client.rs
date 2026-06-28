@@ -247,6 +247,7 @@ impl Platform for ExternalPlatformClient {
     let mut last_deliver_thread_id: Option<i64> = None;
     let mut last_deliver_resource: Option<String> = None;
     let mut last_deliver_is_user_thread: Option<bool> = None;
+    let mut last_deliver_thread_sequence: Option<i32> = None;
 
     loop {
             line_buf.clear();
@@ -322,6 +323,7 @@ impl Platform for ExternalPlatformClient {
                     last_deliver_thread_id = Some(envelope.thread_id);
                     last_deliver_resource = Some(envelope.resource_identifier.clone());
                     last_deliver_is_user_thread = Some(envelope.is_user_thread);
+                    last_deliver_thread_sequence = Some(envelope.thread_sequence);
 
                     // Build deliver params from envelope
                     let params = DeliverParams {
@@ -398,6 +400,7 @@ impl Platform for ExternalPlatformClient {
                                                 if let Some(msg_id) = last_deliver_msg_id.take() {
                                                     let res = last_deliver_resource.take();
                                                     let is_user = last_deliver_is_user_thread.take().unwrap_or(false);
+                                                    let seq = last_deliver_thread_sequence.take().unwrap_or(1);
                                                     let _ = last_deliver_thread_id.take();
                                                     sqlx::query(
                                                         "UPDATE messages SET external_id = $1 WHERE id = $2 AND external_id IS NULL"
@@ -414,9 +417,10 @@ impl Platform for ExternalPlatformClient {
                                                         e
                                                     }).ok();
                                                     // For system-originated threads (kanban, cron, etc.),
-                                                    // immediately send a +1 reaction to acknowledge receipt.
+                                                    // immediately send a +1 reaction to acknowledge receipt
+                                                    // but only for the seq-0 (first) message in the thread.
                                                     if let Some(resource) = res {
-                                                        if !is_user {
+                                                        if !is_user && seq == 0 {
                                                             let _ = send_react(
                                                                 &mut stdin,
                                                                 &mut next_id_val,
