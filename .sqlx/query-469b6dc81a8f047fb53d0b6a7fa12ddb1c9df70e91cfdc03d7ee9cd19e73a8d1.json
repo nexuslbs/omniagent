@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE threads\n        SET status = $1,\n            input_tokens = COALESCE(\n                (SELECT SUM((token_usage->>'prompt_tokens')::int)\n                 FROM messages WHERE thread_id = $2 AND token_usage IS NOT NULL),\n                0\n            ),\n            cached_tokens = COALESCE(\n                (SELECT SUM((token_usage->>'cached_tokens')::int)\n                 FROM messages WHERE thread_id = $3 AND token_usage IS NOT NULL),\n                0\n            ),\n            output_tokens = COALESCE(\n                (SELECT SUM((token_usage->>'completion_tokens')::int)\n                 FROM messages WHERE thread_id = $4 AND token_usage IS NOT NULL),\n                0\n            ),\n            duration_ms = COALESCE(\n                EXTRACT(EPOCH FROM (NOW() - COALESCE(started_at, NOW())))::int * 1000,\n                0\n            ),\n            ended_at = NOW(),\n            iterations = COALESCE(\n                (SELECT MAX(iteration_number)\n                 FROM messages WHERE thread_id = $5),\n                0\n            ),\n            terminal = true\n        WHERE id = $6 AND NOT terminal\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "469b6dc81a8f047fb53d0b6a7fa12ddb1c9df70e91cfdc03d7ee9cd19e73a8d1"
+}

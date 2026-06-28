@@ -41,7 +41,8 @@ pub async fn create_thread(
             ''::text AS "ended_at",
             terminal,
             planning_mode,
-            parent_id
+            parent_id,
+            iterations
         "#,
         ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :planning_mode = &p.planning_mode, :parent_id = p.parent_id.unwrap_or(-1i64) )
     )
@@ -439,7 +440,8 @@ pub async fn find_pending_threads_by_channel(
             COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
             terminal,
             planning_mode,
-            parent_id
+            parent_id,
+            iterations
         FROM threads
         WHERE channel_id = :channel_id AND status = 'pending'
         ORDER BY created_at ASC
@@ -502,6 +504,11 @@ pub async fn complete_thread(
                 0
             ),
             ended_at = NOW(),
+            iterations = COALESCE(
+                (SELECT MAX(iteration_number)
+                 FROM messages WHERE thread_id = :id),
+                0
+            ),
             terminal = true
         WHERE id = :id AND NOT terminal
         "#,
@@ -517,7 +524,7 @@ pub async fn complete_thread(
 pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u64> {
     // Mark all pending/processing threads as skipped
     let result = sql_forge!(
-        "UPDATE threads SET status = 'skipped', ended_at = NOW(), terminal = true WHERE channel_id = :channel_id AND status IN ('pending', 'processing') AND NOT terminal",
+        "UPDATE threads SET status = 'skipped', ended_at = NOW(), terminal = true, iterations = COALESCE((SELECT MAX(iteration_number) FROM messages WHERE thread_id = threads.id), 0) WHERE channel_id = :channel_id AND status IN ('pending', 'processing') AND NOT terminal",
         ( :channel_id = channel_id )
     )
     .execute(pool)
@@ -552,7 +559,7 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
 /// Skip a single pending/processing thread by setting its status to 'skipped'.
 pub async fn skip_thread(pool: &PgPool, thread_id: i64) -> AppResult<u64> {
     let result = sql_forge!(
-        "UPDATE threads SET status = 'skipped', ended_at = NOW(), terminal = true WHERE id = :id AND status IN ('pending', 'processing')",
+        "UPDATE threads SET status = 'skipped', ended_at = NOW(), terminal = true, iterations = COALESCE((SELECT MAX(iteration_number) FROM messages WHERE thread_id = :id), 0) WHERE id = :id AND status IN ('pending', 'processing')",
         ( :id = thread_id )
     )
     .execute(pool)
@@ -657,7 +664,8 @@ pub async fn get_completed_seq0_threads_since(
                     COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
                     terminal,
                     planning_mode,
-                    parent_id
+                    parent_id,
+                    iterations
                 FROM threads
                 WHERE channel_id = :channel_id
                   AND status = 'completed'
@@ -684,7 +692,8 @@ pub async fn get_completed_seq0_threads_since(
                     COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
                     terminal,
                     planning_mode,
-                    parent_id
+                    parent_id,
+                    iterations
                 FROM threads
                 WHERE channel_id = :channel_id
                   AND status = 'completed'
@@ -711,7 +720,8 @@ pub async fn get_completed_seq0_threads_since(
                     COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
                     terminal,
                     planning_mode,
-                    parent_id
+                    parent_id,
+                    iterations
                 FROM threads
                 WHERE channel_id = :channel_id
                   AND status = 'completed'

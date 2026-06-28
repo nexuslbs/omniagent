@@ -30,6 +30,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     phase_20_backfill_kanban_created_events(pool).await?;
     phase_21_add_planning_mode_to_kanban_tasks(pool).await?;
     phase_22_add_threads_parent_id(pool).await?;
+    phase_23_add_threads_iterations(pool).await?;
     Ok(())
 }
 
@@ -1399,5 +1400,35 @@ async fn phase_22_add_threads_parent_id(pool: &PgPool) -> Result<()> {
     .await?;
 
     tracing::info!("[migration] Phase 22 complete: parent_id column added to threads");
+    Ok(())
+}
+
+/// Phase 23: Add iterations column to threads table and backfill from message iteration_number.
+async fn phase_23_add_threads_iterations(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        ALTER TABLE threads
+        ADD COLUMN IF NOT EXISTS iterations INT NOT NULL DEFAULT 0
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Backfill for existing threads: set iterations = MAX(iteration_number) from their messages
+    sqlx::query(
+        r#"
+        UPDATE threads t
+        SET iterations = COALESCE((
+            SELECT MAX(m.iteration_number)
+            FROM messages m
+            WHERE m.thread_id = t.id
+        ), 0)
+        WHERE t.terminal = true
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!("[migration] Phase 23 complete: iterations column added to threads table");
     Ok(())
 }

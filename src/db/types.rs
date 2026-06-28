@@ -35,6 +35,7 @@ pub struct ThreadDb {
     pub schedule_task_id: Option<String>,
     pub planning_mode: String,
     pub parent_id: Option<i64>,
+    pub iterations: i32,
 }
 
 impl TryFrom<ThreadDb> for Thread {
@@ -94,6 +95,7 @@ impl TryFrom<ThreadDb> for Thread {
             schedule_task_id: db.schedule_task_id,
             planning_mode: db.planning_mode,
             parent_id: db.parent_id,
+            iterations: db.iterations,
         })
     }
 }
@@ -472,6 +474,7 @@ pub struct Thread {
     pub schedule_task_id: Option<String>,
     pub planning_mode: String,
     pub parent_id: Option<i64>,
+    pub iterations: i32,
 }
 
 #[allow(dead_code)]
