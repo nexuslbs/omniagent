@@ -31,8 +31,8 @@ pub async fn create_thread(
     let row: ThreadDb = sql_forge!(
         ThreadDb,
         r#"
-        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id, planning_mode)
-        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :planning_mode)
+        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id, planning_mode, parent_id)
+        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :planning_mode, NULLIF(:parent_id, -1::bigint)::bigint)
         RETURNING
             id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
             input_tokens, cached_tokens, output_tokens, duration_ms,
@@ -40,9 +40,10 @@ pub async fn create_thread(
             ''::text AS "started_at",
             ''::text AS "ended_at",
             terminal,
-            planning_mode
+            planning_mode,
+            parent_id
         "#,
-        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :planning_mode = &p.planning_mode )
+        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :planning_mode = &p.planning_mode, :parent_id = p.parent_id.unwrap_or(-1i64) )
     )
     .fetch_one(pool)
     .await?;
@@ -343,7 +344,40 @@ pub async fn create_thread_with_cause(
         })
         .or_else(|| crate::llm::resolve_default_model(&resolved_provider));
 
-    // 5. Create the thread
+    // 5. Resolve parent_id from parent_external_id
+    // If parent_external_id is provided and different from the message's own external_id,
+    // look for the thread in this channel whose cause message (seq-0) has that external_id.
+    let resolved_parent_id = if let Some(ref parent_ext_id) = p.parent_external_id {
+        let same_as_self = p.external_id.as_deref() == Some(parent_ext_id.as_str());
+        if !same_as_self && !parent_ext_id.is_empty() {
+            #[derive(Debug, sqlx::FromRow)]
+            struct ParentRow {
+                thread_id: i64,
+            }
+            let found: Option<ParentRow> = sql_forge!(
+                ParentRow,
+                r#"
+                SELECT m.thread_id
+                FROM messages m
+                JOIN threads t ON t.id = m.thread_id
+                WHERE t.channel_id = :channel_id
+                  AND m.external_id = :parent_ext_id
+                  AND m.thread_sequence = 0
+                LIMIT 1
+                "#,
+                ( :channel_id = channel_id, :parent_ext_id = parent_ext_id.as_str() )
+            )
+            .fetch_optional(pool)
+            .await?;
+            found.map(|f| f.thread_id)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 6. Create the thread (with resolved parent_id, if any)
     let thread = create_thread(
         pool,
         cause,
@@ -355,11 +389,12 @@ pub async fn create_thread_with_cause(
             task_id: p.task_id.clone(),
             schedule_task_id: p.schedule_task_id.clone(),
             planning_mode: planning_mode.clone(),
+            parent_id: resolved_parent_id,
         },
     )
     .await?;
 
-    // 5. Create the cause (seq-0) message and set thread status
+    // 7. Create the cause (seq-0) message and set thread status
     let msg = MessageNew {
         thread_id: thread.id,
         role: "cause".to_string(),
@@ -397,7 +432,8 @@ pub async fn find_pending_threads_by_channel(
             COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
             COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
             terminal,
-            planning_mode
+            planning_mode,
+            parent_id
         FROM threads
         WHERE channel_id = :channel_id AND status = 'pending'
         ORDER BY created_at ASC
@@ -588,34 +624,101 @@ pub async fn get_cause_message(pool: &PgPool, thread_id: i64) -> AppResult<Optio
 /// Get completed seq-0 threads (thread roots) with id > since_id,
 /// ordered by id ASC, limited to `limit` rows.
 /// Now queries the threads table instead of messages.
+/// Get completed seq-0 threads in a channel since a given thread id.
+///
+/// When `parent_id` is:
+/// - `None`: returns ALL completed threads (no parent filter) — used by summary generation
+/// - `Some(None)`: returns only root threads (parent_id IS NULL) — used by context for root threads
+/// - `Some(Some(p))`: returns sibling threads (parent_id = p) plus the parent thread itself (id = p)
 pub async fn get_completed_seq0_threads_since(
     pool: &PgPool,
     channel_id: i64,
     since_id: i64,
     limit: i64,
+    parent_id: Option<Option<i64>>,
 ) -> AppResult<Vec<ThreadDb>> {
-    let rows: Vec<ThreadDb> = sql_forge!(
-        ThreadDb,
-        r#"
-        SELECT
-            id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
-            input_tokens, cached_tokens, output_tokens, duration_ms,
-            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
-            COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
-            terminal,
-            planning_mode
-        FROM threads
-        WHERE channel_id = :channel_id
-          AND status = 'completed'
-          AND id > :since_id
-        ORDER BY id ASC
-        LIMIT :limit
-        "#,
-        ( :channel_id = channel_id, :since_id = since_id, :limit = limit )
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<ThreadDb> = match parent_id {
+        Some(Some(pid)) => {
+            // Reply thread: siblings + parent
+            sql_forge!(
+                ThreadDb,
+                r#"
+                SELECT
+                    id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
+                    input_tokens, cached_tokens, output_tokens, duration_ms,
+                    COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
+                    COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
+                    COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
+                    terminal,
+                    planning_mode,
+                    parent_id
+                FROM threads
+                WHERE channel_id = :channel_id
+                  AND status = 'completed'
+                  AND id > :since_id
+                  AND (parent_id = :parent_id OR id = :parent_id)
+                ORDER BY id ASC
+                LIMIT :limit
+                "#,
+                ( :channel_id = channel_id, :since_id = since_id, :limit = limit, :parent_id = pid )
+            )
+            .fetch_all(pool)
+            .await?
+        }
+        Some(None) => {
+            // Root thread: only parent-less threads
+            sql_forge!(
+                ThreadDb,
+                r#"
+                SELECT
+                    id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
+                    input_tokens, cached_tokens, output_tokens, duration_ms,
+                    COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
+                    COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
+                    COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
+                    terminal,
+                    planning_mode,
+                    parent_id
+                FROM threads
+                WHERE channel_id = :channel_id
+                  AND status = 'completed'
+                  AND id > :since_id
+                  AND parent_id IS NULL
+                ORDER BY id ASC
+                LIMIT :limit
+                "#,
+                ( :channel_id = channel_id, :since_id = since_id, :limit = limit )
+            )
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            // No parent filter — all threads (used by summary generation)
+            sql_forge!(
+                ThreadDb,
+                r#"
+                SELECT
+                    id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
+                    input_tokens, cached_tokens, output_tokens, duration_ms,
+                    COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
+                    COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
+                    COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
+                    terminal,
+                    planning_mode,
+                    parent_id
+                FROM threads
+                WHERE channel_id = :channel_id
+                  AND status = 'completed'
+                  AND id > :since_id
+                ORDER BY id ASC
+                LIMIT :limit
+                "#,
+                ( :channel_id = channel_id, :since_id = since_id, :limit = limit )
+            )
+            .fetch_all(pool)
+            .await?
+        }
+    };
 
     Ok(rows)
 }

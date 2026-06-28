@@ -155,6 +155,7 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
                 msg_type: "kanban".to_string(),
                 msg_subtype: None,
                 task_planning_mode: task_planning_mode.clone(),
+                parent_external_id: None,
             },
         )
         .await

@@ -499,6 +499,10 @@ impl Platform for ExternalPlatformClient {
                                                                 schedule_task_id: None,
                                                                 content: inbound.text.clone(),
                                                                 external_id: Some(inbound.external_id.clone()),
+                                                                parent_external_id: inbound.metadata.get("root_id")
+                                                                    .and_then(|v| v.as_str())
+                                                                    .filter(|s| !s.is_empty())
+                                                                    .map(|s| s.to_string()),
                                                                 metadata: {
                                                                     let mut meta = inbound.metadata.clone();
                                                                     if let Some(ref t) = channel.template {

@@ -512,7 +512,7 @@ pub async fn check_and_generate_summary(
 
     // 2. Fetch completed threads since the last summary
     let completed_threads =
-        match queries::get_completed_seq0_threads_since(pool, channel_id, since_id, trigger_count)
+        match queries::get_completed_seq0_threads_since(pool, channel_id, since_id, trigger_count, None)
             .await
         {
             Ok(threads) => threads,

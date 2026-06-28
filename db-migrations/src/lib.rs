@@ -29,6 +29,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     phase_19_drop_threads_task_id_fk(pool).await?;
     phase_20_backfill_kanban_created_events(pool).await?;
     phase_21_add_planning_mode_to_kanban_tasks(pool).await?;
+    phase_22_add_threads_parent_id(pool).await?;
     Ok(())
 }
 
@@ -1372,5 +1373,31 @@ async fn phase_20_backfill_kanban_created_events(pool: &PgPool) -> Result<()> {
     .await?;
 
     tracing::info!("[migration] Phase 20 complete: backfilled missing 'created' history events");
+    Ok(())
+}
+
+/// Phase 22: Add parent_id column to threads table for thread reply parent tracking.
+/// Allows linking a reply thread to its parent thread, enabling context scoping
+/// where replies only see sibling + parent messages instead of all channel threads.
+async fn phase_22_add_threads_parent_id(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        ALTER TABLE threads
+        ADD COLUMN IF NOT EXISTS parent_id BIGINT REFERENCES threads(id)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_threads_parent_id
+        ON threads(parent_id)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!("[migration] Phase 22 complete: parent_id column added to threads");
     Ok(())
 }

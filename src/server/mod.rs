@@ -507,12 +507,23 @@ async fn prompt_preview_handler(
                     .unwrap_or_else(|| crate::profile::Profile::default(profile_name));
                 let qdrant_url = std::env::var("QDRANT_URL").ok();
 
+                // Look up parent_id for context scoping (preview shows thread-isolated context)
+                let preview_parent_id: Option<i64> = sqlx::query_scalar(
+                    "SELECT parent_id FROM threads WHERE id = $1"
+                )
+                .bind(tid)
+                .fetch_optional(&state.pool)
+                .await
+                .ok()
+                .flatten();
+
                 let (context_text, _meta) = crate::context_builder::build_thread_context(
                     &state.pool,
                     &crate::context_builder::ThreadContextIdentifiers {
                         thread_id: tid,
                         channel_id: ch.id,
                         cause_msg_id: latest.id,
+                        parent_id: preview_parent_id,
                     },
                     &crate::context_builder::ThreadContextConfig {
                         cause_content: &body.prompt,
@@ -765,12 +776,22 @@ async fn context_preview_handler(
 
     // Build context — same function the agent uses
     let qdrant_url = std::env::var("QDRANT_URL").ok();
+    // Look up parent_id for context scoping (preview shows thread-isolated context)
+    let preview_parent_id: Option<i64> = sqlx::query_scalar(
+        "SELECT parent_id FROM threads WHERE id = $1"
+    )
+    .bind(thread_id)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
     let (context_text, meta) = crate::context_builder::build_thread_context(
         &state.pool,
         &crate::context_builder::ThreadContextIdentifiers {
             thread_id,
             channel_id: channel.id,
             cause_msg_id: cause_id,
+            parent_id: preview_parent_id,
         },
         &crate::context_builder::ThreadContextConfig {
             cause_content: &cause_content,

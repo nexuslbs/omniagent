@@ -402,6 +402,7 @@ pub async fn process_thread(
                 thread_id: thread.id,
                 channel_id: thread.channel_id,
                 cause_msg_id: cause_msg.id,
+                parent_id: thread.parent_id,
             },
             &crate::context_builder::ThreadContextConfig {
                 cause_content: &cause_msg.content,

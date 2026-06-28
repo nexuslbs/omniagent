@@ -34,6 +34,7 @@ pub struct ThreadDb {
     pub task_id: Option<String>,
     pub schedule_task_id: Option<String>,
     pub planning_mode: String,
+    pub parent_id: Option<i64>,
 }
 
 impl TryFrom<ThreadDb> for Thread {
@@ -92,6 +93,7 @@ impl TryFrom<ThreadDb> for Thread {
             task_id: db.task_id,
             schedule_task_id: db.schedule_task_id,
             planning_mode: db.planning_mode,
+            parent_id: db.parent_id,
         })
     }
 }
@@ -280,6 +282,7 @@ pub struct CreateThreadParams {
     pub task_id: Option<String>,
     pub schedule_task_id: Option<String>,
     pub planning_mode: String,
+    pub parent_id: Option<i64>,
 }
 
 /// Stats for completing a thread.
@@ -305,6 +308,7 @@ pub struct ThreadCauseParams {
     pub schedule_task_id: Option<String>,
     pub content: String,
     pub external_id: Option<String>,
+    pub parent_external_id: Option<String>,
     pub metadata: serde_json::Value,
     pub msg_type: String,
     pub msg_subtype: Option<String>,
@@ -467,6 +471,7 @@ pub struct Thread {
     pub task_id: Option<String>,
     pub schedule_task_id: Option<String>,
     pub planning_mode: String,
+    pub parent_id: Option<i64>,
 }
 
 #[allow(dead_code)]
@@ -480,6 +485,7 @@ pub struct ThreadNew {
     pub task_id: Option<String>,
     pub schedule_task_id: Option<String>,
     pub planning_mode: String,
+    pub parent_id: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------

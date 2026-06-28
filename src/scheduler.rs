@@ -226,6 +226,7 @@ async fn tick(
                 msg_type: "cron".to_string(),
                 msg_subtype: Some(subtype),
                 task_planning_mode: job.planning_mode.clone(),
+                parent_external_id: None,
             },
         )
         .await
@@ -590,6 +591,7 @@ async fn create_action_thread(
             msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
             task_planning_mode: job.planning_mode.clone(),
+            parent_external_id: None,
         },
     )
     .await?;
@@ -845,6 +847,7 @@ pub async fn fire_cron_job_by_id(
             msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
             task_planning_mode: job.planning_mode.clone(),
+            parent_external_id: None,
         },
     )
     .await?;

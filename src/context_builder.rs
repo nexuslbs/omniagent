@@ -284,6 +284,7 @@ pub struct ThreadContextIdentifiers {
     pub thread_id: i64,
     pub channel_id: i64,
     pub cause_msg_id: i64,
+    pub parent_id: Option<i64>,
 }
 
 /// Configuration parameters for context assembly.
@@ -396,11 +397,17 @@ pub async fn build_thread_context(
                 ));
 
                 // Also include threads completed after the last summary, if any
+                // Filter by parent_id so reply threads only see sibling + parent context,
+                // and root threads only see other root threads.
                 match queries::get_completed_seq0_threads_since(
                     pool,
                     ids.channel_id,
                     summary.next_thread_id,
                     5,
+                    match ids.parent_id {
+                        Some(pid) => Some(Some(pid)),
+                        None => Some(None),
+                    },
                 )
                 .await
                 {
