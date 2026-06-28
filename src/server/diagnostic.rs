@@ -4,6 +4,13 @@ use super::AppState;
 use axum::extract::State;
 use std::sync::Arc;
 use std::time::Duration;
+use sql_forge::sql_forge;
+use sqlx::FromRow;
+
+#[derive(FromRow)]
+struct OneRow {
+    id: Option<i32>,
+}
 
 /// Test endpoint that uses State but returns immediately — no DB calls.
 pub async fn check_state(State(_state): State<Arc<AppState>>) -> &'static str {
@@ -14,11 +21,15 @@ pub async fn check_state(State(_state): State<Arc<AppState>>) -> &'static str {
 pub async fn check_db(State(state): State<Arc<AppState>>) -> String {
     match tokio::time::timeout(
         Duration::from_secs(5),
-        sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&state.pool),
+        sql_forge!(
+            OneRow,
+            "SELECT 1 AS id"
+        )
+        .fetch_one(&state.pool),
     )
     .await
     {
-        Ok(Ok(val)) => format!("db ok: {}", val),
+        Ok(Ok(val)) => format!("db ok: {}", val.id.unwrap_or(0)),
         Ok(Err(e)) => format!("db error: {}", e),
         Err(_) => "db timeout after 5s".to_string(),
     }

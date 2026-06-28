@@ -6,6 +6,7 @@
 //! - `GET /api/secrets/:name/versions` — list all versions of a secret
 //! - `DELETE /api/secrets/:name` — delete a secret and all its versions
 
+use sql_forge::sql_forge;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -89,23 +90,57 @@ pub fn secrets_router() -> Router<Arc<AppState>> {
         .route("/secrets/{name}", delete(delete_secret_handler))
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct SecretRow {
+    id: i64,
+    name: String,
+    field_type: String,
+    current_value: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct SecretIdRow {
+    id: i64,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct SecretCurrentRow {
+    id: i64,
+    name: String,
+    field_type: String,
+    current_value: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct SecretUpdateRow {
+    field_type: String,
+    current_value: String,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct SecretVersionRow {
+    id: i64,
+    version_number: i32,
+    value: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct MaxVersionRow {
+    coalesce: Option<i32>,
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
 /// GET /api/secrets — list all secrets with current values.
 async fn list_secrets_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let rows = match sqlx::query_as::<
-        _,
-        (
-            i64,
-            String,
-            String,
-            String,
-            chrono::DateTime<chrono::Utc>,
-            chrono::DateTime<chrono::Utc>,
-        ),
-    >(
+    let rows = match sql_forge!(
+        SecretRow,
         r#"
         SELECT id, name, field_type, current_value, created_at, updated_at
         FROM secrets
@@ -124,16 +159,14 @@ async fn list_secrets_handler(State(state): State<Arc<AppState>>) -> impl IntoRe
 
     let secrets: Vec<SecretEntry> = rows
         .into_iter()
-        .map(
-            |(id, name, field_type, current_value, created_at, updated_at)| SecretEntry {
-                id,
-                name,
-                field_type,
-                current_value,
-                created_at: fmt_ts(&created_at),
-                updated_at: fmt_ts(&updated_at),
-            },
-        )
+        .map(|row| SecretEntry {
+            id: row.id,
+            name: row.name,
+            field_type: row.field_type,
+            current_value: row.current_value,
+            created_at: fmt_ts(&row.created_at),
+            updated_at: fmt_ts(&row.updated_at),
+        })
         .collect();
 
     ok_json(secrets)
@@ -160,38 +193,27 @@ async fn create_secret_handler(
         _ => "password",
     };
 
-    match sqlx::query_as::<
-        _,
-        (
-            i64,
-            String,
-            String,
-            String,
-            chrono::DateTime<chrono::Utc>,
-            chrono::DateTime<chrono::Utc>,
-        ),
-    >(
+    match sql_forge!(
+        SecretRow,
         r#"
         INSERT INTO secrets (name, field_type, current_value)
-        VALUES ($1, $2, $3)
+        VALUES (:name, :field_type, :value)
         RETURNING id, name, field_type, current_value, created_at, updated_at
         "#,
+        ( :name = &name, :field_type = field_type, :value = &body.value )
     )
-    .bind(&name)
-    .bind(field_type)
-    .bind(&body.value)
     .fetch_one(&state.pool)
     .await
     {
-        Ok((id, name, ft, val, created_at, updated_at)) => {
+        Ok(row) => {
             info!("Created secret '{}'", name);
             ok_json(SecretEntry {
-                id,
-                name,
-                field_type: ft,
-                current_value: val,
-                created_at: fmt_ts(&created_at),
-                updated_at: fmt_ts(&updated_at),
+                id: row.id,
+                name: row.name,
+                field_type: row.field_type,
+                current_value: row.current_value,
+                created_at: fmt_ts(&row.created_at),
+                updated_at: fmt_ts(&row.updated_at),
             })
         }
         Err(e) => {
@@ -216,18 +238,19 @@ async fn update_secret_handler(
     Json(body): Json<UpdateSecretRequest>,
 ) -> impl IntoResponse {
     // 1. Get the current value
-    let current = match sqlx::query_as::<_, (i64, String, String, String)>(
+    let current = match sql_forge!(
+        SecretCurrentRow,
         r#"
         SELECT id, name, field_type, current_value
         FROM secrets
-        WHERE name = $1
+        WHERE name = :name
         "#,
+        ( :name = &name )
     )
-    .bind(&name)
     .fetch_optional(&state.pool)
     .await
     {
-        Ok(Some(row)) => row,
+        Ok(Some(row)) => (row.id, row.name, row.field_type, row.current_value),
         Ok(None) => return err_json(StatusCode::NOT_FOUND, "Secret not found"),
         Err(e) => {
             error!("Failed to fetch secret '{}': {:?}", name, e);
@@ -248,27 +271,27 @@ async fn update_secret_handler(
 
     // 3. If the old value is non-empty, version it
     if !old_value.is_empty() {
-        let max_ver: Option<(i32,)> = sqlx::query_as(
+        let max_ver: Option<MaxVersionRow> = sql_forge!(
+            MaxVersionRow,
             r#"
-            SELECT COALESCE(MAX(version_number), 0) FROM secret_versions WHERE secret_id = $1
+            SELECT COALESCE(MAX(version_number), 0) AS coalesce
+            FROM secret_versions WHERE secret_id = :secret_id
             "#,
+            ( :secret_id = secret_id )
         )
-        .bind(secret_id)
         .fetch_optional(&mut *tx)
         .await
         .unwrap_or(None);
 
-        let next_ver = max_ver.map(|(v,)| v + 1).unwrap_or(1);
+        let next_ver = max_ver.map(|row| row.coalesce.unwrap_or(0) + 1).unwrap_or(1);
 
-        if let Err(e) = sqlx::query(
+        if let Err(e) = sql_forge!(
             r#"
             INSERT INTO secret_versions (secret_id, version_number, value)
-            VALUES ($1, $2, $3)
+            VALUES (:secret_id, :next_ver, :old_value)
             "#,
+            ( :secret_id = secret_id, :next_ver = next_ver, :old_value = &old_value )
         )
-        .bind(secret_id)
-        .bind(next_ver)
-        .bind(&old_value)
         .execute(&mut *tx)
         .await
         {
@@ -282,21 +305,21 @@ async fn update_secret_handler(
     }
 
     // 4. Update the current value
-    let update_result = sqlx::query_as::<_, (String, String, chrono::DateTime<chrono::Utc>)>(
+    let update_result = sql_forge!(
+        SecretUpdateRow,
         r#"
         UPDATE secrets
-        SET current_value = $1, updated_at = NOW()
-        WHERE id = $2
+        SET current_value = :value, updated_at = NOW()
+        WHERE id = :secret_id
         RETURNING field_type, current_value, updated_at
         "#,
+        ( :value = &body.value, :secret_id = secret_id )
     )
-    .bind(&body.value)
-    .bind(secret_id)
     .fetch_one(&mut *tx)
     .await;
 
     match update_result {
-        Ok((field_type, val, updated_at)) => {
+        Ok(row) => {
             if let Err(e) = tx.commit().await {
                 error!("Failed to commit transaction: {:?}", e);
                 return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to commit");
@@ -305,10 +328,10 @@ async fn update_secret_handler(
             ok_json(SecretEntry {
                 id: secret_id,
                 name,
-                field_type,
-                current_value: val,
+                field_type: row.field_type,
+                current_value: row.current_value,
                 created_at: fmt_ts(&chrono::Utc::now()),
-                updated_at: fmt_ts(&updated_at),
+                updated_at: fmt_ts(&row.updated_at),
             })
         }
         Err(e) => {
@@ -325,28 +348,32 @@ async fn list_versions_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // First get the secret id
-    let secret_id = match sqlx::query_as::<_, (i64,)>(r#"SELECT id FROM secrets WHERE name = $1"#)
-            .bind(&name)
-            .fetch_optional(&state.pool)
-            .await
-        {
-            Ok(Some(row)) => row.0,
-            Ok(None) => return err_json(StatusCode::NOT_FOUND, "Secret not found"),
-            Err(e) => {
+    let secret_id = match sql_forge!(
+        SecretIdRow,
+        r#"SELECT id FROM secrets WHERE name = :name"#,
+        ( :name = &name )
+    )
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(Some(row)) => row.id,
+        Ok(None) => return err_json(StatusCode::NOT_FOUND, "Secret not found"),
+        Err(e) => {
                 error!("Failed to find secret '{}': {:?}", name, e);
                 return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
             }
         };
 
-    let rows = match sqlx::query_as::<_, (i64, i32, String, chrono::DateTime<chrono::Utc>)>(
+    let rows = match sql_forge!(
+        SecretVersionRow,
         r#"
         SELECT id, version_number, value, created_at
         FROM secret_versions
-        WHERE secret_id = $1
+        WHERE secret_id = :secret_id
         ORDER BY version_number DESC
         "#,
+        ( :secret_id = secret_id )
     )
-    .bind(secret_id)
     .fetch_all(&state.pool)
     .await
     {
@@ -359,11 +386,11 @@ async fn list_versions_handler(
 
     let versions: Vec<SecretVersionEntry> = rows
         .into_iter()
-        .map(|(id, vn, val, created_at)| SecretVersionEntry {
-            id,
-            version_number: vn,
-            value: val,
-            created_at: fmt_ts(&created_at),
+        .map(|row| SecretVersionEntry {
+            id: row.id,
+            version_number: row.version_number,
+            value: row.value,
+            created_at: fmt_ts(&row.created_at),
         })
         .collect();
 
@@ -375,10 +402,12 @@ async fn delete_secret_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    match sqlx::query("DELETE FROM secrets WHERE name = $1")
-        .bind(&name)
-        .execute(&state.pool)
-        .await
+    match sql_forge!(
+        r#"DELETE FROM secrets WHERE name = :name"#,
+        ( :name = &name )
+    )
+    .execute(&state.pool)
+    .await
     {
         Ok(result) => {
             if result.rows_affected() == 0 {

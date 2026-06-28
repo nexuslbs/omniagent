@@ -48,9 +48,11 @@ pub fn spawn(
     // Clear stale running flags from previous process life (crash/restart)
     let pool2 = pool.clone();
     tokio::spawn(async move {
-        match sqlx::query("UPDATE cron_jobs SET running = false, updated_at = NOW() WHERE running = true")
-            .execute(&pool2)
-            .await
+        match sql_forge!(
+            "UPDATE cron_jobs SET running = false, updated_at = NOW() WHERE running = true"
+        )
+        .execute(&pool2)
+        .await
         {
             Ok(res) => {
                 if res.rows_affected() > 0 {
