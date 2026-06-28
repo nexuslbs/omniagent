@@ -245,6 +245,18 @@ pub async fn create_cause_and_set_pending(
         )
         .execute(&mut *tx)
         .await;
+
+        // Record the transition in history
+        let _ = sql_forge!(
+            r#"
+            INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board)
+            SELECT task_id, 'moved', 'running', 'todo'
+            FROM threads WHERE id = :tid AND task_id IS NOT NULL
+            "#,
+            ( :tid = msg.thread_id )
+        )
+        .execute(&mut *tx)
+        .await;
     }
 
     tx.commit().await?;
@@ -533,6 +545,34 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
     // Update associated kanban tasks:
     // - pending (never started) → todo (can be retried)
     // - processing (was started) → blocked (needs investigation)
+    // Record transitions in history before updating status
+    let _ = sql_forge!(
+        r#"
+        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board)
+        SELECT kt.id, 'moved', kt.status, 'todo'
+        FROM kanban_tasks kt
+        JOIN threads t ON t.task_id = kt.id
+        WHERE t.channel_id = :ch AND t.status = 'pending' AND kt.status = 'ready'
+        "#,
+        ( :ch = channel_id )
+    )
+    .execute(pool)
+    .await;
+
+    let _ = sql_forge!(
+        r#"
+        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board)
+        SELECT kt.id, 'moved', kt.status, 'blocked'
+        FROM kanban_tasks kt
+        JOIN threads t ON t.task_id = kt.id
+        WHERE t.channel_id = :ch AND t.status = 'processing' AND kt.status = 'running'
+        "#,
+        ( :ch = channel_id )
+    )
+    .execute(pool)
+    .await;
+
+    // Now perform the status updates
     let _ = sql_forge!(
         "UPDATE kanban_tasks SET status = 'todo', updated_at = NOW() WHERE id IN (
             SELECT task_id FROM threads

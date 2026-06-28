@@ -166,7 +166,14 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
                     .bind(id)
                     .execute(pool)
                     .await
-                    .map_err(|e| anyhow::anyhow!("Failed to update kanban task status: {}", e))?;
+                    .map_err(|e| anyhow::anyhow!("Failed to update kanban task status: {e}"))?;
+
+                // Record the transition in history
+                db::kanban::insert_kanban_history(
+                    pool, id, "moved",
+                    Some("todo"), Some("ready"),
+                    None,
+                ).await.map_err(|e| anyhow::anyhow!("Failed to insert kanban history: {e}"))?;
 
                 return Ok((
                     format!("Dispatched kanban task '{}' ({}) → thread {} (ready)", title, id, thread.id),
