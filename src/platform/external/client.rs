@@ -512,7 +512,7 @@ impl Platform for ExternalPlatformClient {
                                                                     }
                                                                     meta
                                                                 },
-                                                                msg_type: "user".to_string(),
+                                                                msg_type: "Cause".to_string(),
                                                                 msg_subtype: Some(plugin_name.clone()),
                                                                 task_planning_mode: String::new(),
                                                             },

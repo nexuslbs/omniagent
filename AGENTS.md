@@ -402,12 +402,12 @@ Every thread starts with a seq-0 (cause) message. The `msg_type` and `msg_subtyp
 
 | Source | `msg_type` | `msg_subtype` | Thread `cause` |
 |--------|-----------|---------------|-----------------|
-| User message | `user` | Platform name (e.g., `telegram`) | `user` |
+| User message | `Cause` | Platform name (e.g., `mattermost`) | `user` |
 | Cron job (scheduled) | `cron` | Cron job name | `system` |
 | Cron job (manual run) | `cron` | Cron job name | `user` |
 | Kanban task | `kanban` | Kanban task ID | `system` |
 
-The `msg_type` controls template loading in the executor (templates load for `user`, `cron`, and `kanban` types).
+The `msg_type` controls template loading in the executor (templates load for `Cause`, `cron`, and `kanban` types).
 
 ### Provider/Model Stamping and Validation
 

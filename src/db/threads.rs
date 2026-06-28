@@ -272,6 +272,12 @@ pub async fn create_thread_with_cause(
             cause
         );
     }
+    // Validate msg_type — 'user' is no longer valid for seq-0 messages
+    if p.msg_type == "user" {
+        err_msg!(
+            "msg_type 'user' is no longer valid for seq-0 messages — use 'Cause' instead"
+        );
+    }
     // 1. Get channel for its planning_mode override and current_* fields
     let channel = crate::db::channels::get_channel_by_id(pool, channel_id)
         .await?

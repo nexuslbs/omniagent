@@ -378,6 +378,37 @@ pub async fn build_thread_context(
             "recent_thread_messages".to_string(),
             _start_recent.elapsed().as_millis() as u64,
         );
+
+        // ── Parent thread messages (if this thread is a reply) ──
+        if let Some(parent_id) = ids.parent_id {
+            let _start_parent = Instant::now();
+            match queries::get_recent_thread_messages(pool, parent_id, 10).await {
+                Ok(parent_msgs) if !parent_msgs.is_empty() => {
+                    let parent_content: String = parent_msgs
+                        .iter()
+                        .rev() // oldest first
+                        .map(|m| format!("[{}]: {}", m.role, m.content))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !parent_content.is_empty() {
+                        builder.add_block(ContextBlock::new(
+                            "parent_thread_messages",
+                            BlockPriority::High,
+                            &format!(
+                                "Parent thread (id={}) conversation:\n{}",
+                                parent_id, parent_content
+                            ),
+                            3_000,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            timings.insert(
+                "parent_thread_messages".to_string(),
+                _start_parent.elapsed().as_millis() as u64,
+            );
+        }
     }
 
     let _start_summary = Instant::now();

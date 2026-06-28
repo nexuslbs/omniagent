@@ -263,7 +263,7 @@ Prompt marked as completed, processing_time_ms and token_usage set
 | `msg_type` | Description |
 |------------|-------------|
 | `message` | Standard user or assistant message |
-| `user` | User-initiated seq-0 message (cause thread root). `msg_subtype` = platform name (e.g., `telegram`) |
+| `Cause` | User-initiated seq-0 message (cause thread root). `msg_subtype` = platform name (e.g., `mattermost`) |
 | `cron` | Cron-triggered seq-0 message. `msg_subtype` = cron job name |
 | `kanban` | Kanban-triggered seq-0 message. `msg_subtype` = kanban task ID |
 | `tool` | Tool invocation |
