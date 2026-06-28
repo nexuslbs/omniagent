@@ -31,7 +31,6 @@ pub fn truncate_content(content: &str, max_chars: usize) -> String {
 pub const DEFAULT_MAX_TOOL_OUTPUT_CHARS: usize = 50_000;
 
 pub mod external;
-pub mod tools;
 
 /// A tool call requested by the LLM.
 #[derive(Debug, Clone)]
@@ -157,28 +156,9 @@ impl McpRegistry {
         self.tools.values().collect()
     }
 
-    /// Priority ranking for tool ordering — execution tools first, management tools last.
-    fn tool_priority(name: &str) -> u8 {
-        if name.starts_with("filesystem") {
-            0
-        } else if name.starts_with("docker") {
-            1
-        } else if name.starts_with("query_") || name == "fetch" {
-            2
-        } else if name.starts_with("search_") || name.starts_with("manage_subtask") {
-            3
-        } else if name == "plugin_manager" || name == "list_plugins" || name == "get_plugin" {
-            5
-        } else if name.starts_with("kanban") || name.starts_with("cron") {
-            10
-        } else if name.starts_with("commit_and_push")
-            || name.starts_with("create_github")
-            || name.starts_with("clone_repo")
-        {
-            0
-        } else {
-            4
-        }
+    /// Priority ranking for tool ordering — all tools have equal priority.
+    fn tool_priority(_name: &str) -> u8 {
+        0
     }
 
     /// Get tools allowed for a given profile, sorted by execution priority.
@@ -216,7 +196,7 @@ impl McpRegistry {
             return match result {
                 Ok(r) => {
                     if r.is_error {
-                        // External MCP servers (docker-compose, etc.) return errors
+                        // External MCP servers return errors
                         // as Ok(result) with is_error=true. Enrich the error with
                         // the tool's input schema so the LLM can self-correct.
                         let schema_str = serde_json::to_string_pretty(&tool.input_schema)
@@ -331,7 +311,7 @@ fn list_tool_details_tool() -> McpTool {
             "properties": {
                 "tool_name": {
                     "type": "string",
-                    "description": "The exact name of the tool to inspect (e.g. 'docker_compose', 'filesystem_read', 'kanban_create_task'). Pass a single tool name. Returns the tool's description and complete parameter schema."
+                    "description": "The exact name of the tool to inspect (e.g. 'filesystem_read', 'kanban_create_task'). Pass a single tool name. Returns the tool's description and complete parameter schema."
                 }
             },
             "required": ["tool_name"]
@@ -436,33 +416,11 @@ fn list_tool_details_tool() -> McpTool {
 pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
     let mut registry = McpRegistry::new();
 
-    // Load enabled/disabled state from tools.yml
-    let tool_entries =
-        crate::plugins_yaml::load_raw(&ctx.data_dir, &crate::plugins_yaml::PluginYamlType::Tool)
-            .unwrap_or_default();
-
-    // ── Built-in tools are loaded from external MCP servers via plugins/mcp/ ──
-    // All DB-dependent tools have been externalized to subprocess MCP servers:
-    //   fetch, filesystem, docker-compose, skills (Python stdio)
-    //   cron, kanban, search, memory, git, query, metrics, subtasks, plugin-manager (Rust stdio)
+    // ── External MCP servers are loaded from config + plugins/mcp/ ──
+    // All tools are loaded from external subprocess MCP servers:
+    //   fetch, filesystem, skills (Python stdio)
+    //   cron, kanban, search, memory, git, query, metrics, subtasks, plugin-manager, actions (Rust stdio)
     // External servers are auto-discovered via load_servers_config() below.
-    // The only remaining built-in tools are system actions that call internal Rust functions.
-    // Actions tools (built-in system actions) — gated by tools.yml
-    for action_tool in crate::mcp::tools::actions::tools() {
-        let enabled = tool_entries
-            .get(&action_tool.name)
-            .map(|e| e.enabled)
-            // Built-in tools not in tools.yml are disabled by default
-            .unwrap_or(false);
-        if enabled {
-            registry.register(action_tool);
-        } else {
-            tracing::info!(
-                "Skipping disabled built-in tool '{}' — enable in tools.yml",
-                action_tool.name
-            );
-        }
-    }
 
     // External MCP servers (load from config + plugins/mcp/, best-effort)
     let external_tools = external::client::initialize_external_tools(&ctx.data_dir).await;

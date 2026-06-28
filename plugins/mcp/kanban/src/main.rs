@@ -417,6 +417,15 @@ async fn handle_delete(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     // ── Kanban history: record deletion with full previous values ──
     insert_history(pool, &id_clone, "deleted", None, None, previous_json).await?;
 
+    // Remove all dependency rows referencing this task (both as task_id and depends_on_id)
+    sql_forge!(
+        "DELETE FROM kanban_task_dependencies WHERE task_id = :id OR depends_on_id = :id",
+        ( :id = &id_clone )
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to clean up dependencies for task '{}': {e}", id))?;
+
     let deleted = sql_forge!(
         "DELETE FROM kanban_tasks WHERE id = :id",
         ( :id = &id_clone )
@@ -462,6 +471,24 @@ async fn handle_add_dependency(pool: &PgPool, args: &Value) -> Result<(String, b
 
     if exists != 2 {
         anyhow::bail!("One or both kanban tasks not found");
+    }
+
+    // Circular dependency check: if the reverse relationship already exists, bail
+    let reverse_count: i64 = sql_forge!(
+        scalar i64,
+        "SELECT COUNT(*) FROM kanban_task_dependencies WHERE task_id = :did AND depends_on_id = :tid",
+        ( :did = &depends_on_id_clone, :tid = &task_id_clone )
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to check for circular dependency: {e}"))?;
+
+    if reverse_count > 0 {
+        anyhow::bail!(
+            "Circular dependency detected: '{}' already depends on '{}'. Cannot add reverse dependency.",
+            depends_on_id,
+            task_id
+        );
     }
 
     sql_forge!(

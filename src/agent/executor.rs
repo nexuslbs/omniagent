@@ -372,6 +372,29 @@ pub async fn process_thread(
     // For kanban/cron tasks, use task_context mode (skip conversation history, summaries)
     // even when no template is loaded. The task body IS the primary context.
     let is_task = cause_msg.msg_type == "kanban" || cause_msg.msg_type == "cron";
+
+    // ── System thread: deliver seq-0 cause to channel's platform ──
+    // If this system thread's channel has a platform (e.g. Mattermost),
+    // enqueue the cause message so it appears as a new post in that channel.
+    // Subsequent messages in this thread will be delivered as replies.
+    if thread.cause == "system" && cause_msg.external_id.is_none() {
+        if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
+            if channel.platform.is_some() && channel.resource_identifier.is_some() {
+                info!(
+                    "Delivering system cause (thread {}) to platform {:?}:{:?}",
+                    thread.id, channel.platform, channel.resource_identifier
+                );
+                helpers::enqueue_delivery(
+                    &cfg.ctx,
+                    cause_msg,
+                    &channel,
+                    thread,
+                    None,
+                )
+                .await;
+            }
+        }
+    }
     let context_messages = {
         let (context_text, meta) = crate::context_builder::build_thread_context(
             &cfg.pool,

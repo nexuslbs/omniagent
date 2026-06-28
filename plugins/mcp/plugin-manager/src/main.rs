@@ -8,12 +8,11 @@
 //!   url: string (required for install)
 //!   config: object (required for config action)
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use mcp_server_util::*;
 use omniagent::plugin;
+use omniagent::plugins_yaml;
 use serde_json::Value;
-use sqlx::PgPool;
-use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Environment helpers
@@ -30,13 +29,9 @@ fn data_dir() -> String {
 // Tool: plugin_manager — list
 // ---------------------------------------------------------------------------
 
-async fn handle_list(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
-    let rows = plugin::list_plugins(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to list plugins: {}", e))?;
-
-    let details: Vec<plugin::PluginDetail> =
-        rows.iter().map(|r| plugin::enrich_plugin(r)).collect();
+async fn handle_list(data_dir: &str, _args: &Value) -> Result<(String, bool)> {
+    let details = plugins_yaml::list_plugins(data_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to list plugins: {:#}", e))?;
 
     let output = serde_json::to_string_pretty(&details)?;
     Ok((output, false))
@@ -46,41 +41,21 @@ async fn handle_list(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
 // Tool: plugin_manager — install
 // ---------------------------------------------------------------------------
 
-async fn handle_install(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_install(data_dir: &str, args: &Value) -> Result<(String, bool)> {
     let url = args["url"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument for install: 'url'"))?;
 
-    let dir = data_dir();
-    let manifest = plugin::installer::install_from_url(url, &dir)
-        .map_err(|e| anyhow::anyhow!("Installation failed: {}", e))?;
+    let manifest = plugin::installer::install_from_url(url, data_dir)
+        .map_err(|e| anyhow::anyhow!("Installation failed: {:#}", e))?;
 
-    let manifest_json = serde_json::to_value(&manifest)?;
-    let plugin_type_str = match manifest.plugin_type {
-        plugin::PluginType::Platform => "platform",
-        plugin::PluginType::Mcp => "mcp",
-        plugin::PluginType::Provider => "provider",
-    };
-
-    let row = plugin::upsert_plugin(
-        pool,
-        plugin::UpsertPluginParams {
-            name: &manifest.name,
-            plugin_type: plugin_type_str,
-            version: &manifest.version,
-            source: Some(url),
-            manifest: &manifest_json,
-            config: &serde_json::json!({}),
-        },
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to register plugin in DB: {}", e))?;
+    // Register in YAML state
+    let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
+    plugins_yaml::set_entry(data_dir, &yaml_type, &manifest.name, true, serde_json::json!({}))
+        .map_err(|e| anyhow::anyhow!("Failed to register plugin in YAML: {:#}", e))?;
 
     Ok((
-        format!(
-            "Plugin '{}' installed successfully (id: {})",
-            manifest.name, row.id
-        ),
+        format!("Plugin '{}' installed successfully.", manifest.name),
         false,
     ))
 }
@@ -89,20 +64,28 @@ async fn handle_install(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Tool: plugin_manager — uninstall
 // ---------------------------------------------------------------------------
 
-async fn handle_uninstall(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_uninstall(data_dir: &str, args: &Value) -> Result<(String, bool)> {
     let name = args["name"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'name'"))?;
 
-    let deleted = plugin::delete_plugin(pool, name)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to delete plugin: {}", e))?;
+    // Remove from YAML files (all types)
+    let mut deleted = false;
+    for yaml_type in &[
+        plugins_yaml::PluginYamlType::Platform,
+        plugins_yaml::PluginYamlType::Tool,
+        plugins_yaml::PluginYamlType::Provider,
+    ] {
+        if let Ok(true) = plugins_yaml::remove_entry(data_dir, yaml_type, name) {
+            deleted = true;
+        }
+    }
+
+    // Remove from disk
+    let _ = plugin::installer::uninstall(name, data_dir);
 
     if deleted {
-        Ok((
-            format!("Plugin '{}' uninstalled successfully.", name),
-            false,
-        ))
+        Ok((format!("Plugin '{}' uninstalled successfully.", name), false))
     } else {
         Ok((format!("Plugin '{}' not found.", name), false))
     }
@@ -112,53 +95,47 @@ async fn handle_uninstall(pool: &PgPool, args: &Value) -> Result<(String, bool)>
 // Tool: plugin_manager — enable
 // ---------------------------------------------------------------------------
 
-async fn handle_enable(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_enable(data_dir: &str, args: &Value) -> Result<(String, bool)> {
     let name = args["name"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'name'"))?;
 
-    let row = plugin::update_plugin_status(pool, name, true)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to enable plugin: {}", e))?;
+    let yaml_type = match plugins_yaml::get_disk_plugin_type(data_dir, name) {
+        Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
+        _ => return Ok((format!("Plugin '{}' not found.", name), false)),
+    };
 
-    if let Some(r) = row {
-        Ok((
-            format!("Plugin '{}' enabled (id: {}).", r.name, r.id),
-            false,
-        ))
-    } else {
-        Ok((format!("Plugin '{}' not found.", name), false))
-    }
+    plugins_yaml::set_enabled(data_dir, &yaml_type, name, true)
+        .map_err(|e| anyhow::anyhow!("Failed to enable plugin: {:#}", e))?;
+
+    Ok((format!("Plugin '{}' enabled.", name), false))
 }
 
 // ---------------------------------------------------------------------------
 // Tool: plugin_manager — disable
 // ---------------------------------------------------------------------------
 
-async fn handle_disable(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_disable(data_dir: &str, args: &Value) -> Result<(String, bool)> {
     let name = args["name"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'name'"))?;
 
-    let row = plugin::update_plugin_status(pool, name, false)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to disable plugin: {}", e))?;
+    let yaml_type = match plugins_yaml::get_disk_plugin_type(data_dir, name) {
+        Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
+        _ => return Ok((format!("Plugin '{}' not found.", name), false)),
+    };
 
-    if let Some(r) = row {
-        Ok((
-            format!("Plugin '{}' disabled (id: {}).", r.name, r.id),
-            false,
-        ))
-    } else {
-        Ok((format!("Plugin '{}' not found.", name), false))
-    }
+    plugins_yaml::set_enabled(data_dir, &yaml_type, name, false)
+        .map_err(|e| anyhow::anyhow!("Failed to disable plugin: {:#}", e))?;
+
+    Ok((format!("Plugin '{}' disabled.", name), false))
 }
 
 // ---------------------------------------------------------------------------
 // Tool: plugin_manager — config
 // ---------------------------------------------------------------------------
 
-async fn handle_config(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_config(data_dir: &str, args: &Value) -> Result<(String, bool)> {
     let name = args["name"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'name'"))?;
@@ -166,22 +143,29 @@ async fn handle_config(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
         .get("config")
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'config'"))?;
 
-    let row = plugin::update_plugin_config(pool, name, config)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to update plugin config: {}", e))?;
+    let yaml_type = match plugins_yaml::get_disk_plugin_type(data_dir, name) {
+        Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
+        _ => return Ok((format!("Plugin '{}' not found.", name), false)),
+    };
 
-    if let Some(r) = row {
-        Ok((
+    plugins_yaml::update_config(data_dir, &yaml_type, name, config.clone())
+        .map_err(|e| anyhow::anyhow!("Failed to update plugin config: {:#}", e))?;
+
+    // Return the updated plugin detail
+    match plugins_yaml::get_plugin(data_dir, name) {
+        Ok(Some(detail)) => Ok((
             format!(
-                "Plugin '{}' config updated (id: {}). Current config: {}",
-                r.name,
-                r.id,
-                serde_json::to_string_pretty(&r.config)?
+                "Plugin '{}' config updated. Current config: {}",
+                detail.name,
+                serde_json::to_string_pretty(&detail.config)?
             ),
             false,
-        ))
-    } else {
-        Ok((format!("Plugin '{}' not found.", name), false))
+        )),
+        Ok(None) => Ok((format!("Plugin '{}' not found.", name), false)),
+        Err(e) => Ok((
+            format!("Failed to read plugin after update: {:#}", e),
+            true,
+        )),
     }
 }
 
@@ -189,18 +173,18 @@ async fn handle_config(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Tool: plugin_manager — main dispatch
 // ---------------------------------------------------------------------------
 
-async fn handle_plugin_manager(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_plugin_manager(data_dir: &str, args: &Value) -> Result<(String, bool)> {
     let action = args["action"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'action'"))?;
 
     match action {
-        "list" => handle_list(pool, args).await,
-        "install" => handle_install(pool, args).await,
-        "uninstall" => handle_uninstall(pool, args).await,
-        "enable" => handle_enable(pool, args).await,
-        "disable" => handle_disable(pool, args).await,
-        "config" => handle_config(pool, args).await,
+        "list" => handle_list(data_dir, args).await,
+        "install" => handle_install(data_dir, args).await,
+        "uninstall" => handle_uninstall(data_dir, args).await,
+        "enable" => handle_enable(data_dir, args).await,
+        "disable" => handle_disable(data_dir, args).await,
+        "config" => handle_config(data_dir, args).await,
         _ => Ok((
             format!(
                 "Unknown action '{}'. Valid actions: list, install, uninstall, enable, disable, config",
@@ -217,16 +201,12 @@ async fn handle_plugin_manager(pool: &PgPool, args: &Value) -> Result<(String, b
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let pool = plugin::create_pool()
-        .await
-        .context("Failed to create database pool")?;
-    let pool = Arc::new(pool);
+    let data_dir = data_dir();
 
-    let p = pool.clone();
-
+    let dd = data_dir.clone();
     let handler: ToolHandler = Box::new(move |args: Value| {
-        let p_inner = p.clone();
-        Box::pin(async move { handle_plugin_manager(&p_inner, &args).await })
+        let dd_inner = dd.clone();
+        Box::pin(async move { handle_plugin_manager(&dd_inner, &args).await })
     });
 
     let tools = vec![McpToolEntry {

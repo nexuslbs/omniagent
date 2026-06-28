@@ -2,6 +2,52 @@
 
 ## Guidelines
 
+### Cron / Schedule Mode
+
+Cron jobs have a `mode` field:
+- **`agentic`** (default): Creates a thread, and the agent executor processes it with LLM calls.
+- **`action`**: Executes a tool directly via the MCP registry. **No thread, no messages, no LLM calls.** The action is resolved from `actions.yml` (or hardcoded built-in).
+
+**NEVER change action-mode schedules to agentic mode.** Action-mode jobs (kanban_dispatcher, hindsight_populator, relevance_indexer) have NO prompt and would create empty/meaningless threads. If you see an action-mode job creating a thread, it's a regression — fix the scheduler to handle `mode='action'` before thread creation.
+
+### Silent Cron Jobs
+
+The `silent` flag (boolean) on cron jobs controls whether the job produces visible output:
+- `silent=true`: No thread is created, no messages are saved. Even errors just log — no visible trace in the DB. The job executes and completes silently.
+- `silent=false` (default): Normal thread creation, messages, and platform delivery.
+
+**Silent is NOT a substitute for action mode.** Silent agentic jobs would create threads (wasting tokens) — use action mode instead for tool-only jobs.
+
+### Platform Delivery — Unified Logic
+
+All message delivery uses the same code path, regardless of thread origin (user, kanban, cron):
+
+1. **seq-0 (cause message)**: If the thread's channel has `platform` and `resource_identifier` set, the cause message is delivered to that platform as a new message/post. For user threads, this comes FROM the platform (message received). For system threads, this is posted TO the platform (message sent as bot).
+
+2. **seq-1+ (responses)**: All messages use `cause_external_id` for threading. If the cause message has an external_id, subsequent messages reply in the platform thread. If no external_id, they go as new posts.
+
+3. **No platform = no delivery**: If the channel lacks `platform` or `resource_identifier`, no delivery happens. No special-casing for thread type.
+
+**Key principle**: The channel IS the delivery target. If a kanban task or cron job's channel has `platform='mattermost'` and `resource_identifier='abc'`, messages go to Mattermost automatically. No kanban/cron-specific resolution is needed.
+
+### `enqueue_delivery` — DO NOT add non-user special cases
+The `enqueue_delivery` function in `src/agent/helpers.rs` was historically full of special cases for non-user threads (skipping delivery for system threads). **These are now removed.** ALL messages follow the same path:
+- Channel has platform + resource_identifier → deliver
+- Channel has no platform → skip
+- Tool results → skip (never delivered to platforms)
+
+If someone needs to change delivery behavior, modify the channel's platform/resource_identifier, not the delivery code.
+
+### Run-Cron Endpoint
+`POST /run-cron/{schedule_id}` triggers a cron job immediately. Returns proper HTTP errors:
+- **200** with `{ schedule_id, thread_id: null }` for action/silent jobs
+- **200** with `{ schedule_id, thread_id: <id> }` for agentic jobs
+- **404** when the job doesn't exist
+- **409** when the job is inactive (use `?force=true` to override)
+- **500** for other errors
+
+The endpoint goes through `fire_cron_job_by_id()` in `scheduler.rs`.
+
 ### NEVER modify the database directly — always use the API
 
 **When sending messages or creating threads, NEVER use `psql`, `sqlx`, `sql_forge`, `INSERT INTO` or any other direct database modification.** Always use the HTTP API (port 3001):
@@ -276,7 +322,60 @@ The per-`process_message` cap was previously hardcoded to 12 (`remaining.clamp(0
 
 The LLM summary is saved as the only post-loop message (type `summary`, subtype `interrupted`, `is_summary=true`).
 
-### Cron Schedule Format
+### Actions Feature (Saved Tool Invocations)
+
+The term "actions" is used in two distinct contexts — do not confuse them:
+
+### 1. Saved Actions (Dashboard Pages / HTTP API)
+
+Saved Actions are parameterized tool invocations stored in `{data_dir}/actions.yml`. They let users save a tool name + arguments as a reusable function that can be triggered from the dashboard or associated with a cron job.
+
+**HTTP API** (backed by YAML file, not database):
+| Method | Route | Description |
+|--------|-------|-------------|
+| `GET` | `/actions` | List all saved actions |
+| `POST` | `/actions` | Create a new action |
+| `PUT` | `/actions/{id}` | Update an action |
+| `DELETE` | `/actions/{id}` | Delete an action |
+| `POST` | `/actions/{id}/run` | Execute a saved action via the MCP registry |
+
+**Source:** `src/server/actions.rs` — reads/writes YAML file atomically with `.tmp` rename.
+
+**YAML format** (`{data_dir}/actions.yml`):
+```yaml
+actions:
+  a6:
+    enabled: true
+    tool_name: delete_subtask
+    params:
+      subtask_id: 1
+  builtin_kanban_dispatcher:
+    enabled: true
+    tool_name: kanban_dispatcher
+    params: {}
+    description: Pick up pending kanban tasks and create agent threads
+    is_builtin: true
+```
+
+- Each action has a string ID (the YAML key), a `tool_name` matching a registered MCP tool, and `params` (object).
+- Built-in actions (flagged `is_builtin: true`) are protected from deletion in the UI.
+- The YAML file is the authoritative source for all actions, replacing the old database-backed `actions` table (Phase 13 migration).
+
+**Cron job integration:** Cron jobs can reference a saved action via `action_id`. When `mode=action`, the scheduler executes the saved action's tool directly instead of creating an agent thread.
+
+### 2. "actions" MCP Toolset (External MCP Server)
+
+The `actions` MCP server (`plugins/mcp/actions/`) is an external stdio MCP server that provides 4 built-in tools often used within saved actions:
+- `kanban_dispatcher` — process pending kanban tasks
+- `hindsight_populator` — retain messages into hindsight memory
+- `relevance_indexer` — update wiki relevance index
+- `setup_knowledge_pipeline` — create knowledge pipeline cron job
+
+The name "actions" for this toolset is arbitrary; it simply indicates the tools are designed to be called from saved actions or cron jobs. These 4 tools are implemented as a separate Rust binary (`mcp-server-actions`) launched as a subprocess, not built into the main omniagent binary.
+
+**See also:** `{data_dir}/plugins/mcp/actions/mcp-config.json` for server configuration.
+
+## Cron Schedule Format
 
 Cron expressions use **5-field Linux format** (`min hour day month weekday`). The scheduler prepends `"0 "` (second=0) for the `cron` crate (which expects 6-field). Both `create_cron_job` and `update_cron_job` MCP tools validate exactly 5 fields.
 
@@ -492,3 +591,43 @@ External MCP servers have multiple timeout layers configured through `McpServerC
 The config file can be specified via `MCP_SERVERS_CONFIG` env var or placed at `<data_dir>/config/mcp-servers.json`. Environment variable references (`${VAR}` and `${VAR:-default}`) are supported in all string fields.
 
 For **built-in MCP plugins** (those under `plugins/mcp/`), their `mcp-config.json` files are auto-discovered and merged. These plugins use the `mcp_server_util` framework (see block_in_place anti-pattern above) which reads requests via async stdin and dispatches to sync handlers. The timeout for these built-in plugins is inherited from the parent omniagent process's lifecycle — there is no per-call timeout within the plugin itself.
+
+## Docker & Deployment Pitfalls
+
+### ⚠️ Container filesystem path mismatch
+
+The `filesystem` MCP tool and `compose` MCP tool operate in different path namespaces.
+
+The omniagent Docker container mounts volumes that remap paths:
+```
+Host path                       Container path
+/opt/workspace/omniagent        /app
+/opt/workspace/omni-workspace   /opt/workspace   ← filesystem writes go here
+/opt/workspace/omni-stack       /opt/data
+```
+
+**Critical effect:** When `filesystem` writes to `/opt/workspace/playground/...`, the bytes land at `/opt/workspace/omni-workspace/playground/...` on the host. But `compose(project_dir="/opt/workspace/playground/...")` looks at the ACTUAL host path `/opt/workspace/playground/...`, which does NOT contain the files.
+
+**Rule:** Before writing files that will later be deployed via `compose`, verify the container's mount map:
+```
+docker inspect omni-stack-omniagent-1 --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
+```
+Write files to a path whose container-side `.Destination` corresponds to a `.Source` that `compose` can reach on the host. Always use verified paths, not assumptions.
+
+### ⚠️ Port-in-use detection is container-scoped
+
+`fetch http://localhost:PORT/` from inside the omniagent container only checks ports INSIDE the omniagent container's network namespace. A container like `repo-web-1` may have `0.0.0.0:12347->5173/tcp` on the HOST but be unreachable from inside the omniagent container's localhost.
+
+**Always use these methods to check host port availability:**
+```
+docker ps --format "table {{.Names}}\t{{.Ports}}" | grep ":PORT_NUMBER"
+```
+The Docker socket is available at `/var/run/docker.sock` inside the omniagent container, so `docker ps` shows real host port mappings.
+
+### ⚠️ Compose files don't auto-deploy
+
+Writing a `docker-compose.yml` via `filesystem_write` does NOT deploy it. Always explicitly call:
+```
+compose(project_dir="<verified-host-path>", command="up", args="-d")
+```
+Then verify with `docker ps` and `curl http://localhost:PORT/`.

@@ -28,6 +28,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     phase_18_create_kanban_channel(pool).await?;
     phase_19_drop_threads_task_id_fk(pool).await?;
     phase_20_backfill_kanban_created_events(pool).await?;
+    phase_21_add_planning_mode_to_kanban_tasks(pool).await?;
     Ok(())
 }
 
@@ -1337,6 +1338,18 @@ async fn phase_18_create_kanban_channel(pool: &PgPool) -> Result<()> {
     .await?;
 
     tracing::info!("[migration] Phase 18 complete: kanban channel created if not already present");
+    Ok(())
+}
+
+/// Phase 21: Add planning_mode column to kanban_tasks table.
+async fn phase_21_add_planning_mode_to_kanban_tasks(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS planning_mode TEXT NOT NULL DEFAULT '';"#,
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!("[migration] Phase 21 complete: planning_mode column added to kanban_tasks");
     Ok(())
 }
 

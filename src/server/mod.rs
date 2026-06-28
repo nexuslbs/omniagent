@@ -8,15 +8,13 @@
 //! - `GET /status/{channel_id}` — channel status info
 //! - `GET /prompt/{channel_name}` — show system prompt for a channel
 //! - `POST /prompt-preview/{channel_name}` — preview full prompt (no DB writes), optionally plan
-//! - `GET /actions` — list saved actions
-//! - `POST /actions` — create a new action
-//! - `PUT /actions/:id` — update an action
-//! - `DELETE /actions/:id` — delete an action
-//! - `POST /actions/:id/run` — execute an action (call its MCP tool)
 //! - `POST /run-cron/{schedule_id}` — manually trigger a cron job (proxied from dashboard)
+
+
 
 mod secrets;
 mod settings;
+pub(crate) mod actions;
 
 use crate::error::{AppResult, ErrorContext};
 use axum::{
@@ -36,7 +34,7 @@ use tracing::{error, info};
 
 use crate::db::types as queries;
 use crate::llm::{resolve_llm_api_key, ChatMessage, CompletionRequest, LLMClient};
-use crate::mcp::{AppContext, McpRegistry, McpToolCall};
+use crate::mcp::{AppContext, McpRegistry};
 use crate::prompt_builder::{
     build_planning_prompt, build_system_prompt, build_system_prompt_parts,
     MemoryStore, PlanningPromptParams,
@@ -96,11 +94,6 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
             "/prompt-preview/{channel_name}",
             post(prompt_preview_handler),
         )
-        .route("/actions", get(list_actions_handler))
-        .route("/actions", post(create_action_handler))
-        .route("/actions/{id}", put(update_action_handler))
-        .route("/actions/{id}", delete(delete_action_handler))
-        .route("/actions/{id}/run", post(run_action_handler))
         .route("/mcp/tools", get(list_mcp_tools_handler))
         // ── Context preview (section [3] only, no messages written) ──
         .route("/api/context/{channel_name}", get(context_preview_handler))
@@ -152,10 +145,14 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         .route("/settings", put(settings::update_settings_handler))
         // ── Secrets routes ──
         .merge(secrets::secrets_router())
+        // ── Actions CRUD routes (backed by actions.yml) ──
+        .route("/actions", get(actions::list_actions_handler))
+        .route("/actions", post(actions::create_action_handler))
+        .route("/actions/{id}", put(actions::update_action_handler))
+        .route("/actions/{id}", delete(actions::delete_action_handler))
+        .route("/actions/{id}/run", post(actions::run_action_handler))
         // ── Cron run endpoint ──
         .route("/run-cron/{schedule_id}", post(run_cron_handler))
-        // ── Kanban history endpoint ──
-        .route("/api/kanban/history", get(list_kanban_history_handler))
         .with_state(app_state);
 
     let addr = format!("{}:{}", config.host, config.port);
@@ -665,178 +662,6 @@ async fn prompt_preview_handler(
     )
 }
 
-// ── Action request/response types ──
-
-#[derive(Deserialize)]
-struct CreateActionRequest {
-    name: String,
-    tool_name: String,
-    #[serde(default = "default_params")]
-    params: serde_json::Value,
-}
-
-#[derive(Deserialize)]
-struct UpdateActionRequest {
-    name: String,
-    tool_name: String,
-    #[serde(default = "default_params")]
-    params: serde_json::Value,
-    #[serde(default)]
-    enabled: Option<bool>,
-}
-
-fn default_params() -> serde_json::Value {
-    serde_json::json!({})
-}
-
-// ── Action handlers ──
-
-/// GET /actions — list all saved actions (from YAML), including disabled.
-async fn list_actions_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    match crate::actions::load_all_actions(&state.data_dir) {
-        Ok(actions) => Json(serde_json::json!(actions)),
-        Err(e) => {
-            error!("Failed to list actions: {:?}", e);
-            Json(serde_json::json!({ "error": e.to_string() }))
-        }
-    }
-}
-
-/// POST /actions — create a new action (writes to YAML).
-async fn create_action_handler(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<CreateActionRequest>,
-) -> impl IntoResponse {
-    match crate::actions::add_action(&state.data_dir, &body.name, &body.tool_name, &body.params) {
-        Ok(action) => (StatusCode::CREATED, Json(serde_json::json!(action))).into_response(),
-        Err(e) => {
-            error!("Failed to create action: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response()
-        }
-    }
-}
-
-/// PUT /actions/:id — update an action (writes to YAML).
-async fn update_action_handler(
-    Path(id): Path<String>,
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<UpdateActionRequest>,
-) -> impl IntoResponse {
-    match crate::actions::update_action(
-        &state.data_dir,
-        &id,
-        &body.tool_name,
-        &body.params,
-        body.enabled,
-    ) {
-        Ok(action) => Json(serde_json::json!(action)).into_response(),
-        Err(e) => {
-            error!("Failed to update action {}: {:?}", id, e);
-            if e.to_string().contains("not found") {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({ "error": format!("Action '{}' not found", id) })),
-                )
-                    .into_response()
-            } else {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({ "error": e.to_string() })),
-                )
-                    .into_response()
-            }
-        }
-    }
-}
-
-/// DELETE /actions/:id — delete an action (removes from YAML).
-async fn delete_action_handler(
-    Path(id): Path<String>,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    // Proceed with deletion
-    match crate::actions::delete_action(&state.data_dir, &id) {
-        Ok(true) => (StatusCode::NO_CONTENT, "".to_string()).into_response(),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": format!("Action '{}' not found", id) })),
-        )
-            .into_response(),
-        Err(e) => {
-            error!("Failed to delete action {}: {:?}", id, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": e.to_string() })),
-            )
-                .into_response()
-        }
-    }
-}
-
-/// POST /actions/:id/run — execute an action by calling its MCP tool (reads from YAML).
-async fn run_action_handler(
-    Path(id): Path<String>,
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    // 1. Look up the action from YAML (including disabled, so we can error if disabled)
-    let action = match crate::actions::get_action_unfiltered(&state.data_dir, &id) {
-        Ok(Some(a)) => a,
-        Ok(None) => {
-            return Json(serde_json::json!({
-                "error": format!("Action '{}' not found", id)
-            }));
-        }
-        Err(e) => {
-            error!("Failed to get action {}: {:?}", id, e);
-            return Json(serde_json::json!({ "error": e.to_string() }));
-        }
-    };
-
-    // 2. Reject if the action is disabled
-    if !action.enabled {
-        return Json(serde_json::json!({
-            "error": format!("Action '{}' is disabled", action.name),
-            "is_error": true,
-        }));
-    }
-
-    // 2. Create an MCP tool call with the stored params
-    let mcp_call = McpToolCall {
-        id: format!("run-{}", action.id),
-        name: action.tool_name.clone(),
-        arguments: action.params.clone(),
-    };
-
-    // 3. Execute via MCP registry
-    let ctx = state.app_context.clone();
-    match state.mcp_registry.execute(&mcp_call, ctx).await {
-        Ok(result) => Json(serde_json::json!({
-            "action_id": action.id,
-            "name": action.name,
-            "tool_name": action.tool_name,
-            "result": result.content,
-            "is_error": false,
-        })),
-        Err(e) => {
-            error!(
-                "Failed to execute action {} (tool: {}): {:?}",
-                action.id, action.tool_name, e
-            );
-            Json(serde_json::json!({
-                "action_id": action.id,
-                "name": action.name,
-                "tool_name": action.tool_name,
-                "result": e.to_string(),
-                "is_error": true,
-            }))
-        }
-    }
-}
-
 /// GET /mcp/tools — list all registered MCP tools with their input schemas.
 async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let tools: Vec<serde_json::Value> = state
@@ -853,56 +678,6 @@ async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serd
         })
         .collect();
     Json(serde_json::json!(tools))
-}
-
-/// POST /run-cron/{schedule_id} — manually trigger a cron job (fire immediately).
-///
-/// This reuses the scheduler's internal thread-creation logic so manual runs
-/// go through exactly the same code path as scheduled ticks.
-///
-/// Query params:
-///   force=true — run even if the job is not enabled
-///
-/// Returns the created thread_id.
-async fn run_cron_handler(
-    Path(schedule_id): Path<String>,
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Json<serde_json::Value> {
-    let force = params.get("force").map(|s| s == "true").unwrap_or(false);
-
-    match crate::scheduler::fire_cron_job_by_id(
-        &state.pool,
-        &state.data_dir,
-        &state.mcp_registry,
-        &state.app_context,
-        &schedule_id,
-        force,
-    )
-    .await
-    {
-        Ok(thread_id) => {
-            info!(
-                "[run-cron] Successfully fired cron job '{}', thread {}",
-                schedule_id, thread_id
-            );
-            Json(serde_json::json!({
-                "success": true,
-                "thread_id": thread_id,
-            }))
-        }
-        Err(e) => {
-            error!(
-                "[run-cron] Failed to fire cron job '{}': {:?}",
-                schedule_id, e
-            );
-            let msg = format!("{:#}", e);
-            Json(serde_json::json!({
-                "success": false,
-                "error": msg,
-            }))
-        }
-    }
 }
 
 /// GET /api/context/{channel_name} — preview section [3] Context, read-only.
@@ -1018,132 +793,67 @@ async fn context_preview_handler(
     )
 }
 
-// ── Kanban History handler ──
-
-/// GET /api/kanban/history — list kanban history with optional filters.
-async fn list_kanban_history_handler(
+/// POST /run-cron/{schedule_id} — manually fire a cron job.
+///
+/// Accepts an optional `?force=true` query parameter. When force is true,
+/// the job is executed even if it's marked inactive.
+/// Returns the created thread ID on success.
+async fn run_cron_handler(
+    Path(schedule_id): Path<String>,
     State(state): State<Arc<AppState>>,
-    Query(params): Query<KanbanHistoryQuery>,
+    Query(params): Query<RunCronParams>,
 ) -> impl IntoResponse {
-    let db_params = crate::db::kanban::KanbanHistoryParams {
-        task_id: params.task_id.clone(),
-        action: params.action.clone(),
-        limit: params.limit,
-        offset: params.offset,
-    };
-    match crate::db::kanban::list_kanban_history(&state.pool, &db_params).await {
-        Ok(rows) => (
+    match crate::scheduler::fire_cron_job_by_id(
+        &state.pool,
+        &state.data_dir,
+        &state.mcp_registry,
+        &state.app_context,
+        &schedule_id,
+        params.force.unwrap_or(false),
+    )
+    .await
+    {
+        Ok(thread_id) => (
             StatusCode::OK,
-            Json(serde_json::json!({ "success": true, "data": rows })),
-        )
-            .into_response(),
+            Json(serde_json::json!({
+                "status": "ok",
+                "schedule_id": schedule_id,
+                "thread_id": thread_id,
+            })),
+        ),
         Err(e) => {
-            error!("Failed to list kanban history: {:?}", e);
+            let msg = e.to_string();
+            error!("[run-cron] Failed for schedule '{}': {}", schedule_id, msg);
+
+            // Map domain errors to appropriate HTTP status codes
+            let status = if msg.contains("not found") {
+                StatusCode::NOT_FOUND
+            } else if msg.contains("not active") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "success": false, "error": format!("Failed to list kanban history: {}", e) })),
+                status,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": msg,
+                    "schedule_id": schedule_id,
+                })),
             )
-                .into_response()
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct KanbanHistoryQuery {
-    task_id: Option<String>,
-    action: Option<String>,
-    limit: Option<i64>,
-    offset: Option<i64>,
+#[derive(Deserialize)]
+struct RunCronParams {
+    force: Option<bool>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ─── default_params ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_default_params_returns_empty_object() {
-        let params = default_params();
-        assert_eq!(params, serde_json::json!({}));
-    }
-
-    // ─── CreateActionRequest serde ───────────────────────────────────────
-
-    #[test]
-    fn test_create_action_request_full() {
-        let json = serde_json::json!({
-            "name": "test-action",
-            "tool_name": "test_tool",
-            "params": { "key": "value" }
-        });
-        let req: CreateActionRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.name, "test-action");
-        assert_eq!(req.tool_name, "test_tool");
-        assert_eq!(req.params, serde_json::json!({ "key": "value" }));
-    }
-
-    #[test]
-    fn test_create_action_request_default_params() {
-        let json = serde_json::json!({
-            "name": "test-action",
-            "tool_name": "test_tool"
-        });
-        let req: CreateActionRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.name, "test-action");
-        assert_eq!(req.tool_name, "test_tool");
-        // params should default to {}
-        assert_eq!(req.params, serde_json::json!({}));
-    }
-
-    #[test]
-    fn test_create_action_request_null_params() {
-        let json = serde_json::json!({
-            "name": "test-action",
-            "tool_name": "test_tool",
-            "params": null
-        });
-        let req: CreateActionRequest = serde_json::from_value(json).unwrap();
-        // #[serde(default)] only applies when field is absent, not when null
-        assert_eq!(req.params, serde_json::Value::Null);
-    }
-
-    #[test]
-    fn test_create_action_request_missing_name() {
-        let json = serde_json::json!({
-            "tool_name": "test_tool"
-        });
-        let result: Result<CreateActionRequest, _> = serde_json::from_value(json);
-        assert!(
-            result.is_err(),
-            "missing 'name' should fail deserialization"
-        );
-    }
-
-    // ─── UpdateActionRequest serde ───────────────────────────────────────
-
-    #[test]
-    fn test_update_action_request_full() {
-        let json = serde_json::json!({
-            "name": "updated-action",
-            "tool_name": "updated_tool",
-            "params": { "new_key": "new_value" }
-        });
-        let req: UpdateActionRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.name, "updated-action");
-        assert_eq!(req.tool_name, "updated_tool");
-        assert_eq!(req.params, serde_json::json!({ "new_key": "new_value" }));
-    }
-
-    #[test]
-    fn test_update_action_request_default_params() {
-        let json = serde_json::json!({
-            "name": "updated-action",
-            "tool_name": "updated_tool"
-        });
-        let req: UpdateActionRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.params, serde_json::json!({}));
-    }
 
     // ─── PromptPreviewRequest serde ─────────────────────────────────────
 

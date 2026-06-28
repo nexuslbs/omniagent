@@ -61,7 +61,7 @@ fn sanitize_filename(s: &str) -> String {
 // Tool: promote_to_memory
 // ---------------------------------------------------------------------------
 
-fn handle_promote(data_dir: &str, args: &Value) -> Result<(String, bool)> {
+async fn handle_promote(data_dir: &str, args: &Value) -> Result<(String, bool)> {
     let name = args["name"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'name'"))?;
@@ -163,7 +163,7 @@ expires_at: {}
 // Tool: list_memories
 // ---------------------------------------------------------------------------
 
-fn handle_list(data_dir: &str, args: &Value) -> Result<(String, bool)> {
+async fn handle_list(data_dir: &str, args: &Value) -> Result<(String, bool)> {
     let profile = args["profile"].as_str().unwrap_or("default");
     let include_expired = args["include_expired"].as_bool().unwrap_or(false);
 
@@ -241,7 +241,7 @@ fn handle_list(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 // Tool: review_memories
 // ---------------------------------------------------------------------------
 
-fn handle_review(data_dir: &str, args: &Value) -> Result<(String, bool)> {
+async fn handle_review(data_dir: &str, args: &Value) -> Result<(String, bool)> {
     let profile = args["profile"].as_str().unwrap_or("default");
     let expiring_soon_days = args["expiring_soon_days"].as_i64().unwrap_or(7).max(1);
 
@@ -376,7 +376,7 @@ fn handle_review(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 
 const ENTRY_DELIMITER: &str = "\n§\n";
 
-fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
+async fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
     let target = args["target"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'target'"))?;
@@ -511,21 +511,33 @@ async fn main() -> Result<()> {
     // Wrap each handler to capture clones of data_dir
     let dd_promote = data_dir.clone();
     let promote_handler: ToolHandler = Box::new(move |args: Value| {
-        Box::pin(async move { handle_promote(&dd_promote, &args).await })
+        Box::pin({
+            let value = dd_promote.clone();
+            async move { handle_promote(&value, &args).await }
+        })
     });
 
     let dd_list = data_dir.clone();
     let list_handler: ToolHandler =
-        Box::new(move |args: Value| Box::pin(async move { handle_list(&dd_list, &args).await }));
+        Box::new(move |args: Value| Box::pin({
+            let value = dd_list.clone();
+            async move { handle_list(&value, &args).await }
+        }));
 
     let dd_review = data_dir.clone();
     let review_handler: ToolHandler = Box::new(move |args: Value| {
-        Box::pin(async move { handle_review(&dd_review, &args).await })
+        Box::pin({
+            let value = dd_review.clone();
+            async move { handle_review(&value, &args).await }
+        })
     });
 
     let dd_manage = data_dir.clone();
     let manage_handler: ToolHandler = Box::new(move |args: Value| {
-        Box::pin(async move { handle_manage(&dd_manage, &args).await })
+        Box::pin({
+            let value = dd_manage.clone();
+            async move { handle_manage(&value, &args).await }
+        })
     });
 
     let tools = vec![

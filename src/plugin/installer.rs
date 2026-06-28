@@ -383,8 +383,7 @@ pub fn discover_plugins(
             // (e.g. directory "filesystem" → server name "filesystem").
             // Check if any existing plugin's base_path directory name matches.
             // Normalize both sides by replacing hyphens with underscores for comparison
-            // (some directories use hyphens like "docker-compose" while server name
-            // uses underscores like "docker_compose").
+            // (some directories use hyphens while server names use underscores or different names).
             if let Some(parent_dir) = std::path::Path::new(base_path).parent() {
                 if let Some(dir_name) = parent_dir.file_name().and_then(|n| n.to_str()) {
                     let dir_normalized = dir_name.replace('-', "_");

@@ -675,6 +675,11 @@ pub async fn check_and_generate_summary(
 }
 
 /// Enqueue a message for delivery to its platform.
+/// Uses the channel's platform and resource_identifier to determine
+/// the delivery target. All messages (user and system) follow the same
+/// logic: if the channel has no external platform, no delivery happens.
+/// seq-0 messages create new posts in the platform channel;
+/// seq-1+ messages reply in the platform thread using cause_external_id.
 pub async fn enqueue_delivery(
     ctx: &AppContext,
     saved: &Message,
@@ -682,6 +687,7 @@ pub async fn enqueue_delivery(
     thread: &Thread,
     cause_external_id: Option<String>,
 ) {
+    // If the channel has no platform, there's nowhere to deliver
     let platform = match &channel.platform {
         Some(p) => p.clone(),
         None => return,
@@ -696,11 +702,6 @@ pub async fn enqueue_delivery(
         Some(s) => s.clone(),
         None => return,
     };
-
-    // For non-user threads, only deliver summaries and errors
-    if thread.cause != "user" && saved.msg_type != "summary" && saved.msg_type != "error" {
-        return;
-    }
 
     // Never deliver tool results directly
     if saved.msg_type == "tool-result" {

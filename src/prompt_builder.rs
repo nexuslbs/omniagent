@@ -88,7 +88,6 @@ fn user_max_chars() -> usize {
 fn build_dynamic_identity(tool_names: &[String]) -> String {
     // Classify tool names into display groups
     let _has_filesystem = tool_names.iter().any(|n| n.starts_with("filesystem"));
-    let has_docker = tool_names.iter().any(|n| n.starts_with("docker_"));
     let has_fetch = tool_names.iter().any(|n| n == "fetch");
     let has_search = tool_names.iter().any(|n| n.starts_with("search_"));
     let has_query = tool_names.iter().any(|n| n.starts_with("query_"));
@@ -100,7 +99,6 @@ fn build_dynamic_identity(tool_names: &[String]) -> String {
     let has_plugin = tool_names.iter().any(|n| n == "plugin_manager" || n == "list_plugins");
 
     let mut parts: Vec<&str> = vec!["filesystem (read/write/list)"];
-    if has_docker { parts.push("docker_compose (build/up/exec/logs/ps)"); }
     if has_fetch { parts.push("fetch (HTTP)"); }
     if has_search { parts.push("search (messages/wiki)"); }
     if has_query { parts.push("query_database (SQL)"); }
@@ -142,9 +140,6 @@ exists in your available function list — the tool may have a slightly differen
 (e.g. \"build a blog\", \"run docker compose\"), DO IT directly. \
 Do not search past messages for context you don't need. \
 Do not list the workspace repeatedly. Start writing code and building. \
-**For build tasks: call docker_compose(build) then docker_compose(up -d) \
-in the same turn — do NOT read every file first.** \
-A docker build failure tells you exactly what's wrong; fix and rebuild.\n\
 7. FINAL MESSAGE = SUMMARY: After all tool calls complete, your final text \
 response must be a concise summary of what was accomplished. Cover key results, \
 decisions, and any follow-up actions needed. This replaces the need for a \
