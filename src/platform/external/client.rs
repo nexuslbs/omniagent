@@ -487,6 +487,7 @@ impl Platform for ExternalPlatformClient {
 
                                                         if let Ok((_thread, _msg)) = crate::db::types::create_thread_with_cause(
                                                             &pool,
+                                                            &self.data_dir,
                                                             "user",
                                                             channel.id,
                                                             &channel.current_profile,

@@ -102,13 +102,29 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
     }
 
     // 2. Installed platform plugins (override legacy by name)
+    // Walk all subdirectories of <data_dir>/plugins/installed/ recursively
+    // to find plugin.json files. This supports categorized layouts like
+    // plugins/installed/platforms/mattermost/plugin.json.
     let installed_dir = format!("{}/plugins/installed", data_dir);
-    if let Ok(entries) = std::fs::read_dir(&installed_dir) {
-        for entry in entries.flatten() {
-            let plugin_dir = entry.path();
-            if !plugin_dir.is_dir() {
-                continue;
+    let mut plugin_dirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut scan_stack: Vec<std::path::PathBuf> = Vec::new();
+    scan_stack.push(std::path::PathBuf::from(&installed_dir));
+    while let Some(dir) = scan_stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let plugin_json_path = path.join("plugin.json");
+                    if plugin_json_path.exists() {
+                        plugin_dirs.push(path);
+                    } else {
+                        scan_stack.push(path);
+                    }
+                }
             }
+        }
+    }
+    for plugin_dir in &plugin_dirs {
             let plugin_json_path = plugin_dir.join("plugin.json");
             if !plugin_json_path.exists() {
                 continue;
@@ -158,7 +174,6 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
                 }
             }
         }
-    }
 
     results
 }

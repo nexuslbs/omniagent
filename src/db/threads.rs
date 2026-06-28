@@ -258,6 +258,7 @@ pub async fn create_cause_and_set_pending(
 /// Returns the (Thread, Message) pair.
 pub async fn create_thread_with_cause(
     pool: &PgPool,
+    data_dir: &str,
     cause: &str,
     channel_id: i64,
     profile: &str,
@@ -292,15 +293,65 @@ pub async fn create_thread_with_cause(
         &p.content,
     );
 
-    // 4. Create the thread
+    // 4. Resolve provider and model when not explicitly provided
+    // Chain: explicit param → channel.current_* → profile → env var → provider default
+    let resolved_provider = p
+        .provider
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            channel
+                .current_provider
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
+        .or_else(|| {
+            let registry = crate::profile::ProfileRegistry::new(data_dir);
+            registry.get(profile).and_then(|prof| {
+                prof.provider
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+            })
+        })
+        .unwrap_or_else(|| {
+            std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "opencode-go".to_string())
+        });
+
+    let resolved_model = p
+        .model
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            channel
+                .current_model
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
+        .or_else(|| {
+            let registry = crate::profile::ProfileRegistry::new(data_dir);
+            registry.get(profile).and_then(|prof| {
+                prof.model
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+            })
+        })
+        .or_else(|| crate::llm::resolve_default_model(&resolved_provider));
+
+    // 5. Create the thread
     let thread = create_thread(
         pool,
         cause,
         channel_id,
         profile,
         CreateThreadParams {
-            provider: p.provider.clone(),
-            model: p.model.clone(),
+            provider: p.provider.clone().or(Some(resolved_provider.clone())),
+            model: p.model.clone().or(resolved_model.clone()),
             task_id: p.task_id.clone(),
             schedule_task_id: p.schedule_task_id.clone(),
             planning_mode: planning_mode.clone(),

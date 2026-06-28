@@ -203,6 +203,7 @@ async fn tick(
         let prompt_content = job.prompt.clone().unwrap_or_default();
         match queries::create_thread_with_cause(
             pool,
+            data_dir,
             "system",
             channel.id,
             &profile_name,
@@ -470,7 +471,14 @@ async fn handle_action_mode(
             // Create thread if non-silent (always) OR silent with error
             if !is_silent || is_error {
                 match create_action_thread(
-                    pool, job, now, display_name, &result.content, is_error, cause,
+                    pool,
+                    data_dir,
+                    job,
+                    now,
+                    display_name,
+                    &result.content,
+                    is_error,
+                    cause,
                 )
                 .await
                 {
@@ -496,7 +504,17 @@ async fn handle_action_mode(
 
             // Always create a failure thread for visible error trail
             let err_content = format!("Action execution failed: {}", e);
-            match create_action_thread(pool, job, now, display_name, &err_content, true, cause).await {
+            match create_action_thread(
+                pool,
+                data_dir,
+                job,
+                now,
+                display_name,
+                &err_content,
+                true,
+                cause,
+            )
+            .await {
                 Ok(tid) => Some(tid),
                 Err(e2) => {
                     error!(
@@ -518,6 +536,7 @@ async fn handle_action_mode(
 /// marks the thread as terminal (system for success, failed for error).
 async fn create_action_thread(
     pool: &PgPool,
+    data_dir: &str,
     job: &CronJobDueRow,
     now: &DateTime<Utc>,
     display_name: &str,
@@ -548,6 +567,7 @@ async fn create_action_thread(
     // Create the thread with the given cause and a seq-0 cause message (msg_type='cron')
     let (thread, _cause_msg) = queries::create_thread_with_cause(
         pool,
+        data_dir,
         cause,
         channel.id,
         &profile_name,
@@ -802,6 +822,7 @@ pub async fn fire_cron_job_by_id(
     let prompt_content = job.prompt.clone().unwrap_or_default();
     let (thread, _created) = queries::create_thread_with_cause(
         pool,
+        data_dir,
         "user",
         channel.id,
         &profile_name,

@@ -520,36 +520,38 @@ pub async fn process_thread(
                     });
                     let plan_duration_ms = Some(resp.duration_ms as i32);
 
-                    // Save the plan as a plan-type message
-                    let plan_msg = MessageNew {
-                        thread_id: thread.id,
-                        role: "agent".to_string(),
-                        content: content.clone(),
-                        thread_sequence: {
-                            let v = next_seq;
-                            next_seq += 1;
-                            v
-                        },
-                        external_id: None,
-                        metadata: serde_json::json!({
-                            "plan_iteration": iter,
-                            "plan_accepted": iter == 0 && max_iter == 0,
-                        }),
-                        embedding: None,
-                        summary_text: None,
-                        is_summary: false,
-                        msg_type: "plan".to_string(),
-                        msg_subtype: Some("markdown".to_string()),
-                        processing_time_ms: plan_duration_ms,
-                        token_usage: plan_token_usage,
-                        iteration_number: 1,
-                    };
-                    match queries::create_message(&cfg.pool, &plan_msg).await {
-                        Ok(_) => {}
-                        Err(e) => warn!(
-                            "[plan] Failed to persist plan for thread {}: {:?}",
-                            thread.id, e
-                        ),
+                    // Save the plan as a plan-type message (skip if empty — 0-char plan generates noise)
+                    if !content.is_empty() {
+                        let plan_msg = MessageNew {
+                            thread_id: thread.id,
+                            role: "agent".to_string(),
+                            content: content.clone(),
+                            thread_sequence: {
+                                let v = next_seq;
+                                next_seq += 1;
+                                v
+                            },
+                            external_id: None,
+                            metadata: serde_json::json!({
+                                "plan_iteration": iter,
+                                "plan_accepted": iter == 0 && max_iter == 0,
+                            }),
+                            embedding: None,
+                            summary_text: None,
+                            is_summary: false,
+                            msg_type: "plan".to_string(),
+                            msg_subtype: Some("markdown".to_string()),
+                            processing_time_ms: plan_duration_ms,
+                            token_usage: plan_token_usage,
+                            iteration_number: 1,
+                        };
+                        match queries::create_message(&cfg.pool, &plan_msg).await {
+                            Ok(_) => {}
+                            Err(e) => warn!(
+                                "[plan] Failed to persist plan for thread {}: {:?}",
+                                thread.id, e
+                            ),
+                        }
                     }
 
                     // For complex tasks, auto-create subtasks from JSON plan content
