@@ -735,7 +735,7 @@ pub async fn enqueue_delivery(
             .filter(|s| !s.is_empty())
             .unwrap_or("-");
         format!(
-            "[{} - {} - Thread: #{}] {}",
+            "[{} - {} - Thread: #{}]\n{}",
             saved.msg_type,
             subtype,
             saved.thread_id,
