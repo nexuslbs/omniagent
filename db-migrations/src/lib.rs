@@ -31,6 +31,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     phase_21_add_planning_mode_to_kanban_tasks(pool).await?;
     phase_22_add_threads_parent_id(pool).await?;
     phase_23_add_threads_iterations(pool).await?;
+    phase_24_allow_external_id_update(pool).await?;
     Ok(())
 }
 
@@ -1263,7 +1264,85 @@ async fn phase_16_append_only_message_trigger(pool: &PgPool) -> Result<()> {
     .await?;
 
     tracing::info!(
-        "[migration] Phase 16 complete: messages immutable — only embedding_vec is updatable"
+        "[migration] Phase 23 complete: iterations column added to threads"
+    );
+    Ok(())
+}
+
+/// Phase 24: Allow external_id to be updated on messages after delivery.
+/// The platform plugin returns the platform's post ID (e.g. Mattermost post_id)
+/// after delivering the message; we need to save it back as the message's
+/// external_id so subsequent replies can reference it as the thread parent.
+async fn phase_24_allow_external_id_update(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION prevent_message_mutation()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            IF TG_OP = 'DELETE' THEN
+                RAISE EXCEPTION 'messages is append-only. Deletion of messages is not permitted.';
+            END IF;
+
+            -- Allow UPDATE if only embedding_vec changed (vectorizer)
+            IF NEW.embedding_vec IS DISTINCT FROM OLD.embedding_vec THEN
+                IF NEW.id = OLD.id
+                   AND NEW.role IS NOT DISTINCT FROM OLD.role
+                   AND NEW.content IS NOT DISTINCT FROM OLD.content
+                   AND NEW.thread_id IS NOT DISTINCT FROM OLD.thread_id
+                   AND NEW.thread_sequence IS NOT DISTINCT FROM OLD.thread_sequence
+                   AND NEW.external_id IS NOT DISTINCT FROM OLD.external_id
+                   AND NEW.metadata IS NOT DISTINCT FROM OLD.metadata
+                   AND NEW.embedding IS NOT DISTINCT FROM OLD.embedding
+                   AND NEW.summary_text IS NOT DISTINCT FROM OLD.summary_text
+                   AND NEW.is_summary IS NOT DISTINCT FROM OLD.is_summary
+                   AND NEW.msg_type IS NOT DISTINCT FROM OLD.msg_type
+                   AND NEW.msg_subtype IS NOT DISTINCT FROM OLD.msg_subtype
+                   AND NEW.iteration_number IS NOT DISTINCT FROM OLD.iteration_number
+                   AND NEW.iteration_count IS NOT DISTINCT FROM OLD.iteration_count
+                   AND NEW.profile IS NOT DISTINCT FROM OLD.profile
+                   AND NEW.processing_time_ms IS NOT DISTINCT FROM OLD.processing_time_ms
+                   AND NEW.token_usage IS NOT DISTINCT FROM OLD.token_usage
+                   AND NEW.iterations IS NOT DISTINCT FROM OLD.iterations
+                THEN
+                    RETURN NEW;
+                END IF;
+            END IF;
+
+            -- Allow UPDATE if only external_id changed (platform post-back)
+            IF NEW.external_id IS DISTINCT FROM OLD.external_id THEN
+                IF NEW.id = OLD.id
+                   AND NEW.role IS NOT DISTINCT FROM OLD.role
+                   AND NEW.content IS NOT DISTINCT FROM OLD.content
+                   AND NEW.thread_id IS NOT DISTINCT FROM OLD.thread_id
+                   AND NEW.thread_sequence IS NOT DISTINCT FROM OLD.thread_sequence
+                   AND NEW.embedding_vec IS NOT DISTINCT FROM OLD.embedding_vec
+                   AND NEW.metadata IS NOT DISTINCT FROM OLD.metadata
+                   AND NEW.embedding IS NOT DISTINCT FROM OLD.embedding
+                   AND NEW.summary_text IS NOT DISTINCT FROM OLD.summary_text
+                   AND NEW.is_summary IS NOT DISTINCT FROM OLD.is_summary
+                   AND NEW.msg_type IS NOT DISTINCT FROM OLD.msg_type
+                   AND NEW.msg_subtype IS NOT DISTINCT FROM OLD.msg_subtype
+                   AND NEW.iteration_number IS NOT DISTINCT FROM OLD.iteration_number
+                   AND NEW.iteration_count IS NOT DISTINCT FROM OLD.iteration_count
+                   AND NEW.profile IS NOT DISTINCT FROM OLD.profile
+                   AND NEW.processing_time_ms IS NOT DISTINCT FROM OLD.processing_time_ms
+                   AND NEW.token_usage IS NOT DISTINCT FROM OLD.token_usage
+                   AND NEW.iterations IS NOT DISTINCT FROM OLD.iterations
+                THEN
+                    RETURN NEW;
+                END IF;
+            END IF;
+
+            RAISE EXCEPTION 'messages is immutable after insert. Only embedding_vec may be updated (by vectorizer) and external_id may be updated (by platform post-back). Other columns cannot change.';
+        END;
+        $$ LANGUAGE plpgsql;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!(
+        "[migration] Phase 24 complete: external_id can now be updated on messages after delivery"
     );
     Ok(())
 }

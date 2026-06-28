@@ -1643,7 +1643,18 @@ pub async fn process_thread(
     .await?;
 
     // ── Send completion reaction to platform ──
-    if let Some(ref ext_id) = cause_msg.external_id {
+    // Use the cause message's external_id if available; otherwise look it up
+    // from the database (the async post-back from delivery may have set it).
+    let reaction_ext_id = if cause_msg.external_id.is_some() {
+        cause_msg.external_id.clone()
+    } else {
+        crate::db::threads::get_cause_message(&cfg.pool, thread.id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|m| m.external_id)
+    };
+    if let Some(ref ext_id) = reaction_ext_id {
         if let Some(ref platform) = channel.platform {
             if let Some(ref resource) = channel.resource_identifier {
                 let emoji = match final_status {

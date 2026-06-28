@@ -680,6 +680,12 @@ pub async fn check_and_generate_summary(
 /// logic: if the channel has no external platform, no delivery happens.
 /// seq-0 messages create new posts in the platform channel;
 /// seq-1+ messages reply in the platform thread using cause_external_id.
+///
+/// If cause_external_id is None but the message is seq-1+, fall back to
+/// querying the cause message's external_id from the database — this
+/// handles system-created threads (cron/kanban) where the seq-0 message
+/// was delivered asynchronously and its platform post_id wasn't available
+/// at enqueue time.
 pub async fn enqueue_delivery(
     ctx: &AppContext,
     saved: &Message,
@@ -697,7 +703,7 @@ pub async fn enqueue_delivery(
         None => return,
     };
 
-    // Look up the per-platform sender
+    // Look up the platform sender
     let sender = match ctx.platform_senders.get(&platform) {
         Some(s) => s.clone(),
         None => return,
@@ -708,7 +714,34 @@ pub async fn enqueue_delivery(
         return;
     }
 
-    let envelope_content = if saved.msg_type == "summary" && platform == "cli" {
+    // For non-seq-0 messages lacking a cause_external_id, look up the
+    // cause message's external_id from the database. This is needed for
+    // system-created threads (cron/kanban) whose seq-0 was delivered
+    // asynchronously and had its external_id updated after delivery.
+    let resolved_cause_external_id = if cause_external_id.is_none() && saved.thread_sequence > 0 {
+        match crate::db::threads::get_cause_message(&ctx.pool, saved.thread_id).await {
+            Ok(Some(cause_msg)) => cause_msg.external_id,
+            _ => None,
+        }
+    } else {
+        cause_external_id
+    };
+
+    // For system-originated threads (kanban, cron, etc.), add a metadata
+    // prefix to the seq-0 message so the platform channel lists it with
+    // context: "[{type} - {subtype} - Thread: #{id}] {content}".
+    let envelope_content = if thread.cause != "user" && saved.thread_sequence == 0 {
+        let subtype = saved.msg_subtype.as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("-");
+        format!(
+            "[{} - {} - Thread: #{}] {}",
+            saved.msg_type,
+            subtype,
+            saved.thread_id,
+            saved.content
+        )
+    } else if saved.msg_type == "summary" && platform == "cli" {
         // Quote the seq-0 message for CLI delivery (not needed for Telegram — it uses reply threading)
         match queries::get_cause_message(&ctx.pool, saved.thread_id).await {
             Ok(Some(cause)) => {
@@ -750,7 +783,7 @@ pub async fn enqueue_delivery(
         msg_subtype: saved.msg_subtype.clone(),
         thread_id: saved.thread_id,
         thread_sequence: saved.thread_sequence,
-        cause_external_id,
+        cause_external_id: resolved_cause_external_id,
         cause_root_id: {
             // Look up the cause message's metadata for root_id (e.g. Mattermost
             // thread root) — used when the user's message was inside an existing

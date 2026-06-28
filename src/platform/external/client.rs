@@ -8,7 +8,7 @@
 
 use crate::platform::external::{
     build_deliver_request, build_initialize_request, build_react_request, parse_response,
-    DeliverParams, InitializeResult, PlatformPluginConfig, PluginResponse, ReactParams,
+    DeliverParams, DeliverResult, InitializeResult, PlatformPluginConfig, PluginResponse, ReactParams,
 };
 use crate::platform::{OutboundReceiver, Platform};
 use crate::error::{Error, AppResult, ErrorContext};
@@ -241,7 +241,14 @@ impl Platform for ExternalPlatformClient {
         let mut line_buf = String::new();
         let mut next_id_val = 1u64;
 
-        loop {
+        // Track the last sent deliver envelope info so we can update the message
+    // with the platform's external_id and thread_id when the response arrives.
+    let mut last_deliver_msg_id: Option<i64> = None;
+    let mut last_deliver_thread_id: Option<i64> = None;
+    let mut last_deliver_resource: Option<String> = None;
+    let mut last_deliver_is_user_thread: Option<bool> = None;
+
+    loop {
             line_buf.clear();
 
             select! {
@@ -309,6 +316,13 @@ impl Platform for ExternalPlatformClient {
                         continue;
                     }
 
+                    // Save the message_id and thread_id before sending so the
+                    // response handler can update the external_id in the DB.
+                    last_deliver_msg_id = Some(envelope.message_id);
+                    last_deliver_thread_id = Some(envelope.thread_id);
+                    last_deliver_resource = Some(envelope.resource_identifier.clone());
+                    last_deliver_is_user_thread = Some(envelope.is_user_thread);
+
                     // Build deliver params from envelope
                     let params = DeliverParams {
                         resource_identifier: envelope.resource_identifier.clone(),
@@ -373,9 +387,47 @@ impl Platform for ExternalPlatformClient {
                             // Try to parse as a response first
                             if let Ok(response) = parse_response(&trimmed) {
                                 match response {
-                                    PluginResponse::Success { .. } => {
+                                    PluginResponse::Success { result, .. } => {
                                         if let Ok(mut circuit) = self.circuit.lock() {
                                             circuit.record_success();
+                                        }
+                                        // If this was a deliver response with an external_id,
+                                        // save it back to the message in the database.
+                                        if let Ok(dr) = serde_json::from_value::<DeliverResult>(result) {
+                                            if let Some(ext_id) = dr.external_id {
+                                                if let Some(msg_id) = last_deliver_msg_id.take() {
+                                                    let res = last_deliver_resource.take();
+                                                    let is_user = last_deliver_is_user_thread.take().unwrap_or(false);
+                                                    let _ = last_deliver_thread_id.take();
+                                                    sqlx::query(
+                                                        "UPDATE messages SET external_id = $1 WHERE id = $2 AND external_id IS NULL"
+                                                    )
+                                                    .bind(&ext_id)
+                                                    .bind(msg_id)
+                                                    .execute(&pool)
+                                                    .await
+                                                    .map_err(|e| {
+                                                        tracing::warn!(
+                                                            "Failed to update message {} external_id: {:?}",
+                                                            msg_id, e
+                                                        );
+                                                        e
+                                                    }).ok();
+                                                    // For system-originated threads (kanban, cron, etc.),
+                                                    // immediately send a +1 reaction to acknowledge receipt.
+                                                    if let Some(resource) = res {
+                                                        if !is_user {
+                                                            let _ = send_react(
+                                                                &mut stdin,
+                                                                &mut next_id_val,
+                                                                &resource,
+                                                                &ext_id,
+                                                                ":+1:",
+                                                            ).await;
+                                                        }
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                     PluginResponse::Error { error, .. } => {
