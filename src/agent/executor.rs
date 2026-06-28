@@ -1670,7 +1670,7 @@ pub async fn process_thread(
         } else {
             "blocked"
         };
-        let _ = queries::update_kanban_status(&cfg.pool, task_id, kanban_status).await;
+        let _ = queries::update_kanban_task_status(&cfg.pool, task_id, kanban_status).await;
     }
 
     // 11. Trigger cross-thread summary check

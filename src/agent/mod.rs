@@ -317,7 +317,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
 
                     // If this thread is linked to a kanban task, mark it as running
                     if let Some(ref task_id) = thread.task_id {
-                        let _ = queries::update_kanban_status(&cfg.pool, task_id, "running").await;
+                        let _ = queries::update_kanban_task_status(&cfg.pool, task_id, "running").await;
                     }
 
                     if let Err(e) = process_thread(&cfg, thread, &cause_msg).await {
@@ -345,7 +345,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                         let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
                         // If this thread is linked to a kanban task, mark it as blocked
                         if let Some(ref task_id) = thread.task_id {
-                            let _ = queries::update_kanban_status(&cfg.pool, task_id, "blocked").await;
+                            let _ = queries::update_kanban_task_status(&cfg.pool, task_id, "blocked").await;
                         }
                     }
                 }

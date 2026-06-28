@@ -3,19 +3,61 @@ use sql_forge::sql_forge;
 use sqlx::PgPool;
 
 use crate::error::AppResult;
+use crate::err_str;
 
-/// Update a kanban task's status by task_id.
-pub async fn update_kanban_status(
+/// Update a kanban task's status and record the transition in history — atomically.
+///
+/// Fetches the current status as `initial_board`, updates it, and inserts a
+/// kanban_history row with action = "moved" so the board transition is always tracked.
+pub async fn update_kanban_task_status(
     pool: &PgPool,
     task_id: &str,
-    status: &str,
+    new_status: &str,
 ) -> AppResult<()> {
+    use sqlx::Transaction;
+
+    let mut tx: Transaction<'_, sqlx::Postgres> = pool.begin().await?;
+
+    // 1. Fetch the current status (initial_board)
+    let old_status: Option<String> = sql_forge!(
+        scalar String,
+        "SELECT status FROM kanban_tasks WHERE id = :id FOR UPDATE",
+        ( :id = task_id )
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .map(|v| v.to_string());
+
+    let old_status = match old_status {
+        Some(s) => s,
+        None => {
+            tx.rollback().await?;
+            return Err(err_str!("Kanban task '{}' not found", task_id));
+        }
+    };
+
+    // 2. Update the status
     sql_forge!(
         "UPDATE kanban_tasks SET status = :status, updated_at = NOW() WHERE id = :id",
-        ( :status = status, :id = task_id )
+        ( :status = new_status, :id = task_id )
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    // 3. Insert history record (only if the status actually changed)
+    if old_status != new_status {
+        sql_forge!(
+            r#"
+            INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board)
+            VALUES (:task_id, 'moved', :initial_board::text, :final_board::text)
+            "#,
+            ( :task_id = task_id, :initial_board = &old_status, :final_board = new_status )
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
     Ok(())
 }
 
