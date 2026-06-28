@@ -133,7 +133,7 @@ async fn tick(
             // Silent: executes silently, only creates a thread on failure.
             handle_action_mode(
                 pool, data_dir, mcp_registry, app_context,
-                &job, display_name, &now,
+                &job, display_name, &now, "system",
             ).await;
 
             // Release the job claim and update timestamps
@@ -417,6 +417,7 @@ async fn handle_action_mode(
     job: &CronJobDueRow,
     display_name: &str,
     now: &DateTime<Utc>,
+    cause: &str,
 ) -> Option<i64> {
     let is_silent = job.silent.unwrap_or(false);
 
@@ -469,7 +470,7 @@ async fn handle_action_mode(
             // Create thread if non-silent (always) OR silent with error
             if !is_silent || is_error {
                 match create_action_thread(
-                    pool, job, now, display_name, &result.content, is_error,
+                    pool, job, now, display_name, &result.content, is_error, cause,
                 )
                 .await
                 {
@@ -495,7 +496,7 @@ async fn handle_action_mode(
 
             // Always create a failure thread for visible error trail
             let err_content = format!("Action execution failed: {}", e);
-            match create_action_thread(pool, job, now, display_name, &err_content, true).await {
+            match create_action_thread(pool, job, now, display_name, &err_content, true, cause).await {
                 Ok(tid) => Some(tid),
                 Err(e2) => {
                     error!(
@@ -509,12 +510,12 @@ async fn handle_action_mode(
     }
 }
 
-/// Create a system thread with the action result saved as a message.
+/// Create a system/user thread with the action result saved as a message.
 ///
-/// Creates a thread with cause='system', a seq-0 cause message
-/// (msg_type='action'), saves the tool result as a seq-1 message,
-/// then marks the thread as terminal (system for success, failed
-/// for error).
+/// Creates a thread with the given cause ('system' for scheduled, 'user'
+/// for manual run), a seq-0 cause message (msg_type='cron', msg_subtype
+/// = cron job name), saves the tool result as a seq-1 message, then
+/// marks the thread as terminal (system for success, failed for error).
 async fn create_action_thread(
     pool: &PgPool,
     job: &CronJobDueRow,
@@ -522,6 +523,7 @@ async fn create_action_thread(
     display_name: &str,
     result_content: &str,
     is_error: bool,
+    cause: &str,
 ) -> AppResult<i64> {
     // Resolve the channel the same way as the agentic mode path
     let channel = if let Some(cid) = job.channel_id {
@@ -541,12 +543,12 @@ async fn create_action_thread(
     };
 
     let subtype = job.name.clone().unwrap_or_default();
-    let prompt_content = format!("Action: {}", display_name);
+    let prompt_content = format!("Cron: {}", display_name);
 
-    // Create the thread with cause='system' and a seq-0 cause message (msg_type='action')
+    // Create the thread with the given cause and a seq-0 cause message (msg_type='cron')
     let (thread, _cause_msg) = queries::create_thread_with_cause(
         pool,
-        "system",
+        cause,
         channel.id,
         &profile_name,
         queries::ThreadCauseParams {
@@ -555,7 +557,7 @@ async fn create_action_thread(
             task_id: None,
             schedule_task_id: Some(job.id.clone()),
             content: prompt_content,
-            external_id: Some(format!("action:{}:{}", job.id, now.timestamp())),
+            external_id: Some(format!("cron:{}:{}", job.id, now.timestamp())),
             metadata: serde_json::json!({
                 "cron_job_id": job.id,
                 "cron_job_name": job.name,
@@ -565,7 +567,7 @@ async fn create_action_thread(
                 "profile": profile_name,
                 "template": job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()).unwrap_or_default(),
             }),
-            msg_type: "action".to_string(),
+            msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
             task_planning_mode: job.planning_mode.clone(),
         },
@@ -578,7 +580,7 @@ async fn create_action_thread(
         role: "agent".to_string(),
         content: result_content.to_string(),
         thread_sequence: 1,
-        external_id: Some(format!("action:{}:{}:result", job.id, now.timestamp())),
+        external_id: Some(format!("cron:{}:{}:result", job.id, now.timestamp())),
         metadata: serde_json::json!({
             "cron_job_id": job.id,
             "is_error": is_error,
@@ -746,7 +748,7 @@ pub async fn fire_cron_job_by_id(
     if job.mode.as_deref() == Some("action") {
         let tid = handle_action_mode(
             pool, data_dir, mcp_registry, app_context,
-            &job, display_name, &now,
+            &job, display_name, &now, "user",
         ).await;
         return Ok(tid);
     }
@@ -1245,4 +1247,46 @@ mod tests {
         let code = extract_error_code("error_code_5");
         assert_eq!(code, None);
     }
+
+    // ─── validate_cron_schedule_5field ─────────────────────────────────
+
+    #[test]
+    fn test_validate_cron_5field_valid() {
+        assert!(validate_cron_schedule_5field("* * * * *"));
+        assert!(validate_cron_schedule_5field("0 9 * * 1-5"));
+        assert!(validate_cron_schedule_5field("*/15 * * * *"));
+        assert!(validate_cron_schedule_5field("30 6 * * *"));
+        assert!(validate_cron_schedule_5field("0 0 1 * *"));
+    }
+
+    #[test]
+    fn test_validate_cron_5field_too_few_fields() {
+        assert!(!validate_cron_schedule_5field("* * * *"));
+        assert!(!validate_cron_schedule_5field("* * *"));
+        assert!(!validate_cron_schedule_5field(""));
+    }
+
+    #[test]
+    fn test_validate_cron_5field_too_many_fields() {
+        // 6-field should fail validation (we only accept 5)
+        assert!(!validate_cron_schedule_5field("0 * * * * *"));
+        assert!(!validate_cron_schedule_5field("0 0 9 * * *"));
+    }
+
+    #[test]
+    fn test_validate_cron_5field_with_whitespace() {
+        assert!(validate_cron_schedule_5field("  0 9 * * *  "));
+    }
+
+    // ─── Notes about integration tests ─────────────────────────────────
+    //
+    // Tests for create_action_thread and handle_action_mode require a
+    // live PgPool (cron_jobs table, channels, etc.) and are located in
+    // the integration test suite at tests/integration/action_thread.rs.
+    //
+    // These integration tests verify:
+    //   - Scheduled action mode → thread cause="system", msg_type="cron"
+    //   - Manual run action mode → thread cause="user", msg_type="cron"
+    //   - Silent action with errors → error thread created
+    //   - Silent action without errors → no thread created
 }
