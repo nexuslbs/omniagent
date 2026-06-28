@@ -274,6 +274,11 @@ pub struct DeliverParams {
     pub thread_id: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cause_external_id: Option<String>,
+    /// If the cause message was itself a reply in a thread, this is the
+    /// thread root's external_id (e.g. root_id in Mattermost) — used by
+    /// platform plugins that don't allow nested threads (Mattermost).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause_root_id: Option<String>,
     #[serde(default)]
     pub is_summary: bool,
     #[serde(default)]

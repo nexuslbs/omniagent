@@ -751,6 +751,22 @@ pub async fn enqueue_delivery(
         thread_id: saved.thread_id,
         thread_sequence: saved.thread_sequence,
         cause_external_id,
+        cause_root_id: {
+            // Look up the cause message's metadata for root_id (e.g. Mattermost
+            // thread root) — used when the user's message was inside an existing
+            // thread, so bot replies reference the thread root rather than the
+            // intermediate reply (Mattermost doesn't allow nested threads).
+            queries::get_cause_message(&ctx.pool, saved.thread_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|m| {
+                    m.metadata.get("root_id")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                })
+        },
         is_summary: saved.is_summary,
         is_user_thread: thread.cause == "user",
     };
@@ -807,6 +823,7 @@ pub async fn enqueue_reaction(
         thread_id: 0,
         thread_sequence: 0,
         cause_external_id: Some(external_id.to_string()),
+        cause_root_id: None,
         is_summary: false,
         is_user_thread: false,
     };

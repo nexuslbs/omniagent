@@ -317,6 +317,7 @@ impl Platform for ExternalPlatformClient {
                         msg_subtype: envelope.msg_subtype.clone(),
                         thread_id: envelope.thread_id,
                         cause_external_id: envelope.cause_external_id.clone(),
+                        cause_root_id: envelope.cause_root_id.clone(),
                         is_summary: envelope.is_summary,
                         is_user_thread: envelope.is_user_thread,
                     };
@@ -703,6 +704,7 @@ async fn send_external_reply(
         msg_subtype: None,
         thread_id: 0,
         cause_external_id: Some(inbound.external_id.clone()),
+        cause_root_id: None,
         is_summary: false,
         is_user_thread: false,
     };

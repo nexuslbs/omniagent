@@ -38,6 +38,9 @@ pub struct OutboundEnvelope {
     pub thread_sequence: i32,
     /// The cause (seq-0) message's external_id — used for threading replies.
     pub cause_external_id: Option<String>,
+    /// If the cause message was itself a reply in a thread, this is the
+    /// thread root's external_id (e.g. root_id in Mattermost).
+    pub cause_root_id: Option<String>,
     /// Whether this is a summary message.
     pub is_summary: bool,
     /// Whether this thread was started by a user (vs cron/kanban/system).
