@@ -175,9 +175,8 @@ async fn health_handler() -> &'static str {
     "ok"
 }
 
-/// Stop — mark all pending/processing threads as skipped.
-/// Does NOT change channel state (open/closed). The handler continues running
-/// but will find no pending threads on its next iteration.
+/// Stop — mark all pending/processing threads as skipped and cancel
+/// the channel's executor so it restarts fresh.
 async fn stop_handler(
     Path(channel_id): Path<i64>,
     State(state): State<Arc<AppState>>,
@@ -199,19 +198,56 @@ async fn stop_handler(
         }
     };
 
+    // Cancel the channel's executor so it restarts fresh
+    let mut tokens = state.cancel_tokens.lock().await;
+    let handler_cancelled = if let Some(token) = tokens.remove(&channel_id) {
+        token.cancel();
+        info!("Stop: cancelled executor for channel {}", channel_id);
+        true
+    } else {
+        false
+    };
+
     Json(serde_json::json!({
         "action": "stop",
         "channel_id": channel_id,
         "skipped_threads": skipped,
+        "handler_cancelled": handler_cancelled,
     }))
 }
 
-/// Stop-thread — mark a single pending/processing thread as skipped.
+/// Stop-thread — mark a single pending/processing thread as skipped and
+/// cancel the channel's executor so it restarts and picks up remaining
+/// pending threads.
 async fn stop_thread_handler(
     Path(thread_id): Path<i64>,
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    let _skipped = match queries::skip_thread(&state.pool, thread_id).await {
+    // 1. Find the channel this thread belongs to
+    let channel_id: Option<i64> = sql_forge!(
+        scalar Option<i64>,
+        "SELECT channel_id FROM threads WHERE id = :id",
+        ( :id = thread_id )
+    )
+    .fetch_one(&state.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let channel_id = match channel_id {
+        Some(id) => id,
+        None => {
+            return Json(serde_json::json!({
+                "action": "stop-thread",
+                "thread_id": thread_id,
+                "status": "error",
+                "error": "Thread not found",
+            }));
+        }
+    };
+
+    // 2. Skip the thread
+    let skipped = match queries::skip_thread(&state.pool, thread_id).await {
         Ok(count) => {
             info!(
                 "Stop-thread: skipped thread {} ({} rows affected)",
@@ -225,10 +261,25 @@ async fn stop_thread_handler(
         }
     };
 
+    // 3. Cancel the channel's executor so it restarts fresh (channel stays open)
+    let mut tokens = state.cancel_tokens.lock().await;
+    let handler_cancelled = if let Some(token) = tokens.remove(&channel_id) {
+        token.cancel();
+        info!(
+            "Stop-thread: cancelled executor for channel {} (thread {})",
+            channel_id, thread_id
+        );
+        true
+    } else {
+        false
+    };
+
     Json(serde_json::json!({
         "action": "stop-thread",
         "thread_id": thread_id,
-        "status": "skipped",
+        "channel_id": channel_id,
+        "skipped": skipped,
+        "handler_cancelled": handler_cancelled,
     }))
 }
 

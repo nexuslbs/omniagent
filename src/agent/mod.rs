@@ -195,7 +195,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
         tokio::select! {
             _ = cancel.cancelled() => {
                 info!("Channel {} handler cancelled", channel_id);
-                let _ = queries::skip_channel_threads(&cfg.pool, channel_id).await;
+                // Don't skip pending threads here — stop_thread_handler already marked the
+                // specific thread as skipped before cancelling. Remaining pending threads
+                // should survive and be picked up when the supervisor respawns this handler.
                 break;
             }
             _ = async {
@@ -218,7 +220,8 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                 for thread in &threads {
                     // Best-effort cancellation check before each thread
                     if cancel.is_cancelled() {
-                        let _ = queries::skip_channel_threads(&cfg.pool, channel_id).await;
+                        // Don't skip pending threads — stop_thread_handler already handled
+                        // the target thread. The supervisor will respawn the handler.
                         return;
                     }
 
