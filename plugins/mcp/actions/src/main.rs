@@ -39,53 +39,146 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
         .await
         .map_err(|e| anyhow::anyhow!("Failed to query task dependencies: {}", e))?;
 
-        // No dependencies = immediately eligible
-        if deps.is_empty() {
-            sqlx::query("UPDATE kanban_tasks SET status = 'ready', updated_at = NOW() WHERE id = $1")
-                .bind(id)
-                .execute(pool)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to update kanban task: {}", e))?;
-            return Ok((format!("Dispatched kanban task '{}' ({}) to ready", title, id), false));
-        }
-
         // Check each dependency's status
         let all_satisfied = {
-            let mut ok = true;
-            for (dep_id,) in &deps {
-                let dep_status: Option<(String,)> = sqlx::query_as(
-                    "SELECT status FROM kanban_tasks WHERE id = $1"
-                )
-                .bind(dep_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to query dependency status: {}", e))?;
+            if deps.is_empty() {
+                true
+            } else {
+                let mut ok = true;
+                for (dep_id,) in &deps {
+                    let dep_status: Option<(String,)> = sqlx::query_as(
+                        "SELECT status FROM kanban_tasks WHERE id = $1"
+                    )
+                    .bind(dep_id)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to query dependency status: {}", e))?;
 
-                match dep_status {
-                    Some((status,)) => {
-                        if status != "review" && status != "done" && status != "blocked" {
+                    match dep_status {
+                        Some((status,)) => {
+                            if status != "review" && status != "done" && status != "blocked" {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        None => {
                             ok = false;
                             break;
                         }
                     }
-                    None => {
-                        // Missing dependency → not satisfied
-                        ok = false;
-                        break;
-                    }
                 }
+                ok
             }
-            ok
         };
 
-        if all_satisfied {
-            sqlx::query("UPDATE kanban_tasks SET status = 'ready', updated_at = NOW() WHERE id = $1")
-                .bind(id)
-                .execute(pool)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to update kanban task: {}", e))?;
-            return Ok((format!("Dispatched kanban task '{}' ({}) to ready", title, id), false));
+        if !all_satisfied {
+            continue;
         }
+
+        // ── All deps satisfied — create thread for this kanban task ──
+        // 1. Get full task data
+        let task_data: Option<(String, String, Option<i64>, Option<String>, Option<String>, String)> = sqlx::query_as(
+            "SELECT id, title, channel_id, profile, template, planning_mode FROM kanban_tasks WHERE id = $1"
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to query kanban task '{}': {}", id, e))?;
+
+        let (_task_id, task_title, maybe_channel_id, task_profile, _task_template, task_planning_mode) = match task_data {
+            Some(r) => r,
+            None => continue,
+        };
+
+        let channel_id = match maybe_channel_id {
+            Some(cid) => cid,
+            None => {
+                return Ok((format!("Kanban task '{}' ({}) has no channel — cannot create thread", title, id), false));
+            }
+        };
+
+        // 2. Get channel's current_profile (fallback to 'default')
+        let chan_profile: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT current_profile FROM channels WHERE id = $1"
+        )
+        .bind(channel_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to query channel {}: {}", channel_id, e))?;
+
+        let effective_profile = task_profile
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| chan_profile.as_ref().and_then(|(s,)| s.as_deref()))
+            .unwrap_or("default");
+
+        // 3. Build content: use body if present, otherwise title
+        let body_row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT body FROM kanban_tasks WHERE id = $1"
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to query kanban task body: {}", e))?;
+
+        let body_text = body_row
+            .as_ref()
+            .and_then(|(b,)| b.as_deref())
+            .unwrap_or("");
+
+        let content = if body_text.is_empty() {
+            task_title.clone()
+        } else {
+            format!("{}\n\n{}", task_title, body_text)
+        };
+
+        // 4. Create thread with cause='system' linked to this kanban task
+        let data_dir = std::env::var("OMNI_DATA_DIR").unwrap_or_else(|_| "/opt/data".to_string());
+
+        match crate::db::threads::create_thread_with_cause(
+            pool,
+            &data_dir,
+            "system",
+            channel_id,
+            effective_profile,
+            crate::db::types::ThreadCauseParams {
+                provider: None,
+                model: None,
+                task_id: Some(id.clone()),
+                schedule_task_id: None,
+                content,
+                external_id: None,
+                metadata: serde_json::json!({
+                    "kanban_task_id": id,
+                    "kanban_task_title": task_title,
+                }),
+                msg_type: "kanban".to_string(),
+                msg_subtype: None,
+                task_planning_mode: task_planning_mode.clone(),
+            },
+        )
+        .await
+        {
+            Ok((thread, _msg)) => {
+                // Mark task as ready so the channel handler picks it up
+                sqlx::query("UPDATE kanban_tasks SET status = 'ready', updated_at = NOW() WHERE id = $1")
+                    .bind(id)
+                    .execute(pool)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to update kanban task status: {}", e))?;
+
+                return Ok((
+                    format!("Dispatched kanban task '{}' ({}) → thread {} (ready)", title, id, thread.id),
+                    false,
+                ));
+            }
+            Err(e) => {
+                return Ok((
+                    format!("Failed to create thread for kanban task '{}' ({}): {}", title, id, e),
+                    false,
+                ));
+            }
+        };
     }
 
     Ok(("No eligible kanban tasks to dispatch".to_string(), false))

@@ -1026,8 +1026,12 @@ pub async fn process_thread(
                     "The LLM returned an empty response — likely caused by context explosion."
                         .to_string()
                 } else {
-                    // Reasoning has actual content — use it
-                    response.reasoning.clone().unwrap_or_default()
+                    // Reasoning has content but no response content. Leave
+                    // final_content empty — the reasoning is already saved
+                    // as a separate `reasoning` message (step 8 below).
+                    // Using reasoning as final_content would cause the
+                    // summary message to duplicate the reasoning text.
+                    String::new()
                 }
             } else {
                 response.content
@@ -1411,7 +1415,8 @@ pub async fn process_thread(
 
     // 9. Save the main agent response (when limit_reached, generate LLM summary instead)
     let agent_elapsed_ms = start_time.elapsed().as_millis() as i32;
-    let is_empty_response = final_content.trim().is_empty();
+    let is_empty_response = final_content.trim().is_empty()
+        && final_reasoning.as_ref().map(|r| r.trim().is_empty()).unwrap_or(true);
 
     let saved = if limit_reached {
         // ── Summary generation (when interrupted / iteration limit reached) ──
