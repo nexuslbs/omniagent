@@ -126,6 +126,9 @@ pub struct PluginDetail {
     pub created_at: String,
     /// Empty string for YAML-based plugins.
     pub updated_at: String,
+    /// True if the plugin is a Rust crate that hasn't been compiled yet
+    #[serde(default)]
+    pub needs_build: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -360,6 +363,7 @@ fn build_plugin_detail(
     source: &str,
     yaml_entry: Option<&PluginYamlEntry>,
     key: Option<&str>,
+    plugin_dir: Option<&str>,
 ) -> PluginDetail {
     let enabled = yaml_entry
         .map(|e| e.enabled)
@@ -436,6 +440,32 @@ fn build_plugin_detail(
         }
     }
 
+    // Compute needs_build: Rust crate with no compiled binary
+    let needs_build = plugin_dir
+        .map(|dir| {
+            let cargo_toml = std::path::Path::new(dir).join("Cargo.toml");
+            if !cargo_toml.exists() {
+                return false;
+            }
+            // Check if binary exists at target/release/<package_name>
+            // The package name matches the directory name (with underscores)
+            let dir_name = std::path::Path::new(dir)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            let binary_path = std::path::Path::new(dir)
+                .join("target")
+                .join("release")
+                .join(dir_name);
+            // Also try with underscores (Rust convention)
+            let binary_with_underscores = std::path::Path::new(dir)
+                .join("target")
+                .join("release")
+                .join(dir_name.replace('-', "_"));
+            !binary_path.exists() && !binary_with_underscores.exists()
+        })
+        .unwrap_or(false);
+
     PluginDetail {
         id: 0,
         name: display_key,
@@ -453,6 +483,7 @@ fn build_plugin_detail(
         resolved_env: resolved,
         created_at: String::new(),
         updated_at: String::new(),
+        needs_build,
     }
 }
 
@@ -482,11 +513,14 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         };
 
         let key = extract_plugin_key(manifest, source, base_path);
+        // Plugin directory is the parent of the plugin.json path
+        let plugin_dir = std::path::Path::new(base_path).parent().and_then(|p| p.to_str());
         results.push(build_plugin_detail(
             manifest,
             source,
             yaml_entry,
             Some(&key),
+            plugin_dir,
         ));
     }
 
@@ -515,11 +549,13 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
                 PluginYamlType::Provider => provider_entries.get(&manifest.name),
             };
             let key = extract_plugin_key(manifest, source, base_path);
+            let plugin_dir = std::path::Path::new(base_path).parent().and_then(|p| p.to_str());
             return Ok(Some(build_plugin_detail(
                 manifest,
                 source,
                 yaml_entry,
                 Some(&key),
+                plugin_dir,
             )));
         }
     }

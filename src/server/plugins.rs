@@ -45,6 +45,10 @@ pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
         .route("/api/plugins/{name}/enable", post(enable_plugin_handler))
         .route("/api/plugins/{name}/disable", post(disable_plugin_handler))
         .route(
+            "/api/plugins/{name}/install",
+            post(install_plugin_handler),
+        )
+        .route(
             "/api/plugins/{name}/reinstall",
             post(reinstall_plugin_handler),
         )
@@ -429,6 +433,160 @@ pub(crate) async fn disable_plugin_handler(
                 Json(serde_json::json!({
                     "success": false,
                     "error": format!("Failed to disable plugin: {}", e)
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// POST /api/plugins/:name/install — compile and register a bundled plugin.
+pub(crate) async fn install_plugin_handler(
+    Path(name): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let data_dir = &state.data_dir;
+
+    // 1. Find the plugin directory
+    let plugin_dirs = [
+        format!("{}/plugins/mcp/{}", data_dir, name),
+        format!("{}/plugins/installed/{}", data_dir, name),
+        format!("{}/plugins/providers/{}", data_dir, name),
+        format!("{}/plugins/platforms/{}", data_dir, name),
+    ];
+
+    let mut found_dir = None;
+    for dir in &plugin_dirs {
+        let plugin_json = std::path::Path::new(dir).join("plugin.json");
+        if plugin_json.exists() {
+            found_dir = Some(dir.clone());
+            break;
+        }
+    }
+
+    let plugin_dir = match found_dir {
+        Some(d) => d,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Plugin '{}' not found on disk", name)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Compile if Rust crate
+    let cargo_toml = std::path::Path::new(&plugin_dir).join("Cargo.toml");
+    if cargo_toml.exists() {
+        tracing::info!("Install: compiling Rust crate at {}", plugin_dir);
+        match tokio::task::spawn_blocking({
+            let dir = plugin_dir.clone();
+            let cargo_path = cargo_toml.to_string_lossy().to_string();
+            move || {
+                let status = std::process::Command::new("cargo")
+                    .args(["build", "--release", "--manifest-path", &cargo_path])
+                    .current_dir(&dir)
+                    .status();
+                status
+            }
+        })
+        .await
+        {
+            Ok(Ok(status)) if status.success() => {
+                tracing::info!("Install: Rust compilation succeeded for '{}'", name);
+            }
+            Ok(Ok(status)) => {
+                let msg = format!("Compilation failed for '{}' with exit code {}", name, status);
+                tracing::error!("{}", msg);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": msg,
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(Err(e)) => {
+                let msg = format!("Failed to run cargo for '{}': {}", name, e);
+                tracing::error!("{}", msg);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": msg,
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                let msg = format!("Task join error for '{}': {}", name, e);
+                tracing::error!("{}", msg);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": msg,
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // 3. Determine YAML type and register with enabled=false
+    let yaml_type = match plugins_yaml::get_disk_plugin_type(data_dir, &name) {
+        Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
+        _ => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "Plugin not found after compilation"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Register with enabled=false (installed but not active)
+    match plugins_yaml::set_entry(
+        data_dir,
+        &yaml_type,
+        &name,
+        false,
+        serde_json::json!({}),
+    ) {
+        Ok(_entry) => match plugins_yaml::get_plugin(data_dir, &name) {
+            Ok(Some(detail)) => {
+                info!("Installed plugin '{}' (compiled + registered with disabled state)", name);
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "success": true,
+                        "data": detail,
+                    })),
+                )
+                    .into_response()
+            }
+            _ => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                })),
+            )
+                .into_response(),
+        },
+        Err(e) => {
+            error!("Failed to register plugin '{}' in YAML: {:?}", name, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Compilation succeeded but YAML registration failed: {}", e)
                 })),
             )
                 .into_response()

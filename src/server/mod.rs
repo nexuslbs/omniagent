@@ -131,6 +131,10 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
             post(plugins::reinstall_plugin_handler),
         )
         .route(
+            "/api/plugins/{name}/install",
+            post(plugins::install_plugin_handler),
+        )
+        .route(
             "/api/plugins/{name}/refresh-models",
             post(plugins::refresh_models_handler),
         )
