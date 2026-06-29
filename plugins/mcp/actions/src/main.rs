@@ -236,7 +236,7 @@ async fn handle_hindsight_populator(pool: &PgPool, _args: &Value) -> Result<(Str
 // Tool: relevance_indexer
 // ---------------------------------------------------------------------------
 
-async fn handle_relevance_indexer(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
+async fn handle_relevance_indexer(_pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
     let data_dir = std::env::var("OMNI_DATA_DIR").unwrap_or_else(|_| "/opt/data".to_string());
     let wiki_dir = format!("{}/profiles/default/wiki", data_dir);
     let wiki_path = std::path::Path::new(&wiki_dir);

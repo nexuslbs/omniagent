@@ -293,6 +293,18 @@ pub fn remove_entry(data_dir: &str, pt: &PluginYamlType, name: &str) -> AppResul
 // Enriched plugin building
 // ---------------------------------------------------------------------------
 
+/// Resolve $env:VAR_NAME prefix in a config value string.
+/// Returns the env var value if found, or the original string if not (graceful fallback).
+pub fn resolve_config_value(value: &str) -> String {
+    if let Some(var_name) = value.strip_prefix("$env:") {
+        return std::env::var(var_name).unwrap_or_else(|_| {
+            tracing::warn!("Config references $env:{} but env var is not set", var_name);
+            value.to_string()
+        });
+    }
+    value.to_string()
+}
+
 /// Resolve ${VAR} references in a string against the process environment.
 /// Unresolvable references are replaced with empty string.
 fn resolve_env_var(value: &str) -> String {
@@ -384,10 +396,9 @@ fn build_plugin_detail(
     // Config values override env vars
     if let Some(config_obj) = config.as_object() {
         for (key, val) in config_obj {
-            resolved.insert(
-                key.clone(),
-                val.as_str().map(|s| s.to_string()).unwrap_or_default(),
-            );
+            let raw = val.as_str().map(|s| s.to_string()).unwrap_or_default();
+            let resolved_val = resolve_config_value(&raw);
+            resolved.insert(key.clone(), resolved_val);
         }
     }
 

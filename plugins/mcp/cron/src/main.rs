@@ -268,17 +268,25 @@ async fn main() -> Result<()> {
 
     // Wrap each handler to capture a clone of the pool
     let p_cron = pool.clone();
-    let create_handler: ToolHandler =
-        Box::new(move |args: Value| Box::pin(async move { handle_create(&p_cron, &args).await }));
+    let create_handler: ToolHandler = Box::new(move |args: Value| {
+        let p = p_cron.clone();
+        Box::pin(async move { handle_create(&p, &args).await })
+    });
     let p_list = pool.clone();
-    let list_handler: ToolHandler =
-        Box::new(move |args: Value| Box::pin(async move { handle_list(&p_list, &args).await }));
+    let list_handler: ToolHandler = Box::new(move |args: Value| {
+        let p = p_list.clone();
+        Box::pin(async move { handle_list(&p, &args).await })
+    });
     let p_del = pool.clone();
-    let delete_handler: ToolHandler =
-        Box::new(move |args: Value| Box::pin(async move { handle_delete(&p_del, &args).await }));
+    let delete_handler: ToolHandler = Box::new(move |args: Value| {
+        let p = p_del.clone();
+        Box::pin(async move { handle_delete(&p, &args).await })
+    });
     let p_upd = pool.clone();
-    let update_handler: ToolHandler =
-        Box::new(move |args: Value| Box::pin(async move { handle_update(&p_upd, &args).await }));
+    let update_handler: ToolHandler = Box::new(move |args: Value| {
+        let p = p_upd.clone();
+        Box::pin(async move { handle_update(&p, &args).await })
+    });
 
     let tools = vec![
         McpToolEntry {

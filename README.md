@@ -6,6 +6,7 @@ Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP too
 
 | **Hindsight Memory** | Persistent cross-session memory via omniagent-hindsight, with automatic population from new messages and semantic recall in context assembly |
 | **Hindsight Populator** | Background action (deactivated by default) that retains messages into hindsight every 15 minutes. Activate via `UPDATE cron_jobs SET active = true WHERE id = 'hindsight_populator'`. Cron schedules use standard 5-field Linux format (minute hour day month weekday — the leading seconds field is not used). |
+| **Plugin Config References** | Config values support `$secret:name` (load from secrets DB) and `$env:VAR_NAME` (load from env var) prefixes — keeps secrets out of YAML, single source of truth for shared config. |
 
 ### 🧠 Context Builder & Grounding
 - **Priority-ranked prompt assembly** (`ContextBuilder`) — NeverTrim (system, MEMORY.md, subtasks) → High (thread messages) → Normal (tool defs) → Low (retrieved content)
@@ -47,6 +48,43 @@ Provider plugins can define a `refresh_url` on `enum` type `config_schema` field
 **Currently used by:**
 - **deepseek** — `refresh_url: "https://api.deepseek.com/v1/models"` with static fallback `["deepseek-v4-flash", "deepseek-v3", "deepseek-r1"]`
 - **opencode-go** — `refresh_url: "https://opencode.ai/zen/go/v1/models"` (no static fallback)
+
+### 🪪 Plugin Config References (`$secret:` / `$env:`)
+
+Plugin config fields can reference values from external sources instead of storing them directly in the YAML file. This keeps secrets out of version control and provides a single source of truth for shared values (URLs, API endpoints, etc.).
+
+**Prefix syntax:**
+- `$secret:name` — load from the `/secrets` page (DB-backed), e.g. `$secret:my_api_key`
+- `$env:VAR_NAME` — load from environment variable, e.g. `$env:DEEPSEEK_API_KEY`
+
+**Where it works:**
+Any string or secret field in platform/tool/provider config forms. The prefix is resolved at config consumption time:
+- `$env:` is resolved during `build_plugin_detail()` — synchronous env var lookup
+- `$secret:` is resolved in the HTTP handler — async DB query against the `secrets` table
+
+**Example YAML:**
+```yaml
+telegram:
+  enabled: true
+  config:
+    bot_token: "$secret:my_telegram_token"
+    polling_interval: 30
+```
+
+The actual token value lives in the `/secrets` page, not the YAML file.
+
+**Example env var reference:**
+```yaml
+opencode-go:
+  enabled: true
+  config:
+    api_key: "$env:OPENCODE_GO_API_KEY"
+```
+
+The value is read from the process environment at runtime.
+
+**Dashboard UI:**
+Every string and secret config field has a 🔗 toggle button. Click it to switch to reference mode — choose between "Secret" (load from secrets DB) or "Env Var" (load from env var), then enter the name.
 
 ### 🔌 MCP External Servers
 - **stdio transport** — spawn subprocesses, JSON-RPC 2.0 over stdin/stdout

@@ -323,7 +323,8 @@ async fn main() -> Result<()> {
 
     let p_query = pool.clone();
     let query_handler: ToolHandler = Box::new(move |args: Value| {
-        Box::pin(async move { handle_query_database(&p_query, &args).await })
+        let p = p_query.clone();
+        Box::pin(async move { handle_query_database(&p, &args).await })
     });
 
     let tools = vec![

@@ -491,11 +491,28 @@ async fn handle_add_dependency(pool: &PgPool, args: &Value) -> Result<(String, b
         );
     }
 
+    // Check for duplicate dependency
+    let duplicate_count: i64 = sql_forge!(
+        scalar i64,
+        "SELECT COUNT(*) FROM kanban_task_dependencies WHERE task_id = :tid AND depends_on_id = :did",
+        ( :tid = &task_id_clone, :did = &depends_on_id_clone )
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to check for duplicate dependency: {e}"))?;
+
+    if duplicate_count > 0 {
+        anyhow::bail!(
+            "Duplicate dependency: task '{}' already depends on '{}'",
+            task_id,
+            depends_on_id
+        );
+    }
+
     sql_forge!(
         r#"
         INSERT INTO kanban_task_dependencies (task_id, depends_on_id)
         VALUES (:task_id, :depends_on_id)
-        ON CONFLICT (task_id, depends_on_id) DO NOTHING
         "#,
         ( :task_id = &task_id_clone, :depends_on_id = &depends_on_id_clone )
     )

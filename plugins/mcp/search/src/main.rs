@@ -5,7 +5,6 @@
 
 use anyhow::{Context, Result};
 use mcp_server_util::*;
-use omniagent::db;
 use serde_json::Value;
 use sql_forge::sql_forge;
 use sqlx::{FromRow, PgPool};
@@ -103,7 +102,7 @@ fn handle_search_wiki(args: &Value) -> Result<(String, bool)> {
     let limit = args["limit"].as_i64().unwrap_or(10).min(30) as usize;
     let profile = args["profile"].as_str().unwrap_or("default");
 
-    let data_dir = std::env::var("DATA_DIR")
+    let data_dir = std::env::var("OMNI_DATA_DIR")
         .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)))
         .unwrap_or_else(|_| "/opt/data".to_string());
 
@@ -198,9 +197,10 @@ fn handle_search_wiki(args: &Value) -> Result<(String, bool)> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let pool = db::create_pool()
+    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
+    let pool = omniagent::db::connect(&database_url)
         .await
-        .context("Failed to create database pool")?;
+        .context("Failed to connect to database")?;
     let pool = Arc::new(pool);
 
     let p_search = pool.clone();

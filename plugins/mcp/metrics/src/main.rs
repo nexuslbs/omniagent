@@ -320,7 +320,10 @@ async fn main() -> Result<()> {
     // Wrap handler to capture a clone of the pool
     let p_metrics = pool.clone();
     let metrics_handler: ToolHandler =
-        Box::new(move |args: &Value| handle_get_metrics(&p_metrics, args));
+        Box::new(move |args: Value| {
+            let p = p_metrics.clone();
+            Box::pin(async move { handle_get_metrics(&p, &args).await })
+        });
 
     let tools = vec![McpToolEntry {
         def: McpToolDef {

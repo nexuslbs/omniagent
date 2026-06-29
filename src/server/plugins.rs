@@ -12,6 +12,7 @@ use axum::{
     Json, Router,
 };
 use serde::Deserialize;
+use sqlx;
 use std::sync::Arc;
 use tracing::{error, info};
 
@@ -66,14 +67,40 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
         .await
         .unwrap_or_else(|e| Err(err_str!("Task join error: {}", e)))
     {
-        Ok(details) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "success": true,
-                "data": details
-            })),
-        )
-            .into_response(),
+        Ok(mut details) => {
+            // Resolve $secret: references in resolved_env for all plugins
+            for detail in details.iter_mut() {
+                for val in detail.resolved_env.values_mut() {
+                    if let Some(secret_name) = val.strip_prefix("$secret:") {
+                        let lookup = sqlx::query_scalar::<_, String>(
+                            "SELECT current_value FROM secrets WHERE name = $1"
+                        )
+                        .bind(secret_name)
+                        .fetch_optional(&state.pool)
+                        .await;
+                        match lookup {
+                            Ok(Some(secret_val)) => {
+                                *val = secret_val;
+                            }
+                            Ok(None) => {
+                                tracing::warn!("Secret '{}' referenced in plugin config but not found in DB", secret_name);
+                            }
+                            Err(e) => {
+                                tracing::error!("DB error looking up secret '{}': {:?}", secret_name, e);
+                            }
+                        }
+                    }
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "data": details
+                })),
+            )
+                .into_response()
+        }
         Err(e) => {
             error!("Failed to list plugins: {:?}", e);
             (
@@ -99,14 +126,38 @@ pub(crate) async fn get_plugin_handler(
         .await
         .unwrap_or_else(|e| Err(err_str!("Task join error: {}", e)))
     {
-        Ok(Some(detail)) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "success": true,
-                "data": detail
-            })),
-        )
-            .into_response(),
+        Ok(Some(mut detail)) => {
+            // Resolve $secret: references in resolved_env
+            for val in detail.resolved_env.values_mut() {
+                if let Some(secret_name) = val.strip_prefix("$secret:") {
+                    let lookup = sqlx::query_scalar::<_, String>(
+                        "SELECT current_value FROM secrets WHERE name = $1"
+                    )
+                    .bind(secret_name)
+                    .fetch_optional(&state.pool)
+                    .await;
+                    match lookup {
+                        Ok(Some(secret_val)) => {
+                            *val = secret_val;
+                        }
+                        Ok(None) => {
+                            tracing::warn!("Secret '{}' referenced in plugin config but not found in DB", secret_name);
+                        }
+                        Err(e) => {
+                            tracing::error!("DB error looking up secret '{}': {:?}", secret_name, e);
+                        }
+                    }
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "data": detail
+                })),
+            )
+                .into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
