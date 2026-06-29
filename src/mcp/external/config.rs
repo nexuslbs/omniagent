@@ -172,6 +172,13 @@ fn scan_plugin_servers(plugins_dir: &str) -> Vec<McpServerConfig> {
         return vec![];
     }
 
+    // Resolve the directory containing the omniagent binary — workspace member
+    // MCP servers (mcp-server-*) live next to the omniagent binary in both
+    // dev (/app/target/release/) and production (Docker image).
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()));
+
     let mut servers = Vec::new();
     tracing::info!("Scanning for MCP plugin configs in: {}", plugins_dir);
 
@@ -239,7 +246,7 @@ fn scan_plugin_servers(plugins_dir: &str) -> Vec<McpServerConfig> {
                             if has_cargo_toml {
                                 // Resolve binary path by convention:
                                 // 1. {plugin_dir}/target/release/{package_name} — standalone plugin
-                                // 2. /app/target/release/{package_name} — workspace member
+                                // 2. {exe_dir}/{package_name} — workspace member (next to omniagent binary)
                                 // 3. {plugin_dir}/target/release/{name} — fallback using server name
                                 let pkg = cargo_package_name
                                     .as_deref()
@@ -249,10 +256,13 @@ fn scan_plugin_servers(plugins_dir: &str) -> Vec<McpServerConfig> {
                                     "{}/target/release/{}",
                                     plugin_dir_str, pkg
                                 );
-                                let workspace = format!(
-                                    "/app/target/release/{}",
-                                    pkg
-                                );
+                                // Workspace members' binaries are next to the omniagent binary.
+                                // The package name (e.g. "mcp-server-cron") is the actual filename,
+                                // so no "mcp-server-" prefix is added here.
+                                let workspace = match exe_dir {
+                                    Some(ref d) => format!("{}/{}", d, pkg),
+                                    None => format!("/app/target/release/{}", pkg),
+                                };
                                 let name_fallback = format!(
                                     "{}/target/release/{}",
                                     plugin_dir_str, srv.name
@@ -279,22 +289,23 @@ fn scan_plugin_servers(plugins_dir: &str) -> Vec<McpServerConfig> {
                                 );
                                 srv.command = Some(found);
                             } else {
-                                // No Cargo.toml — try workspace member convention: /app/target/release/mcp-server-{name}
-                                let workspace_member = format!(
-                                    "/app/target/release/mcp-server-{}",
-                                    srv.name
-                                );
-                                if std::path::Path::new(&workspace_member).exists() {
-                                    tracing::info!(
-                                        "Resolved command for '{}' by workspace convention: {}",
-                                        srv.name, workspace_member
-                                    );
-                                    srv.command = Some(workspace_member);
-                                } else {
-                                    tracing::warn!(
-                                        "MCP server '{}' has no command configured and no Cargo.toml or workspace binary found",
-                                        srv.name
-                                    );
+                                // No Cargo.toml — try workspace member convention
+                                // Binary is next to the omniagent binary: {exe_dir}/mcp-server-{name}
+                                let workspace_path = exe_dir.as_ref().map(|d| format!("{}/mcp-server-{}", d, srv.name));
+                                match workspace_path {
+                                    Some(ref path) if std::path::Path::new(path).exists() => {
+                                        tracing::info!(
+                                            "Resolved command for '{}' by workspace convention: {}",
+                                            srv.name, path
+                                        );
+                                        srv.command = Some(path.clone());
+                                    }
+                                    _ => {
+                                        tracing::warn!(
+                                            "MCP server '{}' has no command configured and no Cargo.toml or workspace binary found",
+                                            srv.name
+                                        );
+                                    }
                                 }
                             }
                         }
