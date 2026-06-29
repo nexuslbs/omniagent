@@ -436,14 +436,87 @@ pub(crate) async fn disable_plugin_handler(
     }
 }
 
-/// POST /api/plugins/:name/reinstall — re-scan from disk and reload.
+/// POST /api/plugins/:name/reinstall — re-scan from disk, recompile if Rust, and reload.
 pub(crate) async fn reinstall_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    match plugins_yaml::get_plugin(&state.data_dir, &name) {
+    // 1. Try to compile the plugin if it's a Rust crate
+    let data_dir = &state.data_dir;
+    let plugin_dirs = [
+        format!("{}/plugins/mcp/{}", data_dir, name),
+        format!("{}/plugins/installed/{}", data_dir, name),
+        format!("{}/plugins/providers/{}", data_dir, name),
+        format!("{}/plugins/platforms/{}", data_dir, name),
+    ];
+
+    let mut compiled = false;
+    for dir in &plugin_dirs {
+        let cargo_toml = std::path::Path::new(dir).join("Cargo.toml");
+        if cargo_toml.exists() {
+            tracing::info!("Reinstall: Rust crate detected at {}, compiling...", dir);
+            match tokio::task::spawn_blocking({
+                let dir = dir.clone();
+                move || {
+                    let status = std::process::Command::new("cargo")
+                        .args(["build", "--release", "--manifest-path", &cargo_toml.to_string_lossy()])
+                        .current_dir(dir)
+                        .status();
+                    status
+                }
+            })
+            .await
+            {
+                Ok(Ok(status)) if status.success() => {
+                    tracing::info!("Reinstall: Rust compilation succeeded for '{}'", name);
+                    compiled = true;
+                }
+                Ok(Ok(status)) => {
+                    let msg = format!("Reinstall: Rust compilation failed for '{}' with exit code {}", name, status);
+                    tracing::error!("{}", msg);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": msg,
+                        })),
+                    )
+                        .into_response();
+                }
+                Ok(Err(e)) => {
+                    let msg = format!("Reinstall: Failed to run cargo for '{}': {}", name, e);
+                    tracing::error!("{}", msg);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": msg,
+                        })),
+                    )
+                        .into_response();
+                }
+                Err(e) => {
+                    let msg = format!("Reinstall: Task join error for '{}': {}", name, e);
+                    tracing::error!("{}", msg);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": msg,
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+            break;
+        }
+    }
+
+    // 2. Re-scan from disk
+    match plugins_yaml::get_plugin(data_dir, &name) {
         Ok(Some(detail)) => {
-            info!("Reinstalled plugin '{}'", name);
+            let compile_msg = if compiled { " (recompiled)" } else { "" };
+            info!("Reinstalled plugin '{}'{}", name, compile_msg);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
