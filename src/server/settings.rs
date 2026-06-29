@@ -448,11 +448,6 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             settings: vec![],
         },
         SettingCategory {
-            name: "connections".into(),
-            label: "Connections".into(),
-            settings: vec![],
-        },
-        SettingCategory {
             name: "planning".into(),
             label: "Planning".into(),
             settings: vec![],
@@ -489,7 +484,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "MEMORY_MAX_CHARS"
             | "USER_MAX_CHARS" => "memory",
             "LLM_PROVIDER" => "general",
-            "MAX_POOL_CONNECTIONS" => "connections",
+            "MAX_POOL_CONNECTIONS" => "general",
             _ => "system",
         };
 
