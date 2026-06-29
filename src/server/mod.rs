@@ -764,6 +764,7 @@ async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serd
         .map(|tool| {
             serde_json::json!({
                 "name": tool.name,
+                "full_name": tool.full_name,
                 "description": tool.description,
                 "input_schema": tool.input_schema,
                 "server_name": tool.server_name,

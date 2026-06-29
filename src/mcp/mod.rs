@@ -118,10 +118,31 @@ impl AppContext {
 pub type McpToolHandler =
     Arc<dyn Fn(Value, AppContext) -> Pin<Box<dyn Future<Output = AppResult<McpToolResult>> + Send>> + Send + Sync>;
 
+/// Build a fully-qualified tool name using the unified format:
+/// `{server}_{tool-name-with-dashes}`
+/// Strips redundant server prefix from the tool name when present
+/// (e.g. `filesystem` + `filesystem_read` → `filesystem_read`,
+/// not `filesystem_filesystem-read`).
+pub fn tool_qualify(server: &str, tool_name: &str) -> String {
+    // Strip redundant server prefix from tool name if present
+    let tool = if let Some(rest) = tool_name.strip_prefix(server) {
+        // Remove any leading separator character after the prefix
+        rest.trim_start_matches(|c| c == '-' || c == '_' || c == '.')
+    } else {
+        tool_name
+    };
+    let dasherized = tool.replace('_', "-");
+    format!("{}_{}", server, dasherized)
+}
+
 /// A registered MCP tool.
 #[derive(Clone)]
 pub struct McpTool {
     pub name: String,
+    /// Fully-qualified tool name for display/API purposes.
+    /// Same as `name` for built-in tools; for external tools this is
+    /// the `{server}_{tool}` formatted name from `tool_qualify()`.
+    pub full_name: String,
     pub description: String,
     pub input_schema: Value,
     pub server_name: Option<String>,
@@ -172,18 +193,11 @@ impl McpRegistry {
         tools
     }
 
-    /// Get the qualified name for a tool: `server_name:name` if it has a server,
-    /// or just `name` for built-in tools and unknown tools.
+    /// Get the qualified name for a tool.
+    /// External tools already have `server_name.name` as their registry key,
+    /// so it's returned as-is. Built-in tools have no prefix.
     pub fn qualified_name(&self, name: &str) -> String {
-        if let Some(tool) = self.tools.get(name) {
-            if let Some(ref sn) = tool.server_name {
-                format!("{}:{}", sn, name)
-            } else {
-                name.to_string()
-            }
-        } else {
-            name.to_string()
-        }
+        name.to_string()
     }
 
     /// Execute a tool call — directly awaits the async handler (no spawn_blocking).
@@ -305,6 +319,7 @@ impl McpRegistry {
 fn list_tool_details_tool() -> McpTool {
     McpTool {
         name: "list_tool_details".to_string(),
+        full_name: "list_tool_details".to_string(),
         description: "Get the full definition (description, input schema / expected parameters) for a specific tool by name. Use this when a tool call returns an error about missing or invalid parameters — call this first to see the correct parameter names and types before retrying.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",

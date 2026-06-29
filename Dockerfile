@@ -12,7 +12,7 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
     $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
     && apt-get update \
-    && apt-get install -y docker-ce-cli docker-compose-plugin \
+    && apt-get install -y docker-ce-cli docker-compose-plugin nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Install sqlx-cli for compile-time query verification against the live database
@@ -24,4 +24,4 @@ WORKDIR /app
 # where postgres is reachable at postgres:5432 for sql_forge compile-time checks.
 # Regenerates the query cache against the live database before building.
 # If prepare fails (e.g. first run before migrations), falls back to offline cache.
-CMD ["bash", "-c", "cargo sqlx prepare -- --lib 2>&1 | head -5 || true; cargo build --release && exec ./target/release/omniagent"]
+CMD ["bash", "-c", "apt-get update -qq 2>/dev/null && apt-get install -y -qq nodejs 2>&1 | tail -1; cargo sqlx prepare -- --lib 2>&1 | head -5 || true; cargo build --release && exec ./target/release/omniagent"]

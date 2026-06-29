@@ -180,15 +180,32 @@ pub trait McpServerClient: Send + Sync {
         let mut result = Vec::with_capacity(tools.len());
 
         for t in tools {
-            let name = t.name.clone();
+            // Prefix tool names with server name to avoid collisions
+            // in the registry HashMap (e.g., "test-python-tool_echo").
+            // Uses the unified tool_qualify() function with underscore
+            // separator, converting underscores within tool names to hyphens.
+            // Some MCP servers already include their server name in the tool
+            // name with hyphens, dots, or colons; avoid double-prefixing.
+            let prefixed_name = if t.name.starts_with(&format!("{}-", server_name))
+                || t.name.starts_with(&format!("{}.", server_name))
+                || t.name.starts_with(&format!("{}:", server_name))
+                || t.name.starts_with(&format!("{}_", server_name))
+            {
+                t.name.clone()
+            } else {
+                crate::mcp::tool_qualify(&server_name, &t.name)
+            };
             let schema = convert_input_schema(&t.input_schema);
-            let description = format!("[external:{}] {}", server_name, t.description);
+            // Use a direct, unambiguous description that tells the LLM this is
+            // a callable function, not something requiring filesystem discovery.
+            let description = format!("{} (callable via function-calling API)", t.description);
             let circuit = circuit.clone();
             let sn = server_name.clone();
             let tn = t.name.clone();
 
             result.push(McpTool {
-                name,
+                name: prefixed_name.clone(),
+                full_name: prefixed_name.clone(),
                 description,
                 input_schema: schema,
                 server_name: Some(server_name.clone()),
@@ -566,7 +583,25 @@ impl McpServerClient for StdioMcpClient {
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req = build_call_tool_request(id, name, arguments);
-        let response = process.send_request(&req, server_name).await?;
+
+        // Use the configured timeout_secs for the request-response cycle.
+        // stdio transport had no timeout before — a hanging server would
+        // block the caller indefinitely.
+        let timeout_dur = std::time::Duration::from_secs(self.config.timeout_secs);
+        let response = tokio::time::timeout(timeout_dur, process.send_request(&req, server_name))
+            .await
+            .map_err(|_| {
+                err_str!(
+                    "MCP server '{}' tool '{}' timed out after {} seconds",
+                    server_name,
+                    name,
+                    self.config.timeout_secs,
+                )
+            })?
+            .ctx(format!(
+                "Failed to receive response from MCP server '{}'",
+                server_name
+            ))?;
 
         let result_value =
             match parse_response(&response).ctx("Failed to parse MCP tool call response")? {

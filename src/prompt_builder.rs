@@ -109,6 +109,49 @@ fn build_dynamic_identity(tool_names: &[String]) -> String {
     if has_skills { parts.push("skills"); }
     if has_plugin { parts.push("plugin_manager"); }
 
+    // Collect any tool names not covered by the categories above and list them
+    // individually so the LLM knows they are callable via function-calling API.
+    let is_categorized = |name: &str| -> bool {
+        name.starts_with("filesystem")
+            || name == "fetch"
+            || name.starts_with("search_")
+            || name.starts_with("query_")
+            || name.starts_with("kanban")
+            || name.starts_with("cron")
+            || name.starts_with("commit")
+            || name.starts_with("create_github")
+            || name.starts_with("clone_repo")
+            || name == "status"
+            || name.starts_with("manage_subtask")
+            || name.starts_with("create_skill")
+            || name.starts_with("list_skills")
+            || name == "plugin_manager"
+            || name == "list_plugins"
+            || name == "list_tool_details"
+            || name == "compose"
+            || name.starts_with("hindsight_")
+            || name.starts_with("docker_")
+            || name == "promote_to_memory"
+            || name == "list_memories"
+            || name == "review_memories"
+            || name == "manage_memory"
+            || name == "get_metrics"
+            || name.starts_with("setup_")
+            || name.starts_with("kanban_")
+    };
+    let extra: Vec<&str> = tool_names.iter()
+        .map(|s| s.as_str())
+        .filter(|n| !is_categorized(n))
+        .collect();
+    if !extra.is_empty() {
+        // Append all uncategorized tools as individually-named entries so the
+        // LLM sees their exact names in the system prompt and knows they are
+        // directly callable via the function-calling API.
+        for e in &extra {
+            parts.push(e);
+        }
+    }
+
     // Build the tool names list for the prompt — ordered by priority
     let tool_list = if parts.is_empty() {
         tool_names.join(", ")
@@ -123,7 +166,13 @@ Use minimum roundtrips. If a tool fails, move on — don't retry more than twice
     )
 }
 
-const TOOL_GUIDANCE: &str = "TOOL USE RULES (fail the task if you violate these):\n\
+const TOOL_GUIDANCE: &str = "TOOL USE RULES (fail the task if you violate these):\\n\\\
+1. CALL TOOLS DIRECTLY — Do NOT search the filesystem, read plugin configs, \
+read mcp-config.json files, inspect server.py files, or look at docker-compose files \
+to discover what tools exist or how to call them. The function-calling API already \
+provides every available tool with its exact name, description, and parameters. \
+If the user asks you to \\\"call X tool\\\", look for \\\"X\\\" in your function list \
+and call it immediately.\\n\\\
 1. PLAN before acting — decide ALL data needed in one shot.\n\
 2. BATCH every fetch into ONE turn. Need 4 repos + 4 READMEs? \
 Fetch all 8 in a SINGLE tool-calling round.\n\
@@ -143,7 +192,13 @@ Do not list the workspace repeatedly. Start writing code and building. \
 7. FINAL MESSAGE = SUMMARY: After all tool calls complete, your final text \
 response must be a concise summary of what was accomplished. Cover key results, \
 decisions, and any follow-up actions needed. This replaces the need for a \
-separate summarization step.";
+separate summarization step.\n\
+8. CALL TOOLS DIRECTLY — The function-calling API already lists ALL available \
+tools with their exact names, descriptions, and parameters. Do NOT search the \
+filesystem, read plugin configs, or inspect docker-compose files to discover \
+tools. If a user asks you to \"call X tool\", look for \"X\" in your function list \
+and call it immediately. Do not verify the tool exists by reading files — \
+verify by checking the function names provided to you.";
 /// Grounding policy — instructions for evidence-based answers.
 const GROUNDING_POLICY: &str = "GROUNDING POLICY:\n\
 1. Prefer retrieved evidence over prior assumptions — when evidence is \

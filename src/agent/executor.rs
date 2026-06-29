@@ -3,6 +3,7 @@ use crate::err_msg;
 use tracing::{error, info, warn};
 
 use crate::agent::config::AgentContext;
+use tokio::task::JoinSet;
 use crate::agent::helpers;
 use crate::db::types as queries;
 use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
@@ -1134,58 +1135,36 @@ pub async fn process_thread(
             }
         }
 
-        // Execute each tool call
-        for tc in &response.tool_calls {
+        // ── Parallel tool execution ──
+        // Execute all tool calls concurrently, each inserts its own consolidated
+        // result message (JSON: {tool, input, output}) as it finishes.
+        // LLM-facing ChatMessages are collected and pushed in original call order
+        // after all tools complete.
+        let tool_count = response.tool_calls.len();
+
+        // Pre-allocate sequence numbers for each result message
+        let result_seqs: Vec<i32> = (0..tool_count)
+            .map(|_| {
+                let v = next_seq;
+                next_seq += 1;
+                v
+            })
+            .collect();
+
+        // Single tool: time/tokens go on the result message.
+        // Multi-tool: time/tokens already on the multi-tool message.
+        let single_tool_ptime = if !is_multi_tool { tool_duration_ms } else { None };
+        let single_tool_tu = if !is_multi_tool { tool_token_usage.clone() } else { None };
+
+        let pool = cfg.pool.clone();
+        let mcp_registry = cfg.mcp.clone();
+        let mut join_set = JoinSet::new();
+
+        for (idx, tc) in response.tool_calls.iter().enumerate() {
             let tool_name = tc.function.name.clone();
             let tool_args = tc.function.arguments.clone();
-
-            // Single tool: attach time/tokens to the tool message.
-            // Multi-tool: time/tokens are on the multi-tool message, tools get null.
-            let (tool_ptime, tool_tu) = if is_multi_tool {
-                (None, None)
-            } else {
-                (tool_duration_ms, tool_token_usage.clone())
-            };
-
-            // Persist the tool call as an agent message with msg_type="tool"
-            let tool_call_msg = MessageNew {
-                thread_id: thread.id,
-                role: "agent".to_string(),
-                content: tool_args,
-                thread_sequence: {
-                    let v = next_seq;
-                    next_seq += 1;
-                    v
-                },
-                external_id: None,
-                metadata: serde_json::json!({}),
-                embedding: None,
-                summary_text: None,
-                is_summary: false,
-                msg_type: "tool".to_string(),
-                msg_subtype: Some(cfg.mcp.qualified_name(&tool_name)),
-                processing_time_ms: tool_ptime,
-                token_usage: tool_tu,
-                iteration_number: current_iter as i32,
-            };
-            match helpers::persist_or_abort(&cfg.pool, &tool_call_msg, thread.id).await {
-                helpers::CreateMessageResult::FkViolation => {
-                    err_msg!("FK violation — thread {} no longer exists", thread.id);
-                }
-                helpers::CreateMessageResult::OtherError(e) => {
-                    error!("Failed to persist tool call '{}': {:?}", tool_name, e)
-                }
-                helpers::CreateMessageResult::Success(saved) => {
-                    helpers::enqueue_delivery(
-                        &cfg.ctx,
-                        &saved,
-                        &channel,
-                        thread,
-                        cause_msg.external_id.clone(),
-                    )
-                    .await;
-                }
-            }
+            let tc_id = tc.id.clone();
+            let qualified_name = mcp_registry.qualified_name(&tool_name);
 
             let mcp_call = McpToolCall {
                 id: tc.id.clone(),
@@ -1194,97 +1173,112 @@ pub async fn process_thread(
                     .unwrap_or(serde_json::json!({})),
             };
 
-            let tool_start = std::time::Instant::now();
             let mut tool_ctx = cfg.ctx.clone();
             tool_ctx.current_thread_id = Some(thread.id);
             tool_ctx.current_allowed_tools = prof.allowed_tools.clone();
-            let result = cfg.mcp.execute(&mcp_call, tool_ctx).await;
-            let tool_elapsed_ms = tool_start.elapsed().as_millis() as i32;
 
-            match result {
-                Ok(res) => {
-                    // Layer 2: truncate first — DB stores what the LLM will see
-                    let content = truncate_content(&res.content, DEFAULT_MAX_TOOL_OUTPUT_CHARS);
+            let pool = pool.clone();
+            let mcp = mcp_registry.clone();
+            let seq = result_seqs[idx];
+            let tid = thread.id;
+            let ptime = single_tool_ptime;
+            let tu = single_tool_tu.clone();
+            let iter_num = current_iter as i32;
 
-                    // Persist the tool result as an agent message with msg_type="tool-result"
-                    let tool_result_msg = MessageNew {
-                        thread_id: thread.id,
-                        role: "agent".to_string(),
-                        content: content.clone(),
-                        thread_sequence: {
-                            let v = next_seq;
-                            next_seq += 1;
-                            v
-                        },
-                        external_id: None,
-                        metadata: serde_json::json!({}),
-                        embedding: None,
-                        summary_text: None,
-                        is_summary: false,
-                        msg_type: "tool-result".to_string(),
-                        msg_subtype: Some(cfg.mcp.qualified_name(&tool_name)),
-                        processing_time_ms: Some(tool_elapsed_ms),
-                        token_usage: None,
-                        iteration_number: current_iter as i32,
-                    };
-                    match helpers::persist_or_abort(&cfg.pool, &tool_result_msg, thread.id).await {
-                        helpers::CreateMessageResult::FkViolation => {
-                            err_msg!("FK violation — thread {} no longer exists", thread.id);
-                        }
-                        helpers::CreateMessageResult::OtherError(e) => {
-                            error!("Failed to persist tool result '{}': {:?}", tool_name, e)
-                        }
-                        helpers::CreateMessageResult::Success(_) => {}
+            join_set.spawn(async move {
+                let tool_start = std::time::Instant::now();
+
+                // Per-tool timeout — prevents a single hanging tool from
+                // blocking the entire thread forever. Uses a generous default
+                // (15 min) that covers the timeout_secs of all MCP servers.
+                let timeout_dur = std::time::Duration::from_secs(900);
+                let result = match tokio::time::timeout(timeout_dur, mcp.execute(&mcp_call, tool_ctx)).await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        let msg = format!(
+                            "Tool '{}' exceeded maximum execution time ({}s) and was aborted",
+                            tool_name, timeout_dur.as_secs(),
+                        );
+                        error!("{}", msg);
+                        Err(crate::error::Error::Message(msg))
                     }
+                };
+                let tool_elapsed_ms = tool_start.elapsed().as_millis() as i32;
 
-                    messages.push(ChatMessage::tool_result(
-                        &tc.id,
-                        &tc.function.name,
-                        &content,
-                    ));
+                let (output, is_error) = match &result {
+                    Ok(res) => {
+                        let truncated =
+                            truncate_content(&res.content, DEFAULT_MAX_TOOL_OUTPUT_CHARS);
+                        (truncated, false)
+                    }
+                    Err(e) => (
+                        format!("Error executing tool '{}': {}", tool_name, e),
+                        true,
+                    ),
+                };
+
+                // Build consolidated JSON: {tool, input, output}
+                let args_value: serde_json::Value =
+                    serde_json::from_str(&tool_args).unwrap_or(serde_json::json!(tool_args));
+                let json_content = serde_json::json!({
+                    "tool": qualified_name,
+                    "input": args_value,
+                    "output": output,
+                });
+
+                // Persist single consolidated result message
+                // (no separate "tool" call message anymore)
+                let result_msg = MessageNew {
+                    thread_id: tid,
+                    role: "agent".to_string(),
+                    content: json_content.to_string(),
+                    thread_sequence: seq,
+                    external_id: None,
+                    metadata: serde_json::json!({"is_error": is_error}),
+                    embedding: None,
+                    summary_text: None,
+                    is_summary: false,
+                    msg_type: "tool-result".to_string(),
+                    msg_subtype: Some(qualified_name.clone()),
+                    processing_time_ms: ptime.or(Some(tool_elapsed_ms)),
+                    token_usage: tu.clone(),
+                    iteration_number: iter_num,
+                };
+
+                match helpers::persist_or_abort(&pool, &result_msg, tid).await {
+                    helpers::CreateMessageResult::FkViolation => {
+                        error!("FK violation — thread {} no longer exists", tid);
+                    }
+                    helpers::CreateMessageResult::OtherError(e) => {
+                        error!("Failed to persist tool result '{}': {:?}", tool_name, e)
+                    }
+                    helpers::CreateMessageResult::Success(_) => {}
+                }
+
+                (idx, tc_id, tool_name, output, is_error)
+            });
+        }
+
+        // Collect results as they complete (order may differ from call order)
+        let mut tool_results: Vec<Option<(String, String, String)>> = vec![None; tool_count];
+        while let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Ok((idx, tc_id, tool_name, output, _is_error)) => {
+                    tool_results[idx] = Some((tc_id, tool_name, output));
                 }
                 Err(e) => {
-                    let err_msg = format!("Error executing tool '{}': {}", tool_name, e);
-
-                    // Persist error as tool result
-                    let tool_result_msg = MessageNew {
-                        thread_id: thread.id,
-                        role: "agent".to_string(),
-                        content: err_msg.clone(),
-                        thread_sequence: {
-                            let v = next_seq;
-                            next_seq += 1;
-                            v
-                        },
-                        external_id: None,
-                        metadata: serde_json::json!({}),
-                        embedding: None,
-                        summary_text: None,
-                        is_summary: false,
-                        msg_type: "tool-result".to_string(),
-                        msg_subtype: Some(cfg.mcp.qualified_name(&tool_name)),
-                        processing_time_ms: Some(tool_elapsed_ms),
-                        token_usage: None,
-                        iteration_number: current_iter as i32,
-                    };
-                    match helpers::persist_or_abort(&cfg.pool, &tool_result_msg, thread.id).await {
-                        helpers::CreateMessageResult::FkViolation => {
-                            err_msg!("FK violation — thread {} no longer exists", thread.id);
-                        }
-                        helpers::CreateMessageResult::OtherError(e2) => {
-                            error!("Failed to persist tool error '{}': {:?}", tool_name, e2)
-                        }
-                        helpers::CreateMessageResult::Success(_) => {}
-                    }
-
-                    messages.push(ChatMessage::tool_result(
-                        &tc.id,
-                        &tc.function.name,
-                        &err_msg,
-                    ));
+                    error!("Tool execution task panicked: {:?}", e);
                 }
             }
-        } // end for tc
+        }
+
+        // Push LLM messages in original call order
+        for (i, _tc) in response.tool_calls.iter().enumerate() {
+            if let Some((tc_id, tool_name, output)) = &tool_results[i] {
+                messages.push(ChatMessage::tool_result(tc_id, tool_name, output));
+            }
+        }
 
         // Proactive subtask reminder: if the LLM has made several tool call
         // rounds without managing subtasks, inject a gentle nudge.

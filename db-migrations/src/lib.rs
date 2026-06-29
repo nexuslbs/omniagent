@@ -1098,7 +1098,13 @@ async fn phase_10_fix_thread_causes(pool: &PgPool) -> Result<()> {
 }
 
 /// Phase 11: Rename msg_type 'tool_result' to 'tool-result' for consistency.
+/// Disables the append-only trigger temporarily if it exists, since this
+/// phase may re-run on restart while the trigger is still active.
 async fn phase_11_rename_tool_result_msg_type(pool: &PgPool) -> Result<()> {
+    sqlx::query("ALTER TABLE messages DISABLE TRIGGER trg_messages_append_only")
+        .execute(pool)
+        .await
+        .ok();
     sqlx::query(
         r#"
         UPDATE messages SET msg_type = 'tool-result'
@@ -1107,12 +1113,22 @@ async fn phase_11_rename_tool_result_msg_type(pool: &PgPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    sqlx::query("ALTER TABLE messages ENABLE TRIGGER trg_messages_append_only")
+        .execute(pool)
+        .await
+        .ok();
 
     Ok(())
 }
 
 /// Phase 12: Migrate message role 'user' to 'cause'.
+/// Disables the append-only trigger temporarily if it exists, since this
+/// phase may re-run on restart while the trigger is still active.
 async fn phase_12_migrate_user_role(pool: &PgPool) -> Result<()> {
+    sqlx::query("ALTER TABLE messages DISABLE TRIGGER trg_messages_append_only")
+        .execute(pool)
+        .await
+        .ok();
     sqlx::query(
         r#"
         UPDATE messages SET role = 'cause'
@@ -1121,6 +1137,10 @@ async fn phase_12_migrate_user_role(pool: &PgPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    sqlx::query("ALTER TABLE messages ENABLE TRIGGER trg_messages_append_only")
+        .execute(pool)
+        .await
+        .ok();
 
     Ok(())
 }
