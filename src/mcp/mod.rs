@@ -71,6 +71,9 @@ pub struct AppContext {
     /// tool-calling loop so MCP tools can auto-detect context without the LLM
     /// having to pass `thread_id` explicitly).
     pub current_thread_id: Option<i64>,
+    /// Current channel ID being executed (set per-tool-call so the MCP
+    /// client layer can route to the per-channel connection pool).
+    pub current_channel_id: Option<i64>,
     /// Profile-allowed tool names for the current thread execution.
     /// Set per-tool-call alongside `current_thread_id` so the
     /// `list_tool_details` introspection tool knows which tools are
@@ -108,6 +111,7 @@ impl AppContext {
             memory_store: Arc::new(memory_store),
             platform_senders,
             current_thread_id: None,
+            current_channel_id: None,
             current_allowed_tools: Vec::new(),
             tool_catalog: Vec::new(),
         }

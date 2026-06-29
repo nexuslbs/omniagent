@@ -1175,6 +1175,7 @@ pub async fn process_thread(
 
             let mut tool_ctx = cfg.ctx.clone();
             tool_ctx.current_thread_id = Some(thread.id);
+            tool_ctx.current_channel_id = Some(thread.channel_id);
             tool_ctx.current_allowed_tools = prof.allowed_tools.clone();
 
             let pool = pool.clone();

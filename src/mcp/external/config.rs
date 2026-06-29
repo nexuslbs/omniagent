@@ -48,6 +48,16 @@ pub struct McpServerConfig {
     /// List of allowed tool names from this server ("*" = all).
     #[serde(default = "default_allowed_tools")]
     pub allowed_tools: Vec<String>,
+    /// Number of per-channel subprocesses in the connection pool.
+    /// Each channel gets its own pool of this many processes, so
+    /// channels never block each other. Default 1 = one process per
+    /// channel (no intra-channel blocking, but still serial within
+    /// the same channel for a single-threaded channel handler).
+    /// Increase for servers where multi-tool calls within the same
+    /// channel issue concurrent tool calls (e.g. test tools with
+    /// long-duration waits).
+    #[serde(default = "default_pool_size")]
+    pub pool_size: u32,
 }
 
 fn default_timeout() -> u64 {
@@ -58,6 +68,9 @@ fn default_max_retries() -> u32 {
 }
 fn default_allowed_tools() -> Vec<String> {
     vec!["*".to_string()]
+}
+fn default_pool_size() -> u32 {
+    1
 }
 
 /// Collection of external MCP server configurations.

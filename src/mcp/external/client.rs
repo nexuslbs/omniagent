@@ -209,7 +209,7 @@ pub trait McpServerClient: Send + Sync {
                 description,
                 input_schema: schema,
                 server_name: Some(server_name.clone()),
-                handler: Arc::new(move |args: Value, _ctx: crate::mcp::AppContext| {
+                handler: Arc::new(move |args: Value, ctx: crate::mcp::AppContext| {
                     let sn = sn.clone();
                     let tn = tn.clone();
                     let circuit = circuit.clone();
@@ -227,7 +227,12 @@ pub trait McpServerClient: Send + Sync {
                             });
                         }
 
-                        match call_tool_direct_async(&sn, &tn, &args).await {
+                        let channel_id = ctx.current_channel_id
+                            .ok_or_else(|| crate::error::Error::Message(
+                                "current_channel_id must be set before tool call".to_string()
+                            ))?;
+
+                        match call_tool_pooled_async(&sn, &tn, &args, channel_id).await {
                             Ok(res) => {
                                 circuit.record_success();
                                 Ok(res)
@@ -253,35 +258,80 @@ pub trait McpServerClient: Send + Sync {
     }
 }
 
-/// Async tool call helper — dispatches to the right transport.
-async fn call_tool_direct_async(
-    server_name: &str,
-    tool_name: &str,
-    args: &Value,
-) -> AppResult<McpToolResult> {
-    let client = {
-        let clients = CLIENT_REGISTRY
-            .lock()
-            .map_err(|e| err_str!("Lock error: {}", e))?;
-        clients
-            .get(server_name)
-            .ok_or_else(|| err_str!("MCP server '{}' not found in registry", server_name))?
-            .clone()
-    };
-    client.call_tool(tool_name, args).await
-}
 
-// Global registry of active MCP server clients.
+async fn call_tool_pooled_async(
+        server_name: &str,
+        tool_name: &str,
+        args: &Value,
+        channel_id: i64,
+    ) -> AppResult<McpToolResult> {
+        let config = {
+            let configs = SERVER_CONFIGS
+                .lock()
+                .map_err(|e| err_str!("Config registry lock error: {}", e))?;
+            configs
+                .get(server_name)
+                .ok_or_else(|| err_str!("MCP server '{}' not found in config registry", server_name))?
+                .clone()
+        };
+
+        let pool = {
+            let key = (server_name.to_string(), channel_id);
+            let existing = CLIENT_POOLS
+                .lock()
+                .map_err(|e| err_str!("Pool registry lock error: {}", e))?
+                .get(&key)
+                .cloned();
+            if let Some(pool) = existing {
+                pool
+            } else {
+                // Create pool outside the lock to avoid holding it during spawn
+                let new_pool = McpClientPool::new(&config, config.pool_size.max(1))
+                    .await
+                    .map_err(|e| {
+                        err_str!("Failed to create MCP pool for '{}': {}", server_name, e)
+                    })?;
+                let new_pool = Arc::new(new_pool);
+                let mut pools = CLIENT_POOLS
+                    .lock()
+                    .map_err(|e| err_str!("Pool registry lock error: {}", e))?;
+                pools.entry(key).or_insert(new_pool).clone()
+            }
+        };
+
+        pool.call_tool(tool_name, args, config.timeout_secs).await
+    }
+
+/// Global registry of per-channel MCP connection pools.
+/// Keyed by (server_name, channel_id) so each channel gets independent
+/// subprocesses and channels never block each other.
 use once_cell::sync::Lazy;
-static CLIENT_REGISTRY: Lazy<std::sync::Mutex<HashMap<String, Arc<dyn McpServerClient>>>> =
+static CLIENT_POOLS: Lazy<std::sync::Mutex<HashMap<(String, i64), Arc<McpClientPool>>>> =
     Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
 
-/// Register an MCP client in the global registry.
+/// Global registry of MCP server configs (for lazy pool creation).
+static SERVER_CONFIGS: Lazy<std::sync::Mutex<HashMap<String, McpServerConfig>>> =
+    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Register an MCP server config so pools can be created lazily per channel.
+pub fn register_server_config(name: &str, config: McpServerConfig) {
+    if let Ok(mut registry) = SERVER_CONFIGS.lock() {
+        registry.insert(name.to_string(), config);
+    }
+}
+
+/// Register an MCP client in the global registry (legacy — for init handshake only).
 pub fn register_client(name: &str, client: Box<dyn McpServerClient>) {
+    // Client registration no longer needed for tool calls (pools handle that).
+    // Keep for backward compat in case any code reads CLIENT_REGISTRY directly.
     if let Ok(mut registry) = CLIENT_REGISTRY.lock() {
         registry.insert(name.to_string(), Arc::from(client));
     }
 }
+
+// Legacy client registry — kept for the to_mcp_tools() handshake path.
+static CLIENT_REGISTRY: Lazy<std::sync::Mutex<HashMap<String, Arc<dyn McpServerClient>>>> =
+    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Convert MCP inputSchema to the JSON Schema format the LLM expects.
 fn convert_input_schema(schema: &Value) -> Value {
@@ -846,6 +896,142 @@ impl McpServerClient for HttpMcpClient {
 }
 
 // ---------------------------------------------------------------------------
+// Per-channel connection pool for stdio MCP servers
+// ---------------------------------------------------------------------------
+
+/// A pool of per-channel MCP subprocesses.
+///
+/// Each channel gets its own pool, so tool calls in channel A never
+/// block calls in channel B. Within a channel, `pool_size` independent
+/// subprocesses allow concurrent tool calls (e.g. for multi-tool LLM
+/// responses that fire N tools in parallel).
+///
+/// Processes are spawned eagerly in `new()` with a full MCP initialize
+/// handshake so they are ready for immediate use.
+struct McpClientPool {
+    processes: Vec<Mutex<PooledProcess>>,
+    semaphore: tokio::sync::Semaphore,
+    server_name: String,
+}
+
+/// One subprocess within a pool — exclusive access via its own Mutex.
+struct PooledProcess {
+    process: AsyncChildProcess,
+    next_id: AtomicU64,
+}
+
+impl McpClientPool {
+    /// Create a pool with `size` subprocesses, each fully initialized.
+    async fn new(config: &McpServerConfig, size: u32) -> AppResult<Self> {
+        let size = size.max(1) as usize;
+        let mut processes = Vec::with_capacity(size);
+
+        for i in 0..size {
+            let mut proc = AsyncChildProcess::spawn(config)?;
+            // Full MCP handshake (initialize + initialized notification)
+            let req = build_initialize_request((i as u64) * 1000 + 1);
+            let resp = proc.send_request(&req, &config.name).await?;
+            let _ = parse_response(&resp)
+                .ctx(format!("Failed to parse init response for '{}'", config.name))?;
+
+            let notif = build_initialized_notification();
+            proc.stdin
+                .write_all(notif.as_bytes())
+                .await
+                .ctx("Failed to write initialized notification")?;
+            proc.stdin
+                .write_all(b"\n")
+                .await
+                .ctx("Failed to write newline")?;
+            proc.stdin
+                .flush()
+                .await
+                .ctx("Failed to flush stdin")?;
+
+            processes.push(Mutex::new(PooledProcess {
+                process: proc,
+                next_id: AtomicU64::new((i as u64) * 1000 + 100),
+            }));
+        }
+
+        tracing::info!(
+            "MCP pool for '{}': {} process(es) ready",
+            config.name,
+            size
+        );
+
+        Ok(Self {
+            processes,
+            semaphore: tokio::sync::Semaphore::new(size),
+            server_name: config.name.clone(),
+        })
+    }
+
+    /// Acquire a free subprocess from the pool and call a tool.
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: &Value,
+        timeout_secs: u64,
+    ) -> AppResult<McpToolResult> {
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|e| err_str!("MCP pool semaphore error: {}", e))?;
+
+        // Round-robin selection across pool processes
+        static POOL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let idx = POOL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as usize
+            % self.processes.len();
+
+        let mut guard = self.processes[idx].lock().await;
+        let pooled = &mut *guard;
+        let id = pooled.next_id.fetch_add(1, Ordering::SeqCst);
+        let req = build_call_tool_request(id, name, arguments);
+
+        let timeout_dur = std::time::Duration::from_secs(timeout_secs);
+        let response =
+            tokio::time::timeout(timeout_dur, pooled.process.send_request(&req, &self.server_name))
+                .await
+                .map_err(|_| {
+                    err_str!(
+                        "MCP server '{}' tool '{}' timed out after {} seconds",
+                        self.server_name,
+                        name,
+                        timeout_secs,
+                    )
+                })?
+                .ctx(format!(
+                    "Failed to receive response from MCP server '{}'",
+                    self.server_name
+                ))?;
+
+        let result_value =
+            match parse_response(&response).ctx("Failed to parse MCP tool call response")? {
+                JsonRpcResponse::Success { result, .. } => result,
+                JsonRpcResponse::Error { error, .. } => {
+                    return Err(err_str!(
+                        "MCP tool call error ({}): {}",
+                        error.code,
+                        error.message
+                    ));
+                }
+            };
+
+        let result: CallToolResult =
+            serde_json::from_value(result_value).ctx("Failed to parse tools/call result")?;
+
+        let text = extract_tool_result_text(&result);
+        Ok(McpToolResult {
+            call_id: String::new(),
+            content: text,
+            is_error: result.is_error,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Factory: create the right client type from config
 // ---------------------------------------------------------------------------
 
@@ -866,6 +1052,11 @@ pub fn create_client(config: McpServerConfig) -> Box<dyn McpServerClient> {
 pub async fn initialize_external_tools(data_dir: &str) -> Vec<McpTool> {
     let configs = crate::mcp::external::config::load_servers_config(data_dir);
     let mut all_tools = Vec::new();
+    // Build a name→config map for lazy pool creation
+    let config_map: std::collections::HashMap<String, McpServerConfig> = configs
+        .iter()
+        .map(|c| (c.name.clone(), c.clone()))
+        .collect();
 
     // Load enabled/disabled state from tools.yml
     let tool_entries =
@@ -889,6 +1080,12 @@ pub async fn initialize_external_tools(data_dir: &str) -> Vec<McpTool> {
         }
 
         let mut client = create_client(cfg);
+
+        // Register the config so per-channel pools can be created lazily
+        let server_config = config_map.get(&server_name).cloned();
+        if let Some(ref sc) = server_config {
+            register_server_config(&server_name, sc.clone());
+        }
 
         match client.to_mcp_tools().await {
             mcp_tools => {
