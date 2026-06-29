@@ -47,6 +47,15 @@ Vagrant.configure("2") do |config|
   config.ssh.forward_agent = false
   config.ssh.insert_key = true
 
+  # ── Disable Swap ────────────────────────────────────────────────────
+  config.vm.provision "shell", name: "disable-swap", privileged: true, inline: <<-SHELL
+    set -euxo pipefail
+    echo "Disabling swap memory..."
+    sudo swapoff -a
+    sudo sed -i '/swap/d' /etc/fstab
+    echo "Swap permanently disabled."
+  SHELL
+
   # ── Install Docker Engine + Compose ─────────────────────────────────
   config.vm.provision "shell", name: "install-docker", privileged: true, inline: <<-SHELL
     set -euxo pipefail

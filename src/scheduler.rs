@@ -125,6 +125,17 @@ async fn tick(
             display_name, job.id
         );
 
+        // ── Validate 5-field cron format ──
+        if !validate_cron_schedule_5field(&job.schedule) {
+            warn!(
+                "[cron-scheduler] Job '{}' has invalid cron schedule '{}': expected 5 fields (min hour dom month dow), got {} fields. Job will be skipped.",
+                display_name, job.schedule, job.schedule.trim().split_whitespace().count()
+            );
+            let new_next = calculate_next_run(&job.schedule, &now);
+            release_job(pool, &job.id, &now, &new_next).await?;
+            continue;
+        }
+
         // ── Check mode and silent flags ──
         let is_action = job.mode.as_deref() == Some("action");
         let is_silent = job.silent.unwrap_or(false);
@@ -759,6 +770,15 @@ pub async fn fire_cron_job_by_id(
 
     if !active && !force {
         err_msg!("Job '{}' is not active. Use force=true to run anyway.", schedule_id);
+    }
+
+    // Validate 5-field cron format
+    if !validate_cron_schedule_5field(&job.schedule) {
+        let j_name = job.display_name.as_str();
+        err_msg!(
+            "Invalid cron schedule '{}' for job '{}': expected exactly 5 fields (min hour dom month dow), got {} fields. Use standard Linux crontab format, e.g. '0 9 * * 1-5' for weekdays at 9am.",
+            job.schedule, j_name, job.schedule.trim().split_whitespace().count()
+        );
     }
 
     let now = Utc::now();
