@@ -345,6 +345,18 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 default: Some("2048".into()),
             },
         ),
+        // ── Connections ──
+        (
+            "MAX_POOL_CONNECTIONS".into(),
+            get_env_or_default("MAX_POOL_CONNECTIONS", "5"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Maximum per-channel connections per MCP server. Each channel gets its own pool; this caps how many simultaneous tool calls a single server can handle per channel. Increase for multi-tool workloads, decrease to save memory. Minimum 1.".into(),
+                options: None,
+                readonly: false,
+                default: Some("5".into()),
+            },
+        ),
         // ── General (LLM Provider) ──
         (
             "LLM_PROVIDER".into(),
@@ -436,6 +448,11 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             settings: vec![],
         },
         SettingCategory {
+            name: "connections".into(),
+            label: "Connections".into(),
+            settings: vec![],
+        },
+        SettingCategory {
             name: "planning".into(),
             label: "Planning".into(),
             settings: vec![],
@@ -472,6 +489,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "MEMORY_MAX_CHARS"
             | "USER_MAX_CHARS" => "memory",
             "LLM_PROVIDER" => "general",
+            "MAX_POOL_CONNECTIONS" => "connections",
             _ => "system",
         };
 
@@ -574,6 +592,7 @@ pub async fn update_settings_handler(
         "MEMORY_MAX_CHARS",
         "USER_MAX_CHARS",
         "LLM_PROVIDER",
+        "MAX_POOL_CONNECTIONS",
     ]
     .into_iter()
     .collect();
