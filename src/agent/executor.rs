@@ -1661,7 +1661,7 @@ pub async fn process_thread(
                     "completed" => ":white_check_mark:",
                     "failed" => ":x:",
                     "interrupted" => ":broken_heart:",
-                    _ => ":o:",
+                    _ => ":white_check_mark:",
                 };
                 helpers::enqueue_reaction(
                     &cfg.ctx,
