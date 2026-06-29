@@ -542,7 +542,7 @@ impl Platform for ExternalPlatformClient {
                                                             continue;
                                                         }
 
-                                                        if let Ok((_thread, _msg)) = crate::db::types::create_thread_with_cause(
+                                                        if let Ok((thread, _msg)) = crate::db::types::create_thread_with_cause(
                                                             &pool,
                                                             &self.data_dir,
                                                             "user",
@@ -574,12 +574,19 @@ impl Platform for ExternalPlatformClient {
                                                             },
                                                         ).await {
                                                             // success — message and thread created
+                                                            // Send :o: if the thread was auto-skipped (closed channel),
+                                                            // :+1: otherwise (normal acknowledgment)
+                                                            let react_emoji = if thread.status == "skipped" {
+                                                                ":o:"
+                                                            } else {
+                                                                ":+1:"
+                                                            };
                                                             let _ = send_react(
                                                                 &mut stdin,
                                                                 &mut next_id_val,
                                                                 &inbound.resource_identifier,
                                                                 &inbound.external_id,
-                                                                ":+1:",
+                                                                react_emoji,
                                                             ).await;
                                                         } else {
                                                             tracing::error!("Failed to create thread for inbound message from '{}'", plugin_name);
