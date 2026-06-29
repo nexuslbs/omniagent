@@ -275,7 +275,7 @@ async fn stop_thread_handler(
         false
     };
 
-    // 4. Send :no_entry: reaction to the platform if the thread has a cause message with an external_id
+    // 4. Send :o: reaction to the platform if the thread has a cause message with an external_id
     if skipped > 0 {
         if let Ok(Some(cause_msg)) = crate::db::threads::get_cause_message(&state.pool, thread_id).await {
             if let Some(ref ext_id) = cause_msg.external_id {
@@ -286,10 +286,10 @@ async fn stop_thread_handler(
                             platform,
                             resource,
                             ext_id,
-                            ":no_entry:",
+                            ":o:",
                         ).await;
                         info!(
-                            "Stop-thread: sent :no_entry: reaction for thread {} on {}",
+                            "Stop-thread: sent :o: reaction for thread {} on {}",
                             thread_id, platform
                         );
                     }
