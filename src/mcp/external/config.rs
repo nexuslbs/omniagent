@@ -206,7 +206,103 @@ fn scan_plugin_servers(plugins_dir: &str) -> Vec<McpServerConfig> {
                     config.servers.len(),
                     config_path_str
                 );
-                servers.extend(config.servers);
+
+                // Resolve command by convention for Rust plugins where command is not set
+                let plugin_dir_str = path.to_string_lossy().to_string();
+                let has_cargo_toml = path.join("Cargo.toml").exists();
+
+                // Read package name from Cargo.toml for proper binary resolution
+                let cargo_package_name = if has_cargo_toml {
+                    std::fs::read_to_string(path.join("Cargo.toml"))
+                        .ok()
+                        .and_then(|content| {
+                            content
+                                .lines()
+                                .find_map(|line| {
+                                    let trimmed = line.trim();
+                                    if let Some(name) = trimmed.strip_prefix("name = \"") {
+                                        name.strip_suffix('\"').map(|s| s.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })
+                        })
+                } else {
+                    None
+                };
+
+                let resolved_servers: Vec<McpServerConfig> = config
+                    .servers
+                    .into_iter()
+                    .map(|mut srv| {
+                        if srv.transport == McpTransport::Stdio && srv.command.is_none() {
+                            if has_cargo_toml {
+                                // Resolve binary path by convention:
+                                // 1. {plugin_dir}/target/release/{package_name} — standalone plugin
+                                // 2. /app/target/release/{package_name} — workspace member
+                                // 3. {plugin_dir}/target/release/{name} — fallback using server name
+                                let pkg = cargo_package_name
+                                    .as_deref()
+                                    .unwrap_or(&srv.name);
+
+                                let standalone = format!(
+                                    "{}/target/release/{}",
+                                    plugin_dir_str, pkg
+                                );
+                                let workspace = format!(
+                                    "/app/target/release/{}",
+                                    pkg
+                                );
+                                let name_fallback = format!(
+                                    "{}/target/release/{}",
+                                    plugin_dir_str, srv.name
+                                );
+
+                                let found = if std::path::Path::new(&standalone).exists() {
+                                    standalone
+                                } else if std::path::Path::new(&workspace).exists() {
+                                    workspace
+                                } else if std::path::Path::new(&name_fallback).exists() {
+                                    name_fallback
+                                } else {
+                                    // Don't set command — will error at spawn time with a clear message
+                                    tracing::warn!(
+                                        "MCP server '{}' has no binary found at any convention path. Tried: {}, {}, {}",
+                                        srv.name, standalone, workspace, name_fallback
+                                    );
+                                    return srv;
+                                };
+
+                                tracing::info!(
+                                    "Resolved command for '{}' by convention: {}",
+                                    srv.name, found
+                                );
+                                srv.command = Some(found);
+                            } else {
+                                // No Cargo.toml — try workspace member convention: /app/target/release/mcp-server-{name}
+                                let workspace_member = format!(
+                                    "/app/target/release/mcp-server-{}",
+                                    srv.name
+                                );
+                                if std::path::Path::new(&workspace_member).exists() {
+                                    tracing::info!(
+                                        "Resolved command for '{}' by workspace convention: {}",
+                                        srv.name, workspace_member
+                                    );
+                                    srv.command = Some(workspace_member);
+                                } else {
+                                    tracing::warn!(
+                                        "MCP server '{}' has no command configured and no Cargo.toml or workspace binary found",
+                                        srv.name
+                                    );
+                                }
+                            }
+                        }
+                        srv
+                    })
+                    .collect();
+
+                servers.extend(resolved_servers);
             }
             Err(e) => {
                 tracing::warn!(
