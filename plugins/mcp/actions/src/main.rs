@@ -56,7 +56,7 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
 
                     match dep_status {
                         Some((status,)) => {
-                            if status != "review" && status != "done" && status != "blocked" {
+                            if status != "review" && status != "done" {
                                 ok = false;
                                 break;
                             }

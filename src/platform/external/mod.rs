@@ -534,6 +534,7 @@ mod tests {
             msg_subtype: None,
             thread_id: 456,
             cause_external_id: Some("789".to_string()),
+            cause_root_id: None,
             is_summary: true,
             is_user_thread: true,
         };
