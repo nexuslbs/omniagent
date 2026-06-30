@@ -645,5 +645,5 @@ The omniagent's client.rs handles this:
 3. If the thread is already terminal → does nothing
 4. If the message is NOT the seq-0 (cause) message → does nothing (only thread-root deletion stops the agent)
 
-**Mattermost plugin:** The WebSocket event handler detects `post_deleted` events and sends this notification automatically. Polling mode currently does NOT detect post deletions — use WebSocket mode (`MATTERMOST_CONNECTION_MODE=websocket`) for this feature.
+**Mattermost plugin:** The WebSocket event handler detects `post_deleted` events and sends this notification automatically. Polling mode currently does NOT detect post deletions — use WebSocket mode (`connection_mode: websocket` in platforms.yml) for this feature. Platform-specific settings like connection mode are configured via the platform config (platforms.yml or dashboard UI), not in .env.
 Then verify with `docker ps` and `curl http://localhost:PORT/`.

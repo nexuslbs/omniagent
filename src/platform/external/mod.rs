@@ -144,6 +144,16 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
                                 env: manifest.env,
                                 max_retries: 3,
                             };
+                            // ── Merge YAML config values into env map ──
+                            // Config values set in platforms.yml (via the dashboard)
+                            // should override the default env var references so that
+                            // fields like connection_mode, polling_interval, etc. can
+                            // be configured without setting them in .env.
+                            let merged = merge_platform_config_env(
+                                &config,
+                                &serde_json::json!(manifest.config_schema),
+                                data_dir,
+                            );
                             // Override legacy entry with same name
                             if let Some(pos) = results.iter().position(|p| p.name == manifest.name)
                             {
@@ -151,9 +161,9 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
                                     "Platform plugin '{}' overridden by installed manifest",
                                     manifest.name
                                 );
-                                results[pos] = config;
+                                results[pos] = merged;
                             } else {
-                                results.push(config);
+                                results.push(merged);
                             }
                         }
                         Err(e) => {
@@ -176,6 +186,84 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
         }
 
     results
+}
+
+/// Merge YAML config values from platforms.yml into the plugin's env map.
+///
+/// For each config value set in the YAML file for this plugin, derive the
+/// corresponding environment variable name by uppercasing the config key
+/// and prefixing with the plugin name (e.g. `connection_mode` →
+/// `MATTERMOST_CONNECTION_MODE`) and override the env map entry.
+///
+/// This allows platform config fields (set via the dashboard) to take effect
+/// without requiring those values to be defined in .env.
+fn merge_platform_config_env(
+    config: &PlatformPluginConfig,
+    _config_schema: &serde_json::Value,
+    data_dir: &str,
+) -> PlatformPluginConfig {
+    let prefix = config.name.to_uppercase().replace('-', "_");
+
+    // Load YAML config for this platform
+    let yaml_path = std::path::PathBuf::from(data_dir).join("platforms.yml");
+    let yaml_entry = load_yaml_platform_entry(&yaml_path, &config.name);
+
+    if let Some(ref entry_config) = yaml_entry {
+        if let Some(obj) = entry_config.as_object() {
+            let mut merged_env = config.env.clone();
+            for (key, val) in obj {
+                let env_key = format!("{}_{}", prefix, key.to_uppercase().replace('-', "_"));
+                let str_val = val.as_str().map(|s| s.to_string()).unwrap_or_default();
+                if !str_val.is_empty() {
+                    merged_env.insert(env_key, str_val);
+                }
+            }
+            return PlatformPluginConfig {
+                env: merged_env,
+                ..config.clone()
+            };
+        }
+    }
+
+    config.clone()
+}
+
+/// Load a single platform entry's config from platforms.yml.
+fn load_yaml_platform_entry(
+    yaml_path: &std::path::Path,
+    platform_name: &str,
+) -> Option<serde_json::Value> {
+    use std::collections::BTreeMap;
+
+    if !yaml_path.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(yaml_path).ok()?;
+
+    // Parse the YAML structure manually using serde_yaml
+    // Expected format:
+    //   platforms:
+    //     mattermost:
+    //       enabled: true
+    //       config:
+    //         connection_mode: "websocket"
+    #[derive(Deserialize)]
+    struct PlatformYamlRoot {
+        #[serde(default)]
+        platforms: Option<BTreeMap<String, PlatformYamlEntry>>,
+    }
+    #[derive(Deserialize)]
+    struct PlatformYamlEntry {
+        #[serde(default)]
+        enabled: bool,
+        #[serde(default)]
+        config: Option<serde_json::Value>,
+    }
+
+    let root: PlatformYamlRoot = serde_yaml::from_str(&content).ok()?;
+    let platforms = root.platforms?;
+    let entry = platforms.get(platform_name)?;
+    entry.config.clone()
 }
 
 /// Resolve environment variable references in a config value.
