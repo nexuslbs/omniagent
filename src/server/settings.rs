@@ -619,6 +619,9 @@ pub async fn update_settings_handler(
     {
         Ok(()) => {
             tracing::info!("Settings updated: {:?}", applied);
+            // Reload the global config so the change takes effect immediately
+            // without requiring a container restart.
+            crate::agent::config::reload_global();
             (
                 StatusCode::OK,
                 Json(serde_json::json!({

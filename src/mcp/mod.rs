@@ -127,11 +127,14 @@ pub type McpToolHandler =
 /// Strips redundant server prefix from the tool name when present
 /// (e.g. `filesystem` + `filesystem_read` → `filesystem_read`,
 /// not `filesystem_filesystem-read`).
+/// If stripping the prefix leaves an empty string (server == tool_name),
+/// the original tool name is kept so `fetch` + `fetch` → `fetch_fetch`.
 pub fn tool_qualify(server: &str, tool_name: &str) -> String {
     // Strip redundant server prefix from tool name if present
     let tool = if let Some(rest) = tool_name.strip_prefix(server) {
         // Remove any leading separator character after the prefix
-        rest.trim_start_matches(|c| c == '-' || c == '_' || c == '.')
+        let trimmed = rest.trim_start_matches(|c| c == '-' || c == '_' || c == '.');
+        if trimmed.is_empty() { tool_name } else { trimmed }
     } else {
         tool_name
     };
@@ -345,7 +348,7 @@ impl McpRegistry {
 fn list_tool_details_tool() -> McpTool {
     McpTool {
         name: "list_tool_details".to_string(),
-        full_name: "list_tool_details".to_string(),
+        full_name: tool_qualify("builtin", "list_tool_details"),
         description: "Get the full definition (description, input schema / expected parameters) for a specific tool by name. Use this when a tool call returns an error about missing or invalid parameters — call this first to see the correct parameter names and types before retrying.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",

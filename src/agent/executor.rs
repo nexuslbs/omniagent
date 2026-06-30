@@ -460,7 +460,8 @@ pub async fn process_thread(
 
     let plan_content: Option<String> = if should_plan {
         let max_iter = 0; // one-shot, no refinement iterations
-        let max_tokens = cfg.config.prompt_plan_max_tokens;
+        let cfg_snapshot = cfg.config_snapshot();
+        let max_tokens = cfg_snapshot.prompt_plan_max_tokens;
         let mut last_plan: Option<String> = None;
         let mut json_failure_count: u32 = 0;
         let mut json_error_msg: Option<String> = None;
@@ -710,7 +711,7 @@ pub async fn process_thread(
 
     // 6. Tool-calling loop — max iterations controls total LLM calls
     let iter_limit =
-        queries::max_iterations_for_planning_mode(&cfg.config, &thread.planning_mode) as i32;
+        queries::max_iterations_for_planning_mode(&cfg.config_snapshot(), &thread.planning_mode) as i32;
     // The plan phase consumed 1 iteration (if it ran). Subtract it so the
     // tool-calling loop gets the remaining budget.
     let plan_consumed = if should_plan { 1 } else { 0 };
@@ -748,12 +749,13 @@ pub async fn process_thread(
         // Uses tiktoken BPE tokenizer for accurate token counting instead of
         // character-based estimation (which had ~30% JSON overhead error margin).
 
-        let prompt_token_soft = cfg.config.prompt_token_budget_soft;
-        let prompt_token_hard = cfg.config.prompt_token_budget_hard;
-        let old_msg_budget = cfg.config.old_message_char_budget;
-        let keep_turns = cfg.config.condense_keep_turns;
-        let state_interval = cfg.config.state_block_update_interval as i32;
-        let tokenizer_enc = &cfg.config.tokenizer_encoding;
+        let cfg_snapshot = cfg.config_snapshot();
+        let prompt_token_soft = cfg_snapshot.prompt_token_budget_soft;
+        let prompt_token_hard = cfg_snapshot.prompt_token_budget_hard;
+        let old_msg_budget = cfg_snapshot.old_message_char_budget;
+        let keep_turns = cfg_snapshot.condense_keep_turns;
+        let state_interval = cfg_snapshot.state_block_update_interval as i32;
+        let tokenizer_enc = cfg_snapshot.tokenizer_encoding.clone();
 
         // Count actual tokens using tiktoken (fast BPE, no network calls),
         // then apply safety factor to account for provider tokenizer mismatch.
@@ -763,8 +765,8 @@ pub async fn process_thread(
         } else {
             Some(tools_def.as_slice())
         };
-        let raw_tokens = helpers::count_tokens(&messages, tokenizer_enc, token_tools);
-        let safety_factor = cfg.config.prompt_token_safety_factor;
+        let raw_tokens = helpers::count_tokens(&messages, &tokenizer_enc, token_tools);
+        let safety_factor = cfg_snapshot.prompt_token_safety_factor;
         let current_tokens = (raw_tokens as f64 * safety_factor) as usize;
 
         // Log token count every 5 iterations for diagnostics
@@ -783,7 +785,7 @@ pub async fn process_thread(
         if needs_hard_condense || needs_soft_condense {
             // Use the char budget for the condense_messages function's safety
             // check (which compares system message CHARS, not tokens).
-            let condense_char_soft = cfg.config.prompt_char_budget_soft;
+            let condense_char_soft = cfg_snapshot.prompt_char_budget_soft;
 
             match helpers::condense_messages(
                 std::mem::take(&mut messages),
@@ -793,13 +795,13 @@ pub async fn process_thread(
             ) {
                 Ok(condensed) => {
                     let condensed_raw =
-                        helpers::count_tokens(&condensed, tokenizer_enc, token_tools);
+                        helpers::count_tokens(&condensed, &tokenizer_enc, token_tools);
                     let condensed_tokens = (condensed_raw as f64 * safety_factor) as usize;
                     let saved = current_tokens.saturating_sub(condensed_tokens);
                     messages = condensed;
 
                     // If hard budget triggered, verify we're now below soft
-                    let after_raw = helpers::count_tokens(&messages, tokenizer_enc, token_tools);
+                    let after_raw = helpers::count_tokens(&messages, &tokenizer_enc, token_tools);
                     let after_tokens = (after_raw as f64 * safety_factor) as usize;
                     if needs_hard_condense && after_tokens > prompt_token_soft {
                         // Second pass with more aggressive settings
@@ -818,7 +820,7 @@ pub async fn process_thread(
                         ) {
                             Ok(tighter) => {
                                 let tighter_raw =
-                                    helpers::count_tokens(&tighter, tokenizer_enc, token_tools);
+                                    helpers::count_tokens(&tighter, &tokenizer_enc, token_tools);
                                 let tighter_tokens = (tighter_raw as f64 * safety_factor) as usize;
                                 messages = tighter;
                                 if tighter_tokens > prompt_token_soft {
@@ -868,8 +870,8 @@ pub async fn process_thread(
 
         let request = CompletionRequest {
             messages: messages.clone(),
-            max_tokens: cfg.config.max_tokens,
-            temperature: cfg.config.temperature,
+            max_tokens: cfg.config_snapshot().max_tokens,
+            temperature: cfg.config_snapshot().temperature,
             stream: false,
             tools: if tools_def.is_empty() {
                 None
@@ -1445,7 +1447,7 @@ pub async fn process_thread(
 
         let summary_request = CompletionRequest {
             messages: summary_msgs,
-            max_tokens: cfg.config.thread_summary_tokens,
+            max_tokens: cfg.config_snapshot().thread_summary_tokens,
             temperature: 0.3,
             stream: false,
             tools: None,

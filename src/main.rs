@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
@@ -37,6 +38,10 @@ async fn run_server() -> AppResult<()> {
     // Load base configuration
     let cfg = agent::AgentConfig::from_env()?;
     tracing::info!("Configuration loaded");
+
+    // Initialize global config — shared Arc<RwLock<>> for hot-reload
+    let shared_config = agent::config::init_global(cfg.clone());
+    tracing::info!("Global config initialized");
 
     // Connect to PostgreSQL
     let pool = db::connect(&cfg.database_url).await?;
@@ -104,10 +109,11 @@ async fn run_server() -> AppResult<()> {
         platform_senders,
     );
     let mcp = mcp::default_registry(&mut ctx).await;
-    let mcp_shared = Arc::new(std::sync::RwLock::new(mcp));
+    let mcp_shared = Arc::new(RwLock::new(mcp));
 
-    // Build the agent with MCP context
-    let agent = agent::Agent::new(pool.clone(), cfg.clone(), mcp_shared.clone(), ctx.clone());
+    // Build the agent with shared mutable config
+    let shared_config_for_agent = shared_config.clone();
+    let agent = agent::Agent::new(pool.clone(), shared_config_for_agent, mcp_shared.clone(), ctx.clone());
 
     // ── STARTUP: Skip pending/processing messages BEFORE spawning any concurrent tasks ──
 
@@ -129,6 +135,7 @@ async fn run_server() -> AppResult<()> {
     let data_dir_server = data_dir.clone();
     let mcp_for_server = mcp_shared.clone();
     let ctx_for_server = ctx.clone();
+    let shared_config_for_server = shared_config.clone();
     let server_handle = tokio::spawn(async move {
         if let Err(e) = server::start_server(server::ServerConfig {
             pool: pool_server,
@@ -139,6 +146,7 @@ async fn run_server() -> AppResult<()> {
             workspace_dir,
             mcp_registry: mcp_for_server,
             app_context: ctx_for_server,
+            shared_config: shared_config_for_server,
         })
         .await
         {
@@ -192,8 +200,9 @@ async fn run_server() -> AppResult<()> {
     // Spawn vectorization workers if enabled
     let pool_vectorizer = pool.clone();
     let data_dir_for_vectorizer = data_dir.clone();
+    let shared_config_for_vectorizer = shared_config.clone();
     let vectorizer_handle = tokio::spawn(async move {
-        vectorizer::spawn_vectorizers(pool_vectorizer, &cfg, &data_dir_for_vectorizer).await;
+        vectorizer::spawn_vectorizers(pool_vectorizer, shared_config_for_vectorizer, &data_dir_for_vectorizer).await;
     });
 
     // Spawn cron scheduler

@@ -8,6 +8,8 @@ use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
 use crate::mcp::AppContext;
 use crate::platform::enqueue_notification;
 use crate::platform::queue::OutboundEnvelope;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 /// Merge cumulative usage with a new usage value.
 pub fn merge_usage(cumulative: &mut Option<Usage>, new_usage: Option<Usage>) {
@@ -495,10 +497,11 @@ pub fn condense_messages(
 pub async fn check_and_generate_summary(
     pool: &PgPool,
     llm: &LLMClient,
-    config: &AgentConfig,
+    config: &Arc<RwLock<AgentConfig>>,
     channel_id: i64,
 ) {
-    let window = config.summary_window as i64;
+    let cfg_snapshot = config.read().unwrap();
+    let window = cfg_snapshot.summary_window as i64;
     if window == 0 {
         return; // summaries disabled
     }
@@ -628,7 +631,7 @@ pub async fn check_and_generate_summary(
             ChatMessage::system(&system_summarizer_prompt),
             ChatMessage::user(&summary_prompt),
         ],
-        max_tokens: config.channel_summary_tokens,
+        max_tokens: cfg_snapshot.channel_summary_tokens,
         temperature: 0.2, // lower temperature for factual consistency
         stream: false,
         tools: None,

@@ -32,6 +32,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+use crate::agent::config::AgentConfig;
 use crate::agent::helpers;
 use crate::db::types as queries;
 use crate::llm::{resolve_llm_api_key, ChatMessage, CompletionRequest, LLMClient};
@@ -41,6 +42,7 @@ use crate::prompt_builder::{
     MemoryStore, PlanningPromptParams,
 };
 use sql_forge::sql_forge;
+use std::sync::RwLock;
 
 mod diagnostic;
 pub mod plugins;
@@ -58,6 +60,8 @@ pub(crate) struct AppState {
     mcp_registry: Arc<std::sync::RwLock<McpRegistry>>,
     /// Application context for MCP tool execution
     app_context: AppContext,
+    /// Shared mutable config for hot-reload support
+    shared_config: Arc<RwLock<AgentConfig>>,
 }
 
 /// Configuration for the HTTP server.
@@ -71,6 +75,7 @@ pub struct ServerConfig {
     pub workspace_dir: String,
     pub mcp_registry: Arc<std::sync::RwLock<McpRegistry>>,
     pub app_context: AppContext,
+    pub shared_config: Arc<RwLock<AgentConfig>>,
 }
 
 /// Start the HTTP server on the given host and port.
@@ -83,6 +88,7 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         env_path: format!("{}/.env", config.data_dir),
         mcp_registry: config.mcp_registry,
         app_context: config.app_context,
+        shared_config: config.shared_config,
     });
 
     let app = Router::new()

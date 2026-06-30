@@ -3,6 +3,51 @@ use crate::llm::resolve_llm_api_key;
 use crate::mcp::{AppContext, McpRegistry};
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::RwLock;
+
+// ── Global mutable config ──────────────────────────────────────────────────
+
+/// Global mutable config shared across the application.
+/// Initialized once at startup, updated when settings change via the API.
+pub static GLOBAL_CONFIG: OnceLock<Arc<RwLock<AgentConfig>>> = OnceLock::new();
+
+/// Initialize the global config from a loaded AgentConfig.
+/// Returns the Arc so callers can hold their own reference.
+/// Panics if called more than once (safety guarantee for startup).
+pub fn init_global(config: AgentConfig) -> Arc<RwLock<AgentConfig>> {
+    let arc = Arc::new(RwLock::new(config));
+    GLOBAL_CONFIG
+        .set(arc.clone())
+        .unwrap_or_else(|_| panic!("GLOBAL_CONFIG already initialized"));
+    arc
+}
+
+/// Reload the global config from environment variables.
+/// Call this after settings are updated (e.g. from PUT /settings).
+/// Does nothing if the global hasn't been initialized yet.
+pub fn reload_global() {
+    if let Some(global) = GLOBAL_CONFIG.get() {
+        match AgentConfig::from_env() {
+            Ok(new_config) => {
+                tracing::info!("Reloaded global config from environment");
+                if let Ok(mut guard) = global.write() {
+                    *guard = new_config;
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to reload config from environment: {:?}", e);
+            }
+        }
+    }
+}
+
+/// Get a reference to the global config, if initialized.
+pub fn get_global() -> Option<&'static Arc<RwLock<AgentConfig>>> {
+    GLOBAL_CONFIG.get()
+}
+
+// ── AgentConfig ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -81,9 +126,18 @@ pub struct AgentConfig {
 pub struct AgentContext {
     pub pool: PgPool,
     pub llm: Arc<crate::llm::LLMClient>,
-    pub config: AgentConfig,
-    pub mcp: Arc<std::sync::RwLock<McpRegistry>>,
+    pub config: Arc<RwLock<AgentConfig>>,
+    pub mcp: Arc<RwLock<McpRegistry>>,
     pub ctx: AppContext,
+}
+
+impl AgentContext {
+    /// Take a snapshot of the current config for use during a single thread/task.
+    /// This ensures consistent field values throughout one processing cycle
+    /// even if the global config is updated concurrently.
+    pub fn config_snapshot(&self) -> AgentConfig {
+        self.config.read().unwrap().clone()
+    }
 }
 
 impl AgentConfig {

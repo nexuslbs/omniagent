@@ -182,19 +182,11 @@ pub trait McpServerClient: Send + Sync {
         for t in tools {
             // Prefix tool names with server name to avoid collisions
             // in the registry HashMap (e.g., "test-python-tool_echo").
-            // Uses the unified tool_qualify() function with underscore
-            // separator, converting underscores within tool names to hyphens.
-            // Some MCP servers already include their server name in the tool
-            // name with hyphens, dots, or colons; avoid double-prefixing.
-            let prefixed_name = if t.name.starts_with(&format!("{}-", server_name))
-                || t.name.starts_with(&format!("{}.", server_name))
-                || t.name.starts_with(&format!("{}:", server_name))
-                || t.name.starts_with(&format!("{}_", server_name))
-            {
-                t.name.clone()
-            } else {
-                crate::mcp::tool_qualify(&server_name, &t.name)
-            };
+            // Uses the unified tool_qualify() function which handles both
+            // already-prefixed names (strips redundant prefix) and bare names.
+            // The output is always {hyphenated-server}_{hyphenated-tool} —
+            // tool_qualify is the single source of truth for tool naming.
+            let prefixed_name = crate::mcp::tool_qualify(&server_name, &t.name);
             let schema = convert_input_schema(&t.input_schema);
             // Use a direct, unambiguous description that tells the LLM this is
             // a callable function, not something requiring filesystem discovery.

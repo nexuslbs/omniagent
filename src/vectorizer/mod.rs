@@ -12,6 +12,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::{Duration, SystemTime};
 
 use crate::error::{Error, ErrorContext, AppResult};
@@ -679,7 +681,7 @@ pub struct MessageEmbeddingRow {
 /// This function does not return until cancellation (i.e., it loops forever
 /// via `futures::future::pending()`). It is intended to be spawned as its own
 /// tokio task from main.
-pub async fn spawn_vectorizers(pool: PgPool, config: &crate::agent::AgentConfig, data_dir: &str) {
+pub async fn spawn_vectorizers(pool: PgPool, config: Arc<RwLock<crate::agent::AgentConfig>>, data_dir: &str) {
     struct MakeVectorizerConfig<'a> {
         api_url: &'a Option<String>,
         protocol: &'a str,
@@ -736,16 +738,18 @@ pub async fn spawn_vectorizers(pool: PgPool, config: &crate::agent::AgentConfig,
         }
     }
 
+    let cfg = config.read().unwrap();
+
     // Spawn message vectorizer (with its own config)
-    if config.vectorize_messages {
+    if cfg.vectorize_messages {
         let pool_clone = pool.clone();
         let messages_config = VectorizerConfig {
-            method: config.messages_vectorization_method.clone(),
-            api_url: config.messages_vectorization_api_url.clone(),
-            protocol: config.messages_vectorization_protocol.clone(),
-            api_key: config.messages_vectorization_api_key.clone(),
-            api_model: config.messages_vectorization_api_model.clone(),
-            poll_interval_secs: config.messages_vectorization_interval_secs,
+            method: cfg.messages_vectorization_method.clone(),
+            api_url: cfg.messages_vectorization_api_url.clone(),
+            protocol: cfg.messages_vectorization_protocol.clone(),
+            api_key: cfg.messages_vectorization_api_key.clone(),
+            api_model: cfg.messages_vectorization_api_model.clone(),
+            poll_interval_secs: cfg.messages_vectorization_interval_secs,
             ..Default::default()
         };
         let vec = MessageVectorizer::new(
@@ -771,19 +775,19 @@ pub async fn spawn_vectorizers(pool: PgPool, config: &crate::agent::AgentConfig,
     }
 
     // Spawn wiki vectorizer (with its own config)
-    if config.vectorize_wiki {
+    if cfg.vectorize_wiki {
         let wiki_config = VectorizerConfig {
-            method: config.wiki_vectorization_method.clone(),
-            api_url: config.wiki_vectorization_api_url.clone(),
-            protocol: config.wiki_vectorization_protocol.clone(),
-            api_key: config.wiki_vectorization_api_key.clone(),
-            api_model: config.wiki_vectorization_api_model.clone(),
-            poll_interval_secs: config.wiki_vectorization_interval_secs,
+            method: cfg.wiki_vectorization_method.clone(),
+            api_url: cfg.wiki_vectorization_api_url.clone(),
+            protocol: cfg.wiki_vectorization_protocol.clone(),
+            api_key: cfg.wiki_vectorization_api_key.clone(),
+            api_model: cfg.wiki_vectorization_api_model.clone(),
+            poll_interval_secs: cfg.wiki_vectorization_interval_secs,
             ..Default::default()
         };
         let wiki_vec = WikiVectorizer::new(
             format!("{}/profiles/default/wiki", data_dir),
-            config.qdrant_url.clone(),
+            cfg.qdrant_url.clone(),
             make_vectorizer(
                 &wiki_config.method,
                 "wiki",

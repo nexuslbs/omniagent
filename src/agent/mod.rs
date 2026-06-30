@@ -21,6 +21,7 @@ use sqlx::FromRow;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
@@ -39,35 +40,51 @@ pub use config::AgentContext;
 /// The core agent that supervises per-channel message processing.
 pub struct Agent {
     pub pool: PgPool,
-    pub config: AgentConfig,
+    pub config: Arc<RwLock<AgentConfig>>,
     pub llm: Arc<LLMClient>,
-    pub mcp: Arc<std::sync::RwLock<McpRegistry>>,
+    pub mcp: Arc<RwLock<McpRegistry>>,
     pub ctx: AppContext,
 }
 
 impl Agent {
-    /// Create a new agent from a database pool and configuration.
+    /// Create a new agent from a database pool and shared mutable configuration.
     ///
     /// An LLM client is built from the agent config, falling back to
     /// environment-level defaults for any unset values.
-    pub fn new(pool: PgPool, config: AgentConfig, mcp: Arc<std::sync::RwLock<McpRegistry>>, ctx: AppContext) -> Self {
+    pub fn new(
+        pool: PgPool,
+        config: Arc<RwLock<AgentConfig>>,
+        mcp: Arc<RwLock<McpRegistry>>,
+        ctx: AppContext,
+    ) -> Self {
         let env_cfg = crate::llm::LLMConfig::from_env();
+        // Read config fields inside a scope so the borrow is dropped before
+        // moving `config` into the struct.
+        let (llm_provider, llm_api_key, max_tokens, temperature) = {
+            let cfg_read = config.read().unwrap();
+            (
+                if cfg_read.llm_provider.is_empty() {
+                    env_cfg.provider.clone()
+                } else {
+                    crate::llm::ProviderId::new(&cfg_read.llm_provider)
+                },
+                if cfg_read.llm_api_key.is_empty() {
+                    env_cfg.api_key.clone()
+                } else {
+                    cfg_read.llm_api_key.clone()
+                },
+                cfg_read.max_tokens,
+                cfg_read.temperature,
+            )
+        };
         let llm_config = crate::llm::LLMConfig {
-            provider: if config.llm_provider.is_empty() {
-                env_cfg.provider
-            } else {
-                crate::llm::ProviderId::new(&config.llm_provider)
-            },
-            api_key: if config.llm_api_key.is_empty() {
-                env_cfg.api_key
-            } else {
-                config.llm_api_key.clone()
-            },
+            provider: llm_provider,
+            api_key: llm_api_key,
             base_url: env_cfg.base_url,
             model: env_cfg.model,
             api_mode: env_cfg.api_mode,
-            max_tokens: config.max_tokens,
-            temperature: config.temperature,
+            max_tokens,
+            temperature,
         };
         let llm = Arc::new(LLMClient::new(llm_config));
         Self {
@@ -258,7 +275,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                                 iteration_number: 0,
                             };
                             let _ = queries::create_message(&cfg.pool, &err_msg).await;
-                            // Mark thread as failed (not interrupted — interrupted is only for max iterations)
+                            // Mark thread as failed
                             let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
                             continue;
                         }
@@ -288,7 +305,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                     };
 
                     // Check message count limit before claiming the thread
-                    let max_iter = queries::max_iterations_for_planning_mode(&cfg.config, &thread.planning_mode);
+                    // Take a config snapshot for consistent values during this check + processing
+                    let cfg_snapshot = cfg.config_snapshot();
+                    let max_iter = queries::max_iterations_for_planning_mode(&cfg_snapshot, &thread.planning_mode);
                     match queries::count_thread_messages(&cfg.pool, thread.id).await {
                         Ok(count) if count >= max_iter as i32 => {
                             info!(
