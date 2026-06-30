@@ -623,6 +623,40 @@ impl Platform for ExternalPlatformClient {
                                             }
                                         }
                                     }
+                                    "message_deleted" => {
+                                        // When a message is deleted on the platform, if it was the seq-0
+                                        // (cause) message of an agent thread, stop that thread.
+                                        if let Some(params) = notif.params {
+                                            let resource = params.get("resource_identifier").and_then(|v| v.as_str());
+                                            let ext_id = params.get("external_id").and_then(|v| v.as_str());
+                                            if let (Some(resource), Some(ext_id)) = (resource, ext_id) {
+                                                tracing::info!(
+                                                    "Message deleted on '{}' resource '{}': external_id={}",
+                                                    plugin_name, resource, ext_id
+                                                );
+                                                match handle_message_deleted(&pool, &plugin_name, resource, ext_id).await {
+                                                    Ok(Some(thread_id)) => {
+                                                        tracing::info!(
+                                                            "message_deleted: stopped thread {} (seq-0 was {})",
+                                                            thread_id, ext_id
+                                                        );
+                                                    }
+                                                    Ok(None) => {
+                                                        tracing::debug!(
+                                                            "message_deleted: no seq-0 thread for external_id={} on '{}'",
+                                                            ext_id, resource
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::error!(
+                                                            "Error handling message_deleted for {}: {:?}",
+                                                            ext_id, e
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                     _ => {
                                         tracing::debug!(
                                             "Unknown notification from '{}': {}",
@@ -950,6 +984,92 @@ async fn send_react(
         return;
     }
     let _ = stdin.flush().await;
+}
+
+/// Handle a `message_deleted` notification from a platform plugin.
+///
+/// Looks for a thread whose seq-0 (cause) message has the given `external_id`
+/// and belongs to a channel matching the given platform + resource_identifier.
+///
+/// - If the thread is `pending` or `processing`, marks it as `skipped` (terminal).
+/// - If already terminal, does nothing.
+///
+/// Returns `Ok(Some(thread_id))` if a matching thread was found and acted upon,
+/// `Ok(None)` if no matching seq-0 message exists.
+async fn handle_message_deleted(
+    pool: &PgPool,
+    platform: &str,
+    resource_identifier: &str,
+    external_id: &str,
+) -> Result<Option<i64>, Box<dyn std::error::Error + Send + Sync>> {
+    // Use sqlx::query_as directly because client.rs already uses raw sqlx::query patterns.
+    #[derive(sqlx::FromRow)]
+    struct ThreadStatusRow {
+        id: i64,
+        status: String,
+    }
+
+    let row: Option<ThreadStatusRow> = sqlx::query_as::<_, ThreadStatusRow>(
+        r#"
+        SELECT t.id, t.status
+        FROM messages m
+        JOIN threads t ON t.id = m.thread_id
+        JOIN channels ch ON ch.id = t.channel_id
+        WHERE m.external_id = $1
+          AND m.thread_sequence = 0
+          AND ch.platform = $2
+          AND ch.resource_identifier = $3
+        LIMIT 1
+        "#,
+    )
+    .bind(external_id)
+    .bind(platform)
+    .bind(resource_identifier)
+    .fetch_optional(pool)
+    .await?;
+
+    let info = match row {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    match info.status.as_str() {
+        "pending" | "processing" => {
+            // Skip the thread — marks it as skipped + terminal
+            sqlx::query(
+                r#"
+                UPDATE threads
+                SET status = 'skipped',
+                    ended_at = NOW(),
+                    terminal = true,
+                    iterations = COALESCE(
+                        (SELECT MAX(iteration_number) FROM messages WHERE thread_id = $1),
+                        0
+                    )
+                WHERE id = $1
+                  AND status IN ('pending', 'processing')
+                "#,
+            )
+            .bind(info.id)
+            .execute(pool)
+            .await?;
+
+            tracing::info!(
+                "message_deleted: skipped thread {} (was {}) due to seq-0 message deletion",
+                info.id,
+                info.status
+            );
+            Ok(Some(info.id))
+        }
+        _ => {
+            tracing::debug!(
+                "message_deleted: thread {} has status '{}' — no action needed (non seq-0 or already terminal)",
+                info.id,
+                info.status
+            );
+            Ok(Some(info.id))
+        }
+    }
 }
 
 impl Drop for ExternalPlatformClient {

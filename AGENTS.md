@@ -630,4 +630,20 @@ Writing a `docker-compose.yml` via `filesystem_write` does NOT deploy it. Always
 ```
 compose(project_dir="<verified-host-path>", command="up", args="-d")
 ```
+
+### Platform Plugin `message_deleted` Notification
+
+Platform plugins can send a `message_deleted` notification to the omniagent when a user deletes a message:
+
+```json
+{"method": "message_deleted", "params": {"resource_identifier": "<channel-id>", "external_id": "<deleted-post-id>"}}
+```
+
+The omniagent's client.rs handles this:
+1. Looks up the thread whose seq-0 (cause) message has matching `external_id` AND belongs to the channel matching `resource_identifier`
+2. If the thread is `pending` or `processing` → marks it `skipped` + `terminal` (the agent stops processing it)
+3. If the thread is already terminal → does nothing
+4. If the message is NOT the seq-0 (cause) message → does nothing (only thread-root deletion stops the agent)
+
+**Mattermost plugin:** The WebSocket event handler detects `post_deleted` events and sends this notification automatically. Polling mode currently does NOT detect post deletions — use WebSocket mode (`MATTERMOST_CONNECTION_MODE=websocket`) for this feature.
 Then verify with `docker ps` and `curl http://localhost:PORT/`.
