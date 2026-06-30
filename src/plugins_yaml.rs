@@ -447,22 +447,41 @@ fn build_plugin_detail(
             if !cargo_toml.exists() {
                 return false;
             }
-            // Check if binary exists at target/release/<package_name>
-            // The package name matches the directory name (with underscores)
             let dir_name = std::path::Path::new(dir)
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
-            let binary_path = std::path::Path::new(dir)
-                .join("target")
-                .join("release")
-                .join(dir_name);
-            // Also try with underscores (Rust convention)
-            let binary_with_underscores = std::path::Path::new(dir)
-                .join("target")
-                .join("release")
-                .join(dir_name.replace('-', "_"));
-            !binary_path.exists() && !binary_with_underscores.exists()
+
+            // Read package name from Cargo.toml for proper binary resolution
+            let cargo_package_name = std::fs::read_to_string(&cargo_toml)
+                .ok()
+                .and_then(|content| {
+                    content.lines().find_map(|line| {
+                        let trimmed = line.trim();
+                        if let Some(name) = trimmed.strip_prefix("name = \"") {
+                            name.strip_suffix('\"').map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                });
+
+            // All possible binary paths to check:
+            // - Directory name convention (standalone plugin)
+            // - Underscore variant (Rust convention)
+            // - Package name from Cargo.toml (workspace members with mcp-server- prefix)
+            let mut candidates = vec![
+                format!("{}/target/release/{}", dir, dir_name),
+                format!("{}/target/release/{}", dir, dir_name.replace('-', "_")),
+            ];
+            if let Some(ref pkg) = cargo_package_name {
+                candidates.push(format!("{}/target/release/{}", dir, pkg));
+                if pkg.contains('-') {
+                    candidates.push(format!("{}/target/release/{}", dir, pkg.replace('-', "_")));
+                }
+            }
+
+            !candidates.iter().any(|p| std::path::Path::new(p).exists())
         })
         .unwrap_or(false);
 
