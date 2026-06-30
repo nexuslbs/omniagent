@@ -165,19 +165,23 @@ pub fn discover_plugin_servers(data_dir: &str) -> Vec<McpServerConfig> {
     servers
 }
 
+/// Resolve a plugin binary path relative to the omniagent binary's directory.
+///
+/// Workspace member MCP servers (mcp-server-*) live next to the omniagent
+/// binary in both dev (`/app/target/release/`) and production (Docker image),
+/// so we resolve by convention without hardcoded paths or env vars.
+fn get_bin_path(name: &str) -> Option<String> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| format!("{}/{}", d.display(), name)))
+}
+
 /// Scan a single `plugins/mcp/` directory for `mcp-config.json` files.
 fn scan_plugin_servers(plugins_dir: &str) -> Vec<McpServerConfig> {
     let plugins_path = std::path::Path::new(plugins_dir);
     if !plugins_path.exists() || !plugins_path.is_dir() {
         return vec![];
     }
-
-    // Resolve the directory containing the omniagent binary — workspace member
-    // MCP servers (mcp-server-*) live next to the omniagent binary in both
-    // dev (/app/target/release/) and production (Docker image).
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_string_lossy().to_string()));
 
     let mut servers = Vec::new();
     tracing::info!("Scanning for MCP plugin configs in: {}", plugins_dir);
@@ -246,52 +250,46 @@ fn scan_plugin_servers(plugins_dir: &str) -> Vec<McpServerConfig> {
                             if has_cargo_toml {
                                 // Resolve binary path by convention:
                                 // 1. {plugin_dir}/target/release/{package_name} — standalone plugin
-                                // 2. {exe_dir}/{package_name} — workspace member (next to omniagent binary)
+                                // 2. {get_bin_path(package_name)} — workspace member (next to omniagent binary)
                                 // 3. {plugin_dir}/target/release/{name} — fallback using server name
                                 let pkg = cargo_package_name
                                     .as_deref()
                                     .unwrap_or(&srv.name);
 
-                                let standalone = format!(
-                                    "{}/target/release/{}",
-                                    plugin_dir_str, pkg
-                                );
-                                // Workspace members' binaries are next to the omniagent binary.
-                                // The package name (e.g. "mcp-server-cron") is the actual filename,
-                                // so no "mcp-server-" prefix is added here.
-                                let workspace = match exe_dir {
-                                    Some(ref d) => format!("{}/{}", d, pkg),
-                                    None => format!("/app/target/release/{}", pkg),
-                                };
-                                let name_fallback = format!(
+                                let mut candidates = vec![
+                                    format!("{}/target/release/{}", plugin_dir_str, pkg),
+                                ];
+                                if let Some(w) = get_bin_path(pkg) {
+                                    candidates.push(w);
+                                }
+                                candidates.push(format!(
                                     "{}/target/release/{}",
                                     plugin_dir_str, srv.name
-                                );
+                                ));
 
-                                let found = if std::path::Path::new(&standalone).exists() {
-                                    standalone
-                                } else if std::path::Path::new(&workspace).exists() {
-                                    workspace
-                                } else if std::path::Path::new(&name_fallback).exists() {
-                                    name_fallback
-                                } else {
-                                    // Don't set command — will error at spawn time with a clear message
-                                    tracing::warn!(
-                                        "MCP server '{}' has no binary found at any convention path. Tried: {}, {}, {}",
-                                        srv.name, standalone, workspace, name_fallback
-                                    );
-                                    return srv;
-                                };
+                                let found = candidates
+                                    .into_iter()
+                                    .find(|p| std::path::Path::new(p).exists());
 
-                                tracing::info!(
-                                    "Resolved command for '{}' by convention: {}",
-                                    srv.name, found
-                                );
-                                srv.command = Some(found);
+                                match found {
+                                    Some(ref path) => {
+                                        tracing::info!(
+                                            "Resolved command for '{}' by convention: {}",
+                                            srv.name, path
+                                        );
+                                        srv.command = Some(path.clone());
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            "MCP server '{}' has no binary found at any convention path",
+                                            srv.name,
+                                        );
+                                    }
+                                }
                             } else {
                                 // No Cargo.toml — try workspace member convention
-                                // Binary is next to the omniagent binary: {exe_dir}/mcp-server-{name}
-                                let workspace_path = exe_dir.as_ref().map(|d| format!("{}/mcp-server-{}", d, srv.name));
+                                // Binary is next to the omniagent binary: {get_bin_path("mcp-server-{name}")}
+                                let workspace_path = get_bin_path(&format!("mcp-server-{}", srv.name));
                                 match workspace_path {
                                     Some(ref path) if std::path::Path::new(path).exists() => {
                                         tracing::info!(
