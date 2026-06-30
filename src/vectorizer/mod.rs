@@ -738,18 +738,41 @@ pub async fn spawn_vectorizers(pool: PgPool, config: Arc<RwLock<crate::agent::Ag
         }
     }
 
-    let cfg = config.read().unwrap();
+    let (vectorize_messages, messages_method, messages_api_url, messages_protocol,
+          messages_api_key, messages_api_model, messages_interval,
+          vectorize_wiki, wiki_method, wiki_api_url, wiki_protocol,
+          wiki_api_key, wiki_api_model, wiki_interval,
+          qdrant_url) = {
+        let cfg = config.read().unwrap();
+        (
+            cfg.vectorize_messages,
+            cfg.messages_vectorization_method.clone(),
+            cfg.messages_vectorization_api_url.clone(),
+            cfg.messages_vectorization_protocol.clone(),
+            cfg.messages_vectorization_api_key.clone(),
+            cfg.messages_vectorization_api_model.clone(),
+            cfg.messages_vectorization_interval_secs,
+            cfg.vectorize_wiki,
+            cfg.wiki_vectorization_method.clone(),
+            cfg.wiki_vectorization_api_url.clone(),
+            cfg.wiki_vectorization_protocol.clone(),
+            cfg.wiki_vectorization_api_key.clone(),
+            cfg.wiki_vectorization_api_model.clone(),
+            cfg.wiki_vectorization_interval_secs,
+            cfg.qdrant_url.clone(),
+        )
+    };
 
     // Spawn message vectorizer (with its own config)
-    if cfg.vectorize_messages {
+    if vectorize_messages {
         let pool_clone = pool.clone();
         let messages_config = VectorizerConfig {
-            method: cfg.messages_vectorization_method.clone(),
-            api_url: cfg.messages_vectorization_api_url.clone(),
-            protocol: cfg.messages_vectorization_protocol.clone(),
-            api_key: cfg.messages_vectorization_api_key.clone(),
-            api_model: cfg.messages_vectorization_api_model.clone(),
-            poll_interval_secs: cfg.messages_vectorization_interval_secs,
+            method: messages_method,
+            api_url: messages_api_url,
+            protocol: messages_protocol,
+            api_key: messages_api_key,
+            api_model: messages_api_model,
+            poll_interval_secs: messages_interval,
             ..Default::default()
         };
         let vec = MessageVectorizer::new(
@@ -775,19 +798,19 @@ pub async fn spawn_vectorizers(pool: PgPool, config: Arc<RwLock<crate::agent::Ag
     }
 
     // Spawn wiki vectorizer (with its own config)
-    if cfg.vectorize_wiki {
+    if vectorize_wiki {
         let wiki_config = VectorizerConfig {
-            method: cfg.wiki_vectorization_method.clone(),
-            api_url: cfg.wiki_vectorization_api_url.clone(),
-            protocol: cfg.wiki_vectorization_protocol.clone(),
-            api_key: cfg.wiki_vectorization_api_key.clone(),
-            api_model: cfg.wiki_vectorization_api_model.clone(),
-            poll_interval_secs: cfg.wiki_vectorization_interval_secs,
+            method: wiki_method,
+            api_url: wiki_api_url,
+            protocol: wiki_protocol,
+            api_key: wiki_api_key,
+            api_model: wiki_api_model,
+            poll_interval_secs: wiki_interval,
             ..Default::default()
         };
         let wiki_vec = WikiVectorizer::new(
             format!("{}/profiles/default/wiki", data_dir),
-            cfg.qdrant_url.clone(),
+            qdrant_url.clone(),
             make_vectorizer(
                 &wiki_config.method,
                 "wiki",

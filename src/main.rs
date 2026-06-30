@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::Mutex;
@@ -97,7 +97,8 @@ async fn run_server() -> AppResult<()> {
             plugin_config.clone(),
             &data_dir,
             platform_restart_signals.clone(),
-        );
+        )
+        .await;
         registry.register(Box::new(client));
     }
 

@@ -1050,4 +1050,117 @@ providers:
             PathBuf::from(path).join("providers.yml")
         );
     }
+
+    #[test]
+    fn test_merge_yaml_config_into_env_platform() {
+        let (_d, path) = test_data_dir();
+        write_test_file(
+            &path,
+            &PluginYamlType::Platform,
+            r#"
+platforms:
+  mattermost:
+    enabled: true
+    config:
+      connection_mode: websocket
+      server_url: "https://mm.example.com"
+"#,
+        );
+        let mut env = HashMap::new();
+        env.insert("MATTERMOST_TOKEN".to_string(), "abc".to_string());
+        merge_yaml_config_into_env(&mut env, "mattermost", &path, &PluginYamlType::Platform);
+        assert_eq!(env.get("MATTERMOST_CONNECTION_MODE").unwrap(), "websocket");
+        assert_eq!(env.get("MATTERMOST_SERVER_URL").unwrap(), "https://mm.example.com");
+        assert_eq!(env.get("MATTERMOST_TOKEN").unwrap(), "abc"); // original key preserved
+    }
+
+    #[test]
+    fn test_merge_yaml_config_into_env_tool() {
+        let (_d, path) = test_data_dir();
+        write_test_file(
+            &path,
+            &PluginYamlType::Tool,
+            r#"
+tools:
+  my-tool:
+    enabled: true
+    config:
+      api_url: "https://api.example.com/v1"
+      timeout: "30"
+"#,
+        );
+        let mut env = HashMap::new();
+        merge_yaml_config_into_env(&mut env, "my-tool", &path, &PluginYamlType::Tool);
+        assert_eq!(env.get("MY_TOOL_API_URL").unwrap(), "https://api.example.com/v1");
+        assert_eq!(env.get("MY_TOOL_TIMEOUT").unwrap(), "30");
+    }
+
+    #[test]
+    fn test_merge_yaml_config_into_env_provider() {
+        let (_d, path) = test_data_dir();
+        write_test_file(
+            &path,
+            &PluginYamlType::Provider,
+            r#"
+providers:
+  deepseek:
+    enabled: true
+    config:
+      default_model: deepseek-v4-flash
+      api_base: "https://api.deepseek.com"
+"#,
+        );
+        let mut env = HashMap::new();
+        merge_yaml_config_into_env(&mut env, "deepseek", &path, &PluginYamlType::Provider);
+        assert_eq!(env.get("DEEPSEEK_DEFAULT_MODEL").unwrap(), "deepseek-v4-flash");
+        assert_eq!(env.get("DEEPSEEK_API_BASE").unwrap(), "https://api.deepseek.com");
+    }
+
+    #[test]
+    fn test_merge_yaml_config_into_env_no_yaml_file() {
+        let (_d, path) = test_data_dir();
+        // No YAML file exists yet — should not error
+        let mut env = HashMap::new();
+        merge_yaml_config_into_env(&mut env, "ghost", &path, &PluginYamlType::Tool);
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn test_merge_yaml_config_into_env_plugin_not_in_file() {
+        let (_d, path) = test_data_dir();
+        write_test_file(
+            &path,
+            &PluginYamlType::Platform,
+            r#"
+platforms:
+  telegram:
+    enabled: true
+    config: {}
+"#,
+        );
+        let mut env = HashMap::new();
+        // Plugin "slack" not in the file — should not error, no env vars added
+        merge_yaml_config_into_env(&mut env, "slack", &path, &PluginYamlType::Platform);
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn test_merge_yaml_config_into_env_key_with_hyphens() {
+        let (_d, path) = test_data_dir();
+        write_test_file(
+            &path,
+            &PluginYamlType::Tool,
+            r#"
+tools:
+  mcp-server-foo:
+    enabled: true
+    config:
+      my-setting: "bar"
+"#,
+        );
+        let mut env = HashMap::new();
+        merge_yaml_config_into_env(&mut env, "mcp-server-foo", &path, &PluginYamlType::Tool);
+        // Hyphens in plugin name → underscores in prefix
+        assert_eq!(env.get("MCP_SERVER_FOO_MY_SETTING").unwrap(), "bar");
+    }
 }

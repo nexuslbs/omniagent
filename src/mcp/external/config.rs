@@ -445,6 +445,7 @@ mod tests {
             timeout_secs: default_timeout(),
             max_retries: default_max_retries(),
             allowed_tools: default_allowed_tools(),
+            pool_size: 1,
         };
         assert_eq!(config.timeout_secs, 30);
         assert_eq!(config.max_retries, 3);

@@ -17,7 +17,8 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
+use tokio::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::select;
@@ -82,15 +83,15 @@ pub struct ExternalPlatformClient {
     /// Plugin configuration (mutable for hot-reload).
     config: Arc<RwLock<PlatformPluginConfig>>,
     /// The child process handle (wrapped for interior mutability).
-    process: Arc<Mutex<Option<Child>>>,
+    process: Arc<StdMutex<Option<Child>>>,
     /// Plugin name from initialize response (cached).
-    plugin_name: Arc<Mutex<Option<String>>>,
+    plugin_name: Arc<StdMutex<Option<String>>>,
     /// Plugin capabilities from initialize response (cached).
-    capabilities: Arc<Mutex<Option<(bool, bool)>>>, // (inbound, outbound)
+    capabilities: Arc<StdMutex<Option<(bool, bool)>>>, // (inbound, outbound)
     /// Next request id.
     next_id: AtomicU64,
     /// Circuit breaker state.
-    circuit: Arc<Mutex<CircuitBreaker>>,
+    circuit: Arc<StdMutex<CircuitBreaker>>,
     /// Data directory for profile lookups.
     data_dir: String,
     /// Flag to signal restart to the outer loop.
@@ -103,7 +104,7 @@ pub struct ExternalPlatformClient {
 
 impl ExternalPlatformClient {
     /// Create a new external platform client from configuration.
-    pub fn new(
+    pub async fn new(
         config: PlatformPluginConfig,
         data_dir: &str,
         platform_restart_signals: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
@@ -114,18 +115,19 @@ impl ExternalPlatformClient {
         let stopped = Arc::new(AtomicBool::new(false));
 
         // Register our restart flag in the shared map so the API can signal us
-        if let Ok(mut signals) = platform_restart_signals.lock() {
+        {
+            let mut signals = platform_restart_signals.lock().await;
             signals.insert(name.clone(), Arc::clone(&restart_flag));
         }
 
         Self {
             name,
             config: Arc::new(RwLock::new(config)),
-            process: Arc::new(Mutex::new(None)),
-            plugin_name: Arc::new(Mutex::new(None)),
-            capabilities: Arc::new(Mutex::new(None)),
+            process: Arc::new(StdMutex::new(None)),
+            plugin_name: Arc::new(StdMutex::new(None)),
+            capabilities: Arc::new(StdMutex::new(None)),
             next_id: AtomicU64::new(1),
-            circuit: Arc::new(Mutex::new(CircuitBreaker::new(max_retries))),
+            circuit: Arc::new(StdMutex::new(CircuitBreaker::new(max_retries))),
             data_dir: data_dir.to_string(),
             restart_flag,
             stopped,

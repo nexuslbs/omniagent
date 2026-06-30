@@ -500,8 +500,10 @@ pub async fn check_and_generate_summary(
     config: &Arc<RwLock<AgentConfig>>,
     channel_id: i64,
 ) {
-    let cfg_snapshot = config.read().unwrap();
-    let window = cfg_snapshot.summary_window as i64;
+    let (window, summary_tokens) = {
+        let cfg_snapshot = config.read().unwrap();
+        (cfg_snapshot.summary_window as i64, cfg_snapshot.channel_summary_tokens)
+    };
     if window == 0 {
         return; // summaries disabled
     }
@@ -631,7 +633,7 @@ pub async fn check_and_generate_summary(
             ChatMessage::system(&system_summarizer_prompt),
             ChatMessage::user(&summary_prompt),
         ],
-        max_tokens: cfg_snapshot.channel_summary_tokens,
+        max_tokens: summary_tokens,
         temperature: 0.2, // lower temperature for factual consistency
         stream: false,
         tools: None,
