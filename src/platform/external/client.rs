@@ -336,6 +336,7 @@ impl Platform for ExternalPlatformClient {
                         cause_root_id: envelope.cause_root_id.clone(),
                         is_summary: envelope.is_summary,
                         is_user_thread: envelope.is_user_thread,
+                        thread_sequence: envelope.thread_sequence,
                     };
 
                     let id = next_id_val;
@@ -774,7 +775,8 @@ async fn send_external_reply(
         cause_root_id: None,
         is_summary: false,
         is_user_thread: false,
-    };
+        thread_sequence: 0,
+        };
     let id = *next_id_val;
     *next_id_val += 1;
     let req = crate::platform::external::build_deliver_request(id, &deliver_params);

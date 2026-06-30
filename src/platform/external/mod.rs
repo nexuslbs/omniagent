@@ -272,6 +272,8 @@ pub struct DeliverParams {
     pub msg_subtype: Option<String>,
     #[serde(default)]
     pub thread_id: i64,
+    #[serde(default)]
+    pub thread_sequence: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cause_external_id: Option<String>,
     /// If the cause message was itself a reply in a thread, this is the
@@ -533,6 +535,7 @@ mod tests {
             msg_type: "summary".to_string(),
             msg_subtype: None,
             thread_id: 456,
+            thread_sequence: 2,
             cause_external_id: Some("789".to_string()),
             cause_root_id: None,
             is_summary: true,
