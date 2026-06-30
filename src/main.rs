@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -74,7 +75,7 @@ async fn run_server() -> AppResult<()> {
     );
 
     // Create shared platform restart signals map (for hot-reload)
-    let platform_restart_signals: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    let platform_restart_signals: Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
     // Create platform registry and register platforms

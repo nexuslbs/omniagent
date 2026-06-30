@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
@@ -63,8 +64,8 @@ pub(crate) struct AppState {
     app_context: AppContext,
     /// Shared mutable config for hot-reload support
     shared_config: Arc<RwLock<AgentConfig>>,
-    /// Per-platform restart signal flags (keyed by plugin name)
-    platform_restart_signals: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    /// Per-platform restart signal flags + notify (keyed by plugin name)
+    platform_restart_signals: Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>>,
 }
 
 /// Configuration for the HTTP server.
@@ -79,7 +80,7 @@ pub struct ServerConfig {
     pub mcp_registry: Arc<std::sync::RwLock<McpRegistry>>,
     pub app_context: AppContext,
     pub shared_config: Arc<RwLock<AgentConfig>>,
-    pub platform_restart_signals: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    pub platform_restart_signals: Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>>,
 }
 
 /// Start the HTTP server on the given host and port.

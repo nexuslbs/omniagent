@@ -119,8 +119,6 @@ pub struct MessageDb {
     pub msg_type: String,
     pub msg_subtype: Option<String>,
     pub created_at: Option<String>,
-    pub token_usage: Option<String>,
-    pub processing_time_ms: Option<i32>,
     pub iteration_number: i32,
 }
 
@@ -157,11 +155,6 @@ impl TryFrom<MessageDb> for Message {
                         e
                     ))
                 })?,
-            token_usage: db
-                .token_usage
-                .as_deref()
-                .map(|s| serde_json::from_str(s).unwrap_or_default()),
-            processing_time_ms: db.processing_time_ms,
             iteration_number: db.iteration_number,
         })
     }
@@ -429,8 +422,6 @@ pub struct Message {
     pub msg_type: String,
     pub msg_subtype: Option<String>,
     pub created_at: DateTime<Utc>,
-    pub processing_time_ms: Option<i32>,
-    pub token_usage: Option<serde_json::Value>,
     pub iteration_number: i32,
 }
 
@@ -448,8 +439,6 @@ pub struct MessageNew {
     pub is_summary: bool,
     pub msg_type: String,
     pub msg_subtype: Option<String>,
-    pub processing_time_ms: Option<i32>,
-    pub token_usage: Option<serde_json::Value>,
     pub iteration_number: i32,
 }
 

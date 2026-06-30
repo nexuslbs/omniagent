@@ -270,8 +270,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                                 is_summary: false,
                                 msg_type: "error".to_string(),
                                 msg_subtype: Some("no_cause".to_string()),
-                                processing_time_ms: None,
-                                token_usage: None,
+
                                 iteration_number: 0,
                             };
                             let _ = queries::create_message(&cfg.pool, &err_msg).await;
@@ -294,8 +293,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                                 is_summary: false,
                                 msg_type: "error".to_string(),
                                 msg_subtype: Some("unknown_error".to_string()),
-                                processing_time_ms: None,
-                                token_usage: None,
+
                                 iteration_number: 0,
                             };
                             let _ = queries::create_message(&cfg.pool, &err_msg).await;
@@ -355,8 +353,6 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                             is_summary: false,
                             msg_type: "error".to_string(),
                             msg_subtype: Some("unknown_error".to_string()),
-                            processing_time_ms: None,
-                            token_usage: None,
                             iteration_number: 0,
                         };
                         let _ = queries::create_message(&cfg.pool, &err_msg).await;

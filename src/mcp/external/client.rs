@@ -319,6 +319,26 @@ pub fn register_server_config(name: &str, config: McpServerConfig) {
     }
 }
 
+/// Remove an MCP server config from the global registry.
+/// Used when a plugin config changes and the old config should be discarded.
+pub fn remove_server_config(name: &str) {
+    if let Ok(mut registry) = SERVER_CONFIGS.lock() {
+        registry.remove(name);
+    }
+}
+
+/// Clear all connection pools for a specific MCP server across all channels.
+/// Forces fresh subprocesses to be spawned with the updated config on next tool call.
+pub fn clear_server_pools(server_name: &str) {
+    if let Ok(mut pools) = CLIENT_POOLS.lock() {
+        pools.retain(|key, _| key.0 != server_name);
+        tracing::info!(
+            "Cleared all connection pools for MCP server '{}' (config changes will take effect on next tool call)",
+            server_name
+        );
+    }
+}
+
 /// Register an MCP client in the global registry (legacy — for init handshake only).
 pub fn register_client(name: &str, client: Box<dyn McpServerClient>) {
     // Client registration no longer needed for tool calls (pools handle that).

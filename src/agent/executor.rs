@@ -72,8 +72,6 @@ pub async fn process_thread(
             is_summary: false,
             msg_type: "error".to_string(),
             msg_subtype: Some("no-profile".to_string()),
-            processing_time_ms: None,
-            token_usage: None,
             iteration_number: 0,
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
@@ -130,8 +128,6 @@ pub async fn process_thread(
             is_summary: false,
             msg_type: "error".to_string(),
             msg_subtype: Some("invalid-profile".to_string()),
-            processing_time_ms: None,
-            token_usage: None,
             iteration_number: 0,
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
@@ -181,8 +177,6 @@ pub async fn process_thread(
             is_summary: false,
             msg_type: "error".to_string(),
             msg_subtype: Some("no-provider".to_string()),
-            processing_time_ms: None,
-            token_usage: None,
             iteration_number: 0,
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
@@ -232,8 +226,6 @@ pub async fn process_thread(
             is_summary: false,
             msg_type: "error".to_string(),
             msg_subtype: Some("no-model".to_string()),
-            processing_time_ms: None,
-            token_usage: None,
             iteration_number: 0,
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
@@ -525,17 +517,6 @@ pub async fn process_thread(
                         max_iter + 1,
                     );
 
-                    // Convert Usage to JSON value for token_usage field
-                    let plan_token_usage = resp.usage.map(|u| {
-                        serde_json::json!({
-                            "prompt_tokens": u.prompt_tokens,
-                            "completion_tokens": u.completion_tokens,
-                            "cached_tokens": u.cached_tokens,
-                            "reasoning_tokens": u.reasoning_tokens,
-                        })
-                    });
-                    let plan_duration_ms = Some(resp.duration_ms as i32);
-
                     // Save the plan as a plan-type message (skip if both content and reasoning are empty)
                     if !plan_content.is_empty() {
                         let plan_msg = MessageNew {
@@ -557,8 +538,6 @@ pub async fn process_thread(
                             is_summary: false,
                             msg_type: "plan".to_string(),
                             msg_subtype: Some("markdown".to_string()),
-                            processing_time_ms: plan_duration_ms,
-                            token_usage: plan_token_usage,
                             iteration_number: 1,
                         };
                         match queries::create_message(&cfg.pool, &plan_msg).await {
@@ -891,7 +870,6 @@ pub async fn process_thread(
 
         // Track cumulative token usage
         helpers::merge_usage(&mut cumulative_usage, response.usage.clone());
-        last_response_usage = response.usage.clone();
 
         // Store reasoning if present
         if response.reasoning.is_some() {
@@ -1071,20 +1049,8 @@ pub async fn process_thread(
         assistant_msg.tool_calls = Some(response.tool_calls.clone());
         messages.push(assistant_msg);
 
-        // Per-message token/time from the LLM response that generated these tool calls
-        let tool_token_usage = response.usage.map(|u| {
-            serde_json::json!({
-                "prompt_tokens": u.prompt_tokens,
-                "completion_tokens": u.completion_tokens,
-                "cached_tokens": u.cached_tokens,
-                "reasoning_tokens": u.reasoning_tokens,
-            })
-        });
-        let tool_duration_ms = Some(response.duration_ms as i32);
-        let is_multi_tool = response.tool_calls.len() > 1;
-
-        // If multiple tool calls, persist a multi-tool message first (holds time/tokens)
-        if is_multi_tool {
+        // If multiple tool calls, persist a multi-tool message first
+        if response.tool_calls.len() > 1 {
             let multi_content = response
                 .tool_calls
                 .iter()
@@ -1113,8 +1079,6 @@ pub async fn process_thread(
                 is_summary: false,
                 msg_type: "multi-tool".to_string(),
                 msg_subtype: None,
-                processing_time_ms: tool_duration_ms,
-                token_usage: tool_token_usage.clone(),
                 iteration_number: current_iter as i32,
             };
             match helpers::persist_or_abort(&cfg.pool, &multi_msg, thread.id).await {
@@ -1153,11 +1117,6 @@ pub async fn process_thread(
             })
             .collect();
 
-        // Single tool: time/tokens go on the result message.
-        // Multi-tool: time/tokens already on the multi-tool message.
-        let single_tool_ptime = if !is_multi_tool { tool_duration_ms } else { None };
-        let single_tool_tu = if !is_multi_tool { tool_token_usage.clone() } else { None };
-
         let pool = cfg.pool.clone();
         let mcp_registry = cfg.mcp.clone();
         let mut join_set = JoinSet::new();
@@ -1184,13 +1143,9 @@ pub async fn process_thread(
             let mcp = mcp_registry.clone();
             let seq = result_seqs[idx];
             let tid = thread.id;
-            let ptime = single_tool_ptime;
-            let tu = single_tool_tu.clone();
             let iter_num = current_iter as i32;
 
             join_set.spawn(async move {
-                let tool_start = std::time::Instant::now();
-
                 // Clone the registry snapshot under the lock, then drop the lock
                 // before the async execute call (RwLockReadGuard is !Send).
                 let mcp_snapshot = mcp.read().unwrap().clone();
@@ -1211,8 +1166,6 @@ pub async fn process_thread(
                         Err(crate::error::Error::Message(msg))
                     }
                 };
-                let tool_elapsed_ms = tool_start.elapsed().as_millis() as i32;
-
                 let (output, is_error) = match &result {
                     Ok(res) => {
                         let truncated =
@@ -1248,8 +1201,6 @@ pub async fn process_thread(
                     is_summary: false,
                     msg_type: "tool-result".to_string(),
                     msg_subtype: Some(qualified_name.clone()),
-                    processing_time_ms: ptime.or(Some(tool_elapsed_ms)),
-                    token_usage: tu.clone(),
                     iteration_number: iter_num,
                 };
 
@@ -1392,15 +1343,6 @@ pub async fn process_thread(
                 is_summary: false,
                 msg_type: "reasoning".to_string(),
                 msg_subtype: None,
-                processing_time_ms: None,
-                token_usage: last_response_usage.as_ref().map(|u| {
-                    serde_json::json!({
-                        "prompt_tokens": u.prompt_tokens,
-                        "completion_tokens": u.completion_tokens,
-                        "cached_tokens": u.cached_tokens,
-                        "reasoning_tokens": u.reasoning_tokens,
-                    })
-                }),
                 iteration_number: current_iter as i32,
             };
             let reasoning_saved = queries::create_message(&cfg.pool, &reasoning_msg).await?;
@@ -1488,7 +1430,7 @@ pub async fn process_thread(
                 (format!("Summary generation failed: {}", e), None)
             }
         };
-        let summary_elapsed_ms = summary_start.elapsed().as_millis() as i32;
+
 
         let summary_msg = MessageNew {
             thread_id: thread.id,
@@ -1502,8 +1444,7 @@ pub async fn process_thread(
             is_summary: true,
             msg_type: "summary".to_string(),
             msg_subtype: Some("interrupted".to_string()),
-            processing_time_ms: Some(summary_elapsed_ms),
-            token_usage: summary_token_usage,
+
             iteration_number: current_iter as i32,
         };
 
@@ -1544,8 +1485,7 @@ pub async fn process_thread(
             is_summary: false,
             msg_type: "error".to_string(),
             msg_subtype: Some("empty_response".to_string()),
-            processing_time_ms: Some(agent_elapsed_ms),
-            token_usage: token_usage_json.clone(),
+
             iteration_number: current_iter as i32,
         };
         let saved = queries::create_message(&cfg.pool, &agent_msg).await?;
@@ -1575,8 +1515,7 @@ pub async fn process_thread(
             is_summary: true,
             msg_type: "summary".to_string(),
             msg_subtype: None,
-            processing_time_ms: Some(agent_elapsed_ms),
-            token_usage: token_usage_json.clone(),
+
             iteration_number: current_iter as i32,
         };
         let saved = queries::create_message(&cfg.pool, &agent_msg).await?;
@@ -1635,10 +1574,10 @@ pub async fn process_thread(
         thread.id,
         final_status,
         CompleteThreadStats {
-            input_tokens: 0,
-            cached_tokens: 0,
-            output_tokens: 0,
-            duration_ms: 0,
+            input_tokens: cumulative_usage.as_ref().map(|u| u.prompt_tokens as i32).unwrap_or(0),
+            cached_tokens: cumulative_usage.as_ref().map(|u| u.cached_tokens.unwrap_or(0) as i32).unwrap_or(0),
+            output_tokens: cumulative_usage.as_ref().map(|u| u.completion_tokens as i32).unwrap_or(0),
+            duration_ms: agent_elapsed_ms,
         },
     )
     .await?;

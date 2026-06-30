@@ -628,8 +628,6 @@ async fn create_action_thread(
         is_summary: false,
         msg_type: "tool-result".to_string(),
         msg_subtype: None,
-        processing_time_ms: None,
-        token_usage: None,
         iteration_number: 0,
     };
     let _ = queries::create_message(pool, &result_msg).await;

@@ -107,17 +107,18 @@ impl ExternalPlatformClient {
     pub async fn new(
         config: PlatformPluginConfig,
         data_dir: &str,
-        platform_restart_signals: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+        platform_restart_signals: Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>>,
     ) -> Self {
         let max_retries = config.max_retries;
         let name = config.name.clone();
         let restart_flag = Arc::new(AtomicBool::new(false));
         let stopped = Arc::new(AtomicBool::new(false));
+        let restart_notify = Arc::new(Notify::new());
 
-        // Register our restart flag in the shared map so the API can signal us
+        // Register our restart flag and notify in the shared map so the API can signal us
         {
             let mut signals = platform_restart_signals.lock().await;
-            signals.insert(name.clone(), Arc::clone(&restart_flag));
+            signals.insert(name.clone(), (Arc::clone(&restart_flag), Arc::clone(&restart_notify)));
         }
 
         Self {
@@ -131,7 +132,7 @@ impl ExternalPlatformClient {
             data_dir: data_dir.to_string(),
             restart_flag,
             stopped,
-            restart_notify: Arc::new(Notify::new()),
+            restart_notify,
         }
     }
 

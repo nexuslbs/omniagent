@@ -179,27 +179,24 @@ pub async fn create_cause_and_set_pending(
     let mut tx = pool.begin().await?;
     let metadata_val: serde_json::Value =
         serde_json::from_str(&msg.metadata.to_string()).unwrap_or_default();
-    let token_usage_val: serde_json::Value =
-        msg.token_usage.clone().unwrap_or(serde_json::Value::Null);
     let saved: MessageDb = sql_forge!(
         MessageDb,
         r#"
         INSERT INTO messages (
             thread_id, role, content, thread_sequence, external_id,
             metadata, embedding, summary_text, is_summary,
-            msg_type, msg_subtype, processing_time_ms, token_usage, iteration_number
+            msg_type, msg_subtype, iteration_number
         )
         VALUES (:thread_id, :role, :content, :thread_sequence, NULLIF(:external_id, '')::text,
             :metadata, NULLIF(:embedding, '')::text, NULLIF(:summary_text, '')::text, :is_summary,
-            :msg_type, NULLIF(:msg_subtype, '')::text, NULLIF(:processing_time_ms, -1)::int, NULLIF(:token_usage, 'null')::jsonb, :iteration_number)
+            :msg_type, NULLIF(:msg_subtype, '')::text, :iteration_number)
         RETURNING
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
-            msg_type, msg_subtype,
-            token_usage::text AS "token_usage", processing_time_ms, iteration_number,
+            msg_type, msg_subtype, iteration_number,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         "#,
-        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :processing_time_ms = msg.processing_time_ms.unwrap_or(-1), :token_usage = &token_usage_val.to_string(), :iteration_number = msg.iteration_number )
+        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :iteration_number = msg.iteration_number )
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -426,8 +423,6 @@ pub async fn create_thread_with_cause(
         is_summary: false,
         msg_type: p.msg_type.clone(),
         msg_subtype: p.msg_subtype,
-        processing_time_ms: None,
-        token_usage: None,
         iteration_number: 0,
     };
 
@@ -490,31 +485,16 @@ pub async fn complete_thread(
     pool: &PgPool,
     thread_id: i64,
     status: &str,
-    _stats: CompleteThreadStats,
+    stats: CompleteThreadStats,
 ) -> AppResult<()> {
     sql_forge!(
         r#"
         UPDATE threads
         SET status = :status,
-            input_tokens = COALESCE(
-                (SELECT SUM((token_usage->>'prompt_tokens')::int)
-                 FROM messages WHERE thread_id = :id AND token_usage IS NOT NULL),
-                0
-            ),
-            cached_tokens = COALESCE(
-                (SELECT SUM((token_usage->>'cached_tokens')::int)
-                 FROM messages WHERE thread_id = :id AND token_usage IS NOT NULL),
-                0
-            ),
-            output_tokens = COALESCE(
-                (SELECT SUM((token_usage->>'completion_tokens')::int)
-                 FROM messages WHERE thread_id = :id AND token_usage IS NOT NULL),
-                0
-            ),
-            duration_ms = COALESCE(
-                EXTRACT(EPOCH FROM (NOW() - COALESCE(started_at, NOW())))::int * 1000,
-                0
-            ),
+            input_tokens = :input_tokens,
+            cached_tokens = :cached_tokens,
+            output_tokens = :output_tokens,
+            duration_ms = :duration_ms,
             ended_at = NOW(),
             iterations = COALESCE(
                 (SELECT MAX(iteration_number)
@@ -524,7 +504,7 @@ pub async fn complete_thread(
             terminal = true
         WHERE id = :id AND NOT terminal
         "#,
-        ( :status = status, :id = thread_id )
+        ( :status = status, :id = thread_id, :input_tokens = stats.input_tokens, :cached_tokens = stats.cached_tokens, :output_tokens = stats.output_tokens, :duration_ms = stats.duration_ms )
     )
     .execute(pool)
     .await?;
@@ -659,7 +639,6 @@ pub async fn get_cause_message(pool: &PgPool, thread_id: i64) -> AppResult<Optio
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
             msg_type, msg_subtype, iteration_number,
-            token_usage::text AS "token_usage", processing_time_ms,
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages
         WHERE thread_id = :thread_id AND role = 'cause'

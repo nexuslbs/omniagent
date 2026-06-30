@@ -13,6 +13,7 @@ use axum::{
 };
 use serde::Deserialize;
 use sqlx;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::{error, info};
 
@@ -20,7 +21,6 @@ use crate::err_str;
 use crate::plugin;
 use crate::plugins_yaml;
 use crate::server::AppState;
-use std::sync::atomic::Ordering;
 
 // ---------------------------------------------------------------------------
 // Request/Response types
@@ -265,6 +265,18 @@ pub(crate) async fn update_config_handler(
             if yaml_type == plugins_yaml::PluginYamlType::Platform {
                 reload_platform_plugin(&state, &name).await;
             }
+
+            // If this is a tool (MCP) plugin, clear connection pools, update
+            // the config registry, and re-initialize the server's tools.
+            // This takes effect without needing to restart omniagent.
+            if yaml_type == plugins_yaml::PluginYamlType::Tool {
+                reload_tool_plugin(&state, &name).await;
+            }
+
+            // If this is a provider plugin, the api_key is saved to .env
+            // and the process env is already refreshed above.
+            // Provider plugin config is read from YAML on each use, so
+            // the changes take effect without any additional action needed.
 
             // Return updated plugin detail
             match plugins_yaml::get_plugin(&state.data_dir, &name) {
@@ -1021,7 +1033,46 @@ pub(crate) async fn install_url_handler(
     }
 }
 
+/// Refresh the process environment from the `.env` file.
+/// This ensures `$env:VAR` and `${VAR}` references in plugin manifest
+/// fields resolve to current values when subprocesses are spawned,
+/// without needing a full container restart.
+fn refresh_env_from_file(env_path: &str) -> u32 {
+    match std::fs::read_to_string(env_path) {
+        Ok(content) => {
+            let mut refreshed = 0u32;
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once('=') {
+                    let k = key.trim();
+                    let v = value.trim();
+                    if !k.is_empty() {
+                        std::env::set_var(k, v);
+                        refreshed += 1;
+                    }
+                }
+            }
+            refreshed
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Could not read .env at '{}' for env refresh: {:?}",
+                env_path,
+                e
+            );
+            0
+        }
+    }
+}
+
 /// Trigger a hot-reload of a platform plugin after its config has been updated.
+///
+/// Before signaling the restart, the process environment is refreshed from the
+/// `.env` file so that $env: references in the plugin's manifest resolve to
+/// current values (not stale ones from container startup).
 ///
 /// This function reads the updated config from the YAML file, rebuilds the
 /// `PlatformPluginConfig` from the manifest (merging YAML config values into
@@ -1030,16 +1081,27 @@ pub(crate) async fn install_url_handler(
 async fn reload_platform_plugin(state: &Arc<AppState>, name: &str) {
     tracing::info!("Reloading platform plugin '{}' after config update", name);
 
+    // ── Refresh process environment from .env ────────────────────────
+    let refreshed = refresh_env_from_file(&state.env_path);
+    if refreshed > 0 {
+        tracing::info!(
+            "Refreshed {} env var(s) from .env for platform plugin reload",
+            refreshed
+        );
+    }
+
     // Look up the restart flag in the shared signals map
-    let flag = {
+    let signal = {
         let signals = state.platform_restart_signals.lock().await;
         signals.get(name).cloned()
     };
 
-    if let Some(restart_flag) = flag {
+    if let Some((restart_flag, restart_notify)) = signal {
         // Signal the restart — the outer loop in ExternalPlatformClient::start()
         // will pick this up, reload config from disk, and respawn the subprocess.
         restart_flag.store(true, Ordering::SeqCst);
+        // Also notify the running plugin so the tokio::select! breaks the inner loop
+        restart_notify.notify_one();
         tracing::info!(
             "Set restart flag for platform plugin '{}' — subprocess will be respawned",
             name
@@ -1050,6 +1112,59 @@ async fn reload_platform_plugin(state: &Arc<AppState>, name: &str) {
              The new config will take effect on next omniagent start.",
             name
         );
+    }
+}
+
+/// Trigger a hot-reload of a tool (MCP) plugin after its config has been updated.
+///
+/// Refreshes the process environment, clears all per-channel connection pools
+/// for this server so fresh subprocesses are spawned on the next tool call,
+/// updates the global config registry, and re-initializes the server's tools
+/// in the MCP registry (replacing any previously registered ones).
+async fn reload_tool_plugin(state: &Arc<AppState>, name: &str) {
+    tracing::info!("Reloading tool plugin '{}' after config update", name);
+
+    // ── Refresh process environment from .env ────────────────────────
+    let refreshed = refresh_env_from_file(&state.env_path);
+    if refreshed > 0 {
+        tracing::info!(
+            "Refreshed {} env var(s) from .env for tool plugin reload",
+            refreshed
+        );
+    }
+
+    // ── Clear old connection pools and config ────────────────────────
+    // This forces fresh subprocesses to be spawned with the new config
+    // on the next tool call, without needing to restart omniagent.
+    crate::mcp::external::client::clear_server_pools(name);
+    crate::mcp::external::client::remove_server_config(name);
+
+    // ── Re-initialize the MCP server and register its tools ──────────
+    match crate::mcp::external::client::initialize_single_server_tools(
+        &state.data_dir,
+        &state.workspace_dir,
+        name,
+    )
+    .await
+    {
+        Ok(tools) => {
+            let count = tools.len();
+            // Remove old tools from this server and register the new ones
+            state.mcp_registry.write().unwrap().remove_by_server(name);
+            state.mcp_registry.write().unwrap().register_all(tools);
+            tracing::info!(
+                "Hot-reloaded {} tool(s) from MCP server '{}' after config update (no restart needed)",
+                count,
+                name
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Hot-reload of MCP server '{}' after config update failed (config saved, will retry on next restart): {}",
+                name,
+                e
+            );
+        }
     }
 }
 
