@@ -364,6 +364,7 @@ fn build_plugin_detail(
     yaml_entry: Option<&PluginYamlEntry>,
     key: Option<&str>,
     plugin_dir: Option<&str>,
+    data_dir: &str,
 ) -> PluginDetail {
     let enabled = yaml_entry
         .map(|e| e.enabled)
@@ -422,6 +423,12 @@ fn build_plugin_detail(
             }
         }
     }
+
+    // Merge YAML config values into env with derived env keys
+    // (e.g. connection_mode: websocket → PLUGINNAME_CONNECTION_MODE)
+    // so the API response reflects what the subprocess will actually receive.
+    let yaml_type = PluginYamlType::from_plugin_type(&manifest.plugin_type);
+    merge_yaml_config_into_env(&mut resolved, &manifest.name, data_dir, &yaml_type);
 
     let plugin_type_str = match manifest.plugin_type {
         PluginType::Platform => "platform",
@@ -540,6 +547,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
             yaml_entry,
             Some(&key),
             plugin_dir,
+            data_dir,
         ));
     }
 
@@ -575,6 +583,7 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
                 yaml_entry,
                 Some(&key),
                 plugin_dir,
+                data_dir,
             )));
         }
     }
