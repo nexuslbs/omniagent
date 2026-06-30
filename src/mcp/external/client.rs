@@ -1112,6 +1112,47 @@ pub async fn initialize_external_tools(data_dir: &str, workspace_dir: &str) -> V
     all_tools
 }
 
+/// Initialize a single external MCP server by name and return its tools.
+/// Used for hot-reloading when a plugin is enabled via the dashboard.
+/// Returns an error if the server config is not found or initialization fails.
+pub async fn initialize_single_server_tools(
+    data_dir: &str,
+    workspace_dir: &str,
+    server_name: &str,
+) -> Result<Vec<McpTool>, String> {
+    // Load all configs to find this server
+    let configs = crate::mcp::external::config::load_servers_config(data_dir, workspace_dir);
+    let cfg = configs
+        .into_iter()
+        .find(|c| c.name == server_name)
+        .ok_or_else(|| format!("MCP server '{}' not found in config", server_name))?;
+
+    // Register the config for lazy pool creation
+    register_server_config(server_name, cfg.clone());
+
+    // Create client and initialize
+    let mut client = create_client(cfg);
+    let tools = client.to_mcp_tools().await;
+
+    if tools.is_empty() {
+        return Err(format!(
+            "MCP server '{}' initialized but returned no tools",
+            server_name
+        ));
+    }
+
+    let count = tools.len();
+    register_client(server_name, client);
+
+    tracing::info!(
+        "Hot-reloaded {} external tool(s) from '{}'",
+        count,
+        server_name
+    );
+
+    Ok(tools)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

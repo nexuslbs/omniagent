@@ -274,7 +274,7 @@ pub async fn process_thread(
     let _model_name = model_name;
 
     // 4. Build the initial message history with the structured system prompt
-    let tool_names: Vec<String> = cfg.mcp.all().iter().map(|t| t.name.clone()).collect();
+    let tool_names: Vec<String> = cfg.mcp.read().unwrap().all().iter().map(|t| t.name.clone()).collect();
     let system_prompt = crate::prompt_builder::build_system_prompt(
         &cfg.ctx.memory_store,
         "",   // platform — will be enriched from channel metadata in the future
@@ -706,7 +706,7 @@ pub async fn process_thread(
     messages.push(ChatMessage::user(&cause_msg.content));
 
     // 5. Build tool definitions from the profile's allowed tools
-    let tools_def = cfg.mcp.to_openai_tools(&prof.allowed_tools);
+    let tools_def = cfg.mcp.read().unwrap().to_openai_tools(&prof.allowed_tools);
 
     // 6. Tool-calling loop — max iterations controls total LLM calls
     let iter_limit =
@@ -1089,7 +1089,7 @@ pub async fn process_thread(
                 .map(|tc| {
                     format!(
                         "{}: {}",
-                        cfg.mcp.qualified_name(&tc.function.name),
+                        cfg.mcp.read().unwrap().qualified_name(&tc.function.name),
                         tc.function.arguments
                     )
                 })
@@ -1164,7 +1164,7 @@ pub async fn process_thread(
             let tool_name = tc.function.name.clone();
             let tool_args = tc.function.arguments.clone();
             let tc_id = tc.id.clone();
-            let qualified_name = mcp_registry.qualified_name(&tool_name);
+            let qualified_name = mcp_registry.read().unwrap().qualified_name(&tool_name);
 
             let mcp_call = McpToolCall {
                 id: tc.id.clone(),
@@ -1189,11 +1189,15 @@ pub async fn process_thread(
             join_set.spawn(async move {
                 let tool_start = std::time::Instant::now();
 
+                // Clone the registry snapshot under the lock, then drop the lock
+                // before the async execute call (RwLockReadGuard is !Send).
+                let mcp_snapshot = mcp.read().unwrap().clone();
+
                 // Per-tool timeout — prevents a single hanging tool from
                 // blocking the entire thread forever. Uses a generous default
                 // (15 min) that covers the timeout_secs of all MCP servers.
                 let timeout_dur = std::time::Duration::from_secs(900);
-                let result = match tokio::time::timeout(timeout_dur, mcp.execute(&mcp_call, tool_ctx)).await
+                let result = match tokio::time::timeout(timeout_dur, mcp_snapshot.execute(&mcp_call, tool_ctx)).await
                 {
                     Ok(result) => result,
                     Err(_) => {

@@ -82,7 +82,7 @@ pub struct AgentContext {
     pub pool: PgPool,
     pub llm: Arc<crate::llm::LLMClient>,
     pub config: AgentConfig,
-    pub mcp: McpRegistry,
+    pub mcp: Arc<std::sync::RwLock<McpRegistry>>,
     pub ctx: AppContext,
 }
 

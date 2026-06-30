@@ -171,6 +171,28 @@ impl McpRegistry {
         self.tools.insert(tool.name.clone(), tool);
     }
 
+    /// Register multiple tools at once (for batch loading from a server).
+    pub fn register_all(&mut self, tools: Vec<McpTool>) {
+        for tool in tools {
+            self.tools.insert(tool.name.clone(), tool);
+        }
+    }
+
+    /// Remove all tools belonging to a given server.
+    /// Returns the names of removed tools.
+    pub fn remove_by_server(&mut self, server_name: &str) -> Vec<String> {
+        let mut removed = Vec::new();
+        self.tools.retain(|name, tool| {
+            if tool.server_name.as_deref() == Some(server_name) {
+                removed.push(name.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+
     /// Get a tool by name.
     pub fn get(&self, name: &str) -> Option<&McpTool> {
         self.tools.get(name)

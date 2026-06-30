@@ -54,8 +54,8 @@ pub(crate) struct AppState {
     workspace_dir: String,
     /// Path to the .env file for settings API
     env_path: String,
-    /// MCP tool registry for executing actions
-    mcp_registry: McpRegistry,
+    /// MCP tool registry for executing actions (shared with agent)
+    mcp_registry: Arc<std::sync::RwLock<McpRegistry>>,
     /// Application context for MCP tool execution
     app_context: AppContext,
 }
@@ -69,7 +69,7 @@ pub struct ServerConfig {
     pub cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
     pub data_dir: String,
     pub workspace_dir: String,
-    pub mcp_registry: McpRegistry,
+    pub mcp_registry: Arc<std::sync::RwLock<McpRegistry>>,
     pub app_context: AppContext,
 }
 
@@ -472,7 +472,7 @@ async fn prompt_handler(
         .as_ref()
         .and_then(|c| c.platform.as_deref())
         .unwrap_or("");
-    let tool_names: Vec<String> = state.mcp_registry.all().iter().map(|t| t.name.clone()).collect();
+    let tool_names: Vec<String> = state.mcp_registry.read().unwrap().all().iter().map(|t| t.name.clone()).collect();
     let parts = build_system_prompt_parts(&memory_store, platform, None, profile_name, &tool_names);
 
     // Build system prompt TEMPLATE — stable + context + volatile placeholders
@@ -572,7 +572,7 @@ async fn prompt_preview_handler(
         .as_ref()
         .and_then(|c| c.platform.as_deref())
         .unwrap_or("");
-    let tool_names: Vec<String> = state.mcp_registry.all().iter().map(|t| t.name.clone()).collect();
+    let tool_names: Vec<String> = state.mcp_registry.read().unwrap().all().iter().map(|t| t.name.clone()).collect();
     let system_prompt = build_system_prompt(&memory_store, platform, None, profile_name, &tool_names);
 
     let mut messages = vec![serde_json::json!({ "role": "system", "content": &system_prompt })];
@@ -767,6 +767,8 @@ async fn prompt_preview_handler(
 async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let tools: Vec<serde_json::Value> = state
         .mcp_registry
+        .read()
+        .unwrap()
         .all()
         .iter()
         .map(|tool| {

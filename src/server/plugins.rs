@@ -343,27 +343,56 @@ pub(crate) async fn enable_plugin_handler(
         true,
         serde_json::json!({}),
     ) {
-        Ok(_entry) => match plugins_yaml::get_plugin(&state.data_dir, &name) {
-            Ok(Some(detail)) => {
-                info!("Enabled plugin '{}'", name);
-                (
+        Ok(_entry) => {
+            // Hot-reload: if this is an MCP tool plugin, initialize the server
+            // and register its tools in the shared registry immediately.
+            if yaml_type == plugins_yaml::PluginYamlType::Tool {
+                match crate::mcp::external::client::initialize_single_server_tools(
+                    &state.data_dir,
+                    &state.workspace_dir,
+                    &name,
+                )
+                .await
+                {
+                    Ok(tools) => {
+                        let count = tools.len();
+                        state.mcp_registry.write().unwrap().register_all(tools);
+                        info!(
+                            "Hot-reloaded {} tool(s) from MCP server '{}' (no restart needed)",
+                            count, name
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Hot-reload of MCP server '{}' failed (will retry on next restart): {}",
+                            name, e
+                        );
+                    }
+                }
+            }
+
+            match plugins_yaml::get_plugin(&state.data_dir, &name) {
+                Ok(Some(detail)) => {
+                    info!("Enabled plugin '{}'", name);
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "success": true,
+                            "data": detail
+                        })),
+                    )
+                        .into_response()
+                }
+                _ => (
                     StatusCode::OK,
                     Json(serde_json::json!({
                         "success": true,
-                        "data": detail
+                        "data": { "name": name, "status": "enabled" }
                     })),
                 )
-                    .into_response()
+                    .into_response(),
             }
-            _ => (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "success": true,
-                    "data": { "name": name, "status": "enabled" }
-                })),
-            )
-                .into_response(),
-        },
+        }
         Err(e) => {
             error!("Failed to enable plugin '{}': {:?}", name, e);
             (
@@ -405,27 +434,42 @@ pub(crate) async fn disable_plugin_handler(
         false,
         serde_json::json!({}),
     ) {
-        Ok(_entry) => match plugins_yaml::get_plugin(&state.data_dir, &name) {
-            Ok(Some(detail)) => {
-                info!("Disabled plugin '{}'", name);
-                (
+        Ok(_entry) => {
+            // Hot-reload: remove this MCP server's tools from the shared registry.
+            if yaml_type == plugins_yaml::PluginYamlType::Tool {
+                let removed = state.mcp_registry.write().unwrap().remove_by_server(&name);
+                if !removed.is_empty() {
+                    info!(
+                        "Removed {} tool(s) from disabled MCP server '{}' (no restart needed): {:?}",
+                        removed.len(),
+                        name,
+                        removed
+                    );
+                }
+            }
+
+            match plugins_yaml::get_plugin(&state.data_dir, &name) {
+                Ok(Some(detail)) => {
+                    info!("Disabled plugin '{}'", name);
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "success": true,
+                            "data": detail
+                        })),
+                    )
+                        .into_response()
+                }
+                _ => (
                     StatusCode::OK,
                     Json(serde_json::json!({
                         "success": true,
-                        "data": detail
+                        "data": { "name": name, "status": "disabled" }
                     })),
                 )
-                    .into_response()
+                    .into_response(),
             }
-            _ => (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "success": true,
-                    "data": { "name": name, "status": "disabled" }
-                })),
-            )
-                .into_response(),
-        },
+        }
         Err(e) => {
             error!("Failed to disable plugin '{}': {:?}", name, e);
             (

@@ -16,6 +16,7 @@ use sql_forge::sql_forge;
 use sqlx::FromRow;
 use sqlx::PgPool;
 use std::str::FromStr;
+use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
@@ -42,7 +43,7 @@ struct CronJobDueRow {
 pub fn spawn(
     pool: PgPool,
     data_dir: String,
-    mcp_registry: McpRegistry,
+    mcp_registry: Arc<std::sync::RwLock<McpRegistry>>,
     app_context: AppContext,
 ) -> tokio::task::JoinHandle<()> {
     // Clear stale running flags from previous process life (crash/restart)
@@ -82,7 +83,7 @@ pub fn spawn(
 async fn tick(
     pool: &PgPool,
     data_dir: &str,
-    mcp_registry: &McpRegistry,
+    mcp_registry: &Arc<std::sync::RwLock<McpRegistry>>,
     app_context: &AppContext,
 ) -> AppResult<()> {
     let jobs = fetch_due_jobs(pool).await?;
@@ -427,7 +428,7 @@ fn resolve_action(data_dir: &str, action_id: &str) -> AppResult<McpToolCall> {
 async fn handle_action_mode(
     pool: &PgPool,
     data_dir: &str,
-    mcp_registry: &McpRegistry,
+    mcp_registry: &Arc<std::sync::RwLock<McpRegistry>>,
     app_context: &AppContext,
     job: &CronJobDueRow,
     display_name: &str,
@@ -466,7 +467,9 @@ async fn handle_action_mode(
 
     // Execute the tool first, THEN create the thread with the result.
     // This avoids the executor picking up a pending thread before it's terminal.
-    match mcp_registry.execute(&tool_call, app_context.clone()).await {
+    // Clone the registry snapshot under the lock (RwLockReadGuard is !Send, can't cross .await).
+    let mcp_snapshot = mcp_registry.read().unwrap().clone();
+    match mcp_snapshot.execute(&tool_call, app_context.clone()).await {
         Ok(result) => {
             let is_error = result.is_error;
 
@@ -736,7 +739,7 @@ fn extract_error_code(err_msg: &str) -> Option<String> {
 pub async fn fire_cron_job_by_id(
     pool: &PgPool,
     data_dir: &str,
-    mcp_registry: &McpRegistry,
+    mcp_registry: &Arc<std::sync::RwLock<McpRegistry>>,
     app_context: &AppContext,
     schedule_id: &str,
     force: bool,

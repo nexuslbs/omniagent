@@ -104,17 +104,12 @@ async fn run_server() -> AppResult<()> {
         platform_senders,
     );
     let mcp = mcp::default_registry(&mut ctx).await;
+    let mcp_shared = Arc::new(std::sync::RwLock::new(mcp));
 
     // Build the agent with MCP context
-    let agent = agent::Agent::new(pool.clone(), cfg.clone(), mcp.clone(), ctx.clone());
+    let agent = agent::Agent::new(pool.clone(), cfg.clone(), mcp_shared.clone(), ctx.clone());
 
     // ── STARTUP: Skip pending/processing messages BEFORE spawning any concurrent tasks ──
-    if let Err(e) = agent::skip_on_startup(&pool).await {
-        tracing::error!(
-            "Failed to skip pending/processing messages on startup: {:?}",
-            e
-        );
-    }
 
     // Shared cancellation tokens for /stop endpoint
     let cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>> =
@@ -132,7 +127,7 @@ async fn run_server() -> AppResult<()> {
     let server_host = cfg.host.clone();
     let server_port = cfg.port;
     let data_dir_server = data_dir.clone();
-    let mcp_for_server = mcp.clone();
+    let mcp_for_server = mcp_shared.clone();
     let ctx_for_server = ctx.clone();
     let server_handle = tokio::spawn(async move {
         if let Err(e) = server::start_server(server::ServerConfig {
@@ -202,7 +197,7 @@ async fn run_server() -> AppResult<()> {
     });
 
     // Spawn cron scheduler
-    let cron_handle = scheduler::spawn(pool.clone(), data_dir.clone(), mcp.clone(), ctx.clone());
+    let cron_handle = scheduler::spawn(pool.clone(), data_dir.clone(), mcp_shared.clone(), ctx.clone());
 
     // Graceful shutdown
     tokio::select! {

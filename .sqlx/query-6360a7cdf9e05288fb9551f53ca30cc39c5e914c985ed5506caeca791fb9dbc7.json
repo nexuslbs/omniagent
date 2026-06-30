@@ -1,0 +1,159 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            id, name,\n            COALESCE(platform, '') AS \"platform\",\n            resource_identifier,\n            COALESCE(external_id, '') AS \"external_id\",\n            cause,\n            current_profile, current_model, current_provider,\n            readonly,\n            COALESCE(closed, false) as \"closed\",\n            '{}'::text AS \"metadata\",\n            COALESCE(template, '') AS \"template\",\n            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\",\n            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"updated_at\"\n        FROM channels\n        ORDER BY name ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "platform",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "resource_identifier",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "resource_identifier"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "external_id",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "cause",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "cause"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "current_profile",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "current_profile"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "current_model",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "current_model"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "current_provider",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "current_provider"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "readonly",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "readonly"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "closed",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 11,
+        "name": "metadata",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 12,
+        "name": "template",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 14,
+        "name": "updated_at",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      true,
+      null,
+      false,
+      false,
+      true,
+      true,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "6360a7cdf9e05288fb9551f53ca30cc39c5e914c985ed5506caeca791fb9dbc7"
+}

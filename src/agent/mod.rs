@@ -41,7 +41,7 @@ pub struct Agent {
     pub pool: PgPool,
     pub config: AgentConfig,
     pub llm: Arc<LLMClient>,
-    pub mcp: McpRegistry,
+    pub mcp: Arc<std::sync::RwLock<McpRegistry>>,
     pub ctx: AppContext,
 }
 
@@ -50,7 +50,7 @@ impl Agent {
     ///
     /// An LLM client is built from the agent config, falling back to
     /// environment-level defaults for any unset values.
-    pub fn new(pool: PgPool, config: AgentConfig, mcp: McpRegistry, ctx: AppContext) -> Self {
+    pub fn new(pool: PgPool, config: AgentConfig, mcp: Arc<std::sync::RwLock<McpRegistry>>, ctx: AppContext) -> Self {
         let env_cfg = crate::llm::LLMConfig::from_env();
         let llm_config = crate::llm::LLMConfig {
             provider: if config.llm_provider.is_empty() {
