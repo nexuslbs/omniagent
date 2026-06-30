@@ -446,26 +446,74 @@ pub(crate) async fn install_plugin_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
+    let workspace_dir = &state.workspace_dir;
 
-    // 1. Find the plugin directory
-    let plugin_dirs = [
+    // 1. Find the plugin directory — check data_dir first, then workspace_dir bundled source
+    let data_plugin_dirs = [
         format!("{}/plugins/mcp/{}", data_dir, name),
         format!("{}/plugins/installed/{}", data_dir, name),
         format!("{}/plugins/providers/{}", data_dir, name),
         format!("{}/plugins/platforms/{}", data_dir, name),
     ];
 
-    let mut found_dir = None;
-    for dir in &plugin_dirs {
+    let mut found_dir: Option<(String, bool)> = None;
+    for dir in &data_plugin_dirs {
         let plugin_json = std::path::Path::new(dir).join("plugin.json");
         if plugin_json.exists() {
-            found_dir = Some(dir.clone());
+            found_dir = Some((dir.clone(), false));
             break;
         }
     }
 
-    let plugin_dir = match found_dir {
-        Some(d) => d,
+    // If not found in data_dir, check workspace bundled directories
+    if found_dir.is_none() {
+        let workspace_plugin_dirs = [
+            format!("{}/plugins/mcp/{}", workspace_dir, name),
+            format!("{}/plugins/providers/{}", workspace_dir, name),
+            format!("{}/plugins/platforms/{}", workspace_dir, name),
+        ];
+        for dir in &workspace_plugin_dirs {
+            let plugin_json = std::path::Path::new(dir).join("plugin.json");
+            if plugin_json.exists() {
+                tracing::info!(
+                    "Install: found bundled plugin '{}' at {}, copying to data_dir",
+                    name,
+                    dir
+                );
+                // Determine the target type directory (last directory component of workspace path)
+                let type_dir = std::path::Path::new(dir)
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("mcp");
+                let target_dir = format!("{}/plugins/{}/{}", data_dir, type_dir, name);
+                let target_path = std::path::Path::new(&target_dir);
+
+                // Copy the source (but not target/ if it exists) to data_dir
+                if let Err(e) = copy_bundled_plugin_source(dir, target_path) {
+                    tracing::error!(
+                        "Install: failed to copy bundled plugin '{}' from '{}' to '{}': {:?}",
+                        name, dir, target_dir, e
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to copy bundled plugin source: {}", e)
+                        })),
+                    )
+                        .into_response();
+                }
+
+                found_dir = Some((target_dir, true)); // mark as new copy
+                break;
+            }
+        }
+    }
+
+    let (plugin_dir, _is_new_copy) = match found_dir {
+        Some((d, is_new)) => (d, is_new),
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -921,4 +969,72 @@ pub(crate) async fn install_url_handler(
                 .into_response()
         }
     }
+}
+
+/// Copy a bundled plugin's source from workspace_dir to data_dir.
+/// Skips the `target/` directory (compiled artifacts from any prior build).
+fn copy_bundled_plugin_source(src: &str, dst: &std::path::Path) -> Result<(), String> {
+    let src_path = std::path::Path::new(src);
+    if !src_path.is_dir() {
+        return Err(format!("Source is not a directory: {}", src));
+    }
+
+    // Remove existing target directory if present
+    if dst.exists() {
+        std::fs::remove_dir_all(dst).map_err(|e| format!("Failed to remove existing target: {}", e))?;
+    }
+
+    // Create parent directories
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create parent directories: {}", e))?;
+    }
+
+    // Walk the source directory and copy everything except target/
+    for entry in std::fs::read_dir(src_path).map_err(|e| format!("Failed to read source dir: {}", e))? {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let entry_name = entry.file_name();
+        // Skip target/ directory (compiled artifacts)
+        if entry_name == "target" {
+            continue;
+        }
+        let src_entry = entry.path();
+        let dst_entry = dst.join(&entry_name);
+
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            copy_dir_all(&src_entry, &dst_entry)?;
+        } else {
+            std::fs::copy(&src_entry, &dst_entry)
+                .map_err(|e| format!("Failed to copy {:?} to {:?}: {}", src_entry, dst_entry, e))?;
+        }
+    }
+
+    tracing::info!(
+        "Copied bundled plugin from {} to {}",
+        src,
+        dst.display()
+    );
+    Ok(())
+}
+
+/// Recursively copy a directory.
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    if !dst.exists() {
+        std::fs::create_dir_all(dst)
+            .map_err(|e| format!("Failed to create directory {:?}: {}", dst, e))?;
+    }
+
+    for entry in std::fs::read_dir(src).map_err(|e| format!("Failed to read dir {:?}: {}", src, e))? {
+        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
+        let src_entry = entry.path();
+        let dst_entry = dst.join(entry.file_name());
+
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            copy_dir_all(&src_entry, &dst_entry)?;
+        } else {
+            std::fs::copy(&src_entry, &dst_entry)
+                .map_err(|e| format!("Failed to copy {:?} to {:?}: {}", src_entry, dst_entry, e))?;
+        }
+    }
+    Ok(())
 }

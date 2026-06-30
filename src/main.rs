@@ -141,6 +141,7 @@ async fn run_server() -> AppResult<()> {
             port: server_port,
             cancel_tokens: cancel_tokens_server,
             data_dir: data_dir_server,
+            workspace_dir,
             mcp_registry: mcp_for_server,
             app_context: ctx_for_server,
         })

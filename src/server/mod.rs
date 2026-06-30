@@ -50,6 +50,8 @@ pub(crate) struct AppState {
     pool: PgPool,
     cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
     data_dir: String,
+    /// Workspace directory for bundled plugin discovery
+    workspace_dir: String,
     /// Path to the .env file for settings API
     env_path: String,
     /// MCP tool registry for executing actions
@@ -66,6 +68,7 @@ pub struct ServerConfig {
     pub port: u16,
     pub cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
     pub data_dir: String,
+    pub workspace_dir: String,
     pub mcp_registry: McpRegistry,
     pub app_context: AppContext,
 }
@@ -76,6 +79,7 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         pool: config.pool,
         cancel_tokens: config.cancel_tokens,
         data_dir: config.data_dir.clone(),
+        workspace_dir: config.workspace_dir.clone(),
         env_path: format!("{}/.env", config.data_dir),
         mcp_registry: config.mcp_registry,
         app_context: config.app_context,

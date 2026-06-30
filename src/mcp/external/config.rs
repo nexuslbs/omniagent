@@ -89,7 +89,7 @@ pub struct McpServersConfig {
 ///
 /// Additionally scans `plugins/mcp/` subdirectories for `mcp-config.json` files.
 /// Returns the merged list of all discovered servers.
-pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
+pub fn load_servers_config(data_dir: &str, workspace_dir: &str) -> Vec<McpServerConfig> {
     let mut all_servers = Vec::new();
 
     // Try config file first
@@ -123,7 +123,7 @@ pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
     }
 
     // Also scan plugins/mcp/ directories for mcp-config.json files
-    let plugin_servers = discover_plugin_servers(data_dir);
+    let plugin_servers = discover_plugin_servers(data_dir, workspace_dir);
     if !plugin_servers.is_empty() {
         tracing::info!(
             "Loaded {} MCP server(s) from plugins/mcp/ directories",
@@ -142,23 +142,45 @@ pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
 /// This allows MCP servers to be packaged as self-contained plugins.
 ///
 /// Scans two locations:
-/// 1. `{data_dir}/plugins/mcp/` — installed/data-level plugins
-/// 2. `./plugins/mcp/` relative to CWD — project/workspace-level plugins
-pub fn discover_plugin_servers(data_dir: &str) -> Vec<McpServerConfig> {
+/// 1. `{data_dir}/plugins/mcp/` — installed/data-level plugins (primary)
+/// 2. `{workspace_dir}/plugins/mcp/` — bundled workspace plugins (secondary, dedupped)
+pub fn discover_plugin_servers(data_dir: &str, workspace_dir: &str) -> Vec<McpServerConfig> {
     let mut servers = Vec::new();
 
-    // Scan data_dir/plugins/mcp (installed/data-level plugins)
+    // Scan data_dir/plugins/mcp (installed/data-level plugins) — primary source
     let plugins_dir = format!("{}/plugins/mcp", data_dir);
     let plugins_path = std::path::Path::new(&plugins_dir);
     if plugins_path.exists() && plugins_path.is_dir() {
         servers.extend(scan_plugin_servers(&plugins_dir));
-    } else if let Ok(cwd) = std::env::current_dir() {
-        // Fallback: scan ./plugins/mcp relative to CWD for backward compatibility
-        // Only used when the canonical data_dir path doesn't exist, to avoid
-        // duplicate server registrations when both directories have configs.
-        let cwd_plugins = cwd.join("plugins").join("mcp");
-        if cwd_plugins.exists() && cwd_plugins.is_dir() {
-            servers.extend(scan_plugin_servers(&cwd_plugins.to_string_lossy()));
+    }
+
+    // Also scan workspace_dir/plugins/mcp (bundled workspace plugins) — secondary source
+    // Dedup by server name against already-discovered data_dir plugins.
+    let ws_plugins_dir = format!("{}/plugins/mcp", workspace_dir);
+    let ws_plugins_path = std::path::Path::new(&ws_plugins_dir);
+    if ws_plugins_path.exists() && ws_plugins_path.is_dir() && ws_plugins_dir != plugins_dir {
+        let existing_names: std::collections::HashSet<String> =
+            servers.iter().map(|s| s.name.clone()).collect();
+        let ws_servers = scan_plugin_servers(&ws_plugins_dir);
+        for srv in ws_servers {
+            if !existing_names.contains(&srv.name) {
+                servers.push(srv);
+            }
+        }
+    }
+
+    // Fallback: scan ./plugins/mcp relative to CWD for backward compatibility
+    // Only used when neither canonical path exists, to avoid
+    // duplicate server registrations when both directories have configs.
+    if servers.is_empty() {
+        if let Ok(cwd) = std::env::current_dir() {
+            let cwd_plugins = cwd.join("plugins").join("mcp");
+            if cwd_plugins.exists() && cwd_plugins.is_dir() {
+                let cwd_str = cwd_plugins.to_string_lossy().to_string();
+                if cwd_str != plugins_dir && cwd_str != ws_plugins_dir {
+                    servers.extend(scan_plugin_servers(&cwd_str));
+                }
+            }
         }
     }
 

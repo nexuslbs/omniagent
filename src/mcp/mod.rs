@@ -442,7 +442,7 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
     // External servers are auto-discovered via load_servers_config() below.
 
     // External MCP servers (load from config + plugins/mcp/, best-effort)
-    let external_tools = external::client::initialize_external_tools(&ctx.data_dir).await;
+    let external_tools = external::client::initialize_external_tools(&ctx.data_dir, &ctx.workspace_dir).await;
     for tool in external_tools {
         registry.register(tool);
     }
