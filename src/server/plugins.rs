@@ -20,6 +20,7 @@ use crate::err_str;
 use crate::plugin;
 use crate::plugins_yaml;
 use crate::server::AppState;
+use std::sync::atomic::Ordering;
 
 // ---------------------------------------------------------------------------
 // Request/Response types
@@ -258,6 +259,11 @@ pub(crate) async fn update_config_handler(
                         info!("Saved api_key for plugin '{}' to .env as {}", name, env_key);
                     }
                 }
+            }
+
+            // If this is a platform plugin, trigger a hot-reload of the subprocess
+            if yaml_type == plugins_yaml::PluginYamlType::Platform {
+                reload_platform_plugin(&state, &name).await;
             }
 
             // Return updated plugin detail
@@ -1012,6 +1018,38 @@ pub(crate) async fn install_url_handler(
             )
                 .into_response()
         }
+    }
+}
+
+/// Trigger a hot-reload of a platform plugin after its config has been updated.
+///
+/// This function reads the updated config from the YAML file, rebuilds the
+/// `PlatformPluginConfig` from the manifest (merging YAML config values into
+/// env), and then signals the running `ExternalPlatformClient` to restart
+/// via its shared restart flag.
+async fn reload_platform_plugin(state: &Arc<AppState>, name: &str) {
+    tracing::info!("Reloading platform plugin '{}' after config update", name);
+
+    // Look up the restart flag in the shared signals map
+    let flag = {
+        let signals = state.platform_restart_signals.lock().await;
+        signals.get(name).cloned()
+    };
+
+    if let Some(restart_flag) = flag {
+        // Signal the restart — the outer loop in ExternalPlatformClient::start()
+        // will pick this up, reload config from disk, and respawn the subprocess.
+        restart_flag.store(true, Ordering::SeqCst);
+        tracing::info!(
+            "Set restart flag for platform plugin '{}' — subprocess will be respawned",
+            name
+        );
+    } else {
+        tracing::warn!(
+            "Platform plugin '{}' is not currently registered — restart flag not found. \
+             The new config will take effect on next omniagent start.",
+            name
+        );
     }
 }
 

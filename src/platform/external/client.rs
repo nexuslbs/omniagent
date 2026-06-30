@@ -15,11 +15,13 @@ use crate::error::{Error, AppResult, ErrorContext};
 use crate::err_str;
 use async_trait::async_trait;
 use sqlx::PgPool;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::select;
+use tokio::sync::Notify;
 
 // ---------------------------------------------------------------------------
 // Circuit breaker
@@ -75,8 +77,10 @@ impl CircuitBreaker {
 /// then enters a main loop that forwards outbound envelopes to the plugin
 /// and handles inbound message notifications from the plugin.
 pub struct ExternalPlatformClient {
-    /// Plugin configuration.
-    config: PlatformPluginConfig,
+    /// Plugin name (cached, never changes).
+    name: String,
+    /// Plugin configuration (mutable for hot-reload).
+    config: Arc<RwLock<PlatformPluginConfig>>,
     /// The child process handle (wrapped for interior mutability).
     process: Arc<Mutex<Option<Child>>>,
     /// Plugin name from initialize response (cached).
@@ -89,47 +93,106 @@ pub struct ExternalPlatformClient {
     circuit: Arc<Mutex<CircuitBreaker>>,
     /// Data directory for profile lookups.
     data_dir: String,
+    /// Flag to signal restart to the outer loop.
+    restart_flag: Arc<AtomicBool>,
+    /// Flag to signal clean stop.
+    stopped: Arc<AtomicBool>,
+    /// Notifier for waking up the inner loop on restart/stop.
+    restart_notify: Arc<Notify>,
 }
 
 impl ExternalPlatformClient {
     /// Create a new external platform client from configuration.
-    pub fn new(config: PlatformPluginConfig, data_dir: &str) -> Self {
+    pub fn new(
+        config: PlatformPluginConfig,
+        data_dir: &str,
+        platform_restart_signals: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    ) -> Self {
         let max_retries = config.max_retries;
+        let name = config.name.clone();
+        let restart_flag = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
+
+        // Register our restart flag in the shared map so the API can signal us
+        if let Ok(mut signals) = platform_restart_signals.lock() {
+            signals.insert(name.clone(), Arc::clone(&restart_flag));
+        }
+
         Self {
-            config,
+            name,
+            config: Arc::new(RwLock::new(config)),
             process: Arc::new(Mutex::new(None)),
             plugin_name: Arc::new(Mutex::new(None)),
             capabilities: Arc::new(Mutex::new(None)),
             next_id: AtomicU64::new(1),
             circuit: Arc::new(Mutex::new(CircuitBreaker::new(max_retries))),
             data_dir: data_dir.to_string(),
+            restart_flag,
+            stopped,
+            restart_notify: Arc::new(Notify::new()),
         }
+    }
+
+    /// Reload plugin configuration from disk (called before respawn on restart).
+    fn reload_config_from_disk(&self) {
+        let configs = crate::platform::external::load_plugins_config(&self.data_dir);
+        if let Some(new_config) = configs.into_iter().find(|c| c.name == self.name) {
+            if let Ok(mut config_guard) = self.config.write() {
+                tracing::info!(
+                    "Reloaded config for platform plugin '{}' from disk",
+                    self.name
+                );
+                *config_guard = new_config;
+            }
+        } else {
+            tracing::warn!(
+                "Platform plugin '{}' not found on disk after config update (keeping old config)",
+                self.name
+            );
+        }
+    }
+
+    /// Request a restart — the outer loop will pick this up, kill the old
+    /// subprocess, reload config from disk, and spawn a new one.
+    pub fn request_restart(&self) {
+        self.restart_flag.store(true, Ordering::SeqCst);
+        self.restart_notify.notify_one();
+    }
+
+    /// Request a clean stop — the outer loop will exit gracefully.
+    pub fn request_stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.restart_notify.notify_one();
     }
 
     /// Spawn the plugin subprocess and return handles.
     async fn spawn_plugin(&self) -> AppResult<(Child, ChildStdin, tokio::process::ChildStdout)> {
+        let config = self
+            .config
+            .read()
+            .map_err(|_| Error::LockPoisoned)?;
         tracing::info!(
             "Spawning platform plugin '{}': {} {}",
-            self.config.name,
-            self.config.command,
-            self.config.args.join(" ")
+            config.name,
+            config.command,
+            config.args.join(" ")
         );
 
-        let mut command = Command::new(&self.config.command);
+        let mut command = Command::new(&config.command);
         command
-            .args(&self.config.args)
+            .args(&config.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit());
 
-        for (key, value) in &self.config.env {
+        for (key, value) in &config.env {
             let resolved = crate::platform::external::resolve_env_vars(value);
             command.env(key, resolved);
         }
 
         let mut child = command
             .spawn()
-            .ctx(format!("Failed to spawn platform plugin '{}'", self.config.name))?;
+            .ctx(format!("Failed to spawn platform plugin '{}'", config.name))?;
 
         let stdin = child
             .stdin
@@ -151,7 +214,8 @@ impl ExternalPlatformClient {
     ) -> AppResult<InitializeResult> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req = build_initialize_request(id);
-        tracing::debug!("Sending initialize request to '{}'", self.config.name);
+        let cfg_name = self.name.clone();
+        tracing::debug!("Sending initialize request to '{}'", cfg_name);
 
         // Write request
         stdin.write_all(req.as_bytes()).await?;
@@ -170,7 +234,7 @@ impl ExternalPlatformClient {
                     serde_json::from_value(result).ctx("Failed to parse initialize result")?;
                 tracing::info!(
                     "Platform plugin '{}' initialized: name={}, inbound={}, outbound={}",
-                    self.config.name,
+                    self.name,
                     init_result.name,
                     init_result.capabilities.inbound,
                     init_result.capabilities.outbound,
@@ -188,7 +252,7 @@ impl ExternalPlatformClient {
             }
             PluginResponse::Error { error, .. } => Err(err_str!(
                 "Plugin '{}' initialize error ({}): {}",
-                self.config.name,
+                self.name,
                 error.code,
                 error.message
             )),
@@ -199,102 +263,190 @@ impl ExternalPlatformClient {
 #[async_trait]
 impl Platform for ExternalPlatformClient {
     fn name(&self) -> &str {
-        &self.config.name
+        &self.name
     }
 
     async fn start(&self, pool: PgPool, mut receiver: OutboundReceiver) -> AppResult<()> {
-        tracing::info!("Starting external platform plugin '{}'", self.config.name);
+        tracing::info!("Starting external platform plugin '{}'", self.name);
 
-        // Spawn the plugin subprocess
-        let (child, mut stdin, stdout) = self.spawn_plugin().await?;
+        // Outer loop — respawns the subprocess when a restart is requested
+        loop {
+            // Check if we've been asked to stop
+            if self.stopped.load(Ordering::SeqCst) {
+                tracing::info!(
+                    "Platform plugin '{}' received stop signal, exiting",
+                    self.name
+                );
+                return Ok(());
+            }
 
-        // Store child handle for later cleanup
-        {
-            let mut process_guard = self.process.lock().unwrap();
-            *process_guard = Some(child);
-        }
+            // Spawn the plugin subprocess
+            let (child, mut stdin, stdout) = match self.spawn_plugin().await {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to spawn platform plugin '{}': {:?}",
+                        self.name,
+                        e
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
 
-        // Initialize the plugin using local handles (no locks held across await)
-        let mut stdout = stdout; // make mutable
-        if let Err(e) = self.initialize(&mut stdin, &mut stdout).await {
-            tracing::error!(
-                "Failed to initialize platform plugin '{}': {:?}",
-                self.config.name,
-                e
-            );
-            return Err(e);
-        }
+            // Store child handle for later cleanup
+            {
+                let mut process_guard = self.process.lock().unwrap();
+                *process_guard = Some(child);
+            }
 
-        let plugin_name = self
-            .plugin_name
-            .lock()
-            .ok()
-            .and_then(|p| p.clone())
-            .unwrap_or_else(|| self.config.name.clone());
+            // Initialize the plugin using local handles (no locks held across await)
+            let mut stdout = stdout; // make mutable
+            if let Err(e) = self.initialize(&mut stdin, &mut stdout).await {
+                tracing::error!(
+                    "Failed to initialize platform plugin '{}': {:?}",
+                    self.name,
+                    e
+                );
+                // Kill child if initialization fails
+                let child_to_kill = match self.process.lock() {
+                    Ok(mut guard) => guard.take(),
+                    Err(_) => None,
+                };
+                if let Some(mut child) = child_to_kill {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                continue;
+            }
 
-        tracing::info!("Platform plugin '{}' entering main loop", plugin_name);
+            let plugin_name = self
+                .plugin_name
+                .lock()
+                .ok()
+                .and_then(|p| p.clone())
+                .unwrap_or_else(|| self.name.clone());
 
-        // Main loop: use select! to multiplex between:
-        // 1. Outbound envelopes from the agent
-        // 2. Lines from plugin stdout (responses + inbound notifications)
-        let mut reader = BufReader::new(stdout);
-        let mut line_buf = String::new();
-        let mut next_id_val = 1u64;
+            tracing::info!("Platform plugin '{}' entering main loop", plugin_name);
 
-        // Track the last sent deliver envelope info so we can update the message
-    // with the platform's external_id and thread_id when the response arrives.
-    let mut last_deliver_msg_id: Option<i64> = None;
-    let mut last_deliver_thread_id: Option<i64> = None;
-    let mut last_deliver_resource: Option<String> = None;
-    let mut last_deliver_is_user_thread: Option<bool> = None;
-    let mut last_deliver_thread_sequence: Option<i32> = None;
+            // ── Inner main loop ──────────────────────────────────────────
+            let mut reader = BufReader::new(stdout);
+            let mut line_buf = String::new();
+            let mut next_id_val = 1u64;
 
-    loop {
-            line_buf.clear();
+            // Track the last sent deliver envelope info so we can update the message
+            // with the platform's external_id and thread_id when the response arrives.
+            let mut last_deliver_msg_id: Option<i64> = None;
+            let mut last_deliver_thread_id: Option<i64> = None;
+            let mut last_deliver_resource: Option<String> = None;
+            let mut last_deliver_is_user_thread: Option<bool> = None;
+            let mut last_deliver_thread_sequence: Option<i32> = None;
 
-            select! {
-                // Outbound envelope from the agent
-                envelope = receiver.recv() => {
-                    let envelope = match envelope {
-                        Some(e) => e,
-                        None => {
-                            tracing::info!("Outbound receiver closed for '{}'", plugin_name);
-                            break;
+            loop {
+                line_buf.clear();
+
+                select! {
+                    // Outbound envelope from the agent
+                    envelope = receiver.recv() => {
+                        let envelope = match envelope {
+                            Some(e) => e,
+                            None => {
+                                tracing::info!("Outbound receiver closed for '{}'", plugin_name);
+                                break;
+                            }
+                        };
+
+                        // Check circuit breaker
+                        {
+                            let circuit = self.circuit.lock().map_err(|_| Error::LockPoisoned)?;
+                            if !circuit.is_allowed() {
+                                tracing::warn!(
+                                    "Circuit breaker open for plugin '{}', dropping envelope {}",
+                                    plugin_name,
+                                    envelope.message_id
+                                );
+                                continue;
+                            }
                         }
-                    };
 
-                    // Check circuit breaker
-                    {
-                        let circuit = self.circuit.lock().map_err(|_| Error::LockPoisoned)?;
-                        if !circuit.is_allowed() {
-                            tracing::warn!(
-                                "Circuit breaker open for plugin '{}', dropping envelope {}",
+                        // ── Reaction envelope: handle as react request instead of deliver ──
+                        if envelope.msg_type == "reaction" {
+                            let reactor_params = ReactParams {
+                                resource_identifier: envelope.resource_identifier,
+                                external_id: envelope.cause_external_id.unwrap_or_default(),
+                                emoji: envelope.content,
+                            };
+                            let id = next_id_val;
+                            next_id_val += 1;
+                            let req = build_react_request(id, &reactor_params);
+
+                            tracing::debug!(
+                                "Sending react request to '{}' (emoji={})",
                                 plugin_name,
-                                envelope.message_id
+                                reactor_params.emoji,
                             );
+
+                            if let Err(e) = stdin.write_all(req.as_bytes()).await {
+                                tracing::error!("Failed to write react to plugin '{}' stdin: {:?}", plugin_name, e);
+                                if let Ok(mut circuit) = self.circuit.lock() {
+                                    circuit.record_failure();
+                                }
+                                continue;
+                            }
+                            if let Err(e) = stdin.write_all(b"\n").await {
+                                tracing::error!("Failed to write newline to plugin '{}' stdin: {:?}", plugin_name, e);
+                                if let Ok(mut circuit) = self.circuit.lock() {
+                                    circuit.record_failure();
+                                }
+                                continue;
+                            }
+                            if let Err(e) = stdin.flush().await {
+                                tracing::error!("Failed to flush plugin '{}' stdin: {:?}", plugin_name, e);
+                                if let Ok(mut circuit) = self.circuit.lock() {
+                                    circuit.record_failure();
+                                }
+                                continue;
+                            }
                             continue;
                         }
-                    }
 
-                    // ── Reaction envelope: handle as react request instead of deliver ──
-                    if envelope.msg_type == "reaction" {
-                        let reactor_params = ReactParams {
-                            resource_identifier: envelope.resource_identifier,
-                            external_id: envelope.cause_external_id.unwrap_or_default(),
-                            emoji: envelope.content,
+                        // Save the message_id and thread_id before sending so the
+                        // response handler can update the external_id in the DB.
+                        last_deliver_msg_id = Some(envelope.message_id);
+                        last_deliver_thread_id = Some(envelope.thread_id);
+                        last_deliver_resource = Some(envelope.resource_identifier.clone());
+                        last_deliver_is_user_thread = Some(envelope.is_user_thread);
+                        last_deliver_thread_sequence = Some(envelope.thread_sequence);
+
+                        // Build deliver params from envelope
+                        let params = DeliverParams {
+                            resource_identifier: envelope.resource_identifier.clone(),
+                            content: envelope.content.clone(),
+                            msg_type: envelope.msg_type.clone(),
+                            msg_subtype: envelope.msg_subtype.clone(),
+                            thread_id: envelope.thread_id,
+                            cause_external_id: envelope.cause_external_id.clone(),
+                            cause_root_id: envelope.cause_root_id.clone(),
+                            is_summary: envelope.is_summary,
+                            is_user_thread: envelope.is_user_thread,
+                            thread_sequence: envelope.thread_sequence,
                         };
+
                         let id = next_id_val;
                         next_id_val += 1;
-                        let req = build_react_request(id, &reactor_params);
+                        let req = build_deliver_request(id, &params);
 
                         tracing::debug!(
-                            "Sending react request to '{}' (emoji={})",
+                            "Sending deliver request to '{}' (msg_type={}, id={})",
                             plugin_name,
-                            reactor_params.emoji,
+                            params.msg_type,
+                            envelope.message_id
                         );
 
+                        // Write request (no lock held across await since stdin is local)
                         if let Err(e) = stdin.write_all(req.as_bytes()).await {
-                            tracing::error!("Failed to write react to plugin '{}' stdin: {:?}", plugin_name, e);
+                            tracing::error!("Failed to write to plugin '{}' stdin: {:?}", plugin_name, e);
                             if let Ok(mut circuit) = self.circuit.lock() {
                                 circuit.record_failure();
                             }
@@ -314,396 +466,379 @@ impl Platform for ExternalPlatformClient {
                             }
                             continue;
                         }
-                        continue;
                     }
 
-                    // Save the message_id and thread_id before sending so the
-                    // response handler can update the external_id in the DB.
-                    last_deliver_msg_id = Some(envelope.message_id);
-                    last_deliver_thread_id = Some(envelope.thread_id);
-                    last_deliver_resource = Some(envelope.resource_identifier.clone());
-                    last_deliver_is_user_thread = Some(envelope.is_user_thread);
-                    last_deliver_thread_sequence = Some(envelope.thread_sequence);
-
-                    // Build deliver params from envelope
-                    let params = DeliverParams {
-                        resource_identifier: envelope.resource_identifier.clone(),
-                        content: envelope.content.clone(),
-                        msg_type: envelope.msg_type.clone(),
-                        msg_subtype: envelope.msg_subtype.clone(),
-                        thread_id: envelope.thread_id,
-                        cause_external_id: envelope.cause_external_id.clone(),
-                        cause_root_id: envelope.cause_root_id.clone(),
-                        is_summary: envelope.is_summary,
-                        is_user_thread: envelope.is_user_thread,
-                        thread_sequence: envelope.thread_sequence,
-                    };
-
-                    let id = next_id_val;
-                    next_id_val += 1;
-                    let req = build_deliver_request(id, &params);
-
-                    tracing::debug!(
-                        "Sending deliver request to '{}' (msg_type={}, id={})",
-                        plugin_name,
-                        params.msg_type,
-                        envelope.message_id
-                    );
-
-                    // Write request (no lock held across await since stdin is local)
-                    if let Err(e) = stdin.write_all(req.as_bytes()).await {
-                        tracing::error!("Failed to write to plugin '{}' stdin: {:?}", plugin_name, e);
-                        if let Ok(mut circuit) = self.circuit.lock() {
-                            circuit.record_failure();
-                        }
-                        continue;
-                    }
-                    if let Err(e) = stdin.write_all(b"\n").await {
-                        tracing::error!("Failed to write newline to plugin '{}' stdin: {:?}", plugin_name, e);
-                        if let Ok(mut circuit) = self.circuit.lock() {
-                            circuit.record_failure();
-                        }
-                        continue;
-                    }
-                    if let Err(e) = stdin.flush().await {
-                        tracing::error!("Failed to flush plugin '{}' stdin: {:?}", plugin_name, e);
-                        if let Ok(mut circuit) = self.circuit.lock() {
-                            circuit.record_failure();
-                        }
-                        continue;
-                    }
-                }
-
-                // Line from plugin stdout (response or inbound notification)
-                result = reader.read_line(&mut line_buf) => {
-                    match result {
-                        Ok(0) => {
-                            tracing::info!("Platform plugin '{}' stdout closed (EOF)", plugin_name);
-                            break;
-                        }
-                        Ok(_) => {
-                            let trimmed = line_buf.trim().to_string();
-                            if trimmed.is_empty() {
-                                continue;
+                    // Line from plugin stdout (response or inbound notification)
+                    result = reader.read_line(&mut line_buf) => {
+                        match result {
+                            Ok(0) => {
+                                tracing::info!("Platform plugin '{}' stdout closed (EOF)", plugin_name);
+                                break;
                             }
+                            Ok(_) => {
+                                let trimmed = line_buf.trim().to_string();
+                                if trimmed.is_empty() {
+                                    continue;
+                                }
 
-                            // Try to parse as a response first
-                            if let Ok(response) = parse_response(&trimmed) {
-                                match response {
-                                    PluginResponse::Success { result, .. } => {
-                                        if let Ok(mut circuit) = self.circuit.lock() {
-                                            circuit.record_success();
-                                        }
-                                        // If this was a deliver response with an external_id,
-                                        // save it back to the message in the database.
-                                        if let Ok(dr) = serde_json::from_value::<DeliverResult>(result) {
-                                            if let Some(ext_id) = dr.external_id {
-                                                if let Some(msg_id) = last_deliver_msg_id.take() {
-                                                    let res = last_deliver_resource.take();
-                                                    let is_user = last_deliver_is_user_thread.take().unwrap_or(false);
-                                                    let seq = last_deliver_thread_sequence.take().unwrap_or(1);
-                                                    let _ = last_deliver_thread_id.take();
-                                                    sqlx::query(
-                                                        "UPDATE messages SET external_id = $1 WHERE id = $2 AND external_id IS NULL"
-                                                    )
-                                                    .bind(&ext_id)
-                                                    .bind(msg_id)
-                                                    .execute(&pool)
-                                                    .await
-                                                    .map_err(|e| {
-                                                        tracing::warn!(
-                                                            "Failed to update message {} external_id: {:?}",
-                                                            msg_id, e
-                                                        );
-                                                        e
-                                                    }).ok();
-                                                    // For system-originated threads (kanban, cron, etc.),
-                                                    // immediately send a +1 reaction to acknowledge receipt
-                                                    // but only for the seq-0 (first) message in the thread.
-                                                    if let Some(resource) = res {
-                                                        if !is_user && seq == 0 {
-                                                            let _ = send_react(
-                                                                &mut stdin,
-                                                                &mut next_id_val,
-                                                                &resource,
-                                                                &ext_id,
-                                                                ":+1:",
-                                                            ).await;
+                                // Try to parse as a response first
+                                if let Ok(response) = parse_response(&trimmed) {
+                                    match response {
+                                        PluginResponse::Success { result, .. } => {
+                                            if let Ok(mut circuit) = self.circuit.lock() {
+                                                circuit.record_success();
+                                            }
+                                            // If this was a deliver response with an external_id,
+                                            // save it back to the message in the database.
+                                            if let Ok(dr) = serde_json::from_value::<DeliverResult>(result) {
+                                                if let Some(ext_id) = dr.external_id {
+                                                    if let Some(msg_id) = last_deliver_msg_id.take() {
+                                                        let res = last_deliver_resource.take();
+                                                        let is_user = last_deliver_is_user_thread.take().unwrap_or(false);
+                                                        let seq = last_deliver_thread_sequence.take().unwrap_or(1);
+                                                        let _ = last_deliver_thread_id.take();
+                                                        sqlx::query(
+                                                            "UPDATE messages SET external_id = $1 WHERE id = $2 AND external_id IS NULL"
+                                                        )
+                                                        .bind(&ext_id)
+                                                        .bind(msg_id)
+                                                        .execute(&pool)
+                                                        .await
+                                                        .map_err(|e| {
+                                                            tracing::warn!(
+                                                                "Failed to update message {} external_id: {:?}",
+                                                                msg_id, e
+                                                            );
+                                                            e
+                                                        }).ok();
+                                                        // For system-originated threads (kanban, cron, etc.),
+                                                        // immediately send a +1 reaction to acknowledge receipt
+                                                        // but only for the seq-0 (first) message in the thread.
+                                                        if let Some(resource) = res {
+                                                            if !is_user && seq == 0 {
+                                                                let _ = send_react(
+                                                                    &mut stdin,
+                                                                    &mut next_id_val,
+                                                                    &resource,
+                                                                    &ext_id,
+                                                                    ":+1:",
+                                                                ).await;
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
-                                    PluginResponse::Error { error, .. } => {
-                                        tracing::warn!(
-                                            "Plugin '{}' returned error ({}): {}",
-                                            plugin_name,
-                                            error.code,
-                                            error.message
-                                        );
-                                        if let Ok(mut circuit) = self.circuit.lock() {
-                                            circuit.record_failure();
+                                        PluginResponse::Error { error, .. } => {
+                                            tracing::warn!(
+                                                "Plugin '{}' returned error ({}): {}",
+                                                plugin_name,
+                                                error.code,
+                                                error.message
+                                            );
+                                            if let Ok(mut circuit) = self.circuit.lock() {
+                                                circuit.record_failure();
+                                            }
                                         }
                                     }
+                                    continue;
                                 }
-                                continue;
-                            }
 
-                            // Try to parse as a notification (no id field)
-                            if let Ok(notif) = serde_json::from_str::<crate::platform::external::PluginNotification>(&trimmed) {
-                                match notif.method.as_str() {
-                                    "inbound_message" => {
-                                        if let Some(params) = notif.params {
-                                            if let Ok(inbound) = serde_json::from_value::<crate::platform::external::InboundMessage>(params) {
-                                                tracing::info!(
-                                                    "Received inbound message from '{}' via '{}': {}",
-                                                    inbound.resource_identifier,
-                                                    plugin_name,
-                                                    inbound.text.chars().take(50).collect::<String>()
-                                                );
+                                // Try to parse as a notification (no id field)
+                                if let Ok(notif) = serde_json::from_str::<crate::platform::external::PluginNotification>(&trimmed) {
+                                    match notif.method.as_str() {
+                                        "inbound_message" => {
+                                            if let Some(params) = notif.params {
+                                                if let Ok(inbound) = serde_json::from_value::<crate::platform::external::InboundMessage>(params) {
+                                                    tracing::info!(
+                                                        "Received inbound message from '{}' via '{}': {}",
+                                                        inbound.resource_identifier,
+                                                        plugin_name,
+                                                        inbound.text.chars().take(50).collect::<String>()
+                                                    );
 
-                                                // Handle $new or /new BEFORE channel lookup — creates a fresh channel
-                                                if inbound.text.starts_with("$new") || inbound.text.starts_with("//new") {
-                                                    let reply = match crate::commands::handle_new_external(
+                                                    // Handle $new or /new BEFORE channel lookup — creates a fresh channel
+                                                    if inbound.text.starts_with("$new") || inbound.text.starts_with("//new") {
+                                                        let reply = match crate::commands::handle_new_external(
+                                                            &pool,
+                                                            &plugin_name,
+                                                            &inbound.resource_identifier,
+                                                        ).await {
+                                                            Ok(ch) => format!(
+                                                                "Created new channel '{}' (id={}). You can now send messages.",
+                                                                ch.name, ch.id
+                                                            ),
+                                                            Err(e) => format!("Error creating channel: {}", e),
+                                                        };
+                                                        send_external_reply(
+                                                            &mut stdin,
+                                                            &mut next_id_val,
+                                                            &inbound,
+                                                            &reply,
+                                                        ).await;
+                                                        continue;
+                                                    }
+
+                                                    match crate::db::types::get_channel_by_platform_and_resource(
                                                         &pool,
                                                         &plugin_name,
                                                         &inbound.resource_identifier,
                                                     ).await {
-                                                        Ok(ch) => format!(
-                                                            "Created new channel '{}' (id={}). You can now send messages.",
-                                                            ch.name, ch.id
-                                                        ),
-                                                        Err(e) => format!("Error creating channel: {}", e),
-                                                    };
-                                                    send_external_reply(
-                                                        &mut stdin,
-                                                        &mut next_id_val,
-                                                        &inbound,
-                                                        &reply,
-                                                    ).await;
-                                                    continue;
-                                                }
+                                                        Ok(Some(channel)) => {
+                                                            // Check for /model command
+                                                            if inbound.text.starts_with("//model") {
+                                                                let reply = handle_external_model_command(
+                                                                    &pool,
+                                                                    &self.data_dir,
+                                                                    channel.id,
+                                                                    &inbound.text,
+                                                                ).await;
+                                                                send_external_reply(
+                                                                    &mut stdin,
+                                                                    &mut next_id_val,
+                                                                    &inbound,
+                                                                    &reply,
+                                                                ).await;
+                                                                continue;
+                                                            }
 
-                                                match crate::db::types::get_channel_by_platform_and_resource(
-                                                    &pool,
-                                                    &plugin_name,
-                                                    &inbound.resource_identifier,
-                                                ).await {
-                                                    Ok(Some(channel)) => {
-                                                        // Check for /model command
-                                                        if inbound.text.starts_with("//model") {
-                                                            let reply = handle_external_model_command(
+                                                            // Check for /channel command
+                                                            if inbound.text.starts_with("//channel") {
+                                                                let reply = handle_external_channel_command(
+                                                                    &pool,
+                                                                    &plugin_name,
+                                                                    &inbound.text,
+                                                                    &channel,
+                                                                    &inbound.resource_identifier,
+                                                                ).await;
+                                                                send_external_reply(
+                                                                    &mut stdin,
+                                                                    &mut next_id_val,
+                                                                    &inbound,
+                                                                    &reply,
+                                                                ).await;
+                                                                continue;
+                                                            }
+
+                                                            // Check for /profile command
+                                                            if inbound.text.starts_with("//profile") {
+                                                                let reply = handle_external_profile_command(
+                                                                    &pool,
+                                                                    &inbound.text,
+                                                                    &channel,
+                                                                    &self.data_dir,
+                                                                ).await;
+                                                                send_external_reply(
+                                                                    &mut stdin,
+                                                                    &mut next_id_val,
+                                                                    &inbound,
+                                                                    &reply,
+                                                                ).await;
+                                                                continue;
+                                                            }
+
+                                                            if let Ok((thread, _msg)) = crate::db::types::create_thread_with_cause(
                                                                 &pool,
                                                                 &self.data_dir,
+                                                                "user",
                                                                 channel.id,
-                                                                &inbound.text,
-                                                            ).await;
-                                                            send_external_reply(
-                                                                &mut stdin,
-                                                                &mut next_id_val,
-                                                                &inbound,
-                                                                &reply,
-                                                            ).await;
-                                                            continue;
-                                                        }
-
-                                                        // Check for /channel command
-                                                        if inbound.text.starts_with("//channel") {
-                                                            let reply = handle_external_channel_command(
-                                                                &pool,
-                                                                &plugin_name,
-                                                                &inbound.text,
-                                                                &channel,
-                                                                &inbound.resource_identifier,
-                                                            ).await;
-                                                            send_external_reply(
-                                                                &mut stdin,
-                                                                &mut next_id_val,
-                                                                &inbound,
-                                                                &reply,
-                                                            ).await;
-                                                            continue;
-                                                        }
-
-                                                        // Check for /profile command
-                                                        if inbound.text.starts_with("//profile") {
-                                                            let reply = handle_external_profile_command(
-                                                                &pool,
-                                                                &inbound.text,
-                                                                &channel,
-                                                                &self.data_dir,
-                                                            ).await;
-                                                            send_external_reply(
-                                                                &mut stdin,
-                                                                &mut next_id_val,
-                                                                &inbound,
-                                                                &reply,
-                                                            ).await;
-                                                            continue;
-                                                        }
-
-                                                        if let Ok((thread, _msg)) = crate::db::types::create_thread_with_cause(
-                                                            &pool,
-                                                            &self.data_dir,
-                                                            "user",
-                                                            channel.id,
-                                                            &channel.current_profile,
-                                                            crate::db::types::ThreadCauseParams {
-                                                                provider: channel.current_provider.clone(),
-                                                                model: channel.current_model.clone(),
-                                                                task_id: None,
-                                                                schedule_task_id: None,
-                                                                content: inbound.text.clone(),
-                                                                external_id: Some(inbound.external_id.clone()),
-                                                                parent_external_id: inbound.metadata.get("root_id")
-                                                                    .and_then(|v| v.as_str())
-                                                                    .filter(|s| !s.is_empty())
-                                                                    .map(|s| s.to_string()),
-                                                                metadata: {
-                                                                    let mut meta = inbound.metadata.clone();
-                                                                    if let Some(ref t) = channel.template {
-                                                                        if !t.is_empty() {
-                                                                            meta["template"] = serde_json::json!(t);
+                                                                &channel.current_profile,
+                                                                crate::db::types::ThreadCauseParams {
+                                                                    provider: channel.current_provider.clone(),
+                                                                    model: channel.current_model.clone(),
+                                                                    task_id: None,
+                                                                    schedule_task_id: None,
+                                                                    content: inbound.text.clone(),
+                                                                    external_id: Some(inbound.external_id.clone()),
+                                                                    parent_external_id: inbound.metadata.get("root_id")
+                                                                        .and_then(|v| v.as_str())
+                                                                        .filter(|s| !s.is_empty())
+                                                                        .map(|s| s.to_string()),
+                                                                    metadata: {
+                                                                        let mut meta = inbound.metadata.clone();
+                                                                        if let Some(ref t) = channel.template {
+                                                                            if !t.is_empty() {
+                                                                                meta["template"] = serde_json::json!(t);
+                                                                            }
                                                                         }
-                                                                    }
-                                                                    meta
+                                                                        meta
+                                                                    },
+                                                                    msg_type: "Cause".to_string(),
+                                                                    msg_subtype: Some(plugin_name.clone()),
+                                                                    task_planning_mode: String::new(),
                                                                 },
-                                                                msg_type: "Cause".to_string(),
-                                                                msg_subtype: Some(plugin_name.clone()),
-                                                                task_planning_mode: String::new(),
-                                                            },
-                                                        ).await {
-                                                            // success — message and thread created
-                                                            // Send :o: if the thread was auto-skipped (closed channel),
-                                                            // :+1: otherwise (normal acknowledgment)
-                                                            let react_emoji = if thread.status == "skipped" {
-                                                                ":o:"
+                                                            ).await {
+                                                                // success — message and thread created
+                                                                // Send :o: if the thread was auto-skipped (closed channel),
+                                                                // :+1: otherwise (normal acknowledgment)
+                                                                let react_emoji = if thread.status == "skipped" {
+                                                                    ":o:"
+                                                                } else {
+                                                                    ":+1:"
+                                                                };
+                                                                let _ = send_react(
+                                                                    &mut stdin,
+                                                                    &mut next_id_val,
+                                                                    &inbound.resource_identifier,
+                                                                    &inbound.external_id,
+                                                                    react_emoji,
+                                                                ).await;
                                                             } else {
-                                                                ":+1:"
-                                                            };
-                                                            let _ = send_react(
-                                                                &mut stdin,
-                                                                &mut next_id_val,
-                                                                &inbound.resource_identifier,
-                                                                &inbound.external_id,
-                                                                react_emoji,
-                                                            ).await;
-                                                        } else {
-                                                            tracing::error!("Failed to create thread for inbound message from '{}'", plugin_name);
+                                                                tracing::error!("Failed to create thread for inbound message from '{}'", plugin_name);
+                                                            }
+                                                        }
+                                                        Ok(None) => {
+                                                            tracing::warn!(
+                                                                "No channel for platform '{}', resource '{}'",
+                                                                plugin_name,
+                                                                inbound.resource_identifier
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::error!(
+                                                                "Error looking up channel: {:?}",
+                                                                e
+                                                            );
                                                         }
                                                     }
-                                                    Ok(None) => {
-                                                        tracing::warn!(
-                                                            "No channel for platform '{}', resource '{}'",
-                                                            plugin_name,
-                                                            inbound.resource_identifier
-                                                        );
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::error!(
-                                                            "Error looking up channel: {:?}",
-                                                            e
-                                                        );
+                                                }
+                                            }
+                                        }
+                                        "notify" => {
+                                            // Just log notifications for now
+                                            if let Some(params) = notif.params {
+                                                if let Ok(notify) = serde_json::from_value::<crate::platform::external::NotifyMessage>(params) {
+                                                    tracing::info!(
+                                                        "Notification from '{}' to '{}': {}",
+                                                        plugin_name,
+                                                        notify.resource_identifier,
+                                                        notify.content.chars().take(50).collect::<String>()
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        "message_deleted" => {
+                                            // When a message is deleted on the platform, if it was the seq-0
+                                            // (cause) message of an agent thread, stop that thread.
+                                            if let Some(params) = notif.params {
+                                                let resource = params.get("resource_identifier").and_then(|v| v.as_str());
+                                                let ext_id = params.get("external_id").and_then(|v| v.as_str());
+                                                if let (Some(resource), Some(ext_id)) = (resource, ext_id) {
+                                                    tracing::info!(
+                                                        "Message deleted on '{}' resource '{}': external_id={}",
+                                                        plugin_name, resource, ext_id
+                                                    );
+                                                    match handle_message_deleted(&pool, &plugin_name, resource, ext_id).await {
+                                                        Ok(Some(thread_id)) => {
+                                                            tracing::info!(
+                                                                "message_deleted: stopped thread {} (seq-0 was {})",
+                                                                thread_id, ext_id
+                                                            );
+                                                        }
+                                                        Ok(None) => {
+                                                            tracing::debug!(
+                                                                "message_deleted: no seq-0 thread for external_id={} on '{}'",
+                                                                ext_id, resource
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::error!(
+                                                                "Error handling message_deleted for {}: {:?}",
+                                                                ext_id, e
+                                                            );
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
-                                    "notify" => {
-                                        // Just log notifications for now
-                                        if let Some(params) = notif.params {
-                                            if let Ok(notify) = serde_json::from_value::<crate::platform::external::NotifyMessage>(params) {
-                                                tracing::info!(
-                                                    "Notification from '{}' to '{}': {}",
-                                                    plugin_name,
-                                                    notify.resource_identifier,
-                                                    notify.content.chars().take(50).collect::<String>()
-                                                );
-                                            }
+                                        _ => {
+                                            tracing::debug!(
+                                                "Unknown notification from '{}': {}",
+                                                plugin_name,
+                                                notif.method
+                                            );
                                         }
                                     }
-                                    "message_deleted" => {
-                                        // When a message is deleted on the platform, if it was the seq-0
-                                        // (cause) message of an agent thread, stop that thread.
-                                        if let Some(params) = notif.params {
-                                            let resource = params.get("resource_identifier").and_then(|v| v.as_str());
-                                            let ext_id = params.get("external_id").and_then(|v| v.as_str());
-                                            if let (Some(resource), Some(ext_id)) = (resource, ext_id) {
-                                                tracing::info!(
-                                                    "Message deleted on '{}' resource '{}': external_id={}",
-                                                    plugin_name, resource, ext_id
-                                                );
-                                                match handle_message_deleted(&pool, &plugin_name, resource, ext_id).await {
-                                                    Ok(Some(thread_id)) => {
-                                                        tracing::info!(
-                                                            "message_deleted: stopped thread {} (seq-0 was {})",
-                                                            thread_id, ext_id
-                                                        );
-                                                    }
-                                                    Ok(None) => {
-                                                        tracing::debug!(
-                                                            "message_deleted: no seq-0 thread for external_id={} on '{}'",
-                                                            ext_id, resource
-                                                        );
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::error!(
-                                                            "Error handling message_deleted for {}: {:?}",
-                                                            ext_id, e
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    _ => {
-                                        tracing::debug!(
-                                            "Unknown notification from '{}': {}",
-                                            plugin_name,
-                                            notif.method
-                                        );
-                                    }
+                                } else {
+                                    tracing::debug!(
+                                        "Unrecognized output from '{}' (first 100 chars): {}",
+                                        plugin_name,
+                                        trimmed.chars().take(100).collect::<String>()
+                                    );
                                 }
-                            } else {
-                                tracing::debug!(
-                                    "Unrecognized output from '{}' (first 100 chars): {}",
-                                    plugin_name,
-                                    trimmed.chars().take(100).collect::<String>()
-                                );
+                            }
+                            Err(e) => {
+                                tracing::error!("Error reading from plugin '{}' stdout: {:?}", plugin_name, e);
+                                break;
                             }
                         }
-                        Err(e) => {
-                            tracing::error!("Error reading from plugin '{}' stdout: {:?}", plugin_name, e);
-                            break;
+                    }
+
+                    // Restart/stop signal from the API
+                    _ = self.restart_notify.notified() => {
+                        if self.stopped.load(Ordering::SeqCst) {
+                            tracing::info!(
+                                "Platform plugin '{}' received stop signal from notifier",
+                                plugin_name
+                            );
+                        } else {
+                            tracing::info!(
+                                "Platform plugin '{}' received restart signal from notifier",
+                                plugin_name
+                            );
                         }
+                        break;
                     }
                 }
             }
-        }
 
-        // Cleanup: stdin/stdout are dropped when they go out of scope,
-        // which closes the pipes. Kill the child process (outside the lock).
-        let child_to_kill = match self.process.lock() {
-            Ok(mut guard) => guard.take(),
-            Err(_) => {
-                tracing::warn!("process lock poisoned during cleanup");
-                None
+            // ── Inner loop ended — clean up child process ────────────────
+            // stdin/stdout are dropped when they go out of scope,
+            // which closes the pipes. Kill the child process.
+            let child_to_kill = match self.process.lock() {
+                Ok(mut guard) => guard.take(),
+                Err(_) => {
+                    tracing::warn!("process lock poisoned during cleanup");
+                    None
+                }
+            };
+            if let Some(mut child) = child_to_kill {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
             }
-        };
-        if let Some(mut child) = child_to_kill {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-        }
 
-        tracing::info!("External platform plugin '{}' stopped", plugin_name);
-        Ok(())
+            // Check if we should restart (reload config from disk and respawn)
+            if self.restart_flag.swap(false, Ordering::SeqCst) {
+                tracing::info!(
+                    "Platform plugin '{}' restart triggered — reloading config and respawning",
+                    self.name
+                );
+                // Reload config from disk (picks up new YAML/env values)
+                self.reload_config_from_disk();
+                // Reset circuit breaker for fresh start
+                if let Ok(mut circuit) = self.circuit.lock() {
+                    *circuit = CircuitBreaker::new(
+                        self.config
+                            .read()
+                            .map(|c| c.max_retries)
+                            .unwrap_or(3),
+                    );
+                }
+                // Reset next_id for fresh subprocess
+                self.next_id.store(1, Ordering::SeqCst);
+                continue;
+            }
+
+            // Normal exit (not a restart)
+            tracing::info!("External platform plugin '{}' stopped", plugin_name);
+            return Ok(());
+        }
     }
 
     async fn send_response(&self, _pool: &PgPool, _message_id: i64) -> AppResult<()> {
         tracing::debug!(
             "send_response called on external platform '{}' — no-op",
-            self.config.name
+            self.name
         );
         Ok(())
     }

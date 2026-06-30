@@ -151,7 +151,7 @@ pub fn discover_plugin_servers(data_dir: &str, workspace_dir: &str) -> Vec<McpSe
     let plugins_dir = format!("{}/plugins/mcp", data_dir);
     let plugins_path = std::path::Path::new(&plugins_dir);
     if plugins_path.exists() && plugins_path.is_dir() {
-        servers.extend(scan_plugin_servers(&plugins_dir));
+        servers.extend(scan_plugin_servers(&plugins_dir, data_dir));
     }
 
     // Also scan workspace_dir/plugins/mcp (bundled workspace plugins) — secondary source
@@ -161,7 +161,7 @@ pub fn discover_plugin_servers(data_dir: &str, workspace_dir: &str) -> Vec<McpSe
     if ws_plugins_path.exists() && ws_plugins_path.is_dir() && ws_plugins_dir != plugins_dir {
         let existing_names: std::collections::HashSet<String> =
             servers.iter().map(|s| s.name.clone()).collect();
-        let ws_servers = scan_plugin_servers(&ws_plugins_dir);
+        let ws_servers = scan_plugin_servers(&ws_plugins_dir, data_dir);
         for srv in ws_servers {
             if !existing_names.contains(&srv.name) {
                 servers.push(srv);
@@ -178,7 +178,7 @@ pub fn discover_plugin_servers(data_dir: &str, workspace_dir: &str) -> Vec<McpSe
             if cwd_plugins.exists() && cwd_plugins.is_dir() {
                 let cwd_str = cwd_plugins.to_string_lossy().to_string();
                 if cwd_str != plugins_dir && cwd_str != ws_plugins_dir {
-                    servers.extend(scan_plugin_servers(&cwd_str));
+                    servers.extend(scan_plugin_servers(&cwd_str, data_dir));
                 }
             }
         }
@@ -199,7 +199,7 @@ fn get_bin_path(name: &str) -> Option<String> {
 }
 
 /// Scan a single `plugins/mcp/` directory for `mcp-config.json` files.
-fn scan_plugin_servers(plugins_dir: &str) -> Vec<McpServerConfig> {
+fn scan_plugin_servers(plugins_dir: &str, data_dir: &str) -> Vec<McpServerConfig> {
     let plugins_path = std::path::Path::new(plugins_dir);
     if !plugins_path.exists() || !plugins_path.is_dir() {
         return vec![];
@@ -329,6 +329,19 @@ fn scan_plugin_servers(plugins_dir: &str) -> Vec<McpServerConfig> {
                                 }
                             }
                         }
+
+                        // Merge tools.yml config values into server's env map
+                        let plugin_name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(&srv.name);
+                        crate::plugins_yaml::merge_yaml_config_into_env(
+                            &mut srv.env,
+                            plugin_name,
+                            data_dir,
+                            &crate::plugins_yaml::PluginYamlType::Tool,
+                        );
+
                         srv
                     })
                     .collect();

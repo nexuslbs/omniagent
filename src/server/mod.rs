@@ -27,6 +27,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -62,6 +63,8 @@ pub(crate) struct AppState {
     app_context: AppContext,
     /// Shared mutable config for hot-reload support
     shared_config: Arc<RwLock<AgentConfig>>,
+    /// Per-platform restart signal flags (keyed by plugin name)
+    platform_restart_signals: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 /// Configuration for the HTTP server.
@@ -76,6 +79,7 @@ pub struct ServerConfig {
     pub mcp_registry: Arc<std::sync::RwLock<McpRegistry>>,
     pub app_context: AppContext,
     pub shared_config: Arc<RwLock<AgentConfig>>,
+    pub platform_restart_signals: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 /// Start the HTTP server on the given host and port.
@@ -89,6 +93,7 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         mcp_registry: config.mcp_registry,
         app_context: config.app_context,
         shared_config: config.shared_config,
+        platform_restart_signals: config.platform_restart_signals,
     });
 
     let app = Router::new()

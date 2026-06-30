@@ -788,6 +788,72 @@ pub async fn refresh_plugin_models(data_dir: &str, name: &str) -> AppResult<Opti
 }
 
 // ---------------------------------------------------------------------------
+// Plugin config → env helper
+// ---------------------------------------------------------------------------
+
+/// Merge YAML config values from a plugin's YAML file into its env map.
+///
+/// For each config value set in the YAML file for this plugin, derive the
+/// corresponding environment variable name by uppercasing the config key
+/// and prefixing with the plugin name (e.g. `connection_mode` for a plugin
+/// named `mattermost` → `MATTERMOST_CONNECTION_MODE`) and override the env
+/// map entry.
+///
+/// This allows plugin config fields (set via the dashboard or YAML) to take
+/// effect without requiring those values to be defined in .env.
+///
+/// Works with all plugin types: platforms.yml, tools.yml, providers.yml.
+pub fn merge_yaml_config_into_env(
+    env: &mut HashMap<String, String>,
+    plugin_name: &str,
+    data_dir: &str,
+    yaml_type: &PluginYamlType,
+) {
+    let prefix = plugin_name.to_uppercase().replace('-', "_");
+    let yaml_path = PathBuf::from(data_dir).join(yaml_type.yaml_file());
+
+    // Load the YAML file and find this plugin's config
+    let config = (|| -> Option<serde_json::Value> {
+        use std::collections::BTreeMap;
+        let content = std::fs::read_to_string(yaml_path).ok()?;
+        #[derive(Deserialize)]
+        struct Root {
+            #[serde(default)]
+            platforms: Option<BTreeMap<String, Entry>>,
+            #[serde(default)]
+            tools: Option<BTreeMap<String, Entry>>,
+            #[serde(default)]
+            providers: Option<BTreeMap<String, Entry>>,
+        }
+        #[derive(Deserialize)]
+        struct Entry {
+            #[serde(default)]
+            config: Option<serde_json::Value>,
+        }
+        let root: Root = serde_yaml::from_str(&content).ok()?;
+        let section = match yaml_type.file_name() {
+            "platforms" => root.platforms,
+            "tools" => root.tools,
+            "providers" => root.providers,
+            _ => return None,
+        };
+        section?.get(plugin_name)?.config.clone()
+    })();
+
+    if let Some(ref entry_config) = config {
+        if let Some(obj) = entry_config.as_object() {
+            for (key, val) in obj {
+                let env_key = format!("{}_{}", prefix, key.to_uppercase().replace('-', "_"));
+                let str_val = val.as_str().map(|s| s.to_string()).unwrap_or_default();
+                if !str_val.is_empty() {
+                    env.insert(env_key, str_val);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

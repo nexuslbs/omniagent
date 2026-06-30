@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::Mutex;
@@ -72,6 +73,10 @@ async fn run_server() -> AppResult<()> {
         cfg.max_iterations_complex_plan,
     );
 
+    // Create shared platform restart signals map (for hot-reload)
+    let platform_restart_signals: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
     // Create platform registry and register platforms
     let mut registry = platform::PlatformRegistry::new();
 
@@ -91,6 +96,7 @@ async fn run_server() -> AppResult<()> {
         let client = platform::external::client::ExternalPlatformClient::new(
             plugin_config.clone(),
             &data_dir,
+            platform_restart_signals.clone(),
         );
         registry.register(Box::new(client));
     }
@@ -136,6 +142,7 @@ async fn run_server() -> AppResult<()> {
     let mcp_for_server = mcp_shared.clone();
     let ctx_for_server = ctx.clone();
     let shared_config_for_server = shared_config.clone();
+    let platform_restart_signals_for_server = platform_restart_signals.clone();
     let server_handle = tokio::spawn(async move {
         if let Err(e) = server::start_server(server::ServerConfig {
             pool: pool_server,
@@ -147,6 +154,7 @@ async fn run_server() -> AppResult<()> {
             mcp_registry: mcp_for_server,
             app_context: ctx_for_server,
             shared_config: shared_config_for_server,
+            platform_restart_signals: platform_restart_signals_for_server,
         })
         .await
         {
