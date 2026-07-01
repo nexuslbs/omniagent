@@ -301,14 +301,14 @@ impl LLMConfig {
 
         let api_mode = ApiMode::resolve(&provider_name, &model);
 
-        let api_key = match provider_name.as_str() {
-            "deepseek" => {
-                // Backward compat: DEEPSEEK_API_KEY is the legacy env var
-                // for the deepseek provider, registered via provider plugin.
-                resolve_llm_api_key(None)
-            }
-            _ => resolve_llm_api_key(None),
-        };
+        // Try provider-specific env var first (e.g. OPENCODE_GO_API_KEY for opencode-go),
+        // then fall through to resolve_llm_api_key for backward compat.
+        let provider_key_var = format!(
+            "{}_API_KEY",
+            provider_name.to_uppercase().replace('-', "_")
+        );
+        let provider_specific_key = std::env::var(&provider_key_var).ok();
+        let api_key = resolve_llm_api_key(provider_specific_key.as_deref());
 
         Self {
             provider,
