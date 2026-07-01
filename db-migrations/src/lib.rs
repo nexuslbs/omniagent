@@ -32,6 +32,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     phase_22_add_threads_parent_id(pool).await?;
     phase_23_add_threads_iterations(pool).await?;
     phase_24_allow_external_id_update(pool).await?;
+    phase_25_channel_name_unique(pool).await?;
     Ok(())
 }
 
@@ -1529,5 +1530,65 @@ async fn phase_23_add_threads_iterations(pool: &PgPool) -> Result<()> {
     .await?;
 
     tracing::info!("[migration] Phase 23 complete: iterations column added to threads table");
+    Ok(())
+}
+
+/// Phase 25: Add UNIQUE constraint on channels.name for name-based upsert.
+///
+/// When creating a channel with a name that already exists (e.g. re-running
+/// Mattermost setup for the same channel name), the upsert should update the
+/// resource_identifier (linking to the new Mattermost channel) and open the
+/// channel rather than creating a duplicate row.
+///
+/// The migration disables the append-only trigger temporarily to clean up any
+/// stale duplicate rows, then adds the UNIQUE constraint on name.
+async fn phase_25_channel_name_unique(pool: &PgPool) -> Result<()> {
+    // Temporarily disable the append-only trigger so we can clean up duplicates
+    sqlx::query("ALTER TABLE messages DISABLE TRIGGER trg_messages_append_only")
+        .execute(pool)
+        .await
+        .ok();
+
+    // Delete duplicate channels where the name already exists (keep the oldest one)
+    sqlx::query(
+        r#"
+        DELETE FROM channels
+        WHERE id IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (PARTITION BY name ORDER BY id) AS rn
+                FROM channels
+            ) dup
+            WHERE dup.rn > 1
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Re-enable the trigger
+    sqlx::query("ALTER TABLE messages ENABLE TRIGGER trg_messages_append_only")
+        .execute(pool)
+        .await
+        .ok();
+
+    // Add UNIQUE constraint on name (safe: no duplicates after cleanup above)
+    sqlx::query(
+        r#"
+        DO $$ BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'channels_name_key'
+            ) THEN
+                ALTER TABLE channels ADD CONSTRAINT channels_name_key UNIQUE (name);
+            END IF;
+        END $$;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!(
+        "[migration] Phase 25 complete: UNIQUE constraint on channels.name added"
+    );
     Ok(())
 }

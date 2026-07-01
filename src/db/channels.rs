@@ -159,8 +159,11 @@ pub async fn create_channel(pool: &PgPool, p: CreateChannelParams) -> AppResult<
         r#"
         INSERT INTO channels (name, platform, external_id, cause, resource_identifier)
         VALUES (:name, NULLIF(:platform, '')::text, :external_id, :cause, NULLIF(:resource_identifier, '')::text)
-        ON CONFLICT (platform, external_id)
-        DO UPDATE SET updated_at = NOW()
+        ON CONFLICT (name)
+        DO UPDATE SET
+            resource_identifier = NULLIF(:resource_identifier, '')::text,
+            closed = false,
+            updated_at = NOW()
         RETURNING
             id, name,
             COALESCE(platform, '') AS "platform",
