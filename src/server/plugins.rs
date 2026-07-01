@@ -57,6 +57,7 @@ pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
             "/api/plugins/{name}/refresh-models",
             post(refresh_models_handler),
         )
+        .route("/api/plugins/{name}/setup", post(setup_plugin_handler))
         .route("/api/plugins/{name}", delete(delete_plugin_handler))
         .route("/api/plugins/install-url", post(install_url_handler))
 }
@@ -810,6 +811,379 @@ pub(crate) async fn reinstall_plugin_handler(
             })),
         )
             .into_response(),
+    }
+}
+
+/// POST /api/plugins/:name/setup — run platform plugin setup procedure.
+///
+/// Only available for platform plugins that advertise `capabilities.setup = true`.
+/// Spawns the plugin binary as a one-shot process with a `"setup"` JSON-RPC
+/// request on stdin and returns the result. The plugin validates required config
+/// and runs the setup (create team, channel, users, etc.), returning success or
+/// a descriptive error message.
+pub(crate) async fn setup_plugin_handler(
+    Path(name): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    // 1. Get plugin detail from disk
+    let data_dir = state.data_dir.clone();
+    let data_dir_for_blocking = data_dir.clone();
+    let name_clone = name.clone();
+    let detail = match tokio::task::spawn_blocking(move || {
+        plugins_yaml::get_plugin(&data_dir_for_blocking, &name_clone)
+    })
+    .await
+    .unwrap_or_else(|e| Err(err_str!("Task join error: {}", e)))
+    {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Plugin '{}' not found", name)
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to look up plugin '{}': {}", name, e)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // 2. Check that this platform supports setup
+    let manifest: plugin::PluginManifest = match serde_json::from_value(detail.manifest.clone()) {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to parse manifest for '{}': {}", name, e)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let has_setup = manifest
+        .capabilities
+        .as_ref()
+        .map(|c| c.setup)
+        .unwrap_or(false);
+
+    if !has_setup {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Plugin '{}' does not support setup", name)
+            })),
+        )
+            .into_response();
+    }
+
+    // 3. Find the plugin entrypoint
+    let entrypoint = match &manifest.entrypoint {
+        Some(ep) => ep,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Plugin '{}' has no entrypoint defined", name)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let cmd = std::path::Path::new(&entrypoint.command);
+    let binary_path = if cmd.is_absolute() {
+        cmd.to_path_buf()
+    } else {
+        // Try relative to plugin directory — scan possible locations
+        let plugin_dirs = [
+            format!("{}/plugins/installed/{}", data_dir, name),
+            format!("{}/plugins/platforms/{}", data_dir, name),
+            format!("{}/plugins/mcp/{}", data_dir, name),
+            format!("{}/plugins/providers/{}", data_dir, name),
+        ];
+        let mut found = None;
+        for dir in &plugin_dirs {
+            let candidate = std::path::Path::new(dir).join(&entrypoint.command);
+            if candidate.exists() {
+                found = Some(candidate);
+                break;
+            }
+        }
+        match found {
+            Some(p) => p,
+            None => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Plugin binary not found for '{}': {}", name, entrypoint.command)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    // 4. Build config from resolved_env + current plugin config
+    let mut setup_env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    // Copy the resolved_env from the plugin detail — these have been resolved
+    // from $env: and $secret: references by the YAML layer
+    for (k, v) in &detail.resolved_env {
+        setup_env.insert(k.clone(), v.clone());
+    }
+
+    // Also set env vars from the env block in the manifest (for ${VAR} expansion)
+    if let Some(manifest) = serde_json::from_value::<plugin::PluginManifest>(detail.manifest.clone()).ok()
+    {
+        for (env_key, env_val) in &manifest.env {
+            // Resolve ${VAR} in the env value
+            let resolved = if let Some(var_name) = env_val.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+                std::env::var(var_name).unwrap_or_default()
+            } else if let Some(var_name) = env_val.strip_prefix("$env:") {
+                std::env::var(var_name).unwrap_or_default()
+            } else {
+                env_val.clone()
+            };
+            setup_env.insert(env_key.clone(), resolved);
+        }
+    }
+
+    // 5. Build the setup params from the plugin's config
+    let config = &detail.config;
+    let setup_params = serde_json::json!({
+        "setup_team": config.get("setup_team").and_then(|v| v.as_str()).unwrap_or(""),
+        "setup_channel": config.get("setup_channel").and_then(|v| v.as_str()).unwrap_or(""),
+        "bot_user": config.get("bot_user").and_then(|v| v.as_str()).unwrap_or(""),
+        "admin_user": config.get("admin_user").and_then(|v| v.as_str()).unwrap_or(""),
+        "admin_password": config.get("admin_password").and_then(|v| v.as_str()).unwrap_or(""),
+        "test_user": config.get("test_user").and_then(|v| v.as_str()).unwrap_or(""),
+        "test_password": config.get("test_password").and_then(|v| v.as_str()).unwrap_or(""),
+    });
+
+    let request_body = serde_json::json!({
+        "method": "setup",
+        "id": 1,
+        "params": setup_params,
+    });
+
+    let request_str = serde_json::to_string(&request_body)
+        .unwrap_or_else(|_| "{}".to_string());
+
+    // 6. Spawn the plugin binary with setup env and send the request on stdin
+    tracing::info!(
+        "Spawning plugin '{}' for setup: {}",
+        name,
+        binary_path.display()
+    );
+
+    let mut child = match std::process::Command::new(&binary_path)
+        .arg("setup")
+        .args(&entrypoint.args)
+        .env_clear()
+        .envs(&setup_env)
+        .env("RUST_LOG", "info")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to spawn plugin '{}' for setup: {}", name, e)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Write setup request to stdin
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        if let Err(e) = writeln!(stdin, "{}", request_str) {
+            let _ = child.kill();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to send setup request to '{}': {}", name, e)
+                })),
+            )
+                .into_response();
+        }
+    }
+    // Close stdin
+    drop(child.stdin.take());
+
+    // 7. Wait for response with timeout (120 seconds)
+    let start = std::time::Instant::now();
+    let max_wait = std::time::Duration::from_secs(120);
+
+    let output = loop {
+        if start.elapsed() >= max_wait {
+            let _ = child.kill();
+            return (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Setup for '{}' timed out after 120 seconds", name)
+                })),
+            )
+                .into_response();
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout_output = child
+                    .stdout
+                    .take()
+                    .map(|mut s| {
+                        let mut buf = String::new();
+                        use std::io::Read;
+                        let _ = s.read_to_string(&mut buf);
+                        buf
+                    })
+                    .unwrap_or_default();
+
+                let stderr_output = child
+                    .stderr
+                    .take()
+                    .map(|mut s| {
+                        let mut buf = String::new();
+                        use std::io::Read;
+                        let _ = s.read_to_string(&mut buf);
+                        buf
+                    })
+                    .unwrap_or_default();
+
+                if !status.success() {
+                    let err_detail = if stderr_output.is_empty() {
+                        stdout_output.clone()
+                    } else {
+                        stderr_output.clone()
+                    };
+                    let truncated = if err_detail.len() > 500 {
+                        format!("{}...", &err_detail[..500])
+                    } else {
+                        err_detail
+                    };
+
+                    tracing::error!(
+                        "Setup for '{}' failed (exit: {}): {}",
+                        name,
+                        status,
+                        truncated
+                    );
+
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": format!("Setup failed: {}", truncated)
+                        })),
+                    )
+                        .into_response();
+                }
+
+                break (stdout_output, stderr_output);
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                continue;
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Error waiting for setup process '{}': {}", name, e)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    let (stdout_output, _stderr_output) = output;
+
+    // 8. Parse response
+    // The plugin outputs one JSON line with the result
+    let first_line = stdout_output.lines().next().unwrap_or("");
+
+    match serde_json::from_str::<serde_json::Value>(first_line) {
+        Ok(val) => {
+            // Check if it's a JSON-RPC error
+            if let Some(error) = val.get("error") {
+                let msg = error
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Setup failed with unknown error");
+
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": msg.to_string()
+                    })),
+                )
+                    .into_response();
+            }
+
+            // Success — extract the result
+            let result = val.get("result").cloned().unwrap_or(val);
+
+            tracing::info!("Setup completed for plugin '{}'", name);
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "data": result
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            // If the output wasn't JSON, treat the whole output as the error
+            let msg = if stdout_output.trim().is_empty() {
+                format!("Setup completed but returned no data for '{}'", name)
+            } else {
+                format!("Setup for '{}' returned unexpected output: {}", name, e)
+            };
+
+            tracing::warn!("{}", msg);
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "data": {
+                        "raw_output": stdout_output.trim()
+                    }
+                })),
+            )
+                .into_response()
+        }
     }
 }
 

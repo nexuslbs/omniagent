@@ -74,6 +74,9 @@ pub struct PluginCapabilities {
     pub inbound: bool,
     #[serde(default)]
     pub outbound: bool,
+    /// Whether this platform supports a setup() method
+    #[serde(default)]
+    pub setup: bool,
 }
 
 /// Field definition for plugin config forms

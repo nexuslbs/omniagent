@@ -155,6 +155,10 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
             post(plugins::refresh_models_handler),
         )
         .route(
+            "/api/plugins/{name}/setup",
+            post(plugins::setup_plugin_handler),
+        )
+        .route(
             "/api/plugins/{name}",
             delete(plugins::delete_plugin_handler),
         )
