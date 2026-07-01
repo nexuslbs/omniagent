@@ -710,13 +710,14 @@ pub(crate) fn resolve_thread_config(
             (prov.to_string(), m)
         }
         // Env var level
-        else if let Ok(prov) = std::env::var("LLM_PROVIDER").filter(|s| !s.is_empty()) {
-            let m = crate::llm::resolve_default_model(&prov);
-            (prov, m)
-        }
-        // Nothing — return None, caller will error
         else {
-            return None;
+            match std::env::var("LLM_PROVIDER") {
+                Ok(prov) if !prov.is_empty() => {
+                    let m = crate::llm::resolve_default_model(&prov);
+                    (prov, m)
+                }
+                _ => return None,
+            }
         }
     };
 

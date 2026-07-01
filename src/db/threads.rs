@@ -415,7 +415,7 @@ pub async fn create_thread_with_cause(
         profile,
         CreateThreadParams {
             provider: p.provider.clone().or(Some(resolved_provider.clone())),
-            model: p.model.clone().or(resolved_model.clone()),
+            model: p.model.clone().or(Some(resolved_model.clone())),
             task_id: p.task_id.clone(),
             schedule_task_id: p.schedule_task_id.clone(),
             planning_mode: planning_mode.clone(),
