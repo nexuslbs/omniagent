@@ -144,12 +144,14 @@ impl AgentConfig {
     /// Load agent configuration from environment variables.
     ///
     /// # Env vars
-    /// - `LLM_API_KEY` — API key for the LLM provider
     /// - `LLM_PROVIDER` — Provider name (default: "openai")
     /// - `MAX_TOKENS` — Max tokens per response (default: 4096)
     /// - `TEMPERATURE` — Sampling temperature (default: 0.7)
     /// - `SUMMARIZE_AFTER_DAYS` — Days before auto-summarization (default: 7)
     /// - `MAX_ITERATIONS` — Max agent turns per thread before skipping (default: 60)
+    ///
+    /// The API key is resolved from the provider-specific env var `{PROVIDER}_API_KEY`
+    /// based on `LLM_PROVIDER` (e.g. DEEPSEEK_API_KEY for deepseek).
     pub fn from_env() -> AppResult<Self> {
         Ok(Self {
             llm_api_key: {

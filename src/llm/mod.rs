@@ -1,12 +1,14 @@
 //! LLM provider abstraction — supports multiple backends with reasoning and caching.
 //!
 //! Providers are configured via environment variables:
-//! - `LLM_PROVIDER` — "opencode-go" (default), "openai", "anthropic"
-//! - `LLM_API_KEY` — API key
+//! - `LLM_PROVIDER` — "opencode-go" (default), "deepseek", "openai", "anthropic"
 //! - `LLM_MAX_TOKENS` — Max tokens (default: 8192)
 //! - `LLM_TEMPERATURE` — Temperature (default: 0.7)
 //!
-//! Default model and base URL come from the provider plugin manifest.
+//! The API key is always read from the provider-specific env var `{PROVIDER}_API_KEY`
+//! (e.g. `DEEPSEEK_API_KEY` for deepseek, `OPENCODE_GO_API_KEY` for opencode-go).
+//! There is no generic `LLM_API_KEY` fallback — the correct key must be set for the
+//! provider configured in `LLM_PROVIDER`.
 //!
 //! OpenCode Go serves two API surfaces depending on the model:
 //! - `chat_completions` — OpenAI-compatible `/v1/chat/completions` (GLM, Kimi, DeepSeek)
@@ -256,17 +258,14 @@ impl ApiMode {
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// Resolve LLM API key: provider-specific key → DEEPSEEK_API_KEY → LLM_API_KEY → panic
+/// Resolve LLM API key from the provider-specific env var.
+/// Returns the value of the provider-specific key, or an error if not set.
+/// Callers must construct the key name as `{PROVIDER}_API_KEY` before calling.
 pub fn resolve_llm_api_key(provider_key: Option<&str>) -> String {
     provider_key
         .map(|k| k.to_string())
         .filter(|k| !k.is_empty())
-        .or_else(|| {
-            std::env::var("DEEPSEEK_API_KEY")
-                .ok()
-                .filter(|k| !k.is_empty())
-        })
-        .unwrap_or_else(|| std::env::var("LLM_API_KEY").expect("LLM_API_KEY must be set"))
+        .unwrap_or_else(|| panic!("LLM provider key not set. Set the {PROVIDER}_API_KEY environment variable corresponding to the configured LLM_PROVIDER."))
 }
 
 /// Configuration loaded from environment variables.
@@ -301,8 +300,7 @@ impl LLMConfig {
 
         let api_mode = ApiMode::resolve(&provider_name, &model);
 
-        // Try provider-specific env var first (e.g. OPENCODE_GO_API_KEY for opencode-go),
-        // then fall through to resolve_llm_api_key for backward compat.
+        // Try provider-specific env var (e.g. OPENCODE_GO_API_KEY for opencode-go).
         let provider_key_var = format!(
             "{}_API_KEY",
             provider_name.to_uppercase().replace('-', "_")

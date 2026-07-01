@@ -750,7 +750,7 @@ pub async fn refresh_plugin_models(data_dir: &str, name: &str) -> AppResult<Opti
         };
         had_refresh = true;
 
-        // Resolve API key: try {NAME}_API_KEY, then LLM_API_KEY
+        // Resolve API key from provider-specific env var ({NAME}_API_KEY)
         let provider_key =
             std::env::var(format!("{}_API_KEY", name.to_uppercase().replace('-', "_")))
                 .unwrap_or_default();

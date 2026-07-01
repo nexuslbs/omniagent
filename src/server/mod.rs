@@ -721,7 +721,7 @@ async fn prompt_preview_handler(
         );
 
         // Create LLM client — match how the agent resolves config
-        // (AgentConfig::from_env() tries LLM_API_KEY, then {PROVIDER}_API_KEY).
+        // (constructs {PROVIDER}_API_KEY from provider name).
         let base_url = crate::llm::resolve_default_base_url(&provider_name);
         let api_key = resolve_llm_api_key(Some(
             &std::env::var(format!(
