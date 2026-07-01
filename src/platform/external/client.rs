@@ -169,33 +169,48 @@ impl ExternalPlatformClient {
     }
 
     /// Spawn the plugin subprocess and return handles.
-    async fn spawn_plugin(&self) -> AppResult<(Child, ChildStdin, tokio::process::ChildStdout)> {
-        let config = self
-            .config
-            .read()
-            .map_err(|_| Error::LockPoisoned)?;
-        tracing::info!(
-            "Spawning platform plugin '{}': {} {}",
-            config.name,
-            config.command,
-            config.args.join(" ")
-        );
+    async fn spawn_plugin(
+        &self,
+        pool: &PgPool,
+    ) -> AppResult<(Child, ChildStdin, tokio::process::ChildStdout)> {
+        // Clone config fields while holding the read lock, then release it
+        // before any async work to keep the future Send.
+        let (config_name, config_command, config_args, env_map) = {
+            let config = self.config.read().map_err(|_| Error::LockPoisoned)?;
+            tracing::info!(
+                "Spawning platform plugin '{}': {} {}",
+                config.name,
+                config.command,
+                config.args.join(" ")
+            );
+            (
+                config.name.clone(),
+                config.command.clone(),
+                config.args.clone(),
+                config.env.clone(),
+            )
+        };
 
-        let mut command = Command::new(&config.command);
-        command
-            .args(&config.args)
+        let mut cmd = Command::new(&config_command);
+        cmd.args(&config_args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit());
 
-        for (key, value) in &config.env {
-            let resolved = crate::platform::external::resolve_env_vars(value);
-            command.env(key, resolved);
+        // Resolve $env:, $secret:, and ${VAR} references in env values.
+        // This ensures that env vars set at runtime (e.g. by the setup handler
+        // via std::env::set_var) and secrets stored in the DB are picked up
+        // even after a config reload.
+        let mut resolved_env = env_map;
+        crate::platform::external::resolve_env_refs(&mut resolved_env, pool).await;
+
+        for (key, value) in &resolved_env {
+            cmd.env(key, value);
         }
 
-        let mut child = command
+        let mut child = cmd
             .spawn()
-            .ctx(format!("Failed to spawn platform plugin '{}'", config.name))?;
+            .ctx(format!("Failed to spawn platform plugin '{}'", config_name))?;
 
         let stdin = child
             .stdin
@@ -284,7 +299,7 @@ impl Platform for ExternalPlatformClient {
             }
 
             // Spawn the plugin subprocess
-            let (child, mut stdin, stdout) = match self.spawn_plugin().await {
+            let (child, mut stdin, stdout) = match self.spawn_plugin(&pool).await {
                 Ok(result) => result,
                 Err(e) => {
                     tracing::error!(
@@ -322,6 +337,42 @@ impl Platform for ExternalPlatformClient {
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 continue;
+            }
+
+            // Send configure message with the plugin's config
+            let config_id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            let (config_name_for_log, configure_req) = {
+                let config = self.config.read().map_err(|_| Error::LockPoisoned)?;
+                let req = crate::platform::external::build_configure_request(config_id, &config.env);
+                (config.name.clone(), req)
+            };
+            tracing::debug!("Sending configure request to '{}'", config_name_for_log);
+            stdin.write_all(configure_req.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.flush().await?;
+
+            // Read configure response
+            {
+                let mut reader = tokio::io::BufReader::new(&mut stdout);
+                let mut line = String::new();
+                reader.read_line(&mut line).await?;
+                let response = crate::platform::external::parse_response(line.trim())?;
+                match response {
+                    crate::platform::external::PluginResponse::Success { .. } => {
+                        tracing::info!(
+                            "Plugin '{}' configured successfully",
+                            config_name_for_log
+                        );
+                    }
+                    crate::platform::external::PluginResponse::Error { error, .. } => {
+                        return Err(err_str!(
+                            "Plugin '{}' configure error ({}): {}",
+                            config_name_for_log,
+                            error.code,
+                            error.message
+                        ));
+                    }
+                }
             }
 
             let plugin_name = self

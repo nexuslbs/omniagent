@@ -17,6 +17,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::{error, info};
 
+use crate::db::{channels, types::CreateChannelParams};
 use crate::err_str;
 use crate::plugin;
 use crate::plugins_yaml;
@@ -60,6 +61,7 @@ pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
         .route("/api/plugins/{name}/setup", post(setup_plugin_handler))
         .route("/api/plugins/{name}", delete(delete_plugin_handler))
         .route("/api/plugins/install-url", post(install_url_handler))
+        .route("/api/reload", post(reload_env_handler))
 }
 
 // ---------------------------------------------------------------------------
@@ -964,16 +966,27 @@ pub(crate) async fn setup_plugin_handler(
         }
     }
 
-    // 5. Build the setup params from the plugin's config
+    // 5. Build the setup params from the plugin's resolved env (supports $env:)
     let config = &detail.config;
+    let resolved = &detail.resolved_env;
+    let setup_val = |key: &str| -> String {
+        if let Some(v) = resolved.get(key) {
+            if !v.is_empty() { return v.clone(); }
+        }
+        config.get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+    };
     let setup_params = serde_json::json!({
-        "setup_team": config.get("setup_team").and_then(|v| v.as_str()).unwrap_or(""),
-        "setup_channel": config.get("setup_channel").and_then(|v| v.as_str()).unwrap_or(""),
-        "bot_user": config.get("bot_user").and_then(|v| v.as_str()).unwrap_or(""),
-        "admin_user": config.get("admin_user").and_then(|v| v.as_str()).unwrap_or(""),
-        "admin_password": config.get("admin_password").and_then(|v| v.as_str()).unwrap_or(""),
-        "test_user": config.get("test_user").and_then(|v| v.as_str()).unwrap_or(""),
-        "test_password": config.get("test_password").and_then(|v| v.as_str()).unwrap_or(""),
+        "setup_team": setup_val("setup_team"),
+        "setup_channel": setup_val("setup_channel"),
+        "bot_user": setup_val("bot_user"),
+        "admin_user": setup_val("admin_user"),
+        "admin_password": setup_val("admin_password"),
+        "test_user": setup_val("test_user"),
+        "test_password": setup_val("test_password"),
+        "bot_password": setup_val("bot_password"),
     });
 
     let request_body = serde_json::json!({
@@ -985,7 +998,7 @@ pub(crate) async fn setup_plugin_handler(
     let request_str = serde_json::to_string(&request_body)
         .unwrap_or_else(|_| "{}".to_string());
 
-    // 6. Spawn the plugin binary with setup env and send the request on stdin
+    // 6. Spawn the plugin binary (config comes via stdio protocol, not env vars)
     tracing::info!(
         "Spawning plugin '{}' for setup: {}",
         name,
@@ -996,7 +1009,6 @@ pub(crate) async fn setup_plugin_handler(
         .arg("setup")
         .args(&entrypoint.args)
         .env_clear()
-        .envs(&setup_env)
         .env("RUST_LOG", "info")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1016,8 +1028,109 @@ pub(crate) async fn setup_plugin_handler(
         }
     };
 
+    // 6b. Initialize + Configure + Setup protocol over stdio
+
+    // Take stdin and stdout handles
+    let mut stdin = match child.stdin.take() {
+        Some(s) => s,
+        None => {
+            let _ = child.kill();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to capture stdin for plugin '{}'", name)
+                })),
+            )
+                .into_response();
+        }
+    };
+    let mut stdout = match child.stdout.take() {
+        Some(s) => s,
+        None => {
+            let _ = child.kill();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to capture stdout for plugin '{}'", name)
+                })),
+            )
+                .into_response();
+        }
+    };
+    let mut reader = std::io::BufReader::new(&mut stdout);
+
+    // Send initialize request
+    let init_req = serde_json::json!({"method": "initialize", "id": 1, "params": {}});
+    {
+        use std::io::Write;
+        if let Err(e) = writeln!(stdin, "{}", serde_json::to_string(&init_req).unwrap_or_default()) {
+            let _ = child.kill();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to send initialize request to '{}': {}", name, e)
+                })),
+            )
+                .into_response();
+        }
+    }
+    // Read initialize response
+    {
+        use std::io::BufRead;
+        let mut line = String::new();
+        if let Err(e) = reader.read_line(&mut line) {
+            let _ = child.kill();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to read initialize response from '{}': {}", name, e)
+                })),
+            )
+                .into_response();
+        }
+        tracing::debug!("Plugin '{}' initialize response: {}", name, line.trim());
+    }
+
+    // Send configure request with config values (formerly passed as env vars)
+    let configure_req = serde_json::json!({"method": "configure", "id": 2, "params": &setup_env});
+    {
+        use std::io::Write;
+        if let Err(e) = writeln!(stdin, "{}", serde_json::to_string(&configure_req).unwrap_or_default()) {
+            let _ = child.kill();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to send configure request to '{}': {}", name, e)
+                })),
+            )
+                .into_response();
+        }
+    }
+    // Read configure response
+    {
+        use std::io::BufRead;
+        let mut line = String::new();
+        if let Err(e) = reader.read_line(&mut line) {
+            let _ = child.kill();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to read configure response from '{}': {}", name, e)
+                })),
+            )
+                .into_response();
+        }
+        tracing::debug!("Plugin '{}' configure response: {}", name, line.trim());
+    }
+
     // Write setup request to stdin
-    if let Some(stdin) = child.stdin.as_mut() {
+    {
         use std::io::Write;
         if let Err(e) = writeln!(stdin, "{}", request_str) {
             let _ = child.kill();
@@ -1031,14 +1144,15 @@ pub(crate) async fn setup_plugin_handler(
                 .into_response();
         }
     }
-    // Close stdin
-    drop(child.stdin.take());
+    // Close stdin (signals EOF to the plugin so it knows to exit after setup)
+    drop(stdin);
 
-    // 7. Wait for response with timeout (120 seconds)
+    // 7. Read all stdout output with timeout (120 seconds)
     let start = std::time::Instant::now();
     let max_wait = std::time::Duration::from_secs(120);
 
-    let output = loop {
+    let mut stdout_output = String::new();
+    loop {
         if start.elapsed() >= max_wait {
             let _ = child.kill();
             return (
@@ -1051,19 +1165,15 @@ pub(crate) async fn setup_plugin_handler(
                 .into_response();
         }
 
+        // Try to read available data without blocking indefinitely
         match child.try_wait() {
             Ok(Some(status)) => {
-                let stdout_output = child
-                    .stdout
-                    .take()
-                    .map(|mut s| {
-                        let mut buf = String::new();
-                        use std::io::Read;
-                        let _ = s.read_to_string(&mut buf);
-                        buf
-                    })
-                    .unwrap_or_default();
-
+                // Child has exited — read any remaining stdout data
+                {
+                    use std::io::Read;
+                    let _ = reader.read_to_string(&mut stdout_output);
+                }
+                // Also capture stderr
                 let stderr_output = child
                     .stderr
                     .take()
@@ -1104,9 +1214,12 @@ pub(crate) async fn setup_plugin_handler(
                         .into_response();
                 }
 
-                break (stdout_output, stderr_output);
+                // Success — stdout_output already contains all output
+                break;
             }
             Ok(None) => {
+                // Child still running — try to read a line from stdout (non-blocking-ish)
+                // We do a short sleep to avoid busy-waiting
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
             }
@@ -1122,9 +1235,9 @@ pub(crate) async fn setup_plugin_handler(
                     .into_response();
             }
         }
-    };
+    }
 
-    let (stdout_output, _stderr_output) = output;
+    // stderr is captured inside the loop above when the child exits
 
     // 8. Parse response
     // The plugin outputs one JSON line with the result
@@ -1153,6 +1266,65 @@ pub(crate) async fn setup_plugin_handler(
             let result = val.get("result").cloned().unwrap_or(val);
 
             tracing::info!("Setup completed for plugin '{}'", name);
+
+            // Create the omniagent channel record for this Mattermost channel
+            if let Some(channel_id) = result.get("channel_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                let channel_name = result.get("channel_name").and_then(|v| v.as_str()).unwrap_or("setup");
+                let omni_channel_name = format!("mm-{}", channel_name);
+                match channels::create_channel(
+                    &state.pool,
+                    CreateChannelParams {
+                        name: omni_channel_name.clone(),
+                        platform: "mattermost".to_string(),
+                        external_id: channel_id.to_string(),
+                        resource_identifier: channel_id.to_string(),
+                        cause: "setup".to_string(),
+                    },
+                ).await {
+                    Ok(ch) => tracing::info!(
+                        "Created omniagent channel '{}' (id={}) for Mattermost channel '{}'",
+                        ch.name, ch.id, channel_name
+                    ),
+                    Err(e) => tracing::warn!(
+                        "Failed to create omniagent channel for Mattermost channel '{}': {:?}",
+                        channel_name, e
+                    ),
+                }
+            }
+
+            // Save the bot access token: write to .env and reload the plugin
+            if let Some(bot_token) = result.get("bot_token").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                let env_key = "MATTERMOST_ACCESS_TOKEN";
+                // Write to .env file (same pattern as update_config_handler for provider api_key)
+                let env_path = state.env_path.clone();
+                let env_key_clone = env_key.to_string();
+                let token_owned = bot_token.to_string();
+                let write_result = tokio::task::spawn_blocking(move || {
+                    let content = std::fs::read_to_string(&env_path).unwrap_or_default();
+                    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+                    let mut found = false;
+                    for line in lines.iter_mut() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with(&env_key_clone) && trimmed.contains('=') {
+                            *line = format!("{}={}", env_key_clone, token_owned);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        lines.push(format!("{}={}", env_key_clone, token_owned));
+                    }
+                    let new_content = lines.join("\n") + "\n";
+                    std::fs::write(&env_path, new_content).ok();
+                })
+                .await;
+                if write_result.is_ok() {
+                    std::env::set_var(env_key, bot_token);
+                    tracing::info!("Saved bot access token to .env and process env");
+                }
+                // Hot-reload the mattermost plugin
+                reload_platform_plugin(&state, &name).await;
+            }
 
             (
                 StatusCode::OK,
@@ -1407,8 +1579,26 @@ pub(crate) async fn install_url_handler(
     }
 }
 
-/// Refresh the process environment from the `.env` file.
-/// This ensures `$env:VAR` and `${VAR}` references in plugin manifest
+/// POST /api/reload — reload all env vars from the .env file into the process environment.
+///
+/// Useful when .env was edited manually (e.g. passwords changed) and the new values
+/// need to be picked up by subsequent setup/config operations without restarting omniagent.
+pub(crate) async fn reload_env_handler(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let refreshed = refresh_env_from_file(&state.env_path);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": true,
+            "refreshed": refreshed,
+        })),
+    )
+        .into_response()
+}
+
+/// Refresh the process environment by re-reading the .env file.
+/// Returns the number of env vars that were refreshed.
 /// fields resolve to current values when subprocesses are spawned,
 /// without needing a full container restart.
 fn refresh_env_from_file(env_path: &str) -> u32 {

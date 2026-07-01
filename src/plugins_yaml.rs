@@ -852,7 +852,8 @@ pub fn merge_yaml_config_into_env(
         if let Some(obj) = entry_config.as_object() {
             for (key, val) in obj {
                 let env_key = format!("{}_{}", prefix, key.to_uppercase().replace('-', "_"));
-                let str_val = val.as_str().map(|s| s.to_string()).unwrap_or_default();
+                let raw = val.as_str().map(|s| s.to_string()).unwrap_or_default();
+                let str_val = resolve_config_value(&raw);
                 if !str_val.is_empty() {
                     env.insert(env_key, str_val);
                 }
