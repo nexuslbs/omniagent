@@ -20,8 +20,9 @@ RUN cargo install sqlx-cli --version 0.9.0
 
 WORKDIR /app
 
-# Build and run — builds inside the container on the compose network,
-# where postgres is reachable at postgres:5432 for sql_forge compile-time checks.
-# Regenerates the query cache against the live database before building.
-# If prepare fails (e.g. first run before migrations), falls back to offline cache.
-CMD ["bash", "-c", "apt-get update -qq 2>/dev/null && apt-get install -y -qq nodejs 2>&1 | tail -1; cargo sqlx prepare -- --lib 2>&1 | head -5 || true; cargo build --release && exec ./target/release/omniagent"]
+# Build and run — builds inside the container on the compose network.
+# Uses the pre-generated .sqlx offline query cache (generated via
+# `cargo sqlx prepare` on the host or inside the running container)
+# so SQLX_OFFLINE can remain true for fast, database-free builds.
+# Regenerate the cache with: cargo sqlx prepare -- --lib
+CMD ["bash", "-c", "apt-get update -qq 2>/dev/null && apt-get install -y -qq nodejs 2>&1 | tail -1; cargo build --release && exec ./target/release/omniagent"]
