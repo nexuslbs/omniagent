@@ -310,55 +310,66 @@ pub async fn create_thread_with_cause(
         &p.content,
     );
 
-    // 4. Resolve provider and model when not explicitly provided
-    // Chain: explicit param → channel.current_* → profile → env var → provider default
-    let resolved_provider = p
-        .provider
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            channel
-                .current_provider
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-        })
-        .or_else(|| {
-            let registry = crate::profile::ProfileRegistry::new(data_dir);
-            registry.get(profile).and_then(|prof| {
-                prof.provider
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-            })
-        })
-        .unwrap_or_else(|| {
-            std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "opencode-go".to_string())
-        });
+    // 4. Resolve provider and model
+    //
+    // Provider chain:  channel.current_provider → profile.provider → LLM_PROVIDER env
+    // Model depends on which level the provider came from:
+    //   - Channel level:   use channel.current_model, or provider default_model
+    //   - Profile level:   use profile.model,         or provider default_model
+    //   - Env var level:   always use provider default_model
+    //   - Not set:         error — no model to use
+    //
+    // When explicit p.provider is passed (e.g. from platform client or scheduler),
+    // it represents an already-resolved value and takes precedence over the chain.
+    // Its accompanying model follows the same rule: p.model or provider default.
+    let registry = crate::profile::ProfileRegistry::new(data_dir);
+    let profile_data = registry.get(profile);
 
-    let resolved_model = p
-        .model
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            channel
-                .current_model
-                .as_deref()
+    let (resolved_provider, resolved_model) = {
+        // If the caller already resolved provider+model (cron, platform), use those
+        if let Some(prov) = p.provider.as_deref().filter(|s| !s.is_empty()) {
+            let model = p.model.as_deref()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
-        })
-        .or_else(|| {
-            let registry = crate::profile::ProfileRegistry::new(data_dir);
-            registry.get(profile).and_then(|prof| {
-                prof.model
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
-            })
-        })
-        .or_else(|| crate::llm::resolve_default_model(&resolved_provider));
+                .or_else(|| crate::llm::resolve_default_model(prov));
+            (prov.to_string(), model)
+        }
+        // Channel level: provider in channel → use model from channel or provider default
+        else if let Some(prov) = channel.current_provider.as_deref().filter(|s| !s.is_empty()) {
+            let model = channel.current_model.as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| crate::llm::resolve_default_model(prov));
+            (prov.to_string(), model)
+        }
+        // Profile level: provider in profile → use model from profile or provider default
+        else if let Some(prov) = profile_data.and_then(|p| p.provider.as_deref().filter(|s| !s.is_empty())) {
+            let model = profile_data.and_then(|p| p.model.as_deref())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| crate::llm::resolve_default_model(prov));
+            (prov.to_string(), model)
+        }
+        // Env var level: LLM_PROVIDER → always use provider default_model
+        else if let Ok(prov) = std::env::var("LLM_PROVIDER").filter(|s| !s.is_empty()) {
+            let model = crate::llm::resolve_default_model(&prov);
+            (prov, model)
+        }
+        // Nothing found
+        else {
+            return Err(Error::Message(
+                "No LLM provider configured. Set LLM_PROVIDER env var, or configure a provider in the channel or profile.".to_string()
+            ));
+        }
+    };
+
+    // If model was not resolved at any level, that's an error
+    let resolved_model = resolved_model.ok_or_else(|| {
+        Error::Message(format!(
+            "No model configured for provider '{}'. Set a default_model in the provider plugin config, or specify a model in the channel or profile.",
+            resolved_provider
+        ))
+    })?;
 
     // 5. Resolve parent_id from parent_external_id
     // If parent_external_id is provided and different from the message's own external_id,

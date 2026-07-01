@@ -664,9 +664,11 @@ pub(crate) struct ResolvedThreadConfig {
 /// Resolve the profile, provider, and model for a thread using the chain:
 ///    profile_name: task/override → channel.current_profile
 ///    provider:     channel.current_provider → profile.provider → LLM_PROVIDER env
-///    model:        channel.current_model → profile.model → default_model
+///    model:        derived from where the provider came from:
+///                    channel level → channel.current_model or provider default_model
+///                    profile level → profile.model or provider default_model
+///                    env var level → always provider default_model
 ///
-/// `default_model` is the provider plugin's default model (resolved by caller).
 /// Returns `None` when the resolved profile name is empty, or no model resolved.
 pub(crate) fn resolve_thread_config(
     explicit_profile: Option<&str>,
@@ -685,20 +687,38 @@ pub(crate) fn resolve_thread_config(
         return None;
     }
 
-    let provider = channel_provider
-        .filter(|s| !s.is_empty())
-        .or_else(|| profile_provider.filter(|s| !s.is_empty()))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "opencode-go".to_string())
-        });
-
-    // Model: channel → profile → provider plugin default → error
-    let model = channel_model
-        .filter(|s| !s.is_empty())
-        .or_else(|| profile_model.filter(|s| !s.is_empty()))
-        .map(|s| s.to_string())
-        .or_else(|| crate::llm::resolve_default_model(&provider));
+    // Provider chain: channel → profile → LLM_PROVIDER env
+    // Model depends on where provider came from:
+    //   channel → channel model or provider default
+    //   profile → profile model or provider default
+    //   env     → provider default
+    let (provider, model) = {
+        // Channel level
+        if let Some(prov) = channel_provider.filter(|s| !s.is_empty()) {
+            let m = channel_model
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| crate::llm::resolve_default_model(prov));
+            (prov.to_string(), m)
+        }
+        // Profile level
+        else if let Some(prov) = profile_provider.filter(|s| !s.is_empty()) {
+            let m = profile_model
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| crate::llm::resolve_default_model(prov));
+            (prov.to_string(), m)
+        }
+        // Env var level
+        else if let Ok(prov) = std::env::var("LLM_PROVIDER").filter(|s| !s.is_empty()) {
+            let m = crate::llm::resolve_default_model(&prov);
+            (prov, m)
+        }
+        // Nothing — return None, caller will error
+        else {
+            return None;
+        }
+    };
 
     let model = model?; // Return None if no model resolved
 

@@ -754,13 +754,9 @@ pub async fn refresh_plugin_models(data_dir: &str, name: &str) -> AppResult<Opti
         let provider_key =
             std::env::var(format!("{}_API_KEY", name.to_uppercase().replace('-', "_")))
                 .unwrap_or_default();
-        let api_key = {
-            let key = crate::llm::resolve_llm_api_key(Some(&provider_key));
-            if key.is_empty() {
-                None
-            } else {
-                Some(key)
-            }
+        let api_key = match crate::llm::resolve_llm_api_key(Some(&provider_key)) {
+            Ok(key) if !key.is_empty() => Some(key),
+            _ => None,
         };
 
         match fetch_enum_values(&refresh_url, api_key.as_deref()).await {

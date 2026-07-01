@@ -162,6 +162,7 @@ impl AgentConfig {
                     format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"))
                 };
                 resolve_llm_api_key(Some(&std::env::var(&provider_key).unwrap_or_default()))
+                    .unwrap_or_default()
             },
             llm_provider: std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string()),
             max_tokens: std::env::var("MAX_TOKENS")

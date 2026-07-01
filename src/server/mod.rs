@@ -729,7 +729,8 @@ async fn prompt_preview_handler(
                 provider_name.to_uppercase().replace('-', "_")
             ))
             .unwrap_or_default(),
-        ));
+        ))
+        .unwrap_or_default();
         let api_mode = crate::llm::ApiMode::resolve(&provider_name, &model_name);
 
         let llm_config = crate::llm::LLMConfig {

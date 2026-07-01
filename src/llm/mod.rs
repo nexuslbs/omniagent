@@ -261,11 +261,13 @@ impl ApiMode {
 /// Resolve LLM API key from the provider-specific env var.
 /// Returns the value of the provider-specific key, or an error if not set.
 /// Callers must construct the key name as `{PROVIDER}_API_KEY` before calling.
-pub fn resolve_llm_api_key(provider_key: Option<&str>) -> String {
+pub fn resolve_llm_api_key(provider_key: Option<&str>) -> AppResult<String> {
     provider_key
         .map(|k| k.to_string())
         .filter(|k| !k.is_empty())
-        .unwrap_or_else(|| panic!("LLM provider key not set. Set the {PROVIDER}_API_KEY environment variable corresponding to the configured LLM_PROVIDER."))
+        .ok_or_else(|| Error::Message(
+            "LLM provider key not set. Set the <PROVIDER>_API_KEY environment variable corresponding to the configured LLM_PROVIDER.".to_string()
+        ))
 }
 
 /// Configuration loaded from environment variables.
@@ -306,7 +308,8 @@ impl LLMConfig {
             provider_name.to_uppercase().replace('-', "_")
         );
         let provider_specific_key = std::env::var(&provider_key_var).ok();
-        let api_key = resolve_llm_api_key(provider_specific_key.as_deref());
+        let api_key = resolve_llm_api_key(provider_specific_key.as_deref())
+            .unwrap_or_default();
 
         Self {
             provider,

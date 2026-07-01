@@ -41,7 +41,7 @@ Provider plugins can define a `refresh_url` on `enum` type `config_schema` field
 
 3. **In-memory cache** — `DYNAMIC_ENUM_CACHE` (Mutex\<HashMap\<String, DynamicEnumEntry\>\>) with a 5-minute TTL. Cache is checked when enriching plugin data for API responses (`enrich_plugin()`).
 
-4. **API key resolution** — for authenticated endpoints, the key is resolved as `{PLUGIN_NAME}_API_KEY` → `LLM_API_KEY` environment variable, sent as a `Bearer` token.
+4. **API key resolution** — for authenticated endpoints, the key is resolved from the provider-specific `{PLUGIN_NAME}_API_KEY` environment variable, sent as a `Bearer` token.
 
 5. **Graceful fallback** — if the fetch fails, existing `allowed_values` are preserved (either hardcoded fallbacks in `plugin.json` or the previous cache entry).
 
@@ -134,7 +134,8 @@ Thread subtasks enable the LLM to decompose a complex request into trackable sub
    cp .env.example .env
    ```
    Edit `.env` and set at minimum:
-   - `LLM_API_KEY` — your LLM provider API key
+   - `LLM_PROVIDER` — your LLM provider (e.g. `opencode-go`, `deepseek`)
+   - `{PROVIDER}_API_KEY` — API key for your chosen provider (e.g. `DEEPSEEK_API_KEY` for deepseek, `OPENCODE_GO_API_KEY` for opencode-go)
    - `DATABASE_URL` — PostgreSQL connection string (default: `postgres://omniagent:***@postgres:5432/omniagent`)
 
 3. Start the stack:
@@ -162,16 +163,16 @@ Channels represent communication endpoints. Each channel has its own state, prof
 
 | Field | Description |
 |-------|-------------|
-| `name` | Human-readable channel name |
-| `platform` | Platform identifier (e.g., `telegram`, `api`, `cron`) |
-| `external_id` | Platform-specific address (chat ID, channel name, etc.) |
-| `resource_identifier` | Canonical resource address — used in (platform, resource_identifier) unique constraint |
-| `current_profile` | Profile to use for message processing |
-| `current_provider` | Provider override (overrides profile) |
-| `current_model` | Model override (overrides profile) |
-| `closed` | Boolean (default `false`). A closed channel retains history but **won't process new messages** |
-| `readonly` | Boolean (default `false`). Protects the channel from deletion |
-| `template` | Optional template name; loaded from `profiles/<name>/templates/` and injected into **every user message** seq-0 prompt. Also acts as **default template** for Cron/Kanban tasks in this channel (task-level templates take priority) |
+|| `name` | Human-readable channel name |
+|| `platform` | Platform identifier (e.g., `telegram`, `api`, `cron`) |
+|| `external_id` | Platform-specific address (chat ID, channel name, etc.) |
+|| `resource_identifier` | Canonical resource address — used in (platform, resource_identifier) unique constraint |
+|| `current_profile` | Profile to use for message processing |
+|| `current_provider` | Provider override for this channel |
+|| `current_model` | Model override for this channel |
+|| `closed` | Boolean (default `false`). A closed channel retains history but **won't process new messages** |
+|| `readonly` | Boolean (default `false`). Protects the channel from deletion |
+|| `template` | Optional template name; loaded from `profiles/<name>/templates/` and injected into **every user message** seq-0 prompt. Also acts as **default template** for Cron/Kanban tasks in this channel (task-level templates take priority) |
 
 ### Creating a Channel
 
@@ -245,16 +246,33 @@ VALUES (
 );
 ```
 
-### Profile vs Channel Priority
+### LLM Provider and Model Resolution
 
-The effective model and provider are resolved as:
-1. **Message** `profile` (highest) — set per-message for cron/kanban tasks
-2. **Channel** `current_profile` / `current_model` / `current_provider`
-3. **Profile** `model` / `provider`
-4. Environment defaults
-5. Built-in fallbacks
+The effective provider and model for each request are resolved in this order:
 
-If neither the channel nor the profile specifies a model, the prompt will fail with an error.
+**Provider resolution chain:**
+1. **Channel** `current_provider` — if set, this provider is used
+2. **Profile** `provider` — if the channel has no provider, the profile's provider is used
+3. **`LLM_PROVIDER` env var** — if neither channel nor profile defines a provider, the environment variable is used
+4. **Error** — if none of the above is set, the agent returns an error
+
+**Model resolution depends on where the provider came from:**
+
+- **Provider from channel** → the model is taken from the channel's `current_model`, **or** the provider plugin's `default_model` if the channel has no model set. The profile's model is **ignored** at this level.
+- **Provider from profile** → the model is taken from the profile's `model`, **or** the provider plugin's `default_model` if the profile has no model set. The channel's model is **ignored** at this level.
+- **Provider from `LLM_PROVIDER` env var** → the model is always the provider plugin's `default_model`. Both channel and profile models are **ignored**.
+- **No model resolved at any level** → the agent returns an error.
+
+**API key resolution:**
+The API key is read from the `{PROVIDER}_API_KEY` environment variable matching the resolved provider name (e.g. `DEEPSEEK_API_KEY` for deepseek, `OPENCODE_GO_API_KEY` for opencode-go). There is no generic fallback — the correct key must be set for the active provider.
+
+**Summary table:**
+
+| Provider source | Model source | Model fallback |
+|----------------|-------------|----------------|
+| Channel | Channel model | Provider default_model |
+| Profile | Profile model | Provider default_model |
+| LLM_PROVIDER env | — | Provider default_model |
 
 ## Execution Model
 
