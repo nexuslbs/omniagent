@@ -351,15 +351,18 @@ pub async fn create_thread_with_cause(
             (prov.to_string(), model)
         }
         // Env var level: LLM_PROVIDER → always use provider default_model
-        else if let Ok(prov) = std::env::var("LLM_PROVIDER").filter(|s| !s.is_empty()) {
-            let model = crate::llm::resolve_default_model(&prov);
-            (prov, model)
-        }
-        // Nothing found
         else {
-            return Err(Error::Message(
-                "No LLM provider configured. Set LLM_PROVIDER env var, or configure a provider in the channel or profile.".to_string()
-            ));
+            match std::env::var("LLM_PROVIDER") {
+                Ok(prov) if !prov.is_empty() => {
+                    let model = crate::llm::resolve_default_model(&prov);
+                    (prov, model)
+                }
+                _ => {
+                    return Err(Error::Message(
+                        "No LLM provider configured. Set LLM_PROVIDER env var, or configure a provider in the channel or profile.".to_string()
+                    ));
+                }
+            }
         }
     };
 

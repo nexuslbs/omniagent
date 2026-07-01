@@ -416,8 +416,11 @@ fn build_plugin_detail(
                 let env_val = crate::llm::resolve_llm_api_key(Some(
                     &std::env::var(&provider_api_key_var).unwrap_or_default(),
                 ));
-                if !env_val.is_empty() {
-                    resolved.insert("api_key".to_string(), env_val);
+                match env_val {
+                    Ok(val) if !val.is_empty() => {
+                        resolved.insert("api_key".to_string(), val);
+                    }
+                    _ => {}
                 }
                 break;
             }
