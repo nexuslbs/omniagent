@@ -1,5 +1,4 @@
 use crate::error::{AppResult, ErrorContext};
-use crate::llm::resolve_llm_api_key;
 use crate::mcp::{AppContext, McpRegistry};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -150,20 +149,11 @@ impl AgentConfig {
     /// - `SUMMARIZE_AFTER_DAYS` — Days before auto-summarization (default: 7)
     /// - `MAX_ITERATIONS` — Max agent turns per thread before skipping (default: 60)
     ///
-    /// The API key is resolved from the provider-specific env var `{PROVIDER}_API_KEY`
-    /// based on `LLM_PROVIDER` (e.g. DEEPSEEK_API_KEY for deepseek).
+    /// The API key comes from the provider's plugin config (providers.yml with $env:
+    /// references), not from hardcoded env var names.
     pub fn from_env() -> AppResult<Self> {
         Ok(Self {
-            llm_api_key: {
-                let provider = std::env::var("LLM_PROVIDER").unwrap_or_default();
-                let provider_key = if provider.is_empty() {
-                    String::new()
-                } else {
-                    format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"))
-                };
-                resolve_llm_api_key(Some(&std::env::var(&provider_key).unwrap_or_default()))
-                    .unwrap_or_default()
-            },
+            llm_api_key: String::new(),
             llm_provider: std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "openai".to_string()),
             max_tokens: std::env::var("MAX_TOKENS")
                 .unwrap_or_else(|_| "4096".to_string())

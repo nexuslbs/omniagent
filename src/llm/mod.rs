@@ -5,10 +5,8 @@
 //! - `LLM_MAX_TOKENS` — Max tokens (default: 8192)
 //! - `LLM_TEMPERATURE` — Temperature (default: 0.7)
 //!
-//! The API key is always read from the provider-specific env var `{PROVIDER}_API_KEY`
-//! (e.g. `DEEPSEEK_API_KEY` for deepseek, `OPENCODE_GO_API_KEY` for opencode-go).
-//! There is no generic `LLM_API_KEY` fallback — the correct key must be set for the
-//! provider configured in `LLM_PROVIDER`.
+//! The API key comes from the provider's plugin config (providers.yml with $env:
+//! references). The startup fallback is empty — no hardcoded env var names.
 //!
 //! OpenCode Go serves two API surfaces depending on the model:
 //! - `chat_completions` — OpenAI-compatible `/v1/chat/completions` (GLM, Kimi, DeepSeek)
@@ -258,15 +256,15 @@ impl ApiMode {
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// Resolve LLM API key from the provider-specific env var.
-/// Returns the value of the provider-specific key, or an error if not set.
-/// Callers must construct the key name as `{PROVIDER}_API_KEY` before calling.
+/// Resolve LLM API key from a given string value.
+/// Returns the value if non-empty, or an error if empty/not set.
+/// Callers should look up api_key from the provider's resolved plugin config.
 pub fn resolve_llm_api_key(provider_key: Option<&str>) -> AppResult<String> {
     provider_key
         .map(|k| k.to_string())
         .filter(|k| !k.is_empty())
         .ok_or_else(|| Error::Message(
-            "LLM provider key not set. Set the <PROVIDER>_API_KEY environment variable corresponding to the configured LLM_PROVIDER.".to_string()
+            "LLM provider key not set. Set the api_key in the provider's plugin config (providers.yml).".to_string()
         ))
 }
 
@@ -287,6 +285,9 @@ pub struct LLMConfig {
 impl LLMConfig {
     /// Build config from environment variables.
     ///
+    /// Provider-specific config (api_key) comes from plugin config, not hardcoded
+    /// env var names. No generic fallback env var is used.
+    ///
     /// # Panics
     ///
     /// Panics if `LLM_PROVIDER` contains an unrecognised value.
@@ -302,14 +303,9 @@ impl LLMConfig {
 
         let api_mode = ApiMode::resolve(&provider_name, &model);
 
-        // Try provider-specific env var (e.g. OPENCODE_GO_API_KEY for opencode-go).
-        let provider_key_var = format!(
-            "{}_API_KEY",
-            provider_name.to_uppercase().replace('-', "_")
-        );
-        let provider_specific_key = std::env::var(&provider_key_var).ok();
-        let api_key = resolve_llm_api_key(provider_specific_key.as_deref())
-            .unwrap_or_default();
+        // No generic API key fallback — provider api_key comes from plugin config
+        // (providers.yml with $env: references), not from hardcoded env var names.
+        let api_key = String::new();
 
         Self {
             provider,

@@ -222,48 +222,6 @@ pub(crate) async fn update_config_handler(
     // Update config in YAML
     match plugins_yaml::update_config(&state.data_dir, &yaml_type, &name, body.config.clone()) {
         Ok(_entry) => {
-            // If saving an api_key for a provider, also write to .env as {NAME}_API_KEY
-            if yaml_type == plugins_yaml::PluginYamlType::Provider {
-                if let Some(config_obj) = body.config.as_object() {
-                    if let Some(api_key_val) = config_obj.get("api_key").and_then(|v| v.as_str()) {
-                        let name_upper = name.to_uppercase().replace('-', "_");
-                        let env_key = format!("{}_API_KEY", name_upper);
-
-                        let env_path = state.env_path.clone();
-                        let env_key_clone = env_key.clone();
-                        let api_key_owned = api_key_val.to_string();
-                        let result = tokio::task::spawn_blocking(move || {
-                            let content = std::fs::read_to_string(&env_path).unwrap_or_default();
-                            let mut lines: Vec<String> =
-                                content.lines().map(|l| l.to_string()).collect();
-
-                            let mut found = false;
-                            for line in lines.iter_mut() {
-                                let trimmed = line.trim();
-                                if trimmed.starts_with(&env_key_clone) && trimmed.contains('=') {
-                                    *line = format!("{}={}", env_key_clone, api_key_owned);
-                                    found = true;
-                                    break;
-                                }
-                            }
-                            if !found {
-                                lines.push(format!("{}={}", env_key_clone, api_key_owned));
-                            }
-
-                            let new_content = lines.join("\n") + "\n";
-                            std::fs::write(&env_path, new_content).ok();
-                        })
-                        .await;
-
-                        if result.is_ok() {
-                            std::env::set_var(&env_key, api_key_val);
-                        }
-
-                        info!("Saved api_key for plugin '{}' to .env as {}", name, env_key);
-                    }
-                }
-            }
-
             // If this is a platform plugin, trigger a hot-reload of the subprocess
             if yaml_type == plugins_yaml::PluginYamlType::Platform {
                 reload_platform_plugin(&state, &name).await;
@@ -276,8 +234,6 @@ pub(crate) async fn update_config_handler(
                 reload_tool_plugin(&state, &name).await;
             }
 
-            // If this is a provider plugin, the api_key is saved to .env
-            // and the process env is already refreshed above.
             // Provider plugin config is read from YAML on each use, so
             // the changes take effect without any additional action needed.
 

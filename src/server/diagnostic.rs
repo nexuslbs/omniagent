@@ -87,8 +87,6 @@ pub async fn check_env_read(State(state): State<Arc<AppState>>) -> String {
         "OMNI_DATA_DIR",
         "WORKSPACE_DIR",
         "LLM_PROVIDER",
-        "DEEPSEEK_API_KEY",
-        "OPENCODE_GO_API_KEY",
         "HOST",
         "PORT",
     ];

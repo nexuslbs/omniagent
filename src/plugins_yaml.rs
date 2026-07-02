@@ -407,26 +407,6 @@ fn build_plugin_detail(
         }
     }
 
-    // For provider plugins, resolve api_key from process env as fallback
-    if manifest.plugin_type == PluginType::Provider {
-        let name_upper = manifest.name.to_uppercase().replace('-', "_");
-        let provider_api_key_var = format!("{}_API_KEY", name_upper);
-        for field in &config_schema {
-            if field.key == "api_key" && !resolved.contains_key("api_key") {
-                let env_val = crate::llm::resolve_llm_api_key(Some(
-                    &std::env::var(&provider_api_key_var).unwrap_or_default(),
-                ));
-                match env_val {
-                    Ok(val) if !val.is_empty() => {
-                        resolved.insert("api_key".to_string(), val);
-                    }
-                    _ => {}
-                }
-                break;
-            }
-        }
-    }
-
     // Merge YAML config values into env with derived env keys
     // (e.g. connection_mode: websocket → PLUGINNAME_CONNECTION_MODE)
     // so the API response reflects what the subprocess will actually receive.
@@ -753,14 +733,12 @@ pub async fn refresh_plugin_models(data_dir: &str, name: &str) -> AppResult<Opti
         };
         had_refresh = true;
 
-        // Resolve API key from provider-specific env var ({NAME}_API_KEY)
-        let provider_key =
-            std::env::var(format!("{}_API_KEY", name.to_uppercase().replace('-', "_")))
-                .unwrap_or_default();
-        let api_key = match crate::llm::resolve_llm_api_key(Some(&provider_key)) {
-            Ok(key) if !key.is_empty() => Some(key),
-            _ => None,
-        };
+        // Resolve API key from the provider's resolved plugin config
+        let api_key = detail.config
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
 
         match fetch_enum_values(&refresh_url, api_key.as_deref()).await {
             Ok(values) => {

@@ -37,7 +37,7 @@ use tracing::{error, info};
 use crate::agent::config::AgentConfig;
 use crate::agent::helpers;
 use crate::db::types as queries;
-use crate::llm::{resolve_llm_api_key, ChatMessage, CompletionRequest, LLMClient};
+use crate::llm::{ChatMessage, CompletionRequest, LLMClient};
 use crate::mcp::{AppContext, McpRegistry};
 use crate::prompt_builder::{
     build_planning_prompt, build_system_prompt, build_system_prompt_parts,
@@ -720,17 +720,20 @@ async fn prompt_preview_handler(
             &tool_names,
         );
 
-        // Create LLM client — match how the agent resolves config
-        // (constructs {PROVIDER}_API_KEY from provider name).
+        // Create LLM client — resolve api_key from provider plugin config
+        // (not from hardcoded {PROVIDER}_API_KEY env var names).
         let base_url = crate::llm::resolve_default_base_url(&provider_name);
-        let api_key = resolve_llm_api_key(Some(
-            &std::env::var(format!(
-                "{}_API_KEY",
-                provider_name.to_uppercase().replace('-', "_")
-            ))
-            .unwrap_or_default(),
-        ))
-        .unwrap_or_default();
+
+        // Look up api_key from the provider's resolved plugin config
+        let api_key = match crate::plugins_yaml::get_plugin(&state.data_dir, &provider_name) {
+            Ok(Some(detail)) => detail.config
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
         let api_mode = crate::llm::ApiMode::resolve(&provider_name, &model_name);
 
         let llm_config = crate::llm::LLMConfig {
