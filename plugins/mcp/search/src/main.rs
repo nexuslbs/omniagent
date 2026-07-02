@@ -103,8 +103,8 @@ fn handle_search_wiki(args: &Value) -> Result<(String, bool)> {
     let profile = args["profile"].as_str().unwrap_or("default");
 
     let data_dir = std::env::var("OMNI_DIR")
-        .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)))
-        .unwrap_or_else(|_| "/opt/omni".to_string());
+            .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)))
+            .expect("OMNI_DIR must be set");
 
     let wiki_dir = format!("{}/profiles/{}/wiki", data_dir, profile);
     let wiki_dir_path = std::path::Path::new(&wiki_dir);

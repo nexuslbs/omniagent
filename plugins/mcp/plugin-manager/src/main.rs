@@ -22,7 +22,7 @@ use serde_json::Value;
 fn data_dir() -> String {
     std::env::var("DATA_DIR")
         .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)))
-        .unwrap_or_else(|_| "/opt/omni".to_string())
+        .unwrap_or_else(|_| { eprintln!("FATAL: OMNI_DIR must be set"); std::process::exit(1); })
 }
 
 // ---------------------------------------------------------------------------

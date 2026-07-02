@@ -134,7 +134,7 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
 
         // 4. Create thread with cause='system' linked to this kanban task
         let data_dir = std::env::var("OMNI_DIR")
-            .unwrap_or_else(|_| "/opt/omni".to_string());
+            .unwrap_or_else(|_| { eprintln!("FATAL: OMNI_DIR must be set"); std::process::exit(1); });
 
         match crate::db::threads::create_thread_with_cause(
             pool,
@@ -200,7 +200,7 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
 async fn handle_hindsight_populator(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
     // Read watermark file
     let data_dir = std::env::var("OMNI_DIR")
-        .unwrap_or_else(|_| "/opt/omni".to_string());
+        .unwrap_or_else(|_| { eprintln!("FATAL: OMNI_DIR must be set"); std::process::exit(1); });
     let watermark_path = format!("{}/hindsight_watermark.json", data_dir);
     let last_id: i64 = match std::fs::read_to_string(&watermark_path) {
         Ok(content) => serde_json::from_str::<serde_json::Value>(&content)
@@ -240,7 +240,7 @@ async fn handle_hindsight_populator(pool: &PgPool, _args: &Value) -> Result<(Str
 
 async fn handle_relevance_indexer(_pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
     let data_dir = std::env::var("OMNI_DIR")
-        .unwrap_or_else(|_| "/opt/omni".to_string());
+        .unwrap_or_else(|_| { eprintln!("FATAL: OMNI_DIR must be set"); std::process::exit(1); });
     let wiki_dir = format!("{}/profiles/default/wiki", data_dir);
     let wiki_path = std::path::Path::new(&wiki_dir);
 
