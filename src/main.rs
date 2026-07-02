@@ -54,7 +54,7 @@ async fn run_server() -> AppResult<()> {
     tracing::info!("Database migrations completed");
 
     // Determine data directory (default: /opt/data)
-    let data_dir = env_or_default("OMNI_DATA_DIR", "/opt/data");
+    let data_dir = env_or_default("OMNI_DIR", "/opt/data");
     tracing::info!("Data directory: {}", data_dir);
 
     // Determine workspace directory (default: /opt/workspace)

@@ -2,7 +2,7 @@
 //!
 //! Providers are configured via plugin config (providers.yml with $env: references).
 //! The only hardcoded env var names are the infrastructure defaults set by the
-//! deployment repo: `OMNI_DATA_DIR`, `WORKSPACE_DIR`, and `LLM_PROVIDER`.
+//! deployment repo: `OMNI_DIR`, `WORKSPACE_DIR`, and `LLM_PROVIDER`.
 //!
 //! The API key comes from the provider's plugin config (providers.yml with $env:
 //! references). The startup fallback is empty — no hardcoded env var names.
@@ -148,7 +148,7 @@ fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
 pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::new(|| {
     let workspace_dir =
         std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
-    let data_dir = std::env::var("OMNI_DATA_DIR").unwrap_or_else(|_| "/opt/data".to_string());
+    let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/data".to_string());
 
     let bundled = format!("{}/plugins/providers", workspace_dir);
     let installed = format!("{}/plugins/installed", data_dir);

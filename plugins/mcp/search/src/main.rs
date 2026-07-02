@@ -102,7 +102,7 @@ fn handle_search_wiki(args: &Value) -> Result<(String, bool)> {
     let limit = args["limit"].as_i64().unwrap_or(10).min(30) as usize;
     let profile = args["profile"].as_str().unwrap_or("default");
 
-    let data_dir = std::env::var("OMNI_DATA_DIR")
+    let data_dir = std::env::var("OMNI_DIR")
         .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)))
         .unwrap_or_else(|_| "/opt/data".to_string());
 

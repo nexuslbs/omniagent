@@ -55,7 +55,7 @@ Both insert thousands separators with nearly identical implementations. Extract 
 
 All three classify messages by length + keywords with slightly different keyword lists and thresholds. Unify into one shared function.
 
-### 2c. OMNI_DATA_DIR / WORKSPACE_DIR read 4× in main.rs
+### 2c. OMNI_DIR / WORKSPACE_DIR read 4× in main.rs
 Lines 70, 101, 108, and 112 all read the same env vars with the same fallback. Lines 108-112 are redundant with 70-75 and 101-105.
 
 ### 2d. Vectorization config has duplicated fields
@@ -109,7 +109,7 @@ MCP tool handlers are `sync` closures but call async DB code. They use `tokio::t
 Lines 285-358: Each field update issues a separate SQL UPDATE. This is N+1 queries per update and not atomic. Build a single UPDATE with conditional SET clauses.
 
 ### 4c. No shared module-level constants for env var names
-Env var names like `"LLM_API_KEY"`, `"OMNI_DATA_DIR"`, `"WORKSPACE_DIR"`, `"PLANNING_MODE"` are hardcoded as string literals in 15+ locations across the codebase. Define as `const` or `static` in a central config module.
+Env var names like `"LLM_API_KEY"`, `"OMNI_DIR"`, `"WORKSPACE_DIR"`, `"PLANNING_MODE"` are hardcoded as string literals in 15+ locations across the codebase. Define as `const` or `static` in a central config module.
 
 ### 4d. `format_thousands` uses manual string reversal
 The `format_num`/`format_thousands` functions use `chars().rev()` to insert thousands separators. Use a well-known crate instead of reinventing this.
@@ -135,7 +135,7 @@ The following env var names are string literals scattered across multiple files 
 - `LLM_API_KEY` — 5+ files
 - `LLM_MODEL`, `LLM_PROVIDER`, `LLM_BASE_URL` — 4+ files
 - `LLM_MAX_TOKENS`, `LLM_TEMPERATURE` — 2 files
-- `OMNI_DATA_DIR`, `WORKSPACE_DIR` — 3+ files
+- `OMNI_DIR`, `WORKSPACE_DIR` — 3+ files
 - `PLANNING_MODE` — 2 files
 - `MAX_ITERATIONS_*` — 1 file
 - All `VECTORIZE_*` and `WIKI_VECTORIZATION_*` vars in `config.rs`

@@ -502,7 +502,7 @@ async fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
-    let data_dir = std::env::var("OMNI_DATA_DIR").context("OMNI_DATA_DIR must be set")?;
+    let data_dir = std::env::var("OMNI_DIR").context("OMNI_DIR must be set")?;
 
     let _pool = db::connect(&database_url)
         .await

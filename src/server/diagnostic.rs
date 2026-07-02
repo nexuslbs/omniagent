@@ -84,7 +84,7 @@ pub async fn check_enrich_json(State(state): State<Arc<AppState>>) -> String {
 /// Check environment variables (for debugging env resolution).
 pub async fn check_env_read(State(state): State<Arc<AppState>>) -> String {
     let vars = [
-        "OMNI_DATA_DIR",
+        "OMNI_DIR",
         "WORKSPACE_DIR",
         "LLM_PROVIDER",
         "HOST",

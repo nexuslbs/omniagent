@@ -540,7 +540,7 @@ Memory files are loaded from the profile's memory directory and included in cont
 ### Location
 
 ```
-$OMNI_DATA_DIR/profiles/<name>/memories/
+$OMNI_DIR/profiles/<name>/memories/
   MEMORY.md      # Core memory file
   SOUL.md        # Identity/persona file
 ```
@@ -651,7 +651,7 @@ This will:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OMNI_DATA_DIR` | `/opt/data` | Profile and tools directory |
+| `OMNI_DIR` | `/opt/data` | Profile and tools directory |
 | `DATABASE_URL` | `postgres://omniagent:***@postgres:5432/omniagent` | PostgreSQL connection string |
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant endpoint |
 | `LLM_API_KEY` | — | API key for LLM provider |
@@ -681,7 +681,7 @@ Environment variables are organized into categories:
 
 | Category | Variables |
 |----------|-----------|
-| **General** | `HOST`, `PORT`, `OMNI_DATA_DIR`, `QDRANT_URL`, `DELETE_AFTER_DAYS`, `MAX_ITERATIONS`, `MCP_SERVERS_CONFIG` |
+| **General** | `HOST`, `PORT`, `OMNI_DIR`, `QDRANT_URL`, `DELETE_AFTER_DAYS`, `MAX_ITERATIONS`, `MCP_SERVERS_CONFIG` |
 | **LLM** | `LLM_API_KEY`, `LLM_PROVIDER`, `MAX_TOKENS`, `TEMPERATURE`, `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` |
 | **Memory** | `MEMORY_MAX_CHARS`, `USER_MAX_CHARS` |
 | **Retrieval** | `VECTORIZE_MESSAGES`, `VECTORIZE_WIKI` |
@@ -846,10 +846,10 @@ Both backup and checkpoint use `rclone sync` with rclone v1.74+.
 
 ## Data Directory Structure
 
-Persistent data lives under `OMNI_DATA_DIR` (default `/opt/data`):
+Persistent data lives under `OMNI_DIR` (default `/opt/data`):
 
 ```
-$OMNI_DATA_DIR/
+$OMNI_DIR/
   profiles/
     default/
       memories/         # Memory files (MEMORY.md, SOUL.md)
@@ -919,7 +919,7 @@ The binary reads `.env` automatically via `dotenvy`.
 | LLM call fails | API key missing or invalid | Check `LLM_API_KEY` in `.env` |
 | Processing stuck at `processing` | Container restarted mid-call | On restart, pending/processing messages are marked as skipped |
 | No model configured | Profile + channel both lack model | Set `current_model` on channel or `model` on profile |
-| Tools returning errors | Path outside data directory | Ensure file paths are under `OMNI_DATA_DIR` |
+| Tools returning errors | Path outside data directory | Ensure file paths are under `OMNI_DIR` |
 | Settings write fails with 403 | Attempted to modify read-only setting | `HOST`, `PORT`, `QDRANT_URL` are read-only |
 
 ## Internal Docs
