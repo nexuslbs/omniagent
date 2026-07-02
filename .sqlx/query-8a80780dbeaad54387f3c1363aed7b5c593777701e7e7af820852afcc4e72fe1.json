@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO channels (name, platform, external_id, cause, resource_identifier)\n        VALUES ($1, NULLIF($2, '')::text, $3, $4, NULLIF($5, '')::text)\n        ON CONFLICT (platform, external_id)\n        DO UPDATE SET updated_at = NOW()\n        RETURNING\n            id, name,\n            COALESCE(platform, '') AS \"platform\",\n            resource_identifier,\n            COALESCE(external_id, '') AS \"external_id\",\n            cause,\n            current_profile, current_model, current_provider,\n            readonly,\n            COALESCE(closed, false) as \"closed\",\n            COALESCE(metadata::text, '{}') AS \"metadata\",\n            COALESCE(template, '') AS \"template\",\n            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\",\n            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"updated_at\"\n        ",
+  "query": "\n        INSERT INTO channels (name, platform, external_id, cause, resource_identifier)\n        VALUES ($1, NULLIF($2, '')::text, $3, $4, NULLIF($5, '')::text)\n        ON CONFLICT (name)\n        DO UPDATE SET\n            resource_identifier = NULLIF($6, '')::text,\n            closed = false,\n            updated_at = NOW()\n        RETURNING\n            id, name,\n            COALESCE(platform, '') AS \"platform\",\n            resource_identifier,\n            COALESCE(external_id, '') AS \"external_id\",\n            cause,\n            current_profile, current_model, current_provider,\n            readonly,\n            COALESCE(closed, false) as \"closed\",\n            COALESCE(metadata::text, '{}') AS \"metadata\",\n            COALESCE(template, '') AS \"template\",\n            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\",\n            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"updated_at\"\n        ",
   "describe": {
     "columns": [
       {
@@ -140,6 +140,7 @@
         "Text",
         "Text",
         "Text",
+        "Text",
         "Text"
       ]
     },
@@ -161,5 +162,5 @@
       null
     ]
   },
-  "hash": "b8b20fe48c8498a4ff0ceaa4cca1b7f6b206bee364cefe5d935b2e4f0bc6c648"
+  "hash": "8a80780dbeaad54387f3c1363aed7b5c593777701e7e7af820852afcc4e72fe1"
 }
