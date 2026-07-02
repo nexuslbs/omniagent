@@ -1438,7 +1438,7 @@ pub(crate) async fn delete_plugin_handler(
     for dir in &plugin_dirs {
         let path = std::path::Path::new(dir);
         if path.exists() && path.is_dir() {
-            // Check if this is a bundled plugin (has Cargo.toml or plugin.json from omni-stack)
+            // Check if this is a bundled plugin (has Cargo.toml or plugin.json from the plugins directory)
             let is_bundled = path.join("Cargo.toml").exists()
                 || (path.join("plugin.json").exists()
                     && dir.contains("/plugins/mcp/")

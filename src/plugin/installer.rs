@@ -323,8 +323,8 @@ pub fn discover_plugins(
         }
     }
 
-    // C. Scan data_dir plugins (mounted from omni-stack): <data_dir>/plugins/<type>/<name>/plugin.json
-    // This covers providers, platforms, and MCP tools that live in omni-stack's plugins/ directory.
+    // C. Scan data_dir plugins: <data_dir>/plugins/<type>/<name>/plugin.json
+    // This covers providers, platforms, and MCP tools that live in the plugins/ directory.
     let data_plugins_base = format!("{}/plugins", data_dir);
     if let Ok(data_plugin_entries) = std::fs::read_dir(&data_plugins_base) {
         for entry in data_plugin_entries.flatten() {
