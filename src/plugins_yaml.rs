@@ -330,15 +330,23 @@ pub fn resolve_config_value(value: &str) -> String {
 /// Resolve ${VAR} references in a string against the process environment.
 /// Unresolvable references are replaced with empty string.
 ///
-/// This is for legacy `plugin.json`/`mcp-config.json` env block values only.
-/// YAML plugin config values should use `$env:` or `$secret:` instead.
+/// This function is kept for backward compatibility but should not be used
+/// by any new code. All env resolution uses `$env:` syntax instead.
 pub fn resolve_legacy_env_vars(value: &str) -> String {
     resolve_legacy_vars(value)
 }
 
-/// Resolve `${VAR}` references (legacy format) in a value string.
+/// Resolve `$env:VAR` references in a manifest env value for `build_plugin_detail`.
+/// YAML plugin config values should use `resolve_config_value` instead.
 fn resolve_env_var(value: &str) -> String {
-    resolve_legacy_vars(value)
+    if let Some(var_name) = value.strip_prefix("$env:") {
+        return std::env::var(var_name).unwrap_or_else(|_| {
+            tracing::warn!("Config env ref $env:{} not set", var_name);
+            String::new()
+        });
+    }
+    // No ${VAR} support — that syntax is not used anywhere
+    value.to_string()
 }
 
 /// Resolve `${VAR}` references (legacy format) in a value string.
