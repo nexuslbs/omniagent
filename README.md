@@ -651,7 +651,7 @@ This will:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OMNI_DIR` | `/opt/data` | Profile and tools directory |
+| `OMNI_DIR` | `/opt/omni` | Profile and tools directory |
 | `DATABASE_URL` | `postgres://omniagent:***@postgres:5432/omniagent` | PostgreSQL connection string |
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant endpoint |
 | `LLM_API_KEY` | — | API key for LLM provider |
@@ -815,7 +815,7 @@ services:
     build: ./backup
     env_file: backup.env          # NOT git-versioned
     volumes:
-      - ./data:/opt/data:rw
+      - ./data:/opt/omni:rw
 ```
 
 ### Commands
@@ -824,10 +824,10 @@ Run inside the container (`docker compose exec backup <command>`):
 
 | Command | Description |
 |---------|-------------|
-| `backup` | Syncs `/opt/data/` to `S3_BUCKET/S3_PATH/data/` |
-| `checkpoint` | Syncs `/opt/data/` to `S3_BUCKET/S3_PATH/checkpoint/YYYYMMDD/` |
-| `restore_backup` | Syncs from `S3_BUCKET/S3_PATH/data/` to `/opt/data/` |
-| `restore_checkpoint YYYYMMDD` | Syncs from `S3_BUCKET/S3_PATH/checkpoint/YYYYMMDD/` to `/opt/data/` |
+| `backup` | Syncs `/opt/omni/` to `S3_BUCKET/S3_PATH/data/` |
+| `checkpoint` | Syncs `/opt/omni/` to `S3_BUCKET/S3_PATH/checkpoint/YYYYMMDD/` |
+| `restore_backup` | Syncs from `S3_BUCKET/S3_PATH/data/` to `/opt/omni/` |
+| `restore_checkpoint YYYYMMDD` | Syncs from `S3_BUCKET/S3_PATH/checkpoint/YYYYMMDD/` to `/opt/omni/` |
 
 ### Configuration (`backup.env`)
 
@@ -846,7 +846,7 @@ Both backup and checkpoint use `rclone sync` with rclone v1.74+.
 
 ## Data Directory Structure
 
-Persistent data lives under `OMNI_DIR` (default `/opt/data`):
+Persistent data lives under `OMNI_DIR` (default `/opt/omni`):
 
 ```
 $OMNI_DIR/

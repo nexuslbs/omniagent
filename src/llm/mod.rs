@@ -148,7 +148,7 @@ fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
 pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::new(|| {
     let workspace_dir =
         std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
-    let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/data".to_string());
+    let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/omni".to_string());
 
     let bundled = format!("{}/plugins/providers", workspace_dir);
     let installed = format!("{}/plugins/installed", data_dir);

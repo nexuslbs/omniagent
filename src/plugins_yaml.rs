@@ -444,7 +444,7 @@ fn extract_plugin_key(manifest: &PluginManifest, source: &str, base_path: &str) 
         "mcp_config" => manifest.name.clone(),
         _ => {
             // Extract key from base_path parent directory name
-            // e.g., "/opt/data/plugins/mcp/docker-compose/plugin.json" → directory name
+            // e.g., "/opt/omni/plugins/mcp/docker-compose/plugin.json" → directory name
             if let Some(parent) = std::path::Path::new(base_path).parent() {
                 if let Some(dir_name) = parent.file_name().and_then(|n| n.to_str()) {
                     return dir_name.to_string();

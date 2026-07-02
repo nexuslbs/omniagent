@@ -104,7 +104,7 @@ fn handle_search_wiki(args: &Value) -> Result<(String, bool)> {
 
     let data_dir = std::env::var("OMNI_DIR")
         .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)))
-        .unwrap_or_else(|_| "/opt/data".to_string());
+        .unwrap_or_else(|_| "/opt/omni".to_string());
 
     let wiki_dir = format!("{}/profiles/{}/wiki", data_dir, profile);
     let wiki_dir_path = std::path::Path::new(&wiki_dir);

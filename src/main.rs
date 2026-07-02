@@ -54,8 +54,8 @@ async fn run_server() -> AppResult<()> {
     db::migrations::run(&pool).await.map_err(|e| Error::Message(format!("Migration failed: {}", e)))?;
     tracing::info!("Database migrations completed");
 
-    // Determine data directory (default: /opt/data)
-    let data_dir = env_or_default("OMNI_DIR", "/opt/data");
+    // Determine data directory (default: /opt/omni)
+    let data_dir = env_or_default("OMNI_DIR", "/opt/omni");
     tracing::info!("Data directory: {}", data_dir);
 
     // Refresh process environment from .env file — this overrides any stale

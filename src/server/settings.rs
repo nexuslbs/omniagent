@@ -411,13 +411,13 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "OMNI_DIR".into(),
-            get_env_or_default("OMNI_DIR", "/opt/data"),
+            get_env_or_default("OMNI_DIR", "/opt/omni"),
             SettingMeta {
                 field_type: "text".into(),
                 description: "Data directory for profiles and wiki".into(),
                 options: None,
                 readonly: true,
-                default: Some("/opt/data".into()),
+                default: Some("/opt/omni".into()),
             },
         ),
         (

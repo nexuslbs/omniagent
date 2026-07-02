@@ -613,7 +613,7 @@ The omniagent Docker container mounts volumes that remap paths:
 Host path                       Container path
 /opt/workspace/omniagent        /app
 /opt/workspace/omni-workspace   /opt/workspace   ← filesystem writes go here
-/opt/workspace/omni-stack       /opt/data
+/opt/workspace/omni-stack       /opt/omni
 ```
 
 **Critical effect:** When `filesystem` writes to `/opt/workspace/playground/...`, the bytes land at `/opt/workspace/omni-workspace/playground/...` on the host. But `compose(project_dir="/opt/workspace/playground/...")` looks at the ACTUAL host path `/opt/workspace/playground/...`, which does NOT contain the files.
