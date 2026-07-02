@@ -1,28 +1,40 @@
-# OmniAgent — Dockerfile
-# Builds the Rust binary inside the container on startup.
-# The source code is mounted at /app:rw from the omniagent repo.
-# Rebuild: docker compose restart omniagent (depends_on ensures postgres is healthy first)
+# syntax=docker/dockerfile:1
+# OmniAgent — production multi-stage build
+# Builds the Rust binary, then copies it into a minimal runtime image with Docker CLI.
 
-FROM rust:1.96.0
+# Stage 1: Build the Rust binary
+FROM rust:1.96.0 AS builder
+WORKDIR /build
 
-# Install Docker CLI from official Docker repo
-RUN install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
-    && chmod a+r /etc/apt/keyrings/docker.asc \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
-    $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
-    && apt-get update \
-    && apt-get install -y docker-ce-cli docker-compose-plugin nodejs \
-    && rm -rf /var/lib/apt/lists/*
+# Copy manifests first for dependency caching
+COPY Cargo.toml Cargo.lock* ./
 
-# Install sqlx-cli for compile-time query verification against the live database
-RUN cargo install sqlx-cli --version 0.9.0
+# Create minimal src to cache deps
+RUN mkdir -p src plugins .sqlx && \
+    echo "fn main() {}" > src/main.rs && \
+    cargo build --release 2>/dev/null || true
 
-WORKDIR /app
+# Copy the rest of the source and build
+COPY . .
+ENV SQLX_OFFLINE=true
+RUN cargo build --release
 
-# Build and run — builds inside the container on the compose network.
-# Uses the pre-generated .sqlx offline query cache (generated via
-# `cargo sqlx prepare` on the host or inside the running container)
-# so SQLX_OFFLINE can remain true for fast, database-free builds.
-# Regenerate the cache with: cargo sqlx prepare -- --lib
-CMD ["bash", "-c", "apt-get update -qq 2>/dev/null && apt-get install -y -qq nodejs 2>&1 | tail -1; cargo build --release && exec ./target/release/omniagent"]
+# Stage 2: Docker CLI binary
+FROM docker:cli AS docker-cli
+
+# Stage 3: Runtime — slim image matching builder glibc
+FROM debian:trixie-slim
+
+# Install runtime dependencies
+RUN apt-get update -qq && \
+    apt-get install -y -qq ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy Docker CLI (compose v2 is built into the docker binary)
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+
+# Copy the omniagent binary
+COPY --from=builder /build/target/release/omniagent /usr/local/bin/omniagent
+
+EXPOSE 8080
+CMD ["omniagent"]
