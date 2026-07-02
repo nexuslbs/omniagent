@@ -904,7 +904,7 @@ pub(crate) async fn setup_plugin_handler(
     let mut setup_env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     // Copy the resolved_env from the plugin detail — these have been resolved
-    // from $env: and $secret: references by the YAML layer
+    // from $env: references by the YAML layer ($secret: references resolved below)
     for (k, v) in &detail.resolved_env {
         setup_env.insert(k.clone(), v.clone());
     }
@@ -925,17 +925,27 @@ pub(crate) async fn setup_plugin_handler(
         }
     }
 
-    // 5. Build the setup params from the plugin's resolved env (supports $env:)
+    // Resolve $secret: references in setup_env before sending to the plugin
+    crate::plugins_yaml::resolve_config_refs(&mut setup_env, &state.pool).await;
+
+    // 5. Build the setup params from the plugin's resolved env (supports $env:, $secret:)
     let config = &detail.config;
-    let resolved = &detail.resolved_env;
     let setup_val = |key: &str| -> String {
-        if let Some(v) = resolved.get(key) {
+        if let Some(v) = setup_env.get(key) {
             if !v.is_empty() { return v.clone(); }
         }
-        config.get(key)
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_default()
+        // Fall back to config value with inline resolution of $env: and $secret:
+        if let Some(raw) = config.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            if raw.starts_with("$env:") {
+                std::env::var(raw.strip_prefix("$env:").unwrap()).unwrap_or_default()
+            } else if raw.starts_with("$secret:") {
+                String::new() // Can't resolve without DB pool here; setup_env should have it
+            } else {
+                raw.to_string()
+            }
+        } else {
+            String::new()
+        }
     };
     let setup_params = serde_json::json!({
         "setup_team": setup_val("setup_team"),
@@ -1560,7 +1570,7 @@ pub(crate) async fn reload_env_handler(
 /// Returns the number of env vars that were refreshed.
 /// fields resolve to current values when subprocesses are spawned,
 /// without needing a full container restart.
-fn refresh_env_from_file(env_path: &str) -> u32 {
+pub fn refresh_env_from_file(env_path: &str) -> u32 {
     match std::fs::read_to_string(env_path) {
         Ok(content) => {
             let mut refreshed = 0u32;

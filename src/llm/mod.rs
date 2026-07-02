@@ -649,6 +649,43 @@ impl LLMClient {
     pub async fn completion(&self, request: CompletionRequest) -> AppResult<CompletionResponse> {
         let start = std::time::Instant::now();
 
+        // Built-in noop provider — returns a fake response without any HTTP call.
+        // The response quotes the user's last message, just like the original noop
+        // HTTP server. No external container or API key needed.
+        if self.config.provider.0 == "noop" {
+            let user_msg = request
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "user")
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+
+            let quoted: Vec<String> = user_msg.lines().map(|l| format!("> {l}")).collect();
+            let resp = CompletionResponse {
+                content: format!(
+                    "This is a reply to your message from the **test provider** `noop` \
+                     using the model **{}**.\n\n\
+                     Your original message:\n\n\
+                     {}\n\n\
+                     You can enable and configure other providers in the provider \
+                     settings of omni-dashboard.",
+                    self.config.model,
+                    quoted.join("\n")
+                ),
+                reasoning: None,
+                tool_calls: vec![],
+                usage: Some(Usage {
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    cached_tokens: None,
+                    reasoning_tokens: None,
+                }),
+                duration_ms: 0,
+            };
+            return Ok(resp);
+        }
+
         // Acquire a per-provider throttle permit before making the request.
         // The permit is held for the entire duration of the API call.
         let _permit = self.throttle.acquire(&self.config.provider.0).await;

@@ -166,6 +166,8 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
             "/api/plugins/install-url",
             post(plugins::install_url_handler),
         )
+        // ── Env reload (hot-reload .env without restart) ──
+        .route("/api/reload", post(plugins::reload_env_handler))
         // ── Settings routes ──
         .route("/settings", get(settings::get_settings_handler))
         .route("/settings", put(settings::update_settings_handler))

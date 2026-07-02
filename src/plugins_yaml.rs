@@ -11,6 +11,7 @@ use crate::error::{Error, AppResult, ErrorContext};
 use crate::err_msg;
 use crate::plugin::{ConfigSchemaField, PluginManifest, PluginType};
 use serde::{Deserialize, Serialize};
+use sql_forge::sql_forge;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
@@ -296,8 +297,21 @@ pub fn remove_entry(data_dir: &str, pt: &PluginYamlType, name: &str) -> AppResul
 // Enriched plugin building
 // ---------------------------------------------------------------------------
 
+/// Minimal row for resolving a $secret: reference from the secrets table.
+#[derive(Debug, sqlx::FromRow)]
+struct SecretValueRow {
+    current_value: String,
+}
+
 /// Resolve $env:VAR_NAME prefix in a config value string.
 /// Returns the env var value if found, or the original string if not (graceful fallback).
+///
+/// For `$secret:` prefix, the value is passed through unresolved
+/// (use the async `resolve_config_ref_value` for full resolution with a DB pool).
+///
+/// This function is for YAML plugin config values ONLY. It does NOT handle
+/// `${VAR}` syntax — that legacy format is only supported in `plugin.json`
+/// and `mcp-config.json` env blocks via `resolve_env_var`.
 pub fn resolve_config_value(value: &str) -> String {
     if let Some(var_name) = value.strip_prefix("$env:") {
         return std::env::var(var_name).unwrap_or_else(|_| {
@@ -305,12 +319,30 @@ pub fn resolve_config_value(value: &str) -> String {
             value.to_string()
         });
     }
+    // $secret: passes through — can't resolve without DB pool
+    if value.starts_with("$secret:") {
+        return value.to_string();
+    }
+    // No ${VAR} resolution — YAML config uses $env: and $secret: only
     value.to_string()
 }
 
 /// Resolve ${VAR} references in a string against the process environment.
 /// Unresolvable references are replaced with empty string.
+///
+/// This is for legacy `plugin.json`/`mcp-config.json` env block values only.
+/// YAML plugin config values should use `$env:` or `$secret:` instead.
+pub fn resolve_legacy_env_vars(value: &str) -> String {
+    resolve_legacy_vars(value)
+}
+
+/// Resolve `${VAR}` references (legacy format) in a value string.
 fn resolve_env_var(value: &str) -> String {
+    resolve_legacy_vars(value)
+}
+
+/// Resolve `${VAR}` references (legacy format) in a value string.
+fn resolve_legacy_vars(value: &str) -> String {
     let mut result = value.to_string();
     loop {
         let before = result.clone();
@@ -334,6 +366,63 @@ fn resolve_env_var(value: &str) -> String {
         }
     }
     result
+}
+
+// ---------------------------------------------------------------------------
+// Shared async config reference resolvers (for $env:, $secret:, ${VAR})
+// ---------------------------------------------------------------------------
+
+/// Resolve `$env:VAR` and `$secret:NAME` references in a single value.
+///
+/// - `$env:VAR` — reads from process environment via `std::env::var`
+/// - `$secret:NAME` — reads from the `secrets` table in the DB
+///
+/// For `$secret:`, returns the original string if DB lookup fails.
+/// Does NOT handle `${VAR}` — that legacy syntax is only resolved in
+/// `plugin.json`/`mcp-config.json` env blocks via the sync resolve path.
+pub async fn resolve_config_ref_value(value: &str, pool: &sqlx::PgPool) -> String {
+    if let Some(var_name) = value.strip_prefix("$env:") {
+        return std::env::var(var_name).unwrap_or_else(|_| {
+            tracing::warn!("Config ref $env:{} env var not set", var_name);
+            value.to_string()
+        });
+    }
+    if let Some(secret_name) = value.strip_prefix("$secret:") {
+        match sql_forge!(
+            SecretValueRow,
+            r#"SELECT current_value FROM secrets WHERE name = :secret_name"#,
+            ( :secret_name = secret_name )
+        )
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some(row)) => return row.current_value,
+            Ok(None) => {
+                tracing::warn!(
+                    "Config ref $secret:{} not found in secrets table",
+                    secret_name
+                );
+            }
+            Err(e) => {
+                tracing::error!("DB error resolving $secret:{}: {:?}", secret_name, e);
+            }
+        }
+    }
+    value.to_string()
+}
+
+/// Resolve `$env:VAR` and `$secret:NAME` references in all values of a config map.
+pub async fn resolve_config_refs(
+    env: &mut HashMap<String, String>,
+    pool: &sqlx::PgPool,
+) {
+    let keys: Vec<String> = env.keys().cloned().collect();
+    for key in keys {
+        if let Some(value) = env.remove(&key) {
+            let resolved = resolve_config_ref_value(&value, pool).await;
+            env.insert(key, resolved);
+        }
+    }
 }
 
 /// Build a `PluginDetail` from a disk manifest and YAML state.

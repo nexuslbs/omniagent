@@ -224,7 +224,7 @@ pub trait McpServerClient: Send + Sync {
                                 "current_channel_id must be set before tool call".to_string()
                             ))?;
 
-                        match call_tool_pooled_async(&sn, &tn, &args, channel_id).await {
+                        match call_tool_pooled_async(&sn, &tn, &args, channel_id, &ctx.pool).await {
                             Ok(res) => {
                                 circuit.record_success();
                                 Ok(res)
@@ -256,6 +256,7 @@ async fn call_tool_pooled_async(
         tool_name: &str,
         args: &Value,
         channel_id: i64,
+        pool: &sqlx::PgPool,
     ) -> AppResult<McpToolResult> {
         let config = {
             let configs = SERVER_CONFIGS
@@ -267,7 +268,7 @@ async fn call_tool_pooled_async(
                 .clone()
         };
 
-        let pool = {
+        let mcp_pool = {
             let key = (server_name.to_string(), channel_id);
             let existing = CLIENT_POOLS
                 .lock()
@@ -277,11 +278,14 @@ async fn call_tool_pooled_async(
             if let Some(pool) = existing {
                 pool
             } else {
+                // Resolve $secret: references in config.env before spawning subprocesses
+                let mut resolved_config = config.clone();
+                crate::plugins_yaml::resolve_config_refs(&mut resolved_config.env, pool).await;
                 // Create pool outside the lock to avoid holding it during spawn
                 // Use a fixed max pool cap (no env var — pool config comes from plugin config)
                 let max_pool: u32 = 5;
                 let pool_size = config.pool_size.max(1).min(max_pool);
-                let new_pool = McpClientPool::new(&config, pool_size)
+                let new_pool = McpClientPool::new(&resolved_config, pool_size)
                     .await
                     .map_err(|e| {
                         err_str!("Failed to create MCP pool for '{}': {}", server_name, e)
@@ -294,7 +298,7 @@ async fn call_tool_pooled_async(
             }
         };
 
-        pool.call_tool(tool_name, args, config.timeout_secs).await
+        mcp_pool.call_tool(tool_name, args, config.timeout_secs).await
     }
 
 /// Global registry of per-channel MCP connection pools.

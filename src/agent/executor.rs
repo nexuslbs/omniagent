@@ -270,12 +270,23 @@ pub async fn process_thread(
         let base_url = crate::llm::resolve_default_base_url(&provider_name_val);
         let api_mode = crate::llm::ApiMode::resolve(&provider_name_val, &model_name_val);
         let api_key = match crate::plugins_yaml::get_plugin(&cfg.ctx.data_dir, &provider_name_val) {
-            Ok(Some(detail)) => detail.config
-                .get("api_key")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .unwrap_or_default(),
+            Ok(Some(mut detail)) => {
+                // Resolve $secret: references in resolved_env for full resolution
+                crate::plugins_yaml::resolve_config_refs(&mut detail.resolved_env, &cfg.pool).await;
+                // Check resolved_env first (has all refs resolved), then fall back to config
+                detail.resolved_env
+                    .get("api_key")
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+                    .or_else(|| {
+                        detail.config
+                            .get("api_key")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| crate::plugins_yaml::resolve_config_value(s))
+                    })
+                    .unwrap_or_default()
+            }
             _ => String::new(),
         };
         let llm_cfg = LLMConfig {

@@ -9,6 +9,7 @@ use tracing_subscriber::EnvFilter;
 
 use omniagent::{agent, db, mcp, platform, scheduler, server, vectorizer};
 use omniagent::error::{AppResult, Error};
+use omniagent::server::plugins::refresh_env_from_file;
 
 /// OmniAgent — autonomous agent system with Postgres, pgvector, MCP tools.
 
@@ -56,6 +57,16 @@ async fn run_server() -> AppResult<()> {
     // Determine data directory (default: /opt/data)
     let data_dir = env_or_default("OMNI_DIR", "/opt/data");
     tracing::info!("Data directory: {}", data_dir);
+
+    // Refresh process environment from .env file — this overrides any stale
+    // Docker-loaded env vars with the current .env contents, so that $env:
+    // references in plugin manifests resolve to current values (e.g.
+    // MATTERMOST_ACCESS_TOKEN) even after the .env was modified at runtime.
+    let env_path = format!("{}/.env", data_dir);
+    let refreshed = refresh_env_from_file(&env_path);
+    if refreshed > 0 {
+        tracing::info!("Refreshed {} env var(s) from .env on startup", refreshed);
+    }
 
     // Determine workspace directory (default: /opt/workspace)
     let workspace_dir = env_or_default("WORKSPACE_DIR", "/opt/workspace");

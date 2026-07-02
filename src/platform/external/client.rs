@@ -342,33 +342,18 @@ impl Platform for ExternalPlatformClient {
             // Send configure message with the plugin's config
             let config_id = self.next_id.fetch_add(1, Ordering::SeqCst);
             let (config_name_for_log, configure_req) = {
-                let config = self.config.read().map_err(|_| Error::LockPoisoned)?;
-                let name = config.name.clone();
-                // Resolve $env: and ${VAR} refs synchronously so the plugin
+                // Clone env and name while holding the read lock, then drop
+                // the guard before any async work to keep the future Send.
+                let (name, env_map) = {
+                    let config = self.config.read().map_err(|_| Error::LockPoisoned)?;
+                    (config.name.clone(), config.env.clone())
+                    // RwLockReadGuard dropped here
+                };
+                // Resolve all config refs ($env:, $secret:, ${VAR}) so the plugin
                 // receives actual values (e.g. access_token), not literal
-                // references like "$env:MATTERMOST_ACCESS_TOKEN".
-                let mut resolved_env: HashMap<String, String> = config.env.iter().map(|(k, v)| {
-                    let resolved = if let Some(var) = v.strip_prefix("$env:") {
-                        std::env::var(var).unwrap_or_default()
-                    } else {
-                        v.to_string()
-                    };
-                    (k.clone(), resolved)
-                }).collect();
-                // Also resolve ${VAR} references
-                for val in resolved_env.values_mut() {
-                    let mut result = val.clone();
-                    while let Some(start) = result.find("${") {
-                        if let Some(end) = result[start..].find('}') {
-                            let var_name = &result[start + 2..start + end];
-                            let env_val = std::env::var(var_name).unwrap_or_default();
-                            result.replace_range(start..start + end + 1, &env_val);
-                        } else {
-                            break;
-                        }
-                    }
-                    *val = result;
-                }
+                // references like "$env:MATTERMOST_ACCESS_TOKEN" or "$secret:my_key".
+                let mut resolved_env = env_map;
+                crate::plugins_yaml::resolve_config_refs(&mut resolved_env, &pool).await;
                 let req = crate::platform::external::build_configure_request(config_id, &resolved_env);
                 (name, req)
             };

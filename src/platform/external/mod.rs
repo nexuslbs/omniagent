@@ -17,13 +17,6 @@ use std::path::Path;
 
 use crate::err_str;
 use crate::error::AppResult;
-use sql_forge::sql_forge;
-
-/// Minimal row for resolving a $secret: reference from the secrets table.
-#[derive(Debug, sqlx::FromRow)]
-struct SecretValueRow {
-    current_value: String,
-}
 
 // ---------------------------------------------------------------------------
 // Config types
@@ -218,85 +211,30 @@ fn merge_platform_config_env(
 
 /// Resolve `$env:VAR` and `$secret:NAME` references in a single value.
 ///
+/// Delegates to the shared `crate::plugins_yaml::resolve_config_ref_value`.
 /// - `$env:VAR` — reads from process environment via `std::env::var`
 /// - `$secret:NAME` — reads from the `secrets` table in the DB
-///
-/// For `$secret:`, returns the original string if DB lookup fails or if pool is None.
 pub async fn resolve_env_ref_value(value: &str, pool: &sqlx::PgPool) -> String {
-    if let Some(var_name) = value.strip_prefix("$env:") {
-        return std::env::var(var_name).unwrap_or_else(|_| {
-            tracing::warn!("Config env ref $env:{} not set", var_name);
-            value.to_string()
-        });
-    }
-    if let Some(secret_name) = value.strip_prefix("$secret:") {
-        match sql_forge!(
-            SecretValueRow,
-            r#"SELECT current_value FROM secrets WHERE name = :secret_name"#,
-            ( :secret_name = secret_name )
-        )
-        .fetch_optional(pool)
-        .await
-        {
-            Ok(Some(row)) => return row.current_value,
-            Ok(None) => {
-                tracing::warn!(
-                    "Config env ref $secret:{} not found in secrets table",
-                    secret_name
-                );
-            }
-            Err(e) => {
-                tracing::error!(
-                    "DB error resolving $secret:{}: {:?}",
-                    secret_name,
-                    e
-                );
-            }
-        }
-    }
-    // Also resolve plain ${VAR} references (legacy format)
-    let mut result = value.to_string();
-    while let Some(start) = result.find("${") {
-        if let Some(end) = result[start..].find('}') {
-            let var_name = &result[start + 2..start + end];
-            let env_val = std::env::var(var_name).unwrap_or_default();
-            result.replace_range(start..start + end + 1, &env_val);
-        } else {
-            break;
-        }
-    }
-    result
+    crate::plugins_yaml::resolve_config_ref_value(value, pool).await
 }
 
 /// Resolve `$env:VAR` and `$secret:NAME` references in all values of an env map.
 /// Also resolves legacy `${VAR}` references.
+///
+/// Delegates to the shared `crate::plugins_yaml::resolve_config_refs`.
 pub async fn resolve_env_refs(
     env: &mut std::collections::HashMap<String, String>,
     pool: &sqlx::PgPool,
 ) {
-    let keys: Vec<String> = env.keys().cloned().collect();
-    for key in keys {
-        if let Some(value) = env.remove(&key) {
-            let resolved = resolve_env_ref_value(&value, pool).await;
-            env.insert(key, resolved);
-        }
-    }
+    crate::plugins_yaml::resolve_config_refs(env, pool).await
 }
 
 /// Resolve environment variable references in a config value.
-/// Supports `${VAR_NAME}` syntax.
+/// Supports `${VAR_NAME}` syntax for legacy `plugin.json` env blocks.
+///
+/// Delegates to the shared `crate::plugins_yaml::resolve_legacy_env_vars`.
 pub fn resolve_env_vars(value: &str) -> String {
-    let mut result = value.to_string();
-    while let Some(start) = result.find("${") {
-        if let Some(end) = result[start..].find('}') {
-            let var_name = &result[start + 2..start + end];
-            let env_val = std::env::var(var_name).unwrap_or_default();
-            result.replace_range(start..start + end + 1, &env_val);
-        } else {
-            break;
-        }
-    }
-    result
+    crate::plugins_yaml::resolve_legacy_env_vars(value)
 }
 
 // ---------------------------------------------------------------------------
