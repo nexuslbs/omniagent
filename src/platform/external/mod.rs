@@ -36,8 +36,15 @@ pub struct PlatformPluginConfig {
     #[serde(default)]
     pub args: Vec<String>,
     /// Environment variables to set for the subprocess.
+    /// Only contains runtime env vars from the plugin.json `env` block
+    /// (e.g. RUST_LOG). NOT used for plugin config values.
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Plugin config values from platforms.yml, with original field names
+    /// (e.g. "access_token", "server_url"). Resolved from $env:/$secret:
+    /// references. Sent as configure params — plugins are env-var agnostic.
+    #[serde(default)]
+    pub config: HashMap<String, String>,
     /// Maximum consecutive failures before circuit breaker opens.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
@@ -142,6 +149,7 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
                                 command: manifest.entrypoint.clone().unwrap().command,
                                 args: manifest.entrypoint.unwrap().args,
                                 env: manifest.env,
+                                config: std::collections::HashMap::new(),
                                 max_retries: 3,
                             };
                             // ── Merge YAML config values into env map ──
@@ -190,21 +198,47 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
 
 /// Convenience wrapper: merge platforms.yml config into a PlatformPluginConfig.
 ///
-/// Delegates to the shared `crate::plugins_yaml::merge_yaml_config_into_env` function.
+/// Populates the `config` field with YAML config values using their original
+/// field names (e.g. "access_token", "server_url") — NOT prefixed env keys.
+/// The `env` field keeps only subprocess runtime vars (e.g. RUST_LOG from plugin.json).
+/// Config $env:/$secret: references are resolved inline.
 fn merge_platform_config_env(
     config: &PlatformPluginConfig,
     _config_schema: &serde_json::Value,
     data_dir: &str,
 ) -> PlatformPluginConfig {
     let mut merged_env = config.env.clone();
+    // Only runtime env vars from plugin.json — do NOT merge YAML config into env.
+    // YAML config values go to the `config` field with original field names.
     crate::plugins_yaml::merge_yaml_config_into_env(
         &mut merged_env,
         &config.name,
         data_dir,
         &crate::plugins_yaml::PluginYamlType::Platform,
     );
+
+    // Load YAML config with original field names (unprefixed) for configure params.
+    let mut config_map = std::collections::HashMap::new();
+    let yaml_config = crate::plugins_yaml::load_plugin_yaml_config(
+        &config.name,
+        data_dir,
+        &crate::plugins_yaml::PluginYamlType::Platform,
+    );
+    if let Some(ref cfg) = yaml_config {
+        if let Some(obj) = cfg.as_object() {
+            for (key, val) in obj {
+                let raw = val.as_str().map(|s| s.to_string()).unwrap_or_default();
+                let resolved = crate::plugins_yaml::resolve_config_value(&raw);
+                if !resolved.is_empty() {
+                    config_map.insert(key.clone(), resolved);
+                }
+            }
+        }
+    }
+
     PlatformPluginConfig {
         env: merged_env,
+        config: config_map,
         ..config.clone()
     }
 }

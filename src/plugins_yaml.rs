@@ -886,17 +886,17 @@ pub async fn refresh_plugin_models(data_dir: &str, name: &str) -> AppResult<Opti
 /// effect without requiring those values to be defined in .env.
 ///
 /// Works with all plugin types: platforms.yml, tools.yml, providers.yml.
-pub fn merge_yaml_config_into_env(
-    env: &mut HashMap<String, String>,
+/// Load the raw YAML config value for a specific plugin from platforms/tools/providers YAML.
+/// Returns the `config` object (a JSON Value) if found.
+pub fn load_plugin_yaml_config(
     plugin_name: &str,
     data_dir: &str,
     yaml_type: &PluginYamlType,
-) {
-    let prefix = plugin_name.to_uppercase().replace('-', "_");
+) -> Option<serde_json::Value> {
     let yaml_path = PathBuf::from(data_dir).join(yaml_type.yaml_file());
 
     // Load the YAML file and find this plugin's config
-    let config = (|| -> Option<serde_json::Value> {
+    (|| -> Option<serde_json::Value> {
         use std::collections::BTreeMap;
         let content = std::fs::read_to_string(yaml_path).ok()?;
         #[derive(Deserialize)]
@@ -921,8 +921,24 @@ pub fn merge_yaml_config_into_env(
             _ => return None,
         };
         section?.get(plugin_name)?.config.clone()
-    })();
+    })()
+}
 
+/// Merge YAML plugin config values into the env map with PREFIXED keys
+/// (e.g. "access_token" from YAML becomes "MYTOOL_ACCESS_TOKEN" in env).
+///
+/// This is used by MCP tool servers and provider plugins that need env vars
+/// with prefixed names. For platform plugins, use `load_plugin_yaml_config`
+/// directly — the `config` field (original keys) is sent as configure params.
+pub fn merge_yaml_config_into_env(
+    env: &mut HashMap<String, String>,
+    plugin_name: &str,
+    data_dir: &str,
+    yaml_type: &PluginYamlType,
+) {
+    let prefix = plugin_name.to_uppercase().replace('-', "_");
+
+    let config = load_plugin_yaml_config(plugin_name, data_dir, yaml_type);
     if let Some(ref entry_config) = config {
         if let Some(obj) = entry_config.as_object() {
             for (key, val) in obj {

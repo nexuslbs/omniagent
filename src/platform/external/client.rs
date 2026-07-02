@@ -342,22 +342,22 @@ impl Platform for ExternalPlatformClient {
             // Send configure message with the plugin's config
             let config_id = self.next_id.fetch_add(1, Ordering::SeqCst);
             let (config_name_for_log, configure_req) = {
-                // Clone env and name while holding the read lock, then drop
+                // Clone config map while holding the read lock, then drop
                 // the guard before any async work to keep the future Send.
-                let (name, env_map) = {
+                let (name, config_map) = {
                     let config = self.config.read().map_err(|_| Error::LockPoisoned)?;
-                    (config.name.clone(), config.env.clone())
+                    (config.name.clone(), config.config.clone())
                     // RwLockReadGuard dropped here
                 };
                 // Resolve all config refs ($env:, $secret:, ${VAR}) so the plugin
                 // receives actual values (e.g. access_token), not literal
                 // references like "$env:MATTERMOST_ACCESS_TOKEN" or "$secret:my_key".
-                let mut resolved_env = env_map;
-                crate::plugins_yaml::resolve_config_refs(&mut resolved_env, &pool).await;
-                let req = crate::platform::external::build_configure_request(config_id, &resolved_env);
+                let mut resolved_config = config_map;
+                crate::plugins_yaml::resolve_config_refs(&mut resolved_config, &pool).await;
+                let req =
+                    crate::platform::external::build_configure_request(config_id, &resolved_config);
                 (name, req)
             };
-            tracing::debug!("Sending configure request to '{}'", config_name_for_log);
             stdin.write_all(configure_req.as_bytes()).await?;
             stdin.write_all(b"\n").await?;
             stdin.flush().await?;
