@@ -13,6 +13,7 @@ use axum::{
 };
 use serde::Deserialize;
 use sqlx;
+use sql_forge::sql_forge;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -80,10 +81,11 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
             for detail in details.iter_mut() {
                 for val in detail.resolved_env.values_mut() {
                     if let Some(secret_name) = val.strip_prefix("$secret:") {
-                        let lookup = sqlx::query_scalar::<_, String>(
-                            "SELECT current_value FROM secrets WHERE name = $1"
+                        let lookup = sql_forge!(
+                            String,
+                            "SELECT current_value FROM secrets WHERE name = :name",
+                            ( :name = secret_name )
                         )
-                        .bind(secret_name)
                         .fetch_optional(&state.pool)
                         .await;
                         match lookup {
@@ -138,10 +140,11 @@ pub(crate) async fn get_plugin_handler(
             // Resolve $secret: references in resolved_env
             for val in detail.resolved_env.values_mut() {
                 if let Some(secret_name) = val.strip_prefix("$secret:") {
-                    let lookup = sqlx::query_scalar::<_, String>(
-                        "SELECT current_value FROM secrets WHERE name = $1"
+                    let lookup = sql_forge!(
+                        String,
+                        "SELECT current_value FROM secrets WHERE name = :name",
+                        ( :name = secret_name )
                     )
-                    .bind(secret_name)
                     .fetch_optional(&state.pool)
                     .await;
                     match lookup {

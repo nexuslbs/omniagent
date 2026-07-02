@@ -41,7 +41,7 @@ Provider plugins can define a `refresh_url` on `enum` type `config_schema` field
 
 3. **In-memory cache** — `DYNAMIC_ENUM_CACHE` (Mutex\<HashMap\<String, DynamicEnumEntry\>\>) with a 5-minute TTL. Cache is checked when enriching plugin data for API responses (`enrich_plugin()`).
 
-4. **API key resolution** — for authenticated endpoints, the key is resolved from the provider-specific `{PLUGIN_NAME}_API_KEY` environment variable, sent as a `Bearer` token.
+4. **API key resolution** — for authenticated endpoints, the key is resolved from the provider's resolved plugin config (`detail.config.api_key`), sent as a `Bearer` token.
 
 5. **Graceful fallback** — if the fetch fails, existing `allowed_values` are preserved (either hardcoded fallbacks in `plugin.json` or the previous cache entry).
 
@@ -916,7 +916,7 @@ The binary reads `.env` automatically via `dotenvy`.
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Messages stay `pending` | Channel stopped or agent not running | Check `GET /health`, resume channel |
-| LLM call fails | API key missing or invalid | Check `LLM_API_KEY` in `.env` |
+|| LLM call fails | API key missing or invalid | Check provider plugin config in `providers.yml` |
 | Processing stuck at `processing` | Container restarted mid-call | On restart, pending/processing messages are marked as skipped |
 | No model configured | Profile + channel both lack model | Set `current_model` on channel or `model` on profile |
 | Tools returning errors | Path outside data directory | Ensure file paths are under `OMNI_DIR` |

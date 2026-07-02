@@ -183,7 +183,7 @@ pub struct ConfigSchemaField {
 1. Fetches plugin by name from `plugin_registry` table
 2. Enriches to `PluginDetail` with parsed config_schema
 3. Iterates schema fields looking for non-empty `refresh_url`
-4. Resolves API key: `{PLUGIN_NAME}_API_KEY` → `LLM_API_KEY` env vars (uppercased, dashes → underscores)
+4. Resolves API key: from the provider's resolved plugin config (`detail.config.api_key`), no hardcoded env var names
 5. Calls `fetch_enum_values(url, api_key)` — GET request with 5s timeout, Bearer auth if key present
 6. Parses response as `{data: [{id: "model-name"}, ...]}` (OpenAI `/v1/models` format)
 7. On success: updates the field's `allowed_values` + populates the in-memory cache
@@ -191,13 +191,23 @@ pub struct ConfigSchemaField {
 9. Returns `Some(detail)` if any field had a refresh_url, `None` otherwise
 
 **API key resolution logic:**
+The API key is read from the provider's resolved plugin config (`detail.config.get("api_key")`), which already resolves `$env:` references defined by the user in `providers.yml`. No hardcoded env var names are used.
+
 ```rust
-let api_key = std::env::var(format!("{}_API_KEY", name.to_uppercase().replace('-', "_")))
-    .ok().filter(|k| !k.is_empty())
-    .or_else(|| std::env::var("LLM_API_KEY").ok().filter(|k| !k.is_empty()));
+let api_key = detail.config
+    .get("api_key")
+    .and_then(|v| v.as_str())
+    .filter(|s| !s.is_empty())
+    .map(|s| s.to_string());
 ```
 
-So for the `deepseek` plugin, it checks `DEEPSEEK_API_KEY` first, then `LLM_API_KEY`.
+So for the `deepseek` plugin, the key comes from `providers.yml`:
+```yaml
+deepseek:
+  enabled: true
+  config:
+    api_key: "$env:DEEPSEEK_API_KEY"
+```
 
 **Response format:**
 ```json
