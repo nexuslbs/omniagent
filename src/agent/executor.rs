@@ -7,7 +7,7 @@ use tokio::task::JoinSet;
 use crate::agent::helpers;
 use crate::db::types as queries;
 use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
-use crate::llm::{ChatMessage, CompletionRequest, Usage};
+use crate::llm::{ChatMessage, CompletionRequest, LLMClient, LLMConfig, ProviderId, Usage};
 use crate::mcp::McpToolCall;
 use crate::mcp::{truncate_content, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
 use crate::prompt_builder::{format_subtask_section, PlanningPromptParams};
@@ -262,8 +262,33 @@ pub async fn process_thread(
         .unwrap_or_else(|| crate::profile::Profile::default(&profile_name));
 
     // Use provider/model directly from the thread stamp (no fallback chain)
-    let _provider_name = provider_name;
-    let _model_name = model_name;
+    let provider_name_val = provider_name.clone().unwrap_or_default();
+    let model_name_val = model_name.clone().unwrap_or_default();
+    // Create a per-thread LLM client using the thread's provider/model
+    // (not the shared agent-level one which uses the env default provider).
+    let per_thread_llm = {
+        let base_url = crate::llm::resolve_default_base_url(&provider_name_val);
+        let api_mode = crate::llm::ApiMode::resolve(&provider_name_val, &model_name_val);
+        let api_key = match crate::plugins_yaml::get_plugin(&cfg.ctx.data_dir, &provider_name_val) {
+            Ok(Some(detail)) => detail.config
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        let llm_cfg = LLMConfig {
+            provider: ProviderId::new(&provider_name_val),
+            api_key,
+            base_url,
+            model: model_name_val,
+            api_mode,
+            max_tokens: cfg.config_snapshot().max_tokens,
+            temperature: cfg.config_snapshot().temperature,
+        };
+        LLMClient::new(llm_cfg)
+    };
 
     // 4. Build the initial message history with the structured system prompt
     let tool_names: Vec<String> = cfg.mcp.read().unwrap().all().iter().map(|t| t.name.clone()).collect();
@@ -491,7 +516,7 @@ pub async fn process_thread(
                 tools: None,
             };
 
-            match cfg.llm.completion(plan_request).await {
+            match per_thread_llm.completion(plan_request).await {
                 Ok(resp) => {
                     helpers::merge_usage(&mut cumulative_usage, resp.usage.clone());
                     // Use reasoning as fallback when plan content is empty (e.g. DeepSeek
@@ -859,7 +884,7 @@ pub async fn process_thread(
             },
         };
 
-        let response = match cfg.llm.completion(request).await {
+        let response = match per_thread_llm.completion(request).await {
             Ok(resp) => resp,
             Err(e) => {
                 error!("LLM call failed: {:?}", e);
@@ -1396,7 +1421,7 @@ pub async fn process_thread(
         };
 
         let summary_start = std::time::Instant::now();
-        let (summary_text, summary_token_usage) = match cfg.llm.completion(summary_request).await {
+        let (summary_text, summary_token_usage) = match per_thread_llm.completion(summary_request).await {
             Ok(resp) => {
                 let usage = resp.usage.clone();
                 helpers::merge_usage(&mut cumulative_usage, resp.usage);
