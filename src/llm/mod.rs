@@ -1,9 +1,8 @@
 //! LLM provider abstraction — supports multiple backends with reasoning and caching.
 //!
-//! Providers are configured via environment variables:
-//! - `LLM_PROVIDER` — "opencode-go" (default), "deepseek", "openai", "anthropic"
-//! - `LLM_MAX_TOKENS` — Max tokens (default: 8192)
-//! - `LLM_TEMPERATURE` — Temperature (default: 0.7)
+//! Providers are configured via plugin config (providers.yml with $env: references).
+//! The only hardcoded env var names are the infrastructure defaults set by the
+//! deployment repo: `OMNI_DATA_DIR`, `WORKSPACE_DIR`, and `LLM_PROVIDER`.
 //!
 //! The API key comes from the provider's plugin config (providers.yml with $env:
 //! references). The startup fallback is empty — no hardcoded env var names.
@@ -313,14 +312,8 @@ impl LLMConfig {
             api_key,
             base_url,
             model,
-            max_tokens: std::env::var("LLM_MAX_TOKENS")
-                .unwrap_or_else(|_| "8192".to_string())
-                .parse()
-                .unwrap_or(8192),
-            temperature: std::env::var("LLM_TEMPERATURE")
-                .unwrap_or_else(|_| "0.7".to_string())
-                .parse()
-                .unwrap_or(0.7),
+            max_tokens: 8192,
+            temperature: 0.7,
         }
     }
 }

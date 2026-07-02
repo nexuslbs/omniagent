@@ -278,12 +278,8 @@ async fn call_tool_pooled_async(
                 pool
             } else {
                 // Create pool outside the lock to avoid holding it during spawn
-                // Apply global MAX_POOL_CONNECTIONS cap from settings
-                let max_pool = std::env::var("MAX_POOL_CONNECTIONS")
-                    .ok()
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .unwrap_or(5)
-                    .max(1);
+                // Use a fixed max pool cap (no env var — pool config comes from plugin config)
+                let max_pool: u32 = 5;
                 let pool_size = config.pool_size.max(1).min(max_pool);
                 let new_pool = McpClientPool::new(&config, pool_size)
                     .await
