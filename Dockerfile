@@ -27,7 +27,7 @@ FROM debian:trixie-slim
 
 # Install runtime dependencies
 RUN apt-get update -qq && \
-    apt-get install -y -qq ca-certificates curl && \
+    apt-get install -y -qq ca-certificates curl python3 && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy Docker CLI (compose v2 is built into the docker binary)
