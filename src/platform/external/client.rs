@@ -1149,12 +1149,13 @@ async fn handle_external_profile_command(
             format!("Profile set to '{}'.", name)
         }
         crate::commands::ProfileCommand::Reset => {
+            let default_name = crate::profile::default_profile_name();
             if let Err(e) =
-                crate::commands::handle_profile_set(pool, current_channel.id, "default").await
+                crate::commands::handle_profile_set(pool, current_channel.id, &default_name).await
             {
                 return format!("Error resetting profile: {}", e);
             }
-            "Profile reset to 'default'.".to_string()
+            format!("Profile reset to '{}'.", default_name)
         }
     }
 }

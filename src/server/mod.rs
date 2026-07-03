@@ -56,6 +56,8 @@ pub(crate) struct AppState {
     data_dir: String,
     /// Workspace directory for bundled plugin discovery
     workspace_dir: String,
+    /// Default profile name (from DEFAULT_PROFILE env var)
+    default_profile: String,
     /// Path to the .env file for settings API
     env_path: String,
     /// MCP tool registry for executing actions (shared with agent)
@@ -77,6 +79,7 @@ pub struct ServerConfig {
     pub cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
     pub data_dir: String,
     pub workspace_dir: String,
+    pub default_profile: String,
     pub mcp_registry: Arc<std::sync::RwLock<McpRegistry>>,
     pub app_context: AppContext,
     pub shared_config: Arc<RwLock<AgentConfig>>,
@@ -90,6 +93,7 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         cancel_tokens: config.cancel_tokens,
         data_dir: config.data_dir.clone(),
         workspace_dir: config.workspace_dir.clone(),
+        default_profile: config.default_profile.clone(),
         env_path: format!("{}/.env", config.data_dir),
         mcp_registry: config.mcp_registry,
         app_context: config.app_context,
@@ -479,7 +483,7 @@ async fn prompt_handler(
 
     let profile_name = match channel.as_ref() {
         Some(ch) if !ch.current_profile.is_empty() => &ch.current_profile,
-        _ => "default",
+        _ => &state.default_profile,
     };
 
     let profile_path = format!("{}/profiles/{}", state.data_dir, profile_name);
@@ -579,7 +583,7 @@ async fn prompt_preview_handler(
 
     let profile_name = match channel.as_ref() {
         Some(ch) if !ch.current_profile.is_empty() => &ch.current_profile,
-        _ => "default",
+        _ => &state.default_profile,
     };
 
     let profile_path = format!("{}/profiles/{}", state.data_dir, profile_name);
@@ -835,7 +839,7 @@ async fn context_preview_handler(
     };
 
     let profile_name = if channel.current_profile.is_empty() {
-        "default"
+        &state.default_profile
     } else {
         &channel.current_profile
     };

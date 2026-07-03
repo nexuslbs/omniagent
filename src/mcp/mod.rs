@@ -98,7 +98,7 @@ impl AppContext {
         platform_senders: HashMap<String, OutboundSender>,
     ) -> Self {
         // Load memory store from the default profile's memories directory
-        let profile_path = format!("{}/profiles/default", data_dir);
+        let profile_path = format!("{}/profiles/{}", data_dir, crate::profile::default_profile_name());
         let mut memory_store = MemoryStore::new(&profile_path);
         memory_store.load_from_disk();
 

@@ -159,6 +159,11 @@ impl Profile {
     }
 }
 
+/// Read the default profile name from the DEFAULT_PROFILE env var, falling back to "default".
+pub fn default_profile_name() -> String {
+    std::env::var("DEFAULT_PROFILE").unwrap_or_else(|_| "default".to_string())
+}
+
 /// The profile configuration loaded from the data directory.
 /// Maps profile names to their configurations.
 #[derive(Debug, Clone)]
@@ -172,9 +177,10 @@ pub struct ProfileRegistry {
 impl ProfileRegistry {
     /// Create a new registry, scanning the data directory for profiles.
     pub fn new(data_dir: &str) -> Self {
+        let default = default_profile_name();
         let mut registry = Self {
             profiles: HashMap::new(),
-            default_profile: "default".to_string(),
+            default_profile: default.clone(),
             data_dir: data_dir.to_string(),
         };
         registry.scan_filesystem();
@@ -212,9 +218,11 @@ impl ProfileRegistry {
 
     /// Ensure the default profile exists.
     fn ensure_default(&mut self) {
-        if !self.profiles.contains_key("default") {
-            self.profiles
-                .insert("default".to_string(), Profile::default("default"));
+        if !self.profiles.contains_key(&self.default_profile) {
+            self.profiles.insert(
+                self.default_profile.clone(),
+                Profile::default(&self.default_profile),
+            );
         }
     }
 
@@ -222,14 +230,14 @@ impl ProfileRegistry {
     pub fn get(&self, name: &str) -> Option<&Profile> {
         self.profiles
             .get(name)
-            .or_else(|| self.profiles.get("default"))
+            .or_else(|| self.profiles.get(&self.default_profile))
     }
 
     /// Get the default profile.
     #[allow(dead_code)]
     pub fn default(&self) -> &Profile {
         self.profiles
-            .get("default")
+            .get(&self.default_profile)
             .expect("Default profile must exist")
     }
 
@@ -268,7 +276,8 @@ mod tests {
     #[test]
     fn test_registry_empty_data_dir() {
         let registry = ProfileRegistry::new("/tmp/nonexistent");
-        assert!(registry.get("default").is_some());
-        assert!(registry.list_names().contains(&"default".to_string()));
+        let default_name = crate::profile::default_profile_name();
+        assert!(registry.get(&default_name).is_some());
+        assert!(registry.list_names().contains(&default_name));
     }
 }

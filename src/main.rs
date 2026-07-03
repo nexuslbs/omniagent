@@ -7,7 +7,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
-use omniagent::{agent, db, mcp, platform, scheduler, server, vectorizer};
+use omniagent::{agent, db, mcp, platform, profile, scheduler, server, vectorizer};
 use omniagent::error::{AppResult, Error};
 use omniagent::server::plugins::refresh_env_from_file;
 
@@ -57,6 +57,9 @@ async fn run_server() -> AppResult<()> {
     // Determine data directory from OMNI_DIR env var (required)
     let data_dir = std::env::var("OMNI_DIR").expect("OMNI_DIR must be set");
     tracing::info!("Data directory: {}", data_dir);
+
+    let default_profile = profile::default_profile_name();
+    tracing::info!("Default profile: {}", default_profile);
 
     // Refresh process environment from .env file — this overrides any stale
     // Docker-loaded env vars with the current .env contents, so that $env:
@@ -164,6 +167,7 @@ async fn run_server() -> AppResult<()> {
             cancel_tokens: cancel_tokens_server,
             data_dir: data_dir_server,
             workspace_dir,
+            default_profile: default_profile.clone(),
             mcp_registry: mcp_for_server,
             app_context: ctx_for_server,
             shared_config: shared_config_for_server,

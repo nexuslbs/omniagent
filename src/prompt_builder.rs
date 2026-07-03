@@ -515,7 +515,7 @@ pub fn build_system_prompt_parts(
     ];
 
     // Profile hint
-    if profile_name == "default" {
+    if profile_name == crate::profile::default_profile_name() {
         stable_parts.push(PROFILE_HINT.to_string());
     } else {
         stable_parts.push(format!(

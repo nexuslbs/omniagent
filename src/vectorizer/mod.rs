@@ -809,7 +809,7 @@ pub async fn spawn_vectorizers(pool: PgPool, config: Arc<RwLock<crate::agent::Ag
             ..Default::default()
         };
         let wiki_vec = WikiVectorizer::new(
-            format!("{}/profiles/default/wiki", data_dir),
+            format!("{}/profiles/{}/wiki", data_dir, crate::profile::default_profile_name()),
             qdrant_url.clone(),
             make_vectorizer(
                 &wiki_config.method,

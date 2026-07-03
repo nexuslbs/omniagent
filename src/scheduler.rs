@@ -196,7 +196,10 @@ async fn tick(
         let prof = profile_registry
             .get(&profile_name)
             .cloned()
-            .unwrap_or_else(|| crate::profile::Profile::default("default"));
+            .unwrap_or_else(|| {
+                let default_name = &profile_registry.default_profile;
+                crate::profile::Profile::default(default_name)
+            });
 
         // Use the shared resolution function for provider and model
         let resolved = resolve_thread_config(
@@ -849,7 +852,10 @@ pub async fn fire_cron_job_by_id(
     let prof = profile_registry
         .get(&profile_name)
         .cloned()
-        .unwrap_or_else(|| crate::profile::Profile::default("default"));
+        .unwrap_or_else(|| {
+            let default_name = &profile_registry.default_profile;
+            crate::profile::Profile::default(default_name)
+        });
 
     let resolved = resolve_thread_config(
         job.profile.as_deref(),
