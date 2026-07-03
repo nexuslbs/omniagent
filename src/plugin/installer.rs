@@ -238,6 +238,7 @@ pub fn install_from_git(
     remote_type: &str,
     workspace_dir: &str,
     data_dir: &str,
+    repo_path: Option<&str>,
 ) -> AppResult<PluginManifest> {
     let external_dir = format!("{}/plugins/{}/external/{}", workspace_dir, remote_type, name);
     let external_path = std::path::Path::new(&external_dir);
@@ -291,7 +292,11 @@ pub fn install_from_git(
     }
 
     // Find plugin.json in the cloned directory
-    let plugin_json_path = find_plugin_json(external_path)?;
+    let search_dir = match repo_path {
+        Some(p) if !p.is_empty() => external_path.join(p),
+        _ => external_path.clone(),
+    };
+    let plugin_json_path = find_plugin_json(&search_dir)?;
     let manifest = load_manifest(&plugin_json_path)?;
 
     // Copy to data_dir

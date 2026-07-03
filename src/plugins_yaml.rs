@@ -47,6 +47,9 @@ pub struct PluginRemote {
     /// The plugin type directory to clone into: one of "mcp", "platform", "provider".
     #[serde(rename = "type")]
     pub remote_type: String,
+    /// Optional subdirectory path within the repo where plugin.json lives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 impl PluginRemote {

@@ -48,6 +48,9 @@ pub(crate) struct InstallGitRequest {
     remote_type: String,
     /// Optional name override. If not provided, extracted from plugin.json.
     name: Option<String>,
+    /// Optional subdirectory path within the repo where plugin.json lives.
+    /// Example: "plugins/my-plugin" if plugin.json is not at the repo root.
+    path: Option<String>,
 }
 
 /// Build the plugin management router, reusing the main server's state.
@@ -719,6 +722,7 @@ pub(crate) async fn reinstall_plugin_handler(
             &remote.remote_type,
             workspace_dir,
             data_dir,
+            remote.path.as_deref(),
         ) {
             let msg = format!("Reinstall: failed to re-clone git plugin '{}': {}", name, e);
             tracing::error!("{}", msg);
@@ -1672,6 +1676,7 @@ pub(crate) async fn install_git_handler(
         &body.remote_type,
         &state.workspace_dir,
         &state.data_dir,
+        body.path.as_deref(),
     ) {
         Ok(m) => m,
         Err(e) => {
@@ -1767,11 +1772,17 @@ pub(crate) async fn install_git_handler(
 
     // Register in YAML with the remote field
     let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
-    let remote_val = serde_json::json!({
-        "url": body.url,
-        "git_ref": body.git_ref,
-        "type": body.remote_type,
-    });
+    // Build remote value with optional path
+    let mut remote_val_map = serde_json::Map::new();
+    remote_val_map.insert("url".to_string(), serde_json::json!(body.url));
+    if let Some(ref git_ref) = body.git_ref {
+        remote_val_map.insert("git_ref".to_string(), serde_json::json!(git_ref));
+    }
+    remote_val_map.insert("type".to_string(), serde_json::json!(body.remote_type));
+    if let Some(ref path) = body.path {
+        remote_val_map.insert("path".to_string(), serde_json::json!(path));
+    }
+    let remote_val = serde_json::Value::Object(remote_val_map);
 
     match plugins_yaml::set_entry_with_remote(
         &state.data_dir,
