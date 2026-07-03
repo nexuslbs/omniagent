@@ -219,8 +219,120 @@ fn find_plugin_json(dir: &Path) -> AppResult<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Uninstall
+// Install from Git
 // ---------------------------------------------------------------------------
+
+/// Clone a plugin from a git repository into `<workspace_dir>/plugins/<type_dir>/external/<name>/`,
+/// then copy it to `<data_dir>/plugins/<type_dir>/<name>/` and return the manifest.
+///
+/// Steps:
+/// 1. Shallow clone (`--depth 1`) the repo into the external dir
+/// 2. If a git_ref is specified, check it out after clone
+/// 3. Find plugin.json in the cloned directory
+/// 4. Copy to data_dir (removes existing if present)
+/// 5. Return the parsed PluginManifest
+pub fn install_from_git(
+    url: &str,
+    name: &str,
+    git_ref: Option<&str>,
+    remote_type: &str,
+    workspace_dir: &str,
+    data_dir: &str,
+) -> AppResult<PluginManifest> {
+    let external_dir = format!("{}/plugins/{}/external/{}", workspace_dir, remote_type, name);
+    let external_path = std::path::Path::new(&external_dir);
+
+    // Remove existing clone if present
+    if external_path.exists() {
+        std::fs::remove_dir_all(external_path)
+            .ctx(format!("Failed to remove existing clone at {}", external_dir))?;
+    }
+
+    // Create parent directories
+    if let Some(parent) = external_path.parent() {
+        std::fs::create_dir_all(parent)
+            .ctx(format!("Failed to create parent dirs for {}", external_dir))?;
+    }
+
+    tracing::info!(
+        "Cloning git plugin '{}' from {} (ref: {:?}) to {}",
+        name, url, git_ref, external_dir
+    );
+
+    // Shallow clone
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("clone").arg("--depth").arg("1").arg(url).arg(&external_dir);
+
+    let status = cmd.status().ctx(format!(
+        "Failed to execute git clone for '{}' from {}",
+        name, url
+    ))?;
+
+    if !status.success() {
+        err_msg!("git clone failed for '{}' from {} with status: {}", name, url, status);
+    }
+
+    // Checkout specific ref if specified
+    if let Some(ref_str) = git_ref {
+        if !ref_str.is_empty() {
+            tracing::info!("Checking out ref '{}' for plugin '{}'", ref_str, name);
+            let checkout_status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&external_dir)
+                .arg("checkout")
+                .arg(ref_str)
+                .status()
+                .ctx(format!("Failed to git checkout {} for '{}'", ref_str, name))?;
+
+            if !checkout_status.success() {
+                err_msg!("git checkout '{}' failed for '{}' with status: {}", ref_str, name, checkout_status);
+            }
+        }
+    }
+
+    // Find plugin.json in the cloned directory
+    let plugin_json_path = find_plugin_json(external_path)?;
+    let manifest = load_manifest(&plugin_json_path)?;
+
+    // Copy to data_dir
+    let install_dir = format!("{}/plugins/{}/{}", data_dir, remote_type, name);
+    let install_path = std::path::Path::new(&install_dir);
+
+    if install_path.exists() {
+        std::fs::remove_dir_all(install_path).ctx(format!(
+            "Failed to remove existing plugin directory: {}",
+            install_dir
+        ))?;
+    }
+
+    let parent = install_path
+        .parent()
+        .ok_or_else(|| Error::Message(format!("Install path has no parent: {}", install_dir)))?;
+    std::fs::create_dir_all(parent)
+        .ctx(format!("Failed to create parent directories for: {}", install_dir))?;
+
+    let extracted_dir = std::path::Path::new(&plugin_json_path)
+        .parent()
+        .ok_or_else(|| Error::Message(format!("Plugin JSON path has no parent: {}", plugin_json_path)))?;
+    copy_dir_recursive(extracted_dir, install_path)?;
+
+    // Verify the installed manifest
+    let installed_manifest_path = format!("{}/plugin.json", install_dir);
+    let manifest = load_manifest(&installed_manifest_path).ctx(format!(
+        "Failed to verify installed plugin manifest at: {}",
+        installed_manifest_path
+    ))?;
+
+    tracing::info!(
+        "Installed git plugin '{}' version {} from {} (ref: {:?})",
+        manifest.name,
+        manifest.version,
+        url,
+        git_ref
+    );
+
+    Ok(manifest)
+}
 
 /// Remove a plugin directory from `<data_dir>/plugins/installed/<name>/`.
 pub fn uninstall(name: &str, data_dir: &str) -> AppResult<()> {

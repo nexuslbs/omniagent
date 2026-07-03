@@ -38,6 +38,18 @@ pub(crate) struct InstallUrlRequest {
     url: String,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct InstallGitRequest {
+    url: String,
+    /// Optional git ref (branch, tag, or commit SHA). Defaults to repo HEAD.
+    git_ref: Option<String>,
+    /// The plugin type directory: "mcp", "platform", or "provider".
+    #[serde(rename = "type")]
+    remote_type: String,
+    /// Optional name override. If not provided, extracted from plugin.json.
+    name: Option<String>,
+}
+
 /// Build the plugin management router, reusing the main server's state.
 #[allow(dead_code)]
 pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
@@ -62,6 +74,7 @@ pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
         .route("/api/plugins/{name}/setup", post(setup_plugin_handler))
         .route("/api/plugins/{name}", delete(delete_plugin_handler))
         .route("/api/plugins/install-url", post(install_url_handler))
+        .route("/api/plugins/install-git", post(install_git_handler))
         .route("/api/reload", post(reload_env_handler))
 }
 
@@ -667,12 +680,60 @@ pub(crate) async fn install_plugin_handler(
 }
 
 /// POST /api/plugins/:name/reinstall — re-scan from disk, recompile if Rust, and reload.
+/// For remote (git) plugins, this re-clones the repository first.
 pub(crate) async fn reinstall_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    // 1. Try to compile the plugin if it's a Rust crate
     let data_dir = &state.data_dir;
+    let workspace_dir = &state.workspace_dir;
+
+    // Check if this plugin has a remote — if so, re-clone first
+    let remote_info = plugins_yaml::get_entry(data_dir, &plugins_yaml::PluginYamlType::Tool, &name)
+        .ok()
+        .flatten()
+        .and_then(|e| e.remote)
+        .or_else(|| {
+            plugins_yaml::get_entry(data_dir, &plugins_yaml::PluginYamlType::Platform, &name)
+                .ok()
+                .flatten()
+                .and_then(|e| e.remote)
+        })
+        .or_else(|| {
+            plugins_yaml::get_entry(data_dir, &plugins_yaml::PluginYamlType::Provider, &name)
+                .ok()
+                .flatten()
+                .and_then(|e| e.remote)
+        });
+
+    if let Some(ref remote) = remote_info {
+        tracing::info!(
+            "Reinstall: re-cloning git plugin '{}' from {} (ref: {:?})",
+            name, remote.url, remote.git_ref
+        );
+        // Re-clone (install_from_git handles removing old clone + copying to data_dir)
+        if let Err(e) = plugin::installer::install_from_git(
+            &remote.url,
+            &name,
+            remote.git_ref.as_deref(),
+            &remote.remote_type,
+            workspace_dir,
+            data_dir,
+        ) {
+            let msg = format!("Reinstall: failed to re-clone git plugin '{}': {}", name, e);
+            tracing::error!("{}", msg);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": msg,
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // 1. Try to compile the plugin if it's a Rust crate
     let plugin_dirs = [
         format!("{}/plugins/mcp/{}", data_dir, name),
         format!("{}/plugins/installed/{}", data_dir, name),
@@ -1397,6 +1458,7 @@ pub(crate) async fn delete_plugin_handler(
     // Also remove from disk — scan all possible locations
     // For installed plugins: remove entire directory.
     // For bundled plugins: remove target/ (compiled binary) but keep source.
+    // For remote plugins: also remove workspace external/ clone.
     let plugin_dirs = [
         format!("{}/plugins/installed/{}", &state.data_dir, name),
         format!("{}/plugins/mcp/{}", &state.data_dir, name),
@@ -1442,6 +1504,28 @@ pub(crate) async fn delete_plugin_handler(
                     Err(e) => {
                         tracing::warn!("Failed to delete plugin directory '{}': {:?}", dir, e);
                     }
+                }
+            }
+        }
+    }
+
+    // If this is a remote plugin, also remove the workspace external/ clone
+    let workspace_dir = std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
+    let external_dirs = [
+        format!("{}/plugins/mcp/external/{}", workspace_dir, name),
+        format!("{}/plugins/platforms/external/{}", workspace_dir, name),
+        format!("{}/plugins/providers/external/{}", workspace_dir, name),
+    ];
+    for ext_dir in &external_dirs {
+        let ext_path = std::path::Path::new(ext_dir);
+        if ext_path.exists() && ext_path.is_dir() {
+            match std::fs::remove_dir_all(ext_path) {
+                Ok(()) => {
+                    tracing::info!("Removed external clone: {}", ext_dir);
+                    disk_removed = true;
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to remove external clone '{}': {:?}", ext_dir, e);
                 }
             }
         }
@@ -1548,7 +1632,200 @@ pub(crate) async fn install_url_handler(
     }
 }
 
-/// POST /api/reload — reload all env vars from the .env file into the process environment.
+/// POST /api/plugins/install-git — install a plugin from a git repository.
+///
+/// Body:
+/// - `url` (required): git clone URL
+/// - `git_ref` (optional): branch, tag, or commit SHA
+/// - `type` (required): "mcp", "platform", or "provider"
+/// - `name` (optional): plugin name override (extracted from plugin.json if omitted)
+///
+/// Flow: shallow clone to external/ → copy to data_dir → compile if Rust → register in YAML.
+pub(crate) async fn install_git_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<InstallGitRequest>,
+) -> impl IntoResponse {
+    // Validate remote_type
+    if body.remote_type != "mcp" && body.remote_type != "platform" && body.remote_type != "provider" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid plugin type '{}'. Must be one of: mcp, platform, provider", body.remote_type)
+            })),
+        )
+            .into_response();
+    }
+
+    info!(
+        "Installing git plugin from {} (ref: {:?}, type: {})",
+        body.url, body.git_ref, body.remote_type
+    );
+
+    // Clone and copy to data_dir (name unknown until manifest is parsed)
+    let manifest = match plugin::installer::install_from_git(
+        &body.url,
+        // Use a temporary name for the clone directory if name not provided;
+        // the actual name comes from plugin.json
+        body.name.as_deref().unwrap_or("temp-git-plugin"),
+        body.git_ref.as_deref(),
+        &body.remote_type,
+        &state.workspace_dir,
+        &state.data_dir,
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            error!("Git install failed for {}: {:?}", body.url, e);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Git install failed: {}", e)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // If name was provided, verify it matches manifest name (or rename)
+    // If the user provided a name and it differs from the manifest name,
+    // the cloned dir might be wrong. We handle this by moving/cloning under the right name.
+    // For now, we trust the manifest name as the canonical name.
+    let actual_name = manifest.name.clone();
+    if let Some(ref requested_name) = body.name {
+        if *requested_name != manifest.name {
+            tracing::warn!(
+                "Requested name '{}' differs from manifest name '{}'. Using manifest name.",
+                requested_name, manifest.name
+            );
+        }
+    }
+
+    // Compile if Rust crate
+    let plugin_dir = format!(
+        "{}/plugins/{}/{}",
+        state.data_dir, body.remote_type, actual_name
+    );
+    let cargo_toml = std::path::Path::new(&plugin_dir).join("Cargo.toml");
+
+    if cargo_toml.exists() {
+        tracing::info!("Git install: compiling Rust crate at {}", plugin_dir);
+        match tokio::task::spawn_blocking({
+            let dir = plugin_dir.clone();
+            let cargo_path = cargo_toml.to_string_lossy().to_string();
+            move || {
+                let status = std::process::Command::new("cargo")
+                    .args(["build", "--release", "--manifest-path", &cargo_path])
+                    .current_dir(&dir)
+                    .status();
+                status
+            }
+        })
+        .await
+        {
+            Ok(Ok(status)) if status.success() => {
+                tracing::info!("Git install: Rust compilation succeeded for '{}'", actual_name);
+            }
+            Ok(Ok(status)) => {
+                let msg = format!("Git install: compilation failed for '{}' with exit code {}", actual_name, status);
+                tracing::error!("{}", msg);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": msg,
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(Err(e)) => {
+                let msg = format!("Git install: failed to run cargo for '{}': {}", actual_name, e);
+                tracing::error!("{}", msg);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": msg,
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                let msg = format!("Git install: task join error for '{}': {}", actual_name, e);
+                tracing::error!("{}", msg);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": msg,
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Register in YAML with the remote field
+    let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
+    let remote_val = serde_json::json!({
+        "url": body.url,
+        "git_ref": body.git_ref,
+        "type": body.remote_type,
+    });
+
+    match plugins_yaml::set_entry_with_remote(
+        &state.data_dir,
+        &yaml_type,
+        &actual_name,
+        false,
+        serde_json::json!({}),
+        Some(&serde_json::from_value(remote_val).unwrap()),
+    ) {
+        Ok(_entry) => match plugins_yaml::get_plugin(&state.data_dir, &actual_name) {
+            Ok(Some(detail)) => {
+                info!(
+                    "Successfully installed git plugin '{}' version {} from {}",
+                    actual_name, manifest.version, body.url
+                );
+                (
+                    StatusCode::CREATED,
+                    Json(serde_json::json!({
+                        "success": true,
+                        "data": detail
+                    })),
+                )
+                    .into_response()
+            }
+            _ => {
+                info!(
+                    "Successfully installed git plugin '{}' version {} from {}",
+                    actual_name, manifest.version, body.url
+                );
+                (
+                    StatusCode::CREATED,
+                    Json(serde_json::json!({
+                        "success": true
+                    })),
+                )
+                    .into_response()
+            }
+        },
+        Err(e) => {
+            error!(
+                "Installed git plugin from disk but failed to register in YAML: {:?}",
+                e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Plugin cloned but YAML registration failed: {}", e)
+                })),
+            )
+                .into_response()
+        }
+    }
+}
 ///
 /// Useful when .env was edited manually (e.g. passwords changed) and the new values
 /// need to be picked up by subsequent setup/config operations without restarting omniagent.

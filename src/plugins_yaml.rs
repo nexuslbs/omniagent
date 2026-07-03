@@ -31,6 +31,35 @@ pub struct PluginYamlEntry {
     pub builtin: Option<bool>,
     #[serde(default = "default_config")]
     pub config: serde_json::Value,
+    /// If present, this plugin was installed from a remote git repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<PluginRemote>,
+}
+
+/// Describes a git remote source for a plugin installed from a git repository.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginRemote {
+    /// The git clone URL (https://... or git@...).
+    pub url: String,
+    /// Optional git ref: branch name, tag, or commit SHA. Defaults to the repository's HEAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_ref: Option<String>,
+    /// The plugin type directory to clone into: one of "mcp", "platform", "provider".
+    #[serde(rename = "type")]
+    pub remote_type: String,
+}
+
+impl PluginRemote {
+    /// Return the external directory path under the workspace.
+    /// e.g., `<workspace_dir>/plugins/mcp/external/<name>/`
+    pub fn external_dir(&self, workspace_dir: &str, name: &str) -> String {
+        format!("{}/plugins/{}/external/{}", workspace_dir, self.remote_type, name)
+    }
+
+    /// Return the data directory path for this plugin.
+    pub fn data_dir(&self, data_dir: &str, name: &str) -> String {
+        format!("{}/plugins/{}/{}", data_dir, self.remote_type, name)
+    }
 }
 
 fn default_config() -> serde_json::Value {
@@ -130,6 +159,12 @@ pub struct PluginDetail {
     /// True if the plugin is a Rust crate that hasn't been compiled yet
     #[serde(default)]
     pub needs_build: bool,
+    /// If populated, the plugin was installed from a git remote (shows clone URL + ref).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<PluginRemote>,
+    /// True if the plugin has a remote but has not been cloned yet.
+    #[serde(default)]
+    pub needs_download: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -239,10 +274,37 @@ pub fn set_entry(
     let mut entries = load_raw(data_dir, pt)?;
     // Preserve existing builtin flag if the entry already exists
     let existing_builtin = entries.get(name).and_then(|e| e.builtin);
+    // Preserve existing remote if the entry already exists
+    let existing_remote = entries.get(name).and_then(|e| e.remote.clone());
     let entry = PluginYamlEntry {
         enabled,
         builtin: existing_builtin.or(Some(false)),
         config,
+        remote: existing_remote,
+    };
+    entries.insert(name.to_string(), entry.clone());
+    save_file(data_dir, pt, entries)?;
+    Ok(entry)
+}
+
+/// Set a plugin entry with an explicit remote field (for git-installed plugins).
+/// Creates the entry if it doesn't exist.
+pub fn set_entry_with_remote(
+    data_dir: &str,
+    pt: &PluginYamlType,
+    name: &str,
+    enabled: bool,
+    config: serde_json::Value,
+    remote: Option<&PluginRemote>,
+) -> AppResult<PluginYamlEntry> {
+    let mut entries = load_raw(data_dir, pt)?;
+    // Preserve existing builtin flag if the entry already exists
+    let existing_builtin = entries.get(name).and_then(|e| e.builtin);
+    let entry = PluginYamlEntry {
+        enabled,
+        builtin: existing_builtin.or(Some(false)),
+        config,
+        remote: remote.cloned(),
     };
     entries.insert(name.to_string(), entry.clone());
     save_file(data_dir, pt, entries)?;
@@ -590,6 +652,8 @@ fn build_plugin_detail(
         created_at: String::new(),
         updated_at: String::new(),
         needs_build,
+        remote: yaml_entry.and_then(|e| e.remote.clone()),
+        needs_download: false,
     }
 }
 
