@@ -357,6 +357,17 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 default: Some("5".into()),
             },
         ),
+        (
+            "MAX_INLINE_FILE_KB".into(),
+            get_env_or_default("MAX_INLINE_FILE_KB", "100"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Maximum file size (KB) for inline file content in inbound messages. Files larger than this are listed as metadata only. The agent can still read them via MCP tools.".into(),
+                options: None,
+                readonly: false,
+                default: Some("100".into()),
+            },
+        ),
         // ── General (LLM Provider) ──
         (
             "LLM_PROVIDER".into(),
@@ -500,7 +511,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "THREAD_SUMMARY_TOKENS"
             | "MEMORY_MAX_CHARS"
             | "USER_MAX_CHARS" => "memory",
-            "LLM_PROVIDER" | "PROMPT_LOG_LEVEL" => "general",
+            "LLM_PROVIDER" | "PROMPT_LOG_LEVEL" | "MAX_INLINE_FILE_KB" => "general",
             "MAX_POOL_CONNECTIONS" => "general",
             _ => "system",
         };
@@ -605,6 +616,7 @@ pub async fn update_settings_handler(
         "USER_MAX_CHARS",
         "LLM_PROVIDER",
         "MAX_POOL_CONNECTIONS",
+        "MAX_INLINE_FILE_KB",
     ]
     .into_iter()
     .collect();

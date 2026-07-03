@@ -21,6 +21,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     create_triggers(pool).await?;
     create_readonly_user(pool).await?;
     seed_kanban_channel(pool).await?;
+    seed_cron_channel(pool).await?;
     tracing::info!("[migration] Schema v2 applied successfully");
     Ok(())
 }
@@ -630,5 +631,22 @@ async fn seed_kanban_channel(pool: &PgPool) -> Result<()> {
     .await?;
 
     tracing::info!("[migration] Kanban channel seeded");
+    Ok(())
+}
+
+async fn seed_cron_channel(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO channels (name, platform, external_id, resource_identifier, cause, current_profile)
+        SELECT 'cron', 'cron', 'cron', 'cron', 'system', ''
+        WHERE NOT EXISTS (
+            SELECT 1 FROM channels WHERE platform = 'cron' AND name = 'cron'
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!("[migration] Cron channel seeded");
     Ok(())
 }

@@ -846,6 +846,17 @@ pub(crate) async fn reinstall_plugin_handler(
     // 2. Re-scan from disk
     match plugins_yaml::get_plugin(data_dir, &name) {
         Ok(Some(detail)) => {
+            // 3. If this is a tool (MCP) or platform plugin, restart the
+            //    subprocess so the newly compiled binary takes effect immediately.
+            if let Ok(Some(t)) = plugins_yaml::get_disk_plugin_type(data_dir, &name) {
+                let yaml_type = plugins_yaml::PluginYamlType::from_type_str(&t);
+                if yaml_type == plugins_yaml::PluginYamlType::Tool {
+                    reload_tool_plugin(&state, &name).await;
+                } else if yaml_type == plugins_yaml::PluginYamlType::Platform {
+                    reload_platform_plugin(&state, &name).await;
+                }
+            }
+
             let compile_msg = if compiled { " (recompiled)" } else { "" };
             info!("Reinstalled plugin '{}'{}", name, compile_msg);
             (
