@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+# OmniAgent — Development image
+# Full Rust toolchain for cargo build/check/test with compile-time
+# sql_forge! verification against the live postgres DB (via Docker network).
+FROM rust:1.96.0
+WORKDIR /app
+
+# Rust dev components (fast — no compilation, just downloads)
+RUN rustup component add rustfmt clippy
+
+# cargo-binstall + cargo-watch (pre-built binaries, no compilation)
+RUN curl -fsSLo /tmp/cargo-binstall.tgz \
+      "https://github.com/ryankurte/cargo-binstall/releases/latest/download/cargo-binstall-x86_64-unknown-linux-musl.tgz" \
+    && tar -xzf /tmp/cargo-binstall.tgz -C /usr/local/cargo/bin/ \
+    && rm /tmp/cargo-binstall.tgz \
+    && cargo binstall cargo-watch -y --locked 2>&1
+
+# Keep alive so `docker compose exec omniagent bash` works
+CMD ["sleep", "infinity"]
