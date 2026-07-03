@@ -33,6 +33,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     phase_23_add_threads_iterations(pool).await?;
     phase_24_allow_external_id_update(pool).await?;
     phase_25_channel_name_unique(pool).await?;
+    phase_26_drop_profile_defaults(pool).await?;
     Ok(())
 }
 
@@ -1587,8 +1588,35 @@ async fn phase_25_channel_name_unique(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    tracing::info!("[migration] Phase 25 complete: UNIQUE constraint on channels.name added");
+    Ok(())
+}
+
+/// Phase 26: Drop DB column defaults for profile columns.
+///
+/// The DEFAULT 'default' was a PostgreSQL necessity when adding NOT NULL
+/// columns to existing tables. Now that all code paths supply the profile
+/// name explicitly (from DEFAULT_PROFILE env var), the defaults should be
+/// removed so omitting current_profile from an INSERT correctly errors out.
+async fn phase_26_drop_profile_defaults(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        ALTER TABLE channels ALTER COLUMN current_profile DROP DEFAULT;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        ALTER TABLE threads ALTER COLUMN profile DROP DEFAULT;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
     tracing::info!(
-        "[migration] Phase 25 complete: UNIQUE constraint on channels.name added"
+        "[migration] Phase 26 complete: dropped profile DEFAULTs on channels.current_profile and threads.profile"
     );
     Ok(())
 }

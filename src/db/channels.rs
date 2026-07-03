@@ -154,11 +154,12 @@ pub async fn get_channel_by_id(pool: &PgPool, channel_id: i64) -> AppResult<Opti
 }
 
 pub async fn create_channel(pool: &PgPool, p: CreateChannelParams) -> AppResult<Channel> {
+    let default_profile = crate::profile::default_profile_name();
     let row: ChannelDb = sql_forge!(
         ChannelDb,
         r#"
-        INSERT INTO channels (name, platform, external_id, cause, resource_identifier)
-        VALUES (:name, NULLIF(:platform, '')::text, :external_id, :cause, NULLIF(:resource_identifier, '')::text)
+        INSERT INTO channels (name, platform, external_id, cause, resource_identifier, current_profile)
+        VALUES (:name, NULLIF(:platform, '')::text, :external_id, :cause, NULLIF(:resource_identifier, '')::text, :current_profile)
         ON CONFLICT (name)
         DO UPDATE SET
             resource_identifier = NULLIF(:resource_identifier, '')::text,
@@ -178,7 +179,7 @@ pub async fn create_channel(pool: &PgPool, p: CreateChannelParams) -> AppResult<
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
         "#,
-        ( :name = p.name.as_str(), :platform = p.platform.as_str(), :external_id = p.external_id.as_str(), :cause = p.cause.as_str(), :resource_identifier = p.resource_identifier.as_str() )
+        ( :name = p.name.as_str(), :platform = p.platform.as_str(), :external_id = p.external_id.as_str(), :cause = p.cause.as_str(), :resource_identifier = p.resource_identifier.as_str(), :current_profile = default_profile.as_str() )
     )
     .fetch_one(pool)
     .await?;
