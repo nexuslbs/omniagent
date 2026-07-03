@@ -2073,14 +2073,29 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<(), Stri
 
 /// Sanitize a plugin name for use as a YAML key and directory path.
 /// - Trims whitespace
+/// - NFD-normalizes to decompose diacritics (é → e, ñ → n, ü → u, etc.)
 /// - Converts to lowercase
 /// - Replaces runs of whitespace with a single hyphen
-/// - Removes any character that isn't alphanumeric, hyphen, or underscore
+/// - Strips any character that isn't alphanumeric, hyphen, or underscore
 fn sanitize_plugin_name(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization;
+
     let trimmed = name.trim();
     let mut result = String::with_capacity(trimmed.len());
     let mut in_whitespace = false;
-    for ch in trimmed.chars() {
+
+    for ch in trimmed.nfd() {
+        // Skip combining diacritical marks (decomposed from NFD) so é → e, ñ → n, etc.
+        let code = ch as u32;
+        if (0x0300..=0x036F).contains(&code)
+            || (0x1AB0..=0x1AFF).contains(&code)
+            || (0x1DC0..=0x1DFF).contains(&code)
+            || (0x20D0..=0x20FF).contains(&code)
+            || (0xFE20..=0xFE2F).contains(&code)
+        {
+            continue;
+        }
+
         if ch.is_whitespace() {
             if !in_whitespace {
                 result.push('-');

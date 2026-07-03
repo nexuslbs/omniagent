@@ -56,6 +56,7 @@ base64 = "0.22"
 serde_yaml = "0.9"
 tiktoken-rs = "0.5"
 regex = "1"
+unicode-normalization = "0.1"
 db-migrations = { path = "db-migrations" }
 
 [dev-dependencies]
