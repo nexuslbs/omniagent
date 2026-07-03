@@ -678,14 +678,15 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
     let mut results: Vec<PluginDetail> = Vec::new();
 
     for (manifest, source, base_path) in &discovered {
-        let yaml_type = PluginYamlType::from_plugin_type(&manifest.plugin_type);
-        let yaml_entry = match yaml_type {
-            PluginYamlType::Platform => platform_entries.get(&manifest.name),
-            PluginYamlType::Tool => tool_entries.get(&manifest.name),
-            PluginYamlType::Provider => provider_entries.get(&manifest.name),
-        };
-
         let key = extract_plugin_key(manifest, source, base_path);
+        let yaml_type = PluginYamlType::from_plugin_type(&manifest.plugin_type);
+        // YAML entries are always keyed by the plugin's short name (directory name),
+        // not the human-readable manifest name.
+        let yaml_entry = match yaml_type {
+            PluginYamlType::Platform => platform_entries.get(&key),
+            PluginYamlType::Tool => tool_entries.get(&key),
+            PluginYamlType::Provider => provider_entries.get(&key),
+        };
         // Plugin directory is the parent of the plugin.json path
         let plugin_dir = std::path::Path::new(base_path).parent().and_then(|p| p.to_str());
         results.push(build_plugin_detail(
@@ -715,14 +716,19 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
     let provider_entries = load_raw(data_dir, &PluginYamlType::Provider)?;
 
     for (manifest, source, base_path) in &discovered {
-        if manifest.name == name {
+        let key = extract_plugin_key(manifest, source, base_path);
+        // Match by the display key (directory name) OR the manifest's name field —
+        // the frontend always sends the display key (e.g. "hindsight"), while
+        // plugin.json may have a human-readable name like "Hindsight Memory MCP Server".
+        if key == name || manifest.name == name {
             let yaml_type = PluginYamlType::from_plugin_type(&manifest.plugin_type);
+            // YAML entries are always keyed by the plugin's short name (directory name),
+            // not the human-readable manifest name — use the extracted key.
             let yaml_entry = match yaml_type {
-                PluginYamlType::Platform => platform_entries.get(&manifest.name),
-                PluginYamlType::Tool => tool_entries.get(&manifest.name),
-                PluginYamlType::Provider => provider_entries.get(&manifest.name),
+                PluginYamlType::Platform => platform_entries.get(&key),
+                PluginYamlType::Tool => tool_entries.get(&key),
+                PluginYamlType::Provider => provider_entries.get(&key),
             };
-            let key = extract_plugin_key(manifest, source, base_path);
             let plugin_dir = std::path::Path::new(base_path).parent().and_then(|p| p.to_str());
             return Ok(Some(build_plugin_detail(
                 manifest,

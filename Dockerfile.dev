@@ -15,5 +15,7 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
     && rm /tmp/cargo-binstall.tgz \
     && cargo binstall cargo-watch -y --locked 2>&1
 
-# Keep alive so `docker compose exec omniagent bash` works
-CMD ["sleep", "infinity"]
+# Auto-rebuild and restart on source changes via cargo watch
+# Logs are JSON (set by the app's tracing subscriber) — watch the container logs
+# to see build output and agent startup.
+CMD ["cargo", "watch", "-x", "run --release"]

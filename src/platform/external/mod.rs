@@ -13,7 +13,6 @@ pub mod client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::Path;
 
 use crate::err_str;
 use crate::error::AppResult;

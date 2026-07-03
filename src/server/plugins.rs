@@ -118,6 +118,26 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
                     }
                 }
             }
+
+            // Cross-reference MCP plugins with the MCP registry:
+            // if a plugin is marked "enabled" but its server has zero
+            // registered tools, the server failed to initialize — set
+            // status to "error" so the frontend shows the right badge.
+            {
+                let registry = state.mcp_registry.read().unwrap();
+                let all_tools = registry.all();
+                for detail in details.iter_mut() {
+                    if detail.plugin_type == "mcp" && detail.status == "enabled" {
+                        let has_tools = all_tools.iter().any(|t| {
+                            t.server_name.as_deref() == Some(&detail.name)
+                        });
+                        if !has_tools {
+                            detail.status = "error".to_string();
+                        }
+                    }
+                }
+            }
+
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -176,6 +196,22 @@ pub(crate) async fn get_plugin_handler(
                     }
                 }
             }
+
+            // Cross-reference MCP plugins with the MCP registry:
+            // if a plugin is marked "enabled" but its server has zero
+            // registered tools, the server failed to initialize — set
+            // status to "error" so the frontend shows the right badge.
+            if detail.plugin_type == "mcp" && detail.status == "enabled" {
+                let registry = state.mcp_registry.read().unwrap();
+                let has_tools = registry
+                    .all()
+                    .iter()
+                    .any(|t| t.server_name.as_deref() == Some(&detail.name));
+                if !has_tools {
+                    detail.status = "error".to_string();
+                }
+            }
+
             (
                 StatusCode::OK,
                 Json(serde_json::json!({

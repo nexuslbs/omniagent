@@ -138,6 +138,16 @@ async fn run_server() -> AppResult<()> {
     let agent = agent::Agent::new(pool.clone(), shared_config_for_agent, mcp_shared.clone(), ctx.clone());
 
     // ── STARTUP: Skip pending/processing messages BEFORE spawning any concurrent tasks ──
+    match agent::skip_on_startup(&pool).await {
+        Ok(skipped) => {
+            if skipped > 0 {
+                tracing::info!("Skipped {} pending/processing threads on startup", skipped);
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to skip pending/processing threads on startup: {:?}", e);
+        }
+    }
 
     // Shared cancellation tokens for /stop endpoint
     let cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>> =
