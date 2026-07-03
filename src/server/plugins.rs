@@ -1667,11 +1667,13 @@ pub(crate) async fn install_git_handler(
     );
 
     // Clone and copy to data_dir (name unknown until manifest is parsed)
+    let initial_name = body.name.as_deref()
+        .map(sanitize_plugin_name)
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "temp-git-plugin".to_string());
     let manifest = match plugin::installer::install_from_git(
         &body.url,
-        // Use a temporary name for the clone directory if name not provided;
-        // the actual name comes from plugin.json
-        body.name.as_deref().unwrap_or("temp-git-plugin"),
+        &initial_name,
         body.git_ref.as_deref(),
         &body.remote_type,
         &state.workspace_dir,
@@ -1696,7 +1698,7 @@ pub(crate) async fn install_git_handler(
     // If the user provided a name and it differs from the manifest name,
     // the cloned dir might be wrong. We handle this by moving/cloning under the right name.
     // For now, we trust the manifest name as the canonical name.
-    let actual_name = manifest.name.clone();
+    let raw_name = body.name.clone().unwrap_or_else(|| manifest.name.clone());
     if let Some(ref requested_name) = body.name {
         if *requested_name != manifest.name {
             tracing::warn!(
@@ -1704,6 +1706,18 @@ pub(crate) async fn install_git_handler(
                 requested_name, manifest.name
             );
         }
+    }
+
+    // Sanitize the plugin name: lowercase, replace whitespace with hyphens,
+    // strip non-alphanumeric chars (except hyphens and underscores).
+    // Names are used as YAML keys and directory paths — spaces and special
+    // chars would break both.
+    let actual_name = sanitize_plugin_name(&raw_name);
+    if actual_name != raw_name {
+        tracing::info!(
+            "Sanitized plugin name: '{}' -> '{}'",
+            raw_name, actual_name
+        );
     }
 
     // Compile if Rust crate
@@ -2055,4 +2069,31 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<(), Stri
         }
     }
     Ok(())
+}
+
+/// Sanitize a plugin name for use as a YAML key and directory path.
+/// - Trims whitespace
+/// - Converts to lowercase
+/// - Replaces runs of whitespace with a single hyphen
+/// - Removes any character that isn't alphanumeric, hyphen, or underscore
+fn sanitize_plugin_name(name: &str) -> String {
+    let trimmed = name.trim();
+    let mut result = String::with_capacity(trimmed.len());
+    let mut in_whitespace = false;
+    for ch in trimmed.chars() {
+        if ch.is_whitespace() {
+            if !in_whitespace {
+                result.push('-');
+                in_whitespace = true;
+            }
+        } else if ch.is_alphanumeric() || ch == '-' || ch == '_' {
+            for lower in ch.to_lowercase() {
+                result.push(lower);
+            }
+            in_whitespace = false;
+        } else {
+            in_whitespace = false;
+        }
+    }
+    result
 }
