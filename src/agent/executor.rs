@@ -477,6 +477,11 @@ pub async fn process_thread(
     // Whether subtask creation and enforcement are enabled
     let enable_subtasks = planning_mode == "auto_subtasks";
 
+    // Pre-read prompt log level for consistency across planning and main loop
+    let prompt_log_level = cfg.config_snapshot().prompt_log_level;
+    let prompt_log_level = prompt_log_level.as_str();
+    let mut has_logged_first_prompt = false;
+
     // Determine if we should run the planning phase
     // The thread's planning_mode was resolved at creation time and is the
     // single source of truth. Threads always have exactly one of:
@@ -517,6 +522,39 @@ pub async fn process_thread(
             // Inject the task template so the plan is aware of the instructions
             if let Some(ref ts) = template_section {
                 planning_messages.push(ChatMessage::system(ts));
+            }
+
+            // ── Optional: insert prompt message before planning LLM call ──
+            // Logs the prompt *sent to* the LLM (not the returned plan, which is
+            // already saved as a separate msg_type="plan" message). Does NOT count
+            // as "the first prompt" for main-loop tracking — the main loop's
+            // system prompt + context is the important one for debugging.
+            // Subtype "plan" indicates this is the first prompt to create a plan.
+            if prompt_log_level != "off" {
+                let prompt_seq = { let v = next_seq; next_seq += 1; v };
+                let prompt_content = serde_json::to_string(&planning_messages)
+                    .unwrap_or_else(|_| String::new());
+                let prompt_msg = MessageNew {
+                    thread_id: thread.id,
+                    role: "system".to_string(),
+                    content: prompt_content,
+                    thread_sequence: prompt_seq,
+                    external_id: None,
+                    metadata: serde_json::json!({
+                        "prompt_log_level": prompt_log_level,
+                        "prompt_subtype": "plan",
+                        "num_messages": planning_messages.len(),
+                    }),
+                    embedding: None,
+                    summary_text: None,
+                    is_summary: false,
+                    msg_type: "prompt".to_string(),
+                    msg_subtype: Some("plan".to_string()),
+                    iteration_number: 0,
+                };
+                if let Err(e) = queries::create_message(&cfg.pool, &prompt_msg).await {
+                    warn!("[prompt] Failed to persist planning prompt for thread {}: {:?}", thread.id, e);
+                }
             }
 
             let plan_request = CompletionRequest {
@@ -735,7 +773,7 @@ pub async fn process_thread(
     let mut final_reasoning: Option<String> = None;
     let mut final_tool_call: bool = false;
     let mut limit_reached: bool = false;
-    let mut last_response_usage: Option<Usage> = None;
+    let mut _last_response_usage: Option<Usage> = None;
     current_iter = plan_consumed; // 0 for prompt_only, 1 if plan already ran
     let mut unfinished_subtask_retries: u32 = 0;
     let mut calls_since_subtask_management: u32 = 0;
@@ -880,6 +918,53 @@ pub async fn process_thread(
 
         // Layer 4: compact old assistant tool_calls JSON (only keep recent turns)
         helpers::compact_old_assistant_messages(&mut messages, keep_turns);
+
+        // ── Optional: insert prompt message before LLM call ──
+        // Subtypes: "first" (first normal LLM call), "compaction" (after context
+        // compaction), "follow_up" (subsequent normal calls).
+        let prompt_subtype = if !has_logged_first_prompt {
+            "first"
+        } else if current_iter == last_condense_iteration {
+            "compaction"
+        } else {
+            "follow_up"
+        };
+        let should_log_prompt = match prompt_log_level {
+            "off" => false,
+            "first" => !has_logged_first_prompt,
+            "first+compact" => !has_logged_first_prompt || current_iter == last_condense_iteration,
+            "all" => true,
+            _ => false,
+        };
+        if should_log_prompt {
+            let prompt_seq = { let v = next_seq; next_seq += 1; v };
+            let prompt_content = serde_json::to_string(&messages)
+                .unwrap_or_else(|_| String::new());
+            let prompt_msg = MessageNew {
+                thread_id: thread.id,
+                role: "system".to_string(),
+                content: prompt_content,
+                thread_sequence: prompt_seq,
+                external_id: None,
+                metadata: serde_json::json!({
+                    "prompt_log_level": prompt_log_level,
+                    "prompt_subtype": prompt_subtype,
+                    "num_messages": messages.len(),
+                    "iteration": current_iter,
+                    "condensed": needs_hard_condense || needs_soft_condense,
+                }),
+                embedding: None,
+                summary_text: None,
+                is_summary: false,
+                msg_type: "prompt".to_string(),
+                msg_subtype: Some(prompt_subtype.to_string()),
+                iteration_number: current_iter,
+            };
+            if let Err(e) = queries::create_message(&cfg.pool, &prompt_msg).await {
+                warn!("[prompt] Failed to persist prompt for thread {}: {:?}", thread.id, e);
+            }
+            has_logged_first_prompt = true;
+        }
 
         // ── LLM completion call ──
 
@@ -1431,8 +1516,8 @@ pub async fn process_thread(
             tools: None,
         };
 
-        let summary_start = std::time::Instant::now();
-        let (summary_text, summary_token_usage) = match per_thread_llm.completion(summary_request).await {
+        let _summary_start = std::time::Instant::now();
+        let (summary_text, _summary_token_usage) = match per_thread_llm.completion(summary_request).await {
             Ok(resp) => {
                 let usage = resp.usage.clone();
                 helpers::merge_usage(&mut cumulative_usage, resp.usage);

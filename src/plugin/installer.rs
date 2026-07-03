@@ -294,10 +294,10 @@ pub fn install_from_git(
     // Find plugin.json in the cloned directory
     let search_dir = match repo_path {
         Some(p) if !p.is_empty() => external_path.join(p),
-        _ => external_path.clone(),
+        _ => external_path.to_path_buf(),
     };
     let plugin_json_path = find_plugin_json(&search_dir)?;
-    let manifest = load_manifest(&plugin_json_path)?;
+    let _manifest = load_manifest(&plugin_json_path)?;
 
     // Copy to data_dir
     let install_dir = format!("{}/plugins/{}/{}", data_dir, remote_type, name);

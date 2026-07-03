@@ -95,6 +95,13 @@ pub struct AgentConfig {
     /// Multiplier to account for provider tokenizer mismatch with tiktoken.
     pub prompt_token_safety_factor: f64,
 
+    /// When to insert prompts as messages (msg_type: "prompt") into the messages table.
+    /// - "off" — never insert
+    /// - "first" — insert the first LLM call's prompt only (default)
+    /// - "first+compact" — first prompt + prompts after context compaction
+    /// - "all" — insert every prompt before every LLM call
+    pub prompt_log_level: String,
+
     // Infrastructure config (merged from former config::Config)
     pub database_url: String,
     pub database_readonly_url: String,
@@ -238,6 +245,9 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "15.0".to_string())
                 .parse()
                 .unwrap_or(15.0),
+
+            prompt_log_level: std::env::var("PROMPT_LOG_LEVEL")
+                .unwrap_or_else(|_| "first".to_string()),
 
             // Infrastructure config (merged from former config::Config)
             database_url: std::env::var("DATABASE_URL").ctx("DATABASE_URL must be set")?,

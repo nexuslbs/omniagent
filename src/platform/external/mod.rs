@@ -64,134 +64,66 @@ pub struct PlatformPluginsConfig {
     pub platforms: Vec<PlatformPluginConfig>,
 }
 
-/// Load platform plugin configurations from config file and installed plugins.
+/// Load platform plugin configurations by discovering plugin.json files
+/// under `<data_dir>/plugins/platforms/`.
 ///
-/// Sources (later entries override earlier ones by name):
-/// 1. `<data_dir>/config/platforms.json` — legacy config
-/// 2. `<data_dir>/plugins/installed/<name>/plugin.json` — installed plugins with type=platform
-///
-/// Returns an empty list if no platform plugins are found.
+/// Each subdirectory containing a `plugin.json` with `"type": "platform"`
+/// is loaded as a platform plugin. Platforms are enabled by default.
 pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
     let mut results: Vec<PlatformPluginConfig> = Vec::new();
+    let platforms_dir = format!("{}/plugins/platforms", data_dir);
 
-    // 1. Legacy platforms.json
-    let config_path = std::env::var("PLATFORMS_CONFIG").ok().or_else(|| {
-        let default = format!("{}/config/platforms.json", data_dir);
-        let path = Path::new(&default);
-        if path.exists() {
-            Some(default)
-        } else {
-            None
+    let entries = match std::fs::read_dir(&platforms_dir) {
+        Ok(e) => e,
+        Err(_) => return results,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
         }
-    });
-
-    if let Some(path) = config_path {
-        match std::fs::read_to_string(&path) {
-            Ok(content) => match serde_json::from_str::<PlatformPluginsConfig>(&content) {
-                Ok(config) => {
-                    tracing::info!(
-                        "Loaded {} external platform plugin(s) from {}",
-                        config.platforms.len(),
-                        path
-                    );
-                    results = config.platforms;
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to parse platforms config from {}: {:?}", path, e);
-                }
-            },
+        let plugin_json_path = path.join("plugin.json");
+        if !plugin_json_path.exists() {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&plugin_json_path) {
+            Ok(c) => c,
             Err(e) => {
-                tracing::warn!("Failed to read platforms config from {}: {:?}", path, e);
-            }
-        }
-    } else {
-        tracing::info!("No platforms config found (set PLATFORMS_CONFIG env var)");
-    }
-
-    // 2. Installed platform plugins (override legacy by name)
-    // Walk all subdirectories of <data_dir>/plugins/installed/ recursively
-    // to find plugin.json files. This supports categorized layouts like
-    // plugins/installed/platforms/mattermost/plugin.json.
-    let installed_dir = format!("{}/plugins/installed", data_dir);
-    let mut plugin_dirs: Vec<std::path::PathBuf> = Vec::new();
-    let mut scan_stack: Vec<std::path::PathBuf> = Vec::new();
-    scan_stack.push(std::path::PathBuf::from(&installed_dir));
-    while let Some(dir) = scan_stack.pop() {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let plugin_json_path = path.join("plugin.json");
-                    if plugin_json_path.exists() {
-                        plugin_dirs.push(path);
-                    } else {
-                        scan_stack.push(path);
-                    }
-                }
-            }
-        }
-    }
-    for plugin_dir in &plugin_dirs {
-            let plugin_json_path = plugin_dir.join("plugin.json");
-            if !plugin_json_path.exists() {
+                tracing::warn!("Failed to read platform manifest {}: {:?}", plugin_json_path.display(), e);
                 continue;
             }
-            match std::fs::read_to_string(&plugin_json_path) {
-                Ok(content) => {
-                    match serde_json::from_str::<crate::plugin::PluginManifest>(&content) {
-                        Ok(manifest) => {
-                            if manifest.plugin_type != crate::plugin::PluginType::Platform {
-                                continue;
-                            }
-                            let config = PlatformPluginConfig {
-                                name: manifest.name.clone(),
-                                enabled: true,
-                                command: manifest.entrypoint.clone().unwrap().command,
-                                args: manifest.entrypoint.unwrap().args,
-                                env: manifest.env,
-                                config: std::collections::HashMap::new(),
-                                max_retries: 3,
-                            };
-                            // ── Merge YAML config values into env map ──
-                            // Config values set in platforms.yml (via the dashboard)
-                            // should override the default env var references so that
-                            // fields like connection_mode, polling_interval, etc. can
-                            // be configured without setting them in .env.
-                            let merged = merge_platform_config_env(
-                                &config,
-                                &serde_json::json!(manifest.config_schema),
-                                data_dir,
-                            );
-                            // Override legacy entry with same name
-                            if let Some(pos) = results.iter().position(|p| p.name == manifest.name)
-                            {
-                                tracing::info!(
-                                    "Platform plugin '{}' overridden by installed manifest",
-                                    manifest.name
-                                );
-                                results[pos] = merged;
-                            } else {
-                                results.push(merged);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to parse installed plugin manifest {}: {:?}",
-                                plugin_json_path.display(),
-                                e
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to read installed plugin manifest {}: {:?}",
-                        plugin_json_path.display(),
-                        e
-                    );
-                }
+        };
+        let manifest = match serde_json::from_str::<crate::plugin::PluginManifest>(&content) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("Failed to parse platform manifest {}: {:?}", plugin_json_path.display(), e);
+                continue;
             }
+        };
+        if manifest.plugin_type != crate::plugin::PluginType::Platform {
+            continue;
         }
+        let config = PlatformPluginConfig {
+            name: manifest.name.clone(),
+            enabled: true,
+            command: manifest.entrypoint.clone().unwrap().command,
+            args: manifest.entrypoint.unwrap().args,
+            env: manifest.env,
+            config: std::collections::HashMap::new(),
+            max_retries: 3,
+        };
+        let merged = merge_platform_config_env(
+            &config,
+            &serde_json::json!(manifest.config_schema),
+            data_dir,
+        );
+        tracing::info!(
+            "Loaded platform plugin '{}' from plugins/platforms/",
+            manifest.name
+        );
+        results.push(merged);
+    }
 
     results
 }

@@ -431,6 +431,23 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 default: Some("/opt/workspace".into()),
             },
         ),
+        // ── Prompts ──
+        (
+            "PROMPT_LOG_LEVEL".into(),
+            get_env_or_default("PROMPT_LOG_LEVEL", "first"),
+            SettingMeta {
+                field_type: "select".into(),
+                description: "When to insert prompts as messages (msg_type: \"prompt\") into the messages table: Off (never), First (first LLM call only), First+Compact (first + after context compaction), or All (every LLM call)".into(),
+                options: Some(vec![
+                    SettingOption { id: "off".into(), name: "Off — never insert prompts".into() },
+                    SettingOption { id: "first".into(), name: "First — insert the first prompt only".into() },
+                    SettingOption { id: "first+compact".into(), name: "First+Compact — first prompt + prompts after context compaction".into() },
+                    SettingOption { id: "all".into(), name: "All — insert every prompt before every LLM call".into() },
+                ]),
+                readonly: false,
+                default: Some("first".into()),
+            },
+        ),
     ]
 }
 
@@ -483,7 +500,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "THREAD_SUMMARY_TOKENS"
             | "MEMORY_MAX_CHARS"
             | "USER_MAX_CHARS" => "memory",
-            "LLM_PROVIDER" => "general",
+            "LLM_PROVIDER" | "PROMPT_LOG_LEVEL" => "general",
             "MAX_POOL_CONNECTIONS" => "general",
             _ => "system",
         };
