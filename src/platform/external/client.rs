@@ -6,14 +6,16 @@
 //! Implements the [`Platform`] trait so it can be registered in the
 //! [`PlatformRegistry`] just like built-in platforms.
 
+use crate::err_str;
+use crate::error::{AppResult, Error, ErrorContext};
 use crate::platform::external::{
     build_deliver_request, build_initialize_request, build_react_request, parse_response,
-    DeliverParams, DeliverResult, InitializeResult, PlatformPluginConfig, PluginResponse, ReactParams,
+    DeliverParams, DeliverResult, InitializeResult, PlatformPluginConfig, PluginResponse,
+    ReactParams,
 };
 use crate::platform::{OutboundReceiver, Platform};
-use crate::error::{Error, AppResult, ErrorContext};
-use crate::err_str;
 use async_trait::async_trait;
+use sql_forge::sql_forge;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -816,6 +818,43 @@ impl Platform for ExternalPlatformClient {
                                                 }
                                             }
                                         }
+                                        "message_edited" => {
+                                            // When a message is edited on the platform, update
+                                            // the message content in the messages table only if
+                                            // the thread is still pending (not yet processed).
+                                            if let Some(params) = notif.params {
+                                                let resource = params.get("resource_identifier").and_then(|v| v.as_str());
+                                                let ext_id = params.get("external_id").and_then(|v| v.as_str());
+                                                let new_text = params.get("text").and_then(|v| v.as_str());
+                                                if let (Some(resource), Some(ext_id), Some(new_text)) = (resource, ext_id, new_text) {
+                                                    tracing::info!(
+                                                        "Message edited on '{}' resource '{}': external_id={}, new text preview: {}",
+                                                        plugin_name, resource, ext_id,
+                                                        new_text.chars().take(50).collect::<String>()
+                                                    );
+                                                    match handle_message_edited(&pool, &plugin_name, resource, ext_id, new_text).await {
+                                                        Ok(true) => {
+                                                            tracing::info!(
+                                                                "message_edited: updated content for external_id={}",
+                                                                ext_id
+                                                            );
+                                                        }
+                                                        Ok(false) => {
+                                                            tracing::debug!(
+                                                                "message_edited: no pending thread for external_id={} on '{}'",
+                                                                ext_id, resource
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::error!(
+                                                                "Error handling message_edited for {}: {:?}",
+                                                                ext_id, e
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                         _ => {
                                             tracing::debug!(
                                                 "Unknown notification from '{}': {}",
@@ -1203,29 +1242,31 @@ async fn handle_message_deleted(
     resource_identifier: &str,
     external_id: &str,
 ) -> Result<Option<i64>, Box<dyn std::error::Error + Send + Sync>> {
-    // Use sqlx::query_as directly because client.rs already uses raw sqlx::query patterns.
     #[derive(sqlx::FromRow)]
     struct ThreadStatusRow {
         id: i64,
         status: String,
     }
 
-    let row: Option<ThreadStatusRow> = sqlx::query_as::<_, ThreadStatusRow>(
+    let row: Option<ThreadStatusRow> = sql_forge!(
+        ThreadStatusRow,
         r#"
         SELECT t.id, t.status
         FROM messages m
         JOIN threads t ON t.id = m.thread_id
         JOIN channels ch ON ch.id = t.channel_id
-        WHERE m.external_id = $1
+        WHERE m.external_id = :external_id
           AND m.thread_sequence = 0
-          AND ch.platform = $2
-          AND ch.resource_identifier = $3
+          AND ch.platform = :platform
+          AND ch.resource_identifier = :resource_identifier
         LIMIT 1
         "#,
+        (
+            :external_id = external_id,
+            :platform = platform,
+            :resource_identifier = resource_identifier,
+        )
     )
-    .bind(external_id)
-    .bind(platform)
-    .bind(resource_identifier)
     .fetch_optional(pool)
     .await?;
 
@@ -1237,21 +1278,21 @@ async fn handle_message_deleted(
     match info.status.as_str() {
         "pending" | "processing" => {
             // Skip the thread — marks it as skipped + terminal
-            sqlx::query(
+            sql_forge!(
                 r#"
                 UPDATE threads
                 SET status = 'skipped',
                     ended_at = NOW(),
                     terminal = true,
                     iterations = COALESCE(
-                        (SELECT MAX(iteration_number) FROM messages WHERE thread_id = $1),
+                        (SELECT MAX(iteration_number) FROM messages WHERE thread_id = :id),
                         0
                     )
-                WHERE id = $1
+                WHERE id = :id
                   AND status IN ('pending', 'processing')
                 "#,
+                ( :id = info.id )
             )
-            .bind(info.id)
             .execute(pool)
             .await?;
 
@@ -1270,6 +1311,97 @@ async fn handle_message_deleted(
             );
             Ok(Some(info.id))
         }
+    }
+}
+
+/// Handle a `message_edited` notification from a platform plugin.
+///
+/// Updates the message content in the messages table if the associated thread
+/// is still `pending` (not yet picked up by the executor). If the thread is
+/// already `processing` or later, the edit is ignored.
+///
+/// Returns `Ok(true)` if the content was updated, `Ok(false)` if no matching
+/// seq-0 message was found or the thread wasn't pending.
+async fn handle_message_edited(
+    pool: &PgPool,
+    platform: &str,
+    resource_identifier: &str,
+    external_id: &str,
+    new_content: &str,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    // Check if the seq-0 message exists and its thread is pending
+    #[derive(sqlx::FromRow)]
+    struct MessageThreadRow {
+        msg_id: i64,
+        thread_id: i64,
+        status: String,
+    }
+
+    let row: Option<MessageThreadRow> = sql_forge!(
+        MessageThreadRow,
+        r#"
+        SELECT m.id AS msg_id, t.id AS thread_id, t.status
+        FROM messages m
+        JOIN threads t ON t.id = m.thread_id
+        JOIN channels ch ON ch.id = t.channel_id
+        WHERE m.external_id = :external_id
+          AND m.thread_sequence = 0
+          AND ch.platform = :platform
+          AND ch.resource_identifier = :resource_identifier
+        LIMIT 1
+        "#,
+        (
+            :external_id = external_id,
+            :platform = platform,
+            :resource_identifier = resource_identifier,
+        )
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let info = match row {
+        Some(r) => r,
+        None => return Ok(false),
+    };
+
+    if info.status != "pending" {
+        tracing::debug!(
+            "message_edited: thread {} has status '{}' — edit ignored (only pending can be edited)",
+            info.thread_id,
+            info.status
+        );
+        return Ok(false);
+    }
+
+    // Update the message content (trigger allows this for pending threads)
+    let result = sql_forge!(
+        r#"
+        UPDATE messages
+        SET content = :new_content
+        WHERE id = :msg_id
+          AND thread_id = :thread_id
+          AND thread_sequence = 0
+        "#,
+        (
+            :new_content = new_content,
+            :msg_id = info.msg_id,
+            :thread_id = info.thread_id,
+        )
+    )
+    .execute(pool)
+    .await?;
+
+    let rows_affected = result.rows_affected();
+
+    if rows_affected > 0 {
+        tracing::info!(
+            "message_edited: updated content for message {} (thread {})",
+            info.msg_id,
+            info.thread_id
+        );
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
 

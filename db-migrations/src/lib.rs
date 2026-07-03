@@ -523,7 +523,28 @@ async fn create_triggers(pool: &PgPool) -> Result<()> {
                 END IF;
             END IF;
 
-            RAISE EXCEPTION 'messages is immutable after insert. Only embedding_vec (vectorizer) and external_id (platform post-back) may be updated. Other columns cannot change.';
+            -- Allow content UPDATE for pending threads (message editing on platform)
+            IF NEW.content IS DISTINCT FROM OLD.content THEN
+                IF NEW.id = OLD.id
+                   AND NEW.role IS NOT DISTINCT FROM OLD.role
+                   AND NEW.thread_id IS NOT DISTINCT FROM OLD.thread_id
+                   AND NEW.thread_sequence IS NOT DISTINCT FROM OLD.thread_sequence
+                   AND NEW.external_id IS NOT DISTINCT FROM OLD.external_id
+                   AND NEW.metadata IS NOT DISTINCT FROM OLD.metadata
+                   AND NEW.embedding_vec IS NOT DISTINCT FROM OLD.embedding_vec
+                   AND NEW.embedding IS NOT DISTINCT FROM OLD.embedding
+                   AND NEW.summary_text IS NOT DISTINCT FROM OLD.summary_text
+                   AND NEW.is_summary IS NOT DISTINCT FROM OLD.is_summary
+                   AND NEW.msg_type IS NOT DISTINCT FROM OLD.msg_type
+                   AND NEW.msg_subtype IS NOT DISTINCT FROM OLD.msg_subtype
+                   AND NEW.iteration_number IS NOT DISTINCT FROM OLD.iteration_number
+                   AND EXISTS (SELECT 1 FROM threads t WHERE t.id = NEW.thread_id AND t.status = 'pending')
+                THEN
+                    RETURN NEW;
+                END IF;
+            END IF;
+
+            RAISE EXCEPTION 'messages is immutable after insert. Only embedding_vec (vectorizer), external_id (platform post-back), and content (pending thread edits) may be updated. Other columns cannot change.';
         END;
         $$ LANGUAGE plpgsql;
         "#,
