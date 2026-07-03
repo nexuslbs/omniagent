@@ -92,7 +92,7 @@ async fn handle_promote(data_dir: &str, args: &Value) -> Result<(String, bool)> 
         .unwrap_or_default();
 
     let expires_in_days = args["expires_in_days"].as_i64().unwrap_or(30).max(1);
-    let profile = args["profile"].as_str().unwrap_or("default");
+    let profile = args["profile"].as_str().unwrap_or(&omniagent::profile::default_profile_name());
 
     // Build the wiki path
     let wiki_memories_dir = format!("{}/profiles/{}/wiki/Memory/Promoted", data_dir, profile);
@@ -164,7 +164,7 @@ expires_at: {}
 // ---------------------------------------------------------------------------
 
 async fn handle_list(data_dir: &str, args: &Value) -> Result<(String, bool)> {
-    let profile = args["profile"].as_str().unwrap_or("default");
+    let profile = args["profile"].as_str().unwrap_or(&omniagent::profile::default_profile_name());
     let include_expired = args["include_expired"].as_bool().unwrap_or(false);
 
     let wiki_memories_dir = format!("{}/profiles/{}/wiki/Memory/Promoted", data_dir, profile);
@@ -242,7 +242,7 @@ async fn handle_list(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 // ---------------------------------------------------------------------------
 
 async fn handle_review(data_dir: &str, args: &Value) -> Result<(String, bool)> {
-    let profile = args["profile"].as_str().unwrap_or("default");
+    let profile = args["profile"].as_str().unwrap_or(&omniagent::profile::default_profile_name());
     let expiring_soon_days = args["expiring_soon_days"].as_i64().unwrap_or(7).max(1);
 
     let wiki_memories_dir = format!("{}/profiles/{}/wiki/Memory/Promoted", data_dir, profile);
@@ -384,7 +384,7 @@ async fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'action'"))?;
     let content = args["content"].as_str().unwrap_or("");
-    let profile = args["profile"].as_str().unwrap_or("default");
+    let profile = args["profile"].as_str().unwrap_or(&omniagent::profile::default_profile_name());
 
     let memories_dir = format!("{}/profiles/{}/memories", data_dir, profile);
     let dir_path = std::path::Path::new(&memories_dir);

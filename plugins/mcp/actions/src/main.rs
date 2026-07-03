@@ -110,7 +110,7 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
             .as_deref()
             .filter(|s| !s.is_empty())
             .or_else(|| chan_profile.as_ref().and_then(|(s,)| s.as_deref()))
-            .unwrap_or("default");
+            .unwrap_or(&omniagent::profile::default_profile_name());
 
         // 3. Build content: use body if present, otherwise title
         let body_row: Option<(Option<String>,)> = sqlx::query_as(
@@ -241,7 +241,8 @@ async fn handle_hindsight_populator(pool: &PgPool, _args: &Value) -> Result<(Str
 async fn handle_relevance_indexer(_pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
     let data_dir = std::env::var("OMNI_DIR")
         .unwrap_or_else(|_| { eprintln!("FATAL: OMNI_DIR must be set"); std::process::exit(1); });
-    let wiki_dir = format!("{}/profiles/default/wiki", data_dir);
+    let default_profile = omniagent::profile::default_profile_name();
+    let wiki_dir = format!("{}/profiles/{}/wiki", data_dir, default_profile);
     let wiki_path = std::path::Path::new(&wiki_dir);
 
     if !wiki_path.exists() {
