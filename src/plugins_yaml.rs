@@ -807,8 +807,9 @@ pub fn get_disk_plugin_type(data_dir: &str, name: &str) -> AppResult<Option<Stri
     let workspace_dir =
         std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
     let discovered = crate::plugin::installer::discover_plugins(data_dir, &workspace_dir);
-    for (manifest, _, _) in &discovered {
-        if manifest.name == name {
+    for (manifest, source, base_path) in &discovered {
+        let key = extract_plugin_key(manifest, source, base_path);
+        if key == name || manifest.name == name {
             let type_str = match manifest.plugin_type {
                 PluginType::Platform => "platform",
                 PluginType::Mcp => "mcp",
