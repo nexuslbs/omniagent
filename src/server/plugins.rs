@@ -541,7 +541,60 @@ pub(crate) async fn install_plugin_handler(
         }
     }
 
-    // If not found in data_dir, check workspace bundled directories
+    // If not found in data_dir, check source and workspace bundled directories
+    if found_dir.is_none() {
+        // First check the source code directory (has Cargo.toml for Rust compilation)
+        let source_plugin_dirs = [
+            format!("/app/plugins/mcp/{}", name),
+            format!("/app/plugins/providers/{}", name),
+            format!("/app/plugins/platforms/{}", name),
+        ];
+        for dir in &source_plugin_dirs {
+            let plugin_json = std::path::Path::new(dir).join("plugin.json");
+            if plugin_json.exists() {
+                tracing::info!(
+                    "Install: found bundled plugin source '{}' at {}",
+                    name,
+                    dir
+                );
+                // Use the workspace_dir thin dir for the manifest, source dir for compilation
+                // The thin dir (in workspace) has plugin.json but no Cargo.toml.
+                // Source dir has Cargo.toml + src/ needed for compilation.
+                // We copy from the workspace_dir thin location (which has plugin.json + mcp-config.json)
+                // so the entrypoint paths remain correct for the deployment.
+                // But we also need the source (Cargo.toml) for compilation — that's found later
+                // in the copied location via the source dir.
+                let type_dir = std::path::Path::new(dir)
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("mcp");
+                let target_dir = format!("{}/plugins/{}/{}", data_dir, type_dir, name);
+                let target_path = std::path::Path::new(&target_dir);
+
+                if let Err(e) = copy_bundled_plugin_source(dir, target_path) {
+                    tracing::error!(
+                        "Install: failed to copy bundled plugin source '{}' from '{}' to '{}': {:?}",
+                        name, dir, target_dir, e
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": format!("Failed to copy bundled plugin source: {}", e)
+                        })),
+                    )
+                        .into_response();
+                }
+
+                found_dir = Some((target_dir, true));
+                break;
+            }
+        }
+    }
+
+    // Fall back to workspace_dir bundled directories (thin dirs with plugin.json only)
     if found_dir.is_none() {
         let workspace_plugin_dirs = [
             format!("{}/plugins/mcp/{}", workspace_dir, name),
