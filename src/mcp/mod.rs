@@ -85,6 +85,10 @@ pub struct AppContext {
     /// LLM can introspect tool parameters at runtime without relying solely on
     /// error messages. Populated by `default_registry()`.
     pub tool_catalog: Vec<Value>,
+    /// Per-platform file readers for the `read_attached_file` MCP tool.
+    /// Keyed by platform name (e.g. "mattermost"). Each reader knows how to
+    /// fetch file content from that platform's API using file_id + server_url.
+    pub platform_file_readers: HashMap<String, Arc<dyn crate::platform::external::FileReader + Send + Sync>>,
 }
 
 impl AppContext {
@@ -110,6 +114,7 @@ impl AppContext {
             qdrant_url,
             memory_store: Arc::new(memory_store),
             platform_senders,
+            platform_file_readers: HashMap::new(),
             current_thread_id: None,
             current_channel_id: None,
             current_allowed_tools: Vec::new(),
@@ -340,6 +345,165 @@ impl McpRegistry {
     }
 }
 
+/// Build the `read_attached_file` tool: fetch file content from a platform
+/// on demand, avoiding inlining large files in the prompt or DB.
+fn read_attached_file_tool() -> McpTool {
+    use base64::Engine;
+
+    McpTool {
+        name: "read_attached_file".to_string(),
+        full_name: tool_qualify("builtin", "read_attached_file"),
+        description: "Read the content of an attached file from a platform channel (e.g. Mattermost). \
+                      Use this when a file is mentioned in a message but its content was not inlined \
+                      (because it exceeds the inline size limit). Provide the `file_id` and optionally \
+                      the `server_url` to fetch the file. Returns file content as text or base64."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "file_id": {
+                    "type": "string",
+                    "description": "The file identifier from the platform (e.g. Mattermost file_id)."
+                },
+                "server_url": {
+                    "type": "string",
+                    "description": "Optional server URL (e.g. http://mattermost:8065). Auto-detected from message metadata if omitted."
+                }
+            },
+            "required": ["file_id"]
+        }),
+        server_name: None,
+        handler: Arc::new(|args: Value, ctx: AppContext| {
+            Box::pin(async move {
+                let file_id = args
+                    .get("file_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+
+                if file_id.is_empty() {
+                    return Ok(McpToolResult {
+                        call_id: String::new(),
+                        content: "Error: 'file_id' parameter is required.".to_string(),
+                        is_error: true,
+                    });
+                }
+
+                // Determine server_url from args or from cause message metadata
+                let server_url = match args.get("server_url").and_then(|v| v.as_str()) {
+                    Some(url) if !url.trim().is_empty() => url.trim().to_string(),
+                    _ => {
+                        // Try to look up from the thread's cause message
+                        if let Some(tid) = ctx.current_thread_id {
+                            match sqlx::query_scalar::<_, serde_json::Value>(
+                                "SELECT metadata FROM messages WHERE thread_id = $1 AND role = 'cause' ORDER BY thread_sequence ASC, id ASC LIMIT 1"
+                            )
+                            .bind(tid)
+                            .fetch_optional(&ctx.pool)
+                            .await
+                            {
+                                Ok(Some(meta)) => {
+                                    match meta.get("server_url").and_then(|v| v.as_str()) {
+                                        Some(url) if !url.is_empty() => url.to_string(),
+                                        _ => return Ok(McpToolResult {
+                                            call_id: String::new(),
+                                            content: "Error: server_url not found in message metadata. Provide it explicitly.".to_string(),
+                                            is_error: true,
+                                        }),
+                                    }
+                                }
+                                Ok(None) => return Ok(McpToolResult {
+                                    call_id: String::new(),
+                                    content: "Error: No cause message found for current thread.".to_string(),
+                                    is_error: true,
+                                }),
+                                Err(e) => return Ok(McpToolResult {
+                                    call_id: String::new(),
+                                    content: format!("Error querying cause message: {}", e),
+                                    is_error: true,
+                                }),
+                            }
+                        } else {
+                            return Ok(McpToolResult {
+                                call_id: String::new(),
+                                content: "Error: No current thread and no server_url provided. Pass 'server_url' explicitly.".to_string(),
+                                is_error: true,
+                            });
+                        }
+                    }
+                };
+
+                // Determine platform from channel
+                let platform = if let Some(cid) = ctx.current_channel_id {
+                    match sqlx::query_scalar::<_, String>(
+                        "SELECT COALESCE(platform, 'mattermost') FROM channels WHERE id = $1"
+                    )
+                    .bind(cid)
+                    .fetch_optional(&ctx.pool)
+                    .await
+                    {
+                        Ok(Some(p)) => p,
+                        _ => "mattermost".to_string(),
+                    }
+                } else {
+                    "mattermost".to_string()
+                };
+
+                let reader = match ctx.platform_file_readers.get(&platform) {
+                    Some(r) => r.clone(),
+                    None => {
+                        let available: Vec<&String> = ctx.platform_file_readers.keys().collect();
+                        let available_str: Vec<&str> = available.iter().map(|s| s.as_str()).collect();
+                        return Ok(McpToolResult {
+                            call_id: String::new(),
+                            content: format!(
+                                "Error: No file reader for platform '{}'. Available: {}",
+                                platform,
+                                available_str.join(", ")
+                            ),
+                            is_error: true,
+                        });
+                    }
+                };
+
+                match reader.read_file(&file_id, &server_url).await {
+                    Ok(bytes) => {
+                        if let Ok(text) = String::from_utf8(bytes.clone()) {
+                            Ok(McpToolResult {
+                                call_id: String::new(),
+                                content: format!(
+                                    "📄 File content ({} bytes):\n\n{}",
+                                    bytes.len(),
+                                    text
+                                ),
+                                is_error: false,
+                            })
+                        } else {
+                            use base64::engine::general_purpose;
+                            let b64 = general_purpose::STANDARD.encode(&bytes);
+                            Ok(McpToolResult {
+                                call_id: String::new(),
+                                content: format!(
+                                    "📄 Binary file ({} bytes, base64-encoded):\n{}",
+                                    bytes.len(),
+                                    b64
+                                ),
+                                is_error: false,
+                            })
+                        }
+                    }
+                    Err(e) => Ok(McpToolResult {
+                        call_id: String::new(),
+                        content: format!("Error reading file '{}': {}", file_id, e),
+                        is_error: true,
+                    }),
+                }
+            })
+        }),
+    }
+}
+
 /// Build the `list_tool_details` introspection tool.
 ///
 /// This tool allows the LLM to request the full definition (description, input
@@ -480,6 +644,11 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
     // Registered last so the catalog excludes itself (it reads from AppContext.tool_catalog
     // which was populated just above).
     registry.register(list_tool_details_tool());
+
+    // ── read_attached_file: platform-generic file reading ──
+    // Allows the agent to read file attachments that exceed the inline
+    // size limit by delegating to the appropriate platform's FileReader.
+    registry.register(read_attached_file_tool());
 
     tracing::info!(
         "MCP registry initialized with {} tools (external + built-in)",

@@ -103,8 +103,9 @@ fn resolve_thread_planning_mode_with_content(
         return resolve_max_plan(global_planning_mode);
     }
 
-    // 4. User / Cron default — classify by prompt complexity
-    classify_complexity_for_planning(content, msg_type)
+    // 4. User / Cron default — classify by prompt complexity,
+    //    capped at the global PLANNING_MODE ceiling
+    classify_complexity_for_planning(content, msg_type, global_planning_mode)
 }
 
 /// Normalize a planning mode value to one of the canonical values.
@@ -143,7 +144,13 @@ fn resolve_max_plan(global_mode: &str) -> String {
     }
 }
 
-/// Classify a prompt by complexity and return the appropriate planning mode.
+/// Classify a prompt by complexity and return the appropriate planning mode,
+/// capped at the global planning mode.
+///
+/// The result is never more aggressive than `global_planning_mode` — if the
+/// global max is `auto_plan`, the classifier will not return `auto_subtasks`
+/// regardless of content length or keywords. This ensures the environment-level
+/// `PLANNING_MODE` setting is always the ceiling.
 ///
 /// Reads threshold settings from environment variables:
 /// - `PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS` (default 60)
@@ -151,13 +158,33 @@ fn resolve_max_plan(global_mode: &str) -> String {
 /// - `PLANNING_COMPLEXITY_KEYWORDS` (default comma-separated list)
 ///
 /// Returns one of: "prompt_only", "auto_plan", "auto_subtasks".
-fn classify_complexity_for_planning(content: &str, msg_type: &str) -> String {
+fn classify_complexity_for_planning(content: &str, msg_type: &str, global_planning_mode: &str) -> String {
     use crate::complexity::{classify_complexity, Complexity};
 
-    match classify_complexity(content, msg_type, None) {
-        Complexity::Simple => "prompt_only".to_string(),
-        Complexity::Standard => "auto_plan".to_string(),
-        Complexity::Complex => "auto_subtasks".to_string(),
+    let classified = match classify_complexity(content, msg_type, None) {
+        Complexity::Simple => "prompt_only",
+        Complexity::Standard => "auto_plan",
+        Complexity::Complex => "auto_subtasks",
+    };
+
+    // Cap at global planning mode — never exceed the configured ceiling
+    cap_planning_mode(classified, global_planning_mode)
+}
+
+/// Cap a resolved planning mode so it never exceeds the global ceiling.
+/// Values rank: prompt_only (0) < auto_plan (1) < auto_subtasks (2).
+fn cap_planning_mode<'a>(mode: &'a str, global: &'a str) -> String {
+    let rank = |m: &str| match m {
+        "prompt_only" => 0,
+        "auto_plan" => 1,
+        "auto_subtasks" => 2,
+        _ => 1,
+    };
+
+    if rank(mode) > rank(global) {
+        global.to_string()
+    } else {
+        mode.to_string()
     }
 }
 

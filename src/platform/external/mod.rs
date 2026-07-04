@@ -112,6 +112,35 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
             config: std::collections::HashMap::new(),
             max_retries: 3,
         };
+
+        // Validate that the entrypoint binary exists (for file-path commands).
+        // Commands that look like PATH lookups (no slash) are assumed to exist.
+        let command = &config.command;
+        let has_binary = if command.contains('/') {
+            let path = std::path::Path::new(command);
+            if path.is_relative() {
+                std::env::current_dir()
+                    .ok()
+                    .map(|cwd| cwd.join(path).exists())
+                    .unwrap_or(false)
+            } else {
+                path.exists()
+            }
+        } else {
+            // PATH-based command — assume it's available
+            true
+        };
+
+        if !has_binary {
+            tracing::warn!(
+                "Skipping platform plugin '{}': entrypoint binary not found at '{}' (resolved relative to CWD: {:?})",
+                manifest.name,
+                command,
+                std::env::current_dir().ok().map(|cwd| cwd.join(command)),
+            );
+            continue;
+        }
+
         let merged = merge_platform_config_env(
             &config,
             &serde_json::json!(manifest.config_schema),
@@ -490,6 +519,81 @@ pub fn decode_base64(encoded: &str) -> Result<Vec<u8>, anyhow::Error> {
     general_purpose::STANDARD
         .decode(encoded)
         .map_err(|e| anyhow::anyhow!("Base64 decode error: {}", e))
+}
+
+// ---------------------------------------------------------------------------
+// File reading — generic trait + Mattermost implementation
+// ---------------------------------------------------------------------------
+
+/// A platform-specific file reader.
+/// Each platform plugin can provide an implementation that knows how to
+/// fetch file content by file_id. The MCP tool `read_attached_file`
+/// delegates to the platform-appropriate reader transparently.
+#[async_trait::async_trait]
+pub trait FileReader: Send + Sync + std::fmt::Debug {
+    /// Read a file from the platform's API.
+    ///
+    /// * `file_id` — the file identifier returned by the platform plugin
+    /// * `server_url` — the platform server's base URL (from message metadata)
+    ///
+    /// Returns raw file bytes on success.
+    async fn read_file(&self, file_id: &str, server_url: &str) -> crate::error::AppResult<Vec<u8>>;
+}
+
+/// Reads files from Mattermost by making direct HTTP requests to
+/// the Mattermost REST API. Uses `MATTERMOST_ACCESS_TOKEN` from the
+/// environment for authentication.
+#[derive(Debug)]
+pub struct MattermostFileReader {
+    access_token: String,
+}
+
+impl MattermostFileReader {
+    /// Create a new Mattermost file reader.
+    /// Returns `None` if `MATTERMOST_ACCESS_TOKEN` is not set or empty.
+    pub fn new() -> Option<Self> {
+        let access_token = std::env::var("MATTERMOST_ACCESS_TOKEN").ok()?;
+        if access_token.is_empty() {
+            return None;
+        }
+        Some(Self { access_token })
+    }
+}
+
+#[async_trait::async_trait]
+impl FileReader for MattermostFileReader {
+    async fn read_file(&self, file_id: &str, server_url: &str) -> crate::error::AppResult<Vec<u8>> {
+        let base_url = server_url.trim_end_matches('/');
+        let url = format!("{}/api/v4/files/{}", base_url, file_id);
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .map_err(|e| crate::error::Error::Message(format!("Failed to create HTTP client: {}", e)))?;
+
+        let resp = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.access_token))
+            .send()
+            .await
+            .map_err(|e| crate::error::Error::Message(format!("HTTP request failed for file {}: {}", file_id, e)))?;
+
+        if !resp.status().is_success() {
+            return Err(crate::error::Error::Message(format!(
+                "File fetch failed: status {} for file_id={} on {}",
+                resp.status(),
+                file_id,
+                url
+            )));
+        }
+
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| crate::error::Error::Message(format!("Failed to read file body: {}", e)))?;
+
+        Ok(bytes.to_vec())
+    }
 }
 
 #[cfg(test)]

@@ -20,10 +20,10 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
-use tokio::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::select;
+use tokio::sync::Mutex;
 use tokio::sync::Notify;
 
 // ---------------------------------------------------------------------------
@@ -120,7 +120,10 @@ impl ExternalPlatformClient {
         // Register our restart flag and notify in the shared map so the API can signal us
         {
             let mut signals = platform_restart_signals.lock().await;
-            signals.insert(name.clone(), (Arc::clone(&restart_flag), Arc::clone(&restart_notify)));
+            signals.insert(
+                name.clone(),
+                (Arc::clone(&restart_flag), Arc::clone(&restart_notify)),
+            );
         }
 
         Self {
@@ -261,10 +264,7 @@ impl ExternalPlatformClient {
                 );
                 *self.plugin_name.lock().map_err(|_| Error::LockPoisoned)? =
                     Some(init_result.name.clone());
-                *self
-                    .capabilities
-                    .lock()
-                    .map_err(|_| Error::LockPoisoned)? = Some((
+                *self.capabilities.lock().map_err(|_| Error::LockPoisoned)? = Some((
                     init_result.capabilities.inbound,
                     init_result.capabilities.outbound,
                 ));
@@ -289,6 +289,13 @@ impl Platform for ExternalPlatformClient {
     async fn start(&self, pool: PgPool, mut receiver: OutboundReceiver) -> AppResult<()> {
         tracing::info!("Starting external platform plugin '{}'", self.name);
 
+        // Track consecutive failures with exponential backoff for the spawn loop
+        let max_spawn_retries: u32 = std::env::var("PLATFORM_MAX_SPAWN_RETRIES")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse()
+            .unwrap_or(30);
+        let mut spawn_failures: u32 = 0;
+
         // Outer loop — respawns the subprocess when a restart is requested
         loop {
             // Check if we've been asked to stop
@@ -302,14 +309,43 @@ impl Platform for ExternalPlatformClient {
 
             // Spawn the plugin subprocess
             let (child, mut stdin, stdout) = match self.spawn_plugin(&pool).await {
-                Ok(result) => result,
+                Ok(result) => {
+                    // Success — reset failure counter
+                    spawn_failures = 0;
+                    result
+                }
                 Err(e) => {
-                    tracing::error!(
-                        "Failed to spawn platform plugin '{}': {:?}",
-                        self.name,
-                        e
+                    spawn_failures += 1;
+                    if spawn_failures >= max_spawn_retries {
+                        tracing::error!(
+                            "Platform plugin '{}' failed to spawn {} times, giving up: {:?}",
+                            self.name,
+                            spawn_failures,
+                            e
+                        );
+                        return Err(err_str!(
+                            "Platform plugin '{}' failed to spawn after {} retries: {:?}",
+                            self.name,
+                            max_spawn_retries,
+                            e
+                        ));
+                    }
+                    if spawn_failures == 1 {
+                        tracing::error!("Failed to spawn platform plugin '{}': {:?}", self.name, e);
+                    } else {
+                        tracing::warn!(
+                            "Failed to spawn platform plugin '{}' (attempt {}/{}): {:?}",
+                            self.name,
+                            spawn_failures,
+                            max_spawn_retries,
+                            e
+                        );
+                    }
+                    let backoff = std::cmp::min(
+                        std::time::Duration::from_secs(2u64.saturating_pow(spawn_failures)),
+                        std::time::Duration::from_secs(60),
                     );
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    tokio::time::sleep(backoff).await;
                     continue;
                 }
             };
@@ -323,11 +359,36 @@ impl Platform for ExternalPlatformClient {
             // Initialize the plugin using local handles (no locks held across await)
             let mut stdout = stdout; // make mutable
             if let Err(e) = self.initialize(&mut stdin, &mut stdout).await {
-                tracing::error!(
-                    "Failed to initialize platform plugin '{}': {:?}",
-                    self.name,
-                    e
-                );
+                spawn_failures += 1;
+                if spawn_failures >= max_spawn_retries {
+                    tracing::error!(
+                        "Platform plugin '{}' failed to initialize {} times, giving up: {:?}",
+                        self.name,
+                        spawn_failures,
+                        e
+                    );
+                    return Err(err_str!(
+                        "Platform plugin '{}' failed to initialize after {} retries: {:?}",
+                        self.name,
+                        max_spawn_retries,
+                        e
+                    ));
+                }
+                if spawn_failures == 1 {
+                    tracing::error!(
+                        "Failed to initialize platform plugin '{}': {:?}",
+                        self.name,
+                        e
+                    );
+                } else {
+                    tracing::warn!(
+                        "Failed to initialize platform plugin '{}' (attempt {}/{}): {:?}",
+                        self.name,
+                        spawn_failures,
+                        max_spawn_retries,
+                        e
+                    );
+                }
                 // Kill child if initialization fails
                 let child_to_kill = match self.process.lock() {
                     Ok(mut guard) => guard.take(),
@@ -337,7 +398,11 @@ impl Platform for ExternalPlatformClient {
                     let _ = child.kill().await;
                     let _ = child.wait().await;
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let backoff = std::cmp::min(
+                    std::time::Duration::from_secs(2u64.saturating_pow(spawn_failures)),
+                    std::time::Duration::from_secs(60),
+                );
+                tokio::time::sleep(backoff).await;
                 continue;
             }
 
@@ -372,10 +437,7 @@ impl Platform for ExternalPlatformClient {
                 let response = crate::platform::external::parse_response(line.trim())?;
                 match response {
                     crate::platform::external::PluginResponse::Success { .. } => {
-                        tracing::info!(
-                            "Plugin '{}' configured successfully",
-                            config_name_for_log
-                        );
+                        tracing::info!("Plugin '{}' configured successfully", config_name_for_log);
                     }
                     crate::platform::external::PluginResponse::Error { error, .. } => {
                         return Err(err_str!(
@@ -994,12 +1056,8 @@ impl Platform for ExternalPlatformClient {
                 self.reload_config_from_disk();
                 // Reset circuit breaker for fresh start
                 if let Ok(mut circuit) = self.circuit.lock() {
-                    *circuit = CircuitBreaker::new(
-                        self.config
-                            .read()
-                            .map(|c| c.max_retries)
-                            .unwrap_or(3),
-                    );
+                    *circuit =
+                        CircuitBreaker::new(self.config.read().map(|c| c.max_retries).unwrap_or(3));
                 }
                 // Reset next_id for fresh subprocess
                 self.next_id.store(1, Ordering::SeqCst);
@@ -1122,7 +1180,7 @@ async fn send_external_reply(
         is_summary: false,
         is_user_thread: false,
         thread_sequence: 0,
-        };
+    };
     let id = *next_id_val;
     *next_id_val += 1;
     let req = crate::platform::external::build_deliver_request(id, &deliver_params);

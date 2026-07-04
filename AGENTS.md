@@ -657,3 +657,45 @@ The omniagent's client.rs handles this:
 
 **Mattermost plugin:** The WebSocket event handler detects `post_deleted` events and sends this notification automatically. Polling mode currently does NOT detect post deletions — use WebSocket mode (`connection_mode: websocket` in platforms.yml) for this feature. Platform-specific settings like connection mode are configured via the platform config (platforms.yml or dashboard UI), not in .env.
 Then verify with `docker ps` and `curl http://localhost:PORT/`.
+
+### Prompt Logging — Planning Phase Deduplication
+
+When `PROMPT_LOG_LEVEL=first` and a plan is generated, the executor no longer logs a duplicate "first" prompt for the main loop after the plan phase. The fix (line 631 in `executor.rs`):
+
+- After the plan content is saved as a `msg_type="plan"` message, `has_logged_first_prompt` is set to `true`
+- The planning prompt (`msg_type="prompt"`, `msg_subtype="plan"`) is still logged at all non-off levels
+- The main loop skips its own "first" prompt logging because `has_logged_first_prompt=true`
+- This prevents a redundant `msg_type="prompt"` message that would embed the plan content as context
+- Threads WITHOUT a plan are unaffected (existing behavior preserved)
+
+**Before (T53):** #240 prompt/plan, #241 plan/markdown, #242 prompt/first (duplicates plan content)
+**After:** #240 prompt/plan, #241 plan/markdown — no duplicate #242
+
+### FileReader Trait & `read_attached_file` MCP Tool
+
+Large file attachments (exceeding `max_download_bytes`) are no longer inlined in the prompt or stored in the DB. Instead, a generic `FileReader` trait + MCP tool provides on-demand access:
+
+**Architecture:**
+- `FileReader` trait in `src/platform/external/mod.rs` — defines `async fn read_file(file_id, server_url) -> Vec<u8>`
+- `MattermostFileReader` — reads from Mattermost REST API using `MATTERMOST_ACCESS_TOKEN` env var
+- `AppContext.platform_file_readers` — `HashMap<String, Arc<dyn FileReader>>`, keyed by platform name
+- Registered in `main.rs` after `AppContext` creation
+- The `read_attached_file` MCP tool — auto-detects platform from `current_channel_id`, looks up `server_url` from cause message metadata, delegates to the appropriate `FileReader` implementation
+
+**Usage by the agent:**
+```
+read_attached_file(file_id="abc123", server_url="http://mattermost:8065")
+```
+- `file_id` is required (the file identifier from the platform)
+- `server_url` is optional (auto-detected from thread cause message metadata)
+
+**Generic design:** Any platform plugin can register its own `FileReader` — no per-platform code in the MCP tool itself.
+
+### Plugin Parameter: `max_download_bytes`
+
+The Mattermost plugin now accepts `max_download_bytes` as a configurable integer parameter (plugin.json `config_schema`):
+
+- Type: integer, min 1024 (1 KB), max 1,073,741,824 (1 GB), default 10,485,760 (10 MB)
+- Files under this threshold: plugin downloads and base64-encodes content inline (existing behavior)
+- Files over this threshold: content omitted (`None`), agent can fetch via `read_attached_file` MCP tool
+- The `server_url` and `max_download_bytes` parameters are threaded through all call paths: `poll_channel`, `process_channel_event`, `ws_event_loop`, `send_inbound_notification`

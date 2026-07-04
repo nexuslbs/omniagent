@@ -133,6 +133,19 @@ async fn run_server() -> AppResult<()> {
     let mcp = mcp::default_registry(&mut ctx).await;
     let mcp_shared = Arc::new(RwLock::new(mcp));
 
+    // Register platform-specific file readers for the read_attached_file tool
+    if let Some(reader) = crate::platform::external::MattermostFileReader::new() {
+        ctx.platform_file_readers.insert(
+            "mattermost".to_string(),
+            std::sync::Arc::new(reader),
+        );
+        tracing::info!("Registered MattermostFileReader for read_attached_file");
+    } else {
+        tracing::warn!(
+            "MATTERMOST_ACCESS_TOKEN not set — Mattermost file reading unavailable"
+        );
+    }
+
     // Build the agent with shared mutable config
     let shared_config_for_agent = shared_config.clone();
     let agent = agent::Agent::new(pool.clone(), shared_config_for_agent, mcp_shared.clone(), ctx.clone());

@@ -623,6 +623,13 @@ pub async fn process_thread(
                         }
                     }
 
+                    // Mark first prompt as already logged so the main loop doesn't log
+                    // a duplicate "first" prompt that includes the plan content as context.
+                    // The planning prompt (msg_subtype="plan") and the plan message itself
+                    // already serve as the record — the main-loop "first" prompt would just
+                    // embed the plan text again, duplicating what's already saved.
+                    has_logged_first_prompt = true;
+
                     // For complex tasks, auto-create subtasks from JSON plan content
                     if enable_subtasks && plan_content.len() > 100 {
                         let max_json_retries: u32 = std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES")
