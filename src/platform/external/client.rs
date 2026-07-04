@@ -774,7 +774,12 @@ impl Platform for ExternalPlatformClient {
                                                                 * 1024;
 
                                                                 let mut file_lines: Vec<String> = Vec::new();
-                                                                for file in &inbound.files {
+                                                                let file_ids: Vec<String> = inbound.metadata.get("file_ids")
+                                                                    .and_then(|v| v.as_array())
+                                                                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                                                                    .unwrap_or_default();
+                                                                for (idx, file) in inbound.files.iter().enumerate() {
+                                                                let file_id_hint = file_ids.get(idx).map(|fid| format!(" (file_id: {})", fid)).unwrap_or_default();
                                                                 let size_str = if file.size > 1_000_000 {
                                                                     format!("{:.1} MB", file.size as f64 / 1_000_000.0)
                                                                 } else if file.size > 1_000 {
@@ -799,14 +804,14 @@ impl Platform for ExternalPlatformClient {
                                                                                 match String::from_utf8(decoded) {
                                                                                     Ok(content_str) => {
                                                                                         file_lines.push(format!(
-                                                                                            "- {} ({} {}):\n```\n{}\n```",
-                                                                                            file.name, size_str, file.mime_type, content_str
+                                                                                            "- {} ({} {}){}:\n```\n{}\n```",
+                                                                                            file.name, size_str, file.mime_type, file_id_hint, content_str
                                                                                         ));
                                                                                     }
                                                                                     Err(_) => {
                                                                                         file_lines.push(format!(
-                                                                                            "- {} ({} {}) [binary content, not displayed]",
-                                                                                            file.name, size_str, file.mime_type
+                                                                                            "- {} ({} {}){} [binary content, not displayed]",
+                                                                                            file.name, size_str, file.mime_type, file_id_hint
                                                                                         ));
                                                                                     }
                                                                                 }
@@ -814,21 +819,21 @@ impl Platform for ExternalPlatformClient {
                                                                             Err(e) => {
                                                                                 tracing::warn!("Failed to decode base64 content for {}: {:?}", file.name, e);
                                                                                 file_lines.push(format!(
-                                                                                    "- {} ({} {})",
-                                                                                    file.name, size_str, file.mime_type
+                                                                                    "- {} ({} {}){}",
+                                                                                    file.name, size_str, file.mime_type, file_id_hint
                                                                                 ));
                                                                             }
                                                                         }
                                                                     } else {
                                                                         file_lines.push(format!(
-                                                                            "- {} ({} {})",
-                                                                            file.name, size_str, file.mime_type
+                                                                            "- {} ({} {}){}",
+                                                                            file.name, size_str, file.mime_type, file_id_hint
                                                                         ));
                                                                     }
                                                                 } else {
                                                                     file_lines.push(format!(
-                                                                        "- {} ({} {})",
-                                                                        file.name, size_str, file.mime_type
+                                                                        "- {} ({} {}){}",
+                                                                        file.name, size_str, file.mime_type, file_id_hint
                                                                     ));
                                                                 }
                                                                 }

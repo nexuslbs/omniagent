@@ -348,7 +348,7 @@ impl McpRegistry {
 /// Build the `read_attached_file` tool: fetch file content from a platform
 /// on demand, avoiding inlining large files in the prompt or DB.
 fn read_attached_file_tool() -> McpTool {
-    use base64::Engine;
+    use base64::{Engine, engine::general_purpose};
 
     McpTool {
         name: "read_attached_file".to_string(),
@@ -480,7 +480,6 @@ fn read_attached_file_tool() -> McpTool {
                                 is_error: false,
                             })
                         } else {
-                            use base64::engine::general_purpose;
                             let b64 = general_purpose::STANDARD.encode(&bytes);
                             Ok(McpToolResult {
                                 call_id: String::new(),

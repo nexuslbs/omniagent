@@ -187,7 +187,12 @@ fn merge_platform_config_env(
     if let Some(ref cfg) = yaml_config {
         if let Some(obj) = cfg.as_object() {
             for (key, val) in obj {
-                let raw = val.as_str().map(|s| s.to_string()).unwrap_or_default();
+                let raw = match val {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    _ => String::new(),
+                };
                 let resolved = crate::plugins_yaml::resolve_config_value(&raw);
                 if !resolved.is_empty() {
                     config_map.insert(key.clone(), resolved);
