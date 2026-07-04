@@ -702,9 +702,82 @@ impl Platform for ExternalPlatformClient {
                                                                     &reply,
                                                                 ).await;
                                                                 continue;
-                                                            }
+                                                                }
 
-                                                            if let Ok((thread, _msg)) = crate::db::types::create_thread_with_cause(
+                                                                // Apply generic file attachment inlining (handles all platforms uniformly)
+                                                                let max_inline_bytes = std::env::var("MAX_INLINE_FILE_KB")
+                                                                .ok()
+                                                                .and_then(|v| v.parse::<usize>().ok())
+                                                                .unwrap_or(100)
+                                                                * 1024;
+
+                                                                let mut file_lines: Vec<String> = Vec::new();
+                                                                for file in &inbound.files {
+                                                                let size_str = if file.size > 1_000_000 {
+                                                                    format!("{:.1} MB", file.size as f64 / 1_000_000.0)
+                                                                } else if file.size > 1_000 {
+                                                                    format!("{:.1} KB", file.size as f64 / 1_000.0)
+                                                                } else {
+                                                                    format!("{} B", file.size)
+                                                                };
+
+                                                                let ext = file.name.rsplit('.').next().unwrap_or("").to_lowercase();
+                                                                let is_text = file.mime_type.starts_with("text/")
+                                                                    || matches!(file.mime_type.as_str(),
+                                                                        "application/json" | "application/yaml" | "application/xml"
+                                                                        | "application/x-yaml" | "application/javascript")
+                                                                    || matches!(ext.as_str(),
+                                                                        "txt" | "md" | "json" | "yaml" | "yml" | "xml" | "toml" | "csv"
+                                                                        | "env" | "cfg" | "conf" | "log" | "sh" | "py" | "rs" | "js" | "ts" | "sql");
+
+                                                                if is_text && (file.size as usize) < max_inline_bytes {
+                                                                    if let Some(ref content_b64) = file.content {
+                                                                        match crate::platform::external::decode_base64(content_b64) {
+                                                                            Ok(decoded) => {
+                                                                                match String::from_utf8(decoded) {
+                                                                                    Ok(content_str) => {
+                                                                                        file_lines.push(format!(
+                                                                                            "- {} ({} {}):\n```\n{}\n```",
+                                                                                            file.name, size_str, file.mime_type, content_str
+                                                                                        ));
+                                                                                    }
+                                                                                    Err(_) => {
+                                                                                        file_lines.push(format!(
+                                                                                            "- {} ({} {}) [binary content, not displayed]",
+                                                                                            file.name, size_str, file.mime_type
+                                                                                        ));
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                            Err(e) => {
+                                                                                tracing::warn!("Failed to decode base64 content for {}: {:?}", file.name, e);
+                                                                                file_lines.push(format!(
+                                                                                    "- {} ({} {})",
+                                                                                    file.name, size_str, file.mime_type
+                                                                                ));
+                                                                            }
+                                                                        }
+                                                                    } else {
+                                                                        file_lines.push(format!(
+                                                                            "- {} ({} {})",
+                                                                            file.name, size_str, file.mime_type
+                                                                        ));
+                                                                    }
+                                                                } else {
+                                                                    file_lines.push(format!(
+                                                                        "- {} ({} {})",
+                                                                        file.name, size_str, file.mime_type
+                                                                    ));
+                                                                }
+                                                                }
+
+                                                                let mut text = inbound.text.clone();
+                                                                if !file_lines.is_empty() {
+                                                                text.push_str("\n\n--- Attachments ---\n");
+                                                                text.push_str(&file_lines.join("\n"));
+                                                                }
+
+                                                                if let Ok((thread, _msg)) = crate::db::types::create_thread_with_cause(
                                                                 &pool,
                                                                 &self.data_dir,
                                                                 "user",
@@ -715,7 +788,7 @@ impl Platform for ExternalPlatformClient {
                                                                     model: channel.current_model.clone(),
                                                                     task_id: None,
                                                                     schedule_task_id: None,
-                                                                    content: inbound.text.clone(),
+                                                                    content: text,
                                                                     external_id: Some(inbound.external_id.clone()),
                                                                     parent_external_id: inbound.metadata.get("root_id")
                                                                         .and_then(|v| v.as_str())

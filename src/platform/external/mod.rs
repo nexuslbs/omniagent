@@ -345,12 +345,25 @@ pub struct DeleteResult {
 // Inbound message notification (plugin → agent)
 // ---------------------------------------------------------------------------
 
+/// A file attachment sent by a platform plugin with the inbound message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileAttachment {
+    pub name: String,
+    pub size: i64,
+    pub mime_type: String,
+    /// Raw file content bytes, base64-encoded. Omitted for files > 10MB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
 /// An inbound message received by the plugin from the external service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundMessage {
     pub resource_identifier: String,
     pub text: String,
     pub external_id: String,
+    #[serde(default)]
+    pub files: Vec<FileAttachment>,
     #[serde(default)]
     pub metadata: Value,
 }
@@ -468,6 +481,15 @@ pub fn register_platform_client(name: &str, client: client::ExternalPlatformClie
     if let Ok(mut registry) = PLATFORM_CLIENT_REGISTRY.lock() {
         registry.insert(name.to_string(), client);
     }
+}
+
+/// Decode a base64-encoded string to raw bytes.
+pub fn decode_base64(encoded: &str) -> Result<Vec<u8>, anyhow::Error> {
+    use base64::engine::general_purpose;
+    use base64::Engine;
+    general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|e| anyhow::anyhow!("Base64 decode error: {}", e))
 }
 
 #[cfg(test)]

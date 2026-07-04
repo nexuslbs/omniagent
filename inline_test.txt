@@ -1,0 +1,1 @@
+Hello! This content should now be properly inlined by the fixed plugin.
