@@ -222,11 +222,11 @@ fn find_plugin_json(dir: &Path) -> AppResult<String> {
 // Install from Git
 // ---------------------------------------------------------------------------
 
-/// Clone a plugin from a git repository into `<workspace_dir>/plugins/<type_dir>/external/<name>/`,
+/// Clone a plugin from a git repository into `<workspace_dir>/plugins/<type_dir>/remote/<name>/`,
 /// then copy it to `<data_dir>/plugins/<type_dir>/<name>/` and return the manifest.
 ///
 /// Steps:
-/// 1. Shallow clone (`--depth 1`) the repo into the external dir
+/// 1. Shallow clone (`--depth 1`) the repo into the remote dir
 /// 2. If a git_ref is specified, check it out after clone
 /// 3. Find plugin.json in the cloned directory
 /// 4. Copy to data_dir (removes existing if present)
@@ -240,29 +240,29 @@ pub fn install_from_git(
     data_dir: &str,
     repo_path: Option<&str>,
 ) -> AppResult<PluginManifest> {
-    let external_dir = format!("{}/plugins/{}/external/{}", workspace_dir, remote_type, name);
-    let external_path = std::path::Path::new(&external_dir);
+    let remote_dir = format!("{}/plugins/{}/remote/{}", workspace_dir, remote_type, name);
+    let remote_path = std::path::Path::new(&remote_dir);
 
     // Remove existing clone if present
-    if external_path.exists() {
-        std::fs::remove_dir_all(external_path)
-            .ctx(format!("Failed to remove existing clone at {}", external_dir))?;
+    if remote_path.exists() {
+        std::fs::remove_dir_all(remote_path)
+            .ctx(format!("Failed to remove existing clone at {}", remote_dir))?;
     }
 
     // Create parent directories
-    if let Some(parent) = external_path.parent() {
+    if let Some(parent) = remote_path.parent() {
         std::fs::create_dir_all(parent)
-            .ctx(format!("Failed to create parent dirs for {}", external_dir))?;
+            .ctx(format!("Failed to create parent dirs for {}", remote_dir))?;
     }
 
     tracing::info!(
         "Cloning git plugin '{}' from {} (ref: {:?}) to {}",
-        name, url, git_ref, external_dir
+        name, url, git_ref, remote_dir
     );
 
     // Shallow clone
     let mut cmd = std::process::Command::new("git");
-    cmd.arg("clone").arg("--depth").arg("1").arg(url).arg(&external_dir);
+    cmd.arg("clone").arg("--depth").arg("1").arg(url).arg(&remote_dir);
 
     let status = cmd.status().ctx(format!(
         "Failed to execute git clone for '{}' from {}",
@@ -279,7 +279,7 @@ pub fn install_from_git(
             tracing::info!("Checking out ref '{}' for plugin '{}'", ref_str, name);
             let checkout_status = std::process::Command::new("git")
                 .arg("-C")
-                .arg(&external_dir)
+                .arg(&remote_dir)
                 .arg("checkout")
                 .arg(ref_str)
                 .status()
@@ -293,8 +293,8 @@ pub fn install_from_git(
 
     // Find plugin.json in the cloned directory
     let search_dir = match repo_path {
-        Some(p) if !p.is_empty() => external_path.join(p),
-        _ => external_path.to_path_buf(),
+        Some(p) if !p.is_empty() => remote_path.join(p),
+        _ => remote_path.to_path_buf(),
     };
     let plugin_json_path = find_plugin_json(&search_dir)?;
     let manifest = load_manifest(&plugin_json_path)?;

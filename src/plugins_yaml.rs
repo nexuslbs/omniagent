@@ -53,10 +53,10 @@ pub struct PluginRemote {
 }
 
 impl PluginRemote {
-    /// Return the external directory path under the workspace.
-    /// e.g., `<workspace_dir>/plugins/mcp/external/<name>/`
-    pub fn external_dir(&self, workspace_dir: &str, name: &str) -> String {
-        format!("{}/plugins/{}/external/{}", workspace_dir, self.remote_type, name)
+    /// Return the remote clone directory path under the workspace.
+    /// e.g., `<workspace_dir>/plugins/mcp/remote/<name>/`
+    pub fn remote_dir(&self, workspace_dir: &str, name: &str) -> String {
+        format!("{}/plugins/{}/remote/{}", workspace_dir, self.remote_type, name)
     }
 
     /// Return the data directory path for this plugin.

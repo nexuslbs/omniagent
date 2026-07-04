@@ -1730,23 +1730,23 @@ pub(crate) async fn delete_plugin_handler(
         }
     }
 
-    // If this is a remote plugin, also remove the workspace external/ clone
+    // For remote plugins: also remove workspace remote/ clone.
     let workspace_dir = std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
-    let external_dirs = [
-        format!("{}/plugins/mcp/external/{}", workspace_dir, name),
-        format!("{}/plugins/platforms/external/{}", workspace_dir, name),
-        format!("{}/plugins/providers/external/{}", workspace_dir, name),
+    let remote_dirs = [
+        format!("{}/plugins/mcp/remote/{}", workspace_dir, name),
+        format!("{}/plugins/platforms/remote/{}", workspace_dir, name),
+        format!("{}/plugins/providers/remote/{}", workspace_dir, name),
     ];
-    for ext_dir in &external_dirs {
+    for ext_dir in &remote_dirs {
         let ext_path = std::path::Path::new(ext_dir);
         if ext_path.exists() && ext_path.is_dir() {
             match std::fs::remove_dir_all(ext_path) {
                 Ok(()) => {
-                    tracing::info!("Removed external clone: {}", ext_dir);
+                    tracing::info!("Removed remote clone: {}", ext_dir);
                     disk_removed = true;
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to remove external clone '{}': {:?}", ext_dir, e);
+                    tracing::warn!("Failed to remove remote clone '{}': {:?}", ext_dir, e);
                 }
             }
         }
@@ -1861,7 +1861,7 @@ pub(crate) async fn install_url_handler(
 /// - `type` (required): "mcp", "platform", or "provider"
 /// - `name` (optional): plugin name override (extracted from plugin.json if omitted)
 ///
-/// Flow: shallow clone to external/ → copy to data_dir → compile if Rust → register in YAML.
+/// Flow: shallow clone to remote/ → copy to data_dir → compile if Rust → register in YAML.
 pub(crate) async fn install_git_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<InstallGitRequest>,
