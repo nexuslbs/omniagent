@@ -78,8 +78,6 @@ pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
         )
         .route("/api/plugins/{name}/setup", post(setup_plugin_handler))
         .route("/api/plugins/{name}", delete(delete_plugin_handler))
-        .route("/api/plugins/install-url", post(install_url_handler))
-        .route("/api/plugins/install-git", post(install_git_handler))
         .route("/api/reload", post(reload_env_handler))
 }
 
