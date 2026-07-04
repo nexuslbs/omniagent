@@ -608,18 +608,97 @@ pub(crate) async fn install_plugin_handler(
         }
     };
 
-    // 2. Compile if Rust crate
+    // 2a. If the plugin dir exists in data_dir but lacks Cargo.toml, check if the
+    // Rust source exists at /app/plugins/ and copy it over (handles reinstall after
+    // a previous failed install that only copied plugin.json).
     let cargo_toml = std::path::Path::new(&plugin_dir).join("Cargo.toml");
+    if !cargo_toml.exists() {
+        // Determine the type directory from the plugin_dir path (e.g., ".../mcp/hindsight" => "mcp")
+        let type_dir = std::path::Path::new(&plugin_dir)
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let source_dir = format!("/app/plugins/{}/{}", type_dir, name);
+        let source_path = std::path::Path::new(&source_dir);
+        if source_path.join("Cargo.toml").exists() {
+            tracing::info!(
+                "Install: plugin '{}' in data_dir lacks Cargo.toml, copying Rust source from {}",
+                name, source_dir
+            );
+            let target_path = std::path::Path::new(&plugin_dir);
+            // Copy Rust source files (Cargo.toml, src/, etc.) into the existing plugin dir
+            if let Ok(entries) = std::fs::read_dir(source_path) {
+                for entry in entries.flatten() {
+                    let entry_name = entry.file_name();
+                    if entry_name == "target" {
+                        continue;
+                    }
+                    let src_entry = entry.path();
+                    let dst_entry = target_path.join(&entry_name);
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        if !dst_entry.exists() {
+                            let _ = copy_dir_all(&src_entry, &dst_entry);
+                        }
+                    } else if !dst_entry.exists() {
+                        let _ = std::fs::copy(&src_entry, &dst_entry);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2b. Compile if Rust crate
     if cargo_toml.exists() {
         tracing::info!("Install: compiling Rust crate at {}", plugin_dir);
+
+        // Build from the workspace root if available (handles path deps like
+        // `omniagent = { path = "../../../" }` that break when the plugin is
+        // copied to data_dir and the relative path no longer resolves).
+        let workspace_root = std::path::Path::new("/app");
+        let use_workspace_root = workspace_root.join("Cargo.toml").exists()
+            && workspace_root != std::path::Path::new(&plugin_dir).parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
+                .unwrap_or(std::path::Path::new(""));
+
+        let package_name = if use_workspace_root {
+            // Read package name from Cargo.toml for -p flag
+            std::fs::read_to_string(&cargo_toml)
+                .ok()
+                .and_then(|content| {
+                    content.lines().find_map(|line| {
+                        let trimmed = line.trim();
+                        if let Some(name) = trimmed.strip_prefix("name = \"") {
+                            name.strip_suffix('\"').map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                })
+        } else {
+            None
+        };
+
         match tokio::task::spawn_blocking({
-            let dir = plugin_dir.clone();
-            let cargo_path = cargo_toml.to_string_lossy().to_string();
+            let dir = if use_workspace_root {
+                workspace_root.to_path_buf()
+            } else {
+                std::path::PathBuf::from(&plugin_dir)
+            };
+            let cargo_path = if use_workspace_root {
+                workspace_root.join("Cargo.toml").to_string_lossy().to_string()
+            } else {
+                cargo_toml.to_string_lossy().to_string()
+            };
+            let pkg = package_name.clone();
             move || {
-                let status = std::process::Command::new("cargo")
-                    .args(["build", "--release", "--manifest-path", &cargo_path])
-                    .current_dir(&dir)
-                    .status();
+                let mut cmd = std::process::Command::new("cargo");
+                cmd.arg("build").arg("--release").arg("--manifest-path").arg(&cargo_path);
+                if let Some(ref name) = pkg {
+                    cmd.arg("-p").arg(name);
+                }
+                let status = cmd.current_dir(&dir).status();
                 status
             }
         })
@@ -627,6 +706,46 @@ pub(crate) async fn install_plugin_handler(
         {
             Ok(Ok(status)) if status.success() => {
                 tracing::info!("Install: Rust compilation succeeded for '{}'", name);
+                // If built from workspace root, copy the binary to the plugin dir
+                // so needs_build detection finds it.
+                if use_workspace_root {
+                    let binary_name = package_name.as_deref()
+                        .or_else(|| Some(&name as &str))
+                        .unwrap_or("mcp-server");
+                    let binary_path = format!(
+                        "{}/target/release/{}",
+                        workspace_root.to_string_lossy(),
+                        binary_name.replace('-', "_")
+                    );
+                    let binary_path2 = format!(
+                        "{}/target/release/{}",
+                        workspace_root.to_string_lossy(),
+                        binary_name
+                    );
+                    let src_binary = if std::path::Path::new(&binary_path).exists() {
+                        binary_path
+                    } else if std::path::Path::new(&binary_path2).exists() {
+                        binary_path2
+                    } else {
+                        String::new()
+                    };
+                    if !src_binary.is_empty() {
+                        let target_dir = std::path::Path::new(&plugin_dir).join("target").join("release");
+                        let _ = std::fs::create_dir_all(&target_dir);
+                        let dst = target_dir.join(binary_name.replace('-', "_"));
+                        if let Err(e) = std::fs::copy(&src_binary, &dst) {
+                            tracing::warn!(
+                                "Install: failed to copy binary for '{}' to plugin dir: {:?}",
+                                name, e
+                            );
+                        } else {
+                            tracing::info!(
+                                "Install: copied binary for '{}' to {}",
+                                name, dst.display()
+                            );
+                        }
+                    }
+                }
             }
             Ok(Ok(status)) => {
                 let msg = format!("Compilation failed for '{}' with exit code {}", name, status);
