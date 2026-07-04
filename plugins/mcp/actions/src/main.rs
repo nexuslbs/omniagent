@@ -106,11 +106,12 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
         .await
         .map_err(|e| anyhow::anyhow!("Failed to query channel {}: {}", channel_id, e))?;
 
+        let default_profile = omniagent::profile::default_profile_name();
         let effective_profile = task_profile
             .as_deref()
             .filter(|s| !s.is_empty())
             .or_else(|| chan_profile.as_ref().and_then(|(s,)| s.as_deref()))
-            .unwrap_or(&omniagent::profile::default_profile_name());
+            .unwrap_or(&default_profile);
 
         // 3. Build content: use body if present, otherwise title
         let body_row: Option<(Option<String>,)> = sqlx::query_as(

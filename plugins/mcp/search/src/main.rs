@@ -100,7 +100,8 @@ fn handle_search_wiki(args: &Value) -> Result<(String, bool)> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'query'"))?;
     let limit = args["limit"].as_i64().unwrap_or(10).min(30) as usize;
-    let profile = args["profile"].as_str().unwrap_or(&omniagent::profile::default_profile_name());
+    let default_profile = omniagent::profile::default_profile_name();
+    let profile = args["profile"].as_str().unwrap_or(&default_profile);
 
     let data_dir = std::env::var("OMNI_DIR")
             .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)))
