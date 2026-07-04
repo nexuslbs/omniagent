@@ -297,10 +297,10 @@ pub fn install_from_git(
         _ => external_path.to_path_buf(),
     };
     let plugin_json_path = find_plugin_json(&search_dir)?;
-    let _manifest = load_manifest(&plugin_json_path)?;
+    let manifest = load_manifest(&plugin_json_path)?;
 
-    // Copy to data_dir
-    let install_dir = format!("{}/plugins/{}/{}", data_dir, remote_type, name);
+    // Copy to data_dir — use the manifest's canonical name, not the temp clone name
+    let install_dir = format!("{}/plugins/{}/{}", data_dir, remote_type, manifest.name);
     let install_path = std::path::Path::new(&install_dir);
 
     if install_path.exists() {

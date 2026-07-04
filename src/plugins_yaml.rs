@@ -381,7 +381,7 @@ pub fn resolve_config_value(value: &str) -> String {
     if let Some(var_name) = value.strip_prefix("$env:") {
         return std::env::var(var_name).unwrap_or_else(|_| {
             tracing::warn!("Config references $env:{} but env var is not set", var_name);
-            value.to_string()
+            String::new()
         });
     }
     // $secret: passes through — can't resolve without DB pool
@@ -457,7 +457,7 @@ pub async fn resolve_config_ref_value(value: &str, pool: &sqlx::PgPool) -> Strin
     if let Some(var_name) = value.strip_prefix("$env:") {
         return std::env::var(var_name).unwrap_or_else(|_| {
             tracing::warn!("Config ref $env:{} env var not set", var_name);
-            value.to_string()
+            String::new()
         });
     }
     if let Some(secret_name) = value.strip_prefix("$secret:") {
