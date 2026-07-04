@@ -57,6 +57,8 @@ pub(crate) struct InstallGitRequest {
 #[allow(dead_code)]
 pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/plugins/install-git", post(install_git_handler))
+        .route("/api/plugins/install-url", post(install_url_handler))
         .route("/api/plugins", get(list_plugins_handler))
         .route("/api/plugins/{name}", get(get_plugin_handler))
         .route("/api/plugins/{name}/config", post(update_config_handler))

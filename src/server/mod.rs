@@ -132,6 +132,8 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
             "/api/plugins/check-enrich",
             get(diagnostic::check_enrich_json),
         )
+        .route("/api/plugins/install-git", post(plugins::install_git_handler))
+        .route("/api/plugins/install-url", post(plugins::install_url_handler))
         .route("/api/plugins", get(plugins::list_plugins_handler))
         .route("/api/plugins/{name}", get(plugins::get_plugin_handler))
         .route(
