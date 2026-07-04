@@ -24,8 +24,6 @@ use sqlx::FromRow;
 #[derive(Debug, FromRow)]
 struct KanbanTaskRow {
     id: String,
-    #[allow(dead_code)]
-    display_id: Option<i64>,
     title: String,
     body: Option<String>,
     status: String,
@@ -180,7 +178,7 @@ async fn handle_list(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let result: Vec<KanbanTaskRow> = sql_forge!(
         KanbanTaskRow,
         r#"
-        SELECT id, display_id, title, body, status, priority, assignee, template, created_at, updated_at
+        SELECT id, title, body, status, priority, assignee, template, created_at, updated_at
         FROM kanban_tasks
         ORDER BY status, priority DESC, created_at DESC
         "#,
