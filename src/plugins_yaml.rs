@@ -275,19 +275,36 @@ pub fn set_entry(
     config: serde_json::Value,
 ) -> AppResult<PluginYamlEntry> {
     let mut entries = load_raw(data_dir, pt)?;
-    // Preserve existing builtin flag if the entry already exists
+    // Preserve existing builtin flag if the entry already exists,
+    // otherwise detect via source directory existence
     let existing_builtin = entries.get(name).and_then(|e| e.builtin);
+    let builtin = existing_builtin.or_else(|| {
+        if is_plugin_builtin(data_dir, name, pt) {
+            Some(true)
+        } else {
+            None
+        }
+    });
     // Preserve existing remote if the entry already exists
     let existing_remote = entries.get(name).and_then(|e| e.remote.clone());
     let entry = PluginYamlEntry {
         enabled,
-        builtin: existing_builtin.or(Some(false)),
+        builtin,
         config,
         remote: existing_remote,
     };
     entries.insert(name.to_string(), entry.clone());
     save_file(data_dir, pt, entries)?;
     Ok(entry)
+}
+
+/// Helper: determine if a plugin is built-in by checking if its source lives
+/// under the plugin source directory at /app/plugins/ (workspace source dir).
+fn is_plugin_builtin(data_dir: &str, name: &str, plugin_type: &PluginYamlType) -> bool {
+    let type_dir = plugin_type.file_name();
+    let source_dir = format!("/app/plugins/{}/{}", type_dir, name);
+    std::path::Path::new(&source_dir).join("Cargo.toml").exists()
+        || std::path::Path::new(&source_dir).join("plugin.json").exists()
 }
 
 /// Set a plugin entry with an explicit remote field (for git-installed plugins).
