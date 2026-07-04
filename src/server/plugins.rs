@@ -648,9 +648,53 @@ pub(crate) async fn install_plugin_handler(
         }
     }
 
-    // 2b. Compile if Rust crate
+    // 2b. Compile if Rust crate (or use existing binary)
     if cargo_toml.exists() {
-        tracing::info!("Install: compiling Rust crate at {}", plugin_dir);
+        // Check if binary already exists from workspace build (avoids unnecessary compilation)
+        let package_name = std::fs::read_to_string(&cargo_toml)
+            .ok()
+            .and_then(|content| {
+                content.lines().find_map(|line| {
+                    let trimmed = line.trim();
+                    if let Some(name) = trimmed.strip_prefix("name = \"") {
+                        name.strip_suffix('\"').map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+            });
+        
+        let existing_binary = package_name.as_ref().and_then(|pkg| {
+            let workspace_root = std::path::Path::new("/app");
+            let hyphenated = workspace_root.join("target").join("release").join(pkg);
+            let underscored = workspace_root.join("target").join("release").join(pkg.replace('-', "_"));
+            if hyphenated.exists() { Some(hyphenated) }
+            else if underscored.exists() { Some(underscored) }
+            else { None }
+        });
+        
+        if let Some(src_binary) = existing_binary {
+            tracing::info!(
+                "Install: binary already exists at {}, copying to plugin dir (no compilation needed)",
+                src_binary.display()
+            );
+            let target_dir = std::path::Path::new(&plugin_dir).join("target").join("release");
+            let _ = std::fs::create_dir_all(&target_dir);
+            let dst_name = package_name.as_deref().unwrap_or(&name).replace('-', "_");
+            let dst = target_dir.join(&dst_name);
+            if let Err(e) = std::fs::copy(&src_binary, &dst) {
+                tracing::warn!(
+                    "Install: failed to copy existing binary for '{}' to plugin dir: {:?}",
+                    name, e
+                );
+            } else {
+                tracing::info!(
+                    "Install: copied existing binary for '{}' to {}",
+                    name, dst.display()
+                );
+            }
+        } else {
+            tracing::info!("Install: compiling Rust crate at {}", plugin_dir);
 
         // Build from the workspace root if available (handles path deps like
         // `omniagent = { path = "../../../" }` that break when the plugin is
@@ -784,8 +828,9 @@ pub(crate) async fn install_plugin_handler(
                     .into_response();
             }
         }
-    }
-
+    }   // closes match + else (no binary existing)
+    }   // closes if cargo_toml.exists()
+ 
     // 3. Determine YAML type and register with enabled=false
     let yaml_type = match plugins_yaml::get_disk_plugin_type(data_dir, &name) {
         Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),

@@ -631,6 +631,23 @@ fn build_plugin_detail(
                 if pkg.contains('-') {
                     candidates.push(format!("{}/target/release/{}", dir, pkg.replace('-', "_")));
                 }
+                // Also check workspace root target (for builtin:true plugins whose
+                // binaries live at /app/target/release/<package> from workspace builds)
+                let workspace_root = std::path::Path::new("/app");
+                if workspace_root.join("Cargo.toml").exists() {
+                    candidates.push(format!(
+                        "{}/target/release/{}",
+                        workspace_root.to_string_lossy(),
+                        pkg
+                    ));
+                    if pkg.contains('-') {
+                        candidates.push(format!(
+                            "{}/target/release/{}",
+                            workspace_root.to_string_lossy(),
+                            pkg.replace('-', "_")
+                        ));
+                    }
+                }
             }
 
             !candidates.iter().any(|p| std::path::Path::new(p).exists())
