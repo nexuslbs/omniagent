@@ -181,7 +181,7 @@ pub(crate) async fn create_action_handler(
         enabled: true,
         tool_name: body.tool_name,
         params: body.params.unwrap_or(serde_json::json!({})),
-        description: None,
+        description: Some(name.clone()),
         is_builtin: None,
     };
 
@@ -234,6 +234,15 @@ pub(crate) async fn update_action_handler(
     }
     if let Some(enabled) = body.enabled {
         entry.enabled = enabled;
+    }
+    if let Some(name) = body.name {
+        if name.trim().is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Name cannot be empty" })),
+            );
+        }
+        entry.description = Some(name.trim().to_string());
     }
 
     // Don't allow changing name for builtins via the YAML
