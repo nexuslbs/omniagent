@@ -37,6 +37,9 @@ pub struct PluginYamlEntry {
 }
 
 /// Describes a git remote source for a plugin installed from a git repository.
+///
+/// The plugin type (mcp, platform, provider) is inferred from the YAML file section
+/// (tools.yml, platforms.yml, providers.yml) — not stored in this struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginRemote {
     /// The git clone URL (https://... or git@...).
@@ -44,25 +47,9 @@ pub struct PluginRemote {
     /// Optional git ref: branch name, tag, or commit SHA. Defaults to the repository's HEAD.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_ref: Option<String>,
-    /// The plugin type directory to clone into: one of "mcp", "platform", "provider".
-    #[serde(rename = "type")]
-    pub remote_type: String,
     /// Optional subdirectory path within the repo where plugin.json lives.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-}
-
-impl PluginRemote {
-    /// Return the remote clone directory path under the workspace.
-    /// e.g., `<workspace_dir>/plugins/mcp/remote/<name>/`
-    pub fn remote_dir(&self, workspace_dir: &str, name: &str) -> String {
-        format!("{}/plugins/{}/remote/{}", workspace_dir, self.remote_type, name)
-    }
-
-    /// Return the data directory path for this plugin.
-    pub fn data_dir(&self, data_dir: &str, name: &str) -> String {
-        format!("{}/plugins/{}/{}", data_dir, self.remote_type, name)
-    }
 }
 
 fn default_config() -> serde_json::Value {
@@ -300,7 +287,7 @@ pub fn set_entry(
 
 /// Helper: determine if a plugin is built-in by checking if its source lives
 /// under the plugin source directory at /app/plugins/ (workspace source dir).
-fn is_plugin_builtin(data_dir: &str, name: &str, plugin_type: &PluginYamlType) -> bool {
+fn is_plugin_builtin(_data_dir: &str, name: &str, plugin_type: &PluginYamlType) -> bool {
     let type_dir = plugin_type.file_name();
     let source_dir = format!("/app/plugins/{}/{}", type_dir, name);
     std::path::Path::new(&source_dir).join("Cargo.toml").exists()

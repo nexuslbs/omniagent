@@ -43,13 +43,10 @@ pub(crate) struct InstallGitRequest {
     url: String,
     /// Optional git ref (branch, tag, or commit SHA). Defaults to repo HEAD.
     git_ref: Option<String>,
-    /// The plugin type directory: "mcp", "platform", or "provider".
-    #[serde(rename = "type")]
-    remote_type: String,
     /// Optional name override. If not provided, extracted from plugin.json.
     name: Option<String>,
     /// Optional subdirectory path within the repo where plugin.json lives.
-    /// Example: "plugins/my-plugin" if plugin.json is not at the repo root.
+    /// Example: "tools/test-rust-tool" if plugin.json is not at the repo root.
     path: Option<String>,
 }
 
@@ -925,7 +922,6 @@ pub(crate) async fn reinstall_plugin_handler(
             &remote.url,
             &name,
             remote.git_ref.as_deref(),
-            &remote.remote_type,
             workspace_dir,
             data_dir,
             remote.path.as_deref(),
@@ -1858,29 +1854,23 @@ pub(crate) async fn install_url_handler(
 /// Body:
 /// - `url` (required): git clone URL
 /// - `git_ref` (optional): branch, tag, or commit SHA
-/// - `type` (required): "mcp", "platform", or "provider"
 /// - `name` (optional): plugin name override (extracted from plugin.json if omitted)
+/// - `path` (optional): subdirectory within repo where plugin.json lives
 ///
-/// Flow: shallow clone to remote/ → copy to data_dir → compile if Rust → register in YAML.
+/// Flow: shallow clone to temp → discover type from manifest → move to
+/// <workspace_dir>/plugins/<type_dir>/remote/<name>/ → copy to data_dir →
+/// compile if Rust → register in YAML.
+///
+/// The plugin.json must have a `type` field that identifies the plugin kind
+/// (mcp, platform, or provider). For MCP tools, an `mcp-config.json` in the
+/// plugin's source directory is required for the server to be discoverable.
 pub(crate) async fn install_git_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<InstallGitRequest>,
 ) -> impl IntoResponse {
-    // Validate remote_type
-    if body.remote_type != "mcp" && body.remote_type != "platform" && body.remote_type != "provider" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "success": false,
-                "error": format!("Invalid plugin type '{}'. Must be one of: mcp, platform, provider", body.remote_type)
-            })),
-        )
-            .into_response();
-    }
-
     info!(
-        "Installing git plugin from {} (ref: {:?}, type: {})",
-        body.url, body.git_ref, body.remote_type
+        "Installing git plugin from {} (ref: {:?})",
+        body.url, body.git_ref
     );
 
     // Clone and copy to data_dir (name unknown until manifest is parsed)
@@ -1892,7 +1882,6 @@ pub(crate) async fn install_git_handler(
         &body.url,
         &initial_name,
         body.git_ref.as_deref(),
-        &body.remote_type,
         &state.workspace_dir,
         &state.data_dir,
         body.path.as_deref(),
@@ -1937,10 +1926,17 @@ pub(crate) async fn install_git_handler(
         );
     }
 
+    // Determine type directory from manifest
+    let type_dir_str = match manifest.plugin_type {
+        plugin::PluginType::Platform => "platforms",
+        plugin::PluginType::Mcp => "mcp",
+        plugin::PluginType::Provider => "providers",
+    };
+
     // Compile if Rust crate
     let plugin_dir = format!(
         "{}/plugins/{}/{}",
-        state.data_dir, body.remote_type, actual_name
+        state.data_dir, type_dir_str, actual_name
     );
     let cargo_toml = std::path::Path::new(&plugin_dir).join("Cargo.toml");
 
@@ -2009,7 +2005,6 @@ pub(crate) async fn install_git_handler(
     if let Some(ref git_ref) = body.git_ref {
         remote_val_map.insert("git_ref".to_string(), serde_json::json!(git_ref));
     }
-    remote_val_map.insert("type".to_string(), serde_json::json!(body.remote_type));
     if let Some(ref path) = body.path {
         remote_val_map.insert("path".to_string(), serde_json::json!(path));
     }

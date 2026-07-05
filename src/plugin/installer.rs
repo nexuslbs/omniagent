@@ -225,51 +225,56 @@ fn find_plugin_json(dir: &Path) -> AppResult<String> {
 /// Clone a plugin from a git repository into `<workspace_dir>/plugins/<type_dir>/remote/<name>/`,
 /// then copy it to `<data_dir>/plugins/<type_dir>/<name>/` and return the manifest.
 ///
+/// The type directory (mcp, platforms, providers) is determined automatically from the
+/// `type` field in the plugin's plugin.json manifest after cloning.
+///
 /// Steps:
-/// 1. Shallow clone (`--depth 1`) the repo into the remote dir
+/// 1. Shallow clone (`--depth 1`) directly into `plugins/mcp/remote/<name>/`
 /// 2. If a git_ref is specified, check it out after clone
 /// 3. Find plugin.json in the cloned directory
-/// 4. Copy to data_dir (removes existing if present)
-/// 5. Return the parsed PluginManifest
+/// 4. Read manifest to determine plugin type
+/// 5. If the correct type dir differs from "mcp", rename the clone to the correct directory
+/// 6. Copy to data_dir (removes existing if present)
+/// 7. Return the parsed PluginManifest
 pub fn install_from_git(
     url: &str,
     name: &str,
     git_ref: Option<&str>,
-    remote_type: &str,
     workspace_dir: &str,
     data_dir: &str,
     repo_path: Option<&str>,
 ) -> AppResult<PluginManifest> {
-    let remote_dir = format!("{}/plugins/{}/remote/{}", workspace_dir, remote_type, name);
-    let remote_path = std::path::Path::new(&remote_dir);
+    // ── Clone directly into mcp/remote/<name> as the workspace directory ──
+    // We clone into mcp first because that's the most common type. If the
+    // manifest says otherwise, we rename to the correct type dir afterwards.
+    // Both are under the same workspace mount, so rename is atomic.
+    let initial_remote_dir = format!("{}/plugins/mcp/remote/{}", workspace_dir, name);
+    let initial_remote_path = std::path::Path::new(&initial_remote_dir);
 
     // Remove existing clone if present
-    if remote_path.exists() {
-        std::fs::remove_dir_all(remote_path)
-            .ctx(format!("Failed to remove existing clone at {}", remote_dir))?;
+    if initial_remote_path.exists() {
+        std::fs::remove_dir_all(initial_remote_path)
+            .ctx(format!("Failed to remove existing clone at {}", initial_remote_dir))?;
     }
-
-    // Create parent directories
-    if let Some(parent) = remote_path.parent() {
+    if let Some(parent) = initial_remote_path.parent() {
         std::fs::create_dir_all(parent)
-            .ctx(format!("Failed to create parent dirs for {}", remote_dir))?;
+            .ctx(format!("Failed to create parent dirs for {}", initial_remote_dir))?;
     }
 
     tracing::info!(
         "Cloning git plugin '{}' from {} (ref: {:?}) to {}",
-        name, url, git_ref, remote_dir
+        name, url, git_ref, initial_remote_dir
     );
 
-    // Shallow clone
+    // Shallow clone directly into the remote dir
     let mut cmd = std::process::Command::new("git");
-    cmd.arg("clone").arg("--depth").arg("1").arg(url).arg(&remote_dir);
-
+    cmd.arg("clone").arg("--depth").arg("1").arg(url).arg(&initial_remote_dir);
     let status = cmd.status().ctx(format!(
         "Failed to execute git clone for '{}' from {}",
         name, url
     ))?;
-
     if !status.success() {
+        let _ = std::fs::remove_dir_all(&initial_remote_dir);
         err_msg!("git clone failed for '{}' from {} with status: {}", name, url, status);
     }
 
@@ -279,13 +284,13 @@ pub fn install_from_git(
             tracing::info!("Checking out ref '{}' for plugin '{}'", ref_str, name);
             let checkout_status = std::process::Command::new("git")
                 .arg("-C")
-                .arg(&remote_dir)
+                .arg(&initial_remote_dir)
                 .arg("checkout")
                 .arg(ref_str)
                 .status()
                 .ctx(format!("Failed to git checkout {} for '{}'", ref_str, name))?;
-
             if !checkout_status.success() {
+                let _ = std::fs::remove_dir_all(&initial_remote_dir);
                 err_msg!("git checkout '{}' failed for '{}' with status: {}", ref_str, name, checkout_status);
             }
         }
@@ -293,36 +298,80 @@ pub fn install_from_git(
 
     // Find plugin.json in the cloned directory
     let search_dir = match repo_path {
-        Some(p) if !p.is_empty() => remote_path.join(p),
-        _ => remote_path.to_path_buf(),
+        Some(p) if !p.is_empty() => initial_remote_path.join(p),
+        _ => initial_remote_path.to_path_buf(),
     };
-    let plugin_json_path = find_plugin_json(&search_dir)?;
-    let manifest = load_manifest(&plugin_json_path)?;
+    let _plugin_json_path = find_plugin_json(&search_dir)?;
+    let manifest = load_manifest(&_plugin_json_path)?;
 
-    // Copy to data_dir — use the manifest's canonical name, not the temp clone name
-    let install_dir = format!("{}/plugins/{}/{}", data_dir, remote_type, manifest.name);
-    let install_path = std::path::Path::new(&install_dir);
+    // Determine the correct type directory from the manifest
+    let type_dir = match manifest.plugin_type {
+        PluginType::Platform => "platforms",
+        PluginType::Mcp => "mcp",
+        PluginType::Provider => "providers",
+    };
 
-    if install_path.exists() {
-        std::fs::remove_dir_all(install_path).ctx(format!(
-            "Failed to remove existing plugin directory: {}",
-            install_dir
-        ))?;
+    // If the type is not mcp, rename the clone to the correct directory
+    if type_dir != "mcp" {
+        let final_remote_dir = format!("{}/plugins/{}/remote/{}", workspace_dir, type_dir, name);
+        let final_remote_path = std::path::Path::new(&final_remote_dir);
+        if final_remote_path.exists() {
+            std::fs::remove_dir_all(final_remote_path)
+                .ctx(format!("Failed to remove existing clone at {}", final_remote_dir))?;
+        }
+        if let Some(parent) = final_remote_path.parent() {
+            std::fs::create_dir_all(parent)
+                .ctx(format!("Failed to create parent dirs for {}", final_remote_dir))?;
+        }
+        // Rename works here because both are under the same workspace mount
+        std::fs::rename(initial_remote_path, final_remote_path)
+            .ctx(format!("Failed to rename clone from {} to {}", initial_remote_dir, final_remote_dir))?;
+
+        // Copy to data_dir using the final remote path
+        let install_dir = format!("{}/plugins/{}/{}", data_dir, type_dir, manifest.name);
+        let install_path = std::path::Path::new(&install_dir);
+        if install_path.exists() {
+            std::fs::remove_dir_all(install_path).ctx(format!(
+                "Failed to remove existing plugin directory: {}",
+                install_dir
+            ))?;
+        }
+        let parent = install_path
+            .parent()
+            .ok_or_else(|| Error::Message(format!("Install path has no parent: {}", install_dir)))?;
+        std::fs::create_dir_all(parent)
+            .ctx(format!("Failed to create parent directories for: {}", install_dir))?;
+
+        let copy_source_dir = match repo_path {
+            Some(p) if !p.is_empty() => final_remote_path.join(p),
+            _ => final_remote_path.to_path_buf(),
+        };
+        copy_dir_recursive(&copy_source_dir, install_path)?;
+    } else {
+        // MCP type — clone is already at the right location
+        let install_dir = format!("{}/plugins/{}/{}", data_dir, type_dir, manifest.name);
+        let install_path = std::path::Path::new(&install_dir);
+        if install_path.exists() {
+            std::fs::remove_dir_all(install_path).ctx(format!(
+                "Failed to remove existing plugin directory: {}",
+                install_dir
+            ))?;
+        }
+        let parent = install_path
+            .parent()
+            .ok_or_else(|| Error::Message(format!("Install path has no parent: {}", install_dir)))?;
+        std::fs::create_dir_all(parent)
+            .ctx(format!("Failed to create parent directories for: {}", install_dir))?;
+
+        let copy_source_dir = match repo_path {
+            Some(p) if !p.is_empty() => initial_remote_path.join(p),
+            _ => initial_remote_path.to_path_buf(),
+        };
+        copy_dir_recursive(&copy_source_dir, install_path)?;
     }
 
-    let parent = install_path
-        .parent()
-        .ok_or_else(|| Error::Message(format!("Install path has no parent: {}", install_dir)))?;
-    std::fs::create_dir_all(parent)
-        .ctx(format!("Failed to create parent directories for: {}", install_dir))?;
-
-    let extracted_dir = std::path::Path::new(&plugin_json_path)
-        .parent()
-        .ok_or_else(|| Error::Message(format!("Plugin JSON path has no parent: {}", plugin_json_path)))?;
-    copy_dir_recursive(extracted_dir, install_path)?;
-
     // Verify the installed manifest
-    let installed_manifest_path = format!("{}/plugin.json", install_dir);
+    let installed_manifest_path = format!("{}/plugins/{}/{}/plugin.json", data_dir, type_dir, manifest.name);
     let manifest = load_manifest(&installed_manifest_path).ctx(format!(
         "Failed to verify installed plugin manifest at: {}",
         installed_manifest_path
