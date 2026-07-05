@@ -952,57 +952,167 @@ pub(crate) async fn reinstall_plugin_handler(
         let cargo_toml = std::path::Path::new(dir).join("Cargo.toml");
         if cargo_toml.exists() {
             tracing::info!("Reinstall: Rust crate detected at {}, compiling...", dir);
-            match tokio::task::spawn_blocking({
-                let dir = dir.clone();
-                move || {
-                    let status = std::process::Command::new("cargo")
-                        .args(["build", "--release", "--manifest-path", &cargo_toml.to_string_lossy()])
-                        .current_dir(dir)
-                        .status();
-                    status
+
+            // Extract package name from Cargo.toml
+            let package_name = std::fs::read_to_string(&cargo_toml)
+                .ok()
+                .and_then(|content| {
+                    content.lines().find_map(|line| {
+                        let trimmed = line.trim();
+                        if let Some(name) = trimmed.strip_prefix("name = \"") {
+                            name.strip_suffix('\"').map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                });
+
+            // Check if binary already exists in workspace build output
+            let existing_binary = package_name.as_ref().and_then(|pkg| {
+                let workspace_root = std::path::Path::new("/app");
+                let hyphenated = workspace_root.join("target").join("release").join(pkg);
+                let underscored = workspace_root.join("target").join("release").join(pkg.replace('-', "_"));
+                if hyphenated.exists() { Some(hyphenated) }
+                else if underscored.exists() { Some(underscored) }
+                else { None }
+            });
+
+            if let Some(src_binary) = existing_binary {
+                tracing::info!(
+                    "Reinstall: binary already exists at {}, copying to plugin dir (no compilation needed)",
+                    src_binary.display()
+                );
+                let target_dir = std::path::Path::new(dir).join("target").join("release");
+                let _ = std::fs::create_dir_all(&target_dir);
+                let dst_name = package_name.as_deref().unwrap_or(&name).replace('-', "_");
+                let dst = target_dir.join(&dst_name);
+                if let Err(e) = std::fs::copy(&src_binary, &dst) {
+                    tracing::warn!(
+                        "Reinstall: failed to copy existing binary for '{}' to plugin dir: {:?}",
+                        name, e
+                    );
+                } else {
+                    tracing::info!(
+                        "Reinstall: copied existing binary for '{}' to {}",
+                        name, dst.display()
+                    );
                 }
-            })
-            .await
-            {
-                Ok(Ok(status)) if status.success() => {
-                    tracing::info!("Reinstall: Rust compilation succeeded for '{}'", name);
-                    compiled = true;
-                }
-                Ok(Ok(status)) => {
-                    let msg = format!("Reinstall: Rust compilation failed for '{}' with exit code {}", name, status);
-                    tracing::error!("{}", msg);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "success": false,
-                            "error": msg,
-                        })),
-                    )
-                        .into_response();
-                }
-                Ok(Err(e)) => {
-                    let msg = format!("Reinstall: Failed to run cargo for '{}': {}", name, e);
-                    tracing::error!("{}", msg);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "success": false,
-                            "error": msg,
-                        })),
-                    )
-                        .into_response();
-                }
-                Err(e) => {
-                    let msg = format!("Reinstall: Task join error for '{}': {}", name, e);
-                    tracing::error!("{}", msg);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({
-                            "success": false,
-                            "error": msg,
-                        })),
-                    )
-                        .into_response();
+                compiled = true;
+            } else {
+                // Build from workspace root if available (handles path deps like
+                // `omniagent = { path = \"../../../\" }` that break when the plugin is
+                // copied to data_dir and the relative path no longer resolves).
+                let workspace_root = std::path::Path::new("/app");
+                let use_workspace_root = workspace_root.join("Cargo.toml").exists()
+                    && workspace_root != std::path::Path::new(dir).parent()
+                        .and_then(|p| p.parent())
+                        .and_then(|p| p.parent())
+                        .unwrap_or(std::path::Path::new(""));
+                let pkg_name_for_build = if use_workspace_root { package_name.clone() } else { None };
+
+                match tokio::task::spawn_blocking({
+                    let build_dir = if use_workspace_root {
+                        workspace_root.to_path_buf()
+                    } else {
+                        std::path::PathBuf::from(dir)
+                    };
+                    let cargo_path = if use_workspace_root {
+                        workspace_root.join("Cargo.toml").to_string_lossy().to_string()
+                    } else {
+                        cargo_toml.to_string_lossy().to_string()
+                    };
+                    let pkg = pkg_name_for_build.clone();
+                    move || {
+                        let mut cmd = std::process::Command::new("cargo");
+                        cmd.arg("build").arg("--release").arg("--manifest-path").arg(&cargo_path);
+                        if let Some(ref name) = pkg {
+                            cmd.arg("-p").arg(name);
+                        }
+                        let status = cmd.current_dir(&build_dir).status();
+                        status
+                    }
+                })
+                .await
+                {
+                    Ok(Ok(status)) if status.success() => {
+                        tracing::info!("Reinstall: Rust compilation succeeded for '{}'", name);
+                        // If built from workspace root, copy the binary to the plugin dir
+                        if use_workspace_root {
+                            let binary_name = package_name.as_deref()
+                                .or_else(|| Some(&name as &str))
+                                .unwrap_or("mcp-server");
+                            let binary_path = format!(
+                                "{}/target/release/{}",
+                                workspace_root.to_string_lossy(),
+                                binary_name.replace('-', "_")
+                            );
+                            let binary_path2 = format!(
+                                "{}/target/release/{}",
+                                workspace_root.to_string_lossy(),
+                                binary_name
+                            );
+                            let src_binary = if std::path::Path::new(&binary_path).exists() {
+                                binary_path
+                            } else if std::path::Path::new(&binary_path2).exists() {
+                                binary_path2
+                            } else {
+                                String::new()
+                            };
+                            if !src_binary.is_empty() {
+                                let target_dir = std::path::Path::new(dir).join("target").join("release");
+                                let _ = std::fs::create_dir_all(&target_dir);
+                                let dst = target_dir.join(binary_name.replace('-', "_"));
+                                if let Err(e) = std::fs::copy(&src_binary, &dst) {
+                                    tracing::warn!(
+                                        "Reinstall: failed to copy binary for '{}' to plugin dir: {:?}",
+                                        name, e
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        "Reinstall: copied binary for '{}' to {}",
+                                        name, dst.display()
+                                    );
+                                }
+                            }
+                        }
+                        compiled = true;
+                    }
+                    Ok(Ok(status)) => {
+                        let msg = format!("Reinstall: Rust compilation failed for '{}' with exit code {}", name, status);
+                        tracing::error!("{}", msg);
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "success": false,
+                                "error": msg,
+                            })),
+                        )
+                            .into_response();
+                    }
+                    Ok(Err(e)) => {
+                        let msg = format!("Reinstall: Failed to run cargo for '{}': {}", name, e);
+                        tracing::error!("{}", msg);
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "success": false,
+                                "error": msg,
+                            })),
+                        )
+                            .into_response();
+                    }
+                    Err(e) => {
+                        let msg = format!("Reinstall: Task join error for '{}': {}", name, e);
+                        tracing::error!("{}", msg);
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "success": false,
+                                "error": msg,
+                            })),
+                        )
+                            .into_response();
+                    }
                 }
             }
             break;
