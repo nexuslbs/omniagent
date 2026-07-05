@@ -677,8 +677,8 @@ pub(crate) async fn install_plugin_handler(
             );
             let target_dir = std::path::Path::new(&plugin_dir).join("target").join("release");
             let _ = std::fs::create_dir_all(&target_dir);
-            let dst_name = package_name.as_deref().unwrap_or(&name).replace('-', "_");
-            let dst = target_dir.join(&dst_name);
+            let binary_name = package_name.as_deref().unwrap_or(&name);
+            let dst = target_dir.join(binary_name);
             if let Err(e) = std::fs::copy(&src_binary, &dst) {
                 tracing::warn!(
                     "Install: failed to copy existing binary for '{}' to plugin dir: {:?}",
@@ -773,7 +773,7 @@ pub(crate) async fn install_plugin_handler(
                     if !src_binary.is_empty() {
                         let target_dir = std::path::Path::new(&plugin_dir).join("target").join("release");
                         let _ = std::fs::create_dir_all(&target_dir);
-                        let dst = target_dir.join(binary_name.replace('-', "_"));
+                        let dst = target_dir.join(binary_name);
                         if let Err(e) = std::fs::copy(&src_binary, &dst) {
                             tracing::warn!(
                                 "Install: failed to copy binary for '{}' to plugin dir: {:?}",
@@ -985,8 +985,7 @@ pub(crate) async fn reinstall_plugin_handler(
                 let target_dir = std::path::Path::new(dir).join("target").join("release");
                 let _ = std::fs::create_dir_all(&target_dir);
                 let binary_name = package_name.as_deref().unwrap_or(&name);
-                let dst_name = binary_name.replace('-', "_");
-                let dst = target_dir.join(&dst_name);
+                let dst = target_dir.join(binary_name);
                 if let Err(e) = std::fs::copy(&src_binary, &dst) {
                     tracing::warn!(
                         "Reinstall: failed to copy existing binary for '{}' to plugin dir: {:?}",
@@ -997,11 +996,6 @@ pub(crate) async fn reinstall_plugin_handler(
                         "Reinstall: copied existing binary for '{}' to {}",
                         name, dst.display()
                     );
-                }
-                // Also copy to hypen-named path for convention-based binary resolution
-                if binary_name.contains('-') {
-                    let dst_hyphen = target_dir.join(binary_name);
-                    let _ = std::fs::copy(&src_binary, &dst_hyphen);
                 }
                 compiled = true;
             } else {
@@ -1067,7 +1061,7 @@ pub(crate) async fn reinstall_plugin_handler(
                             if !src_binary.is_empty() {
                                 let target_dir = std::path::Path::new(dir).join("target").join("release");
                                 let _ = std::fs::create_dir_all(&target_dir);
-                                let dst = target_dir.join(binary_name.replace('-', "_"));
+                                let dst = target_dir.join(binary_name);
                                 if let Err(e) = std::fs::copy(&src_binary, &dst) {
                                     tracing::warn!(
                                         "Reinstall: failed to copy binary for '{}' to plugin dir: {:?}",

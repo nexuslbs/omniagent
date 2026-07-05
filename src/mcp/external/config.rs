@@ -281,6 +281,14 @@ fn scan_plugin_servers(plugins_dir: &str, data_dir: &str) -> Vec<McpServerConfig
                                 let mut candidates = vec![
                                     format!("{}/target/release/{}", plugin_dir_str, pkg),
                                 ];
+                                // Also check underscored variant (legacy installs that copied with underscores)
+                                if pkg.contains('-') {
+                                    candidates.push(format!(
+                                        "{}/target/release/{}",
+                                        plugin_dir_str,
+                                        pkg.replace('-', "_")
+                                    ));
+                                }
                                 if let Some(w) = get_bin_path(pkg) {
                                     candidates.push(w);
                                 }
@@ -288,6 +296,14 @@ fn scan_plugin_servers(plugins_dir: &str, data_dir: &str) -> Vec<McpServerConfig
                                     "{}/target/release/{}",
                                     plugin_dir_str, srv.name
                                 ));
+                                // Also check underscored server-name variant
+                                if srv.name.contains('-') {
+                                    candidates.push(format!(
+                                        "{}/target/release/{}",
+                                        plugin_dir_str,
+                                        srv.name.replace('-', "_")
+                                    ));
+                                }
 
                                 let found = candidates
                                     .into_iter()
