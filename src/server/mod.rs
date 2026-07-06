@@ -11,11 +11,17 @@
 //! - `POST /run-cron/{schedule_id}` — manually trigger a cron job (proxied from dashboard)
 
 
-
+pub(crate) mod messages;
+pub(crate) mod channels;
+pub(crate) mod threads;
+pub(crate) mod overview;
 mod secrets;
 mod settings;
 pub(crate) mod actions;
-
+pub(crate) mod memory;
+pub(crate) mod platforms;
+pub(crate) mod schedule;
+pub(crate) mod kanban;
 use crate::error::{AppResult, ErrorContext};
 use axum::{
     extract::{Path, Query, State},
@@ -47,6 +53,26 @@ use sql_forge::sql_forge;
 use std::sync::RwLock;
 
 mod diagnostic;
+
+// ── Shared response helpers ────────────────────────────────────────────────
+// Used by threads.rs, channels.rs, etc. for consistent JSON response format.
+// Existing modules (messages.rs, secrets.rs) have their own copies.
+
+/// Wrap success data: `{ "success": true, "data": ... }`
+pub(crate) fn ok_json<T: Serialize>(data: T) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "success": true, "data": data })),
+    )
+}
+
+/// Wrap error: `{ "success": false, "error": "..." }`
+pub(crate) fn err_json(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        status,
+        Json(serde_json::json!({ "success": false, "error": msg })),
+    )
+}
 pub mod plugins;
 /// Shared application state for the HTTP server.
 #[derive(Clone)]
@@ -175,6 +201,22 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         .route("/settings", put(settings::update_settings_handler))
         // ── Secrets routes ──
         .merge(secrets::secrets_router())
+        // ── Messages API routes ──
+        .merge(messages::messages_router())
+        // ── Threads API routes ──
+        .merge(threads::threads_router())
+        // ── Channels API routes ──
+        .merge(channels::channels_router())
+        // ── Overview / Dashboard routes ──
+        .merge(overview::overview_router())
+        // ── Memory API routes (stats + search) ──
+        .merge(memory::memory_router())
+        // ── Platforms API routes ──
+        .merge(platforms::platforms_router())
+        // ── Kanban API routes ──
+        .merge(kanban::kanban_router())
+        // ── Schedule API routes (replaces dashboard schedule.ts) ──
+        .merge(schedule::schedule_router())
         // ── Actions CRUD routes (backed by actions.yml) ──
         .route("/actions", get(actions::list_actions_handler))
         .route("/actions", post(actions::create_action_handler))

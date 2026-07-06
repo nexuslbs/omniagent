@@ -22,6 +22,17 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     create_readonly_user(pool).await?;
     seed_kanban_channel(pool).await?;
     seed_cron_channel(pool).await?;
+    // ── Column constraint fixes ────────────────────────────────────────────
+    // planning_mode columns were created with NOT NULL DEFAULT '' but should
+    // accept NULL. These ALTERs are idempotent.
+    sqlx::query("ALTER TABLE kanban_tasks ALTER COLUMN planning_mode DROP NOT NULL")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE cron_jobs ALTER COLUMN planning_mode DROP NOT NULL")
+        .execute(pool)
+        .await
+        .ok();
     tracing::info!("[migration] Schema v2 applied successfully");
     Ok(())
 }

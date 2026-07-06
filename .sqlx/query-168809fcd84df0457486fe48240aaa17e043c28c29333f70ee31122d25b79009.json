@@ -1,0 +1,202 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            last_msg.id,\n            last_msg.thread_id,\n            last_msg.role,\n            last_msg.content,\n            last_msg.msg_type,\n            last_msg.msg_subtype AS subtype,\n            t.provider,\n            t.model,\n            last_msg.processing_time_ms,\n            last_msg.token_usage,\n            last_msg.iteration_number,\n            last_msg.thread_sequence,\n            last_msg.created_at,\n            last_msg.metadata::text AS metadata,\n            t.status AS thread_status,\n            c.name AS channel_name\n        FROM threads t\n        LEFT JOIN channels c ON c.id = t.channel_id\n        LEFT JOIN LATERAL (\n            SELECT m.id, m.thread_id, m.role, m.content, m.msg_type,\n                   m.msg_subtype, m.processing_time_ms, m.token_usage::text AS token_usage,\n                   m.iteration_number, m.thread_sequence,\n                   m.created_at, m.metadata\n            FROM messages m\n            WHERE m.thread_id = t.id\n            ORDER BY m.id DESC\n            LIMIT 1\n        ) last_msg ON true\n        WHERE t.schedule_task_id = $1\n        ORDER BY\n            CASE WHEN $2 THEN last_msg.created_at END ASC,\n            CASE WHEN $3 = false THEN last_msg.created_at END DESC\n            NULLS LAST\n        OFFSET $4 LIMIT $5\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "thread_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "thread_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "content",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "content"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "msg_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "msg_type"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "subtype",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "msg_subtype"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "provider",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "model",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "model"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "processing_time_ms",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "processing_time_ms"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "token_usage",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "iteration_number",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "iteration_number"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "thread_sequence",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "thread_sequence"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "metadata",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 14,
+        "name": "thread_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "channel_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "name"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bool",
+        "Bool",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      null,
+      false,
+      false,
+      false,
+      null,
+      false,
+      false
+    ]
+  },
+  "hash": "168809fcd84df0457486fe48240aaa17e043c28c29333f70ee31122d25b79009"
+}

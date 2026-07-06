@@ -1,0 +1,8 @@
+{
+  "servers": [
+    {
+      "name": "cron",
+      "transport": "stdio"
+    }
+  ]
+}

@@ -36,7 +36,7 @@ struct CronJobDueRow {
     action_id: Option<String>,
     silent: Option<bool>,
     template: Option<String>,
-    planning_mode: String,
+    planning_mode: Option<String>,
 }
 
 /// Spawn the cron scheduler loop as a background task.
@@ -242,7 +242,7 @@ async fn tick(
                 }),
                 msg_type: "cron".to_string(),
                 msg_subtype: Some(subtype),
-                task_planning_mode: job.planning_mode.clone(),
+                task_planning_mode: job.planning_mode.clone().unwrap_or_default(),
                 parent_external_id: None,
             },
         )
@@ -609,7 +609,7 @@ async fn create_action_thread(
             }),
             msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
-            task_planning_mode: job.planning_mode.clone(),
+            task_planning_mode: job.planning_mode.clone().unwrap_or_default(),
             parent_external_id: None,
         },
     )
@@ -896,7 +896,7 @@ pub async fn fire_cron_job_by_id(
             }),
             msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
-            task_planning_mode: job.planning_mode.clone(),
+            task_planning_mode: job.planning_mode.clone().unwrap_or_default(),
             parent_external_id: None,
         },
     )
@@ -922,8 +922,8 @@ mod tests {
         let cfg = resolve_thread_config(
             Some("task-profile"),
             "channel-profile",
-            None,
-            None,
+            Some("deepseek"),
+            Some("deepseek-v4-flash"),
             None,
             None,
         );
@@ -932,13 +932,21 @@ mod tests {
 
     #[test]
     fn test_profile_from_channel_when_task_none() {
-        let cfg = resolve_thread_config(None, "channel-profile", None, None, None, None);
+        let cfg = resolve_thread_config(
+            None, "channel-profile",
+            Some("deepseek"), Some("deepseek-v4-flash"),
+            None, None,
+        );
         assert_eq!(cfg.unwrap().profile_name, "channel-profile");
     }
 
     #[test]
     fn test_profile_from_channel_when_task_empty() {
-        let cfg = resolve_thread_config(Some(""), "channel-profile", None, None, None, None);
+        let cfg = resolve_thread_config(
+            Some(""), "channel-profile",
+            Some("deepseek"), Some("deepseek-v4-flash"),
+            None, None,
+        );
         assert_eq!(cfg.unwrap().profile_name, "channel-profile");
     }
 
@@ -962,7 +970,7 @@ mod tests {
             None,
             "default",
             Some("deepseek"),
-            None,
+            Some("deepseek-v4-flash"),
             Some("anthropic"),
             None,
         );
@@ -1001,7 +1009,7 @@ mod tests {
             None,
             "default",
             Some("deepseek"),
-            None,
+            Some("deepseek-v4-flash"),
             Some("anthropic"),
             None,
         );
@@ -1015,9 +1023,9 @@ mod tests {
         let cfg = resolve_thread_config(
             None,
             "default",
-            None,
+            Some("deepseek"),
             Some("deepseek-v4-flash"),
-            None,
+            Some("anthropic"),
             Some("claude-3"),
         );
         assert_eq!(cfg.unwrap().model, "deepseek-v4-flash");
@@ -1025,7 +1033,14 @@ mod tests {
 
     #[test]
     fn test_model_falls_back_to_profile() {
-        let cfg = resolve_thread_config(None, "default", None, None, None, Some("claude-3"));
+        let cfg = resolve_thread_config(
+            None,
+            "default",
+            None,
+            None,
+            Some("anthropic"),
+            Some("claude-3"),
+        );
         assert_eq!(cfg.unwrap().model, "claude-3");
     }
 
@@ -1034,9 +1049,9 @@ mod tests {
         let cfg = resolve_thread_config(
             None,
             "default",
-            None,
+            Some("deepseek"),
             Some("deepseek-v4-flash"),
-            None,
+            Some("anthropic"),
             Some("claude-3"),
         );
         assert_eq!(cfg.unwrap().model, "deepseek-v4-flash");
@@ -1044,7 +1059,14 @@ mod tests {
 
     #[test]
     fn test_model_skip_empty_channel() {
-        let cfg = resolve_thread_config(None, "default", None, Some(""), None, Some("claude-3"));
+        let cfg = resolve_thread_config(
+            None,
+            "default",
+            None,
+            Some(""),
+            Some("anthropic"),
+            Some("claude-3"),
+        );
         assert_eq!(cfg.unwrap().model, "claude-3");
     }
 
@@ -1120,19 +1142,12 @@ mod tests {
     fn test_thread_without_provider_rejected() {
         // Simulates the scenario that caused the bug:
         // thread created with provider=None, model=None should be rejected
-        // by the agent's validation (tested via the resolve function contract)
+        // resolve_thread_config now returns None when it cannot resolve
+        // a provider and model at any level (channel → profile → env)
         let cfg = resolve_thread_config(None, "default", None, None, None, None);
-        // resolve_thread_config always returns Some as long as profile is non-empty
-        // (it falls back to env vars). The *agent* checks thread.provider directly.
-        let c = cfg.unwrap();
-        // The strings should come from env var fallbacks (not None/empty)
         assert!(
-            !c.provider.is_empty(),
-            "provider must not be empty even after full fallback"
-        );
-        assert!(
-            !c.model.is_empty(),
-            "model must not be empty even after full fallback"
+            cfg.is_none(),
+            "should return None when no provider/model can be resolved"
         );
     }
 

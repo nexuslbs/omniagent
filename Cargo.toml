@@ -12,7 +12,6 @@ members = [
     "plugins/mcp/plugin-manager",
     "plugins/mcp/subtasks",
     "plugins/mcp/hindsight",
-    "plugins/mcp/actions",
 ]
 resolver = "2"
 

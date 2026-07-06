@@ -1,0 +1,99 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, kanban_task_id, action, initial_board, final_board,\n               previous_values, created_at::text AS created_at\n        FROM kanban_history\n        WHERE kanban_task_id = $1\n          AND ($2 = '' OR action = $3)\n        ORDER BY id DESC\n        LIMIT $4 OFFSET $5\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "kanban_history",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "kanban_task_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_history",
+            "name": "kanban_task_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "action",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_history",
+            "name": "action"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "initial_board",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_history",
+            "name": "initial_board"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "final_board",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_history",
+            "name": "final_board"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "previous_values",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "kanban_history",
+            "name": "previous_values"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "2315de033aeb393be5258a7f8dadcfe95a441214d40cca69882d6d9bd511cdfa"
+}

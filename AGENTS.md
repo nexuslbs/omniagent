@@ -699,3 +699,133 @@ The Mattermost plugin now accepts `max_download_bytes` as a configurable integer
 - Files under this threshold: plugin downloads and base64-encodes content inline (existing behavior)
 - Files over this threshold: content omitted (`None`), agent can fetch via `read_attached_file` MCP tool
 - The `server_url` and `max_download_bytes` parameters are threaded through all call paths: `poll_channel`, `process_channel_event`, `ws_event_loop`, `send_inbound_notification`
+
+## Plugin Installation Architecture — Three Canonical Locations
+
+Every plugin has a single canonical install location depending on its type. **No source copying occurs for any plugin type** — each plugin compiles and runs from its canonical location.
+
+### 1. Builtin Plugins (`builtin: true` in YAML)
+
+Plugins that ship with the omniagent workspace (Rust crate members of the workspace).
+
+- **Source directory**: `/app/plugins/{type_dir}/{name}/`
+- **Binary location**: `get_bin_path("mcp-server-{name}")` — next to the omniagent binary
+  - Dev: `/app/target/release/mcp-server-{name}` (same dir as omniagent)
+  - Production: `/usr/local/bin/mcp-server-{name}` (from Dockerfile `COPY mcp-server-*`)
+- **mcp-config.json**: Present but with no `command` field — binary auto-resolved by scanner
+- **Install/reinstall**: Verify binary exists at `get_bin_path()`. If missing, compile from workspace root with `cargo build --release -p mcp-server-{name}`
+- **Uninstall**: Remove from YAML only (binary stays at `get_bin_path()`)
+- **Discovery**: Source found at `/app/plugins/{type}/{name}/Cargo.toml`, `is_plugin_builtin()` returns `true`
+
+**Detection logic:**
+```rust
+let is_builtin = plugins_yaml::is_plugin_builtin(data_dir, &name, &yaml_type);
+// Checks if /app/plugins/{type}/{name}/Cargo.toml or plugin.json exists
+```
+
+### 2. Omni-Stack Plugins (user-created, in workspace repo, no remote)
+
+Plugins that are part of the omni-stack repository or the user's workspace directory.
+
+- **Source directory**: `{workspace_dir}/plugins/{type_dir}/{name}/`
+- **Binary location**: `{workspace_dir}/plugins/{type_dir}/{name}/target/release/{binary_name}`
+- **plugin.json**: Present (full plugin package)
+- **Install/reinstall**: Already in place — compile from their own Cargo.toml in-place
+- **Uninstall**: Remove from YAML only (source stays in the git repo; removal means disable + remove YAML entry)
+- **Discovery**: Scanned as "bundled" plugins from `{workspace_dir}/plugins/{type}/`
+
+**Detection logic:**
+```rust
+let yaml_entry = plugins_yaml::get_entry(data_dir, &yaml_type, &name)?;
+let has_remote = yaml_entry.as_ref().and_then(|e| e.remote.as_ref()).is_some();
+let is_builtin = yaml_entry.as_ref().and_then(|e| e.builtin).unwrap_or(false);
+// Omni-stack = !is_builtin && !has_remote
+```
+
+### 3. Remote Plugins (git-installed, has `remote` field in YAML)
+
+Plugins installed from an external git repository via the dashboard or API.
+
+- **Source directory**: `{data_dir}/plugins/{type_dir}/.remote/{name}/{repo_path}/`
+  - Uses `.remote` (leading dot) to avoid collision with any plugin named "remote"
+- **Binary location**: `{data_dir}/plugins/{type_dir}/.remote/{name}/{repo_path}/target/release/{binary_name}`
+- **plugin.json**: Present (cloned from git repo)
+- **Install (`install_from_git`)**: Clone DIRECTLY into `.remote/` dir — no copy step
+- **Reinstall**: Remove `.remote/` dir, re-clone fresh
+- **Uninstall**: `rm -rf .remote/` directory + remove from YAML — plugin is completely gone as if never added
+- **`.gitignore`**: `.remote/` pattern added so git-ignored clones don't pollute the repo
+- **Discovery**: Scanned from `{data_dir}/plugins/{type}/.remote/` by `discover_plugins()`
+
+**Detection logic:**
+```rust
+let has_remote = yaml_entry.as_ref().and_then(|e| e.remote.as_ref()).is_some();
+// Remote = has_remote == true
+```
+
+### Config Scanner Resolution Order
+
+When the MCP scanner (`scan_plugin_servers` in `mcp/external/config.rs`) resolves the binary command for a plugin, it checks:
+
+1. If `mcp-config.json` has an explicit `command` → use it directly
+2. If `Cargo.toml` exists → check candidates in order:
+   1. `{plugin_dir}/target/release/{package_name}` (standalone plugin build)
+   2. `get_bin_path("{package_name}")` (workspace member next to omniagent binary)
+   3. `{plugin_dir}/target/release/{server_name}` (fallback)
+3. If no `Cargo.toml` → check `get_bin_path("mcp-server-{name}")` then `{plugin_dir}/target/release/mcp-server-{name}`
+
+### Key Design Principles
+
+- **No source copying**: Every plugin compiles and runs from its canonical location
+- **`get_bin_path()`**: Single source of truth for builtin plugin binaries — resolves `{exe_dir}/{name}` using `std::env::current_exe()`
+- **`.remote/` convention**: Git-installed plugins live under `.remote/` (leading dot) to avoid naming collisions, always under `{data_dir}`
+- **YAML-only uninstall**: For builtin and omni-stack plugins, "uninstall" only removes the YAML entry. The source and compiled binary remain (source is part of the workspace repo, binary is in `get_bin_path()` or the workspace build output)
+
+### Plugin Source Resolution (Three Sources per Name)
+
+A plugin name may have up to **3 disk sources**: **bundled** (omni-stack), **built-in** (omniagent workspace), and **remote** (git-cloned). The YAML file determines which is primary (active):
+
+| YAML entry | Primary source | Others' status |
+|---|---|---|
+| `builtin: true` | built-in | `"duplicated"` |
+| `builtin: false` or unset + exists in YAML | bundled | `"duplicated"` |
+| `remote: { url: ... }` | remote | `"duplicated"` |
+| No YAML entry | bundled (first discovered) | built-in hidden unless bundled absent |
+
+**Rules:**
+
+1. **builtin tools are NOT enabled by default** — must be explicitly added to YAML with `enabled: true` and `builtin: true`
+2. **If YAML has a tool key with `builtin: false` or unset** → the built-in source is ignored; the bundled (omni_dir) version is primary
+3. **If YAML has `builtin: true`** → the built-in source is primary; the bundled copy shows as `"duplicated"`
+4. **If a plugin has no YAML entry** → its bundled copy shows as enabled (discovered from disk); its built-in copy shows as disabled
+5. **Dashboard shows `"duplicated"` status** for all non-primary sources of a plugin name
+
+**Directory name convention (`PluginYamlType`):**
+
+```rust
+// file_name() returns the YAML section name:
+PluginYamlType::Tool   → "tools"   (the YAML key)
+PluginYamlType::Platform → "platforms"
+PluginYamlType::Provider → "providers"
+
+// type_dir_name() returns the plugins/ subdirectory name:
+PluginYamlType::Tool   → "mcp"     (the directory name)
+PluginYamlType::Platform → "platforms"
+PluginYamlType::Provider → "providers"
+```
+
+Use `type_dir_name()` for filesystem paths under `/app/plugins/` and `<workspace_dir>/plugins/`. Use `file_name()` only for YAML section references.
+
+**Discovery order** (`discover_plugins` in `installer.rs`):
+
+1. Section A: `data_dir/plugins/<type>/<name>/plugin.json` → `"bundled"`
+2. Section B: `workspace_dir/plugins/<type>/<name>/plugin.json` → `"bundled"` (deduped against A)
+3. Section C: `data_dir/plugins/<type>/.remote/<name>/plugin.json` → `"remote"`
+4. Section D: `/app/plugins/<type>/<name>/` (Cargo.toml + plugin.json or mcp-config.json) → `"built-in"`
+5. mcp_config: from `mcp-config.json` files → synthetic manifest (deduped against all above)
+
+All sources are returned to `list_plugins`, which groups by directory key and picks the primary per YAML.
+
+**`util` crate filtering:** A crate must have **both** `Cargo.toml` AND (`plugin.json` OR `mcp-config.json`) to be considered a plugin. Utility libraries (like `mcp-server-util`) with only `Cargo.toml` are excluded from both plugin discovery and MCP server discovery.
+
+**`actions` plugin:** Source lives in `omni-stack/plugins/mcp/actions/`. Removed from `omniagent/plugins/mcp/actions/` and from the workspace `Cargo.toml` member list. Only appears as bundled source.
+

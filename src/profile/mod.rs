@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn test_default_profile_has_core_tools() {
         let p = Profile::default("test");
-        assert!(p.allowed_tools.contains(&"create_cron_job".to_string()));
+        assert!(p.allowed_tools.contains(&"cron_create-job".to_string()));
         assert!(p.allowed_tools.contains(&"plugin_manager".to_string()));
         assert_eq!(p.allowed_tools.len(), CORE_TOOLS.len());
     }

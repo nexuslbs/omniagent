@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*) AS total\n        FROM messages m\n        JOIN threads t ON t.id = m.thread_id\n        JOIN channels c ON c.id = t.channel_id\n        WHERE 1=1\n          AND ($1 = '' OR $2 = 'all' OR t.channel_id = $3)\n          AND ($4 = '' OR m.thread_id = $5)\n          AND ($6 = '' OR $7 = 'all' OR m.role = $8)\n          AND ($9 = '' OR $10 = 'all' OR t.provider = $11)\n          AND ($12 = '' OR $13 = 'all' OR t.model = $14)\n          AND ($15 = '' OR $16 = 'all' OR m.msg_type = ANY(string_to_array($17, ',')))\n          AND ($18 != 'true' OR m.thread_sequence = 0)\n          AND ($19 = '' OR m.msg_subtype LIKE $20)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ac95be38eea3e1262c1a8822e4088ec8414beb4b2e73aab1dc94fbe3f3ff5d84"
+}

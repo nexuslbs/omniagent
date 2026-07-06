@@ -1,0 +1,8 @@
+{
+  "servers": [
+    {
+      "name": "subtasks",
+      "transport": "stdio"
+    }
+  ]
+}

@@ -1,4 +1,6 @@
 use serde_json::Value;
+use sql_forge::sql_forge;
+use sqlx::FromRow;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::future::Future;
@@ -48,6 +50,17 @@ pub struct McpToolResult {
     pub call_id: String,
     pub content: String,
     pub is_error: bool,
+}
+
+// sql_forge row structs for MCP lookups
+#[derive(FromRow)]
+struct CauseMetadataRow {
+    metadata: Value,
+}
+
+#[derive(FromRow)]
+struct ChannelPlatformRow {
+    platform: Option<String>,
 }
 
 use crate::prompt_builder::MemoryStore;
@@ -396,15 +409,16 @@ fn read_attached_file_tool() -> McpTool {
                     _ => {
                         // Try to look up from the thread's cause message
                         if let Some(tid) = ctx.current_thread_id {
-                            match sqlx::query_scalar::<_, serde_json::Value>(
-                                "SELECT metadata FROM messages WHERE thread_id = $1 AND role = 'cause' ORDER BY thread_sequence ASC, id ASC LIMIT 1"
+                            match sql_forge!(
+                                CauseMetadataRow,
+                                r#"SELECT metadata FROM messages WHERE thread_id = :tid AND role = 'cause' ORDER BY thread_sequence ASC, id ASC LIMIT 1"#,
+                                ( :tid = tid )
                             )
-                            .bind(tid)
                             .fetch_optional(&ctx.pool)
                             .await
                             {
-                                Ok(Some(meta)) => {
-                                    match meta.get("server_url").and_then(|v| v.as_str()) {
+                                Ok(Some(row)) => {
+                                    match row.metadata.get("server_url").and_then(|v| v.as_str()) {
                                         Some(url) if !url.is_empty() => url.to_string(),
                                         _ => return Ok(McpToolResult {
                                             call_id: String::new(),
@@ -436,14 +450,15 @@ fn read_attached_file_tool() -> McpTool {
 
                 // Determine platform from channel
                 let platform = if let Some(cid) = ctx.current_channel_id {
-                    match sqlx::query_scalar::<_, String>(
-                        "SELECT COALESCE(platform, 'mattermost') FROM channels WHERE id = $1"
+                    match sql_forge!(
+                        ChannelPlatformRow,
+                        r#"SELECT COALESCE(platform, 'mattermost') AS platform FROM channels WHERE id = :cid"#,
+                        ( :cid = cid )
                     )
-                    .bind(cid)
                     .fetch_optional(&ctx.pool)
                     .await
                     {
-                        Ok(Some(p)) => p,
+                        Ok(Some(row)) => row.platform.unwrap_or_else(|| "mattermost".to_string()),
                         _ => "mattermost".to_string(),
                     }
                 } else {

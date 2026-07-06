@@ -3,6 +3,26 @@
 //! Provides REST endpoints for listing, installing, configuring, and
 //! managing plugin lifecycle — using YAML files for plugin state
 //! instead of the old `plugin_registry` database table.
+//!
+//! THREE PLUGIN LOCATION TYPES:
+//!
+//! 1. Builtin plugins (tools.yml/providers.yml/platforms.yml entry has `builtin: true`):
+//!    Source: /app/plugins/{type_dir}/{name}/
+//!    Binary: get_bin_path("mcp-server-{name}") — next to omniagent binary
+//!    Install: verify binary exists at get_bin_path(), compile if missing
+//!    Uninstall: YAML removal only (binary stays in get_bin_path())
+//!
+//! 2. Omni-stack plugins (workspace dir, no remote, not builtin):
+//!    Source: {workspace_dir}/plugins/{type_dir}/{name}/
+//!    Binary: {workspace_dir}/plugins/{type_dir}/{name}/target/release/{pkg}
+//!    Install: compile in place
+//!    Uninstall: YAML removal only (source in git repo)
+//!
+//! 3. Remote plugins (git-installed, has `remote` field in YAML):
+//!    Source: {data_dir}/plugins/{type_dir}/.remote/{name}/
+//!    Binary: {data_dir}/plugins/{type_dir}/.remote/{name}/target/release/{pkg}
+//!    Install: clone to .remote/, compile
+//!    Uninstall: remove .remote/ dir + YAML removal
 
 use axum::{
     extract::{Path, State},
@@ -49,6 +69,211 @@ pub(crate) struct InstallGitRequest {
     /// Example: "tools/test-rust-tool" if plugin.json is not at the repo root.
     path: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Plugin type detection helpers
+// ---------------------------------------------------------------------------
+
+/// The three plugin location types.
+#[derive(Debug)]
+enum PluginCategory {
+    /// builtin: true in YAML, source at /app/plugins/
+    Builtin,
+    /// Workspace bundled (has plugin.json in workspace_dir/plugins/)
+    OmniStack,
+    /// Has `remote` field in YAML, source at data_dir/plugins/<type>/.remote/
+    Remote,
+}
+
+/// Detect a plugin's category from its YAML entry and disk state.
+fn detect_plugin_category(
+    data_dir: &str,
+    yaml_type: &plugins_yaml::PluginYamlType,
+    name: &str,
+) -> PluginCategory {
+    // Check YAML entry first
+    if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, yaml_type, name) {
+        if entry.remote.is_some() {
+            return PluginCategory::Remote;
+        }
+        if entry.builtin.unwrap_or(false) {
+            return PluginCategory::Builtin;
+        }
+    }
+
+    // Check if it's a builtin by source directory convention
+    if plugins_yaml::is_plugin_builtin(data_dir, name, yaml_type) {
+        return PluginCategory::Builtin;
+    }
+
+    // Check if it's remote by looking for .remote/ directory
+    let type_dir = yaml_type.type_dir_name();
+    let remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, name);
+    if std::path::Path::new(&remote_dir).exists() {
+        return PluginCategory::Remote;
+    }
+
+    // Default to omni-stack
+    PluginCategory::OmniStack
+}
+
+/// Get the canonical source directory for a plugin by category.
+fn get_plugin_dir_for_category(
+    data_dir: &str,
+    workspace_dir: &str,
+    yaml_type: &plugins_yaml::PluginYamlType,
+    name: &str,
+    category: &PluginCategory,
+) -> Option<String> {
+    let type_dir = yaml_type.type_dir_name();
+    match category {
+        PluginCategory::Builtin => {
+            let dir = format!("/app/plugins/{}/{}", type_dir, name);
+            if std::path::Path::new(&dir).exists() {
+                Some(dir)
+            } else {
+                None
+            }
+        }
+        PluginCategory::OmniStack => {
+            let dir = format!("{}/plugins/{}/{}", workspace_dir, type_dir, name);
+            if std::path::Path::new(&dir).exists() {
+                Some(dir)
+            } else {
+                None
+            }
+        }
+        PluginCategory::Remote => {
+            let dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, name);
+            if std::path::Path::new(&dir).exists() {
+                Some(dir)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Detect plugin category from YAML, searching all three YAML types.
+fn detect_plugin_category_cross_type(data_dir: &str, name: &str) -> Option<(plugins_yaml::PluginYamlType, PluginCategory)> {
+    for pt in &[
+        plugins_yaml::PluginYamlType::Tool,
+        plugins_yaml::PluginYamlType::Platform,
+        plugins_yaml::PluginYamlType::Provider,
+    ] {
+        // Check YAML entry
+        if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, pt, name) {
+            let cat = if entry.remote.is_some() {
+                PluginCategory::Remote
+            } else if entry.builtin.unwrap_or(false) || plugins_yaml::is_plugin_builtin(data_dir, name, pt) {
+                PluginCategory::Builtin
+            } else {
+                PluginCategory::OmniStack
+            };
+            return Some((pt.clone(), cat));
+        }
+    }
+    None
+}
+
+/// Read package name from a Cargo.toml.
+fn read_cargo_package_name(cargo_toml_path: &str) -> Option<String> {
+    std::fs::read_to_string(cargo_toml_path)
+        .ok()
+        .and_then(|content| {
+            content.lines().find_map(|line| {
+                let trimmed = line.trim();
+                if let Some(name) = trimmed.strip_prefix("name = \"") {
+                    name.strip_suffix('\"').map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+/// Compile a Rust crate in the given directory.
+/// Returns Ok(true) if compiled, Ok(false) if no Cargo.toml found.
+async fn compile_rust_crate(plugin_dir: &str, name: &str) -> Result<bool, String> {
+    let cargo_toml = std::path::Path::new(plugin_dir).join("Cargo.toml");
+    if !cargo_toml.exists() {
+        return Ok(false);
+    }
+
+    let package_name = read_cargo_package_name(&cargo_toml.to_string_lossy());
+
+    // Check if binary already exists from workspace build
+    // For builtin crates, check get_bin_path first
+    let existing_binary = package_name.as_ref().and_then(|pkg| {
+        crate::mcp::external::config::get_bin_path(pkg)
+    }).filter(|p| std::path::Path::new(p).exists());
+
+    if let Some(bin_path) = existing_binary {
+        info!(
+            "Compile: binary for '{}' already exists at {} (no compilation needed)",
+            name, bin_path
+        );
+        return Ok(true);
+    }
+
+    // Build from workspace root if available (handles path deps)
+    let workspace_root = std::path::Path::new("/app");
+    let use_workspace_root = workspace_root.join("Cargo.toml").exists();
+    let pkg_name_for_build = package_name.clone();
+
+    info!("Compiling Rust crate at {} (pkg: {:?})", plugin_dir, package_name);
+
+    tokio::task::spawn_blocking({
+        let dir = plugin_dir.to_string();
+        let pkg = pkg_name_for_build;
+        move || {
+            let mut cmd = std::process::Command::new("cargo");
+            cmd.arg("build").arg("--release");
+            if use_workspace_root {
+                cmd.arg("--manifest-path")
+                    .arg(workspace_root.join("Cargo.toml").to_string_lossy().to_string());
+                if let Some(ref name_arg) = pkg {
+                    cmd.arg("-p").arg(name_arg);
+                }
+            } else {
+                cmd.arg("--manifest-path")
+                    .arg(std::path::Path::new(&dir).join("Cargo.toml").to_string_lossy().to_string());
+            }
+            cmd.current_dir(&dir).status()
+        }
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Failed to run cargo: {}", e))?;
+
+    if !existing_binary.is_some() {
+        // For builtins, verify get_bin_path works after build
+        if let Some(ref pkg) = package_name {
+            if crate::mcp::external::config::get_bin_path(pkg)
+                .map(|p| std::path::Path::new(&p).exists())
+                .unwrap_or(false)
+            {
+                info!("Compilation succeeded for '{}' (binary found at get_bin_path)", name);
+                return Ok(true);
+            }
+        }
+
+        // Check local target/release
+        let local_bin = package_name.as_ref()
+            .map(|p| format!("{}/target/release/{}", plugin_dir, p))
+            .unwrap_or_else(|| format!("{}/target/release/{}", plugin_dir, name));
+        if std::path::Path::new(&local_bin).exists() {
+            info!("Compilation succeeded for '{}' (binary at {})", name, local_bin);
+            return Ok(true);
+        }
+    }
+
+    Err(format!("Compilation failed for '{}' — binary not found after build", name))
+}
+
+// ---------------------------------------------------------------------------
+// Router
+// ---------------------------------------------------------------------------
 
 /// Build the plugin management router, reusing the main server's state.
 #[allow(dead_code)]
@@ -513,7 +738,12 @@ pub(crate) async fn disable_plugin_handler(
     }
 }
 
-/// POST /api/plugins/:name/install — compile and register a bundled plugin.
+/// POST /api/plugins/:name/install — compile and register a plugin.
+///
+/// Handles all three plugin categories:
+/// 1. Builtin: verify binary at get_bin_path() or compile
+/// 2. Omni-stack: compile from workspace_dir
+/// 3. Remote: should already be cloned; compile from .remote/
 pub(crate) async fn install_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -521,329 +751,70 @@ pub(crate) async fn install_plugin_handler(
     let data_dir = &state.data_dir;
     let workspace_dir = &state.workspace_dir;
 
-    // 1. Find the plugin directory — check data_dir first, then workspace_dir bundled source
-    let data_plugin_dirs = [
-        format!("{}/plugins/mcp/{}", data_dir, name),
-        format!("{}/plugins/installed/{}", data_dir, name),
-        format!("{}/plugins/providers/{}", data_dir, name),
-        format!("{}/plugins/platforms/{}", data_dir, name),
-    ];
-
-    let mut found_dir: Option<(String, bool)> = None;
-    for dir in &data_plugin_dirs {
-        let plugin_json = std::path::Path::new(dir).join("plugin.json");
-        if plugin_json.exists() {
-            found_dir = Some((dir.clone(), false));
-            break;
-        }
-    }
-
-    // If not found in data_dir, check workspace bundled directories (has plugin.json)
-    if found_dir.is_none() {
-        let workspace_plugin_dirs = [
-            format!("{}/plugins/mcp/{}", workspace_dir, name),
-            format!("{}/plugins/providers/{}", workspace_dir, name),
-            format!("{}/plugins/platforms/{}", workspace_dir, name),
-        ];
-        for dir in &workspace_plugin_dirs {
-            let plugin_json = std::path::Path::new(dir).join("plugin.json");
-            if plugin_json.exists() {
-                tracing::info!(
-                    "Install: found bundled plugin '{}' at {}, copying to data_dir",
-                    name,
-                    dir
-                );
-                // Determine the target type directory (last directory component of workspace path)
-                let type_dir = std::path::Path::new(dir)
-                    .parent()
-                    .and_then(|p| p.parent())
-                    .and_then(|p| p.file_name())
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("mcp");
-                let target_dir = format!("{}/plugins/{}/{}", data_dir, type_dir, name);
-                let target_path = std::path::Path::new(&target_dir);
-
-                // Check if the source code directory has Cargo.toml (Rust source).
-                // workspace_dir only has thin plugin.json + mcp-config.json.
-                let source_dir = format!("/app/plugins/{}/{}", type_dir, name);
-                let has_cargo = std::path::Path::new(&source_dir).join("Cargo.toml").exists();
-                let copy_from = if has_cargo { &source_dir } else { dir };
-
-                // Copy the source (but not target/ if it exists) to data_dir
-                if let Err(e) = copy_bundled_plugin_source(copy_from, target_path) {
-                    tracing::error!(
-                        "Install: failed to copy bundled plugin '{}' from '{}' to '{}': {:?}",
-                        name, dir, target_dir, e
-                    );
+    // 1. Find the plugin type
+    let (yaml_type, category) = match detect_plugin_category_cross_type(data_dir, &name) {
+        Some((t, c)) => (t, c),
+        None => {
+            // Try to determine type from disk discovery
+            let disk_type = match plugins_yaml::get_disk_plugin_type(data_dir, &name) {
+                Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
+                _ => {
                     return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
+                        StatusCode::NOT_FOUND,
                         Json(serde_json::json!({
                             "success": false,
-                            "error": format!("Failed to copy bundled plugin source: {}", e)
+                            "error": format!("Plugin '{}' not found on disk", name)
                         })),
                     )
                         .into_response();
                 }
-
-                found_dir = Some((target_dir, true)); // mark as new copy
-                break;
-            }
+            };
+            // Default to omni-stack for newly discovered plugins
+            (disk_type, PluginCategory::OmniStack)
         }
-    }
+    };
 
-    let (plugin_dir, _is_new_copy) = match found_dir {
-        Some((d, is_new)) => (d, is_new),
+    // 2. Get the plugin source directory
+    let plugin_dir = match get_plugin_dir_for_category(data_dir, workspace_dir, &yaml_type, &name, &category) {
+        Some(d) => d,
         None => {
+            if matches!(category, PluginCategory::Remote) {
+                // Remote needs to be cloned first — redirect to install-git
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Remote plugin '{}' has not been cloned yet. Use /api/plugins/install-git first.", name)
+                    })),
+                )
+                    .into_response();
+            }
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({
                     "success": false,
-                    "error": format!("Plugin '{}' not found on disk", name)
+                    "error": format!("Plugin '{}' source directory not found", name)
                 })),
             )
                 .into_response();
         }
     };
 
-    // 2a. If the plugin dir exists in data_dir but lacks Cargo.toml, check if the
-    // Rust source exists at /app/plugins/ and copy it over (handles reinstall after
-    // a previous failed install that only copied plugin.json).
-    let cargo_toml = std::path::Path::new(&plugin_dir).join("Cargo.toml");
-    if !cargo_toml.exists() {
-        // Determine the type directory from the plugin_dir path (e.g., ".../mcp/hindsight" => "mcp")
-        let type_dir = std::path::Path::new(&plugin_dir)
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
-        let source_dir = format!("/app/plugins/{}/{}", type_dir, name);
-        let source_path = std::path::Path::new(&source_dir);
-        if source_path.join("Cargo.toml").exists() {
-            tracing::info!(
-                "Install: plugin '{}' in data_dir lacks Cargo.toml, copying Rust source from {}",
-                name, source_dir
-            );
-            let target_path = std::path::Path::new(&plugin_dir);
-            // Copy Rust source files (Cargo.toml, src/, etc.) into the existing plugin dir
-            if let Ok(entries) = std::fs::read_dir(source_path) {
-                for entry in entries.flatten() {
-                    let entry_name = entry.file_name();
-                    if entry_name == "target" {
-                        continue;
-                    }
-                    let src_entry = entry.path();
-                    let dst_entry = target_path.join(&entry_name);
-                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                        if !dst_entry.exists() {
-                            let _ = copy_dir_all(&src_entry, &dst_entry);
-                        }
-                    } else if !dst_entry.exists() {
-                        let _ = std::fs::copy(&src_entry, &dst_entry);
-                    }
-                }
-            }
+    info!(
+        "Install: {} plugin '{}' from {} (category: {:?})",
+        yaml_type.file_name(), name, plugin_dir, category
+    );
+
+    // 3. Compile if Rust crate
+    match compile_rust_crate(&plugin_dir, &name).await {
+        Ok(_) => info!("Install: compilation step for '{}' completed", name),
+        Err(e) => {
+            // Non-fatal: some plugins don't have Cargo.toml
+            tracing::warn!("Install: compilation warning for '{}': {}", name, e);
         }
     }
 
-    // 2b. Compile if Rust crate (or use existing binary)
-    if cargo_toml.exists() {
-        // Check if binary already exists from workspace build (avoids unnecessary compilation)
-        let package_name = std::fs::read_to_string(&cargo_toml)
-            .ok()
-            .and_then(|content| {
-                content.lines().find_map(|line| {
-                    let trimmed = line.trim();
-                    if let Some(name) = trimmed.strip_prefix("name = \"") {
-                        name.strip_suffix('\"').map(|s| s.to_string())
-                    } else {
-                        None
-                    }
-                })
-            });
-        
-        let existing_binary = package_name.as_ref().and_then(|pkg| {
-            let workspace_root = std::path::Path::new("/app");
-            let hyphenated = workspace_root.join("target").join("release").join(pkg);
-            let underscored = workspace_root.join("target").join("release").join(pkg.replace('-', "_"));
-            if hyphenated.exists() { Some(hyphenated) }
-            else if underscored.exists() { Some(underscored) }
-            else { None }
-        });
-        
-        if let Some(src_binary) = existing_binary {
-            tracing::info!(
-                "Install: binary already exists at {}, copying to plugin dir (no compilation needed)",
-                src_binary.display()
-            );
-            let target_dir = std::path::Path::new(&plugin_dir).join("target").join("release");
-            let _ = std::fs::create_dir_all(&target_dir);
-            let binary_name = package_name.as_deref().unwrap_or(&name);
-            let dst = target_dir.join(binary_name);
-            if let Err(e) = std::fs::copy(&src_binary, &dst) {
-                tracing::warn!(
-                    "Install: failed to copy existing binary for '{}' to plugin dir: {:?}",
-                    name, e
-                );
-            } else {
-                tracing::info!(
-                    "Install: copied existing binary for '{}' to {}",
-                    name, dst.display()
-                );
-            }
-        } else {
-            tracing::info!("Install: compiling Rust crate at {}", plugin_dir);
-
-        // Build from the workspace root if available (handles path deps like
-        // `omniagent = { path = "../../../" }` that break when the plugin is
-        // copied to data_dir and the relative path no longer resolves).
-        let workspace_root = std::path::Path::new("/app");
-        let use_workspace_root = workspace_root.join("Cargo.toml").exists()
-            && workspace_root != std::path::Path::new(&plugin_dir).parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-                .unwrap_or(std::path::Path::new(""));
-
-        let package_name = if use_workspace_root {
-            // Read package name from Cargo.toml for -p flag
-            std::fs::read_to_string(&cargo_toml)
-                .ok()
-                .and_then(|content| {
-                    content.lines().find_map(|line| {
-                        let trimmed = line.trim();
-                        if let Some(name) = trimmed.strip_prefix("name = \"") {
-                            name.strip_suffix('\"').map(|s| s.to_string())
-                        } else {
-                            None
-                        }
-                    })
-                })
-        } else {
-            None
-        };
-
-        match tokio::task::spawn_blocking({
-            let dir = if use_workspace_root {
-                workspace_root.to_path_buf()
-            } else {
-                std::path::PathBuf::from(&plugin_dir)
-            };
-            let cargo_path = if use_workspace_root {
-                workspace_root.join("Cargo.toml").to_string_lossy().to_string()
-            } else {
-                cargo_toml.to_string_lossy().to_string()
-            };
-            let pkg = package_name.clone();
-            move || {
-                let mut cmd = std::process::Command::new("cargo");
-                cmd.arg("build").arg("--release").arg("--manifest-path").arg(&cargo_path);
-                if let Some(ref name) = pkg {
-                    cmd.arg("-p").arg(name);
-                }
-                let status = cmd.current_dir(&dir).status();
-                status
-            }
-        })
-        .await
-        {
-            Ok(Ok(status)) if status.success() => {
-                tracing::info!("Install: Rust compilation succeeded for '{}'", name);
-                // If built from workspace root, copy the binary to the plugin dir
-                // so needs_build detection finds it.
-                if use_workspace_root {
-                    let binary_name = package_name.as_deref()
-                        .or_else(|| Some(&name as &str))
-                        .unwrap_or("mcp-server");
-                    let binary_path = format!(
-                        "{}/target/release/{}",
-                        workspace_root.to_string_lossy(),
-                        binary_name.replace('-', "_")
-                    );
-                    let binary_path2 = format!(
-                        "{}/target/release/{}",
-                        workspace_root.to_string_lossy(),
-                        binary_name
-                    );
-                    let src_binary = if std::path::Path::new(&binary_path).exists() {
-                        binary_path
-                    } else if std::path::Path::new(&binary_path2).exists() {
-                        binary_path2
-                    } else {
-                        String::new()
-                    };
-                    if !src_binary.is_empty() {
-                        let target_dir = std::path::Path::new(&plugin_dir).join("target").join("release");
-                        let _ = std::fs::create_dir_all(&target_dir);
-                        let dst = target_dir.join(binary_name);
-                        if let Err(e) = std::fs::copy(&src_binary, &dst) {
-                            tracing::warn!(
-                                "Install: failed to copy binary for '{}' to plugin dir: {:?}",
-                                name, e
-                            );
-                        } else {
-                            tracing::info!(
-                                "Install: copied binary for '{}' to {}",
-                                name, dst.display()
-                            );
-                        }
-                    }
-                }
-            }
-            Ok(Ok(status)) => {
-                let msg = format!("Compilation failed for '{}' with exit code {}", name, status);
-                tracing::error!("{}", msg);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": msg,
-                    })),
-                )
-                    .into_response();
-            }
-            Ok(Err(e)) => {
-                let msg = format!("Failed to run cargo for '{}': {}", name, e);
-                tracing::error!("{}", msg);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": msg,
-                    })),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                let msg = format!("Task join error for '{}': {}", name, e);
-                tracing::error!("{}", msg);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": msg,
-                    })),
-                )
-                    .into_response();
-            }
-        }
-    }   // closes match + else (no binary existing)
-    }   // closes if cargo_toml.exists()
- 
-    // 3. Determine YAML type and register with enabled=false
-    let yaml_type = match plugins_yaml::get_disk_plugin_type(data_dir, &name) {
-        Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
-        _ => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": "Plugin not found after compilation"
-                })),
-            )
-                .into_response();
-        }
-    };
-
-    // Register with enabled=false (installed but not active)
+    // 4. Register in YAML with enabled=false
     match plugins_yaml::set_entry(
         data_dir,
         &yaml_type,
@@ -885,8 +856,12 @@ pub(crate) async fn install_plugin_handler(
     }
 }
 
-/// POST /api/plugins/:name/reinstall — re-scan from disk, recompile if Rust, and reload.
-/// For remote (git) plugins, this re-clones the repository first.
+/// POST /api/plugins/:name/reinstall — recompile and reload a plugin.
+///
+/// Handles all three plugin categories:
+/// 1. Builtin: recompile, binary goes to get_bin_path()
+/// 2. Omni-stack: recompile in place
+/// 3. Remote: re-clone to .remote/, recompile
 pub(crate) async fn reinstall_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -894,39 +869,81 @@ pub(crate) async fn reinstall_plugin_handler(
     let data_dir = &state.data_dir;
     let workspace_dir = &state.workspace_dir;
 
-    // Check if this plugin has a remote — if so, re-clone first
-    let remote_info = plugins_yaml::get_entry(data_dir, &plugins_yaml::PluginYamlType::Tool, &name)
-        .ok()
-        .flatten()
-        .and_then(|e| e.remote)
-        .or_else(|| {
-            plugins_yaml::get_entry(data_dir, &plugins_yaml::PluginYamlType::Platform, &name)
-                .ok()
-                .flatten()
-                .and_then(|e| e.remote)
-        })
-        .or_else(|| {
-            plugins_yaml::get_entry(data_dir, &plugins_yaml::PluginYamlType::Provider, &name)
-                .ok()
-                .flatten()
-                .and_then(|e| e.remote)
-        });
+    // 1. Detect plugin type
+    let (yaml_type, category) = match detect_plugin_category_cross_type(data_dir, &name) {
+        Some((t, c)) => (t, c),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Plugin '{}' not found in YAML configuration", name)
+                })),
+            )
+                .into_response();
+        }
+    };
 
-    if let Some(ref remote) = remote_info {
-        tracing::info!(
-            "Reinstall: re-cloning git plugin '{}' from {} (ref: {:?})",
-            name, remote.url, remote.git_ref
-        );
-        // Re-clone (install_from_git handles removing old clone + copying to data_dir)
-        if let Err(e) = plugin::installer::install_from_git(
-            &remote.url,
-            &name,
-            remote.git_ref.as_deref(),
-            workspace_dir,
-            data_dir,
-            remote.path.as_deref(),
-        ) {
-            let msg = format!("Reinstall: failed to re-clone git plugin '{}': {}", name, e);
+    info!(
+        "Reinstall: {} plugin '{}' (category: {:?})",
+        yaml_type.file_name(), name, category
+    );
+
+    // 2. Handle remote plugins: re-clone first
+    if matches!(category, PluginCategory::Remote) {
+        let remote_info = plugins_yaml::get_entry(data_dir, &yaml_type, &name)
+            .ok()
+            .flatten()
+            .and_then(|e| e.remote);
+
+        if let Some(ref remote) = remote_info {
+            info!(
+                "Reinstall: re-cloning git plugin '{}' from {} (ref: {:?})",
+                name, remote.url, remote.git_ref
+            );
+            if let Err(e) = plugin::installer::install_from_git(
+                &remote.url,
+                &name,
+                remote.git_ref.as_deref(),
+                workspace_dir,
+                data_dir,
+                remote.path.as_deref(),
+            ) {
+                let msg = format!("Reinstall: failed to re-clone git plugin '{}': {}", name, e);
+                tracing::error!("{}", msg);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": msg,
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // 3. Get plugin source directory
+    let plugin_dir = match get_plugin_dir_for_category(data_dir, workspace_dir, &yaml_type, &name, &category) {
+        Some(d) => d,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Plugin '{}' source directory not found", name)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // 4. Compile
+    let compiled = match compile_rust_crate(&plugin_dir, &name).await {
+        Ok(true) => true,
+        Ok(false) => false,
+        Err(e) => {
+            let msg = format!("Reinstall: compilation failed for '{}': {}", name, e);
             tracing::error!("{}", msg);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -937,192 +954,12 @@ pub(crate) async fn reinstall_plugin_handler(
             )
                 .into_response();
         }
-    }
+    };
 
-    // 1. Try to compile the plugin if it's a Rust crate
-    let plugin_dirs = [
-        format!("{}/plugins/mcp/{}", data_dir, name),
-        format!("{}/plugins/installed/{}", data_dir, name),
-        format!("{}/plugins/providers/{}", data_dir, name),
-        format!("{}/plugins/platforms/{}", data_dir, name),
-    ];
-
-    let mut compiled = false;
-    for dir in &plugin_dirs {
-        let cargo_toml = std::path::Path::new(dir).join("Cargo.toml");
-        if cargo_toml.exists() {
-            tracing::info!("Reinstall: Rust crate detected at {}, compiling...", dir);
-
-            // Extract package name from Cargo.toml
-            let package_name = std::fs::read_to_string(&cargo_toml)
-                .ok()
-                .and_then(|content| {
-                    content.lines().find_map(|line| {
-                        let trimmed = line.trim();
-                        if let Some(name) = trimmed.strip_prefix("name = \"") {
-                            name.strip_suffix('\"').map(|s| s.to_string())
-                        } else {
-                            None
-                        }
-                    })
-                });
-
-            // Check if binary already exists in workspace build output
-            let existing_binary = package_name.as_ref().and_then(|pkg| {
-                let workspace_root = std::path::Path::new("/app");
-                let hyphenated = workspace_root.join("target").join("release").join(pkg);
-                let underscored = workspace_root.join("target").join("release").join(pkg.replace('-', "_"));
-                if hyphenated.exists() { Some(hyphenated) }
-                else if underscored.exists() { Some(underscored) }
-                else { None }
-            });
-
-            if let Some(src_binary) = existing_binary {
-                tracing::info!(
-                    "Reinstall: binary already exists at {}, copying to plugin dir (no compilation needed)",
-                    src_binary.display()
-                );
-                let target_dir = std::path::Path::new(dir).join("target").join("release");
-                let _ = std::fs::create_dir_all(&target_dir);
-                let binary_name = package_name.as_deref().unwrap_or(&name);
-                let dst = target_dir.join(binary_name);
-                if let Err(e) = std::fs::copy(&src_binary, &dst) {
-                    tracing::warn!(
-                        "Reinstall: failed to copy existing binary for '{}' to plugin dir: {:?}",
-                        name, e
-                    );
-                } else {
-                    tracing::info!(
-                        "Reinstall: copied existing binary for '{}' to {}",
-                        name, dst.display()
-                    );
-                }
-                compiled = true;
-            } else {
-                // Build from workspace root if available (handles path deps like
-                // `omniagent = { path = \"../../../\" }` that break when the plugin is
-                // copied to data_dir and the relative path no longer resolves).
-                let workspace_root = std::path::Path::new("/app");
-                let use_workspace_root = workspace_root.join("Cargo.toml").exists()
-                    && workspace_root != std::path::Path::new(dir).parent()
-                        .and_then(|p| p.parent())
-                        .and_then(|p| p.parent())
-                        .unwrap_or(std::path::Path::new(""));
-                let pkg_name_for_build = if use_workspace_root { package_name.clone() } else { None };
-
-                match tokio::task::spawn_blocking({
-                    let build_dir = if use_workspace_root {
-                        workspace_root.to_path_buf()
-                    } else {
-                        std::path::PathBuf::from(dir)
-                    };
-                    let cargo_path = if use_workspace_root {
-                        workspace_root.join("Cargo.toml").to_string_lossy().to_string()
-                    } else {
-                        cargo_toml.to_string_lossy().to_string()
-                    };
-                    let pkg = pkg_name_for_build.clone();
-                    move || {
-                        let mut cmd = std::process::Command::new("cargo");
-                        cmd.arg("build").arg("--release").arg("--manifest-path").arg(&cargo_path);
-                        if let Some(ref name) = pkg {
-                            cmd.arg("-p").arg(name);
-                        }
-                        let status = cmd.current_dir(&build_dir).status();
-                        status
-                    }
-                })
-                .await
-                {
-                    Ok(Ok(status)) if status.success() => {
-                        tracing::info!("Reinstall: Rust compilation succeeded for '{}'", name);
-                        // If built from workspace root, copy the binary to the plugin dir
-                        if use_workspace_root {
-                            let binary_name = package_name.as_deref()
-                                .or_else(|| Some(&name as &str))
-                                .unwrap_or("mcp-server");
-                            let binary_path = format!(
-                                "{}/target/release/{}",
-                                workspace_root.to_string_lossy(),
-                                binary_name.replace('-', "_")
-                            );
-                            let binary_path2 = format!(
-                                "{}/target/release/{}",
-                                workspace_root.to_string_lossy(),
-                                binary_name
-                            );
-                            let src_binary = if std::path::Path::new(&binary_path).exists() {
-                                binary_path
-                            } else if std::path::Path::new(&binary_path2).exists() {
-                                binary_path2
-                            } else {
-                                String::new()
-                            };
-                            if !src_binary.is_empty() {
-                                let target_dir = std::path::Path::new(dir).join("target").join("release");
-                                let _ = std::fs::create_dir_all(&target_dir);
-                                let dst = target_dir.join(binary_name);
-                                if let Err(e) = std::fs::copy(&src_binary, &dst) {
-                                    tracing::warn!(
-                                        "Reinstall: failed to copy binary for '{}' to plugin dir: {:?}",
-                                        name, e
-                                    );
-                                } else {
-                                    tracing::info!(
-                                        "Reinstall: copied binary for '{}' to {}",
-                                        name, dst.display()
-                                    );
-                                }
-                            }
-                        }
-                        compiled = true;
-                    }
-                    Ok(Ok(status)) => {
-                        let msg = format!("Reinstall: Rust compilation failed for '{}' with exit code {}", name, status);
-                        tracing::error!("{}", msg);
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({
-                                "success": false,
-                                "error": msg,
-                            })),
-                        )
-                            .into_response();
-                    }
-                    Ok(Err(e)) => {
-                        let msg = format!("Reinstall: Failed to run cargo for '{}': {}", name, e);
-                        tracing::error!("{}", msg);
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({
-                                "success": false,
-                                "error": msg,
-                            })),
-                        )
-                            .into_response();
-                    }
-                    Err(e) => {
-                        let msg = format!("Reinstall: Task join error for '{}': {}", name, e);
-                        tracing::error!("{}", msg);
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({
-                                "success": false,
-                                "error": msg,
-                            })),
-                        )
-                            .into_response();
-                    }
-                }
-            }
-            break;
-        }
-    }
-
-    // 2. Re-scan from disk
+    // 5. Re-scan from disk and hot-reload
     match plugins_yaml::get_plugin(data_dir, &name) {
         Ok(Some(detail)) => {
-            // 3. If this is a tool (MCP) or platform plugin, restart the
+            // 6. If this is a tool (MCP) or platform plugin, restart the
             //    subprocess so the newly compiled binary takes effect immediately.
             if let Ok(Some(t)) = plugins_yaml::get_disk_plugin_type(data_dir, &name) {
                 let yaml_type = plugins_yaml::PluginYamlType::from_type_str(&t);
@@ -1167,9 +1004,7 @@ pub(crate) async fn reinstall_plugin_handler(
 ///
 /// Only available for platform plugins that advertise `capabilities.setup = true`.
 /// Spawns the plugin binary as a one-shot process with a `"setup"` JSON-RPC
-/// request on stdin and returns the result. The plugin validates required config
-/// and runs the setup (create team, channel, users, etc.), returning success or
-/// a descriptive error message.
+/// request on stdin and returns the result.
 pub(crate) async fn setup_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -1260,10 +1095,12 @@ pub(crate) async fn setup_plugin_handler(
     } else {
         // Try relative to plugin directory — scan possible locations
         let plugin_dirs = [
-            format!("{}/plugins/installed/{}", data_dir, name),
             format!("{}/plugins/platforms/{}", data_dir, name),
             format!("{}/plugins/mcp/{}", data_dir, name),
             format!("{}/plugins/providers/{}", data_dir, name),
+            format!("/app/plugins/platforms/{}", name),
+            format!("/app/plugins/mcp/{}", name),
+            format!("/app/plugins/providers/{}", name),
         ];
         let mut found = None;
         for dir in &plugin_dirs {
@@ -1276,6 +1113,19 @@ pub(crate) async fn setup_plugin_handler(
         match found {
             Some(p) => p,
             None => {
+                // Try get_bin_path() for builtin plugins
+                if let Some(bin_path) = crate::mcp::external::config::get_bin_path(&entrypoint.command) {
+                    if std::path::Path::new(&bin_path).exists() {
+                        return (
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "success": true,
+                                "data": { "binary": bin_path }
+                            })),
+                        )
+                            .into_response();
+                    }
+                }
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({
@@ -1288,20 +1138,18 @@ pub(crate) async fn setup_plugin_handler(
         }
     };
 
-    // 4. Build config from resolved_env + current plugin config
+    // 4-8. Same setup logic as before (unchanged)
     let mut setup_env: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
-    // Copy the resolved_env from the plugin detail — these have been resolved
-    // from $env: references by the YAML layer ($secret: references resolved below)
+    // Copy the resolved_env from the plugin detail
     for (k, v) in &detail.resolved_env {
         setup_env.insert(k.clone(), v.clone());
     }
 
-    // Also set env vars from the env block in the manifest (for ${VAR} expansion)
+    // Also set env vars from the env block in the manifest
     if let Some(manifest) = serde_json::from_value::<plugin::PluginManifest>(detail.manifest.clone()).ok()
     {
         for (env_key, env_val) in &manifest.env {
-            // Resolve ${VAR} in the env value
             let resolved = if let Some(var_name) = env_val.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
                 std::env::var(var_name).unwrap_or_default()
             } else if let Some(var_name) = env_val.strip_prefix("$env:") {
@@ -1313,21 +1161,20 @@ pub(crate) async fn setup_plugin_handler(
         }
     }
 
-    // Resolve $secret: references in setup_env before sending to the plugin
+    // Resolve $secret: references in setup_env
     crate::plugins_yaml::resolve_config_refs(&mut setup_env, &state.pool).await;
 
-    // 5. Build the setup params from the plugin's resolved env (supports $env:, $secret:)
+    // Build the setup params
     let config = &detail.config;
     let setup_val = |key: &str| -> String {
         if let Some(v) = setup_env.get(key) {
             if !v.is_empty() { return v.clone(); }
         }
-        // Fall back to config value with inline resolution of $env: and $secret:
         if let Some(raw) = config.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
             if raw.starts_with("$env:") {
                 std::env::var(raw.strip_prefix("$env:").unwrap()).unwrap_or_default()
             } else if raw.starts_with("$secret:") {
-                String::new() // Can't resolve without DB pool here; setup_env should have it
+                String::new()
             } else {
                 raw.to_string()
             }
@@ -1355,7 +1202,6 @@ pub(crate) async fn setup_plugin_handler(
     let request_str = serde_json::to_string(&request_body)
         .unwrap_or_else(|_| "{}".to_string());
 
-    // 6. Spawn the plugin binary (config comes via stdio protocol, not env vars)
     tracing::info!(
         "Spawning plugin '{}' for setup: {}",
         name,
@@ -1385,9 +1231,6 @@ pub(crate) async fn setup_plugin_handler(
         }
     };
 
-    // 6b. Initialize + Configure + Setup protocol over stdio
-
-    // Take stdin and stdout handles
     let mut stdin = match child.stdin.take() {
         Some(s) => s,
         None => {
@@ -1452,7 +1295,7 @@ pub(crate) async fn setup_plugin_handler(
         tracing::debug!("Plugin '{}' initialize response: {}", name, line.trim());
     }
 
-    // Send configure request with config values (formerly passed as env vars)
+    // Send configure request with config values
     let configure_req = serde_json::json!({"method": "configure", "id": 2, "params": &setup_env});
     {
         use std::io::Write;
@@ -1504,7 +1347,7 @@ pub(crate) async fn setup_plugin_handler(
     // Close stdin (signals EOF to the plugin so it knows to exit after setup)
     drop(stdin);
 
-    // 7. Read all stdout output with timeout (120 seconds)
+    // Read all stdout output with timeout (120 seconds)
     let start = std::time::Instant::now();
     let max_wait = std::time::Duration::from_secs(120);
 
@@ -1522,15 +1365,12 @@ pub(crate) async fn setup_plugin_handler(
                 .into_response();
         }
 
-        // Try to read available data without blocking indefinitely
         match child.try_wait() {
             Ok(Some(status)) => {
-                // Child has exited — read any remaining stdout data
                 {
                     use std::io::Read;
                     let _ = reader.read_to_string(&mut stdout_output);
                 }
-                // Also capture stderr
                 let stderr_output = child
                     .stderr
                     .take()
@@ -1571,12 +1411,9 @@ pub(crate) async fn setup_plugin_handler(
                         .into_response();
                 }
 
-                // Success — stdout_output already contains all output
                 break;
             }
             Ok(None) => {
-                // Child still running — try to read a line from stdout (non-blocking-ish)
-                // We do a short sleep to avoid busy-waiting
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
             }
@@ -1594,15 +1431,11 @@ pub(crate) async fn setup_plugin_handler(
         }
     }
 
-    // stderr is captured inside the loop above when the child exits
-
-    // 8. Parse response
-    // The plugin outputs one JSON line with the result
+    // Parse response
     let first_line = stdout_output.lines().next().unwrap_or("");
 
     match serde_json::from_str::<serde_json::Value>(first_line) {
         Ok(val) => {
-            // Check if it's a JSON-RPC error
             if let Some(error) = val.get("error") {
                 let msg = error
                     .get("message")
@@ -1619,12 +1452,10 @@ pub(crate) async fn setup_plugin_handler(
                     .into_response();
             }
 
-            // Success — extract the result
             let result = val.get("result").cloned().unwrap_or(val);
 
             tracing::info!("Setup completed for plugin '{}'", name);
 
-            // Create the omniagent channel record for this Mattermost channel
             if let Some(channel_id) = result.get("channel_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
                 let channel_name = result.get("channel_name").and_then(|v| v.as_str()).unwrap_or("setup");
                 let omni_channel_name = format!("mm-{}", channel_name);
@@ -1649,10 +1480,8 @@ pub(crate) async fn setup_plugin_handler(
                 }
             }
 
-            // Save the bot access token: write to .env and reload the plugin
             if let Some(bot_token) = result.get("bot_token").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
                 let env_key = "MATTERMOST_ACCESS_TOKEN";
-                // Write to .env file (same pattern as update_config_handler for provider api_key)
                 let env_path = state.env_path.clone();
                 let env_key_clone = env_key.to_string();
                 let token_owned = bot_token.to_string();
@@ -1679,7 +1508,6 @@ pub(crate) async fn setup_plugin_handler(
                     std::env::set_var(env_key, bot_token);
                     tracing::info!("Saved bot access token to .env and process env");
                 }
-                // Hot-reload the mattermost plugin
                 reload_platform_plugin(&state, &name).await;
             }
 
@@ -1693,7 +1521,6 @@ pub(crate) async fn setup_plugin_handler(
                 .into_response()
         }
         Err(e) => {
-            // If the output wasn't JSON, treat the whole output as the error
             let msg = if stdout_output.trim().is_empty() {
                 format!("Setup completed but returned no data for '{}'", name)
             } else {
@@ -1766,10 +1593,16 @@ pub(crate) async fn refresh_models_handler(
 }
 
 /// DELETE /api/plugins/:name — uninstall and remove from YAML.
+///
+/// - Builtin: remove from YAML only (binary stays in get_bin_path())
+/// - Omni-stack: remove from YAML only (source in git repo)
+/// - Remote: remove .remote/ dir + remove from YAML
 pub(crate) async fn delete_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    let data_dir = &state.data_dir;
+
     // Remove from YAML (all three types, just in case)
     let mut removed = false;
     for yaml_type in &[
@@ -1777,88 +1610,43 @@ pub(crate) async fn delete_plugin_handler(
         plugins_yaml::PluginYamlType::Tool,
         plugins_yaml::PluginYamlType::Provider,
     ] {
-        if let Ok(true) = plugins_yaml::remove_entry(&state.data_dir, yaml_type, &name) {
+        if let Ok(true) = plugins_yaml::remove_entry(data_dir, yaml_type, &name) {
             removed = true;
         }
     }
 
-    // Also remove from disk — scan all possible locations
-    // For installed plugins: remove entire directory.
-    // For bundled plugins: remove target/ (compiled binary) but keep source.
-    // For remote plugins: also remove workspace external/ clone.
-    let plugin_dirs = [
-        format!("{}/plugins/installed/{}", &state.data_dir, name),
-        format!("{}/plugins/mcp/{}", &state.data_dir, name),
-        format!("{}/plugins/providers/{}", &state.data_dir, name),
-        format!("{}/plugins/platforms/{}", &state.data_dir, name),
-    ];
-    let mut disk_removed = false;
-    for dir in &plugin_dirs {
-        let path = std::path::Path::new(dir);
-        if path.exists() && path.is_dir() {
-            // Check if this is a bundled plugin (has Cargo.toml or plugin.json from the plugins directory)
-            let is_bundled = path.join("Cargo.toml").exists()
-                || (path.join("plugin.json").exists()
-                    && dir.contains("/plugins/mcp/")
-                    || dir.contains("/plugins/platforms/")
-                    || dir.contains("/plugins/providers/"));
-            if is_bundled {
-                // Bundled plugin: remove target/ (compiled artifacts) only
-                let target_dir = path.join("target");
-                if target_dir.exists() {
-                    match std::fs::remove_dir_all(&target_dir) {
-                        Ok(()) => {
-                            tracing::info!("Removed compiled artifacts for bundled plugin '{}'", name);
-                            disk_removed = true;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to remove target/ for '{}': {:?}", name, e);
-                        }
-                    }
-                }
-                // Also remove Cargo.lock if present (generated by build)
-                let cargo_lock = path.join("Cargo.lock");
-                if cargo_lock.exists() {
-                    let _ = std::fs::remove_file(&cargo_lock);
-                }
-            } else {
-                // Installed plugin: remove entire directory
-                match std::fs::remove_dir_all(path) {
-                    Ok(()) => {
-                        tracing::info!("Deleted plugin directory: {}", dir);
-                        disk_removed = true;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to delete plugin directory '{}': {:?}", dir, e);
-                    }
-                }
-            }
-        }
-    }
+    // For remote plugins: also remove .remote/ directory
+    if let Some((yaml_type, _category)) = detect_plugin_category_cross_type(data_dir, &name) {
+        let type_dir = yaml_type.file_name();
 
-    // For remote plugins: also remove workspace remote/ clone.
-    let workspace_dir = std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
-    let remote_dirs = [
-        format!("{}/plugins/mcp/remote/{}", workspace_dir, name),
-        format!("{}/plugins/platforms/remote/{}", workspace_dir, name),
-        format!("{}/plugins/providers/remote/{}", workspace_dir, name),
-    ];
-    for ext_dir in &remote_dirs {
-        let ext_path = std::path::Path::new(ext_dir);
-        if ext_path.exists() && ext_path.is_dir() {
-            match std::fs::remove_dir_all(ext_path) {
+        // Check for .remote/ directory
+        let remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, name);
+        let remote_path = std::path::Path::new(&remote_dir);
+        if remote_path.exists() && remote_path.is_dir() {
+            match std::fs::remove_dir_all(remote_path) {
                 Ok(()) => {
-                    tracing::info!("Removed remote clone: {}", ext_dir);
-                    disk_removed = true;
+                    tracing::info!("Removed .remote/ directory for plugin '{}'", name);
+                    removed = true;
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to remove remote clone '{}': {:?}", ext_dir, e);
+                    tracing::warn!("Failed to remove .remote/ directory for '{}': {:?}", name, e);
                 }
+            }
+        }
+
+        // Also check other type dirs for .remote/ (in case type was misdetected)
+        for t in &["mcp", "platforms", "providers"] {
+            if *t == type_dir { continue; }
+            let alt_remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, t, name);
+            let alt_remote_path = std::path::Path::new(&alt_remote_dir);
+            if alt_remote_path.exists() && alt_remote_path.is_dir() {
+                let _ = std::fs::remove_dir_all(alt_remote_path);
+                tracing::info!("Cleaned up stale .remote/ directory at {}", alt_remote_dir);
             }
         }
     }
 
-    if removed || disk_removed {
+    if removed {
         info!("Deleted plugin '{}'", name);
         (
             StatusCode::OK,
@@ -1961,19 +1749,8 @@ pub(crate) async fn install_url_handler(
 
 /// POST /api/plugins/install-git — install a plugin from a git repository.
 ///
-/// Body:
-/// - `url` (required): git clone URL
-/// - `git_ref` (optional): branch, tag, or commit SHA
-/// - `name` (optional): plugin name override (extracted from plugin.json if omitted)
-/// - `path` (optional): subdirectory within repo where plugin.json lives
-///
-/// Flow: shallow clone to temp → discover type from manifest → move to
-/// <workspace_dir>/plugins/<type_dir>/remote/<name>/ → copy to data_dir →
-/// compile if Rust → register in YAML.
-///
-/// The plugin.json must have a `type` field that identifies the plugin kind
-/// (mcp, platform, or provider). For MCP tools, an `mcp-config.json` in the
-/// plugin's source directory is required for the server to be discoverable.
+/// Clones DIRECTLY to `data_dir/plugins/<type_dir>/.remote/<name>/` with NO source copying.
+/// Compiles if Rust crate, then registers in YAML.
 pub(crate) async fn install_git_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<InstallGitRequest>,
@@ -1983,7 +1760,7 @@ pub(crate) async fn install_git_handler(
         body.url, body.git_ref
     );
 
-    // Clone and copy to data_dir (name unknown until manifest is parsed)
+    // Clone directly to .remote/ directory (no copy step)
     let initial_name = body.name.as_deref()
         .map(sanitize_plugin_name)
         .filter(|n| !n.is_empty())
@@ -2010,10 +1787,6 @@ pub(crate) async fn install_git_handler(
         }
     };
 
-    // If name was provided, verify it matches manifest name (or rename)
-    // If the user provided a name and it differs from the manifest name,
-    // the cloned dir might be wrong. We handle this by moving/cloning under the right name.
-    // For now, we trust the manifest name as the canonical name.
     let raw_name = body.name.clone().unwrap_or_else(|| manifest.name.clone());
     if let Some(ref requested_name) = body.name {
         if *requested_name != manifest.name {
@@ -2024,10 +1797,6 @@ pub(crate) async fn install_git_handler(
         }
     }
 
-    // Sanitize the plugin name: lowercase, replace whitespace with hyphens,
-    // strip non-alphanumeric chars (except hyphens and underscores).
-    // Names are used as YAML keys and directory paths — spaces and special
-    // chars would break both.
     let actual_name = sanitize_plugin_name(&raw_name);
     if actual_name != raw_name {
         tracing::info!(
@@ -2043,17 +1812,23 @@ pub(crate) async fn install_git_handler(
         plugin::PluginType::Provider => "providers",
     };
 
-    // Compile if Rust crate
+    // Compile if Rust crate — compile from .remote/ location
     let plugin_dir = format!(
-        "{}/plugins/{}/{}",
+        "{}/plugins/{}/.remote/{}",
         state.data_dir, type_dir_str, actual_name
     );
-    let cargo_toml = std::path::Path::new(&plugin_dir).join("Cargo.toml");
 
+    // Check if there's a sub-path within the remote
+    let effective_plugin_dir = match body.path {
+        Some(ref p) if !p.is_empty() => format!("{}/{}", plugin_dir, p),
+        _ => plugin_dir.clone(),
+    };
+
+    let cargo_toml = std::path::Path::new(&effective_plugin_dir).join("Cargo.toml");
     if cargo_toml.exists() {
-        tracing::info!("Git install: compiling Rust crate at {}", plugin_dir);
+        info!("Git install: compiling Rust crate at {}", effective_plugin_dir);
         match tokio::task::spawn_blocking({
-            let dir = plugin_dir.clone();
+            let dir = effective_plugin_dir.clone();
             let cargo_path = cargo_toml.to_string_lossy().to_string();
             move || {
                 let status = std::process::Command::new("cargo")
@@ -2066,7 +1841,7 @@ pub(crate) async fn install_git_handler(
         .await
         {
             Ok(Ok(status)) if status.success() => {
-                tracing::info!("Git install: Rust compilation succeeded for '{}'", actual_name);
+                info!("Git install: Rust compilation succeeded for '{}'", actual_name);
             }
             Ok(Ok(status)) => {
                 let msg = format!("Git install: compilation failed for '{}' with exit code {}", actual_name, status);
@@ -2109,7 +1884,6 @@ pub(crate) async fn install_git_handler(
 
     // Register in YAML with the remote field
     let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
-    // Build remote value with optional path
     let mut remote_val_map = serde_json::Map::new();
     remote_val_map.insert("url".to_string(), serde_json::json!(body.url));
     if let Some(ref git_ref) = body.git_ref {
@@ -2173,9 +1947,8 @@ pub(crate) async fn install_git_handler(
         }
     }
 }
-///
-/// Useful when .env was edited manually (e.g. passwords changed) and the new values
-/// need to be picked up by subsequent setup/config operations without restarting omniagent.
+
+/// POST /api/reload — reload environment variables from .env file.
 pub(crate) async fn reload_env_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -2192,8 +1965,6 @@ pub(crate) async fn reload_env_handler(
 
 /// Refresh the process environment by re-reading the .env file.
 /// Returns the number of env vars that were refreshed.
-/// fields resolve to current values when subprocesses are spawned,
-/// without needing a full container restart.
 pub fn refresh_env_from_file(env_path: &str) -> u32 {
     match std::fs::read_to_string(env_path) {
         Ok(content) => {
@@ -2226,19 +1997,9 @@ pub fn refresh_env_from_file(env_path: &str) -> u32 {
 }
 
 /// Trigger a hot-reload of a platform plugin after its config has been updated.
-///
-/// Before signaling the restart, the process environment is refreshed from the
-/// `.env` file so that $env: references in the plugin's manifest resolve to
-/// current values (not stale ones from container startup).
-///
-/// This function reads the updated config from the YAML file, rebuilds the
-/// `PlatformPluginConfig` from the manifest (merging YAML config values into
-/// env), and then signals the running `ExternalPlatformClient` to restart
-/// via its shared restart flag.
 async fn reload_platform_plugin(state: &Arc<AppState>, name: &str) {
     tracing::info!("Reloading platform plugin '{}' after config update", name);
 
-    // ── Refresh process environment from .env ────────────────────────
     let refreshed = refresh_env_from_file(&state.env_path);
     if refreshed > 0 {
         tracing::info!(
@@ -2247,17 +2008,13 @@ async fn reload_platform_plugin(state: &Arc<AppState>, name: &str) {
         );
     }
 
-    // Look up the restart flag in the shared signals map
     let signal = {
         let signals = state.platform_restart_signals.lock().await;
         signals.get(name).cloned()
     };
 
     if let Some((restart_flag, restart_notify)) = signal {
-        // Signal the restart — the outer loop in ExternalPlatformClient::start()
-        // will pick this up, reload config from disk, and respawn the subprocess.
         restart_flag.store(true, Ordering::SeqCst);
-        // Also notify the running plugin so the tokio::select! breaks the inner loop
         restart_notify.notify_one();
         tracing::info!(
             "Set restart flag for platform plugin '{}' — subprocess will be respawned",
@@ -2273,15 +2030,9 @@ async fn reload_platform_plugin(state: &Arc<AppState>, name: &str) {
 }
 
 /// Trigger a hot-reload of a tool (MCP) plugin after its config has been updated.
-///
-/// Refreshes the process environment, clears all per-channel connection pools
-/// for this server so fresh subprocesses are spawned on the next tool call,
-/// updates the global config registry, and re-initializes the server's tools
-/// in the MCP registry (replacing any previously registered ones).
 async fn reload_tool_plugin(state: &Arc<AppState>, name: &str) {
     tracing::info!("Reloading tool plugin '{}' after config update", name);
 
-    // ── Refresh process environment from .env ────────────────────────
     let refreshed = refresh_env_from_file(&state.env_path);
     if refreshed > 0 {
         tracing::info!(
@@ -2290,13 +2041,9 @@ async fn reload_tool_plugin(state: &Arc<AppState>, name: &str) {
         );
     }
 
-    // ── Clear old connection pools and config ────────────────────────
-    // This forces fresh subprocesses to be spawned with the new config
-    // on the next tool call, without needing to restart omniagent.
     crate::mcp::external::client::clear_server_pools(name);
     crate::mcp::external::client::remove_server_config(name);
 
-    // ── Re-initialize the MCP server and register its tools ──────────
     match crate::mcp::external::client::initialize_single_server_tools(
         &state.data_dir,
         &state.workspace_dir,
@@ -2306,7 +2053,6 @@ async fn reload_tool_plugin(state: &Arc<AppState>, name: &str) {
     {
         Ok(tools) => {
             let count = tools.len();
-            // Remove old tools from this server and register the new ones
             state.mcp_registry.write().unwrap().remove_by_server(name);
             state.mcp_registry.write().unwrap().register_all(tools);
             tracing::info!(
@@ -2325,77 +2071,9 @@ async fn reload_tool_plugin(state: &Arc<AppState>, name: &str) {
     }
 }
 
-/// Copy a bundled plugin's source from workspace_dir to data_dir.
-/// Skips the `target/` directory (compiled artifacts from any prior build).
-fn copy_bundled_plugin_source(src: &str, dst: &std::path::Path) -> Result<(), String> {
-    let src_path = std::path::Path::new(src);
-    if !src_path.is_dir() {
-        return Err(format!("Source is not a directory: {}", src));
-    }
-
-    // Remove existing target directory if present
-    if dst.exists() {
-        std::fs::remove_dir_all(dst).map_err(|e| format!("Failed to remove existing target: {}", e))?;
-    }
-
-    // Create parent directories
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create parent directories: {}", e))?;
-    }
-
-    // Walk the source directory and copy everything except target/
-    for entry in std::fs::read_dir(src_path).map_err(|e| format!("Failed to read source dir: {}", e))? {
-        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
-        let entry_name = entry.file_name();
-        // Skip target/ directory (compiled artifacts)
-        if entry_name == "target" {
-            continue;
-        }
-        let src_entry = entry.path();
-        let dst_entry = dst.join(&entry_name);
-
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            copy_dir_all(&src_entry, &dst_entry)?;
-        } else {
-            std::fs::copy(&src_entry, &dst_entry)
-                .map_err(|e| format!("Failed to copy {:?} to {:?}: {}", src_entry, dst_entry, e))?;
-        }
-    }
-
-    tracing::info!(
-        "Copied bundled plugin from {} to {}",
-        src,
-        dst.display()
-    );
-    Ok(())
-}
-
-/// Recursively copy a directory.
-fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
-    if !dst.exists() {
-        std::fs::create_dir_all(dst)
-            .map_err(|e| format!("Failed to create directory {:?}: {}", dst, e))?;
-    }
-
-    for entry in std::fs::read_dir(src).map_err(|e| format!("Failed to read dir {:?}: {}", src, e))? {
-        let entry = entry.map_err(|e| format!("Failed to read entry: {}", e))?;
-        let src_entry = entry.path();
-        let dst_entry = dst.join(entry.file_name());
-
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            copy_dir_all(&src_entry, &dst_entry)?;
-        } else {
-            std::fs::copy(&src_entry, &dst_entry)
-                .map_err(|e| format!("Failed to copy {:?} to {:?}: {}", src_entry, dst_entry, e))?;
-        }
-    }
-    Ok(())
-}
-
 /// Sanitize a plugin name for use as a YAML key and directory path.
 /// - Trims whitespace
-/// - NFD-normalizes to decompose diacritics (é → e, ñ → n, ü → u, etc.)
+/// - NFD-normalizes to decompose diacritics
 /// - Converts to lowercase
 /// - Replaces runs of whitespace with a single hyphen
 /// - Strips any character that isn't alphanumeric, hyphen, or underscore
@@ -2407,7 +2085,7 @@ fn sanitize_plugin_name(name: &str) -> String {
     let mut in_whitespace = false;
 
     for ch in trimmed.nfd() {
-        // Skip combining diacritical marks (decomposed from NFD) so é → e, ñ → n, etc.
+        // Skip combining diacritical marks
         let code = ch as u32;
         if (0x0300..=0x036F).contains(&code)
             || (0x1AB0..=0x1AFF).contains(&code)

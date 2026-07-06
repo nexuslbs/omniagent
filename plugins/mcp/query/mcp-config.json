@@ -1,0 +1,8 @@
+{
+  "servers": [
+    {
+      "name": "query",
+      "transport": "stdio"
+    }
+  ]
+}

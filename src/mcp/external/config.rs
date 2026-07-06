@@ -169,6 +169,20 @@ pub fn discover_plugin_servers(data_dir: &str, workspace_dir: &str) -> Vec<McpSe
         }
     }
 
+    // Scan /app/plugins/mcp for builtin crates (third priority)
+    let app_plugins_dir = "/app/plugins/mcp";
+    let app_plugins_path = std::path::Path::new(app_plugins_dir);
+    if app_plugins_path.exists() && app_plugins_path.is_dir() && app_plugins_dir != plugins_dir && app_plugins_dir != ws_plugins_dir {
+        let existing_names: std::collections::HashSet<String> =
+            servers.iter().map(|s| s.name.clone()).collect();
+        let app_servers = scan_plugin_servers(app_plugins_dir, data_dir);
+        for srv in app_servers {
+            if !existing_names.contains(&srv.name) {
+                servers.push(srv);
+            }
+        }
+    }
+
     // Fallback: scan ./plugins/mcp relative to CWD for backward compatibility
     // Only used when neither canonical path exists, to avoid
     // duplicate server registrations when both directories have configs.
@@ -192,10 +206,26 @@ pub fn discover_plugin_servers(data_dir: &str, workspace_dir: &str) -> Vec<McpSe
 /// Workspace member MCP servers (mcp-server-*) live next to the omniagent
 /// binary in both dev (`/app/target/release/`) and production (Docker image),
 /// so we resolve by convention without hardcoded paths or env vars.
-fn get_bin_path(name: &str) -> Option<String> {
-    std::env::current_exe()
+pub(crate) fn get_bin_path(name: &str) -> Option<String> {
+    // Look for the binary in multiple locations:
+    // 1. Next to the current executable (the canonical location)
+    // 2. /app/target/release/<name> (development workspace)
+
+    // Primary: next to executable
+    if let Some(path) = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| format!("{}/{}", d.display(), name)))
+    {
+        return Some(path);
+    }
+
+    // Fallback: check /app/target/release/<name>
+    let dev_path = format!("/app/target/release/{}", name);
+    if std::path::Path::new(&dev_path).exists() {
+        return Some(dev_path);
+    }
+
+    None
 }
 
 /// Scan a single `plugins/mcp/` directory for `mcp-config.json` files.
@@ -227,6 +257,52 @@ fn scan_plugin_servers(plugins_dir: &str, data_dir: &str) -> Vec<McpServerConfig
         }
 
         let config_file = path.join("mcp-config.json");
+        let has_cargo_toml = path.join("Cargo.toml").exists();
+        let has_plugin_json = path.join("plugin.json").exists();
+
+        // Handle builtin crates: no mcp-config.json but has Cargo.toml + plugin.json
+        // Create a synthetic server config with binary resolved via get_bin_path
+        // Skip crates that have neither mcp-config.json nor plugin.json (utility libs like util)
+        if !config_file.exists() && has_cargo_toml && has_plugin_json {
+            let dir_name = path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let pkg = std::fs::read_to_string(path.join("Cargo.toml"))
+                .ok()
+                .and_then(|content| {
+                    content.lines().find_map(|line| {
+                        let trimmed = line.trim();
+                        if let Some(name) = trimmed.strip_prefix("name = \"") {
+                            name.strip_suffix('\"').map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .unwrap_or_else(|| format!("mcp-server-{}", dir_name));
+
+            if let Some(cmd) = get_bin_path(&pkg) {
+                tracing::info!(
+                    "Builtin crate '{}' at {}: resolved binary via get_bin_path: {}",
+                    dir_name, path.display(), cmd
+                );
+                servers.push(McpServerConfig {
+                    name: dir_name,
+                    transport: McpTransport::Stdio,
+                    command: Some(cmd),
+                    args: vec![],
+                    url: None,
+                    env: HashMap::new(),
+                    timeout_secs: default_timeout(),
+                    max_retries: default_max_retries(),
+                    allowed_tools: default_allowed_tools(),
+                    pool_size: default_pool_size(),
+                });
+            }
+            continue;
+        }
+
         if !config_file.exists() {
             continue;
         }
@@ -281,14 +357,6 @@ fn scan_plugin_servers(plugins_dir: &str, data_dir: &str) -> Vec<McpServerConfig
                                 let mut candidates = vec![
                                     format!("{}/target/release/{}", plugin_dir_str, pkg),
                                 ];
-                                // Also check underscored variant (legacy installs that copied with underscores)
-                                if pkg.contains('-') {
-                                    candidates.push(format!(
-                                        "{}/target/release/{}",
-                                        plugin_dir_str,
-                                        pkg.replace('-', "_")
-                                    ));
-                                }
                                 if let Some(w) = get_bin_path(pkg) {
                                     candidates.push(w);
                                 }
@@ -296,15 +364,6 @@ fn scan_plugin_servers(plugins_dir: &str, data_dir: &str) -> Vec<McpServerConfig
                                     "{}/target/release/{}",
                                     plugin_dir_str, srv.name
                                 ));
-                                // Also check underscored server-name variant
-                                if srv.name.contains('-') {
-                                    candidates.push(format!(
-                                        "{}/target/release/{}",
-                                        plugin_dir_str,
-                                        srv.name.replace('-', "_")
-                                    ));
-                                }
-
                                 let found = candidates
                                     .into_iter()
                                     .find(|p| std::path::Path::new(p).exists());
@@ -325,20 +384,37 @@ fn scan_plugin_servers(plugins_dir: &str, data_dir: &str) -> Vec<McpServerConfig
                                     }
                                 }
                             } else {
-                                // No Cargo.toml — try workspace member convention
-                                // Binary is next to the omniagent binary: {get_bin_path("mcp-server-{name}")}
-                                let workspace_path = get_bin_path(&format!("mcp-server-{}", srv.name));
-                                match workspace_path {
-                                    Some(ref path) if std::path::Path::new(path).exists() => {
+                                // No Cargo.toml — try workspace member convention, then
+                                // plugin-local target/release (for compiled-but-copied plugins).
+                                let mut candidates = Vec::new();
+
+                                // 1. Workspace: binary next to omniagent binary
+                                if let Some(w) = get_bin_path(&format!("mcp-server-{}", srv.name)) {
+                                    candidates.push(w);
+                                }
+
+                                // 2. Plugin-local target/release (after install/reinstall)
+                                //    Check both hyphenated and underscored variants.
+                                let ws_name = format!("mcp-server-{}", srv.name);
+                                candidates.push(format!(
+                                    "{}/target/release/{}",
+                                    plugin_dir_str, ws_name
+                                ));
+                                let found = candidates
+                                    .into_iter()
+                                    .find(|p| std::path::Path::new(p).exists());
+
+                                match found {
+                                    Some(ref path) => {
                                         tracing::info!(
-                                            "Resolved command for '{}' by workspace convention: {}",
+                                            "Resolved command for '{}' by convention: {}",
                                             srv.name, path
                                         );
                                         srv.command = Some(path.clone());
                                     }
-                                    _ => {
+                                    None => {
                                         tracing::warn!(
-                                            "MCP server '{}' has no command configured and no Cargo.toml or workspace binary found",
+                                            "MCP server '{}' has no command configured, no Cargo.toml, and no binary found in workspace or plugin target/release",
                                             srv.name
                                         );
                                     }

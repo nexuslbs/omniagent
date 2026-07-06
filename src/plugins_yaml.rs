@@ -86,6 +86,16 @@ impl PluginYamlType {
         }
     }
 
+    /// The directory name under plugins/ directory (e.g. "platforms", "mcp", "providers").
+    /// Note: differs from file_name() — Tool uses "mcp" not "tools".
+    pub fn type_dir_name(&self) -> &str {
+        match self {
+            PluginYamlType::Platform => "platforms",
+            PluginYamlType::Tool => "mcp",
+            PluginYamlType::Provider => "providers",
+        }
+    }
+
     /// The YAML filename (e.g. "platforms.yml", "tools.yml", "providers.yml").
     pub fn yaml_file(&self) -> &str {
         match self {
@@ -287,8 +297,8 @@ pub fn set_entry(
 
 /// Helper: determine if a plugin is built-in by checking if its source lives
 /// under the plugin source directory at /app/plugins/ (workspace source dir).
-fn is_plugin_builtin(_data_dir: &str, name: &str, plugin_type: &PluginYamlType) -> bool {
-    let type_dir = plugin_type.file_name();
+pub fn is_plugin_builtin(_data_dir: &str, name: &str, plugin_type: &PluginYamlType) -> bool {
+    let type_dir = plugin_type.type_dir_name();
     let source_dir = format!("/app/plugins/{}/{}", type_dir, name);
     std::path::Path::new(&source_dir).join("Cargo.toml").exists()
         || std::path::Path::new(&source_dir).join("plugin.json").exists()
@@ -534,8 +544,10 @@ fn build_plugin_detail(
 ) -> PluginDetail {
     let enabled = yaml_entry
         .map(|e| e.enabled)
-        // Plugins are enabled by default when not present in YAML
-        .unwrap_or(true);
+        // All plugins default to disabled when not present in YAML.
+        // They must be explicitly added to YAML to be enabled,
+        // regardless of source type (bundled, built-in, remote).
+        .unwrap_or(false);
     let config = yaml_entry
         .map(|e| e.config.clone())
         .unwrap_or(serde_json::json!({}));
@@ -624,17 +636,14 @@ fn build_plugin_detail(
 
             // All possible binary paths to check:
             // - Directory name convention (standalone plugin)
-            // - Underscore variant (Rust convention)
             // - Package name from Cargo.toml (workspace members with mcp-server- prefix)
+            // - get_bin_path() for builtins (binary next to omniagent or in workspace target/release)
             let mut candidates = vec![
                 format!("{}/target/release/{}", dir, dir_name),
-                format!("{}/target/release/{}", dir, dir_name.replace('-', "_")),
             ];
             if let Some(ref pkg) = cargo_package_name {
                 candidates.push(format!("{}/target/release/{}", dir, pkg));
-                if pkg.contains('-') {
-                    candidates.push(format!("{}/target/release/{}", dir, pkg.replace('-', "_")));
-                }
+
                 // Also check workspace root target (for builtin:true plugins whose
                 // binaries live at /app/target/release/<package> from workspace builds)
                 let workspace_root = std::path::Path::new("/app");
@@ -644,13 +653,12 @@ fn build_plugin_detail(
                         workspace_root.to_string_lossy(),
                         pkg
                     ));
-                    if pkg.contains('-') {
-                        candidates.push(format!(
-                            "{}/target/release/{}",
-                            workspace_root.to_string_lossy(),
-                            pkg.replace('-', "_")
-                        ));
-                    }
+                }
+
+                // Check get_bin_path() — resolves binary next to the omniagent executable
+                // or at /app/target/release/<name>
+                if let Some(bin_path) = crate::mcp::external::config::get_bin_path(pkg) {
+                    candidates.push(bin_path);
                 }
             }
 
@@ -685,7 +693,60 @@ fn build_plugin_detail(
 // Discovery + enrichment (combines disk manifests with YAML state)
 // ---------------------------------------------------------------------------
 
+/// A single plugin's discovered sources, grouped by key (directory name).
+#[derive(Debug)]
+struct PluginSourceGroup {
+    key: String,
+    sources: Vec<(PluginManifest, String, String)>,
+    yaml_type: Option<PluginYamlType>,
+    yaml_entry: Option<PluginYamlEntry>,
+}
+
+/// Pick the primary source for a plugin based on YAML configuration.
+/// Returns the index into `sources` that should be the primary (active) entry.
+fn pick_primary_source(group: &PluginSourceGroup) -> usize {
+    let yaml_entry = &group.yaml_entry;
+    let sources = &group.sources;
+
+    // If YAML has a remote field, prefer the 'remote' source
+    if let Some(entry) = yaml_entry {
+        if entry.remote.is_some() {
+            // Find the remote source
+            for (i, (_, source, _)) in sources.iter().enumerate() {
+                if source == "remote" {
+                    return i;
+                }
+            }
+        }
+    }
+
+    // If YAML has builtin: true, prefer the 'built-in' source
+    if let Some(entry) = yaml_entry {
+        if entry.builtin.unwrap_or(false) {
+            for (i, (_, source, _)) in sources.iter().enumerate() {
+                if source == "built-in" {
+                    return i;
+                }
+            }
+        }
+    }
+
+    // If YAML has the plugin but no remote/builtin preference, prefer bundled
+    if yaml_entry.is_some() {
+        for (i, (_, source, _)) in sources.iter().enumerate() {
+            if source == "bundled" || source == "remote" {
+                return i;
+            }
+        }
+    }
+
+    // Default: first source
+    0
+}
+
 /// List all plugins, combining disk discovery with YAML overrides.
+/// Groups multiple sources (bundled, built-in, remote) by name.
+/// YAML determines which source is primary; others show as "duplicated".
 pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
     let workspace_dir =
         std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
@@ -696,28 +757,81 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
     let tool_entries = load_raw(data_dir, &PluginYamlType::Tool)?;
     let provider_entries = load_raw(data_dir, &PluginYamlType::Provider)?;
 
-    let mut results: Vec<PluginDetail> = Vec::new();
+    // Group discovered plugins by key (directory name)
+    let mut groups: std::collections::BTreeMap<String, PluginSourceGroup> = std::collections::BTreeMap::new();
 
     for (manifest, source, base_path) in &discovered {
-        let key = extract_plugin_key(manifest, source, base_path);
+        let key = crate::plugin::installer::extract_plugin_key_from_path(base_path);
+        if key.is_empty() {
+            continue;
+        }
         let yaml_type = PluginYamlType::from_plugin_type(&manifest.plugin_type);
-        // YAML entries are always keyed by the plugin's short name (directory name),
-        // not the human-readable manifest name.
-        let yaml_entry = match yaml_type {
+        let yaml_entry = match &yaml_type {
             PluginYamlType::Platform => platform_entries.get(&key),
             PluginYamlType::Tool => tool_entries.get(&key),
             PluginYamlType::Provider => provider_entries.get(&key),
         };
-        // Plugin directory is the parent of the plugin.json path
-        let plugin_dir = std::path::Path::new(base_path).parent().and_then(|p| p.to_str());
-        results.push(build_plugin_detail(
-            manifest,
-            source,
-            yaml_entry,
-            Some(&key),
-            plugin_dir,
-            data_dir,
-        ));
+
+        // Remote sources only show if YAML has a remote entry for this key
+        if source == "remote" {
+            let has_remote_yaml = yaml_entry.and_then(|e| e.remote.as_ref()).is_some();
+            if !has_remote_yaml {
+                continue;
+            }
+        }
+
+        let entry = groups.entry(key.clone()).or_insert_with(|| PluginSourceGroup {
+            key: key.clone(),
+            sources: Vec::new(),
+            yaml_type: None,
+            yaml_entry: None,
+        });
+        entry.sources.push((manifest.clone(), source.clone(), base_path.clone()));
+        // Only set YAML info on first insertion (all sources share the same YAML)
+        if entry.yaml_type.is_none() {
+            entry.yaml_type = Some(yaml_type);
+            entry.yaml_entry = yaml_entry.cloned();
+        }
+    }
+
+    let mut results: Vec<PluginDetail> = Vec::new();
+
+    for (key, group) in &groups {
+        let primary_idx = pick_primary_source(group);
+
+        let yaml_type = group.yaml_type.as_ref().unwrap_or(&PluginYamlType::Tool);
+        let yaml_entry_ref = group.yaml_entry.as_ref();
+
+        for (i, (manifest, source, base_path)) in group.sources.iter().enumerate() {
+            let is_primary = i == primary_idx;
+
+            // Plugin directory is the parent of the base_path
+            let plugin_dir = std::path::Path::new(base_path).parent().and_then(|p| p.to_str());
+
+            // For the primary source, pass the real YAML entry; for duplicates, pass None
+            // to trigger default (disabled for built-in, and forced "duplicated" status)
+            let detail_yaml_entry = if is_primary {
+                yaml_entry_ref
+            } else {
+                None
+            };
+
+            let mut detail = build_plugin_detail(
+                manifest,
+                source,
+                detail_yaml_entry,
+                Some(key),
+                plugin_dir,
+                data_dir,
+            );
+
+            // Override status for non-primary sources
+            if !is_primary {
+                detail.status = "duplicated".to_string();
+            }
+
+            results.push(detail);
+        }
     }
 
     // Sort by name for deterministic ordering

@@ -33,8 +33,9 @@ RUN apt-get update -qq && \
 # Copy Docker CLI (compose v2 is built into the docker binary)
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
-# Copy the omniagent binary
+# Copy the omniagent binary and all workspace member MCP server binaries
 COPY --from=builder /build/target/release/omniagent /usr/local/bin/omniagent
+COPY --from=builder /build/target/release/mcp-server-* /usr/local/bin/
 
 EXPOSE 8080
 CMD ["omniagent"]

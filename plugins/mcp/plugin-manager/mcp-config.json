@@ -1,0 +1,8 @@
+{
+  "servers": [
+    {
+      "name": "plugin-manager",
+      "transport": "stdio"
+    }
+  ]
+}

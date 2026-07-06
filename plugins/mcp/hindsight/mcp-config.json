@@ -1,0 +1,8 @@
+{
+  "servers": [
+    {
+      "name": "hindsight",
+      "transport": "stdio"
+    }
+  ]
+}

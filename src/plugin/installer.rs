@@ -2,11 +2,12 @@
 //!
 //! Supports:
 //! - Installing from URL (.tar.gz, .tgz, .zip)
-//! - Uninstalling (removing plugin directory)
+//! - Installing from Git (clones to data_dir/plugins/<type>/.remote/<name>/)
+//! - Uninstalling (removing plugin directory / YAML caller handles removal)
 //! - Discovering plugins from disk
 
-use crate::error::{Error, AppResult, ErrorContext};
 use crate::err_msg;
+use crate::error::{AppResult, Error, ErrorContext};
 use std::path::Path;
 
 use crate::plugin::{load_manifest, PluginManifest, PluginType};
@@ -20,8 +21,8 @@ use crate::plugin::{load_manifest, PluginManifest, PluginType};
 /// Uses `reqwest::blocking::get` to download and shell commands (tar, unzip) to extract.
 /// Returns the parsed PluginManifest from the extracted plugin.json.
 pub fn install_from_url(url: &str, data_dir: &str) -> AppResult<PluginManifest> {
-    let response = reqwest::blocking::get(url)
-        .ctx(format!("Failed to download plugin from {}", url))?;
+    let response =
+        reqwest::blocking::get(url).ctx(format!("Failed to download plugin from {}", url))?;
 
     if !response.status().is_success() {
         err_msg!(
@@ -44,8 +45,10 @@ pub fn install_from_url(url: &str, data_dir: &str) -> AppResult<PluginManifest> 
             .as_nanos()
     );
     let temp_path = std::path::PathBuf::from("/tmp").join(&temp_id);
-    std::fs::create_dir_all(&temp_path)
-        .ctx(format!("Failed to create temp directory at {:?}", temp_path))?;
+    std::fs::create_dir_all(&temp_path).ctx(format!(
+        "Failed to create temp directory at {:?}",
+        temp_path
+    ))?;
 
     // Cleanup on drop (if still present)
     let temp_path_clone = temp_path.clone();
@@ -118,8 +121,14 @@ fn install_from_url_inner(
     let plugin_json = find_plugin_json(&temp_path)?;
     let manifest = load_manifest(&plugin_json)?;
 
-    // Copy to the installed plugins directory
-    let install_dir = format!("{}/plugins/installed/{}", data_dir, manifest.name);
+    // Install to the correct type directory under data_dir
+    let type_dir = match manifest.plugin_type {
+        PluginType::Platform => "platforms",
+        PluginType::Mcp => "mcp",
+        PluginType::Provider => "providers",
+    };
+
+    let install_dir = format!("{}/plugins/{}/{}", data_dir, type_dir, manifest.name);
     let install_path = Path::new(&install_dir);
 
     // Remove existing if present
@@ -134,13 +143,15 @@ fn install_from_url_inner(
     let parent = install_path
         .parent()
         .ok_or_else(|| Error::Message(format!("Install path has no parent: {}", install_dir)))?;
-    std::fs::create_dir_all(parent)
-        .ctx(format!("Failed to create parent directories for: {}", install_dir))?;
+    std::fs::create_dir_all(parent).ctx(format!(
+        "Failed to create parent directories for: {}",
+        install_dir
+    ))?;
 
     // Copy the extracted plugin directory to the install location
-    let extracted_dir = Path::new(&plugin_json)
-        .parent()
-        .ok_or_else(|| Error::Message(format!("Plugin JSON path has no parent: {}", plugin_json)))?;
+    let extracted_dir = Path::new(&plugin_json).parent().ok_or_else(|| {
+        Error::Message(format!("Plugin JSON path has no parent: {}", plugin_json))
+    })?;
     let copy_result = copy_dir_recursive(extracted_dir, install_path);
     if let Err(e) = copy_result {
         // Clean up on failure
@@ -174,8 +185,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> AppResult<()> {
         err_msg!("Source is not a directory: {:?}", src);
     }
     if !dst.exists() {
-        std::fs::create_dir_all(dst)
-            .ctx(format!("Failed to create directory: {:?}", dst))?;
+        std::fs::create_dir_all(dst).ctx(format!("Failed to create directory: {:?}", dst))?;
     }
 
     for entry in std::fs::read_dir(src)? {
@@ -222,60 +232,75 @@ fn find_plugin_json(dir: &Path) -> AppResult<String> {
 // Install from Git
 // ---------------------------------------------------------------------------
 
-/// Clone a plugin from a git repository into `<workspace_dir>/plugins/<type_dir>/remote/<name>/`,
-/// then copy it to `<data_dir>/plugins/<type_dir>/<name>/` and return the manifest.
+/// Clone a plugin from a git repository directly into
+/// `<data_dir>/plugins/<type_dir>/.remote/<name>/` — NO source copying.
 ///
-/// The type directory (mcp, platforms, providers) is determined automatically from the
-/// `type` field in the plugin's plugin.json manifest after cloning.
+/// The type directory (mcp, platforms, providers) is determined automatically
+/// from the `type` field in the plugin's plugin.json manifest after cloning.
 ///
 /// Steps:
-/// 1. Shallow clone (`--depth 1`) directly into `plugins/mcp/remote/<name>/`
+/// 1. Shallow clone (`--depth 1`) directly into `data_dir/plugins/mcp/.remote/<name>/`
 /// 2. If a git_ref is specified, check it out after clone
 /// 3. Find plugin.json in the cloned directory
 /// 4. Read manifest to determine plugin type
-/// 5. If the correct type dir differs from "mcp", rename the clone to the correct directory
-/// 6. Copy to data_dir (removes existing if present)
-/// 7. Return the parsed PluginManifest
+/// 5. If the correct type dir differs from "mcp", rename the .remote/ dir
+/// 6. Compile if Rust crate (caller's responsibility)
+/// 7. Return the parsed PluginManifest from the .remote/ location
 pub fn install_from_git(
     url: &str,
     name: &str,
     git_ref: Option<&str>,
-    workspace_dir: &str,
+    _workspace_dir: &str,
     data_dir: &str,
     repo_path: Option<&str>,
 ) -> AppResult<PluginManifest> {
-    // ── Clone directly into mcp/remote/<name> as the workspace directory ──
+    // ── Clone into data_dir/plugins/mcp/.remote/<name> first ──
     // We clone into mcp first because that's the most common type. If the
     // manifest says otherwise, we rename to the correct type dir afterwards.
-    // Both are under the same workspace mount, so rename is atomic.
-    let initial_remote_dir = format!("{}/plugins/mcp/remote/{}", workspace_dir, name);
+    let initial_remote_dir = format!("{}/plugins/mcp/.remote/{}", data_dir, name);
     let initial_remote_path = std::path::Path::new(&initial_remote_dir);
 
     // Remove existing clone if present
     if initial_remote_path.exists() {
-        std::fs::remove_dir_all(initial_remote_path)
-            .ctx(format!("Failed to remove existing clone at {}", initial_remote_dir))?;
+        std::fs::remove_dir_all(initial_remote_path).ctx(format!(
+            "Failed to remove existing clone at {}",
+            initial_remote_dir
+        ))?;
     }
     if let Some(parent) = initial_remote_path.parent() {
-        std::fs::create_dir_all(parent)
-            .ctx(format!("Failed to create parent dirs for {}", initial_remote_dir))?;
+        std::fs::create_dir_all(parent).ctx(format!(
+            "Failed to create parent dirs for {}",
+            initial_remote_dir
+        ))?;
     }
 
     tracing::info!(
         "Cloning git plugin '{}' from {} (ref: {:?}) to {}",
-        name, url, git_ref, initial_remote_dir
+        name,
+        url,
+        git_ref,
+        initial_remote_dir
     );
 
     // Shallow clone directly into the remote dir
     let mut cmd = std::process::Command::new("git");
-    cmd.arg("clone").arg("--depth").arg("1").arg(url).arg(&initial_remote_dir);
+    cmd.arg("clone")
+        .arg("--depth")
+        .arg("1")
+        .arg(url)
+        .arg(&initial_remote_dir);
     let status = cmd.status().ctx(format!(
         "Failed to execute git clone for '{}' from {}",
         name, url
     ))?;
     if !status.success() {
         let _ = std::fs::remove_dir_all(&initial_remote_dir);
-        err_msg!("git clone failed for '{}' from {} with status: {}", name, url, status);
+        err_msg!(
+            "git clone failed for '{}' from {} with status: {}",
+            name,
+            url,
+            status
+        );
     }
 
     // Checkout specific ref if specified
@@ -291,18 +316,23 @@ pub fn install_from_git(
                 .ctx(format!("Failed to git checkout {} for '{}'", ref_str, name))?;
             if !checkout_status.success() {
                 let _ = std::fs::remove_dir_all(&initial_remote_dir);
-                err_msg!("git checkout '{}' failed for '{}' with status: {}", ref_str, name, checkout_status);
+                err_msg!(
+                    "git checkout '{}' failed for '{}' with status: {}",
+                    ref_str,
+                    name,
+                    checkout_status
+                );
             }
         }
     }
 
-    // Find plugin.json in the cloned directory
+    // Find plugin.json in the cloned directory (respecting repo_path)
     let search_dir = match repo_path {
         Some(p) if !p.is_empty() => initial_remote_path.join(p),
         _ => initial_remote_path.to_path_buf(),
     };
-    let _plugin_json_path = find_plugin_json(&search_dir)?;
-    let manifest = load_manifest(&_plugin_json_path)?;
+    let plugin_json_path = find_plugin_json(&search_dir)?;
+    let manifest = load_manifest(&plugin_json_path)?;
 
     // Determine the correct type directory from the manifest
     let type_dir = match manifest.plugin_type {
@@ -311,74 +341,44 @@ pub fn install_from_git(
         PluginType::Provider => "providers",
     };
 
-    // If the type is not mcp, rename the clone to the correct directory
+    // If the type is not mcp, rename the .remote/ dir to the correct type directory
     if type_dir != "mcp" {
-        let final_remote_dir = format!("{}/plugins/{}/remote/{}", workspace_dir, type_dir, name);
+        let final_remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, name);
         let final_remote_path = std::path::Path::new(&final_remote_dir);
         if final_remote_path.exists() {
-            std::fs::remove_dir_all(final_remote_path)
-                .ctx(format!("Failed to remove existing clone at {}", final_remote_dir))?;
+            std::fs::remove_dir_all(final_remote_path).ctx(format!(
+                "Failed to remove existing clone at {}",
+                final_remote_dir
+            ))?;
         }
         if let Some(parent) = final_remote_path.parent() {
-            std::fs::create_dir_all(parent)
-                .ctx(format!("Failed to create parent dirs for {}", final_remote_dir))?;
-        }
-        // Rename works here because both are under the same workspace mount
-        std::fs::rename(initial_remote_path, final_remote_path)
-            .ctx(format!("Failed to rename clone from {} to {}", initial_remote_dir, final_remote_dir))?;
-
-        // Copy to data_dir using the final remote path
-        let install_dir = format!("{}/plugins/{}/{}", data_dir, type_dir, manifest.name);
-        let install_path = std::path::Path::new(&install_dir);
-        if install_path.exists() {
-            std::fs::remove_dir_all(install_path).ctx(format!(
-                "Failed to remove existing plugin directory: {}",
-                install_dir
+            std::fs::create_dir_all(parent).ctx(format!(
+                "Failed to create parent dirs for {}",
+                final_remote_dir
             ))?;
         }
-        let parent = install_path
-            .parent()
-            .ok_or_else(|| Error::Message(format!("Install path has no parent: {}", install_dir)))?;
-        std::fs::create_dir_all(parent)
-            .ctx(format!("Failed to create parent directories for: {}", install_dir))?;
-
-        let copy_source_dir = match repo_path {
-            Some(p) if !p.is_empty() => final_remote_path.join(p),
-            _ => final_remote_path.to_path_buf(),
-        };
-        copy_dir_recursive(&copy_source_dir, install_path)?;
-    } else {
-        // MCP type — clone is already at the right location
-        let install_dir = format!("{}/plugins/{}/{}", data_dir, type_dir, manifest.name);
-        let install_path = std::path::Path::new(&install_dir);
-        if install_path.exists() {
-            std::fs::remove_dir_all(install_path).ctx(format!(
-                "Failed to remove existing plugin directory: {}",
-                install_dir
-            ))?;
-        }
-        let parent = install_path
-            .parent()
-            .ok_or_else(|| Error::Message(format!("Install path has no parent: {}", install_dir)))?;
-        std::fs::create_dir_all(parent)
-            .ctx(format!("Failed to create parent directories for: {}", install_dir))?;
-
-        let copy_source_dir = match repo_path {
-            Some(p) if !p.is_empty() => initial_remote_path.join(p),
-            _ => initial_remote_path.to_path_buf(),
-        };
-        copy_dir_recursive(&copy_source_dir, install_path)?;
+        // Rename works here because both are under the same data_dir mount
+        std::fs::rename(initial_remote_path, final_remote_path).ctx(format!(
+            "Failed to rename clone from {} to {}",
+            initial_remote_dir, final_remote_dir
+        ))?;
     }
 
-    // Verify the installed manifest
-    let installed_manifest_path = format!("{}/plugins/{}/{}/plugin.json", data_dir, type_dir, manifest.name);
-    let manifest = load_manifest(&installed_manifest_path).ctx(format!(
+    // Verify the manifest from the .remote/ location
+    let final_type_dir = if type_dir != "mcp" { type_dir } else { "mcp" };
+    let check_remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, final_type_dir, name);
+    let check_search_dir = match repo_path {
+        Some(p) if !p.is_empty() => std::path::Path::new(&check_remote_dir).join(p),
+        _ => std::path::PathBuf::from(&check_remote_dir),
+    };
+    let final_manifest_path = check_search_dir.join("plugin.json");
+    let manifest = load_manifest(&final_manifest_path.to_string_lossy()).ctx(format!(
         "Failed to verify installed plugin manifest at: {}",
-        installed_manifest_path
+        final_manifest_path.display()
     ))?;
 
     tracing::info!(
-        "Installed git plugin '{}' version {} from {} (ref: {:?})",
+        "Installed git plugin '{}' version {} from {} (ref: {:?}) — in-place at .remote/",
         manifest.name,
         manifest.version,
         url,
@@ -388,23 +388,54 @@ pub fn install_from_git(
     Ok(manifest)
 }
 
-/// Remove a plugin directory from `<data_dir>/plugins/installed/<name>/`.
-pub fn uninstall(name: &str, data_dir: &str) -> AppResult<()> {
-    let install_dir = format!("{}/plugins/installed/{}", data_dir, name);
-    let path = Path::new(&install_dir);
-
-    if !path.exists() {
-        err_msg!("Plugin '{}' is not installed at: {}", name, install_dir);
+/// Uninstall a plugin from disk.
+///
+/// - For remote plugins: removes `.remote/` directory under data_dir
+/// - For builtin/omni-stack plugins: no-op on filesystem (YAML removal is caller's job)
+pub fn uninstall(name: &str, data_dir: &str, type_dir: &str, is_remote: bool) -> AppResult<()> {
+    if is_remote {
+        // Remote plugin: remove the .remote/ directory
+        let remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, name);
+        let path = Path::new(&remote_dir);
+        if path.exists() && path.is_dir() {
+            std::fs::remove_dir_all(path).ctx(format!(
+                "Failed to remove remote plugin directory: {}",
+                remote_dir
+            ))?;
+            tracing::info!("Removed remote plugin directory '{}'", name);
+            return Ok(());
+        } else {
+            // Try all type dirs if type not known
+            for t in &["mcp", "platforms", "providers"] {
+                let alt_dir = format!("{}/plugins/{}/.remote/{}", data_dir, t, name);
+                let alt_path = Path::new(&alt_dir);
+                if alt_path.exists() && alt_path.is_dir() {
+                    std::fs::remove_dir_all(alt_path).ctx(format!(
+                        "Failed to remove remote plugin directory: {}",
+                        alt_dir
+                    ))?;
+                    tracing::info!(
+                        "Removed remote plugin directory '{}' from {}",
+                        name,
+                        alt_dir
+                    );
+                    return Ok(());
+                }
+            }
+            err_msg!(
+                "Remote plugin '{}' has no .remote/ directory at any known type path",
+                name
+            );
+        }
     }
 
-    if !path.is_dir() {
-        err_msg!("Plugin path is not a directory: {}", install_dir);
-    }
-
-    std::fs::remove_dir_all(path)
-        .ctx(format!("Failed to remove plugin directory: {}", install_dir))?;
-
-    tracing::info!("Uninstalled plugin '{}'", name);
+    // For builtin and omni-stack plugins: no filesystem removal
+    // YAML entry removal is the caller's responsibility
+    tracing::info!(
+        "Uninstall: no filesystem removal for builtin/omni-stack plugin '{}' (type={})",
+        name,
+        type_dir
+    );
     Ok(())
 }
 
@@ -412,84 +443,38 @@ pub fn uninstall(name: &str, data_dir: &str) -> AppResult<()> {
 // Discover plugins
 // ---------------------------------------------------------------------------
 
-/// Discover all plugins from disk by scanning installed and bundled directories.
+/// Helper to extract directory key from base_path of a discovered plugin.
+/// For "bundled" and "remote" sources, the key is the parent directory name of plugin.json.
+/// For "built-in" synthetic sources, the key is the directory name.
+pub(crate) fn extract_plugin_key_from_path(base_path: &str) -> String {
+    if let Some(parent) = std::path::Path::new(base_path).parent() {
+        if let Some(dir_name) = parent.file_name().and_then(|n| n.to_str()) {
+            return dir_name.to_string();
+        }
+    }
+    String::new()
+}
+
+/// Discover all plugins from disk by scanning all canonical locations.
 ///
 /// Returns a vector of `(PluginManifest, source_type, base_path)` tuples.
+/// May contain multiple entries with the same key (directory name) from different sources
+/// (e.g., bundled + built-in). Callers must resolve duplicates via YAML configuration.
 ///
 /// Scans:
-/// - `<data_dir>/plugins/installed/<name>/plugin.json` — source: "installed"
-/// - `<workspace_dir>/plugins/<type>/<name>/plugin.json` — source: "bundled"
-///   where `<type>` is one of: platforms, mcp, providers
+/// - `<data_dir>/plugins/<type>/<name>/plugin.json` — source: "bundled" (data level)
+/// - `<workspace_dir>/plugins/<type>/<name>/plugin.json` — source: "bundled" (workspace - deduped against data_dir)
+/// - `<data_dir>/plugins/<type>/.remote/<name>/plugin.json` — source: "remote"
+/// - `/app/plugins/<type>/<name>/plugin.json or Cargo.toml` — source: "built-in"
 pub fn discover_plugins(
     data_dir: &str,
     workspace_dir: &str,
 ) -> Vec<(PluginManifest, String, String)> {
     let mut results = Vec::new();
+    // Track seen keys per source type so we dedup bundled scans (A and B scan same data)
+    let mut bundled_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // A. Scan installed plugins: <data_dir>/plugins/installed/<name>/plugin.json
-    let installed_base = format!("{}/plugins/installed", data_dir);
-    if let Ok(entries) = std::fs::read_dir(&installed_base) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let manifest_path = path.join("plugin.json");
-            if manifest_path.exists() {
-                let path_str = manifest_path.to_string_lossy().to_string();
-                match load_manifest(&path_str) {
-                    Ok(manifest) => {
-                        results.push((manifest, "installed".to_string(), path_str));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to load installed plugin manifest at {}: {:?}",
-                            path_str,
-                            e
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // B. Scan bundled plugins: <workspace_dir>/plugins/<type>/<name>/plugin.json
-    let bundled_base = format!("{}/plugins", workspace_dir);
-    if let Ok(bundled_entries) = std::fs::read_dir(&bundled_base) {
-        for entry in bundled_entries.flatten() {
-            let type_path = entry.path();
-            if !type_path.is_dir() {
-                continue;
-            }
-            // type_path is like plugins/mcp or plugins/platform
-            if let Ok(plugin_entries) = std::fs::read_dir(&type_path) {
-                for plugin_entry in plugin_entries.flatten() {
-                    let plugin_path = plugin_entry.path();
-                    if !plugin_path.is_dir() {
-                        continue;
-                    }
-                    let manifest_path = plugin_path.join("plugin.json");
-                    if manifest_path.exists() {
-                        let path_str = manifest_path.to_string_lossy().to_string();
-                        match load_manifest(&path_str) {
-                            Ok(manifest) => {
-                                results.push((manifest, "bundled".to_string(), path_str));
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to load bundled plugin manifest at {}: {:?}",
-                                    path_str,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // C. Scan data_dir plugins: <data_dir>/plugins/<type>/<name>/plugin.json
+    // A. Scan data_dir plugins: <data_dir>/plugins/<type>/<name>/plugin.json
     // This covers providers, platforms, and MCP tools that live in the plugins/ directory.
     let data_plugins_base = format!("{}/plugins", data_dir);
     if let Ok(data_plugin_entries) = std::fs::read_dir(&data_plugins_base) {
@@ -498,8 +483,8 @@ pub fn discover_plugins(
             if !type_path.is_dir() {
                 continue;
             }
-            // Skip the 'installed' subdirectory — handled by section A
-            if type_path.file_name().and_then(|n| n.to_str()) == Some("installed") {
+            // Skip .remote/ directories at the type level — handled separately (section C)
+            if type_path.file_name().and_then(|n| n.to_str()).map(|s| s.starts_with('.')).unwrap_or(false) {
                 continue;
             }
             // type_path is like plugins/providers, plugins/platforms, plugins/mcp
@@ -509,10 +494,13 @@ pub fn discover_plugins(
                     if !plugin_path.is_dir() {
                         continue;
                     }
+                    // Skip .remote/ hidden directories
+                    if plugin_path.file_name().and_then(|n| n.to_str()).map(|s| s.starts_with('.')).unwrap_or(false) {
+                        continue;
+                    }
                     let manifest_path = plugin_path.join("plugin.json");
                     if manifest_path.exists() {
                         let path_str = manifest_path.to_string_lossy().to_string();
-                        // Dedup against already-discovered plugins (by name)
                         let manifest = match load_manifest(&path_str) {
                             Ok(m) => m,
                             Err(e) => {
@@ -524,32 +512,184 @@ pub fn discover_plugins(
                                 continue;
                             }
                         };
-                        if !results.iter().any(|(m, _, _)| m.name == manifest.name) {
-                            results.push((manifest, "bundled".to_string(), path_str));
-                        }
+                        let key = extract_plugin_key_from_path(&path_str);
+                        bundled_seen.insert(key);
+                        results.push((manifest, "bundled".to_string(), path_str));
                     }
                 }
             }
         }
     }
 
+    // B. Scan workspace bundled plugins: <workspace_dir>/plugins/<type>/<name>/plugin.json
+    // Deduped against data_dir plugins (section A) since they may point to the same directory.
+    let bundled_base = format!("{}/plugins", workspace_dir);
+    if let Ok(bundled_entries) = std::fs::read_dir(&bundled_base) {
+        for entry in bundled_entries.flatten() {
+            let type_path = entry.path();
+            if !type_path.is_dir() {
+                continue;
+            }
+            // Skip .remote/ directories at the type level
+            if type_path.file_name().and_then(|n| n.to_str()).map(|s| s.starts_with('.')).unwrap_or(false) {
+                continue;
+            }
+            // type_path is like plugins/mcp or plugins/platform
+            if let Ok(plugin_entries) = std::fs::read_dir(&type_path) {
+                for plugin_entry in plugin_entries.flatten() {
+                    let plugin_path = plugin_entry.path();
+                    if !plugin_path.is_dir() {
+                        continue;
+                    }
+                    // Skip .remote/ hidden directories
+                    if plugin_path.file_name().and_then(|n| n.to_str()).map(|s| s.starts_with('.')).unwrap_or(false) {
+                        continue;
+                    }
+                    let manifest_path = plugin_path.join("plugin.json");
+                    if manifest_path.exists() {
+                        let path_str = manifest_path.to_string_lossy().to_string();
+                        let manifest = match load_manifest(&path_str) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to load bundled plugin manifest at {}: {:?}",
+                                    path_str,
+                                    e
+                                );
+                                continue;
+                            }
+                        };
+                        let key = extract_plugin_key_from_path(&path_str);
+                        // Skip if already discovered from data_dir (same directory)
+                        if bundled_seen.contains(&key) {
+                            continue;
+                        }
+                        bundled_seen.insert(key);
+                        results.push((manifest, "bundled".to_string(), path_str));
+                    }
+                }
+            }
+        }
+    }
+
+    // C. Scan remote plugins: <data_dir>/plugins/<type>/.remote/<name>/plugin.json
+    for type_name in &["mcp", "platforms", "providers"] {
+        let remote_base = format!("{}/plugins/{}/.remote", data_dir, type_name);
+        if let Ok(remote_entries) = std::fs::read_dir(&remote_base) {
+            for entry in remote_entries.flatten() {
+                let plugin_path = entry.path();
+                if !plugin_path.is_dir() {
+                    continue;
+                }
+                // Search for plugin.json one level deep (to handle repo_path subdirectories)
+                let manifest = find_remote_plugin_json(&plugin_path);
+                if let Some((manifest, manifest_path_str)) = manifest {
+                    let key = extract_plugin_key_from_path(&manifest_path_str);
+                    if !results.iter().any(|(m, _, _): &(PluginManifest, String, String)| m.name == manifest.name) {
+                        results.push((manifest, "remote".to_string(), manifest_path_str));
+                    }
+                }
+            }
+        }
+    }
+
+    // D. Scan builtin plugins: /app/plugins/<type>/<name>/
+    // These are workspace member crates that have Cargo.toml (and optionally mcp-config.json
+    // or plugin.json). All builtin sources are added; callers handle dedup.
+    for type_name in &["mcp", "platforms", "providers"] {
+        let app_plugins_dir = format!("/app/plugins/{}", type_name);
+        if let Ok(plugin_entries) = std::fs::read_dir(&app_plugins_dir) {
+            for entry in plugin_entries.flatten() {
+                let plugin_path = entry.path();
+                if !plugin_path.is_dir() {
+                    continue;
+                }
+                let has_cargo_toml = plugin_path.join("Cargo.toml").exists();
+                let has_plugin_json = plugin_path.join("plugin.json").exists();
+                let has_mcp_config = plugin_path.join("mcp-config.json").exists();
+                // Require at least plugin.json or mcp-config.json to be a plugin;
+                // having only Cargo.toml (e.g. a utility library like util) isn't enough
+                if !has_cargo_toml && !has_plugin_json {
+                    continue;
+                }
+                if !has_plugin_json && !has_mcp_config {
+                    // Has Cargo.toml but no plugin.json or mcp-config.json — not a plugin
+                    continue;
+                }
+
+                let dir_name = plugin_path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                if has_plugin_json {
+                    let path_str = plugin_path.join("plugin.json").to_string_lossy().to_string();
+                    match load_manifest(&path_str) {
+                        Ok(manifest) => {
+                            results.push((manifest, "built-in".to_string(), path_str));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to load builtin plugin manifest at {}: {:?}",
+                                path_str,
+                                e
+                            );
+                        }
+                    }
+                } else if has_cargo_toml {
+                    // Synthetic manifest for Rust workspace member crates
+                    let _pkg_name = std::fs::read_to_string(plugin_path.join("Cargo.toml"))
+                        .ok()
+                        .and_then(|content| {
+                            content.lines().find_map(|line| {
+                                let trimmed = line.trim();
+                                if let Some(name) = trimmed.strip_prefix("name = \"") {
+                                    name.strip_suffix('\"').map(|s| s.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .unwrap_or_else(|| format!("mcp-server-{}", dir_name));
+
+                    let manifest = PluginManifest {
+                        name: dir_name.clone(),
+                        version: "0.1.0".to_string(),
+                        plugin_type: match *type_name {
+                            "platforms" => PluginType::Platform,
+                            "providers" => PluginType::Provider,
+                            _ => PluginType::Mcp,
+                        },
+                        description: Some(format!("Builtin {} plugin", type_name)),
+                        entrypoint: Some(crate::plugin::PluginEntrypoint {
+                            command: format!("mcp-server-{}", dir_name),
+                            args: vec![],
+                            transport: "stdio".to_string(),
+                            url: None,
+                        }),
+                        capabilities: None,
+                        config_schema: vec![],
+                        env: std::collections::HashMap::new(),
+                        default_base_url: None,
+                        api_mode: None,
+                    };
+                    let path_str = plugin_path.join("Cargo.toml").to_string_lossy().to_string();
+                    results.push((manifest, "built-in".to_string(), path_str));
+                }
+            }
+        }
+    }
+
     // After all discovery, also scan mcp-config.json files for MCP server entries
-    // that aren't covered by bundled/installed plugin.json files.
+    // that aren't covered by bundled/remote/builtin plugin.json files.
     // These get synthetic manifests but won't have config_schema unless
-    // a plugin.json is also present under the installed/bundled paths.
+    // a plugin.json is also present.
     let mcp_plugin_servers = crate::mcp::external::config::discover_plugin_servers(data_dir, workspace_dir);
     for srv in &mcp_plugin_servers {
-        // Dedup: check if a plugin with the same name OR from the same source directory
-        // (matching plugin.json directory name) already exists in results.
-        let already_exists = results.iter().any(|(m, _, base_path)| {
+        let already_exists = results.iter().any(|(m, _, base_path): &(PluginManifest, String, String)| {
             if m.name == srv.name {
                 return true;
             }
-            // The mcp-config.json server name typically matches the directory name
-            // (e.g. directory "filesystem" → server name "filesystem").
-            // Check if any existing plugin's base_path directory name matches.
-            // Normalize both sides by replacing hyphens with underscores for comparison
-            // (some directories use hyphens while server names use underscores or different names).
             if let Some(parent_dir) = std::path::Path::new(base_path).parent() {
                 if let Some(dir_name) = parent_dir.file_name().and_then(|n| n.to_str()) {
                     let dir_normalized = dir_name.replace('-', "_");
@@ -590,6 +730,34 @@ pub fn discover_plugins(
     results
 }
 
+/// Find plugin.json in a remote plugin directory (searches top-level and one level deep).
+fn find_remote_plugin_json(dir: &Path) -> Option<(PluginManifest, String)> {
+    // Check plugin.json at top level
+    let top = dir.join("plugin.json");
+    if top.exists() {
+        let path_str = top.to_string_lossy().to_string();
+        return load_manifest(&path_str).ok().map(|m| (m, path_str));
+    }
+
+    // Search one level deep
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let candidate = path.join("plugin.json");
+                if candidate.exists() {
+                    let path_str = candidate.to_string_lossy().to_string();
+                    if let Ok(manifest) = load_manifest(&path_str) {
+                        return Some((manifest, path_str));
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -608,7 +776,17 @@ mod tests {
             data_dir.path().to_str().unwrap(),
             workspace_dir.path().to_str().unwrap(),
         );
-        assert!(plugins.is_empty());
+        // Builtin plugins may be found from /app/plugins/ but none from temp dirs
+        // mcp_config entries also come from the CWD's plugins/ directory
+        let from_temp: Vec<_> = plugins
+            .iter()
+            .filter(|(_, s, _)| s != "built-in" && s != "mcp_config")
+            .collect();
+        assert!(
+            from_temp.is_empty(),
+            "Expected no plugins from temp dirs, got {:?}",
+            from_temp
+        );
     }
 
     #[test]
@@ -616,11 +794,11 @@ mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         let workspace_dir = tempfile::tempdir().unwrap();
 
-        // Create an installed plugin
+        // Create a data directory plugin
         let plugin_dir = data_dir
             .path()
             .join("plugins")
-            .join("installed")
+            .join("mcp")
             .join("my-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         let manifest_content = r#"{
@@ -638,9 +816,49 @@ mod tests {
             data_dir.path().to_str().unwrap(),
             workspace_dir.path().to_str().unwrap(),
         );
-        assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].0.name, "my-plugin");
-        assert_eq!(plugins[0].1, "installed");
+        assert!(plugins.len() >= 1);
+        let found = plugins
+            .iter()
+            .any(|(m, s, _)| m.name == "my-plugin" && s == "bundled");
+        assert!(found, "Expected my-plugin to be discovered");
+    }
+
+    #[test]
+    fn test_discover_remote_plugin() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let workspace_dir = tempfile::tempdir().unwrap();
+
+        // Create a remote plugin under .remote/
+        let plugin_dir = data_dir
+            .path()
+            .join("plugins")
+            .join("mcp")
+            .join(".remote")
+            .join("my-remote-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let manifest_content = r#"{
+            "name": "my-remote-plugin",
+            "version": "1.0.0",
+            "type": "mcp",
+            "entrypoint": {
+                "command": "python3",
+                "args": ["server.py"]
+            }
+        }"#;
+        std::fs::write(plugin_dir.join("plugin.json"), manifest_content).unwrap();
+
+        let plugins = discover_plugins(
+            data_dir.path().to_str().unwrap(),
+            workspace_dir.path().to_str().unwrap(),
+        );
+        assert!(plugins.len() >= 1);
+        let found = plugins
+            .iter()
+            .any(|(m, s, _)| m.name == "my-remote-plugin" && s == "remote");
+        assert!(
+            found,
+            "Expected my-remote-plugin to be discovered as remote"
+        );
     }
 
     #[test]
@@ -683,10 +901,27 @@ mod tests {
     }
 
     #[test]
-    fn test_uninstall_nonexistent() {
+    fn test_uninstall_remote_not_found() {
         let data_dir = tempfile::tempdir().unwrap();
-        let result = uninstall("nonexistent-plugin", data_dir.path().to_str().unwrap());
+        let result = uninstall(
+            "nonexistent-plugin",
+            data_dir.path().to_str().unwrap(),
+            "mcp",
+            true,
+        );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_uninstall_non_remote_is_noop() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let result = uninstall(
+            "some-plugin",
+            data_dir.path().to_str().unwrap(),
+            "mcp",
+            false,
+        );
+        assert!(result.is_ok()); // non-remote uninstall is a no-op
     }
 
     #[test]
@@ -708,5 +943,40 @@ mod tests {
             std::fs::read_to_string(dst_path.join("file1.txt")).unwrap(),
             "content1"
         );
+    }
+
+    #[test]
+    fn test_find_remote_plugin_json_top() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("plugin.json"),
+            r#"{"name":"test-remote","type":"mcp","entrypoint":{"command":"test"}}"#,
+        )
+        .unwrap();
+        let found = find_remote_plugin_json(dir.path());
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().0.name, "test-remote");
+    }
+
+    #[test]
+    fn test_find_remote_plugin_json_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("subdir");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(
+            nested.join("plugin.json"),
+            r#"{"name":"test-remote-nested","type":"mcp","entrypoint":{"command":"test"}}"#,
+        )
+        .unwrap();
+        let found = find_remote_plugin_json(dir.path());
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().0.name, "test-remote-nested");
+    }
+
+    #[test]
+    fn test_find_remote_plugin_json_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let found = find_remote_plugin_json(dir.path());
+        assert!(found.is_none());
     }
 }

@@ -626,11 +626,10 @@ impl Platform for ExternalPlatformClient {
                                                         let is_user = last_deliver_is_user_thread.take().unwrap_or(false);
                                                         let seq = last_deliver_thread_sequence.take().unwrap_or(1);
                                                         let _ = last_deliver_thread_id.take();
-                                                        sqlx::query(
-                                                            "UPDATE messages SET external_id = $1 WHERE id = $2 AND external_id IS NULL"
+                                                        sql_forge!(
+                                                            r#"UPDATE messages SET external_id = :ext_id WHERE id = :msg_id AND external_id IS NULL"#,
+                                                            ( :ext_id = &ext_id, :msg_id = msg_id )
                                                         )
-                                                        .bind(&ext_id)
-                                                        .bind(msg_id)
                                                         .execute(&pool)
                                                         .await
                                                         .map_err(|e| {

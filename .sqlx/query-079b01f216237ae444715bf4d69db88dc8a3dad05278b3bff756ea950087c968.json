@@ -1,0 +1,264 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                m.id,\n                m.thread_id,\n                m.role,\n                m.content,\n                m.thread_sequence,\n                m.external_id,\n                m.metadata::text AS metadata,\n                m.created_at,\n                m.msg_type,\n                m.msg_subtype,\n                m.iteration_number AS iteration_number,\n                t.channel_id,\n                t.status,\n                t.profile,\n                t.provider,\n                t.model,\n                t.duration_ms::bigint AS thread_duration_ms,\n                t.input_tokens::bigint AS thread_input_tokens,\n                t.output_tokens::bigint AS thread_output_tokens,\n                t.cached_tokens::bigint AS thread_cached_tokens,\n                c.name AS channel_name\n            FROM messages m\n            JOIN threads t ON t.id = m.thread_id\n            JOIN channels c ON c.id = t.channel_id\n            WHERE 1=1\n              AND ($1 = '' OR $2 = 'all' OR t.channel_id = $3)\n              AND ($4 = '' OR m.thread_id = $5)\n              AND ($6 = '' OR $7 = 'all' OR m.role = $8)\n              AND ($9 = '' OR $10 = 'all' OR t.provider = $11)\n              AND ($12 = '' OR $13 = 'all' OR t.model = $14)\n              AND ($15 = '' OR $16 = 'all' OR m.msg_type = ANY(string_to_array($17, ',')))\n              AND ($18 != 'true' OR m.thread_sequence = 0)\n              AND ($19 = '' OR m.msg_subtype LIKE $20)\n            ORDER BY m.id DESC\n            LIMIT $21 OFFSET $22\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "thread_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "thread_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "content",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "content"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "thread_sequence",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "thread_sequence"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "external_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "external_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "metadata",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "msg_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "msg_type"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "msg_subtype",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "msg_subtype"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "iteration_number",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "iteration_number"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "profile",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "profile"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "provider",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "model",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "model"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "thread_duration_ms",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 17,
+        "name": "thread_input_tokens",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 18,
+        "name": "thread_output_tokens",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 19,
+        "name": "thread_cached_tokens",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 20,
+        "name": "channel_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "name"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      null,
+      null,
+      null,
+      null,
+      false
+    ]
+  },
+  "hash": "079b01f216237ae444715bf4d69db88dc8a3dad05278b3bff756ea950087c968"
+}
