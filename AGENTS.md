@@ -57,18 +57,46 @@ Each non-primary source gets `is_duplicated: true` and its `status` is determine
 
 ### Install / Reinstall with Builtin Fallback
 
-#### Fix: Binary-Only Bundled Copies No Longer Block Install
+#### Fix: Binary-Only Bundled Copies No Longer Block Install (Updated)
 
-When the user tries to **Install** or **Reinstall** a plugin that is categorized as OmniStack (bundled) but the bundled directory contains only a pre-compiled binary (no Cargo.toml, no script entrypoint), the handler now **falls back** to the builtin source directory if it exists:
+When the user tries to **Install** or **Reinstall** a plugin that is categorized as OmniStack (bundled) but the bundled directory contains only a pre-compiled binary (no Cargo.toml, no src/), the handler now **falls back** to the builtin source directory if it exists.
 
-1. `detect_plugin_category_cross_type` determines the category (Builtin if `builtin: true` in YAML, OmniStack otherwise)
-2. `get_plugin_dir_for_category` returns the source directory for the detected category
-3. **Two fallback points** in both install/reinstall handlers:
-   - If `get_plugin_dir_for_category` returns `None` (dir doesn't exist), try `/app/plugins/{type}/{name}/` before giving up with 404
-   - If the source dir exists but has NO `Cargo.toml` AND no path-based entrypoint, try `/app/plugins/{type}/{name}/` before returning "no source code"
-4. When falling back, the category is updated to `Builtin` so `compile_rust_crate` uses the workspace build strategy
+**Previously:** The fallback condition was `!has_cargo_toml && !has_entrypoint`. Binary-only copies from omni-stack (like `plugin-manager`, `cron`) have a `plugin.json` with a bare binary entrypoint (e.g., `mcp-server-cron`) but no Cargo.toml. Because `has_entrypoint` was true (non-empty command), the fallback was **NOT triggered**, causing the install to silently do nothing (compile returned `Ok(false)` with no binary produced).
 
-This ensures that a plugin like `plugin-manager` with YAML `builtin: false` (or no builtin flag) that only has a binary copy in omni-stack can still be installed/reinstalled by compiling from the builtin source in omniagent.
+**Fixed:** The condition changed to `!has_cargo_toml` only. If there's no `Cargo.toml`, the source directory has no compileable Rust code — fall back to builtin regardless of entrypoint state. This applies to both `install_plugin_handler` and `reinstall_plugin_handler`.
+
+### Remote Plugin Store (.remote/plugins.yml)
+
+Remote plugin info (URL, path, git_ref) is now persisted independently in `{data_dir}/plugins/.remote/plugins.yml`. This ensures remote configurations survive source switches (e.g., switching from remote to built-in and back).
+
+**Structure:**
+```yaml
+tools:
+  cron:
+    url: https://github.com/nexuslbs/omni-plugins.git
+    path: tools/cron-echo
+    git_ref: main
+  test-rust-tool:
+    url: https://github.com/nexuslbs/omni-plugins.git
+    path: tools/test-rust-tool
+```
+
+**Key Behaviors:**
+- **On git install** (`install_git_handler`): After writing to main YAML (`set_entry_with_remote`), also calls `save_remote_plugin()` to persist to `.remote/plugins.yml`
+- **On enable** (`enable_plugin_handler`): When enabling a remote source, saves remote info to `.remote/plugins.yml`
+- **On delete** (`delete_plugin_handler`): Cleans up `.remote/plugins.yml` entry via `remove_remote_plugin()`
+- **Plugin listing** (`list_plugins`, `get_plugin`): Remote sources show if they have a YAML remote field OR if `.remote/plugins.yml` has an entry — checked via `get_remote_plugin(data_dir, &yaml_type, &key)`
+
+### "Not Found" Status for YAML-Only Entries
+
+When a plugin exists in the main YAML file (tools.yml, platforms.yml, providers.yml) but has NO source on disk in any of the 3 discovery paths, a **synthetic "not found" entry** is added to the API response:
+
+- `status: "not_found"` — shown as a red badge in the dashboard
+- `needs_download: true` — for remote plugins, a Download button is shown
+- `needs_download: false` — for bundled/non-remote plugins
+- `has_source_code: false`, `needs_build: false`
+
+**Download endpoint** `POST /api/plugins/{name}/download`: Reads the YAML entry's remote field, runs git clone + compile, and re-registers in YAML. This allows users to recover remote plugins that were only in YAML (e.g., after `.remote/` directory was removed).
 
 #### Key Behaviors
 

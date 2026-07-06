@@ -59,6 +59,13 @@ pub(crate) struct PluginSourceRequest {
     /// Source identifier: "built-in", "bundled", or "remote".
     /// Required. The handler acts on this exact source.
     pub source: String,
+    /// Optional remote config to set when enabling a remote source.
+    /// When source is "remote" and this is provided, the remote URL/path
+    /// is written to the YAML entry. Required when re-enabling a remote
+    /// source after it was previously cleared (by switching to built-in
+    /// or bundled).
+    #[serde(default)]
+    pub remote: Option<plugins_yaml::PluginRemote>,
 }
 
 #[derive(Deserialize)]
@@ -307,6 +314,7 @@ pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
         .route("/api/plugins/{name}/reinstall", post(reinstall_plugin_handler))
         .route("/api/plugins/{name}/refresh-models", post(refresh_models_handler))
         .route("/api/plugins/{name}/setup", post(setup_plugin_handler))
+        .route("/api/plugins/{name}/download", post(download_plugin_handler))
         .route("/api/plugins/{name}", delete(delete_plugin_handler))
         .route("/api/reload", post(reload_env_handler))
 }
@@ -640,6 +648,13 @@ pub(crate) async fn enable_plugin_handler(
         }
     }
 
+    // Save existing remote info before modifying YAML (needed when re-enabling remote
+    // source after it was cleared by a previous bundled/built-in switch)
+    let existing_remote = plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name)
+        .ok()
+        .flatten()
+        .and_then(|e| e.remote);
+
     // Upsert with enabled=true and explicit builtin override
     match plugins_yaml::set_entry_with_builtin_override(
         &state.data_dir,
@@ -650,6 +665,29 @@ pub(crate) async fn enable_plugin_handler(
         serde_json::json!({}),
     ) {
         Ok(_entry) => {
+            // Handle the remote field based on source:
+            // - "built-in" or "bundled": clear remote so pick_primary_source doesn't prefer it
+            // - "remote": restore the remote field from the request or existing entry
+            if req.source.as_str() != "remote" {
+                let _ = plugins_yaml::clear_remote_field(&state.data_dir, &yaml_type, &name);
+            } else {
+                // Use the remote from the request if provided, otherwise fall back to existing
+                let remote_to_set = req.remote.as_ref().or(existing_remote.as_ref());
+                if let Some(ref remote) = remote_to_set {
+                    let _ = plugins_yaml::set_entry_with_remote(
+                        &state.data_dir,
+                        &yaml_type,
+                        &name,
+                        true,
+                        serde_json::json!({}),
+                        Some(remote),
+                    );
+                    // Persist to .remote/plugins.yml so remote info survives source switches
+                    let _ = plugins_yaml::save_remote_plugin(
+                        &state.data_dir, &yaml_type, &name, remote,
+                    );
+                }
+            }
             // Hot-reload: if this is an MCP tool plugin, initialize the server
             // and register its tools in the shared registry immediately.
             if yaml_type == plugins_yaml::PluginYamlType::Tool {
@@ -931,8 +969,10 @@ pub(crate) async fn install_plugin_handler(
         false
     };
 
-    // If the primary category's source dir has no compileable code, fall back to Builtin
-    if !has_cargo_toml && !has_entrypoint && !matches!(category, PluginCategory::Builtin) {
+    // If the source dir has no Cargo.toml (binary-only copy or empty dir), fall back to Builtin.
+    // Binary-only bundled copies from omni-stack have plugin.json with a bare binary entrypoint
+    // but no Cargo.toml or src/ — they need to compile from the builtin workspace member crate.
+    if !has_cargo_toml && !matches!(category, PluginCategory::Builtin) {
         let builtin_dir = format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name);
         let builtin_cargo = std::path::Path::new(&builtin_dir).join("Cargo.toml");
         if builtin_cargo.exists() {
@@ -1169,8 +1209,10 @@ pub(crate) async fn reinstall_plugin_handler(
         false
     };
 
-    // If the primary category's source dir has no compileable code, fall back to Builtin
-    if !has_cargo_toml && !has_entrypoint && !matches!(category, PluginCategory::Builtin) {
+    // If the source dir has no Cargo.toml (binary-only copy or empty dir), fall back to Builtin.
+    // Binary-only bundled copies from omni-stack have plugin.json with a bare binary entrypoint
+    // but no Cargo.toml or src/ — they need to compile from the builtin workspace member crate.
+    if !has_cargo_toml && !matches!(category, PluginCategory::Builtin) {
         let builtin_dir = format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name);
         let builtin_cargo = std::path::Path::new(&builtin_dir).join("Cargo.toml");
         if builtin_cargo.exists() {
@@ -1989,6 +2031,15 @@ pub(crate) async fn delete_plugin_handler(
             }
         }
 
+        // Clean up .remote/plugins.yml entry for remote plugins
+        for pt in &[
+            plugins_yaml::PluginYamlType::Platform,
+            plugins_yaml::PluginYamlType::Tool,
+            plugins_yaml::PluginYamlType::Provider,
+        ] {
+            let _ = plugins_yaml::remove_remote_plugin(data_dir, pt, &name);
+        }
+
         for t in &["mcp", "platforms", "providers"] {
             if *t == type_dir { continue; }
             let alt_remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, t, name);
@@ -2248,43 +2299,52 @@ pub(crate) async fn install_git_handler(
     }
     let remote_val = serde_json::Value::Object(remote_val_map);
 
+    let remote_info: plugins_yaml::PluginRemote = serde_json::from_value(remote_val).unwrap();
+
     match plugins_yaml::set_entry_with_remote(
         &state.data_dir,
         &yaml_type,
         &actual_name,
         false,
         serde_json::json!({}),
-        Some(&serde_json::from_value(remote_val).unwrap()),
+        Some(&remote_info),
     ) {
-        Ok(_entry) => match plugins_yaml::get_plugin(&state.data_dir, &actual_name) {
-            Ok(Some(detail)) => {
-                info!(
-                    "Successfully installed git plugin '{}' version {} from {}",
-                    actual_name, manifest.version, body.url
-                );
-                (
-                    StatusCode::CREATED,
-                    Json(serde_json::json!({
-                        "success": true,
-                        "data": detail
-                    })),
-                )
-                    .into_response()
+        Ok(_entry) => {
+            // Persist remote plugin info to .remote/plugins.yml so it survives source switches
+            let _ = plugins_yaml::save_remote_plugin(
+                &state.data_dir, &yaml_type, &actual_name, &remote_info,
+            );
+
+            match plugins_yaml::get_plugin(&state.data_dir, &actual_name) {
+                Ok(Some(detail)) => {
+                    info!(
+                        "Successfully installed git plugin '{}' version {} from {}",
+                        actual_name, manifest.version, body.url
+                    );
+                    (
+                        StatusCode::CREATED,
+                        Json(serde_json::json!({
+                            "success": true,
+                            "data": detail
+                        })),
+                    )
+                        .into_response()
+                }
+                _ => {
+                    info!(
+                        "Successfully installed git plugin '{}' version {} from {}",
+                        actual_name, manifest.version, body.url
+                    );
+                    (
+                        StatusCode::CREATED,
+                        Json(serde_json::json!({
+                            "success": true
+                        })),
+                    )
+                        .into_response()
+                }
             }
-            _ => {
-                info!(
-                    "Successfully installed git plugin '{}' version {} from {}",
-                    actual_name, manifest.version, body.url
-                );
-                (
-                    StatusCode::CREATED,
-                    Json(serde_json::json!({
-                        "success": true
-                    })),
-                )
-                    .into_response()
-            }
-        },
+        }
         Err(e) => {
             error!(
                 "Installed git plugin from disk but failed to register in YAML: {:?}",
@@ -2300,6 +2360,139 @@ pub(crate) async fn install_git_handler(
                 .into_response()
         }
     }
+}
+
+/// POST /api/plugins/{name}/download — download a remote plugin that exists in YAML but not on disk.
+/// Reads the remote field from the YAML entry and runs git clone + compile.
+pub(crate) async fn download_plugin_handler(
+    Path(name): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let data_dir = &state.data_dir;
+    let workspace_dir = &state.workspace_dir;
+
+    // Find the YAML entry and extract remote info
+    let (yaml_type, remote_info) = match plugins_yaml::get_entry_with_type(data_dir, &name) {
+        Ok(Some((pt, entry))) => {
+            if let Some(ref remote) = entry.remote {
+                (pt, remote.clone())
+            } else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Plugin '{}' is not a remote plugin (no remote field in YAML)", name)
+                    })),
+                ).into_response();
+            }
+        }
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Plugin '{}' not found in YAML configuration", name)
+                })),
+            ).into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to read YAML: {}", e)
+                })),
+            ).into_response();
+        }
+    };
+
+    info!("Download: cloning remote plugin '{}' from {} (path: {:?})", name, remote_info.url, remote_info.path);
+
+    // Clone from git
+    let manifest = match plugin::installer::install_from_git(
+        &remote_info.url,
+        &name,
+        remote_info.git_ref.as_deref(),
+        workspace_dir,
+        data_dir,
+        remote_info.path.as_deref(),
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            let msg = format!("Download: failed to clone git plugin '{}': {}", name, e);
+            tracing::error!("{}", msg);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": msg,
+                })),
+            ).into_response();
+        }
+    };
+
+    // Compile if Rust crate
+    let type_dir_str = match manifest.plugin_type {
+        plugin::PluginType::Platform => "platforms",
+        plugin::PluginType::Mcp => "mcp",
+        plugin::PluginType::Provider => "providers",
+    };
+    let plugin_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir_str, name);
+    let effective_dir = match remote_info.path {
+        Some(ref p) if !p.is_empty() => format!("{}/{}", plugin_dir, p),
+        _ => plugin_dir.clone(),
+    };
+    let cargo_toml = std::path::Path::new(&effective_dir).join("Cargo.toml");
+    if cargo_toml.exists() {
+        info!("Download: compiling Rust crate at {}", effective_dir);
+        match tokio::task::spawn_blocking({
+            let dir = effective_dir.clone();
+            let cargo_path = cargo_toml.to_string_lossy().to_string();
+            move || {
+                let status = std::process::Command::new("cargo")
+                    .args(["build", "--release", "--manifest-path", &cargo_path])
+                    .current_dir(&dir)
+                    .status();
+                status
+            }
+        }).await {
+            Ok(Ok(status)) if status.success() => {
+                info!("Download: Rust compilation succeeded for '{}'", name);
+            }
+            Ok(Ok(status)) => {
+                let msg = format!("Download: compilation failed for '{}' with exit code {}", name, status);
+                tracing::error!("{}", msg);
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": msg}))).into_response();
+            }
+            Ok(Err(e)) => {
+                let msg = format!("Download: failed to run cargo for '{}': {}", name, e);
+                tracing::error!("{}", msg);
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": msg}))).into_response();
+            }
+            Err(e) => {
+                let msg = format!("Download: task join error for '{}': {}", name, e);
+                tracing::error!("{}", msg);
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"success": false, "error": msg}))).into_response();
+            }
+        }
+    }
+
+    // Ensure YAML entry has the remote field
+    let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
+    let _ = plugins_yaml::set_entry_with_remote(
+        data_dir, &yaml_type, &name, false, serde_json::json!({}), Some(&remote_info),
+    );
+
+    match plugins_yaml::get_plugin(data_dir, &name) {
+        Ok(Some(detail)) => {
+            info!("Downloaded remote plugin '{}' successfully", name);
+            (StatusCode::OK, Json(serde_json::json!({"success": true, "data": detail})))
+        }
+        _ => {
+            info!("Downloaded remote plugin '{}' but could not re-read detail", name);
+            (StatusCode::OK, Json(serde_json::json!({"success": true})))
+        }
+    }.into_response()
 }
 
 /// POST /api/reload — reload environment variables from .env file.

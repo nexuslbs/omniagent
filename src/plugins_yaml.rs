@@ -382,6 +382,20 @@ pub fn set_entry_with_remote(
     Ok(entry)
 }
 
+/// Get a plugin entry by searching all three YAML types, returning the entry and its type.
+pub fn get_entry_with_type(data_dir: &str, name: &str) -> AppResult<Option<(PluginYamlType, PluginYamlEntry)>> {
+    for pt in &[
+        PluginYamlType::Platform,
+        PluginYamlType::Tool,
+        PluginYamlType::Provider,
+    ] {
+        if let Ok(Some(entry)) = get_entry(data_dir, pt, name) {
+            return Ok(Some((pt.clone(), entry)));
+        }
+    }
+    Ok(None)
+}
+
 /// Set only the enabled/disabled status of a plugin.
 pub fn set_enabled(
     data_dir: &str,
@@ -397,6 +411,110 @@ pub fn set_enabled(
     let result = entry.clone();
     save_file(data_dir, pt, entries)?;
     Ok(result)
+}
+
+/// Remove the `remote` field from a plugin entry in YAML.
+/// Used when switching from remote to built-in or bundled source — the remote
+/// URL/path is cleared so pick_primary_source no longer prefers the remote source.
+pub fn clear_remote_field(
+    data_dir: &str,
+    pt: &PluginYamlType,
+    name: &str,
+) -> AppResult<()> {
+    let mut entries = load_raw(data_dir, pt)?;
+    if let Some(entry) = entries.get_mut(name) {
+        entry.remote = None;
+        save_file(data_dir, pt, entries)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Remote plugin store (.remote/plugins.yml) — persists remote plugin info
+// independently of the main YAML, so switching sources doesn't lose it.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RemotePluginStore {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<std::collections::BTreeMap<String, PluginRemote>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platforms: Option<std::collections::BTreeMap<String, PluginRemote>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<std::collections::BTreeMap<String, PluginRemote>>,
+}
+
+fn remote_plugins_path(data_dir: &str) -> String {
+    format!("{}/plugins/.remote/plugins.yml", data_dir)
+}
+
+/// Load the remote plugin store from `.remote/plugins.yml`.
+pub fn load_remote_plugins(data_dir: &str) -> RemotePluginStore {
+    let path = remote_plugins_path(data_dir);
+    let p = std::path::Path::new(&path);
+    if p.exists() {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|c| serde_yaml::from_str(&c).ok())
+            .unwrap_or_default()
+    } else {
+        RemotePluginStore::default()
+    }
+}
+
+/// Save a remote plugin entry to `.remote/plugins.yml`.
+pub fn save_remote_plugin(
+    data_dir: &str,
+    pt: &PluginYamlType,
+    name: &str,
+    remote: &PluginRemote,
+) -> AppResult<()> {
+    let mut store = load_remote_plugins(data_dir);
+    let entries = match pt {
+        PluginYamlType::Tool => store.tools.get_or_insert_with(Default::default),
+        PluginYamlType::Platform => store.platforms.get_or_insert_with(Default::default),
+        PluginYamlType::Provider => store.providers.get_or_insert_with(Default::default),
+    };
+    entries.insert(name.to_string(), remote.clone());
+    let path = remote_plugins_path(data_dir);
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let content = serde_yaml::to_string(&store)
+        .map_err(|e| Error::Message(format!("Failed to serialize remote plugins: {}", e)))?;
+    std::fs::write(&path, content)
+        .map_err(|e| Error::Message(format!("Failed to write remote plugins: {}", e)))?;
+    Ok(())
+}
+
+/// Remove a remote plugin entry from `.remote/plugins.yml`.
+pub fn remove_remote_plugin(data_dir: &str, pt: &PluginYamlType, name: &str) -> AppResult<()> {
+    let mut store = load_remote_plugins(data_dir);
+    let entries = match pt {
+        PluginYamlType::Tool => &mut store.tools,
+        PluginYamlType::Platform => &mut store.platforms,
+        PluginYamlType::Provider => &mut store.providers,
+    };
+    if let Some(ref mut map) = entries {
+        map.remove(name);
+    }
+    let path = remote_plugins_path(data_dir);
+    let content = serde_yaml::to_string(&store)
+        .map_err(|e| Error::Message(format!("Failed to serialize remote plugins: {}", e)))?;
+    std::fs::write(&path, content)
+        .map_err(|e| Error::Message(format!("Failed to write remote plugins: {}", e)))?;
+    Ok(())
+}
+
+/// Get a remote plugin entry from `.remote/plugins.yml`.
+pub fn get_remote_plugin(data_dir: &str, pt: &PluginYamlType, name: &str) -> Option<PluginRemote> {
+    let store = load_remote_plugins(data_dir);
+    let entries = match pt {
+        PluginYamlType::Tool => store.tools.as_ref()?,
+        PluginYamlType::Platform => store.platforms.as_ref()?,
+        PluginYamlType::Provider => store.providers.as_ref()?,
+    };
+    entries.get(name).cloned()
 }
 
 /// Update only the config of a plugin.
@@ -883,10 +1001,12 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
             PluginYamlType::Provider => provider_entries.get(&key),
         };
 
-        // Remote sources only show if YAML has a remote entry for this key
+        // Remote sources show if YAML has a remote entry for this key,
+        // OR if the .remote/plugins.yml store has an entry (persisted independently).
         if source == "remote" {
             let has_remote_yaml = yaml_entry.and_then(|e| e.remote.as_ref()).is_some();
-            if !has_remote_yaml {
+            let has_remote_store = get_remote_plugin(data_dir, &yaml_type, &key).is_some();
+            if !has_remote_yaml && !has_remote_store {
                 continue;
             }
         }
@@ -994,6 +1114,59 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
 
             results.push(detail);
         }
+    }  // end of groups loop
+
+    // ── "Not found" entries: YAML entries with no discovered source on disk ──
+    // Check all YAML entries and add synthetic entries for those without matching groups.
+    for (yaml_type, entries) in &[
+        (PluginYamlType::Platform, &platform_entries),
+        (PluginYamlType::Tool, &tool_entries),
+        (PluginYamlType::Provider, &provider_entries),
+    ] {
+        for (key, yaml_entry) in *entries {
+            if !groups.contains_key(key) {
+                let is_remote = yaml_entry.remote.is_some();
+                let manifest = PluginManifest {
+                    name: key.clone(),
+                    version: "0.1.0".to_string(),
+                    plugin_type: match yaml_type {
+                        PluginYamlType::Platform => PluginType::Platform,
+                        PluginYamlType::Tool => PluginType::Mcp,
+                        PluginYamlType::Provider => PluginType::Provider,
+                    },
+                    description: Some(if is_remote {
+                        "Remote plugin — not downloaded yet".to_string()
+                    } else {
+                        "Plugin source not found on disk".to_string()
+                    }),
+                    entrypoint: None,
+                    capabilities: None,
+                    config_schema: Vec::new(),
+                    env: std::collections::HashMap::new(),
+                    default_base_url: None,
+                    api_mode: None,
+                };
+                let source = if is_remote { "remote" } else { "bundled" };
+                let mut detail = build_plugin_detail(
+                    &manifest,
+                    source,
+                    Some(yaml_entry),
+                    Some(key),
+                    None, // no plugin_dir
+                    data_dir,
+                    false,
+                );
+                detail.status = "not_found".to_string();
+                detail.needs_download = is_remote;
+                detail.has_source_code = false;
+                detail.needs_build = false;
+                // For remote plugins not yet cloned, set needs_download on the source
+                if is_remote {
+                    detail.source = Some("remote".to_string());
+                }
+                results.push(detail);
+            }
+        }
     }
 
     // Sort by name for deterministic ordering
@@ -1029,10 +1202,12 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
             PluginYamlType::Provider => provider_entries.get(&key),
         };
 
-        // Remote sources only show if YAML has a remote entry for this key
+        // Remote sources show if YAML has a remote entry for this key,
+        // OR if the .remote/plugins.yml store has an entry (persisted independently).
         if source == "remote" {
             let has_remote_yaml = yaml_entry.and_then(|e| e.remote.as_ref()).is_some();
-            if !has_remote_yaml {
+            let has_remote_store = get_remote_plugin(data_dir, &yaml_type, &key).is_some();
+            if !has_remote_yaml && !has_remote_store {
                 continue;
             }
         }
@@ -1076,7 +1251,70 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
         )));
     }
 
+    // Not found via discovery — check YAML entries directly (YAML-only entry with no disk source)
+    if let Some(detail) = build_not_found_from_yaml(data_dir, name, &platform_entries, &tool_entries, &provider_entries) {
+        return Ok(Some(detail));
+    }
+
     Ok(None)
+}
+
+/// Build a synthetic "not found" PluginDetail from YAML entries if the plugin name exists in any YAML file.
+fn build_not_found_from_yaml(
+    data_dir: &str,
+    name: &str,
+    platform_entries: &BTreeMap<String, PluginYamlEntry>,
+    tool_entries: &BTreeMap<String, PluginYamlEntry>,
+    provider_entries: &BTreeMap<String, PluginYamlEntry>,
+) -> Option<PluginDetail> {
+    for (yaml_type, entries) in &[
+        (PluginYamlType::Platform, platform_entries),
+        (PluginYamlType::Tool, tool_entries),
+        (PluginYamlType::Provider, provider_entries),
+    ] {
+        if let Some(yaml_entry) = entries.get(name) {
+            let is_remote = yaml_entry.remote.is_some();
+            let manifest = PluginManifest {
+                name: name.to_string(),
+                version: "0.1.0".to_string(),
+                plugin_type: match yaml_type {
+                    PluginYamlType::Platform => PluginType::Platform,
+                    PluginYamlType::Tool => PluginType::Mcp,
+                    PluginYamlType::Provider => PluginType::Provider,
+                },
+                description: Some(if is_remote {
+                    "Remote plugin — not downloaded yet".to_string()
+                } else {
+                    "Plugin source not found on disk".to_string()
+                }),
+                entrypoint: None,
+                capabilities: None,
+                config_schema: Vec::new(),
+                env: std::collections::HashMap::new(),
+                default_base_url: None,
+                api_mode: None,
+            };
+            let source = if is_remote { "remote" } else { "bundled" };
+            let mut detail = build_plugin_detail(
+                &manifest,
+                source,
+                Some(yaml_entry),
+                Some(name),
+                None,
+                data_dir,
+                false,
+            );
+            detail.status = "not_found".to_string();
+            detail.needs_download = is_remote;
+            detail.has_source_code = false;
+            detail.needs_build = false;
+            if is_remote {
+                detail.source = Some("remote".to_string());
+            }
+            return Some(detail);
+        }
+    }
+    None
 }
 
 /// Get enabled provider names for the settings API.
