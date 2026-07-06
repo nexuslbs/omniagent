@@ -739,16 +739,32 @@ fn find_remote_plugin_json(dir: &Path) -> Option<(PluginManifest, String)> {
         return load_manifest(&path_str).ok().map(|m| (m, path_str));
     }
 
-    // Search one level deep
+    // Search up to two levels deep (to handle repo_path subdirectories like tools/<name>/)
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
+                // Level 1: {dir}/{subdir}/plugin.json
                 let candidate = path.join("plugin.json");
                 if candidate.exists() {
                     let path_str = candidate.to_string_lossy().to_string();
                     if let Ok(manifest) = load_manifest(&path_str) {
                         return Some((manifest, path_str));
+                    }
+                }
+                // Level 2: {dir}/{subdir}/{nested}/plugin.json
+                if let Ok(nested_entries) = std::fs::read_dir(&path) {
+                    for nested in nested_entries.flatten() {
+                        let nested_path = nested.path();
+                        if nested_path.is_dir() {
+                            let nested_candidate = nested_path.join("plugin.json");
+                            if nested_candidate.exists() {
+                                let path_str = nested_candidate.to_string_lossy().to_string();
+                                if let Ok(manifest) = load_manifest(&path_str) {
+                                    return Some((manifest, path_str));
+                                }
+                            }
+                        }
                     }
                 }
             }
