@@ -63,11 +63,25 @@ A plugin **can** exist at multiple sources simultaneously (e.g., a builtin crate
 
 #### Enable/Disable
 - `POST /api/plugins/{name}/enable` — sets `enabled: true` in YAML
-  - If plugin was not in YAML, auto-detects `builtin: true` from disk
+  - **REQUIRES JSON body** with `source` field: `{ "source": "built-in" }` or `{ "source": "bundled" }`
+  - `source: "built-in"` → sets `builtin: true` in YAML entry
+  - `source: "bundled"` → sets `builtin: false` (equivalent to no builtin flag)
+  - If plugin was not in YAML, the source determines the builtin flag
   - Hot-reloads MCP server for tool plugins (registers tools in shared registry)
 - `POST /api/plugins/{name}/disable` — sets `enabled: false` in YAML
+  - **REQUIRES JSON body** with `source` field: `{ "source": "built-in" }` or `{ "source": "bundled" }`
+  - Source is validated but does NOT modify the `builtin` flag — just ensures the request targets the correct source
   - Does NOT unset `builtin` flag
 - Both preserve existing `builtin` and `remote` fields
+- **No backward compatibility**: the `source` field is mandatory. Omitting it returns 422.
+- Request type: `PluginSourceRequest { source: String }` defined in `src/server/plugins.rs`
+
+#### Toggle Request Flow (Frontend)
+- The card carries `data-source` from the API response's `p.source` field
+- On click, the toggle handler sends `{ source: pluginSource }` via `apiPost`
+- All three pages (tools.ts, providers.ts, platforms.ts) use the same pattern
+- If `data-source` is empty/missing, the toggle silently does nothing (`if (!pluginSource) return;`)
+- After rebuild: `npm run build:frontend` (dist is mounted read-only, no container restart needed)
 
 ### YAML Auto-Detection on Enable
 
