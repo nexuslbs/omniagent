@@ -905,7 +905,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         }
     }
 
-    // After standard discovery, check YAML entries for remote.path subdirectories.
+    // After standard discovery - YAML remote path, check YAML entries for remote.path subdirectories.
     // A remote plugin at .remote/<name>/ with remote.path: "tools/<name>" has its
     // plugin.json at .remote/<name>/tools/<name>/plugin.json — not at the root level
     // that find_remote_plugin_json() searches. Use the YAML remote.path to construct
@@ -915,7 +915,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         (PluginYamlType::Tool, &tool_entries),
         (PluginYamlType::Provider, &provider_entries),
     ] {
-        for (name, entry) in yaml_entries {
+        for (name, entry) in *yaml_entries {
             if let Some(ref remote) = entry.remote {
                 if let Some(ref remote_path) = remote.path {
                     let type_dir = yaml_type.type_dir_name();
@@ -1145,6 +1145,35 @@ pub fn get_disk_plugin_type(data_dir: &str, name: &str) -> AppResult<Option<Stri
             return Ok(Some(type_str.to_string()));
         }
     }
+
+    // Fallback: check YAML entries for remote.path — the plugin may exist at
+    // .remote/<name>/{path}/plugin.json which find_remote_plugin_json does not find.
+    for (yaml_type, entries) in &[
+        (PluginYamlType::Platform, load_raw(data_dir, &PluginYamlType::Platform)?),
+        (PluginYamlType::Tool, load_raw(data_dir, &PluginYamlType::Tool)?),
+        (PluginYamlType::Provider, load_raw(data_dir, &PluginYamlType::Provider)?),
+    ] {
+        if let Some(entry) = entries.get(name) {
+            if let Some(ref remote) = entry.remote {
+                if let Some(ref remote_path) = remote.path {
+                    let type_dir = yaml_type.type_dir_name();
+                    let manifest_path = format!(
+                        "{}/plugins/{}/.remote/{}/{}/plugin.json",
+                        data_dir, type_dir, name, remote_path
+                    );
+                    if std::path::Path::new(&manifest_path).exists() {
+                        let type_str = match yaml_type {
+                            PluginYamlType::Platform => "platform",
+                            PluginYamlType::Tool => "mcp",
+                            PluginYamlType::Provider => "provider",
+                        };
+                        return Ok(Some(type_str.to_string()));
+                    }
+                }
+            }
+        }
+    }
+
     Ok(None)
 }
 
@@ -1665,4 +1694,5 @@ tools:
         assert_eq!(env.get("MCP_SERVER_FOO_MY_SETTING").unwrap(), "bar");
     }
 }
+
 

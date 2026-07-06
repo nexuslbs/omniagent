@@ -601,7 +601,7 @@ pub(crate) async fn enable_plugin_handler(
     // Determine desired builtin flag from source parameter
     let desired_builtin = match req.source.as_str() {
         "built-in" => Some(true),
-        "bundled" => Some(false),
+        "bundled" | "remote" => Some(false),
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -736,7 +736,7 @@ pub(crate) async fn disable_plugin_handler(
     // Validate source parameter
     let _desired_builtin = match req.source.as_str() {
         "built-in" => Some(true),
-        "bundled" => Some(false),
+        "bundled" | "remote" => Some(false),
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
