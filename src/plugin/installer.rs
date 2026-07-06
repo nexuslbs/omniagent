@@ -732,39 +732,22 @@ pub fn discover_plugins(
 
 /// Find plugin.json in a remote plugin directory (searches top-level and one level deep).
 fn find_remote_plugin_json(dir: &Path) -> Option<(PluginManifest, String)> {
-    // Check plugin.json at top level
     let top = dir.join("plugin.json");
     if top.exists() {
         let path_str = top.to_string_lossy().to_string();
         return load_manifest(&path_str).ok().map(|m| (m, path_str));
     }
 
-    // Search up to two levels deep (to handle repo_path subdirectories like tools/<name>/)
+    // Search one level deep (legacy layout where the whole repo is the plugin)
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                // Level 1: {dir}/{subdir}/plugin.json
                 let candidate = path.join("plugin.json");
                 if candidate.exists() {
                     let path_str = candidate.to_string_lossy().to_string();
                     if let Ok(manifest) = load_manifest(&path_str) {
                         return Some((manifest, path_str));
-                    }
-                }
-                // Level 2: {dir}/{subdir}/{nested}/plugin.json
-                if let Ok(nested_entries) = std::fs::read_dir(&path) {
-                    for nested in nested_entries.flatten() {
-                        let nested_path = nested.path();
-                        if nested_path.is_dir() {
-                            let nested_candidate = nested_path.join("plugin.json");
-                            if nested_candidate.exists() {
-                                let path_str = nested_candidate.to_string_lossy().to_string();
-                                if let Ok(manifest) = load_manifest(&path_str) {
-                                    return Some((manifest, path_str));
-                                }
-                            }
-                        }
                     }
                 }
             }

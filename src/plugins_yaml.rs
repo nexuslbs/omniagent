@@ -905,6 +905,48 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         }
     }
 
+    // After standard discovery, check YAML entries for remote.path subdirectories.
+    // A remote plugin at .remote/<name>/ with remote.path: "tools/<name>" has its
+    // plugin.json at .remote/<name>/tools/<name>/plugin.json — not at the root level
+    // that find_remote_plugin_json() searches. Use the YAML remote.path to construct
+    // the exact path and discover these deterministicly.
+    for (yaml_type, yaml_entries) in &[
+        (PluginYamlType::Platform, &platform_entries),
+        (PluginYamlType::Tool, &tool_entries),
+        (PluginYamlType::Provider, &provider_entries),
+    ] {
+        for (name, entry) in yaml_entries {
+            if let Some(ref remote) = entry.remote {
+                if let Some(ref remote_path) = remote.path {
+                    let type_dir = yaml_type.type_dir_name();
+                    let manifest_path = format!(
+                        "{}/plugins/{}/.remote/{}/{}/plugin.json",
+                        data_dir, type_dir, name, remote_path
+                    );
+                    if !std::path::Path::new(&manifest_path).exists() {
+                        continue;
+                    }
+                    // Skip if already discovered (avoid duplicates)
+                    if groups.contains_key(name) {
+                        continue;
+                    }
+                    if let Ok(manifest) = crate::plugin::load_manifest(&manifest_path) {
+                        let base_path = manifest_path.to_string();
+                        let key = name.clone();
+                        let mut sources = Vec::new();
+                        sources.push((manifest, "remote".to_string(), base_path));
+                        groups.insert(key.clone(), PluginSourceGroup {
+                            key,
+                            sources,
+                            yaml_type: Some(yaml_type.clone()),
+                            yaml_entry: Some(entry.clone()),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     let mut results: Vec<PluginDetail> = Vec::new();
 
     for (key, group) in &groups {
