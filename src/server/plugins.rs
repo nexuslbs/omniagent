@@ -733,7 +733,7 @@ pub(crate) async fn disable_plugin_handler(
         }
     };
 
-    // Validate source parameter
+    // Validate source incl remote
     let _desired_builtin = match req.source.as_str() {
         "built-in" => Some(true),
         "bundled" | "remote" => Some(false),
@@ -850,34 +850,51 @@ pub(crate) async fn install_plugin_handler(
         }
     };
 
-    // 2. Get the plugin source directory
-    let plugin_dir = match get_plugin_dir_for_category(
+    // 2. Get the plugin source directory with fallback
+    let (mut plugin_dir, mut category) = match get_plugin_dir_for_category(
         data_dir,
         workspace_dir,
         &yaml_type,
         &name,
         &category,
     ) {
-        Some(d) => d,
+        Some(d) => (d, category),
         None => {
-            if matches!(category, PluginCategory::Remote) {
+            // Fallback: try Builtin source before giving up
+            if !matches!(category, PluginCategory::Builtin) {
+                let builtin_dir = format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name);
+                if std::path::Path::new(&builtin_dir).join("Cargo.toml").exists() {
+                    info!("Install: falling back to built-in source for '{}'", name);
+                    (builtin_dir, PluginCategory::Builtin)
+                } else if matches!(category, PluginCategory::Remote) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": format!("Remote plugin '{}' has not been cloned yet. Use /api/plugins/install-git first.", name)
+                        })),
+                    )
+                        .into_response();
+                } else {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": format!("Plugin '{}' source directory not found", name)
+                        })),
+                    )
+                        .into_response();
+                }
+            } else {
                 return (
-                    StatusCode::BAD_REQUEST,
+                    StatusCode::NOT_FOUND,
                     Json(serde_json::json!({
                         "success": false,
-                        "error": format!("Remote plugin '{}' has not been cloned yet. Use /api/plugins/install-git first.", name)
+                        "error": format!("Plugin '{}' source directory not found", name)
                     })),
                 )
                     .into_response();
             }
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": format!("Plugin '{}' source directory not found", name)
-                })),
-            )
-                .into_response();
         }
     };
 
@@ -896,7 +913,7 @@ pub(crate) async fn install_plugin_handler(
             }
         }
     }
-    let has_cargo_toml = dir_path.join("Cargo.toml").exists();
+    let mut has_cargo_toml = dir_path.join("Cargo.toml").exists();
     let has_plugin_json = dir_path.join("plugin.json").exists();
     let has_entrypoint = if has_plugin_json {
         std::fs::read_to_string(dir_path.join("plugin.json"))
@@ -913,6 +930,19 @@ pub(crate) async fn install_plugin_handler(
     } else {
         false
     };
+
+    // If the primary category's source dir has no compileable code, fall back to Builtin
+    if !has_cargo_toml && !has_entrypoint && !matches!(category, PluginCategory::Builtin) {
+        let builtin_dir = format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name);
+        let builtin_cargo = std::path::Path::new(&builtin_dir).join("Cargo.toml");
+        if builtin_cargo.exists() {
+            info!("Install: falling back to built-in source for '{}' (bundled dir has no source code)", name);
+            plugin_dir = builtin_dir;
+            category = PluginCategory::Builtin;
+            dir_path = std::path::Path::new(&plugin_dir).to_path_buf();
+            has_cargo_toml = true;
+        }
+    }
 
     if !has_cargo_toml && !has_entrypoint {
         return (
@@ -1073,18 +1103,36 @@ pub(crate) async fn reinstall_plugin_handler(
         }
     }
 
-    // 3. Get plugin source directory
-    let plugin_dir = match get_plugin_dir_for_category(data_dir, workspace_dir, &yaml_type, &name, &category) {
-        Some(d) => d,
+    // 3. Get plugin source directory with Builtin fallback
+    let (mut plugin_dir, mut category) = match get_plugin_dir_for_category(data_dir, workspace_dir, &yaml_type, &name, &category) {
+        Some(d) => (d, category),
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": format!("Plugin '{}' source directory not found", name)
-                })),
-            )
-                .into_response();
+            // Fallback: try Builtin source before giving up
+            if !matches!(category, PluginCategory::Builtin) {
+                let builtin_dir = format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name);
+                if std::path::Path::new(&builtin_dir).join("Cargo.toml").exists() {
+                    info!("Reinstall: falling back to built-in source for '{}'", name);
+                    (builtin_dir, PluginCategory::Builtin)
+                } else {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": format!("Plugin '{}' source directory not found", name)
+                        })),
+                    )
+                        .into_response();
+                }
+            } else {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Plugin '{}' source directory not found", name)
+                    })),
+                )
+                    .into_response();
+            }
         }
     };
 
@@ -1103,7 +1151,7 @@ pub(crate) async fn reinstall_plugin_handler(
             }
         }
     }
-    let has_cargo_toml = dir_path.join("Cargo.toml").exists();
+    let mut has_cargo_toml = dir_path.join("Cargo.toml").exists();
     let has_plugin_json = dir_path.join("plugin.json").exists();
     let has_entrypoint = if has_plugin_json {
         std::fs::read_to_string(dir_path.join("plugin.json"))
@@ -1120,6 +1168,19 @@ pub(crate) async fn reinstall_plugin_handler(
     } else {
         false
     };
+
+    // If the primary category's source dir has no compileable code, fall back to Builtin
+    if !has_cargo_toml && !has_entrypoint && !matches!(category, PluginCategory::Builtin) {
+        let builtin_dir = format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name);
+        let builtin_cargo = std::path::Path::new(&builtin_dir).join("Cargo.toml");
+        if builtin_cargo.exists() {
+            info!("Reinstall: falling back to built-in source for '{}' (bundled dir has no source code)", name);
+            plugin_dir = builtin_dir;
+            category = PluginCategory::Builtin;
+            dir_path = std::path::Path::new(&plugin_dir).to_path_buf();
+            has_cargo_toml = true;
+        }
+    }
 
     if !has_cargo_toml && !has_entrypoint {
         return (

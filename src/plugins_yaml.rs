@@ -905,7 +905,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         }
     }
 
-    // After standard discovery - YAML remote path, check YAML entries for remote.path subdirectories.
+    // After standard discovery + YAML remote path, check YAML entries for remote.path subdirectories.
     // A remote plugin at .remote/<name>/ with remote.path: "tools/<name>" has its
     // plugin.json at .remote/<name>/tools/<name>/plugin.json — not at the root level
     // that find_remote_plugin_json() searches. Use the YAML remote.path to construct

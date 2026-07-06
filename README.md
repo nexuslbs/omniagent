@@ -86,6 +86,27 @@ The value is read from the process environment at runtime.
 **Dashboard UI:**
 Every string and secret config field has a 🔗 toggle button. Click it to switch to reference mode — choose between "Secret" (load from secrets DB) or "Env Var" (load from env var), then enter the name.
 
+### 🔌 Plugin System (MCP Tools, Platforms, Providers)
+
+OmniAgent has a three-source plugin system:
+
+- **Built-in** (`/app/plugins/{type}/{name}/`) — workspace member crates compiled as part of omniagent
+- **Bundled** (`{workspace_dir}/plugins/{type}/{name}/`) — standalone crates shipped with omni-stack
+- **Remote** (`{data_dir}/plugins/{type}/.remote/{name}/`) — git-cloned plugins from external repos
+
+Each plugin has a **type** (mcp/tool, platform, provider) and a **category** determined by YAML config and disk state. At most one source can be enabled per plugin name — enabling a different source overwrites the YAML entry.
+
+**Key rules:**
+- Builtin tools are disabled by default — must be explicitly added to YAML with `enabled: true` and `builtin: true`
+- If YAML has a tool without `builtin: true`, the builtin source is ignored in favor of the bundled/remote one
+- Builtin plugins with no YAML entry appear as disabled — Enable creates a YAML entry with `builtin: true`
+- Erroneous binary-only bundled copies (cron, kanban, memory, etc.) show as duplicated with a yellow badge
+- Install/Reinstall automatically falls back to the builtin source if the bundled dir has no source code
+
+Managed via the Dashboard UI (/tools, /platforms, /providers pages), YAML files, and REST API.
+
+For full internal documentation, see [AGENTS.md](AGENTS.md).
+
 ### 🔌 MCP External Servers
 - **stdio transport** — spawn subprocesses, JSON-RPC 2.0 over stdin/stdout
 - **HTTP transport** — connect to remote MCP servers via HTTP POST
