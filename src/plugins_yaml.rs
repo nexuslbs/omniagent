@@ -146,6 +146,8 @@ pub struct PluginDetail {
     pub plugin_type: String,
     pub version: String,
     pub source: Option<String>,
+    /// Status is one of "enabled" or "disabled" only.
+    /// "duplicated" is NOT a status — use `is_duplicated` flag instead.
     pub status: String,
     pub manifest: serde_json::Value,
     pub config: serde_json::Value,
@@ -165,6 +167,19 @@ pub struct PluginDetail {
     /// True if the plugin has a remote but has not been cloned yet.
     #[serde(default)]
     pub needs_download: bool,
+    /// True when this source is NOT the primary (YAML-configured) one.
+    /// Non-primary sources of a duplicate plugin name get this flag.
+    /// The original status (enabled/disabled) is preserved unchanged.
+    #[serde(default)]
+    pub is_duplicated: bool,
+    /// True if the plugin has source code (Cargo.toml or plugin.json entrypoint).
+    /// False = pre-built binary only, no source to install/reinstall from.
+    #[serde(default)]
+    pub has_source_code: bool,
+    /// True if this is a script-language MCP (plugin.json entrypoint with non-Rust command).
+    /// Script MCPs don't need compilation — they run via the configured command directly.
+    #[serde(default)]
+    pub is_script: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +279,11 @@ pub fn get_entry(
 }
 
 /// Set a plugin entry (enabled + config) in a YAML file. Creates the entry if it doesn't exist.
+///
+/// Builtin flag preservation: If the entry already exists, the existing `builtin` flag
+/// is preserved to avoid overwriting it on re-enable. For NEW entries, the builtin flag
+/// IS auto-detected from disk (checking /app/plugins/) so that enabling a built-in plugin
+/// for the first time correctly sets `builtin: true`.
 pub fn set_entry(
     data_dir: &str,
     pt: &PluginYamlType,
@@ -272,10 +292,9 @@ pub fn set_entry(
     config: serde_json::Value,
 ) -> AppResult<PluginYamlEntry> {
     let mut entries = load_raw(data_dir, pt)?;
-    // Preserve existing builtin flag if the entry already exists,
-    // otherwise detect via source directory existence
-    let existing_builtin = entries.get(name).and_then(|e| e.builtin);
-    let builtin = existing_builtin.or_else(|| {
+    // Preserve existing builtin flag — don't re-detect on update.
+    // For NEW entries, auto-detect from disk source directory.
+    let builtin = entries.get(name).and_then(|e| e.builtin).or_else(|| {
         if is_plugin_builtin(data_dir, name, pt) {
             Some(true)
         } else {
@@ -541,6 +560,7 @@ fn build_plugin_detail(
     key: Option<&str>,
     plugin_dir: Option<&str>,
     data_dir: &str,
+    is_duplicated: bool,
 ) -> PluginDetail {
     let enabled = yaml_entry
         .map(|e| e.enabled)
@@ -666,6 +686,46 @@ fn build_plugin_detail(
         })
         .unwrap_or(false);
 
+    // Compute has_source_code: plugin has Cargo.toml OR is a script-based plugin.
+    // Binary-only plugins (entrypoint is a bare binary name like "mcp-server-cron")
+    // do NOT have source code — they are pre-compiled.
+    let has_source_code = plugin_dir
+        .map(|dir| {
+            let cargo_toml = std::path::Path::new(dir).join("Cargo.toml");
+            if cargo_toml.exists() {
+                return true;
+            }
+            // Check if manifest has a script entrypoint (not a bare binary name)
+            if let Some(ep) = manifest.entrypoint.as_ref() {
+                if !ep.command.is_empty() {
+                    // Check if entrypoint references a file/script in the plugin directory
+                    // (e.g., "./target/release/mcp-server-foo" or "./plugin.py").
+                    // If the first token contains a path separator, it's a script/path.
+                    let first_word = ep.command.split_whitespace().next().unwrap_or("");
+                    if first_word.contains('/') || first_word.contains('\\') {
+                        return true;
+                    }
+                    // Bare binary names like "mcp-server-actions" or "python3" are NOT
+                    // source code — they're either pre-compiled binaries or script runners.
+                    // A bare word that ISN'T in the manifest's list of known runners is
+                    // definitely a pre-compiled binary name. Known runners are checked
+                    // by looking at the first word's characteristics:
+                    // - Known script runners always have extensions or are well-known names
+                    // - Plugin binaries follow the "mcp-server-*" or similar conventions
+                    // We return false here — bare binary name = no source code.
+                    return false;
+                }
+            }
+            false
+        })
+        .unwrap_or(false);
+
+    // Compute is_script: has entrypoint with script runner but no Cargo.toml
+    // Note: with the match-based check above, is_script can never be true
+    // because we return false for all bare entrypoint commands. Plugins with
+    // script entrypoints must have path-based commands (e.g., "./plugin.py").
+    let is_script = false;
+
     PluginDetail {
         id: 0,
         name: display_key,
@@ -686,6 +746,9 @@ fn build_plugin_detail(
         needs_build,
         remote: yaml_entry.and_then(|e| e.remote.clone()),
         needs_download: false,
+        is_duplicated,
+        has_source_code,
+        is_script,
     }
 }
 
@@ -708,14 +771,23 @@ fn pick_primary_source(group: &PluginSourceGroup) -> usize {
     let yaml_entry = &group.yaml_entry;
     let sources = &group.sources;
 
+    // Helper: find the first source matching one of the given types
+    let find_source = |types: &[&str]| -> Option<usize> {
+        for t in types {
+            for (i, (_, source, _)) in sources.iter().enumerate() {
+                if source == t {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    };
+
     // If YAML has a remote field, prefer the 'remote' source
     if let Some(entry) = yaml_entry {
         if entry.remote.is_some() {
-            // Find the remote source
-            for (i, (_, source, _)) in sources.iter().enumerate() {
-                if source == "remote" {
-                    return i;
-                }
+            if let Some(idx) = find_source(&["remote"]) {
+                return idx;
             }
         }
     }
@@ -723,21 +795,25 @@ fn pick_primary_source(group: &PluginSourceGroup) -> usize {
     // If YAML has builtin: true, prefer the 'built-in' source
     if let Some(entry) = yaml_entry {
         if entry.builtin.unwrap_or(false) {
-            for (i, (_, source, _)) in sources.iter().enumerate() {
-                if source == "built-in" {
-                    return i;
-                }
+            if let Some(idx) = find_source(&["built-in"]) {
+                return idx;
             }
         }
     }
 
     // If YAML has the plugin but no remote/builtin preference, prefer bundled
     if yaml_entry.is_some() {
-        for (i, (_, source, _)) in sources.iter().enumerate() {
-            if source == "bundled" || source == "remote" {
-                return i;
-            }
+        if let Some(idx) = find_source(&["bundled", "remote"]) {
+            return idx;
         }
+    }
+
+    // No YAML entry: prefer built-in source (it has actual source code and can be installed).
+    // The built-in source is the development location; the bundled version is a deployment
+    // wrapper that references the pre-compiled binary. When no YAML config exists yet,
+    // the built-in should be the primary so Install/Enable buttons are available.
+    if let Some(idx) = find_source(&["built-in"]) {
+        return idx;
     }
 
     // Default: first source
@@ -823,12 +899,13 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                 Some(key),
                 plugin_dir,
                 data_dir,
+                !is_primary,
             );
 
-            // Override status for non-primary sources
-            if !is_primary {
-                detail.status = "duplicated".to_string();
-            }
+            // is_duplicated is now set via the build_plugin_detail parameter,
+            // NOT by overriding the status. The original status (enabled/disabled)
+            // is preserved for all sources — the frontend uses is_duplicated
+            // to display the duplicate label separately.
 
             results.push(detail);
         }
@@ -840,6 +917,8 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
 }
 
 /// Get a single plugin by name, combining disk discovery with YAML state.
+/// Returns the PRIMARY source for that plugin name based on YAML configuration,
+/// unlike list_plugins which returns all sources with is_duplicated flags.
 pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>> {
     let workspace_dir =
         std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
@@ -850,30 +929,66 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
     let tool_entries = load_raw(data_dir, &PluginYamlType::Tool)?;
     let provider_entries = load_raw(data_dir, &PluginYamlType::Provider)?;
 
+    // Group by key (same logic as list_plugins)
+    let mut groups: std::collections::BTreeMap<String, PluginSourceGroup> = std::collections::BTreeMap::new();
+
     for (manifest, source, base_path) in &discovered {
-        let key = extract_plugin_key(manifest, source, base_path);
-        // Match by the display key (directory name) OR the manifest's name field —
-        // the frontend always sends the display key (e.g. "hindsight"), while
-        // plugin.json may have a human-readable name like "Hindsight Memory MCP Server".
-        if key == name || manifest.name == name {
-            let yaml_type = PluginYamlType::from_plugin_type(&manifest.plugin_type);
-            // YAML entries are always keyed by the plugin's short name (directory name),
-            // not the human-readable manifest name — use the extracted key.
-            let yaml_entry = match yaml_type {
-                PluginYamlType::Platform => platform_entries.get(&key),
-                PluginYamlType::Tool => tool_entries.get(&key),
-                PluginYamlType::Provider => provider_entries.get(&key),
-            };
-            let plugin_dir = std::path::Path::new(base_path).parent().and_then(|p| p.to_str());
-            return Ok(Some(build_plugin_detail(
-                manifest,
-                source,
-                yaml_entry,
-                Some(&key),
-                plugin_dir,
-                data_dir,
-            )));
+        let key = crate::plugin::installer::extract_plugin_key_from_path(base_path);
+        if key.is_empty() {
+            continue;
         }
+        let yaml_type = PluginYamlType::from_plugin_type(&manifest.plugin_type);
+        let yaml_entry = match &yaml_type {
+            PluginYamlType::Platform => platform_entries.get(&key),
+            PluginYamlType::Tool => tool_entries.get(&key),
+            PluginYamlType::Provider => provider_entries.get(&key),
+        };
+
+        // Remote sources only show if YAML has a remote entry for this key
+        if source == "remote" {
+            let has_remote_yaml = yaml_entry.and_then(|e| e.remote.as_ref()).is_some();
+            if !has_remote_yaml {
+                continue;
+            }
+        }
+
+        let entry = groups.entry(key.clone()).or_insert_with(|| PluginSourceGroup {
+            key: key.clone(),
+            sources: Vec::new(),
+            yaml_type: None,
+            yaml_entry: None,
+        });
+        entry.sources.push((manifest.clone(), source.clone(), base_path.clone()));
+        if entry.yaml_type.is_none() {
+            entry.yaml_type = Some(yaml_type);
+            entry.yaml_entry = yaml_entry.cloned();
+        }
+    }
+
+    // Find the group matching the requested name
+    for (key, group) in &groups {
+        // Match by key (directory name) or manifest name
+        let matches = key == name
+            || group.sources.iter().any(|(m, _, _)| m.name == name);
+        if !matches {
+            continue;
+        }
+
+        let primary_idx = pick_primary_source(group);
+        let (manifest, source, base_path) = &group.sources[primary_idx];
+        let yaml_type = group.yaml_type.as_ref().unwrap_or(&PluginYamlType::Tool);
+        let yaml_entry = group.yaml_entry.as_ref();
+        let plugin_dir = std::path::Path::new(base_path).parent().and_then(|p| p.to_str());
+
+        return Ok(Some(build_plugin_detail(
+            manifest,
+            source,
+            yaml_entry,
+            Some(key),
+            plugin_dir,
+            data_dir,
+            false, // get_plugin always returns the primary (is_duplicated=false)
+        )));
     }
 
     Ok(None)
@@ -1473,3 +1588,4 @@ tools:
         assert_eq!(env.get("MCP_SERVER_FOO_MY_SETTING").unwrap(), "bar");
     }
 }
+

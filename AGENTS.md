@@ -1,831 +1,120 @@
 # OmniAgent — AGENTS.md
 
-## Guidelines
+## Plugin System Rules & Conventions
 
-### Cron / Schedule Mode
+### Core Principle
+Every action must be deterministic based on the **exact source** — never guess. The build strategy, YAML flags, and directory path are all derived from the source.
 
-Cron jobs have a `mode` field:
-- **`agentic`** (default): Creates a thread, and the agent executor processes it with LLM calls.
-- **`action`**: Executes a tool directly via the MCP registry. **No thread, no messages, no LLM calls.** The action is resolved from `actions.yml` (or hardcoded built-in).
+A plugin **can** exist at multiple sources simultaneously (e.g., a builtin crate in omniagent AND a bundled copy in omni-stack). The source field unambiguously identifies which one to act on.
 
-**NEVER change action-mode schedules to agentic mode.** Action-mode jobs (kanban_dispatcher, hindsight_populator, relevance_indexer) have NO prompt and would create empty/meaningless threads. If you see an action-mode job creating a thread, it's a regression — fix the scheduler to handle `mode='action'` before thread creation.
+### Source Definitions
 
-### Silent Cron Jobs
+| Source | Location | Build Method | Binary Check | YAML Flag |
+|--------|---------|-------------|-------------|-----------|
+| `built-in` | `/app/plugins/{type}/{name}/` | Workspace: `cargo build -p <pkg>` from `/app/Cargo.toml` | `get_bin_path(pkg_name)` | `builtin: true` |
+| `bundled` | `{workspace_dir}/plugins/{type}/{name}/` | Standalone: `cargo build` from plugin's own `Cargo.toml` | `{dir}/target/release/{pkg_name}` | no builtin flag |
+| `remote` | `{data_dir}/plugins/{type}/.remote/{name}/` | Standalone: `cargo build` from `.remote/{name}/Cargo.toml` | `{dir}/target/release/{pkg_name}` | `remote: {...}` |
 
-The `silent` flag (boolean) on cron jobs controls whether the job produces visible output:
-- `silent=true`: No thread is created, no messages are saved. Even errors just log — no visible trace in the DB. The job executes and completes silently.
-- `silent=false` (default): Normal thread creation, messages, and platform delivery.
+### Category Detection Priority (`detect_plugin_category`)
 
-**Silent is NOT a substitute for action mode.** Silent agentic jobs would create threads (wasting tokens) — use action mode instead for tool-only jobs.
+1. YAML has `remote` → `PluginCategory::Remote`
+2. YAML has `builtin: true` → `PluginCategory::Builtin`
+3. Disk has Cargo.toml at `/app/plugins/{type}/{name}/` → `PluginCategory::Builtin`
+4. Disk has `.remote/` directory → `PluginCategory::Remote`
+5. Default → `PluginCategory::OmniStack`
 
-### Platform Delivery — Unified Logic
+### Primary Source Priority (`pick_primary_source`)
 
-All message delivery uses the same code path, regardless of thread origin (user, kanban, cron):
+1. YAML has `remote` → prefer `remote` source
+2. YAML has `builtin: true` → prefer `built-in` source
+3. YAML entry exists but no remote/builtin → prefer `bundled` source
+4. **No YAML entry** → prefer `built-in` source (so Install/Enable buttons are visible)
+5. Fallback → first source in discovery order
 
-1. **seq-0 (cause message)**: If the thread's channel has `platform` and `resource_identifier` set, the cause message is delivered to that platform as a new message/post. For user threads, this comes FROM the platform (message received). For system threads, this is posted TO the platform (message sent as bot).
+### Builtin Plugin Rules
 
-2. **seq-1+ (responses)**: All messages use `cause_external_id` for threading. If the cause message has an external_id, subsequent messages reply in the platform thread. If no external_id, they go as new posts.
+- **Builtin tools are disabled by default.** They must be explicitly added to the YAML file (tools.yml, platforms.yml, providers.yml) with `enabled: true` and `builtin: true` to activate.
+- **When a tool is defined in YAML** (e.g., `enabled: true` without `builtin: true`), and a builtin with the same name exists on disk, the builtin is **ignored** for the YAML-configured entry. The one from omni-stack (bundled) or remote takes precedence.
+- **When a builtin plugin has NO YAML entry**, it appears in the UI as **disabled** (`is_duplicated: false`, `status: disabled`, source = `built-in`). Clicking Enable on it will create a YAML entry with `enabled: true, builtin: true`.
+- **Builtin plugins live only in omniagent** (`/app/plugins/{type}/{name}/`). They are workspace members in `/app/Cargo.toml`. They have `Cargo.toml` + `src/` + `mcp-config.json` but NOT `plugin.json`.
 
-3. **No platform = no delivery**: If the channel lacks `platform` or `resource_identifier`, no delivery happens. No special-casing for thread type.
+### Bundled Plugin Rules (Omni-Stack)
 
-**Key principle**: The channel IS the delivery target. If a kanban task or cron job's channel has `platform='mattermost'` and `resource_identifier='abc'`, messages go to Mattermost automatically. No kanban/cron-specific resolution is needed.
+- Bundled plugins live in `{workspace_dir}/plugins/{type}/{name}/` (mounted at `/opt/workspace/omni-stack/`).
+- They have their own `Cargo.toml` + `src/` + `plugin.json` + `mcp-config.json`.
+- Most bundled plugins (fetch, filesystem, git, skills, docker-compose, test-rust-tool) are **self-contained**: they only depend on `mcp-server-util` and external crates.
+- **`actions`** is special: it depends on `omniagent` crate for database access. Its Cargo.toml dependency path **must** be `../../../../omniagent` to resolve inside the Docker container.
+- Some omni-stack plugin directories contain **pre-compiled binaries only** (no Cargo.toml, no src/) — these are erroneous/leftover copies of builtin plugins (kanban, memory, hindsight, etc.). They show as `is_duplicated=true, status=disabled, has_source_code=false` in the UI and are non-functional.
 
-### `enqueue_delivery` — DO NOT add non-user special cases
-The `enqueue_delivery` function in `src/agent/helpers.rs` was historically full of special cases for non-user threads (skipping delivery for system threads). **These are now removed.** ALL messages follow the same path:
-- Channel has platform + resource_identifier → deliver
-- Channel has no platform → skip
-- Tool results → skip (never delivered to platforms)
+### Key Behaviors
 
-If someone needs to change delivery behavior, modify the channel's platform/resource_identifier, not the delivery code.
+#### Install
+- `POST /api/plugins/{name}/install` — detects source from YAML + disk state
+- For builtin: workspace build from `/app/Cargo.toml`
+- For bundled: standalone build from the plugin's Cargo.toml
+- For remote: standalone build from `.remote/{name}/Cargo.toml`
+- After compile: registers in YAML with `enabled: false`
+- Compilation errors are **fatal** (return 500)
 
-### Run-Cron Endpoint
-`POST /run-cron/{schedule_id}` triggers a cron job immediately. Returns proper HTTP errors:
-- **200** with `{ schedule_id, thread_id: null }` for action/silent jobs
-- **200** with `{ schedule_id, thread_id: <id> }` for agentic jobs
-- **404** when the job doesn't exist
-- **409** when the job is inactive (use `?force=true` to override)
-- **500** for other errors
+#### Reinstall
+- `POST /api/plugins/{name}/reinstall` — same category detection as install
+- Re-clones remote plugins, then recompiles
+- Updates YAML entry (preserves enabled state)
 
-The endpoint goes through `fire_cron_job_by_id()` in `scheduler.rs`.
+#### Enable/Disable
+- `POST /api/plugins/{name}/enable` — sets `enabled: true` in YAML
+  - If plugin was not in YAML, auto-detects `builtin: true` from disk
+  - Hot-reloads MCP server for tool plugins (registers tools in shared registry)
+- `POST /api/plugins/{name}/disable` — sets `enabled: false` in YAML
+  - Does NOT unset `builtin` flag
+- Both preserve existing `builtin` and `remote` fields
 
-### NEVER modify the database directly — always use the API
+### YAML Auto-Detection on Enable
 
-**When sending messages or creating threads, NEVER use `psql`, `sqlx`, `sql_forge`, `INSERT INTO` or any other direct database modification.** Always use the HTTP API (port 3001):
+When enabling a builtin plugin that has NO YAML entry yet, `set_entry()` calls `is_plugin_builtin()` which checks for:
+- `/app/plugins/{type}/{name}/Cargo.toml` exists → builtin
+- `/app/plugins/{type}/{name}/plugin.json` exists → builtin
 
-- `POST /api/kanban/tasks` — create a kanban task (set `status: "ready"` to trigger agent execution)
-- `POST /api/schedule` — create a cron job
-- Use `curl` against `http://localhost:12346/api/...` (dashboard proxy → omniagent)
+If either exists, the YAML entry gets `builtin: true` automatically.
 
-Direct DB writes bypass the agent's state machine, timestamp tracking, and error handling. The API is the single source of truth for state changes.
+### Warning: Erroneous Bundled Plugins
 
-### SQL Queries: Always use sql_forge!()
-**Every SQL query MUST use `sql_forge!()`.** No raw `sqlx::query`, `sqlx::query_as`, or `sqlx::query_scalar` except where documented below:
+The following plugin directories in omni-stack (`/opt/workspace/omni-stack/plugins/mcp/`) were **erroneously added** by a previous agent and contain only binaries (no source code):
+- `cron`, `kanban`, `search`, `memory`, `metrics`, `query`, `plugin-manager`, `subtasks`, `hindsight`
 
-**Exceptions (must use `sqlx::query()` runtime):**
-- **`src/db/migrations.rs`** — DDL (CREATE TABLE, ALTER TABLE, etc.) changes the schema at runtime. `sql_forge!()` validates columns against the live DB at compile time, creating a chicken-and-egg problem when the migration adds columns that the same migration file later references. Use `sqlx::query("SQL").execute(pool)` for all migration DDL and seed INSERTs.
-- **pgvector `<=>` operator** — The `vector` type from pgvector is not in sqlx's hardcoded compile-time type registry. This affects `sqlx::query_as!` and `sql_forge!()` equally. Use `sqlx::query_as::<_, DbStruct>()` (runtime) with a comment explaining why.
-- **Dynamic SQL** — Variable column sets or fully dynamic queries must use `sqlx::query(sqlx::AssertSqlSafe(sql))` with appropriate safety measures.
+These are DEAD entries. They have `plugin.json` but no `Cargo.toml` or `src/`. They MUST NOT be installed (no source to compile). The actual source for these plugins is in **omniagent** (`/app/plugins/mcp/<name>/`) as workspace-built builtins.
 
-Dynamic SQL (variable column sets) should be decomposed into individual static `sql_forge!()` UPDATEs per field rather than building SQL strings at runtime.
+These omni-stack copies will be removed later. For now, they appear as `is_duplicated=true, status=disabled, has_source_code=false` in the UI.
 
-**Type discipline:** Always match Rust types to the actual PostgreSQL column types:
-- `INT4` (INTEGER) → `i32` or `Option<i32>`
-- `INT8` (BIGINT) → `i64` or `Option<i64>`
-- `TEXT` / `VARCHAR` → `String` or `Option<String>`
-- `TIMESTAMPTZ` → `chrono::DateTime<Utc>` or `Option<...>`
-- `JSONB` → `serde_json::Value` or `String` (with `.to_string()` for jsonb casts)
+### Compiling Omni-Stack Plugins (Actions Special Case)
 
-Never cast in Rust (`as i32`, `as i64`) when sql_forge can infer the correct type — use the right sql_forge scalar type instead.
+`compile_rust_crate(plugin_dir, name, source)` uses the `source` string to determine build strategy:
 
-### Column Aliases: No sqlx Proprietary Suffixes
-**NEVER use sqlx-proprietary `?` / `!` suffixes in column aliases** (`AS "column?"`, `AS "column!"`).
+- **built-in**: Workspace build from `/app/Cargo.toml` — `cargo build --release -p <pkg_name>`
+- **bundled/remote**: Standalone build — `cargo build --release` from the plugin's Cargo.toml
 
-These suffixes are handled by `sqlx::query_as!` (compile-time) but **NOT** by `sqlx::FromRow` (runtime). At runtime, `FromRow` looks for column names matching the Rust field names exactly, so `AS "created_at!"` produces a column named `created_at!` in the result — which `FromRow` can't find when looking for `created_at`.
-
-**Correct approach:**
-- Use `Option<T>` in the DB struct for expression columns with unknown nullability (COALESCE, TO_CHAR, etc.)
-- Strip the suffix from the SQL alias so the column name matches the Rust field
-- Convert to the domain type in `TryFrom` with `.unwrap_or_default()` / `as_deref().unwrap_or("")` (safe since COALESCE guarantees non-null)
-
-The `.sqlx/` offline cache must be regenerated whenever the DB schema changes:
-```bash
-cargo sqlx prepare -- --bin omniagent
+The actions plugin (`actions`) depends on the `omniagent` crate (for database access). Its `Cargo.toml` has:
+```toml
+omniagent = { path = "../../../../omniagent" }
 ```
-
-### Error Handling
-- Use `anyhow::Result` for fallible functions
-- Use `tracing` (info/warn/error) for logging, never `println!`
-
-### Lint Attributes: Use `#[expect(...)]` not `#[allow(...)]`
-Prefer `#[expect(dead_code)]` over `#[allow(dead_code)]`. The `expect` attribute produces a compiler warning when the lint no longer applies (i.e., the dead code became used), making it self-cleaning — you know to remove it. `#[allow]` silently hides the lint forever, even after the suppression is no longer needed.
-
-This applies to ALL lint types, not just `dead_code`: if you must suppress a lint, use `#[expect(lint_name)]` so the compiler tells you when the suppression is stale.
-
-### Module Structure
-- `src/db/types.rs` — All DB queries
-- `src/agent/mod.rs` — Agent loop, message processing
-- `src/mcp/tools/` — Individual tool implementations
-- `src/prompt_builder.rs` — System prompt assembly
-- `src/context_builder.rs` — Context retrieval assembly
-
-### Function Signatures: Use Structs for 4+ Parameters
-
-Functions with **4 or more parameters** (beyond `pool`, `cause`, etc.) should use a parameter struct instead of positional arguments. This makes call sites self-documenting and avoids cascading changes when adding fields.
-
-**Pattern:** Define a struct immediately before the function. Use owned `String` types when callers have owned values, or lifetime-annotated `&'a str` references when borrowing from a shared context. Convert to `&str` inside the body with `.as_deref()` / `.as_str()` as needed.
-
-**Examples:**
-```rust
-pub struct CreateThreadParams {
-    pub provider: Option<String>,
-    pub model: Option<String>,
-    pub task_id: Option<String>,
-    pub schedule_task_id: Option<String>,
-    pub planning_mode: String,
-}
-```
-
-```rust
-struct ActionContext<'a> {
-    pool: &'a PgPool,
-    data_dir: &'a str,
-    mcp_registry: &'a McpRegistry,
-    app_context: &'a AppContext,
-    job: &'a CronJobDueRow,
-    display_name: &'a str,
-}
-```
-
-Existing examples in the codebase: `CreateThreadParams`, `CompleteThreadStats`, `CreateChannelParams`, `ThreadLookupParams`, `ClaimChannelParams`, `UpsertPluginParams`, `ServerConfig`, `PlanningPromptParams`, `ActionContext`, `ReportActionFailureParams`, `AgentContext`, `ThreadContextIdentifiers`, `ThreadContextConfig`, `MakeVectorizerConfig`, `CollectWikiFilesCtx`.
-
-### UI Modal Behavior
-
-**Modal close-on-outside-click rules:**
-1. **Form modals** (inputs, selects, textareas — user data entry): MUST NOT close when clicking outside. User must use Cancel/Close buttons. Examples: Create Schedule, Create Task, Edit Task, Install Plugin.
-2. **Information/confirmation modals** (read-only display, simple confirmations): MAY close on outside click. Examples: status popups, simple confirm dialogs.
-
-All modals should provide explicit close buttons (✕ close button + Cancel/Confirm buttons in footer).
-
-### Tool Development
-- Each MCP tool gets its own file in `src/mcp/tools/<name>.rs`
-- Register in `default_registry()` in `src/mcp/mod.rs`
-- Add to default profile's `allowed_tools` if it should be available by default
-- Tool descriptions must include: ACTION PREFIX + USE CASE + NEGATIVE SPACE
-
-### Dynamic Enum Refresh (`refresh_url`)
-
-Provider plugins can source model lists dynamically from an external API using `refresh_url` on `enum` config schema fields.
-
-**Source locations:**
-- **Core logic:** `src/plugin/mod.rs` — `fetch_enum_values()`, `refresh_plugin_models()`, `DYNAMIC_ENUM_CACHE`
-- **API handler:** `src/server/plugins.rs` — `refresh_models_handler()`
-- **Route registration:** `src/server/mod.rs:106` — `POST /api/plugins/{name}/refresh-models`
-
-**Schema field type (`ConfigSchemaField`):**
-```rust
-pub struct ConfigSchemaField {
-    pub key: String,
-    pub label: String,
-    pub field_type: FieldType,  // String, Secret, Boolean, Integer, Enum, MultiSelect
-    pub refresh_url: Option<String>,  // URL for dynamic enum values
-    pub allowed_values: Option<Vec<String>>,  // Static fallback list
-    // ...
-}
-```
-
-**Cache architecture:**
-- `DYNAMIC_ENUM_CACHE` — `Lazy<Mutex<HashMap<String, DynamicEnumEntry>>>` where key is the refresh_url
-- `DynamicEnumEntry` stores `values: Vec<String>` + `fetched_at: Instant`
-- TTL: `DYNAMIC_ENUM_TTL` = 300 seconds (5 minutes)
-- Cache is checked in `enrich_plugin()` when populating `allowed_values` for API responses
-
-**Refresh flow (`refresh_plugin_models()`):**
-1. Fetches plugin by name from `plugin_registry` table
-2. Enriches to `PluginDetail` with parsed config_schema
-3. Iterates schema fields looking for non-empty `refresh_url`
-4. Resolves API key: from the provider's resolved plugin config (`detail.config.api_key`), no hardcoded env var names
-5. Calls `fetch_enum_values(url, api_key)` — GET request with 5s timeout, Bearer auth if key present
-6. Parses response as `{data: [{id: "model-name"}, ...]}` (OpenAI `/v1/models` format)
-7. On success: updates the field's `allowed_values` + populates the in-memory cache
-8. On failure: logs warning, preserves existing `allowed_values` (no breaking change)
-9. Returns `Some(detail)` if any field had a refresh_url, `None` otherwise
-
-**API key resolution logic:**
-The API key is read from the provider's resolved plugin config (`detail.config.get("api_key")`), which already resolves `$env:` references defined by the user in `providers.yml`. No hardcoded env var names are used.
-
-```rust
-let api_key = detail.config
-    .get("api_key")
-    .and_then(|v| v.as_str())
-    .filter(|s| !s.is_empty())
-    .map(|s| s.to_string());
-```
-
-So for the `deepseek` plugin, the key comes from `providers.yml`:
-```yaml
-deepseek:
-  enabled: true
-  config:
-    api_key: "$env:DEEPSEEK_API_KEY"
-```
-
-**Response format:**
-```json
-// POST /api/plugins/deepseek/refresh-models
-{
-  "success": true,
-  "data": {
-    "name": "deepseek",
-    "config_schema": [
-      { "key": "default_model", "label": "Default Model", "type": "enum",
-        "allowed_values": ["deepseek-v4-flash", "deepseek-v3", "deepseek-r1", "deepseek-coder"],
-        "refresh_url": "https://api.deepseek.com/v1/models" }
-    ]
-  }
-}
-```
-
-**Error cases:**
-- Plugin not found → `404 Not Found`
-- Plugin has no `refresh_url` fields → `400 Bad Request` with message "Plugin has no refresh_url fields"
-- Network/parse failure → `500 Internal Server Error`, but the cache keeps the previous values
-
-**Currently used by:**
-- `deepseek` (provider) — `refresh_url: "https://api.deepseek.com/v1/models"` + static fallback
-- `opencode-go` (provider) — `refresh_url: "https://opencode.ai/zen/go/v1/models"` (no static fallback)
-
-### Hindsight Populator (`hindsight_populator.rs`)
-- Located at `src/hindsight_populator.rs`
-- Queries new messages from the DB (id > watermark) and retains them into omniagent-hindsight
-- Watermark stored at `{data_dir}/hindsight_watermark.json` (JSON with `last_message_id`, `last_run_at`)
-- Processes in batches of 200, sub-batches of 50
-- Uses `strategy: "fast"` to skip LLM extraction (works offline)
-- Tags messages by role, type, and subtype for semantic filtering at recall time
-- **Builtin action**: `builtin_hindsight_populator` registered in both DB `actions` table and scheduler dispatch
-- **MCP tool**: `actions_hindsight_populator` for manual agent triggering
-- **Cron**: Job `hindsight_populator` (every 15 min, `mode=action`, deactivated by default)
-- **Recall integration**: `context_builder.rs` calls `POST /v1/default/banks/{bank}/memories/recall` with the user query, injects results as Low-priority block
-
-### Subtask Tool (`manage_subtasks`)
-- Located at `src/mcp/tools/subtasks.rs`
-- Backend module at `src/subtask/mod.rs` — uses `sql_forge!()` for all DB operations
-- DB table: `thread_subtasks` (columns: `id`, `thread_id`, `description`, `status`, `priority`, `created_at`, `updated_at`)
-- Foreign key: `thread_id` → `threads(id)` with `ON DELETE CASCADE`
-- **Actions**: `add` (insert + return full state), `list` (all for thread), `update` (status + description), `delete` (by id), `get_counts` (aggregate)
-- **Current subtask** (`get_current_subtask`): queries the first `pending` row ordered by `priority DESC, created_at ASC`
-- Prompt injection in `src/prompt_builder.rs:format_subtask_section()` — only injected when subtasks exist and at least one is non-cancelled
-- **Override pattern**: Delete all subtasks for a thread (`DELETE FROM thread_subtasks WHERE thread_id = ?`), then add new ones
-
-### Thread Summaries
-- Summaries are stored in the `summaries` table (channel_id, next_thread_id, content, created_at)
-- A summary is generated every `2*SUMMARY_WINDOW` completed seq-0 (thread-root) messages per channel
-- The window slides by `SUMMARY_WINDOW`, so summaries overlap by half a window
-- The last summary for a channel is always included in LLM context as a High-priority block
-- Summary generation uses a separate LLM call with `CHANNEL_SUMMARY_TOKENS` max tokens (default 4096)
-- Per-thread end-of-execution summaries use `THREAD_SUMMARY_TOKENS` (default 2048)
-- Old summaries are deleted alongside old messages via the daily cleanup task
-- Config env vars: `SUMMARY_WINDOW` (default 10), `CHANNEL_SUMMARY_TOKENS` (default 4096), `THREAD_SUMMARY_TOKENS` (default 2048), `DELETE_AFTER_DAYS` (default 30)
-
-### Planning Mode Resolution
-
-Planning mode is resolved **at thread creation time** and stamped on `threads.planning_mode`.
-
-**Source locations:**
-- **Resolution:** `src/db/threads.rs` — `resolve_thread_planning_mode_with_content()` (core logic), `classify_complexity_for_planning()` (threshold logic), `resolve_cron_planning_mode()`, `resolve_max_plan()`
-- **Max iterations:** `src/db/threads.rs` — `max_iterations_for_planning_mode()` maps mode → iteration cap
-- **Prompt injection:** `src/prompt_builder.rs` — planning instructions injected based on `thread.planning_mode`
-- **Table columns:** `threads.planning_mode` (runtime truth), `channels.planning_mode` (per-channel override), `cron_jobs.planning_mode` (per-job override)
-
-**Modes:**
-
-| Value | Meaning |
-|-------|---------|
-| `prompt_only` | No planning — LLM responds immediately |
-| `auto_plan` | Single planning step before responding |
-| `auto_subtasks` | Full subtask decomposition (only when explicitly configured — see below) |
-| `always` | Legacy alias for `auto_subtasks` |
-
-**When is `auto_subtasks` available?**
-
-`auto_subtasks` (full subtask decomposition) is **not** the default. It is only available when explicitly configured in one of these ways:
-
-- **Global `PLANNING_MODE` env var** set to `auto_subtasks` or `plan with subtasks`
-- **Channel** `planning_mode` set to `auto_subtasks` or `always`
-- **Cron job** `planning_mode` set to `plan_with_subtasks` or `auto_subtasks`
-- **Kanban tasks** — always use the max plan mode derived from the global `PLANNING_MODE` (so if global is `auto_subtasks`, kanban gets `auto_subtasks`)
-- **Task-level explicit override** (for cron jobs and kanban tasks)
-
-If none of these explicitly enables it, the complexity-based classification caps at `auto_plan` — it will never spontaneously promote to `auto_subtasks`.
-
-**Priority chain** (first non-empty wins):
-
-1. **Cron task** `planning_mode` — highest priority, overrides channel and global
-   - Valid values: empty (→ complexity-based default), `no_plan` (→ `prompt_only`), `simple_plan` (→ `auto_plan`), `plan_with_subtasks` (→ `auto_subtasks`), `max_plan` (→ `resolve_max_plan(global_mode)`), or direct canonical values
-2. **Channel** `planning_mode` — override for the entire channel
-   - Valid values: empty (→ default), `prompt_only`, `auto_plan`, `auto_subtasks`, `never` (→ `prompt_only`), `always` (→ `auto_subtasks`)
-3. **Kanban tasks** — always `resolve_max_plan(global_mode)` (no complexity classification)
-4. **User / Cron default** — `classify_complexity_for_planning()` via content heuristics (see below)
-
-**Complexity classification (`classify_complexity_for_planning`):**
-
-The classifier evaluates prompt content against threshold heuristics and returns a canonical planning mode. The outcome is **capped by the resolved planning mode context** — `auto_subtasks` is only returned when the global `PLANNING_MODE` or an explicit task/channel setting has enabled it.
-
-| Complexity Level | Criteria | Resulting Mode |
-|---|---|---|
-| **Simple** | `char_len < SIMPLE_MAX (60)` or `word_count ≤ 3 + greeting` | `prompt_only` — no planning needed |
-| **Standard** | Everything between Simple and Complex | `auto_plan` — single planning step |
-| **Complex** | `char_len > STANDARD_MAX (200)` or action keywords match | `auto_subtasks` **iff** the resolved planning mode context permits it (global `PLANNING_MODE` is `auto_subtasks`, or an explicit task/channel/cron setting enables it); otherwise caps at `auto_plan` |
-
-**Env vars:** `PLANNING_MODE`, `PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS`, `PLANNING_COMPLEXITY_STANDARD_MAX_CHARS`, `PLANNING_COMPLEXITY_KEYWORDS` — all adjustable via `/settings` endpoint.
-
-**Iteration caps** per mode (configured in `AgentConfig`):
-- `prompt_only` → `max_iterations_no_plan` (default 5)
-- `auto_plan` → `max_iterations_simple_plan` (default 10)
-- `auto_subtasks`/`always` → `max_iterations_complex_plan` (default 25)
-
-The per-`process_message` cap was previously hardcoded to 12 (`remaining.clamp(0, 12)`). It now uses the full remaining budget from the MAX_ITERATIONS_* settings directly (`remaining.max(0)`), so a single user message can consume all remaining iterations for the thread.
-
-**When the iteration limit is reached**, the thread is marked `interrupted` (not `failed`). Instead of a hardcoded message, the executor calls the LLM to generate a summary that includes:
-- The iteration count (`{current_iter}/{iter_limit}`)
-- What was accomplished
-- What remains to be done
-
-The LLM summary is saved as the only post-loop message (type `summary`, subtype `interrupted`, `is_summary=true`).
-
-### Actions Feature (Saved Tool Invocations)
-
-The term "actions" is used in two distinct contexts — do not confuse them:
-
-### 1. Saved Actions (Dashboard Pages / HTTP API)
-
-Saved Actions are parameterized tool invocations stored in `{data_dir}/actions.yml`. They let users save a tool name + arguments as a reusable function that can be triggered from the dashboard or associated with a cron job.
-
-**HTTP API** (backed by YAML file, not database):
-| Method | Route | Description |
-|--------|-------|-------------|
-| `GET` | `/actions` | List all saved actions |
-| `POST` | `/actions` | Create a new action |
-| `PUT` | `/actions/{id}` | Update an action |
-| `DELETE` | `/actions/{id}` | Delete an action |
-| `POST` | `/actions/{id}/run` | Execute a saved action via the MCP registry |
-
-**Source:** `src/server/actions.rs` — reads/writes YAML file atomically with `.tmp` rename.
-
-**YAML format** (`{data_dir}/actions.yml`):
-```yaml
-actions:
-  a6:
-    enabled: true
-    tool_name: delete_subtask
-    params:
-      subtask_id: 1
-  builtin_kanban_dispatcher:
-    enabled: true
-    tool_name: kanban_dispatcher
-    params: {}
-    description: Pick up pending kanban tasks and create agent threads
-    is_builtin: true
-```
-
-- Each action has a string ID (the YAML key), a `tool_name` matching a registered MCP tool, and `params` (object).
-- Built-in actions (flagged `is_builtin: true`) are protected from deletion in the UI.
-- The YAML file is the authoritative source for all actions, replacing the old database-backed `actions` table (Phase 13 migration).
-
-**Cron job integration:** Cron jobs can reference a saved action via `action_id`. When `mode=action`, the scheduler executes the saved action's tool directly instead of creating an agent thread.
-
-### 2. "actions" MCP Toolset (External MCP Server)
-
-The `actions` MCP server (`plugins/mcp/actions/`) is an external stdio MCP server that provides 4 built-in tools often used within saved actions:
-- `kanban_dispatcher` — process pending kanban tasks
-- `hindsight_populator` — retain messages into hindsight memory
-- `relevance_indexer` — update wiki relevance index
-- `setup_knowledge_pipeline` — create knowledge pipeline cron job
-
-The name "actions" for this toolset is arbitrary; it simply indicates the tools are designed to be called from saved actions or cron jobs. These 4 tools are implemented as a separate Rust binary (`mcp-server-actions`) launched as a subprocess, not built into the main omniagent binary.
-
-**See also:** `{data_dir}/plugins/mcp/actions/mcp-config.json` for server configuration.
-
-## Cron Schedule Format
-
-Cron expressions use **5-field Linux format** (`min hour day month weekday`). The scheduler prepends `"0 "` (second=0) for the `cron` crate (which expects 6-field). Both `create_cron_job` and `update_cron_job` MCP tools validate exactly 5 fields.
-
-Examples:
-- `0 * * * *` — every hour
-- `*/15 * * * *` — every 15 minutes
-- `0 9 * * 1-5` — weekdays at 9am
-
-### Channel Templates
-
-Channels can have a `template` field (TEXT, stored in `channels.template`). When set:
-
-1. **User messages**: The template name is injected into the seq-0 message metadata under `"template"`. The agent executor loads the template content from `profiles/<name>/templates/<name>.md` and injects it as a `=== Task Template ===` block into the system prompt.
-
-2. **Cron jobs**: If the cron job has no `template` set, the channel's `template` is used as fallback.
-
-3. **Kanban tasks**: If the kanban task has no `template` set, the channel's `template` is used as fallback.
-
-**Priority order**: Task-level template → channel template → no template.
-
-### Seq-0 Message Types
-
-Every thread starts with a seq-0 (cause) message. The `msg_type` and `msg_subtype` fields identify the origin:
-
-| Source | `msg_type` | `msg_subtype` | Thread `cause` |
-|--------|-----------|---------------|-----------------|
-| User message | `Cause` | Platform name (e.g., `mattermost`) | `user` |
-| Cron job (scheduled) | `cron` | Cron job name | `system` |
-| Cron job (manual run) | `cron` | Cron job name | `user` |
-| Kanban task | `kanban` | Kanban task ID | `system` |
-
-The `msg_type` controls template loading in the executor (templates load for `Cause`, `cron`, and `kanban` types).
-
-### Provider/Model Stamping and Validation
-
-**Stamping at creation time** — When any seq-0 message is created (user message, cron job, kanban ready-task), `provider` and `model` are resolved and stamped on the **thread** using this chain:
-1. Channel `current_provider` / `current_model`
-2. Profile `provider` / `model`
-3. `LLM_PROVIDER` env var (model from provider plugin's `default_model`)
-4. Built-in defaults: `opencode-go` / `deepseek-v4-flash`
-
-**Validation at execution time** — In `process_thread()` (src/agent/mod.rs), before calling the LLM, four checks run:
-1. `thread.profile` is non-empty → `no-profile` error
-2. Profile exists in `ProfileRegistry` → `invalid-profile` error (Note: ProfileRegistry.get() falls back to default profile, so this only fails if there's no default either)
-3. `thread.provider` is `None` or empty → `no-provider` error
-4. `thread.model` is `None` or empty → `no-model` error
-
-Failed validation inserts a `msg_type='error'` message into the thread and marks the thread as `failed`.
-
-### Thread Architecture
-
-Messages are organized into **threads** — a thread represents a single user request (or cron/kanban trigger) and its LLM processing loop.
-
-- `threads` table (Postgres): `id`, `status`, `cause`, `channel_id`, `profile`, `provider`, `model`, token usage, timestamps
-- `messages` table: `id`, `thread_id` (FK), `role`, `content`, `thread_sequence`, `msg_type`, `msg_subtype`
-- Profile/model/provider live on the **thread**, not individual messages
-
-**Thread statuses:** `created` → `pending` → `processing` → `completed`/`failed`/`skipped`/`interrupted`
-
-**Channel handlers** (one per channel, spawned by supervisor loop):
-- Poll for `pending` threads every 1 second
-- **Sequential** within a channel: threads are processed one at a time per channel (ordered by `created_at`)
-- **Parallel** across channels: each channel handler runs as an independent tokio task
-
-### Testing Guide
-
-#### Test 1: All causes in a single channel
-```sql
--- Insert threads with different causes in the same channel
-INSERT INTO threads (status, cause, channel_id, profile, provider, model)
-VALUES ('created', 'user', <ch_id>, 'default', 'opencode-go', 'deepseek-v4-flash');
--- repeat for 'system' cause (used for cron/kanban tasks)
-
--- Add cause messages
-INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
-VALUES (<thread_id>, 'cause', 'your prompt', 0, 'message');  -- or if cron/kanban
-
--- Set pending
-UPDATE threads SET status = 'pending' WHERE channel_id = <ch_id> AND status = 'created';
-```
-
-**Expected:** Threads processed **sequentially** (one after another) in the same channel. All complete with cause and msg_type preserved.
-
-#### Test 2: Different channels (parallelism)
-```sql
--- Insert threads in DIFFERENT channels
-INSERT INTO threads (...) VALUES ('created', 'user',  <ch_a>, ...);
-INSERT INTO threads (...) VALUES ('created', 'system', <ch_b>, ...);
-INSERT INTO threads (...) VALUES ('created', 'system', <ch_c>, ...);
-UPDATE threads SET status = 'pending' WHERE channel_id IN (<ch_a>, <ch_b>, <ch_c>);
-```
-
-**Expected:** Threads started at the **same second** — parallel processing across channels. Each channel's handler runs independently.
-
-#### Test 3: Stop and Resume
-```bash
-# Stop a channel mid-processing
-curl http://localhost:8080/stop/<channel_id>
-
-# Check thread status — should be 'skipped'
-SELECT id, status, cause, started_at IS NOT NULL as started, ended_at IS NOT NULL as ended
-FROM threads WHERE channel_id = <channel_id> ORDER BY id DESC LIMIT 5;
-
-# Resume the channel
-curl http://localhost:8080/resume/<channel_id>
-
-# New message executes immediately after resume
-INSERT INTO threads (...) VALUES ('created', 'user', <ch_id>, ...);
-```
-
-**Expected:** Stopped threads get `skipped` status with `ended_at` set. After resume, new messages are picked up immediately by the next supervisor cycle.
-
-#### Test 4: Failure cases
-```sql
--- Empty provider → should fail with clear error
-INSERT INTO threads (...) VALUES ('created', 'user', <ch>, 'default', '', 'deepseek-v4-flash');
-
--- Empty model → should fail with clear error
-INSERT INTO threads (...) VALUES ('created', 'user', <ch>, 'default', 'opencode-go', '');
-
--- Nonexistent profile → falls back to default profile (intentional feature)
-INSERT INTO threads (...) VALUES ('created', 'user', <ch>, 'nonexistent', 'opencode-go', 'deepseek-v4-flash');
-```
-
-**Expected:** Empty provider/model fail with clear error msg in thread. Nonexistent profile falls back to default.
-
-#### Monitoring
-```bash
-# Watch processing
-docker compose logs -f omniagent | grep -E "Processing|completed|summary"
-
-# Query threads state
-docker compose exec postgres psql -U omniagent -d omniagent -c "
-SELECT t.id, t.status, t.cause, c.name as ch,
-       (SELECT count(*) FROM messages m WHERE m.thread_id = t.id) as msg_count
-FROM threads t JOIN channels c ON t.channel_id = c.id
-WHERE t.channel_id = <ch_id> ORDER BY t.id;"
-```
-
-### block_in_place Anti-Pattern
-
-`tokio::task::block_in_place()` blocks the calling thread, preventing the tokio worker from making progress on other tasks. This should be avoided in async code.
-
-**Affected location:**
-
-`plugins/mcp/util/src/lib.rs:324` — `handle_tools_call()` in `mcp_server_util`:
-
-```rust
-let (text, is_error) = match tokio::task::block_in_place(|| (entry.handler)(args)) {
-```
-
-This wraps a synchronous handler call in `block_in_place()` inside an async function. The handler type is `Box<dyn Fn(&Value) -> Result<(String, bool)> + Send + Sync>` — a synchronous closure.
-
-**Why it's problematic:**
-- `block_in_place()` tells tokio to hand off the current worker to a replacement thread, but the sync handler still runs on the same OS thread, preventing that worker from polling other tasks.
-- If the sync handler blocks on I/O (e.g., a database query or HTTP call), the entire worker thread is stalled.
-- The `block_in_place()` primitive exists for bridging sync code into async — but only when the sync code will block for less than a few microseconds. Long-running sync handlers stall the runtime.
-
-**The fix:**
-
-Use **async handlers** (`BoxFuture`) instead of synchronous closures, allowing the MCP server to `await` the handler without blocking:
-
-```rust
-// Async handler type:
-pub type AsyncToolHandler = Box<dyn Fn(Value) -> BoxFuture<'static, Result<(String, bool)>> + Send + Sync>;
-
-// In handle_tools_call:
-let (text, is_error) = match (entry.handler)(args).await {
-    Ok(result) => result,
-    Err(e) => { ... }
-};
-```
-
-Alternatively, if the handler must remain synchronous, wrap it with `tokio::task::spawn_blocking()` instead of `block_in_place()`:
-
-```rust
-let (text, is_error) = match tokio::task::spawn_blocking(move || (entry.handler)(args)).await {
-    Ok(Ok(result)) => result,
-    Ok(Err(e)) => { ... }
-    Err(e) => { ... }  // panic in handler
-};
-```
-
-**Note:** The main `McpRegistry::execute()` method in `src/mcp/mod.rs:193` already uses the correct pattern (`spawn_blocking`). Only `mcp_server_util::handle_tools_call()` uses `block_in_place`.
-
-### MCP Server Timeouts
-
-External MCP servers have multiple timeout layers configured through `McpServerConfig` (defined in `src/mcp/external/config.rs`):
-
-| Timeout Layer | Default | Config Field | Description |
-|---|---|---|---|
-| **Up / Restart** | 300s (5 min) | _(process lifecycle)_ | Time to wait for an MCP server subprocess to start up and respond to the `initialize` handshake. If the server doesn't respond within this window, it's considered dead and gets restarted. |
-| **Exec / Run** | 600s (10 min) | `timeout_secs` | Time to wait for a single tool call (`tools/call`) to complete. Long-running tools (e.g., filesystem operations, Docker containers, searches) may need this. |
-| **Circuit breaker cooldown** | 30s | _(hardcoded)_ | After N consecutive failures (default 3), the circuit breaker opens. After 30s it transitions to HalfOpen, allowing one probe request. |
-
-**Specifiable by the agent:** The `timeout_secs` field in `McpServerConfig` is configurable per-server via the `mcp-servers.json` config file:
-
-```json
-{
-  "servers": [
-    {
-      "name": "my-server",
-      "transport": "stdio",
-      "command": "python3",
-      "args": ["server.py"],
-      "timeout_secs": 600,
-      "max_retries": 5
-    }
-  ]
-}
-```
-
-The config file can be specified via `MCP_SERVERS_CONFIG` env var or placed at `<data_dir>/config/mcp-servers.json`. Environment variable references (`${VAR}` and `${VAR:-default}`) are supported in all string fields.
-
-For **built-in MCP plugins** (those under `plugins/mcp/`), their `mcp-config.json` files are auto-discovered and merged. These plugins use the `mcp_server_util` framework (see block_in_place anti-pattern above) which reads requests via async stdin and dispatches to sync handlers. The timeout for these built-in plugins is inherited from the parent omniagent process's lifecycle — there is no per-call timeout within the plugin itself.
-
-## Docker & Deployment Pitfalls
-
-### ⚠️ Container filesystem path mismatch
-
-The `filesystem` MCP tool and `compose` MCP tool operate in different path namespaces.
-
-The omniagent Docker container mounts volumes that remap paths:
-```
-Host path                       Container path
-/opt/workspace/omniagent        /app
-/opt/workspace/omni-workspace   /opt/workspace   ← filesystem writes go here
-/opt/workspace/omni-stack       /opt/omni
-```
-
-**Critical effect:** When `filesystem` writes to `/opt/workspace/playground/...`, the bytes land at `/opt/workspace/omni-workspace/playground/...` on the host. But `compose(project_dir="/opt/workspace/playground/...")` looks at the ACTUAL host path `/opt/workspace/playground/...`, which does NOT contain the files.
-
-**Rule:** Before writing files that will later be deployed via `compose`, verify the container's mount map:
-```
-docker inspect omni-stack-omniagent-1 --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}'
-```
-Write files to a path whose container-side `.Destination` corresponds to a `.Source` that `compose` can reach on the host. Always use verified paths, not assumptions.
-
-### ⚠️ Port-in-use detection is container-scoped
-
-`fetch http://localhost:PORT/` from inside the omniagent container only checks ports INSIDE the omniagent container's network namespace. A container like `repo-web-1` may have `0.0.0.0:12347->5173/tcp` on the HOST but be unreachable from inside the omniagent container's localhost.
-
-**Always use these methods to check host port availability:**
-```
-docker ps --format "table {{.Names}}\t{{.Ports}}" | grep ":PORT_NUMBER"
-```
-The Docker socket is available at `/var/run/docker.sock` inside the omniagent container, so `docker ps` shows real host port mappings.
-
-### ⚠️ Compose files don't auto-deploy
-
-Writing a `docker-compose.yml` via `filesystem_write` does NOT deploy it. Always explicitly call:
-```
-compose(project_dir="<verified-host-path>", command="up", args="-d")
-```
-
-### Platform Plugin `message_deleted` Notification
-
-Platform plugins can send a `message_deleted` notification to the omniagent when a user deletes a message:
-
-```json
-{"method": "message_deleted", "params": {"resource_identifier": "<channel-id>", "external_id": "<deleted-post-id>"}}
-```
-
-The omniagent's client.rs handles this:
-1. Looks up the thread whose seq-0 (cause) message has matching `external_id` AND belongs to the channel matching `resource_identifier`
-2. If the thread is `pending` or `processing` → marks it `skipped` + `terminal` (the agent stops processing it)
-3. If the thread is already terminal → does nothing
-4. If the message is NOT the seq-0 (cause) message → does nothing (only thread-root deletion stops the agent)
-
-**Mattermost plugin:** The WebSocket event handler detects `post_deleted` events and sends this notification automatically. Polling mode currently does NOT detect post deletions — use WebSocket mode (`connection_mode: websocket` in platforms.yml) for this feature. Platform-specific settings like connection mode are configured via the platform config (platforms.yml or dashboard UI), not in .env.
-Then verify with `docker ps` and `curl http://localhost:PORT/`.
-
-### Prompt Logging — Planning Phase Deduplication
-
-When `PROMPT_LOG_LEVEL=first` and a plan is generated, the executor no longer logs a duplicate "first" prompt for the main loop after the plan phase. The fix (line 631 in `executor.rs`):
-
-- After the plan content is saved as a `msg_type="plan"` message, `has_logged_first_prompt` is set to `true`
-- The planning prompt (`msg_type="prompt"`, `msg_subtype="plan"`) is still logged at all non-off levels
-- The main loop skips its own "first" prompt logging because `has_logged_first_prompt=true`
-- This prevents a redundant `msg_type="prompt"` message that would embed the plan content as context
-- Threads WITHOUT a plan are unaffected (existing behavior preserved)
-
-**Before (T53):** #240 prompt/plan, #241 plan/markdown, #242 prompt/first (duplicates plan content)
-**After:** #240 prompt/plan, #241 plan/markdown — no duplicate #242
-
-### FileReader Trait & `read_attached_file` MCP Tool
-
-Large file attachments (exceeding `max_download_bytes`) are no longer inlined in the prompt or stored in the DB. Instead, a generic `FileReader` trait + MCP tool provides on-demand access:
-
-**Architecture:**
-- `FileReader` trait in `src/platform/external/mod.rs` — defines `async fn read_file(file_id, server_url) -> Vec<u8>`
-- `MattermostFileReader` — reads from Mattermost REST API using `MATTERMOST_ACCESS_TOKEN` env var
-- `AppContext.platform_file_readers` — `HashMap<String, Arc<dyn FileReader>>`, keyed by platform name
-- Registered in `main.rs` after `AppContext` creation
-- The `read_attached_file` MCP tool — auto-detects platform from `current_channel_id`, looks up `server_url` from cause message metadata, delegates to the appropriate `FileReader` implementation
-
-**Usage by the agent:**
-```
-read_attached_file(file_id="abc123", server_url="http://mattermost:8065")
-```
-- `file_id` is required (the file identifier from the platform)
-- `server_url` is optional (auto-detected from thread cause message metadata)
-
-**Generic design:** Any platform plugin can register its own `FileReader` — no per-platform code in the MCP tool itself.
-
-### Plugin Parameter: `max_download_bytes`
-
-The Mattermost plugin now accepts `max_download_bytes` as a configurable integer parameter (plugin.json `config_schema`):
-
-- Type: integer, min 1024 (1 KB), max 1,073,741,824 (1 GB), default 10,485,760 (10 MB)
-- Files under this threshold: plugin downloads and base64-encodes content inline (existing behavior)
-- Files over this threshold: content omitted (`None`), agent can fetch via `read_attached_file` MCP tool
-- The `server_url` and `max_download_bytes` parameters are threaded through all call paths: `poll_channel`, `process_channel_event`, `ws_event_loop`, `send_inbound_notification`
-
-## Plugin Installation Architecture — Three Canonical Locations
-
-Every plugin has a single canonical install location depending on its type. **No source copying occurs for any plugin type** — each plugin compiles and runs from its canonical location.
-
-### 1. Builtin Plugins (`builtin: true` in YAML)
-
-Plugins that ship with the omniagent workspace (Rust crate members of the workspace).
-
-- **Source directory**: `/app/plugins/{type_dir}/{name}/`
-- **Binary location**: `get_bin_path("mcp-server-{name}")` — next to the omniagent binary
-  - Dev: `/app/target/release/mcp-server-{name}` (same dir as omniagent)
-  - Production: `/usr/local/bin/mcp-server-{name}` (from Dockerfile `COPY mcp-server-*`)
-- **mcp-config.json**: Present but with no `command` field — binary auto-resolved by scanner
-- **Install/reinstall**: Verify binary exists at `get_bin_path()`. If missing, compile from workspace root with `cargo build --release -p mcp-server-{name}`
-- **Uninstall**: Remove from YAML only (binary stays at `get_bin_path()`)
-- **Discovery**: Source found at `/app/plugins/{type}/{name}/Cargo.toml`, `is_plugin_builtin()` returns `true`
-
-**Detection logic:**
-```rust
-let is_builtin = plugins_yaml::is_plugin_builtin(data_dir, &name, &yaml_type);
-// Checks if /app/plugins/{type}/{name}/Cargo.toml or plugin.json exists
-```
-
-### 2. Omni-Stack Plugins (user-created, in workspace repo, no remote)
-
-Plugins that are part of the omni-stack repository or the user's workspace directory.
-
-- **Source directory**: `{workspace_dir}/plugins/{type_dir}/{name}/`
-- **Binary location**: `{workspace_dir}/plugins/{type_dir}/{name}/target/release/{binary_name}`
-- **plugin.json**: Present (full plugin package)
-- **Install/reinstall**: Already in place — compile from their own Cargo.toml in-place
-- **Uninstall**: Remove from YAML only (source stays in the git repo; removal means disable + remove YAML entry)
-- **Discovery**: Scanned as "bundled" plugins from `{workspace_dir}/plugins/{type}/`
-
-**Detection logic:**
-```rust
-let yaml_entry = plugins_yaml::get_entry(data_dir, &yaml_type, &name)?;
-let has_remote = yaml_entry.as_ref().and_then(|e| e.remote.as_ref()).is_some();
-let is_builtin = yaml_entry.as_ref().and_then(|e| e.builtin).unwrap_or(false);
-// Omni-stack = !is_builtin && !has_remote
-```
-
-### 3. Remote Plugins (git-installed, has `remote` field in YAML)
-
-Plugins installed from an external git repository via the dashboard or API.
-
-- **Source directory**: `{data_dir}/plugins/{type_dir}/.remote/{name}/{repo_path}/`
-  - Uses `.remote` (leading dot) to avoid collision with any plugin named "remote"
-- **Binary location**: `{data_dir}/plugins/{type_dir}/.remote/{name}/{repo_path}/target/release/{binary_name}`
-- **plugin.json**: Present (cloned from git repo)
-- **Install (`install_from_git`)**: Clone DIRECTLY into `.remote/` dir — no copy step
-- **Reinstall**: Remove `.remote/` dir, re-clone fresh
-- **Uninstall**: `rm -rf .remote/` directory + remove from YAML — plugin is completely gone as if never added
-- **`.gitignore`**: `.remote/` pattern added so git-ignored clones don't pollute the repo
-- **Discovery**: Scanned from `{data_dir}/plugins/{type}/.remote/` by `discover_plugins()`
-
-**Detection logic:**
-```rust
-let has_remote = yaml_entry.as_ref().and_then(|e| e.remote.as_ref()).is_some();
-// Remote = has_remote == true
-```
-
-### Config Scanner Resolution Order
-
-When the MCP scanner (`scan_plugin_servers` in `mcp/external/config.rs`) resolves the binary command for a plugin, it checks:
-
-1. If `mcp-config.json` has an explicit `command` → use it directly
-2. If `Cargo.toml` exists → check candidates in order:
-   1. `{plugin_dir}/target/release/{package_name}` (standalone plugin build)
-   2. `get_bin_path("{package_name}")` (workspace member next to omniagent binary)
-   3. `{plugin_dir}/target/release/{server_name}` (fallback)
-3. If no `Cargo.toml` → check `get_bin_path("mcp-server-{name}")` then `{plugin_dir}/target/release/mcp-server-{name}`
-
-### Key Design Principles
-
-- **No source copying**: Every plugin compiles and runs from its canonical location
-- **`get_bin_path()`**: Single source of truth for builtin plugin binaries — resolves `{exe_dir}/{name}` using `std::env::current_exe()`
-- **`.remote/` convention**: Git-installed plugins live under `.remote/` (leading dot) to avoid naming collisions, always under `{data_dir}`
-- **YAML-only uninstall**: For builtin and omni-stack plugins, "uninstall" only removes the YAML entry. The source and compiled binary remain (source is part of the workspace repo, binary is in `get_bin_path()` or the workspace build output)
-
-### Plugin Source Resolution (Three Sources per Name)
-
-A plugin name may have up to **3 disk sources**: **bundled** (omni-stack), **built-in** (omniagent workspace), and **remote** (git-cloned). The YAML file determines which is primary (active):
-
-| YAML entry | Primary source | Others' status |
-|---|---|---|
-| `builtin: true` | built-in | `"duplicated"` |
-| `builtin: false` or unset + exists in YAML | bundled | `"duplicated"` |
-| `remote: { url: ... }` | remote | `"duplicated"` |
-| No YAML entry | bundled (first discovered) | built-in hidden unless bundled absent |
-
-**Rules:**
-
-1. **builtin tools are NOT enabled by default** — must be explicitly added to YAML with `enabled: true` and `builtin: true`
-2. **If YAML has a tool key with `builtin: false` or unset** → the built-in source is ignored; the bundled (omni_dir) version is primary
-3. **If YAML has `builtin: true`** → the built-in source is primary; the bundled copy shows as `"duplicated"`
-4. **If a plugin has no YAML entry** → its bundled copy shows as enabled (discovered from disk); its built-in copy shows as disabled
-5. **Dashboard shows `"duplicated"` status** for all non-primary sources of a plugin name
-
-**Directory name convention (`PluginYamlType`):**
-
-```rust
-// file_name() returns the YAML section name:
-PluginYamlType::Tool   → "tools"   (the YAML key)
-PluginYamlType::Platform → "platforms"
-PluginYamlType::Provider → "providers"
-
-// type_dir_name() returns the plugins/ subdirectory name:
-PluginYamlType::Tool   → "mcp"     (the directory name)
-PluginYamlType::Platform → "platforms"
-PluginYamlType::Provider → "providers"
-```
-
-Use `type_dir_name()` for filesystem paths under `/app/plugins/` and `<workspace_dir>/plugins/`. Use `file_name()` only for YAML section references.
-
-**Discovery order** (`discover_plugins` in `installer.rs`):
-
-1. Section A: `data_dir/plugins/<type>/<name>/plugin.json` → `"bundled"`
-2. Section B: `workspace_dir/plugins/<type>/<name>/plugin.json` → `"bundled"` (deduped against A)
-3. Section C: `data_dir/plugins/<type>/.remote/<name>/plugin.json` → `"remote"`
-4. Section D: `/app/plugins/<type>/<name>/` (Cargo.toml + plugin.json or mcp-config.json) → `"built-in"`
-5. mcp_config: from `mcp-config.json` files → synthetic manifest (deduped against all above)
-
-All sources are returned to `list_plugins`, which groups by directory key and picks the primary per YAML.
-
-**`util` crate filtering:** A crate must have **both** `Cargo.toml` AND (`plugin.json` OR `mcp-config.json`) to be considered a plugin. Utility libraries (like `mcp-server-util`) with only `Cargo.toml` are excluded from both plugin discovery and MCP server discovery.
-
-**`actions` plugin:** Source lives in `omni-stack/plugins/mcp/actions/`. Removed from `omniagent/plugins/mcp/actions/` and from the workspace `Cargo.toml` member list. Only appears as bundled source.
-
+This resolves to `/opt/workspace/omniagent/Cargo.toml` inside the container (4 levels up from actions directory: `/opt/workspace/omni-stack/plugins/mcp/actions/` → `/opt/workspace/` → `omniagent/`).
+
+This is the ONLY plugin in omni-stack that depends on `omniagent`. All others are self-contained.
+
+### Key API Response Fields
+
+Each plugin entry in `/api/plugins` includes:
+- `source`: `"built-in"` | `"bundled"` | `"mcp_config"`
+- `is_duplicated`: true when this source is NOT the YAML-configured primary
+- `has_source_code`: true if `Cargo.toml` or script entrypoint exists
+- `status`: `"enabled"` | `"disabled"`
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `src/server/plugins.rs` | Plugin API handlers, `compile_rust_crate(source)`, `category_to_source()` |
+| `src/plugins_yaml.rs` | YAML state, `pick_primary_source`, `build_plugin_detail`, `set_entry`, `is_plugin_builtin` |
+| `src/plugin/installer.rs` | Filesystem install/uninstall/discover |
+| `docker-compose.yml` (omni-stack) | Container volumes, WORKSPACE_DIR env var |
+| `omni-stack/plugins/mcp/<name>/Cargo.toml` | Bundled plugin dependencies (path must resolve in container) |

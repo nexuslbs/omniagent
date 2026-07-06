@@ -81,8 +81,24 @@ async fn handle_uninstall(data_dir: &str, args: &Value) -> Result<(String, bool)
         }
     }
 
-    // Remove from disk
-    let _ = plugin::installer::uninstall(name, data_dir);
+    // Remove from disk — detect type to pass correct arguments
+    let is_remote = plugins_yaml::get_disk_plugin_type(data_dir, name)
+        .ok()
+        .flatten()
+        .map(|t| {
+            let yaml_type = plugins_yaml::PluginYamlType::from_type_str(&t);
+            plugins_yaml::get_entry(data_dir, &yaml_type, name)
+                .ok()
+                .flatten()
+                .and_then(|e| e.remote)
+                .is_some()
+        })
+        .unwrap_or(false);
+    let type_dir = plugins_yaml::get_disk_plugin_type(data_dir, name)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "mcp".to_string());
+    let _ = plugin::installer::uninstall(name, data_dir, &type_dir, is_remote);
 
     if deleted {
         Ok((format!("Plugin '{}' uninstalled successfully.", name), false))

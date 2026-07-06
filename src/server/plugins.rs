@@ -25,7 +25,7 @@
 //!    Uninstall: remove .remote/ dir + YAML removal
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
@@ -34,6 +34,7 @@ use axum::{
 use serde::Deserialize;
 use sqlx;
 use sql_forge::sql_forge;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::{error, info};
@@ -136,11 +137,18 @@ fn get_plugin_dir_for_category(
             }
         }
         PluginCategory::OmniStack => {
+            // Check workspace_dir first (omni-stack source)
             let dir = format!("{}/plugins/{}/{}", workspace_dir, type_dir, name);
             if std::path::Path::new(&dir).exists() {
                 Some(dir)
             } else {
-                None
+                // Fallback: check data_dir (bundled plugins copied to data dir)
+                let data_plugin_dir = format!("{}/plugins/{}/{}", data_dir, type_dir, name);
+                if std::path::Path::new(&data_plugin_dir).exists() {
+                    Some(data_plugin_dir)
+                } else {
+                    None
+                }
             }
         }
         PluginCategory::Remote => {
@@ -155,6 +163,7 @@ fn get_plugin_dir_for_category(
 }
 
 /// Detect plugin category from YAML, searching all three YAML types.
+/// Falls back to disk state if no YAML entry exists (e.g., after uninstall).
 fn detect_plugin_category_cross_type(data_dir: &str, name: &str) -> Option<(plugins_yaml::PluginYamlType, PluginCategory)> {
     for pt in &[
         plugins_yaml::PluginYamlType::Tool,
@@ -172,6 +181,16 @@ fn detect_plugin_category_cross_type(data_dir: &str, name: &str) -> Option<(plug
             };
             return Some((pt.clone(), cat));
         }
+    }
+    // Fallback: check disk state — plugin exists on disk even without YAML entry
+    if let Ok(Some(type_str)) = plugins_yaml::get_disk_plugin_type(data_dir, name) {
+        let pt = plugins_yaml::PluginYamlType::from_type_str(&type_str);
+        // Check if builtin source directory exists (e.g., /app/plugins/<type>/<name>/)
+        // BEFORE defaulting to OmniStack so install/reinstall handlers find the right dir.
+        if plugins_yaml::is_plugin_builtin(data_dir, name, &pt) {
+            return Some((pt, PluginCategory::Builtin));
+        }
+        return Some((pt, PluginCategory::OmniStack));
     }
     None
 }
@@ -192,88 +211,77 @@ fn read_cargo_package_name(cargo_toml_path: &str) -> Option<String> {
         })
 }
 
-/// Compile a Rust crate in the given directory.
-/// Returns Ok(true) if compiled, Ok(false) if no Cargo.toml found.
-async fn compile_rust_crate(plugin_dir: &str, name: &str) -> Result<bool, String> {
-    let cargo_toml = std::path::Path::new(plugin_dir).join("Cargo.toml");
+/// Compile a Rust crate. Uses the EXACT source to determine build strategy.
+/// - "built-in": workspace build from /app/Cargo.toml
+/// - "bundled" or "remote": standalone build from the plugin's own Cargo.toml
+async fn compile_rust_crate(plugin_dir: &str, name: &str, source: &str) -> Result<bool, String> {
+    let cargo_path = std::path::Path::new(plugin_dir);
+    let cargo_toml = cargo_path.join("Cargo.toml");
     if !cargo_toml.exists() {
         return Ok(false);
     }
 
-    let package_name = read_cargo_package_name(&cargo_toml.to_string_lossy());
+    let pkg_name = read_cargo_package_name(&cargo_toml.to_string_lossy());
 
-    // Check if binary already exists from workspace build
-    // For builtin crates, check get_bin_path first
-    let existing_binary = package_name.as_ref().and_then(|pkg| {
-        crate::mcp::external::config::get_bin_path(pkg)
-    }).filter(|p| std::path::Path::new(p).exists());
+    // Check if binary already exists (pre-built by cargo watch or release build)
+    let bin_exists = if source == "built-in" {
+        pkg_name.as_ref()
+            .and_then(|p| crate::mcp::external::config::get_bin_path(p))
+            .filter(|p| std::path::Path::new(p).exists())
+            .is_some()
+    } else {
+        let local = pkg_name.as_ref()
+            .map(|p| format!("{}/target/release/{}", plugin_dir, p))
+            .unwrap_or_else(|| format!("{}/target/release/{}", plugin_dir, name));
+        std::path::Path::new(&local).exists()
+    };
 
-    if let Some(bin_path) = existing_binary {
-        info!(
-            "Compile: binary for '{}' already exists at {} (no compilation needed)",
-            name, bin_path
-        );
+    if bin_exists {
+        info!("Compile: binary for '{}' already exists — no compilation needed", name);
         return Ok(true);
     }
 
-    // Build from workspace root if available (handles path deps)
-    let workspace_root = std::path::Path::new("/app");
-    let use_workspace_root = workspace_root.join("Cargo.toml").exists();
-    let pkg_name_for_build = package_name.clone();
-
-    info!("Compiling Rust crate at {} (pkg: {:?})", plugin_dir, package_name);
-
-    tokio::task::spawn_blocking({
-        let dir = plugin_dir.to_string();
-        let pkg = pkg_name_for_build;
-        move || {
-            let mut cmd = std::process::Command::new("cargo");
-            cmd.arg("build").arg("--release");
-            if use_workspace_root {
-                cmd.arg("--manifest-path")
-                    .arg(workspace_root.join("Cargo.toml").to_string_lossy().to_string());
-                if let Some(ref name_arg) = pkg {
-                    cmd.arg("-p").arg(name_arg);
-                }
-            } else {
-                cmd.arg("--manifest-path")
-                    .arg(std::path::Path::new(&dir).join("Cargo.toml").to_string_lossy().to_string());
+    // Build from the EXACT source — no guessing
+    if source == "built-in" {
+        // Workspace build (all builtins are workspace members)
+        if let Some(ref pn) = pkg_name {
+            let mut cmd = tokio::process::Command::new("cargo");
+            cmd.args(["build", "--release", "--manifest-path", "/app/Cargo.toml", "-p", pn]);
+            cmd.current_dir("/app");
+            let st = cmd.status().await
+                .map_err(|e| format!("cargo failed: {}", e))?;
+            if !st.success() {
+                return Err(format!("Workspace build for '{}' failed: {}", name, st));
             }
-            cmd.current_dir(&dir).status()
+            info!("Builtin crate '{}' compiled via workspace", name);
+        } else {
+            return Err(format!("Cannot determine package name for '{}'", name));
         }
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?
-    .map_err(|e| format!("Failed to run cargo: {}", e))?;
-
-    if !existing_binary.is_some() {
-        // For builtins, verify get_bin_path works after build
-        if let Some(ref pkg) = package_name {
-            if crate::mcp::external::config::get_bin_path(pkg)
-                .map(|p| std::path::Path::new(&p).exists())
-                .unwrap_or(false)
-            {
-                info!("Compilation succeeded for '{}' (binary found at get_bin_path)", name);
-                return Ok(true);
-            }
+    } else {
+        // Standalone build for bundled or remote
+        let cargo_s = cargo_toml.to_string_lossy().to_string();
+        let mut cmd = tokio::process::Command::new("cargo");
+        cmd.args(["build", "--release", "--manifest-path", &cargo_s]);
+        cmd.current_dir(plugin_dir);
+        let st = cmd.status().await
+            .map_err(|e| format!("cargo failed: {}", e))?;
+        if !st.success() {
+            return Err(format!("Standalone build for '{}' failed: {}", name, st));
         }
-
-        // Check local target/release
-        let local_bin = package_name.as_ref()
-            .map(|p| format!("{}/target/release/{}", plugin_dir, p))
-            .unwrap_or_else(|| format!("{}/target/release/{}", plugin_dir, name));
-        if std::path::Path::new(&local_bin).exists() {
-            info!("Compilation succeeded for '{}' (binary at {})", name, local_bin);
-            return Ok(true);
-        }
+        info!("Standalone crate '{}' compiled", name);
     }
 
-    Err(format!("Compilation failed for '{}' — binary not found after build", name))
+    Ok(true)
 }
 
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
+/// Map PluginCategory to source string for compile_rust_crate.
+fn category_to_source(category: &PluginCategory) -> &'static str {
+    match category {
+        PluginCategory::Builtin => "built-in",
+        PluginCategory::OmniStack => "bundled",
+        PluginCategory::Remote => "remote",
+    }
+}
 
 /// Build the plugin management router, reusing the main server's state.
 #[allow(dead_code)]
@@ -286,18 +294,9 @@ pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
         .route("/api/plugins/{name}/config", post(update_config_handler))
         .route("/api/plugins/{name}/enable", post(enable_plugin_handler))
         .route("/api/plugins/{name}/disable", post(disable_plugin_handler))
-        .route(
-            "/api/plugins/{name}/install",
-            post(install_plugin_handler),
-        )
-        .route(
-            "/api/plugins/{name}/reinstall",
-            post(reinstall_plugin_handler),
-        )
-        .route(
-            "/api/plugins/{name}/refresh-models",
-            post(refresh_models_handler),
-        )
+        .route("/api/plugins/{name}/install", post(install_plugin_handler))
+        .route("/api/plugins/{name}/reinstall", post(reinstall_plugin_handler))
+        .route("/api/plugins/{name}/refresh-models", post(refresh_models_handler))
         .route("/api/plugins/{name}/setup", post(setup_plugin_handler))
         .route("/api/plugins/{name}", delete(delete_plugin_handler))
         .route("/api/reload", post(reload_env_handler))
@@ -589,6 +588,29 @@ pub(crate) async fn enable_plugin_handler(
         }
     };
 
+    // Check if plugin already enabled — if so, skip YAML update to avoid
+    // auto-detecting builtin flag when the user just clicked Enable on an
+    // already-enabled builtin entry.
+    if let Ok(Some(entry)) = plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name) {
+        if entry.enabled {
+            // Already enabled — just return current state without touching YAML
+            match plugins_yaml::get_plugin(&state.data_dir, &name) {
+                Ok(Some(detail)) => {
+                    info!("Plugin '{}' is already enabled — no change needed", name);
+                    return (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "success": true,
+                            "data": detail
+                        })),
+                    )
+                        .into_response();
+                }
+                _ => {}
+            }
+        }
+    }
+
     // Upsert with enabled=true (creates YAML entry if not exists)
     match plugins_yaml::set_entry(
         &state.data_dir,
@@ -769,8 +791,14 @@ pub(crate) async fn install_plugin_handler(
                         .into_response();
                 }
             };
-            // Default to omni-stack for newly discovered plugins
-            (disk_type, PluginCategory::OmniStack)
+            // Default to omni-stack for newly discovered plugins, but check
+            // for builtin source first (the plugin may live at /app/plugins/ without YAML entry)
+            let category = if plugins_yaml::is_plugin_builtin(data_dir, &name, &disk_type) {
+                PluginCategory::Builtin
+            } else {
+                PluginCategory::OmniStack
+            };
+            (disk_type, category)
         }
     };
 
@@ -806,7 +834,20 @@ pub(crate) async fn install_plugin_handler(
     };
 
     // Check if there's actual source code to work with
-    let dir_path = std::path::Path::new(&plugin_dir);
+    // For remote plugins with a path subdirectory, also check the subpath
+    let mut dir_path = std::path::Path::new(&plugin_dir).to_path_buf();
+    if matches!(category, PluginCategory::Remote) {
+        if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, &yaml_type, &name) {
+            if let Some(ref remote) = entry.remote {
+                if let Some(ref subpath) = remote.path {
+                    let sub = dir_path.join(subpath);
+                    if sub.join("Cargo.toml").exists() || sub.join("plugin.json").exists() {
+                        dir_path = sub;
+                    }
+                }
+            }
+        }
+    }
     let has_cargo_toml = dir_path.join("Cargo.toml").exists();
     let has_plugin_json = dir_path.join("plugin.json").exists();
     let has_entrypoint = if has_plugin_json {
@@ -841,12 +882,20 @@ pub(crate) async fn install_plugin_handler(
         yaml_type.file_name(), name, plugin_dir, category
     );
 
-    // 3. Compile if Rust crate
-    match compile_rust_crate(&plugin_dir, &name).await {
+    // 3. Compile if Rust crate — error is fatal (don't silently skip)
+    match compile_rust_crate(&plugin_dir, &name, category_to_source(&category)).await {
         Ok(_) => info!("Install: compilation step for '{}' completed", name),
         Err(e) => {
-            // Non-fatal: some plugins don't have Cargo.toml
-            tracing::warn!("Install: compilation warning for '{}': {}", name, e);
+            let msg = format!("Install: compilation failed for '{}': {}", name, e);
+            tracing::error!("{}", msg);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": msg,
+                })),
+            )
+                .into_response();
         }
     }
 
@@ -975,7 +1024,20 @@ pub(crate) async fn reinstall_plugin_handler(
     };
 
     // Check if there's actual source code to work with
-    let dir_path = std::path::Path::new(&plugin_dir);
+    // For remote plugins with a path subdirectory, also check the subpath
+    let mut dir_path = std::path::Path::new(&plugin_dir).to_path_buf();
+    if matches!(category, PluginCategory::Remote) {
+        if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, &yaml_type, &name) {
+            if let Some(ref remote) = entry.remote {
+                if let Some(ref subpath) = remote.path {
+                    let sub = dir_path.join(subpath);
+                    if sub.join("Cargo.toml").exists() || sub.join("plugin.json").exists() {
+                        dir_path = sub;
+                    }
+                }
+            }
+        }
+    }
     let has_cargo_toml = dir_path.join("Cargo.toml").exists();
     let has_plugin_json = dir_path.join("plugin.json").exists();
     let has_entrypoint = if has_plugin_json {
@@ -1006,7 +1068,7 @@ pub(crate) async fn reinstall_plugin_handler(
     }
 
     // 4. Compile
-    let compiled = match compile_rust_crate(&plugin_dir, &name).await {
+    let compiled = match compile_rust_crate(&plugin_dir, &name, category_to_source(&category)).await {
         Ok(true) => true,
         Ok(false) => false,
         Err(e) => {
@@ -1659,17 +1721,118 @@ pub(crate) async fn refresh_models_handler(
     }
 }
 
-/// DELETE /api/plugins/:name — uninstall and remove from YAML.
+/// DELETE /api/plugins/:name — Remove or Uninstall plugin.
 ///
-/// - Builtin: remove from YAML only (binary stays in get_bin_path())
-/// - Omni-stack: remove from YAML only (source in git repo)
-/// - Remote: remove .remote/ dir + remove from YAML
+/// Default behavior (Remove): Removes YAML entry entirely. For remote, also removes .remote/ dir.
+/// `?mode=uninstall` (Uninstall): For remote, removes .remote/ dir but keeps YAML entry
+/// (sets enabled=false). For non-remote, removes YAML entry.
 pub(crate) async fn delete_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
+    let is_uninstall_mode = params.get("mode").map(|s| s == "uninstall").unwrap_or(false);
 
+    if is_uninstall_mode {
+        // ── Uninstall mode ──
+        // For remote: remove .remote/ dir, set enabled=false (keep YAML entry)
+        // For non-remote: remove from YAML (source stays in repo)
+        let is_remote = match detect_plugin_category_cross_type(data_dir, &name) {
+            Some((_, PluginCategory::Remote)) => true,
+            _ => false,
+        };
+
+        if is_remote {
+            let mut removed_binary = false;
+            for t in &["mcp", "platforms", "providers"] {
+                let remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, t, name);
+                let remote_path = std::path::Path::new(&remote_dir);
+                if remote_path.exists() && remote_path.is_dir() {
+                    match std::fs::remove_dir_all(remote_path) {
+                        Ok(()) => {
+                            tracing::info!("Uninstall: removed .remote/ directory for plugin '{}'", name);
+                            removed_binary = true;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Uninstall: failed to remove .remote/ for '{}': {:?}", name, e);
+                        }
+                    }
+                }
+            }
+
+            // Set enabled=false in YAML (keep the entry)
+            for yaml_type in &[
+                plugins_yaml::PluginYamlType::Platform,
+                plugins_yaml::PluginYamlType::Tool,
+                plugins_yaml::PluginYamlType::Provider,
+            ] {
+                if let Ok(Some(_)) = plugins_yaml::get_entry(data_dir, yaml_type, &name) {
+                    let _ = plugins_yaml::set_enabled(data_dir, yaml_type, &name, false);
+                    break;
+                }
+            }
+
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "data": {"uninstalled": true}
+                })),
+            ).into_response();
+        } else {
+            // Non-remote: remove from YAML + remove compiled target/ directory
+
+            // Remove target/ directory if it exists (the compiled binary)
+            if let Some((yaml_type, _category)) = detect_plugin_category_cross_type(data_dir, &name) {
+                let type_dirs = [yaml_type.type_dir_name(), "mcp", "platforms", "providers"];
+                let search_dirs = [
+                    data_dir,
+                    &state.workspace_dir,
+                ];
+                for type_dir in &type_dirs {
+                    for base in &search_dirs {
+                        let plugin_dir = format!("{}/plugins/{}/{}", base, type_dir, name);
+                        let target_dir = format!("{}/target", plugin_dir);
+                        let target_path = std::path::Path::new(&target_dir);
+                        if target_path.exists() && target_path.is_dir() {
+                            let _ = std::fs::remove_dir_all(target_path);
+                            tracing::info!("Uninstall: removed target/ directory at {}", target_dir);
+                        }
+                    }
+                }
+            }
+            let mut removed = false;
+            for yaml_type in &[
+                plugins_yaml::PluginYamlType::Platform,
+                plugins_yaml::PluginYamlType::Tool,
+                plugins_yaml::PluginYamlType::Provider,
+            ] {
+                if let Ok(true) = plugins_yaml::remove_entry(data_dir, yaml_type, &name) {
+                    removed = true;
+                }
+            }
+            if removed {
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "success": true,
+                        "data": {"uninstalled": true}
+                    })),
+                ).into_response();
+            } else {
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "success": true,
+                        "data": {"uninstalled": true, "note": "not found in YAML"}
+                    })),
+                ).into_response();
+            }
+        }
+    }
+
+    // ── Remove mode (default) —─
     // Remove from YAML (all three types, just in case)
     let mut removed = false;
     for yaml_type in &[
@@ -1686,7 +1849,6 @@ pub(crate) async fn delete_plugin_handler(
     if let Some((yaml_type, _category)) = detect_plugin_category_cross_type(data_dir, &name) {
         let type_dir = yaml_type.file_name();
 
-        // Check for .remote/ directory
         let remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, name);
         let remote_path = std::path::Path::new(&remote_dir);
         if remote_path.exists() && remote_path.is_dir() {
@@ -1701,7 +1863,6 @@ pub(crate) async fn delete_plugin_handler(
             }
         }
 
-        // Also check other type dirs for .remote/ (in case type was misdetected)
         for t in &["mcp", "platforms", "providers"] {
             if *t == type_dir { continue; }
             let alt_remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, t, name);
@@ -1726,10 +1887,10 @@ pub(crate) async fn delete_plugin_handler(
     } else {
         info!("Plugin '{}' not found on disk or in YAML", name);
         (
-            StatusCode::NOT_FOUND,
+            StatusCode::OK,
             Json(serde_json::json!({
-                "success": false,
-                "error": format!("Plugin '{}' not found on disk or in YAML", name)
+                "success": true,
+                "data": {"deleted": true, "note": "not found in YAML"}
             })),
         )
             .into_response()
