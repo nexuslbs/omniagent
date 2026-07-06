@@ -775,11 +775,16 @@ pub(crate) async fn install_plugin_handler(
     };
 
     // 2. Get the plugin source directory
-    let plugin_dir = match get_plugin_dir_for_category(data_dir, workspace_dir, &yaml_type, &name, &category) {
+    let plugin_dir = match get_plugin_dir_for_category(
+        data_dir,
+        workspace_dir,
+        &yaml_type,
+        &name,
+        &category,
+    ) {
         Some(d) => d,
         None => {
             if matches!(category, PluginCategory::Remote) {
-                // Remote needs to be cloned first — redirect to install-git
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
@@ -799,6 +804,37 @@ pub(crate) async fn install_plugin_handler(
                 .into_response();
         }
     };
+
+    // Check if there's actual source code to work with
+    let dir_path = std::path::Path::new(&plugin_dir);
+    let has_cargo_toml = dir_path.join("Cargo.toml").exists();
+    let has_plugin_json = dir_path.join("plugin.json").exists();
+    let has_entrypoint = if has_plugin_json {
+        std::fs::read_to_string(dir_path.join("plugin.json"))
+            .ok()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .map(|v| {
+                v.get("entrypoint")
+                    .and_then(|e| e.get("command"))
+                    .and_then(|c| c.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    if !has_cargo_toml && !has_entrypoint {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Plugin '{}' has no source code — only a pre-built binary exists. Install requires source code (Cargo.toml or plugin.json entrypoint).", name)
+            })),
+        )
+            .into_response();
+    }
 
     info!(
         "Install: {} plugin '{}' from {} (category: {:?})",
@@ -937,6 +973,37 @@ pub(crate) async fn reinstall_plugin_handler(
                 .into_response();
         }
     };
+
+    // Check if there's actual source code to work with
+    let dir_path = std::path::Path::new(&plugin_dir);
+    let has_cargo_toml = dir_path.join("Cargo.toml").exists();
+    let has_plugin_json = dir_path.join("plugin.json").exists();
+    let has_entrypoint = if has_plugin_json {
+        std::fs::read_to_string(dir_path.join("plugin.json"))
+            .ok()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .map(|v| {
+                v.get("entrypoint")
+                    .and_then(|e| e.get("command"))
+                    .and_then(|c| c.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    if !has_cargo_toml && !has_entrypoint {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Plugin '{}' has no source code — only a pre-built binary exists. Reinstall requires source code (Cargo.toml or plugin.json entrypoint).", name)
+            })),
+        )
+            .into_response();
+    }
 
     // 4. Compile
     let compiled = match compile_rust_crate(&plugin_dir, &name).await {
