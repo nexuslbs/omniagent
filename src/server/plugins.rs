@@ -55,6 +55,13 @@ pub(crate) struct UpdateConfigRequest {
 }
 
 #[derive(Deserialize)]
+pub(crate) struct PluginSourceRequest {
+    /// Source identifier: "built-in", "bundled", or "remote".
+    /// Required. The handler acts on this exact source.
+    pub source: String,
+}
+
+#[derive(Deserialize)]
 pub(crate) struct InstallUrlRequest {
     url: String,
 }
@@ -573,6 +580,7 @@ pub(crate) async fn update_config_handler(
 pub(crate) async fn enable_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
+    Json(req): Json<PluginSourceRequest>,
 ) -> impl IntoResponse {
     let yaml_type = match plugins_yaml::get_disk_plugin_type(&state.data_dir, &name) {
         Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
@@ -588,15 +596,34 @@ pub(crate) async fn enable_plugin_handler(
         }
     };
 
-    // Check if plugin already enabled — if so, skip YAML update to avoid
-    // auto-detecting builtin flag when the user just clicked Enable on an
-    // already-enabled builtin entry.
+    // Determine desired builtin flag from source parameter
+    let desired_builtin = match req.source.as_str() {
+        "built-in" => Some(true),
+        "bundled" => Some(false),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Invalid source '{}': must be 'built-in' or 'bundled'", req.source)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Check if plugin already in the desired state — skip only if source matches
     if let Ok(Some(entry)) = plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name) {
-        if entry.enabled {
-            // Already enabled — just return current state without touching YAML
+        let source_matches = match desired_builtin {
+            Some(true) => entry.builtin.unwrap_or(false),
+            Some(false) => !entry.builtin.unwrap_or(false),
+            None => unreachable!(), // desired_builtin is always Some after validation
+        };
+        if entry.enabled && source_matches {
+            // Already enabled with matching source — no change needed
             match plugins_yaml::get_plugin(&state.data_dir, &name) {
                 Ok(Some(detail)) => {
-                    info!("Plugin '{}' is already enabled — no change needed", name);
+                    info!("Plugin '{}' is already enabled with matching source — no change needed", name);
                     return (
                         StatusCode::OK,
                         Json(serde_json::json!({
@@ -611,12 +638,13 @@ pub(crate) async fn enable_plugin_handler(
         }
     }
 
-    // Upsert with enabled=true (creates YAML entry if not exists)
-    match plugins_yaml::set_entry(
+    // Upsert with enabled=true and explicit builtin override
+    match plugins_yaml::set_entry_with_builtin_override(
         &state.data_dir,
         &yaml_type,
         &name,
         true,
+        desired_builtin,
         serde_json::json!({}),
     ) {
         Ok(_entry) => {
@@ -687,6 +715,7 @@ pub(crate) async fn enable_plugin_handler(
 pub(crate) async fn disable_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
+    Json(req): Json<PluginSourceRequest>,
 ) -> impl IntoResponse {
     let yaml_type = match plugins_yaml::get_disk_plugin_type(&state.data_dir, &name) {
         Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
@@ -702,12 +731,29 @@ pub(crate) async fn disable_plugin_handler(
         }
     };
 
-    // Upsert with enabled=false
-    match plugins_yaml::set_entry(
+    // Validate source parameter
+    let _desired_builtin = match req.source.as_str() {
+        "built-in" => Some(true),
+        "bundled" => Some(false),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Invalid source '{}': must be 'built-in' or 'bundled'", req.source)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Upsert with enabled=false — preserve existing builtin flag
+    match plugins_yaml::set_entry_with_builtin_override(
         &state.data_dir,
         &yaml_type,
         &name,
         false,
+        None, // preserve existing builtin flag
         serde_json::json!({}),
     ) {
         Ok(_entry) => {

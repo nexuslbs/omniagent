@@ -323,6 +323,41 @@ pub fn is_plugin_builtin(_data_dir: &str, name: &str, plugin_type: &PluginYamlTy
         || std::path::Path::new(&source_dir).join("plugin.json").exists()
 }
 
+/// Set a plugin entry with an explicit builtin flag override.
+/// When `builtin_override` is Some(true), forces `builtin: true`.
+/// When `builtin_override` is Some(false), forces `builtin: false` (cleared).
+/// When `builtin_override` is None, auto-detects from disk (preserves existing).
+/// Preserves the existing remote field.
+pub fn set_entry_with_builtin_override(
+    data_dir: &str,
+    pt: &PluginYamlType,
+    name: &str,
+    enabled: bool,
+    builtin_override: Option<bool>,
+    config: serde_json::Value,
+) -> AppResult<PluginYamlEntry> {
+    let mut entries = load_raw(data_dir, pt)?;
+    let existing_remote = entries.get(name).and_then(|e| e.remote.clone());
+    let builtin = builtin_override.or_else(|| {
+        entries.get(name).and_then(|e| e.builtin).or_else(|| {
+            if is_plugin_builtin(data_dir, name, pt) {
+                Some(true)
+            } else {
+                None
+            }
+        })
+    });
+    let entry = PluginYamlEntry {
+        enabled,
+        builtin,
+        config,
+        remote: existing_remote,
+    };
+    entries.insert(name.to_string(), entry.clone());
+    save_file(data_dir, pt, entries)?;
+    Ok(entry)
+}
+
 /// Set a plugin entry with an explicit remote field (for git-installed plugins).
 /// Creates the entry if it doesn't exist.
 pub fn set_entry_with_remote(
