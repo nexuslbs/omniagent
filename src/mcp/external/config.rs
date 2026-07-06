@@ -210,6 +210,7 @@ pub(crate) fn get_bin_path(name: &str) -> Option<String> {
     // Look for the binary in multiple locations:
     // 1. Next to the current executable (the canonical location)
     // 2. /app/target/release/<name> (development workspace)
+    // 3. Same with mcp-server-{name} convention (package name may differ from plugin name)
 
     // Primary: next to executable
     if let Some(path) = std::env::current_exe()
@@ -223,6 +224,34 @@ pub(crate) fn get_bin_path(name: &str) -> Option<String> {
     let dev_path = format!("/app/target/release/{}", name);
     if std::path::Path::new(&dev_path).exists() {
         return Some(dev_path);
+    }
+
+    // Fallback: check mcp-server-{name} convention next to executable
+    let mcp_server_name = format!("mcp-server-{}", name);
+    if let Some(path) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| format!("{}/{}", d.display(), &mcp_server_name)))
+    {
+        if std::path::Path::new(&path).exists() {
+            return Some(path);
+        }
+    }
+
+    // Fallback: check /app/target/release/mcp-server-{name}
+    let mcp_dev_path = format!("/app/target/release/mcp-server-{}", name);
+    if std::path::Path::new(&mcp_dev_path).exists() {
+        return Some(mcp_dev_path);
+    }
+
+    // Check for directory-name binary (plugin dir name may be the binary name)
+    // e.g. test-rust-tool directory produces test-rust-tool binary
+    if let Some(path) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| format!("{}/{}", d.display(), name)))
+    {
+        if std::path::Path::new(&path).exists() {
+            return Some(path);
+        }
     }
 
     None

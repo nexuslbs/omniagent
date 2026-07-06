@@ -107,9 +107,11 @@ fn detect_plugin_category(
         if entry.builtin.unwrap_or(false) {
             return PluginCategory::Builtin;
         }
+        // YAML entry exists but builtin is not true → bundled/omni-stack
+        return PluginCategory::OmniStack;
     }
 
-    // Check if it's a builtin by source directory convention
+    // No YAML entry — check disk for builtin source directory
     if plugins_yaml::is_plugin_builtin(data_dir, name, yaml_type) {
         return PluginCategory::Builtin;
     }
@@ -181,7 +183,7 @@ fn detect_plugin_category_cross_type(data_dir: &str, name: &str) -> Option<(plug
         if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, pt, name) {
             let cat = if entry.remote.is_some() {
                 PluginCategory::Remote
-            } else if entry.builtin.unwrap_or(false) || plugins_yaml::is_plugin_builtin(data_dir, name, pt) {
+            } else if entry.builtin.unwrap_or(false) {
                 PluginCategory::Builtin
             } else {
                 PluginCategory::OmniStack
@@ -928,24 +930,13 @@ pub(crate) async fn install_plugin_handler(
         yaml_type.file_name(), name, plugin_dir, category
     );
 
-    // 3. Compile if Rust crate — error is fatal (don't silently skip)
-    match compile_rust_crate(&plugin_dir, &name, category_to_source(&category)).await {
-        Ok(_) => info!("Install: compilation step for '{}' completed", name),
-        Err(e) => {
-            let msg = format!("Install: compilation failed for '{}': {}", name, e);
-            tracing::error!("{}", msg);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": msg,
-                })),
-            )
-                .into_response();
-        }
-    }
+    let category_source = category_to_source(&category);
 
-    // 4. Register in YAML with enabled=false
+    // 3. Register in YAML with enabled=false FIRST (before async compile)
+    info!(
+        "Install: registering plugin '{}' in YAML before background compile",
+        name
+    );
     match plugins_yaml::set_entry(
         data_dir,
         &yaml_type,
@@ -953,33 +944,61 @@ pub(crate) async fn install_plugin_handler(
         false,
         serde_json::json!({}),
     ) {
-        Ok(_entry) => match plugins_yaml::get_plugin(data_dir, &name) {
-            Ok(Some(detail)) => {
-                info!("Installed plugin '{}' (compiled + registered with disabled state)", name);
-                (
+        Ok(_entry) => {
+            // Register in YAML succeeded — now spawn compile in background
+            let plugin_dir_clone = plugin_dir.clone();
+            let name_clone = name.clone();
+            let source_clone = category_source.to_string();
+            tokio::spawn(async move {
+                info!(
+                    "Background compile: starting for '{}' from {} (source: {})",
+                    name_clone, plugin_dir_clone, source_clone
+                );
+                match compile_rust_crate(&plugin_dir_clone, &name_clone, &source_clone).await {
+                    Ok(_) => info!(
+                        "Background compile: '{}' completed successfully",
+                        name_clone
+                    ),
+                    Err(e) => {
+                        tracing::error!(
+                            "Background compile: '{}' failed: {}",
+                            name_clone,
+                            e
+                        );
+                    }
+                }
+            });
+
+            // Return immediately — plugin is registered even if compile hasn't finished
+            match plugins_yaml::get_plugin(data_dir, &name) {
+                Ok(Some(detail)) => {
+                    info!("Installed plugin '{}' (registered, compile in background)", name);
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "success": true,
+                            "data": detail,
+                            "background_compile": true,
+                        })),
+                    )
+                        .into_response()
+                }
+                _ => (
                     StatusCode::OK,
                     Json(serde_json::json!({
                         "success": true,
-                        "data": detail,
                     })),
                 )
-                    .into_response()
+                    .into_response(),
             }
-            _ => (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "success": true,
-                })),
-            )
-                .into_response(),
-        },
+        }
         Err(e) => {
             error!("Failed to register plugin '{}' in YAML: {:?}", name, e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
                     "success": false,
-                    "error": format!("Compilation succeeded but YAML registration failed: {}", e)
+                    "error": format!("YAML registration failed: {}", e)
                 })),
             )
                 .into_response()
