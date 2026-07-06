@@ -99,13 +99,13 @@ fn detect_plugin_category(
     yaml_type: &plugins_yaml::PluginYamlType,
     name: &str,
 ) -> PluginCategory {
-    // Check YAML entry first
+    // Check YAML entry first — builtin:true overrides remote
     if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, yaml_type, name) {
-        if entry.remote.is_some() {
-            return PluginCategory::Remote;
-        }
         if entry.builtin.unwrap_or(false) {
             return PluginCategory::Builtin;
+        }
+        if entry.remote.is_some() {
+            return PluginCategory::Remote;
         }
         // YAML entry exists but builtin is not true → bundled/omni-stack
         return PluginCategory::OmniStack;
@@ -181,10 +181,10 @@ fn detect_plugin_category_cross_type(data_dir: &str, name: &str) -> Option<(plug
     ] {
         // Check YAML entry
         if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, pt, name) {
-            let cat = if entry.remote.is_some() {
-                PluginCategory::Remote
-            } else if entry.builtin.unwrap_or(false) {
+            let cat = if entry.builtin.unwrap_or(false) {
                 PluginCategory::Builtin
+            } else if entry.remote.is_some() {
+                PluginCategory::Remote
             } else {
                 PluginCategory::OmniStack
             };

@@ -818,19 +818,19 @@ fn pick_primary_source(group: &PluginSourceGroup) -> usize {
         None
     };
 
-    // If YAML has a remote field, prefer the 'remote' source
+    // If YAML has builtin: true, prefer the 'built-in' source
     if let Some(entry) = yaml_entry {
-        if entry.remote.is_some() {
-            if let Some(idx) = find_source(&["remote"]) {
+        if entry.builtin.unwrap_or(false) {
+            if let Some(idx) = find_source(&["built-in"]) {
                 return idx;
             }
         }
     }
 
-    // If YAML has builtin: true, prefer the 'built-in' source
+    // If YAML has a remote field, prefer the 'remote' source
     if let Some(entry) = yaml_entry {
-        if entry.builtin.unwrap_or(false) {
-            if let Some(idx) = find_source(&["built-in"]) {
+        if entry.remote.is_some() {
+            if let Some(idx) = find_source(&["remote"]) {
                 return idx;
             }
         }
@@ -926,21 +926,29 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                     if !std::path::Path::new(&manifest_path).exists() {
                         continue;
                     }
-                    // Skip if already discovered (avoid duplicates)
+                    // Check if a remote source is already in this group
                     if groups.contains_key(name) {
-                        continue;
+                        let has_remote = groups[name].sources.iter().any(|(_, s, _)| s == "remote");
+                        if has_remote {
+                            continue;
+                        }
                     }
                     if let Ok(manifest) = crate::plugin::load_manifest(&manifest_path) {
                         let base_path = manifest_path.to_string();
                         let key = name.clone();
-                        let mut sources = Vec::new();
-                        sources.push((manifest, "remote".to_string(), base_path));
-                        groups.insert(key.clone(), PluginSourceGroup {
-                            key,
-                            sources,
-                            yaml_type: Some(yaml_type.clone()),
-                            yaml_entry: Some(entry.clone()),
-                        });
+                        // Add to existing group or create new one
+                        if let Some(group) = groups.get_mut(name) {
+                            group.sources.push((manifest, "remote".to_string(), base_path));
+                        } else {
+                            let mut sources = Vec::new();
+                            sources.push((manifest, "remote".to_string(), base_path));
+                            groups.insert(key, PluginSourceGroup {
+                                key: name.clone(),
+                                sources,
+                                yaml_type: Some(yaml_type.clone()),
+                                yaml_entry: Some(entry.clone()),
+                            });
+                        }
                     }
                 }
             }
