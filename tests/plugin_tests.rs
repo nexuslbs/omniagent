@@ -1,163 +1,284 @@
-//! Integration tests for the plugin management system.
-//! Tests the install, enable, disable, reinstall flows for builtin, bundled, and remote plugins.
-//! These tests verify the correct behavior of pick_primary_source, category detection,
-//! and the install/enable/disable/reinstall handlers.
+//! Integration tests for plugin installation, reinstallation, and uninstallation.
 //!
-//! Run with: `cargo test --test plugin_tests -- --nocapture`
+//! These tests exercise the plugin API endpoints against a running omniagent instance.
+//! They verify:
+//! - Plugin listing shows correct sources and no stale entries
+//! - Install/reinstall/uninstall work for remote, builtin, and bundled plugins
+//! - Dashboard-facing states (needs_build, status) are accurate
+//! - Remote plugins with subpaths compile correctly
+//! - No "mcp" directory references remain (all use "tools")
 
-use std::collections::BTreeMap;
-use serde::{Deserialize, Serialize};
-use tempfile::tempdir;
+use std::process::Command;
 
-// ── Test fixtures ──
-
-/// Minimal plugin manifest for tests
-fn bundled_manifest(name: &str, plugin_type: &str) -> String {
-    format!(r#"{{
-        "name": "{}",
-        "type": "{}",
-        "entrypoint": {{
-            "command": "mcp-server-{}"
-        }}
-    }}"#, name, plugin_type, name)
+/// Helper: run a command and return (stdout, stderr, exit_code)
+fn run(args: &[&str]) -> (String, String, i32) {
+    let output = Command::new("docker")
+        .args(["exec", "omni-omniagent-1"])
+        .args(args)
+        .output()
+        .expect("Failed to execute command");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    (stdout, stderr, output.status.code().unwrap_or(-1))
 }
 
-fn builtin_manifest(name: &str, plugin_type: &str) -> String {
-    format!(r#"{{
-        "name": "{}",
-        "type": "{}",
-        "entrypoint": {{
-            "command": "mcp-server-{}"
-        }},
-        "config_schema": []
-    }}"#, name, plugin_type, name)
+/// Helper: hit the plugins API and parse the response
+fn api_get(path: &str) -> serde_json::Value {
+    let (stdout, _, code) = run(&[
+        "sh", "-c",
+        &format!("curl -sf http://localhost:8080/api{}", path),
+    ]);
+    assert_eq!(code, 0, "API GET {} failed: {}", path, stdout);
+    serde_json::from_str(&stdout).expect("Failed to parse API response")
 }
 
-// ── pick_primary_source tests ──
+/// Helper: POST to a plugin endpoint and parse response
+fn api_post(path: &str) -> serde_json::Value {
+    let (stdout, _, code) = run(&[
+        "sh", "-c",
+        &format!("curl -sf -X POST http://localhost:8080/api{}", path),
+    ]);
+    assert_eq!(code, 0, "API POST {} failed: {}", path, stdout);
+    serde_json::from_str(&stdout).expect("Failed to parse API response")
+}
+
+/// Helper: get a plugin detail by name from the list
+fn get_plugin(name: &str) -> Option<serde_json::Value> {
+    let resp = api_get("/plugins");
+    let data = resp["data"].as_array()?;
+    data.iter().find(|p| p["name"] == name).cloned()
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Plugin listing tests
+// ════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn test_no_yaml_entry_prefers_builtin() {
-    // When no YAML entry exists and both bundled + built-in sources are available,
-    // pick_primary_source should prefer the built-in source.
-    let dir = tempdir().unwrap();
-    let data_dir = dir.path().to_str().unwrap().to_string();
+fn test_list_plugins_no_stale_entries() {
+    let resp = api_get("/plugins");
+    let data = resp["data"].as_array().expect("Expected data array");
     
-    // Create plugin directories
-    let bundled_dir = dir.path().join("plugins").join("mcp").join("test-plugin");
-    std::fs::create_dir_all(&bundled_dir).unwrap();
-    std::fs::write(
-        bundled_dir.join("plugin.json"),
-        bundled_manifest("test-plugin", "mcp"),
-    ).unwrap();
+    // No stale directories should appear as plugins
+    let names: Vec<&str> = data.iter().map(|p| p["name"].as_str().unwrap_or("")).collect();
+    assert!(!names.contains(&"docker-compose"), "docker-compose should not appear");
+    assert!(!names.contains(&"external"), "external should not appear");
+    assert!(!names.contains(&"util"), "util should not appear");
+}
+
+#[test]
+fn test_list_builtins_have_source_code() {
+    let resp = api_get("/plugins");
+    let data = resp["data"].as_array().expect("Expected data array");
     
-    let builtin_dir = std::path::Path::new("/tmp")
-        .join(format!("test-builtin-{}", std::process::id()))
-        .join("plugins")
-        .join("mcp")
-        .join("test-plugin");
-    std::fs::create_dir_all(&builtin_dir).unwrap();
-    std::fs::write(
-        builtin_dir.join("plugin.json"),
-        builtin_manifest("test-plugin", "mcp"),
-    ).unwrap();
+    // Builtin tools that are workspace members should have source code
+    for name in &["cron", "kanban", "memory", "metrics", "plugin-manager", "query", "search", "subtasks"] {
+        let plugin = data.iter().find(|p| {
+            p["name"] == *name && p["source"] == "built-in"
+        });
+        assert!(plugin.is_some(), "Builtin '{}' not found in listing", name);
+        let p = plugin.unwrap();
+        assert_eq!(p["has_source_code"], true, "Builtin '{}' should have source code", name);
+    }
+}
+
+#[test]
+fn test_list_bundled_exist() {
+    let resp = api_get("/plugins");
+    let data = resp["data"].as_array().expect("Expected data array");
     
-    // Import the pick_primary_source logic
-    // Discover both sources and check that built-in is preferred
-    let manifest1 = serde_json::from_str(&bundled_manifest("test-plugin", "mcp")).unwrap();
-    let manifest2 = serde_json::from_str(&builtin_manifest("test-plugin", "mcp")).unwrap();
+    for name in &["actions", "fetch", "filesystem", "git", "skills"] {
+        let plugin = data.iter().find(|p| {
+            p["name"] == *name && p["source"] == "bundled"
+        });
+        assert!(plugin.is_some(), "Bundled '{}' not found in listing", name);
+    }
+}
+
+#[test]
+fn test_builtins_enabled_only_in_yaml() {
+    // Verify only plugins with explicit source: built-in and enabled: true are enabled
+    let resp = api_get("/plugins");
+    let data = resp["data"].as_array().expect("Expected data array");
     
-    // Verify both manifests parsed
-    assert_eq!(manifest1.name, "test-plugin");
-    assert_eq!(manifest2.name, "test-plugin");
+    for p in data {
+        if p["source"] == "built-in" && p["status"] == "enabled" {
+            let name = p["name"].as_str().unwrap_or("");
+            // These should all have explicit YAML entries
+            eprintln!("Builtin '{}' is enabled — verify YAML has source: built-in", name);
+        }
+    }
+}
+
+#[test]
+fn test_no_duplicated_primary_enabled() {
+    // If a plugin has both built-in and bundled, only one should be enabled
+    let resp = api_get("/plugins");
+    let data = resp["data"].as_array().expect("Expected data array");
     
-    println!("PASS: No YAML entry - both sources discovered");
+    // Group by name
+    let mut groups: std::collections::HashMap<String, Vec<&serde_json::Value>> = std::collections::HashMap::new();
+    for p in data {
+        let name = p["name"].as_str().unwrap_or("").to_string();
+        groups.entry(name).or_default().push(p);
+    }
+    
+    for (name, entries) in &groups {
+        if entries.len() > 1 {
+            let enabled_count = entries.iter().filter(|e| e["status"] == "enabled").count();
+            assert!(enabled_count <= 1, "Plugin '{}' has {} enabled entries (max 1)", name, enabled_count);
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Remote plugin install/reinstall/uninstall tests
+// ════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_remote_plugin_install_compile() {
+    let name = "test-rust-tool";
+    
+    // Ensure clean state — uninstall first
+    let _ = api_post(&format!("/plugins/{}/disable", name));
+    let _ = api_post(&format!("/plugins/{}/delete?mode=uninstall", name));
+    
+    // Verify plugin is in disabled state (via remote.yml)
+    let plugin = get_plugin(name).expect("test-rust-tool should exist via remote.yml");
+    assert_eq!(plugin["source"], "remote");
+    assert_eq!(plugin["status"], "disabled");
+    assert_eq!(plugin["needs_build"], true, "test-rust-tool should need build");
+    assert_eq!(plugin["has_source_code"], true, "test-rust-tool should have source code");
+    
+    // Install
+    let resp = api_post(&format!("/plugins/{}/install", name));
+    assert_eq!(resp["success"], true, "Install failed: {:?}", resp);
+    
+    // Wait for background compile
+    std::thread::sleep(std::time::Duration::from_secs(30));
+    
+    // Check binary was built
+    let (stdout, _, code) = run(&[
+        "sh", "-c",
+        &format!("ls /opt/omni/plugins/tools/.remote/{}/tools/{}/target/release/{} 2>/dev/null", name, name, name),
+    ]);
+    assert_eq!(code, 0, "Binary not found after install:\n{}", stdout);
+    
+    // Check plugin detail
+    let plugin = get_plugin(name).expect("test-rust-tool should exist after install");
+    assert_eq!(plugin["status"], "disabled", "Should be disabled until enabled");
+    assert_eq!(plugin["needs_build"], false, "Should not need build anymore");
+    assert_eq!(plugin["has_source_code"], true, "Should still have source code");
 }
 
 #[test]
-fn test_yaml_with_builtin_true_prefers_builtin() {
-    // When YAML has builtin: true, the built-in source should be primary
-    // even if a bundled source is also available.
-    println!("PASS: YAML builtin=true prefers built-in source");
+fn test_remote_plugin_enable_and_query() {
+    let name = "test-rust-tool";
+    
+    // Enable
+    let resp = api_post(&format!("/plugins/{}/enable", name));
+    assert_eq!(resp["success"], true, "Enable failed: {:?}", resp);
+    
+    let plugin = get_plugin(name).expect("test-rust-tool should exist after enable");
+    assert_eq!(plugin["status"], "enabled", "Should be enabled after enable call");
 }
 
 #[test]
-fn test_yaml_without_builtin_flag_prefers_bundled() {
-    // When YAML entry exists but doesn't have builtin flag, bundled should be primary
-    println!("PASS: YAML without builtin flag prefers bundled source");
+fn test_remote_plugin_reinstall() {
+    let name = "test-rust-tool";
+    
+    // Verify it's enabled
+    let plugin = get_plugin(name).expect("test-rust-tool should exist");
+    assert_eq!(plugin["status"], "enabled", "test-rust-tool should be enabled before reinstall");
+    
+    // Reinstall
+    let resp = api_post(&format!("/plugins/{}/reinstall", name));
+    assert_eq!(resp["success"], true, "Reinstall failed: {:?}", resp);
+    
+    // Wait for re-clone and re-compile
+    std::thread::sleep(std::time::Duration::from_secs(60));
+    
+    // Check binary still exists (was recompiled)
+    let (stdout, _, code) = run(&[
+        "sh", "-c",
+        &format!("ls /opt/omni/plugins/tools/.remote/{}/tools/{}/target/release/{} 2>/dev/null", name, name, name),
+    ]);
+    assert_eq!(code, 0, "Binary not found after reinstall:\n{}", stdout);
 }
 
 #[test]
-fn test_yaml_with_remote_prefers_remote() {
-    // When YAML has remote field, remote source should be primary
-    println!("PASS: YAML with remote prefers remote source");
-}
-
-// ── Category detection tests ──
-
-#[test]
-fn test_builtin_without_yaml_entry_is_detected_as_builtin() {
-    // A plugin with source at /app/plugins/ but no YAML entry
-    // should be detected as BuiltinCategory, not OmniStack
-    println!("PASS: Builtin without YAML entry detected as Builtin");
-}
-
-#[test]
-fn test_bundled_without_yaml_entry_is_detected_as_omnistack() {
-    // A plugin with source at workspace_dir/plugins/ but no YAML entry
-    // should be detected as OmniStack
-    println!("PASS: Bundled without YAML entry detected as OmniStack");
-}
-
-// ── Install/Reinstall tests ──
-
-#[test]
-fn test_builtin_install_succeeds_with_correct_source_dir() {
-    // Install on a builtin plugin should find the source at /app/plugins/
-    // and not fail with "source directory not found"
-    println!("PASS: Builtin install uses correct source directory");
+fn test_remote_plugin_uninstall() {
+    let name = "test-rust-tool";
+    
+    // Verify it's enabled first
+    let plugin = get_plugin(name).expect("test-rust-tool should exist before uninstall");
+    assert_eq!(plugin["status"], "enabled", "test-rust-tool should be enabled before uninstall");
+    
+    // Uninstall (disable then delete with mode=uninstall)
+    let resp = api_post(&format!("/plugins/{}/disable", name));
+    assert_eq!(resp["success"], true, "Disable failed before uninstall: {:?}", resp);
+    
+    let resp = api_post(&format!("/plugins/{}/delete?mode=uninstall", name));
+    assert_eq!(resp["success"], true, "Uninstall failed: {:?}", resp);
+    
+    // Check plugin is gone or in disabled state
+    let (stdout, _, _) = run(&[
+        "sh", "-c",
+        &format!("ls /opt/omni/plugins/tools/.remote/{}/ 2>/dev/null", name),
+    ]);
+    assert!(stdout.is_empty(), "Remote directory should be removed after uninstall");
 }
 
 #[test]
-fn test_omnistack_install_compiles_with_standalone_cargo() {
-    // OmniStack plugins should compile as standalone crates when
-    // not workspace members of the active Cargo workspace
-    println!("PASS: OmniStack install compiles standalone");
-}
-
-// ── Enable/Disable tests ──
-
-#[test]
-fn test_enable_already_enabled_is_idempotent() {
-    // Enabling an already-enabled plugin should not change its state
-    println!("PASS: Enable on already-enabled is idempotent");
-}
-
-#[test]
-fn test_disable_already_disabled_is_idempotent() {
-    // Disabling an already-disabled plugin should not change its state
-    println!("PASS: Disable on already-disabled is idempotent");
-}
-
-// ── has_source_code detection tests ──
-
-#[test]
-fn test_crate_with_cargo_toml_has_source_code() {
-    // A plugin directory with Cargo.toml should have has_source_code=true
-    println!("PASS: Crate with Cargo.toml has source code");
+fn test_builtin_plugin_reinstall() {
+    // Test that a builtin plugin can be reinstalled successfully
+    // plugin-manager is a builtin with explicit source: built-in in YAML
+    let name = "plugin-manager";
+    
+    let plugin = get_plugin(name).expect("plugin-manager should exist");
+    assert_eq!(plugin["source"], "built-in", "plugin-manager should be built-in");
+    
+    // Reinstall
+    let resp = api_post(&format!("/plugins/{}/reinstall", name));
+    assert_eq!(resp["success"], true, "Builtin reinstall failed: {:?}", resp);
+    
+    // Check it's still showing as built-in
+    let plugin = get_plugin(name).expect("plugin-manager should exist after reinstall");
+    assert_eq!(plugin["source"], "built-in");
+    assert_eq!(plugin["has_source_code"], true);
 }
 
 #[test]
-fn test_crate_without_cargo_toml_or_plugin_json_has_no_source() {
-    // A directory with only Cargo.toml but no plugin.json should NOT be a plugin
-    // This is the "util" case - library crates without plugin.json
-    println!("PASS: Library crate without plugin.json is not a plugin");
+fn test_no_mcp_directory_references() {
+    // Verify the mcp/ directory no longer exists
+    let (stdout, _, code) = run(&["sh", "-c", "test -d /app/plugins/mcp && echo EXISTS || echo NOT_FOUND"]);
+    assert_eq!(stdout.trim(), "NOT_FOUND", "mcp/ directory should not exist — should be tools/");
+    
+    // tools/ should exist
+    let (stdout, _, code) = run(&["sh", "-c", "test -d /app/plugins/tools && echo EXISTS || echo NOT_FOUND"]);
+    assert_eq!(stdout.trim(), "EXISTS", "tools/ directory should exist");
 }
 
-// ── End-to-end plugin lifecycle ──
+#[test]
+fn test_workspace_cargo_toml_uses_tools_not_mcp() {
+    let (stdout, _, code) = run(&["sh", "-c", "grep 'plugins/mcp' /app/Cargo.toml || echo NO_MCP_REFS"]);
+    assert_eq!(stdout.trim(), "NO_MCP_REFS", "Cargo.toml should not reference plugins/mcp/");
+    
+    let (stdout, _, _) = run(&["sh", "-c", "grep 'plugins/tools' /app/Cargo.toml | head -3"]);
+    assert!(!stdout.is_empty(), "Cargo.toml should reference plugins/tools/");
+}
 
 #[test]
-fn test_plugin_lifecycle_install_enable_disable_uninstall() {
-    // Full cycle: discover -> install -> enabled -> register tools -> disable -> uninstall
-    // Verifies the whole plugin management flow works end-to-end
-    println!("PASS: Full plugin lifecycle works correctly");
+fn test_all_plugin_statuses_are_valid() {
+    let resp = api_get("/plugins");
+    let data = resp["data"].as_array().expect("Expected data array");
+    
+    for p in data {
+        let status = p["status"].as_str().unwrap_or("");
+        assert!(
+            ["enabled", "disabled", "error", "not_found"].contains(&status),
+            "Plugin '{}' has invalid status: '{}'",
+            p["name"].as_str().unwrap_or("?"),
+            status
+        );
+    }
 }

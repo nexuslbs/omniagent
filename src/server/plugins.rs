@@ -151,14 +151,6 @@ fn get_plugin_dir_for_category(
             let dir = format!("/app/plugins/{}/{}", type_dir, name);
             if std::path::Path::new(&dir).exists() {
                 Some(dir)
-            } else if matches!(yaml_type, plugins_yaml::PluginYamlType::Tool) {
-                // Also check legacy `mcp/` directory for Tool type
-                let legacy_dir = format!("/app/plugins/mcp/{}", name);
-                if std::path::Path::new(&legacy_dir).exists() {
-                    Some(legacy_dir)
-                } else {
-                    None
-                }
             } else {
                 None
             }
@@ -940,6 +932,9 @@ pub(crate) async fn install_plugin_handler(
                 let sub = dir_path.join(subpath);
                 if sub.join("Cargo.toml").exists() || sub.join("plugin.json").exists() {
                     dir_path = sub;
+                    // Update plugin_dir to the resolved subpath so compile_rust_crate
+                    // uses the right source directory (not the .remote/{name}/ root)
+                    plugin_dir = dir_path.to_string_lossy().to_string();
                 }
             }
         }
@@ -1184,6 +1179,9 @@ pub(crate) async fn reinstall_plugin_handler(
                 let sub = dir_path.join(subpath);
                 if sub.join("Cargo.toml").exists() || sub.join("plugin.json").exists() {
                     dir_path = sub;
+                    // Update plugin_dir to the resolved subpath so compile_rust_crate
+                    // uses the right source directory (not the .remote/{name}/ root)
+                    plugin_dir = dir_path.to_string_lossy().to_string();
                 }
             }
         }
@@ -1950,7 +1948,7 @@ pub(crate) async fn delete_plugin_handler(
 
             // Remove target/ directory if it exists (the compiled binary)
             if let Some((yaml_type, _category)) = detect_plugin_category_cross_type(data_dir, &name) {
-                let type_dirs = [yaml_type.type_dir_name(), "mcp", "platforms", "providers"];
+                let type_dirs = [yaml_type.type_dir_name(), "tools", "platforms", "providers"];
                 let search_dirs = [
                     data_dir,
                     &state.workspace_dir,
@@ -2037,7 +2035,7 @@ pub(crate) async fn delete_plugin_handler(
             let _ = plugins_yaml::remove_remote_plugin(data_dir, pt, &name);
         }
 
-        for t in &["mcp", "platforms", "providers"] {
+        for t in &["tools", "platforms", "providers"] {
             if *t == type_dir { continue; }
             let alt_remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, t, name);
             let alt_remote_path = std::path::Path::new(&alt_remote_dir);

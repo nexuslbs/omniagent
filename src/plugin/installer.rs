@@ -574,7 +574,7 @@ pub fn discover_plugins(
     }
 
     // C. Scan remote plugins: <data_dir>/plugins/<type>/.remote/<name>/plugin.json
-    for type_name in &["mcp", "platforms", "providers"] {
+    for type_name in &["tools", "platforms", "providers"] {
         let remote_base = format!("{}/plugins/{}/.remote", data_dir, type_name);
         if let Ok(remote_entries) = std::fs::read_dir(&remote_base) {
             for entry in remote_entries.flatten() {
@@ -597,7 +597,7 @@ pub fn discover_plugins(
     // D. Scan builtin plugins: /app/plugins/<type>/<name>/
     // These are workspace member crates that have Cargo.toml (and optionally mcp-config.json
     // or plugin.json). All builtin sources are added; callers handle dedup.
-    for type_name in &["mcp", "platforms", "providers"] {
+    for type_name in &["tools", "platforms", "providers"] {
         let app_plugins_dir = format!("/app/plugins/{}", type_name);
         if let Ok(plugin_entries) = std::fs::read_dir(&app_plugins_dir) {
             for entry in plugin_entries.flatten() {

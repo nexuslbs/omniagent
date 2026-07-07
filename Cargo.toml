@@ -2,16 +2,16 @@
 members = [
     ".",
     "db-migrations",
-    "plugins/mcp/util",
-    "plugins/mcp/cron",
-    "plugins/mcp/kanban",
-    "plugins/mcp/search",
-    "plugins/mcp/memory",
-    "plugins/mcp/metrics",
-    "plugins/mcp/query",
-    "plugins/mcp/plugin-manager",
-    "plugins/mcp/subtasks",
-    "plugins/mcp/hindsight",
+    "plugins/tools/util",
+    "plugins/tools/cron",
+    "plugins/tools/kanban",
+    "plugins/tools/search",
+    "plugins/tools/memory",
+    "plugins/tools/metrics",
+    "plugins/tools/query",
+    "plugins/tools/plugin-manager",
+    "plugins/tools/subtasks",
+    "plugins/tools/hindsight",
 ]
 resolver = "2"
 
