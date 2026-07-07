@@ -87,7 +87,7 @@ pub(crate) struct AppState {
     /// Path to the .env file for settings API
     env_path: String,
     /// MCP tool registry for executing actions (shared with agent)
-    mcp_registry: Arc<std::sync::RwLock<McpRegistry>>,
+    tool_registry: Arc<std::sync::RwLock<crate::mcp::McpRegistry>>,
     /// Application context for MCP tool execution
     app_context: AppContext,
     /// Shared mutable config for hot-reload support
@@ -106,7 +106,7 @@ pub struct ServerConfig {
     pub data_dir: String,
     pub workspace_dir: String,
     pub default_profile: String,
-    pub mcp_registry: Arc<std::sync::RwLock<McpRegistry>>,
+    pub tool_registry: Arc<std::sync::RwLock<McpRegistry>>,
     pub app_context: AppContext,
     pub shared_config: Arc<RwLock<AgentConfig>>,
     pub platform_restart_signals: Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>>,
@@ -121,7 +121,7 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         workspace_dir: config.workspace_dir.clone(),
         default_profile: config.default_profile.clone(),
         env_path: format!("{}/.env", config.data_dir),
-        mcp_registry: config.mcp_registry,
+        tool_registry: config.tool_registry,
         app_context: config.app_context,
         shared_config: config.shared_config,
         platform_restart_signals: config.platform_restart_signals,
@@ -534,7 +534,7 @@ async fn prompt_handler(
         .as_ref()
         .and_then(|c| c.platform.as_deref())
         .unwrap_or("");
-    let tool_names: Vec<String> = state.mcp_registry.read().unwrap().all().iter().map(|t| t.name.clone()).collect();
+    let tool_names: Vec<String> = state.tool_registry.read().unwrap().all().iter().map(|t| t.name.clone()).collect();
     let parts = build_system_prompt_parts(&memory_store, platform, None, profile_name, &tool_names);
 
     // Build system prompt TEMPLATE — stable + context + volatile placeholders
@@ -634,7 +634,7 @@ async fn prompt_preview_handler(
         .as_ref()
         .and_then(|c| c.platform.as_deref())
         .unwrap_or("");
-    let tool_names: Vec<String> = state.mcp_registry.read().unwrap().all().iter().map(|t| t.name.clone()).collect();
+    let tool_names: Vec<String> = state.tool_registry.read().unwrap().all().iter().map(|t| t.name.clone()).collect();
     let system_prompt = build_system_prompt(&memory_store, platform, None, profile_name, &tool_names);
 
     let mut messages = vec![serde_json::json!({ "role": "system", "content": &system_prompt })];
@@ -832,7 +832,7 @@ async fn prompt_preview_handler(
 /// GET /mcp/tools — list all registered MCP tools with their input schemas.
 async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let tools: Vec<serde_json::Value> = state
-        .mcp_registry
+        .tool_registry
         .read()
         .unwrap()
         .all()
@@ -992,7 +992,7 @@ async fn run_cron_handler(
     match crate::scheduler::fire_cron_job_by_id(
         &state.pool,
         &state.data_dir,
-        &state.mcp_registry,
+        &state.tool_registry,
         &state.app_context,
         &schedule_id,
         params.force.unwrap_or(false),

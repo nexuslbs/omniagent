@@ -928,7 +928,7 @@ async fn run_schedule_handler(
     match crate::scheduler::fire_cron_job_by_id(
         &state.pool,
         &state.data_dir,
-        &state.mcp_registry,
+        &state.tool_registry,
         &state.app_context,
         &id,
         force,

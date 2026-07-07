@@ -25,15 +25,17 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginYamlEntry {
     pub enabled: bool,
-    /// If true, this plugin ships with omniagent (its handler is compiled in or bundled).
-    /// Built-in tools are disabled by default when not present in the YAML file.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub builtin: Option<bool>,
+    /// Source identifier: "built-in", "bundled", or "remote".
+    /// Authoritative — determines which binary/source to use.
+    /// No more builtin:bool or remote:{...} guessing.
+    #[serde(default = "default_source")]
+    pub source: String,
     #[serde(default = "default_config")]
     pub config: serde_json::Value,
-    /// If present, this plugin was installed from a remote git repository.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote: Option<PluginRemote>,
+}
+
+fn default_source() -> String {
+    "built-in".to_string()
 }
 
 /// Describes a git remote source for a plugin installed from a git repository.
@@ -80,29 +82,24 @@ impl PluginYamlType {
     /// The section name in the YAML file (e.g. "platforms", "tools", "providers").
     pub fn file_name(&self) -> &str {
         match self {
-            PluginYamlType::Platform => "platforms",
-            PluginYamlType::Tool => "tools",
-            PluginYamlType::Provider => "providers",
+            PluginYamlType::Platform => "platforms", // section name still "platforms" in unified plugins.yml
+            PluginYamlType::Tool => "tools",     // section name still "tools" in unified plugins.yml
+            PluginYamlType::Provider => "providers", // section name still "providers" in unified plugins.yml
         }
     }
 
-    /// The directory name under plugins/ directory (e.g. "platforms", "mcp", "providers").
-    /// Note: differs from file_name() — Tool uses "mcp" not "tools".
+    /// The directory name under plugins/ directory (e.g. "platforms", "tools", "providers").
     pub fn type_dir_name(&self) -> &str {
         match self {
             PluginYamlType::Platform => "platforms",
-            PluginYamlType::Tool => "mcp",
+            PluginYamlType::Tool => "tools", // Was "mcp", now consistently "tools"
             PluginYamlType::Provider => "providers",
         }
     }
 
     /// The YAML filename (e.g. "platforms.yml", "tools.yml", "providers.yml").
     pub fn yaml_file(&self) -> &str {
-        match self {
-            PluginYamlType::Platform => "platforms.yml",
-            PluginYamlType::Tool => "tools.yml",
-            PluginYamlType::Provider => "providers.yml",
-        }
+        "plugins.yml"
     }
 
     /// Map from a manifest `PluginType` (Platform, Mcp, Provider) to the YAML file type.
@@ -118,7 +115,8 @@ impl PluginYamlType {
     pub fn from_type_str(s: &str) -> Self {
         match s {
             "platform" => PluginYamlType::Platform,
-            "mcp" => PluginYamlType::Tool,
+            "mcp" => PluginYamlType::Tool, // Map legacy "mcp" to "tool"
+            "tool" => PluginYamlType::Tool,
             "provider" => PluginYamlType::Provider,
             _ => PluginYamlType::Tool, // fallback
         }
@@ -128,7 +126,7 @@ impl PluginYamlType {
     pub fn to_type_str(&self) -> &str {
         match self {
             PluginYamlType::Platform => "platform",
-            PluginYamlType::Tool => "mcp",
+            PluginYamlType::Tool => "tools", // Was "mcp", now consistently "tools" for API
             PluginYamlType::Provider => "provider",
         }
     }
@@ -186,25 +184,52 @@ pub struct PluginDetail {
 // File path helpers
 // ---------------------------------------------------------------------------
 
-fn file_path(data_dir: &str, pt: &PluginYamlType) -> PathBuf {
-    PathBuf::from(data_dir).join(pt.yaml_file())
+fn file_path(data_dir: &str, _pt: &PluginYamlType) -> PathBuf {
+    // Unified plugins.yml replaces the old per-type files
+    PathBuf::from(data_dir).join("plugins.yml")
 }
 
 // ---------------------------------------------------------------------------
 // Low-level YAML I/O
 // ---------------------------------------------------------------------------
 
-/// Load the raw entries map from a YAML file, or return an empty map if file doesn't exist.
-pub fn load_raw(data_dir: &str, pt: &PluginYamlType) -> AppResult<BTreeMap<String, PluginYamlEntry>> {
-    let path = file_path(data_dir, pt);
+/// Load the entire PluginYamlFile (all three sections) from plugins.yml.
+pub fn load_all_sections(data_dir: &str) -> AppResult<PluginYamlFile> {
+    let path = PathBuf::from(data_dir).join("plugins.yml");
     if !path.exists() {
-        return Ok(BTreeMap::new());
+        return Ok(PluginYamlFile {
+            platforms: None,
+            tools: None,
+            providers: None,
+        });
     }
-    let content =
-        fs::read_to_string(&path).ctx(format!("Failed to read {}", path.display()))?;
+    let content = fs::read_to_string(&path).ctx(format!("Failed to read {}", path.display()))?;
     let file: PluginYamlFile = serde_yaml::from_str(&content)
         .ctx(format!("Failed to parse {}", path.display()))?;
+    Ok(file)
+}
 
+/// Save the entire PluginYamlFile (all three sections) to plugins.yml.
+pub fn save_all_sections(data_dir: &str, file: &PluginYamlFile) -> AppResult<()> {
+    let path = PathBuf::from(data_dir).join("plugins.yml");
+    let tmp_path = path.with_extension("yml.tmp");
+    let yaml = serde_yaml::to_string(file).ctx("Failed to serialize plugin YAML")?;
+    {
+        let mut f = fs::File::create(&tmp_path)
+            .ctx(format!("Failed to create {}", tmp_path.display()))?;
+        f.write_all(yaml.as_bytes())
+            .ctx(format!("Failed to write {}", tmp_path.display()))?;
+        f.sync_all()
+            .ctx(format!("Failed to sync {}", tmp_path.display()))?;
+    }
+    fs::rename(&tmp_path, &path)
+        .ctx(format!("Failed to rename {} to {}", tmp_path.display(), path.display()))?;
+    Ok(())
+}
+
+/// Load the raw entries map from plugins.yml for a specific section.
+pub fn load_raw(data_dir: &str, pt: &PluginYamlType) -> AppResult<BTreeMap<String, PluginYamlEntry>> {
+    let file = load_all_sections(data_dir)?;
     let section_name = pt.file_name();
     let entries = match section_name {
         "platforms" => file.platforms.unwrap_or_default(),
@@ -216,55 +241,26 @@ pub fn load_raw(data_dir: &str, pt: &PluginYamlType) -> AppResult<BTreeMap<Strin
 }
 
 /// Save entries to a YAML file (atomic write: .tmp → fsync → rename).
+/// Preserves all three sections (platforms, tools, providers) in the unified plugins.yml.
 fn save_file(
     data_dir: &str,
     pt: &PluginYamlType,
     entries: BTreeMap<String, PluginYamlEntry>,
 ) -> AppResult<()> {
-    let path = file_path(data_dir, pt);
-    let tmp_path = path.with_extension("yml.tmp");
-
-    // Build the file with the correct section name
-    let file = match pt.file_name() {
-        "platforms" => PluginYamlFile {
-            platforms: Some(entries),
-            tools: None,
-            providers: None,
-        },
-        "tools" => PluginYamlFile {
-            platforms: None,
-            tools: Some(entries),
-            providers: None,
-        },
-        "providers" => PluginYamlFile {
-            platforms: None,
-            tools: None,
-            providers: Some(entries),
-        },
+    let mut file = load_all_sections(data_dir).unwrap_or(PluginYamlFile {
+        platforms: None,
+        tools: None,
+        providers: None,
+    });
+    match pt.file_name() {
+        "platforms" => file.platforms = Some(entries),
+        "tools" => file.tools = Some(entries),
+        "providers" => file.providers = Some(entries),
         _ => err_msg!("Unknown plugin YAML type: {}", pt.file_name()),
-    };
-
-    let yaml = serde_yaml::to_string(&file).ctx("Failed to serialize plugin YAML")?;
-
-    {
-        let mut f = fs::File::create(&tmp_path)
-            .ctx(format!("Failed to create {}", tmp_path.display()))?;
-        f.write_all(yaml.as_bytes())
-            .ctx(format!("Failed to write {}", tmp_path.display()))?;
-        f.sync_all()
-            .ctx(format!("Failed to fsync {}", tmp_path.display()))?;
     }
-
-    fs::rename(&tmp_path, &path).ctx(format!(
-        "Failed to rename {} -> {}",
-        tmp_path.display(),
-        path.display()
-    ))?;
-
-    Ok(())
+    save_all_sections(data_dir, &file)
 }
 
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -279,11 +275,7 @@ pub fn get_entry(
 }
 
 /// Set a plugin entry (enabled + config) in a YAML file. Creates the entry if it doesn't exist.
-///
-/// Builtin flag preservation: If the entry already exists, the existing `builtin` flag
-/// is preserved to avoid overwriting it on re-enable. For NEW entries, the builtin flag
-/// IS auto-detected from disk (checking /app/plugins/) so that enabling a built-in plugin
-/// for the first time correctly sets `builtin: true`.
+/// Preserves the existing `source` field; for new entries, defaults to `"built-in"`.
 pub fn set_entry(
     data_dir: &str,
     pt: &PluginYamlType,
@@ -292,22 +284,11 @@ pub fn set_entry(
     config: serde_json::Value,
 ) -> AppResult<PluginYamlEntry> {
     let mut entries = load_raw(data_dir, pt)?;
-    // Preserve existing builtin flag — don't re-detect on update.
-    // For NEW entries, auto-detect from disk source directory.
-    let builtin = entries.get(name).and_then(|e| e.builtin).or_else(|| {
-        if is_plugin_builtin(data_dir, name, pt) {
-            Some(true)
-        } else {
-            None
-        }
-    });
-    // Preserve existing remote if the entry already exists
-    let existing_remote = entries.get(name).and_then(|e| e.remote.clone());
+    let source = entries.get(name).map(|e| e.source.clone()).unwrap_or_else(|| "built-in".to_string());
     let entry = PluginYamlEntry {
         enabled,
-        builtin,
+        source,
         config,
-        remote: existing_remote,
     };
     entries.insert(name.to_string(), entry.clone());
     save_file(data_dir, pt, entries)?;
@@ -323,59 +304,21 @@ pub fn is_plugin_builtin(_data_dir: &str, name: &str, plugin_type: &PluginYamlTy
         || std::path::Path::new(&source_dir).join("plugin.json").exists()
 }
 
-/// Set a plugin entry with an explicit builtin flag override.
-/// When `builtin_override` is Some(true), forces `builtin: true`.
-/// When `builtin_override` is Some(false), forces `builtin: false` (cleared).
-/// When `builtin_override` is None, auto-detects from disk (preserves existing).
-/// Preserves the existing remote field.
-pub fn set_entry_with_builtin_override(
+/// Set a plugin entry with an explicit source override.
+/// The `source` is one of "built-in", "bundled", or "remote".
+pub fn set_entry_with_source(
     data_dir: &str,
     pt: &PluginYamlType,
     name: &str,
     enabled: bool,
-    builtin_override: Option<bool>,
+    source: &str,
     config: serde_json::Value,
 ) -> AppResult<PluginYamlEntry> {
     let mut entries = load_raw(data_dir, pt)?;
-    let existing_remote = entries.get(name).and_then(|e| e.remote.clone());
-    let builtin = builtin_override.or_else(|| {
-        entries.get(name).and_then(|e| e.builtin).or_else(|| {
-            if is_plugin_builtin(data_dir, name, pt) {
-                Some(true)
-            } else {
-                None
-            }
-        })
-    });
     let entry = PluginYamlEntry {
         enabled,
-        builtin,
+        source: source.to_string(),
         config,
-        remote: existing_remote,
-    };
-    entries.insert(name.to_string(), entry.clone());
-    save_file(data_dir, pt, entries)?;
-    Ok(entry)
-}
-
-/// Set a plugin entry with an explicit remote field (for git-installed plugins).
-/// Creates the entry if it doesn't exist.
-pub fn set_entry_with_remote(
-    data_dir: &str,
-    pt: &PluginYamlType,
-    name: &str,
-    enabled: bool,
-    config: serde_json::Value,
-    remote: Option<&PluginRemote>,
-) -> AppResult<PluginYamlEntry> {
-    let mut entries = load_raw(data_dir, pt)?;
-    // Preserve existing builtin flag if the entry already exists
-    let existing_builtin = entries.get(name).and_then(|e| e.builtin);
-    let entry = PluginYamlEntry {
-        enabled,
-        builtin: existing_builtin.or(Some(false)),
-        config,
-        remote: remote.cloned(),
     };
     entries.insert(name.to_string(), entry.clone());
     save_file(data_dir, pt, entries)?;
@@ -413,22 +356,6 @@ pub fn set_enabled(
     Ok(result)
 }
 
-/// Remove the `remote` field from a plugin entry in YAML.
-/// Used when switching from remote to built-in or bundled source — the remote
-/// URL/path is cleared so pick_primary_source no longer prefers the remote source.
-pub fn clear_remote_field(
-    data_dir: &str,
-    pt: &PluginYamlType,
-    name: &str,
-) -> AppResult<()> {
-    let mut entries = load_raw(data_dir, pt)?;
-    if let Some(entry) = entries.get_mut(name) {
-        entry.remote = None;
-        save_file(data_dir, pt, entries)?;
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Remote plugin store (.remote/plugins.yml) — persists remote plugin info
 // independently of the main YAML, so switching sources doesn't lose it.
@@ -445,7 +372,7 @@ pub struct RemotePluginStore {
 }
 
 fn remote_plugins_path(data_dir: &str) -> String {
-    format!("{}/plugins/.remote/plugins.yml", data_dir)
+    format!("{}/remote.yml", data_dir)
 }
 
 /// Load the remote plugin store from `.remote/plugins.yml`.
@@ -766,7 +693,7 @@ fn build_plugin_detail(
 
     let plugin_type_str = match manifest.plugin_type {
         PluginType::Platform => "platform",
-        PluginType::Mcp => "mcp",
+        PluginType::Mcp => "tool", // Was "mcp", now consistently "tool" for API
         PluginType::Provider => "provider",
     };
 
@@ -897,7 +824,13 @@ fn build_plugin_detail(
         created_at: String::new(),
         updated_at: String::new(),
         needs_build,
-        remote: yaml_entry.and_then(|e| e.remote.clone()),
+        remote: if source == "remote" {
+            // For remote plugins, look up the remote info from remote.yml
+            let yaml_type = PluginYamlType::from_plugin_type(&manifest.plugin_type);
+            get_remote_plugin(data_dir, &yaml_type, &manifest.name)
+        } else {
+            None
+        },
         needs_download: false,
         is_duplicated,
         has_source_code,
@@ -936,27 +869,18 @@ fn pick_primary_source(group: &PluginSourceGroup) -> usize {
         None
     };
 
-    // If YAML has builtin: true, prefer the 'built-in' source
+    // YAML's `source` field is authoritative.
+    // Prefer the source that matches the YAML entry's source value.
     if let Some(entry) = yaml_entry {
-        if entry.builtin.unwrap_or(false) {
-            if let Some(idx) = find_source(&["built-in"]) {
-                return idx;
-            }
+        if let Some(idx) = find_source(&[&entry.source]) {
+            return idx;
         }
     }
 
-    // If YAML has a remote field, prefer the 'remote' source
-    if let Some(entry) = yaml_entry {
-        if entry.remote.is_some() {
-            if let Some(idx) = find_source(&["remote"]) {
-                return idx;
-            }
-        }
-    }
-
-    // If YAML has the plugin but no remote/builtin preference, prefer bundled
+    // If the exact source doesn't exist on disk, try other available sources
+    // in priority order: built-in > bundled > remote
     if yaml_entry.is_some() {
-        if let Some(idx) = find_source(&["bundled", "remote"]) {
+        if let Some(idx) = find_source(&["built-in", "bundled", "remote"]) {
             return idx;
         }
     }
@@ -1001,12 +925,12 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
             PluginYamlType::Provider => provider_entries.get(&key),
         };
 
-        // Remote sources show if YAML has a remote entry for this key,
-        // OR if the .remote/plugins.yml store has an entry (persisted independently).
+        // Remote sources show if YAML entry has source: remote,
+        // OR if remote.yml has an entry for this plugin.
         if source == "remote" {
-            let has_remote_yaml = yaml_entry.and_then(|e| e.remote.as_ref()).is_some();
-            let has_remote_store = get_remote_plugin(data_dir, &yaml_type, &key).is_some();
-            if !has_remote_yaml && !has_remote_store {
+            let has_source = yaml_entry.map(|e| e.source.as_str() == "remote").unwrap_or(false);
+            let has_store = get_remote_plugin(data_dir, &yaml_type, &key).is_some();
+            if !has_source && !has_store {
                 continue;
             }
         }
@@ -1036,7 +960,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         (PluginYamlType::Provider, &provider_entries),
     ] {
         for (name, entry) in *yaml_entries {
-            if let Some(ref remote) = entry.remote {
+            if let Some(ref remote) = get_remote_plugin(data_dir, yaml_type, name) {
                 if let Some(ref remote_path) = remote.path {
                     let type_dir = yaml_type.type_dir_name();
                     let manifest_path = format!(
@@ -1125,7 +1049,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
     ] {
         for (key, yaml_entry) in *entries {
             if !groups.contains_key(key) {
-                let is_remote = yaml_entry.remote.is_some();
+                let is_remote = yaml_entry.source == "remote";
                 let manifest = PluginManifest {
                     name: key.clone(),
                     version: "0.1.0".to_string(),
@@ -1202,12 +1126,12 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
             PluginYamlType::Provider => provider_entries.get(&key),
         };
 
-        // Remote sources show if YAML has a remote entry for this key,
-        // OR if the .remote/plugins.yml store has an entry (persisted independently).
+        // Remote sources show if YAML entry has source: remote,
+        // OR if remote.yml has an entry for this plugin.
         if source == "remote" {
-            let has_remote_yaml = yaml_entry.and_then(|e| e.remote.as_ref()).is_some();
-            let has_remote_store = get_remote_plugin(data_dir, &yaml_type, &key).is_some();
-            if !has_remote_yaml && !has_remote_store {
+            let has_source = yaml_entry.map(|e| e.source.as_str() == "remote").unwrap_or(false);
+            let has_store = get_remote_plugin(data_dir, &yaml_type, &key).is_some();
+            if !has_source && !has_store {
                 continue;
             }
         }
@@ -1273,7 +1197,7 @@ fn build_not_found_from_yaml(
         (PluginYamlType::Provider, provider_entries),
     ] {
         if let Some(yaml_entry) = entries.get(name) {
-            let is_remote = yaml_entry.remote.is_some();
+            let is_remote = yaml_entry.source == "remote";
             let manifest = PluginManifest {
                 name: name.to_string(),
                 version: "0.1.0".to_string(),
@@ -1400,7 +1324,7 @@ pub fn get_disk_plugin_type(data_dir: &str, name: &str) -> AppResult<Option<Stri
         (PluginYamlType::Provider, load_raw(data_dir, &PluginYamlType::Provider)?),
     ] {
         if let Some(entry) = entries.get(name) {
-            if let Some(ref remote) = entry.remote {
+            if let Some(ref remote) = get_remote_plugin(data_dir, yaml_type, name) {
                 if let Some(ref remote_path) = remote.path {
                     let type_dir = yaml_type.type_dir_name();
                     let manifest_path = format!(

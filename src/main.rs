@@ -191,7 +191,7 @@ async fn run_server() -> AppResult<()> {
             data_dir: data_dir_server,
             workspace_dir,
             default_profile: default_profile.clone(),
-            mcp_registry: mcp_for_server,
+            tool_registry: mcp_for_server,
             app_context: ctx_for_server,
             shared_config: shared_config_for_server,
             platform_restart_signals: platform_restart_signals_for_server,

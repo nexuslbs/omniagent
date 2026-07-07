@@ -106,16 +106,13 @@ fn detect_plugin_category(
     yaml_type: &plugins_yaml::PluginYamlType,
     name: &str,
 ) -> PluginCategory {
-    // Check YAML entry first — builtin:true overrides remote
+    // Check YAML entry first — source field is authoritative
     if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, yaml_type, name) {
-        if entry.builtin.unwrap_or(false) {
-            return PluginCategory::Builtin;
+        match entry.source.as_str() {
+            "built-in" => return PluginCategory::Builtin,
+            "remote" => return PluginCategory::Remote,
+            _ => return PluginCategory::OmniStack,
         }
-        if entry.remote.is_some() {
-            return PluginCategory::Remote;
-        }
-        // YAML entry exists but builtin is not true → bundled/omni-stack
-        return PluginCategory::OmniStack;
     }
 
     // No YAML entry — check disk for builtin source directory
@@ -188,12 +185,10 @@ fn detect_plugin_category_cross_type(data_dir: &str, name: &str) -> Option<(plug
     ] {
         // Check YAML entry
         if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, pt, name) {
-            let cat = if entry.builtin.unwrap_or(false) {
-                PluginCategory::Builtin
-            } else if entry.remote.is_some() {
-                PluginCategory::Remote
-            } else {
-                PluginCategory::OmniStack
+            let cat = match entry.source.as_str() {
+                "built-in" => PluginCategory::Builtin,
+                "remote" => PluginCategory::Remote,
+                _ => PluginCategory::OmniStack,
             };
             return Some((pt.clone(), cat));
         }
@@ -362,10 +357,10 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
             // registered tools, the server failed to initialize — set
             // status to "error" so the frontend shows the right badge.
             {
-                let registry = state.mcp_registry.read().unwrap();
+                let registry = state.tool_registry.read().unwrap();
                 let all_tools = registry.all();
                 for detail in details.iter_mut() {
-                    if detail.plugin_type == "mcp" && detail.status == "enabled" {
+                    if detail.plugin_type == "tool" && detail.status == "enabled" {
                         let has_tools = all_tools.iter().any(|t| {
                             t.server_name.as_deref() == Some(&detail.name)
                         });
@@ -439,8 +434,8 @@ pub(crate) async fn get_plugin_handler(
             // if a plugin is marked "enabled" but its server has zero
             // registered tools, the server failed to initialize — set
             // status to "error" so the frontend shows the right badge.
-            if detail.plugin_type == "mcp" && detail.status == "enabled" {
-                let registry = state.mcp_registry.read().unwrap();
+            if detail.plugin_type == "tool" && detail.status == "enabled" {
+                let registry = state.tool_registry.read().unwrap();
                 let has_tools = registry
                     .all()
                     .iter()
@@ -606,16 +601,15 @@ pub(crate) async fn enable_plugin_handler(
         }
     };
 
-    // Determine desired builtin flag from source parameter
-    let desired_builtin = match req.source.as_str() {
-        "built-in" => Some(true),
-        "bundled" | "remote" => Some(false),
+    // Validate source parameter
+    match req.source.as_str() {
+        "built-in" | "bundled" | "remote" => {}
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "success": false,
-                    "error": format!("Invalid source '{}': must be 'built-in' or 'bundled'", req.source)
+                    "error": format!("Invalid source '{}': must be 'built-in', 'bundled', or 'remote'", req.source)
                 })),
             )
                 .into_response();
@@ -624,12 +618,7 @@ pub(crate) async fn enable_plugin_handler(
 
     // Check if plugin already in the desired state — skip only if source matches
     if let Ok(Some(entry)) = plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name) {
-        let source_matches = match desired_builtin {
-            Some(true) => entry.builtin.unwrap_or(false),
-            Some(false) => !entry.builtin.unwrap_or(false),
-            None => unreachable!(), // desired_builtin is always Some after validation
-        };
-        if entry.enabled && source_matches {
+        if entry.enabled && entry.source == req.source {
             // Already enabled with matching source — no change needed
             match plugins_yaml::get_plugin(&state.data_dir, &name) {
                 Ok(Some(detail)) => {
@@ -648,41 +637,25 @@ pub(crate) async fn enable_plugin_handler(
         }
     }
 
-    // Save existing remote info before modifying YAML (needed when re-enabling remote
-    // source after it was cleared by a previous bundled/built-in switch)
-    let existing_remote = plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name)
-        .ok()
-        .flatten()
-        .and_then(|e| e.remote);
+    // Look up remote info from remote.yml (needed when re-enabling remote source)
+    let existing_remote = plugins_yaml::get_remote_plugin(
+        &state.data_dir, &yaml_type, &name,
+    );
 
-    // Upsert with enabled=true and explicit builtin override
-    match plugins_yaml::set_entry_with_builtin_override(
+    // Upsert with enabled=true and explicit source
+    match plugins_yaml::set_entry_with_source(
         &state.data_dir,
         &yaml_type,
         &name,
         true,
-        desired_builtin,
+        &req.source,
         serde_json::json!({}),
     ) {
         Ok(_entry) => {
-            // Handle the remote field based on source:
-            // - "built-in" or "bundled": clear remote so pick_primary_source doesn't prefer it
-            // - "remote": restore the remote field from the request or existing entry
-            if req.source.as_str() != "remote" {
-                let _ = plugins_yaml::clear_remote_field(&state.data_dir, &yaml_type, &name);
-            } else {
-                // Use the remote from the request if provided, otherwise fall back to existing
+            // Save remote info to remote.yml when enabling remote source
+            if req.source.as_str() == "remote" {
                 let remote_to_set = req.remote.as_ref().or(existing_remote.as_ref());
                 if let Some(ref remote) = remote_to_set {
-                    let _ = plugins_yaml::set_entry_with_remote(
-                        &state.data_dir,
-                        &yaml_type,
-                        &name,
-                        true,
-                        serde_json::json!({}),
-                        Some(remote),
-                    );
-                    // Persist to .remote/plugins.yml so remote info survives source switches
                     let _ = plugins_yaml::save_remote_plugin(
                         &state.data_dir, &yaml_type, &name, remote,
                     );
@@ -700,7 +673,7 @@ pub(crate) async fn enable_plugin_handler(
                 {
                     Ok(tools) => {
                         let count = tools.len();
-                        state.mcp_registry.write().unwrap().register_all(tools);
+                        state.tool_registry.write().unwrap().register_all(tools);
                         info!(
                             "Hot-reloaded {} tool(s) from MCP server '{}' (no restart needed)",
                             count, name
@@ -771,35 +744,33 @@ pub(crate) async fn disable_plugin_handler(
         }
     };
 
-    // Validate source incl remote
-    let _desired_builtin = match req.source.as_str() {
-        "built-in" => Some(true),
-        "bundled" | "remote" => Some(false),
+    // Validate source
+    match req.source.as_str() {
+        "built-in" | "bundled" | "remote" => {}
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "success": false,
-                    "error": format!("Invalid source '{}': must be 'built-in' or 'bundled'", req.source)
+                    "error": format!("Invalid source '{}': must be 'built-in', 'bundled', or 'remote'", req.source)
                 })),
             )
                 .into_response();
         }
     };
 
-    // Upsert with enabled=false — preserve existing builtin flag
-    match plugins_yaml::set_entry_with_builtin_override(
+    // Upsert with enabled=false — preserve existing source field
+    match plugins_yaml::set_entry(
         &state.data_dir,
         &yaml_type,
         &name,
         false,
-        None, // preserve existing builtin flag
         serde_json::json!({}),
     ) {
         Ok(_entry) => {
             // Hot-reload: remove this MCP server's tools from the shared registry.
             if yaml_type == plugins_yaml::PluginYamlType::Tool {
-                let removed = state.mcp_registry.write().unwrap().remove_by_server(&name);
+                let removed = state.tool_registry.write().unwrap().remove_by_server(&name);
                 if !removed.is_empty() {
                     info!(
                         "Removed {} tool(s) from disabled MCP server '{}' (no restart needed): {:?}",
@@ -940,13 +911,11 @@ pub(crate) async fn install_plugin_handler(
     // For remote plugins with a path subdirectory, also check the subpath
     let mut dir_path = std::path::Path::new(&plugin_dir).to_path_buf();
     if matches!(category, PluginCategory::Remote) {
-        if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, &yaml_type, &name) {
-            if let Some(ref remote) = entry.remote {
-                if let Some(ref subpath) = remote.path {
-                    let sub = dir_path.join(subpath);
-                    if sub.join("Cargo.toml").exists() || sub.join("plugin.json").exists() {
-                        dir_path = sub;
-                    }
+        if let Some(remote) = plugins_yaml::get_remote_plugin(data_dir, &yaml_type, &name) {
+            if let Some(ref subpath) = remote.path {
+                let sub = dir_path.join(subpath);
+                if sub.join("Cargo.toml").exists() || sub.join("plugin.json").exists() {
+                    dir_path = sub;
                 }
             }
         }
@@ -1111,10 +1080,7 @@ pub(crate) async fn reinstall_plugin_handler(
 
     // 2. Handle remote plugins: re-clone first
     if matches!(category, PluginCategory::Remote) {
-        let remote_info = plugins_yaml::get_entry(data_dir, &yaml_type, &name)
-            .ok()
-            .flatten()
-            .and_then(|e| e.remote);
+    let remote_info = plugins_yaml::get_remote_plugin(data_dir, &yaml_type, &name);
 
         if let Some(ref remote) = remote_info {
             info!(
@@ -1180,13 +1146,11 @@ pub(crate) async fn reinstall_plugin_handler(
     // For remote plugins with a path subdirectory, also check the subpath
     let mut dir_path = std::path::Path::new(&plugin_dir).to_path_buf();
     if matches!(category, PluginCategory::Remote) {
-        if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, &yaml_type, &name) {
-            if let Some(ref remote) = entry.remote {
-                if let Some(ref subpath) = remote.path {
-                    let sub = dir_path.join(subpath);
-                    if sub.join("Cargo.toml").exists() || sub.join("plugin.json").exists() {
-                        dir_path = sub;
-                    }
+        if let Some(remote) = plugins_yaml::get_remote_plugin(data_dir, &yaml_type, &name) {
+            if let Some(ref subpath) = remote.path {
+                let sub = dir_path.join(subpath);
+                if sub.join("Cargo.toml").exists() || sub.join("plugin.json").exists() {
+                    dir_path = sub;
                 }
             }
         }
@@ -1393,10 +1357,10 @@ pub(crate) async fn setup_plugin_handler(
         // Try relative to plugin directory — scan possible locations
         let plugin_dirs = [
             format!("{}/plugins/platforms/{}", data_dir, name),
-            format!("{}/plugins/mcp/{}", data_dir, name),
+            format!("{}/plugins/tools/{}", data_dir, name),
             format!("{}/plugins/providers/{}", data_dir, name),
             format!("/app/plugins/platforms/{}", name),
-            format!("/app/plugins/mcp/{}", name),
+            format!("/app/plugins/tools/{}", name),
             format!("/app/plugins/providers/{}", name),
         ];
         let mut found = None;
@@ -1913,7 +1877,7 @@ pub(crate) async fn delete_plugin_handler(
 
         if is_remote {
             let mut removed_binary = false;
-            for t in &["mcp", "platforms", "providers"] {
+            for t in &["tools", "platforms", "providers"] {
                 let remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, t, name);
                 let remote_path = std::path::Path::new(&remote_dir);
                 if remote_path.exists() && remote_path.is_dir() {
@@ -2301,16 +2265,16 @@ pub(crate) async fn install_git_handler(
 
     let remote_info: plugins_yaml::PluginRemote = serde_json::from_value(remote_val).unwrap();
 
-    match plugins_yaml::set_entry_with_remote(
+    match plugins_yaml::set_entry_with_source(
         &state.data_dir,
         &yaml_type,
         &actual_name,
         false,
+        "remote",
         serde_json::json!({}),
-        Some(&remote_info),
     ) {
         Ok(_entry) => {
-            // Persist remote plugin info to .remote/plugins.yml so it survives source switches
+            // Persist remote plugin info to remote.yml so it survives source switches
             let _ = plugins_yaml::save_remote_plugin(
                 &state.data_dir, &yaml_type, &actual_name, &remote_info,
             );
@@ -2373,15 +2337,15 @@ pub(crate) async fn download_plugin_handler(
 
     // Find the YAML entry and extract remote info
     let (yaml_type, remote_info) = match plugins_yaml::get_entry_with_type(data_dir, &name) {
-        Ok(Some((pt, entry))) => {
-            if let Some(ref remote) = entry.remote {
+        Ok(Some((pt, _entry))) => {
+            if let Some(remote) = plugins_yaml::get_remote_plugin(data_dir, &pt, &name) {
                 (pt, remote.clone())
             } else {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
                         "success": false,
-                        "error": format!("Plugin '{}' is not a remote plugin (no remote field in YAML)", name)
+                        "error": format!("Plugin '{}' has remote source but no remote.yml entry", name)
                     })),
                 ).into_response();
             }
@@ -2477,10 +2441,10 @@ pub(crate) async fn download_plugin_handler(
         }
     }
 
-    // Ensure YAML entry has the remote field
+    // Ensure YAML entry has the remote source field
     let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
-    let _ = plugins_yaml::set_entry_with_remote(
-        data_dir, &yaml_type, &name, false, serde_json::json!({}), Some(&remote_info),
+    let _ = plugins_yaml::set_entry_with_source(
+        data_dir, &yaml_type, &name, false, "remote", serde_json::json!({}),
     );
 
     match plugins_yaml::get_plugin(data_dir, &name) {
@@ -2600,8 +2564,8 @@ async fn reload_tool_plugin(state: &Arc<AppState>, name: &str) {
     {
         Ok(tools) => {
             let count = tools.len();
-            state.mcp_registry.write().unwrap().remove_by_server(name);
-            state.mcp_registry.write().unwrap().register_all(tools);
+            state.tool_registry.write().unwrap().remove_by_server(name);
+            state.tool_registry.write().unwrap().register_all(tools);
             tracing::info!(
                 "Hot-reloaded {} tool(s) from MCP server '{}' after config update (no restart needed)",
                 count,

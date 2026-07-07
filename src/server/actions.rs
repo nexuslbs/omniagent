@@ -323,7 +323,7 @@ pub(crate) async fn run_action_handler(
 
     // Clone the registry snapshot under the lock, then drop the lock
     // before the async execute call (RwLockReadGuard is !Send).
-    let mcp_snapshot = state.mcp_registry.read().unwrap().clone();
+    let mcp_snapshot = state.tool_registry.read().unwrap().clone();
     match mcp_snapshot.execute(&call, state.app_context.clone())
         .await
     {
