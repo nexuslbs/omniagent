@@ -42,13 +42,26 @@ tools:
     path: tools/test-rust-tool
 ```
 
-### Source Definitions
+### Source Determination — HARD RULE: NO PRIORITY, NO FALLBACK
 
-| Source | Location | Build Method | Binary Check |
-|--------|---------|-------------|-------------|
-| `built-in` | `/app/plugins/{type}/{name}/` | Workspace: `cargo build -p <pkg>` from `/app/Cargo.toml` | `get_bin_path(pkg_name)` |
-| `bundled` | `{workspace_dir}/plugins/{type}/{name}/` | Standalone: `cargo build` from plugin's own `Cargo.toml` | `{dir}/target/release/{pkg_name}` |
-| `remote` | `{data_dir}/plugins/{type}/.remote/{name}/` | Standalone: `cargo build` from `.remote/{name}/Cargo.toml` | `{dir}/target/release/{pkg_name}` |
+A plugin's **source** is determined **solely by its physical location on disk**. There is no priority order between built-in, bundled, and remote. Each stands independently:
+
+| Source | Physical Location | Identified By |
+|--------|------------------|---------------|
+| `built-in` | `/app/plugins/{type}/{name}/` | `Cargo.toml` + `plugin.json` or `mcp-config.json` in workspace |
+| `bundled` | `{data_dir}/plugins/{type}/{name}/` or `{workspace_dir}/plugins/{type}/{name}/` | `plugin.json` at root |
+| `remote` | `{data_dir}/plugins/{type}/.remote/{name}/{path}/` | `plugin.json` at subpath + entry in `remote.yml` |
+
+**The `source` field in `plugins.yml` is authoritative.** When a plugin has a YAML entry with `source: built-in`, only the built-in source is active. The bundled and remote sources for the same name still exist on disk but are marked `is_duplicated: true` and shown as disabled.
+
+**When there is no YAML entry**, all sources are discovered and shown as disabled. The user can enable any source via the dashboard, which creates a YAML entry with that source.
+
+**No function should guess or fall back between sources.** The `detect_plugin_category_cross_type()` function returns `None` when no YAML entry exists — it does NOT pick a source. Each caller (install handler, enable handler, etc.) has its own source-specific logic.
+
+**MCP scanner (`discover_plugin_servers`) is source-aware:** It reads `plugins.yml` and only starts MCP servers for enabled plugins at their correct source location. It does NOT scan all directories blindly.
+
+**Plugin discovery (`discover_plugins`) scans ALL directories:** Sections A-D scan every physical location so ALL discoverable plugins appear in the dashboard listing. Plugins not in `plugins.yml` default to `status: "disabled"`.
+| `remote` | `{data_dir}/plugins/{type}/.remote/{name}/{path}/` | Standalone: `cargo build` from `.remote/{name}/{path}/Cargo.toml` | `{dir}/target/release/{pkg_name}` |
 
 ### Builtin Plugin Rules
 
@@ -135,3 +148,22 @@ When a plugin exists in `plugins.yml` but has no source on disk, a synthetic "no
 
 - `plugin_type` in API responses uses `"tool"` instead of `"mcp"` (backward compat maintained via `from_type_str` mapping)
 - Enable/disable endpoints require `{ source: "built-in" | "bundled" | "remote" }`
+
+### Reinstall Behavior
+
+- **Reinstall does NOT re-clone the git repository** for remote plugins. It only recompiles the existing source code in `.remote/<name>/`.
+- To update from git (re-clone the latest version), use the **Download** endpoint (`POST /api/plugins/{name}/download`) instead.
+
+### Uninstall Behavior
+
+- **Uninstall does NOT remove the `.remote/` directory** for remote plugins. It only:
+  1. Removes the compiled `target/` directory (`{data_dir}/plugins/{type}/.remote/{name}/target`)
+  2. Sets `enabled: false` in `plugins.yml` (keeps the YAML entry and `.remote/` source code)
+- For non-remote plugins, uninstall removes the YAML entry and the compiled `target/` directory.
+
+### Bundled Plugin Buttons (Dashboard)
+
+- **Bundled plugins always show a Remove button** — there is no Update button (the code lives in the omni-stack repo, there's no external repository to update).
+- The Remove button calls `DELETE /api/plugins/{name}` (remove mode), which removes the YAML entry and the compiled `target/` directory.
+- Bundled plugins with `source: bundled` in `plugins.yml` can be removed via this endpoint. If the entry is not in `plugins.yml`, the Remove button still shows for discovery-purposes only (removes any stale YAML entry).
+- The Install button for bundled plugins compiles synchronously, writes `enabled: true` to `plugins.yml`, and hot-reloads the MCP server — all in one synchronous API call. No more background compile.
