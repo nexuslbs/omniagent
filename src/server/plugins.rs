@@ -85,6 +85,12 @@ pub(crate) struct InstallGitRequest {
     path: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct RenameRequest {
+    /// The new name for the plugin.
+    pub new_name: String,
+}
+
 // ---------------------------------------------------------------------------
 // Plugin type detection helpers
 // ---------------------------------------------------------------------------
@@ -310,6 +316,7 @@ pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
         .route("/api/plugins/{name}/refresh-models", post(refresh_models_handler))
         .route("/api/plugins/{name}/setup", post(setup_plugin_handler))
         .route("/api/plugins/{name}/download", post(download_plugin_handler))
+        .route("/api/plugins/{name}/rename", post(rename_plugin_handler))
         .route("/api/plugins/{name}", delete(delete_plugin_handler))
         .route("/api/reload", post(reload_env_handler))
 }
@@ -2116,10 +2123,11 @@ pub(crate) async fn install_url_handler(
     }
 }
 
-/// POST /api/plugins/install-git — install a plugin from a git repository.
+/// POST /api/plugins/install-git — clone a plugin repository.
 ///
-/// Clones DIRECTLY to `data_dir/plugins/<type_dir>/.remote/<name>/` with NO source copying.
-/// Compiles if Rust crate, then registers in YAML.
+/// Clones DIRECTLY to `data_dir/plugins/<type_dir>/.remote/<name>/` and persists
+/// the remote info to `remote.yml`. Does NOT compile or register in plugins.yml
+/// — that happens via the separate Install action from the dashboard.
 pub(crate) async fn install_git_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<InstallGitRequest>,
@@ -2173,162 +2181,215 @@ pub(crate) async fn install_git_handler(
         }
     };
 
-    // The directory name IS the plugin key — use target_name for YAML regardless of manifest name.
-    // If the manifest name differs, log a warning but keep target_name as the key.
+    // The directory name IS the plugin key.
     if target_name != manifest.name {
         tracing::warn!(
             "Requested name '{}' differs from manifest name '{}'. Using requested name as the key.",
             target_name, manifest.name
         );
     }
-    let actual_name = target_name;
-    // Determine type directory from manifest
-    let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
-    let type_dir_str = yaml_type.type_dir_name();
 
-    // Compile if Rust crate — compile from .remote/ location
-    let plugin_dir = format!(
-        "{}/plugins/{}/.remote/{}",
-        state.data_dir, type_dir_str, actual_name
+    // Persist to remote.yml only — no YAML entry, no compilation.
+    let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
+    let remote_info = plugins_yaml::PluginRemote {
+        url: body.url.clone(),
+        git_ref: body.git_ref,
+        path: body.path,
+    };
+    if let Err(e) = plugins_yaml::save_remote_plugin(&state.data_dir, &yaml_type, &target_name, &remote_info) {
+        error!("Failed to persist remote info to remote.yml: {:?}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Failed to persist remote info: {}", e)
+            })),
+        )
+            .into_response();
+    }
+
+    info!(
+        "Successfully cloned git plugin '{}' (manifest name '{}') into .remote/",
+        target_name, manifest.name
     );
 
-    // Check if there's a sub-path within the remote
-    let effective_plugin_dir = match body.path {
-        Some(ref p) if !p.is_empty() => format!("{}/{}", plugin_dir, p),
-        _ => plugin_dir.clone(),
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "success": true,
+            "data": {
+                "name": target_name,
+                "manifest_name": manifest.name,
+                "plugin_type": yaml_type.to_type_str(),
+            }
+        })),
+    )
+        .into_response()
+}
+
+/// POST /api/plugins/{name}/rename — rename a remote plugin.
+///
+/// Updates remote.yml key, plugins.yml key (if an entry exists), and renames
+/// the .remote/ directory from the old name to the new name.
+pub(crate) async fn rename_plugin_handler(
+    Path(name): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<RenameRequest>,
+) -> impl IntoResponse {
+    let new_name = sanitize_plugin_name(&body.new_name);
+    if new_name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": "New name cannot be empty"
+            })),
+        )
+            .into_response();
+    }
+    if new_name == name {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": "New name is the same as the current name"
+            })),
+        )
+            .into_response();
+    }
+
+    let data_dir = &state.data_dir;
+
+    // 1. Find the plugin in remote.yml across all types
+    let store = plugins_yaml::load_remote_plugins(data_dir);
+    let yaml_type = {
+        let mut found: Option<plugins_yaml::PluginYamlType> = None;
+        for (pt, entries) in [
+            (&store.tools, plugins_yaml::PluginYamlType::Tool),
+            (&store.platforms, plugins_yaml::PluginYamlType::Platform),
+            (&store.providers, plugins_yaml::PluginYamlType::Provider),
+        ] {
+            if let Some(ref map) = pt {
+                if map.contains_key(&name) {
+                    found = Some(entries);
+                    break;
+                }
+            }
+        }
+        match found {
+            Some(t) => t,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Plugin '{}' not found in remote.yml", name)
+                    })),
+                )
+                    .into_response();
+            }
+        }
     };
 
-    let cargo_toml = std::path::Path::new(&effective_plugin_dir).join("Cargo.toml");
-    if cargo_toml.exists() {
-        info!("Git install: compiling Rust crate at {}", effective_plugin_dir);
-        match tokio::task::spawn_blocking({
-            let dir = effective_plugin_dir.clone();
-            let cargo_path = cargo_toml.to_string_lossy().to_string();
-            move || {
-                let status = std::process::Command::new("cargo")
-                    .args(["build", "--release", "--manifest-path", &cargo_path])
-                    .current_dir(&dir)
-                    .status();
-                status
-            }
-        })
-        .await
-        {
-            Ok(Ok(status)) if status.success() => {
-                info!("Git install: Rust compilation succeeded for '{}'", actual_name);
-            }
-            Ok(Ok(status)) => {
-                let msg = format!("Git install: compilation failed for '{}' with exit code {}", actual_name, status);
-                tracing::error!("{}", msg);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": msg,
-                    })),
-                )
-                    .into_response();
-            }
-            Ok(Err(e)) => {
-                let msg = format!("Git install: failed to run cargo for '{}': {}", actual_name, e);
-                tracing::error!("{}", msg);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": msg,
-                    })),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                let msg = format!("Git install: task join error for '{}': {}", actual_name, e);
-                tracing::error!("{}", msg);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": msg,
-                    })),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    // Register in YAML with the remote field
-    let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
-    let mut remote_val_map = serde_json::Map::new();
-    remote_val_map.insert("url".to_string(), serde_json::json!(body.url));
-    if let Some(ref git_ref) = body.git_ref {
-        remote_val_map.insert("git_ref".to_string(), serde_json::json!(git_ref));
-    }
-    if let Some(ref path) = body.path {
-        remote_val_map.insert("path".to_string(), serde_json::json!(path));
-    }
-    let remote_val = serde_json::Value::Object(remote_val_map);
-
-    let remote_info: plugins_yaml::PluginRemote = serde_json::from_value(remote_val).unwrap();
-
-    match plugins_yaml::set_entry_with_source(
-        &state.data_dir,
-        &yaml_type,
-        &actual_name,
-        false,
-        "remote",
-        serde_json::json!({}),
-    ) {
-        Ok(_entry) => {
-            // Persist remote plugin info to remote.yml so it survives source switches
-            let _ = plugins_yaml::save_remote_plugin(
-                &state.data_dir, &yaml_type, &actual_name, &remote_info,
-            );
-
-            match plugins_yaml::get_plugin(&state.data_dir, &actual_name) {
-                Ok(Some(detail)) => {
-                    info!(
-                        "Successfully installed git plugin '{}' version {} from {}",
-                        actual_name, manifest.version, body.url
-                    );
-                    (
-                        StatusCode::CREATED,
-                        Json(serde_json::json!({
-                            "success": true,
-                            "data": detail
-                        })),
-                    )
-                        .into_response()
-                }
-                _ => {
-                    info!(
-                        "Successfully installed git plugin '{}' version {} from {}",
-                        actual_name, manifest.version, body.url
-                    );
-                    (
-                        StatusCode::CREATED,
-                        Json(serde_json::json!({
-                            "success": true
-                        })),
-                    )
-                        .into_response()
-                }
-            }
-        }
-        Err(e) => {
-            error!(
-                "Installed git plugin from disk but failed to register in YAML: {:?}",
-                e
-            );
-            (
+    // 2. Get the remote info
+    let remote_info = match plugins_yaml::get_remote_plugin(data_dir, &yaml_type, &name) {
+        Some(r) => r,
+        None => {
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
                     "success": false,
-                    "error": format!("Plugin cloned but YAML registration failed: {}", e)
+                    "error": "Plugin found in remote.yml store but no data returned"
                 })),
             )
-                .into_response()
+                .into_response();
+        }
+    };
+
+    // 3. Check that new_name doesn't already exist in remote.yml for this type
+    if let Some(_existing) = plugins_yaml::get_remote_plugin(data_dir, &yaml_type, &new_name) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Plugin '{}' already exists in remote.yml", new_name)
+            })),
+        )
+            .into_response();
+    }
+
+    // 4. Rename directory
+    let type_dir = yaml_type.type_dir_name();
+    let old_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, name);
+    let new_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, new_name);
+    let old_path = std::path::Path::new(&old_dir);
+    let new_path = std::path::Path::new(&new_dir);
+
+    if old_path.exists() {
+        if new_path.exists() {
+            if let Err(e) = std::fs::remove_dir_all(new_path) {
+                error!("Failed to remove existing directory at {}: {:?}", new_dir, e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to remove existing directory: {}", e)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        if let Some(parent) = new_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                error!("Failed to create parent dirs: {:?}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Failed to create directory: {}", e)
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        if let Err(e) = std::fs::rename(old_path, new_path) {
+            error!("Failed to rename directory from {} to {}: {:?}", old_dir, new_dir, e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to rename directory: {}", e)
+                })),
+            )
+                .into_response();
         }
     }
+
+    // 5. Update remote.yml: remove old key, add new key
+    plugins_yaml::remove_remote_plugin(data_dir, &yaml_type, &name);
+    plugins_yaml::save_remote_plugin(data_dir, &yaml_type, &new_name, &remote_info);
+
+    // 6. Update plugins.yml if entry exists: rename the key
+    if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, &yaml_type, &name) {
+        let _ = plugins_yaml::remove_entry(data_dir, &yaml_type, &name);
+        let _ = plugins_yaml::set_entry_with_source(
+            data_dir, &yaml_type, &new_name, entry.enabled, &entry.source, entry.config,
+        );
+    }
+
+    info!("Renamed remote plugin '{}' to '{}'", name, new_name);
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": true,
+            "data": {
+                "old_name": name,
+                "new_name": new_name,
+            }
+        })),
+    )
+        .into_response()
 }
 
 /// POST /api/plugins/{name}/download — download a remote plugin that exists in YAML but not on disk.

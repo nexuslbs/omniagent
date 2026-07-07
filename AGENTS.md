@@ -53,9 +53,11 @@ tools:
 ### Builtin Plugin Rules
 
 - **Builtin plugins are disabled by default.** They must be explicitly added to `plugins.yml` with `enabled: true` and `source: built-in`.
-- **When a tool is defined in YAML** with `source: bundled` and a builtin with the same name exists, the builtin is ignored — the bundled source is the primary.
-- **When a builtin plugin has a YAML entry but NO explicit `source` field**, it defaults to `built-in` but appears as disabled if enabled=false.
+- **If a tool/plugin is defined in YAML** with `source: bundled` or `source: remote` and a builtin with the same name exists, the builtin is ignored — the non-builtin source is the primary. The builtin still shows as an available source but marked as duplicated.
+- **When a builtin plugin has a YAML entry but no explicit `source` field**, it defaults to `built-in` but appears as disabled if enabled=false.
 - **Builtin plugins** are workspace members in `/app/Cargo.toml`.
+- **Only plugins with `plugin.json` at directory root** are considered local/repo plugins. Directories without `plugin.json` (e.g., config-only dirs like `util`) should not appear as discoverable plugins.
+- **Duplicated plugins in the tools page**: When a plugin exists both as builtin (in omniagent `/app/plugins/`) and bundled (in omni-stack `plugins/`), the non-primary source shows as "duplicated" in the dashboard. The omni-stack copy usually takes precedence unless the YAML explicitly sets `source: built-in`.
 
 ### Bundled Plugin Rules (Omni-Stack)
 
@@ -77,6 +79,25 @@ Each non-primary source gets `is_duplicated: true`.
 ### Install / Reinstall with Builtin Fallback
 
 When Install/Reinstall is called and the categorized source directory has no Cargo.toml (only pre-compiled binary), the handler falls back to the builtin source.
+
+### Git Install (install-git)
+
+- **API**: `POST /api/plugins/install-git` — clones a plugin repo and persists to `remote.yml` only.
+- Does NOT compile or register in `plugins.yml`. 
+- The dashboard handles Install (compile + YAML entry), Enable, Remove as separate steps.
+- Directory naming priority: explicit `name` → last segment of `path` → repo name from URL, sanitized with `sanitize_plugin_name()`.
+- Clone destination: `{data_dir}/plugins/{type}/.remote/{name}/`
+
+### Rename Plugin
+
+- **API**: `POST /api/plugins/{name}/rename` with body `{ "new_name": "..." }`
+- Updates all three locations atomically:
+  1. Renames directory: `plugins/{type}/.remote/{old_name}/` → `plugins/{type}/.remote/{new_name}/`
+  2. Updates `remote.yml` key: removes old key, adds new key with same URL/path/ref
+  3. Updates `plugins.yml` key (if YAML entry exists): removes old key, inserts new key with same enabled/source/config
+- Returns 404 if plugin not found in `remote.yml`
+- Returns 409 if `new_name` already exists in `remote.yml` for the same type
+- New name is sanitized with `sanitize_plugin_name()` before use
 
 ### Remote Plugin Store (remote.yml)
 

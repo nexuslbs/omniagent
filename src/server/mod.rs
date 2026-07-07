@@ -191,6 +191,14 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
             post(plugins::setup_plugin_handler),
         )
         .route(
+            "/api/plugins/{name}/download",
+            post(plugins::download_plugin_handler),
+        )
+        .route(
+            "/api/plugins/{name}/rename",
+            post(plugins::rename_plugin_handler),
+        )
+        .route(
             "/api/plugins/{name}",
             delete(plugins::delete_plugin_handler),
         )
