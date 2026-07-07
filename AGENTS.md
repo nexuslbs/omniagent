@@ -76,6 +76,21 @@ The `/api/plugins` response groups plugins by name and assigns a **primary sourc
 
 Each non-primary source gets `is_duplicated: true`.
 
+### Plugin Display Rules (Dashboard)
+
+- **Remote Rust plugins that need build** (`needs_build=true`): Show **Remove + Install** buttons (NOT Update).
+  - "Update" is only for non-compilable (script/no-source) remote plugins.
+- **Non-remote Rust plugins that need build**: Show **Install** button.
+- **Installed Rust plugins**: Show **Uninstall + Reinstall** buttons.
+- **Script/no-source plugins**: Show **Remove + Update** buttons (remote) or no build buttons (non-remote).
+
+### Plugin Discovery Rules
+
+- `.remote/` directories contain remote plugin clones. Plugins inside `.remote/` with `plugin.json` at root are discovered as remote sources.
+- Plugins cloned with a `path` sub-path (e.g., `path: tools/cron-echo`) are in a subdirectory within `.remote/{name}/{path}/`.
+- Stale/old plugin directories in the workspace (non-.remote copies, mcp/ dirs, temp clones) should be cleaned up. They create false "bundled" or "duplicated" entries.
+- The `remote.yml` must have entries that match the `.remote/` directory structure. Orphan `.remote/` directories (no remote.yml entry) are ignored.
+
 ### Install / Reinstall with Builtin Fallback
 
 When Install/Reinstall is called and the categorized source directory has no Cargo.toml (only pre-compiled binary), the handler falls back to the builtin source.
