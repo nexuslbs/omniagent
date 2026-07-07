@@ -874,8 +874,9 @@ struct PluginSourceGroup {
 }
 
 /// Pick the primary source for a plugin based on YAML configuration.
-/// Returns the index into `sources` that should be the primary (active) entry.
-fn pick_primary_source(group: &PluginSourceGroup) -> usize {
+/// Returns the index into `sources` that should be the primary (active) entry,
+/// or `None` if no source should be designated as primary (all are equal).
+fn pick_primary_source(group: &PluginSourceGroup) -> Option<usize> {
     let yaml_entry = &group.yaml_entry;
     let sources = &group.sources;
 
@@ -895,7 +896,7 @@ fn pick_primary_source(group: &PluginSourceGroup) -> usize {
     // Prefer the source that matches the YAML entry's source value.
     if let Some(entry) = yaml_entry {
         if let Some(idx) = find_source(&[&entry.source]) {
-            return idx;
+            return Some(idx);
         }
     }
 
@@ -903,20 +904,14 @@ fn pick_primary_source(group: &PluginSourceGroup) -> usize {
     // in priority order: built-in > bundled > remote
     if yaml_entry.is_some() {
         if let Some(idx) = find_source(&["built-in", "bundled", "remote"]) {
-            return idx;
+            return Some(idx);
         }
     }
 
-    // No YAML entry: prefer built-in source (it has actual source code and can be installed).
-    // The built-in source is the development location; the bundled version is a deployment
-    // wrapper that references the pre-compiled binary. When no YAML config exists yet,
-    // the built-in should be the primary so Install/Enable buttons are available.
-    if let Some(idx) = find_source(&["built-in"]) {
-        return idx;
-    }
-
-    // Default: first source
-    0
+    // No YAML entry: do NOT designate any source as primary.
+    // All sources are equal — none is "duplicated" over the others.
+    // The frontend shows the disabled-card styling and buttons on all of them.
+    None
 }
 
 /// List all plugins, combining disk discovery with YAML overrides.
@@ -1072,7 +1067,8 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         let yaml_entry_ref = group.yaml_entry.as_ref();
 
         for (i, (manifest, source, base_path)) in group.sources.iter().enumerate() {
-            let is_primary = i == primary_idx;
+            let is_primary = primary_idx.map(|idx| i == idx);
+            // When primary_idx is None (no YAML entry, none enabled), no source is a "duplicate"
 
             // Plugin directory is the parent of the base_path
             let plugin_dir = std::path::Path::new(base_path)
@@ -1081,7 +1077,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
 
             // For the primary source, pass the real YAML entry; for duplicates, pass None
             // to trigger default (disabled for built-in, and forced "duplicated" status)
-            let detail_yaml_entry = if is_primary { yaml_entry_ref } else { None };
+            let detail_yaml_entry = if is_primary.unwrap_or(true) { yaml_entry_ref } else { None };
 
             let detail = build_plugin_detail(
                 manifest,
@@ -1090,7 +1086,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                 Some(key),
                 plugin_dir,
                 data_dir,
-                !is_primary,
+                !is_primary.unwrap_or(true),
             );
 
             // is_duplicated is now set via the build_plugin_detail parameter,
@@ -1275,7 +1271,7 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
     }
 
     if let Some(group) = merged_group {
-        let primary_idx = pick_primary_source(&group);
+        let primary_idx = pick_primary_source(&group).unwrap_or(0);
         let (manifest, source, base_path) = &group.sources[primary_idx];
         let _yaml_type = group.yaml_type.as_ref().unwrap_or(&PluginYamlType::Tool);
         let yaml_entry = group.yaml_entry.as_ref();
