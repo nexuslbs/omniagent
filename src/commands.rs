@@ -3,8 +3,8 @@
 //! Provides a unified parsing + validation layer so that CLI, Telegram,
 //! and external platform plugins all use the same logic.
 
-use crate::error::{AppResult, Error};
 use crate::err_msg;
+use crate::error::{AppResult, Error};
 use sql_forge::sql_forge;
 use sqlx::PgPool;
 
@@ -281,7 +281,11 @@ pub async fn handle_new_external(
 }
 
 /// Set the profile on a channel by updating `current_profile`.
-pub async fn handle_profile_set(pool: &PgPool, channel_id: i64, profile_name: &str) -> AppResult<()> {
+pub async fn handle_profile_set(
+    pool: &PgPool,
+    channel_id: i64,
+    profile_name: &str,
+) -> AppResult<()> {
     sql_forge!(
         "UPDATE channels SET current_profile = :profile_name, updated_at = NOW() WHERE id = :channel_id",
         ( :profile_name = profile_name, :channel_id = channel_id )
@@ -318,7 +322,10 @@ pub async fn handle_channel_list(pool: &PgPool, platform: &str) -> AppResult<Vec
     .fetch_all(pool)
     .await?;
     rows.into_iter()
-        .map(|r| r.try_into().map_err(|e| Error::Message(format!("Channel conversion failed: {}", e))))
+        .map(|r| {
+            r.try_into()
+                .map_err(|e| Error::Message(format!("Channel conversion failed: {}", e)))
+        })
         .collect()
 }
 

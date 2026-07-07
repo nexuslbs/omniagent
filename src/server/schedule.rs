@@ -262,13 +262,14 @@ fn parse_skills(val: Option<String>) -> Vec<String> {
             // Try parsing as JSON array first
             if let Ok(arr) = serde_json::from_str::<Vec<String>>(&s) {
                 arr
-            } else if s.trim().starts_with('[') {
-                vec![]
-            } else if s.is_empty() {
+            } else if s.trim().starts_with('[') || s.is_empty() {
                 vec![]
             } else {
                 // Fallback: treat as comma-separated
-                s.split(',').map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect()
+                s.split(',')
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .collect()
             }
         }
     }
@@ -299,13 +300,19 @@ fn fmt_ts_opt(ts: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
 fn generate_id(name: &str) -> String {
     name.to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
 /// Validate a 5-field cron expression. Returns an error message if invalid.
 fn validate_cron(schedule: &str) -> Option<String> {
-    let fields: Vec<&str> = schedule.trim().split_whitespace().collect();
+    let fields: Vec<&str> = schedule.split_whitespace().collect();
     if fields.len() != 5 {
         Some(format!(
             "Invalid cron expression: expected 5 fields (min hour dom month dow), got {}. \
@@ -354,7 +361,7 @@ fn job_row_to_entry(row: CronJobRow) -> JobEntry {
         next_run: fmt_ts_opt(row.next_run_at),
         last_run_at: fmt_ts_opt(row.last_run_at),
         next_run_at: fmt_ts_opt(row.next_run_at),
-        created_at: row.created_at.as_ref().map(|dt| fmt_ts(dt)).unwrap_or_default(),
+        created_at: row.created_at.as_ref().map(fmt_ts).unwrap_or_default(),
         status: if enabled {
             "active".to_string()
         } else {
@@ -507,7 +514,11 @@ async fn create_schedule_handler(
 
     // When no channel_id is provided, use the permanent default cron channel
     let effective_channel_id: i64 = if let Some(cid) = body.channel_id {
-        if cid != 0 { cid } else { lookup_cron_channel(&state.pool).await }
+        if cid != 0 {
+            cid
+        } else {
+            lookup_cron_channel(&state.pool).await
+        }
     } else {
         lookup_cron_channel(&state.pool).await
     };
@@ -559,9 +570,7 @@ async fn create_schedule_handler(
     .execute(&state.pool)
     .await
     {
-        Ok(_) => {
-            ok_json(serde_json::json!({ "success": true, "id": job_id }))
-        }
+        Ok(_) => ok_json(serde_json::json!({ "success": true, "id": job_id })),
         Err(e) => {
             error!("[schedule] create failed: {:?}", e);
             err_json(
@@ -746,7 +755,7 @@ async fn schedule_threads_handler(
     Query(params): Query<ThreadsQueryParams>,
 ) -> impl IntoResponse {
     let offset = params.offset.unwrap_or(0).max(0);
-    let limit = params.limit.unwrap_or(10).min(100).max(1);
+    let limit = params.limit.unwrap_or(10).clamp(1, 100);
     let order_asc = params.order.as_deref() == Some("asc");
 
     // ── Total count ──
@@ -761,10 +770,7 @@ async fn schedule_threads_handler(
         Ok(row) => row.total.unwrap_or(0),
         Err(e) => {
             error!("[schedule/{}/threads] count query failed: {:?}", id, e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to count threads",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to count threads");
         }
     };
 
@@ -821,10 +827,7 @@ async fn schedule_threads_handler(
         Ok(rows) => rows,
         Err(e) => {
             error!("[schedule/{}/threads] data query failed: {:?}", id, e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to fetch threads",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch threads");
         }
     };
 

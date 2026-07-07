@@ -93,21 +93,48 @@ fn build_dynamic_identity(tool_names: &[String]) -> String {
     let has_query = tool_names.iter().any(|n| n.starts_with("query_"));
     let has_kanban = tool_names.iter().any(|n| n.starts_with("kanban"));
     let has_cron = tool_names.iter().any(|n| n.starts_with("cron"));
-    let has_git = tool_names.iter().any(|n| n.starts_with("commit") || n.starts_with("create_github") || n.starts_with("clone_repo") || n == "status");
+    let has_git = tool_names.iter().any(|n| {
+        n.starts_with("commit")
+            || n.starts_with("create_github")
+            || n.starts_with("clone_repo")
+            || n == "status"
+    });
     let has_subtasks = tool_names.iter().any(|n| n.starts_with("manage_subtask"));
-    let has_skills = tool_names.iter().any(|n| n.starts_with("create_skill") || n.starts_with("list_skills"));
-    let has_plugin = tool_names.iter().any(|n| n == "plugin_manager" || n == "list_plugins");
+    let has_skills = tool_names
+        .iter()
+        .any(|n| n.starts_with("create_skill") || n.starts_with("list_skills"));
+    let has_plugin = tool_names
+        .iter()
+        .any(|n| n == "plugin_manager" || n == "list_plugins");
 
     let mut parts: Vec<&str> = vec!["filesystem (read/write/list)"];
-    if has_fetch { parts.push("fetch (HTTP)"); }
-    if has_search { parts.push("search (messages/wiki)"); }
-    if has_query { parts.push("query_database (SQL)"); }
-    if has_kanban { parts.push("kanban"); }
-    if has_cron { parts.push("cron"); }
-    if has_git { parts.push("git"); }
-    if has_subtasks { parts.push("manage_subtasks"); }
-    if has_skills { parts.push("skills"); }
-    if has_plugin { parts.push("plugin_manager"); }
+    if has_fetch {
+        parts.push("fetch (HTTP)");
+    }
+    if has_search {
+        parts.push("search (messages/wiki)");
+    }
+    if has_query {
+        parts.push("query_database (SQL)");
+    }
+    if has_kanban {
+        parts.push("kanban");
+    }
+    if has_cron {
+        parts.push("cron");
+    }
+    if has_git {
+        parts.push("git");
+    }
+    if has_subtasks {
+        parts.push("manage_subtasks");
+    }
+    if has_skills {
+        parts.push("skills");
+    }
+    if has_plugin {
+        parts.push("plugin_manager");
+    }
 
     // Collect any tool names not covered by the categories above and list them
     // individually so the LLM knows they are callable via function-calling API.
@@ -139,7 +166,8 @@ fn build_dynamic_identity(tool_names: &[String]) -> String {
             || name.starts_with("setup_")
             || name.starts_with("kanban_")
     };
-    let extra: Vec<&str> = tool_names.iter()
+    let extra: Vec<&str> = tool_names
+        .iter()
         .map(|s| s.as_str())
         .filter(|n| !is_categorized(n))
         .collect();
@@ -299,7 +327,7 @@ impl MemoryStore {
                     // Compare against expected hash from sidecar file
                     let expected =
                         Self::read_expected_hash(&self.memories_dir.join("MEMORY.md.sha256"));
-                    let valid = expected.as_ref().map_or(true, |e| e == &hash);
+                    let valid = expected.as_ref().is_none_or(|e| e == &hash);
                     if !valid {
                         tracing::warn!(
                             "[memory] MEMORY.md hash MISMATCH: expected {}, got {}. File may have been modified externally.",
@@ -617,7 +645,13 @@ pub fn build_system_prompt(
     profile_name: &str,
     tool_names: &[String],
 ) -> String {
-    let parts = build_system_prompt_parts(memory_store, platform, system_message, profile_name, tool_names);
+    let parts = build_system_prompt_parts(
+        memory_store,
+        platform,
+        system_message,
+        profile_name,
+        tool_names,
+    );
     let segments: Vec<&str> = [&parts.stable, &parts.context, &parts.volatile]
         .into_iter()
         .filter(|s| !s.is_empty())
@@ -647,7 +681,11 @@ pub struct PlanningPromptParams<'a> {
 ///
 /// The user message is included as a reference so the LLM can scope its
 /// plan appropriately, but it does NOT execute any tools here.
-pub fn build_planning_prompt(memory_store: &MemoryStore, p: PlanningPromptParams<'_>, tool_names: &[String]) -> String {
+pub fn build_planning_prompt(
+    memory_store: &MemoryStore,
+    p: PlanningPromptParams<'_>,
+    tool_names: &[String],
+) -> String {
     // Base system identity — dynamically built from actual available tool names.
     let identity = build_dynamic_identity(tool_names);
 
@@ -825,15 +863,10 @@ pub fn format_subtask_section(subtasks: &[ThreadSubtask], thread_id: i64) -> Opt
     let current_idx = subtasks
         .iter()
         .position(|s| s.status == SubtaskStatus::InProgress);
-    let current_name = current_idx.and_then(|idx| {
+    let current_name = current_idx.map(|idx| {
         let s = &subtasks[idx];
         // Use total_steps from the current subtask for display
-        Some(format!(
-            "{}  (step {} of {})",
-            s.name,
-            idx + 1,
-            s.total_steps
-        ))
+        format!("{}  (step {} of {})", s.name, idx + 1, s.total_steps)
     });
 
     // Build the step list
@@ -961,8 +994,13 @@ mod tests {
         let mut store = MemoryStore::new(dir.path().to_str().unwrap());
         store.load_from_disk();
 
-        let prompt =
-            build_system_prompt(&store, "telegram", Some("Custom system message"), "default", &[]);
+        let prompt = build_system_prompt(
+            &store,
+            "telegram",
+            Some("Custom system message"),
+            "default",
+            &[],
+        );
         assert!(prompt.contains("OmniAgent"));
         assert!(prompt.contains("GROUNDING POLICY"));
         assert!(prompt.contains("SKILLS"));

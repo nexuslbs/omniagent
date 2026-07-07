@@ -22,7 +22,10 @@ use serde_json::Value;
 fn data_dir() -> String {
     std::env::var("DATA_DIR")
         .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)))
-        .unwrap_or_else(|_| { eprintln!("FATAL: OMNI_DIR must be set"); std::process::exit(1); })
+        .unwrap_or_else(|_| {
+            eprintln!("FATAL: OMNI_DIR must be set");
+            std::process::exit(1);
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -51,8 +54,14 @@ async fn handle_install(data_dir: &str, args: &Value) -> Result<(String, bool)> 
 
     // Register in YAML state
     let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
-    plugins_yaml::set_entry(data_dir, &yaml_type, &manifest.name, true, serde_json::json!({}))
-        .map_err(|e| anyhow::anyhow!("Failed to register plugin in YAML: {:#}", e))?;
+    plugins_yaml::set_entry(
+        data_dir,
+        &yaml_type,
+        &manifest.name,
+        true,
+        serde_json::json!({}),
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to register plugin in YAML: {:#}", e))?;
 
     Ok((
         format!("Plugin '{}' installed successfully.", manifest.name),
@@ -101,7 +110,10 @@ async fn handle_uninstall(data_dir: &str, args: &Value) -> Result<(String, bool)
     let _ = plugin::installer::uninstall(name, data_dir, &type_dir, is_remote);
 
     if deleted {
-        Ok((format!("Plugin '{}' uninstalled successfully.", name), false))
+        Ok((
+            format!("Plugin '{}' uninstalled successfully.", name),
+            false,
+        ))
     } else {
         Ok((format!("Plugin '{}' not found.", name), false))
     }
@@ -178,10 +190,7 @@ async fn handle_config(data_dir: &str, args: &Value) -> Result<(String, bool)> {
             false,
         )),
         Ok(None) => Ok((format!("Plugin '{}' not found.", name), false)),
-        Err(e) => Ok((
-            format!("Failed to read plugin after update: {:#}", e),
-            true,
-        )),
+        Err(e) => Ok((format!("Failed to read plugin after update: {:#}", e), true)),
     }
 }
 

@@ -12,8 +12,8 @@
 //! - `anthropic_messages` — Anthropic-compatible `/v1/messages` (MiniMax, Qwen 3.7)
 //!   API mode is auto-detected from the model name.
 
-use crate::error::{Error, ErrorContext, AppResult};
 use crate::err_msg;
+use crate::error::{AppResult, Error, ErrorContext};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -363,9 +363,8 @@ impl ProviderThrottle {
         // Ensure well-known providers are present even if metadata is missing
         for name in &["deepseek", "anthropic", "openai", "opencode-go"] {
             let n = name.to_string();
-            if !map.contains_key(&n) {
-                map.insert(n, Arc::new(Semaphore::new(max)));
-            }
+            map.entry(n)
+                .or_insert_with(|| Arc::new(Semaphore::new(max)));
         }
 
         Self {
@@ -381,7 +380,7 @@ impl ProviderThrottle {
     /// when dropped, the semaphore slot is released.
     pub async fn acquire(&self, provider: &str) -> Option<tokio::sync::SemaphorePermit<'_>> {
         let sem = self.inner.get(provider)?;
-        Some(sem.acquire().await.ok()?)
+        sem.acquire().await.ok()
     }
 
     /// Returns the configured max permits per provider.
@@ -393,7 +392,9 @@ impl ProviderThrottle {
     /// Returns the number of available permits for a given provider.
     #[allow(dead_code)]
     pub fn available_permits(&self, provider: &str) -> Option<u32> {
-        self.inner.get(provider).map(|s| s.available_permits() as u32)
+        self.inner
+            .get(provider)
+            .map(|s| s.available_permits() as u32)
     }
 }
 
@@ -877,7 +878,10 @@ impl LLMClient {
     // Anthropic Messages API
     // -----------------------------------------------------------------------
 
-    async fn completion_anthropic(&self, request: CompletionRequest) -> AppResult<CompletionResponse> {
+    async fn completion_anthropic(
+        &self,
+        request: CompletionRequest,
+    ) -> AppResult<CompletionResponse> {
         let url = format!("{}/messages", self.config.base_url.trim_end_matches('/'));
 
         // Convert our ChatMessages to Anthropic's format.

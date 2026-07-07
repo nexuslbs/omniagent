@@ -7,8 +7,8 @@
 //! Reads happen on every access (no caching — files are tiny, parsing is ~50µs).
 //! Writes are atomic: write to `.tmp` → fsync → rename.
 
-use crate::error::{Error, AppResult, ErrorContext};
 use crate::err_msg;
+use crate::error::{AppResult, Error, ErrorContext};
 use crate::plugin::{ConfigSchemaField, PluginManifest, PluginType};
 use serde::{Deserialize, Serialize};
 use sql_forge::sql_forge;
@@ -83,7 +83,7 @@ impl PluginYamlType {
     pub fn file_name(&self) -> &str {
         match self {
             PluginYamlType::Platform => "platforms", // section name still "platforms" in unified plugins.yml
-            PluginYamlType::Tool => "tools",     // section name still "tools" in unified plugins.yml
+            PluginYamlType::Tool => "tools", // section name still "tools" in unified plugins.yml
             PluginYamlType::Provider => "providers", // section name still "providers" in unified plugins.yml
         }
     }
@@ -208,8 +208,8 @@ pub fn load_all_sections(data_dir: &str) -> AppResult<PluginYamlFile> {
         });
     }
     let content = fs::read_to_string(&path).ctx(format!("Failed to read {}", path.display()))?;
-    let file: PluginYamlFile = serde_yaml::from_str(&content)
-        .ctx(format!("Failed to parse {}", path.display()))?;
+    let file: PluginYamlFile =
+        serde_yaml::from_str(&content).ctx(format!("Failed to parse {}", path.display()))?;
     Ok(file)
 }
 
@@ -219,20 +219,26 @@ pub fn save_all_sections(data_dir: &str, file: &PluginYamlFile) -> AppResult<()>
     let tmp_path = path.with_extension("yml.tmp");
     let yaml = serde_yaml::to_string(file).ctx("Failed to serialize plugin YAML")?;
     {
-        let mut f = fs::File::create(&tmp_path)
-            .ctx(format!("Failed to create {}", tmp_path.display()))?;
+        let mut f =
+            fs::File::create(&tmp_path).ctx(format!("Failed to create {}", tmp_path.display()))?;
         f.write_all(yaml.as_bytes())
             .ctx(format!("Failed to write {}", tmp_path.display()))?;
         f.sync_all()
             .ctx(format!("Failed to sync {}", tmp_path.display()))?;
     }
-    fs::rename(&tmp_path, &path)
-        .ctx(format!("Failed to rename {} to {}", tmp_path.display(), path.display()))?;
+    fs::rename(&tmp_path, &path).ctx(format!(
+        "Failed to rename {} to {}",
+        tmp_path.display(),
+        path.display()
+    ))?;
     Ok(())
 }
 
 /// Load the raw entries map from plugins.yml for a specific section.
-pub fn load_raw(data_dir: &str, pt: &PluginYamlType) -> AppResult<BTreeMap<String, PluginYamlEntry>> {
+pub fn load_raw(
+    data_dir: &str,
+    pt: &PluginYamlType,
+) -> AppResult<BTreeMap<String, PluginYamlEntry>> {
     let file = load_all_sections(data_dir)?;
     let section_name = pt.file_name();
     let entries = match section_name {
@@ -288,7 +294,10 @@ pub fn set_entry(
     config: serde_json::Value,
 ) -> AppResult<PluginYamlEntry> {
     let mut entries = load_raw(data_dir, pt)?;
-    let source = entries.get(name).map(|e| e.source.clone()).unwrap_or_else(|| "built-in".to_string());
+    let source = entries
+        .get(name)
+        .map(|e| e.source.clone())
+        .unwrap_or_else(|| "built-in".to_string());
     let entry = PluginYamlEntry {
         enabled,
         source,
@@ -304,8 +313,12 @@ pub fn set_entry(
 pub fn is_plugin_builtin(_data_dir: &str, name: &str, plugin_type: &PluginYamlType) -> bool {
     let type_dir = plugin_type.type_dir_name();
     let source_dir = format!("/app/plugins/{}/{}", type_dir, name);
-    std::path::Path::new(&source_dir).join("Cargo.toml").exists()
-        || std::path::Path::new(&source_dir).join("plugin.json").exists()
+    std::path::Path::new(&source_dir)
+        .join("Cargo.toml")
+        .exists()
+        || std::path::Path::new(&source_dir)
+            .join("plugin.json")
+            .exists()
 }
 
 /// Set a plugin entry with an explicit source override.
@@ -330,7 +343,10 @@ pub fn set_entry_with_source(
 }
 
 /// Get a plugin entry by searching all three YAML types, returning the entry and its type.
-pub fn get_entry_with_type(data_dir: &str, name: &str) -> AppResult<Option<(PluginYamlType, PluginYamlEntry)>> {
+pub fn get_entry_with_type(
+    data_dir: &str,
+    name: &str,
+) -> AppResult<Option<(PluginYamlType, PluginYamlEntry)>> {
     for pt in &[
         PluginYamlType::Platform,
         PluginYamlType::Tool,
@@ -607,10 +623,7 @@ pub async fn resolve_config_ref_value(value: &str, pool: &sqlx::PgPool) -> Strin
 }
 
 /// Resolve `$env:VAR` and `$secret:NAME` references in all values of a config map.
-pub async fn resolve_config_refs(
-    env: &mut HashMap<String, String>,
-    pool: &sqlx::PgPool,
-) {
+pub async fn resolve_config_refs(env: &mut HashMap<String, String>, pool: &sqlx::PgPool) {
     let keys: Vec<String> = env.keys().cloned().collect();
     for key in keys {
         if let Some(value) = env.remove(&key) {
@@ -730,26 +743,25 @@ fn build_plugin_detail(
                 .unwrap_or("");
 
             // Read package name from Cargo.toml for proper binary resolution
-            let cargo_package_name = std::fs::read_to_string(&cargo_toml)
-                .ok()
-                .and_then(|content| {
-                    content.lines().find_map(|line| {
-                        let trimmed = line.trim();
-                        if let Some(name) = trimmed.strip_prefix("name = \"") {
-                            name.strip_suffix('\"').map(|s| s.to_string())
-                        } else {
-                            None
-                        }
-                    })
-                });
+            let cargo_package_name =
+                std::fs::read_to_string(&cargo_toml)
+                    .ok()
+                    .and_then(|content| {
+                        content.lines().find_map(|line| {
+                            let trimmed = line.trim();
+                            if let Some(name) = trimmed.strip_prefix("name = \"") {
+                                name.strip_suffix('\"').map(|s| s.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                    });
 
             // All possible binary paths to check:
             // - Directory name convention (standalone plugin)
             // - Package name from Cargo.toml (workspace members with mcp-server- prefix)
             // - get_bin_path() for builtins (binary next to omniagent or in workspace target/release)
-            let mut candidates = vec![
-                format!("{}/target/release/{}", dir, dir_name),
-            ];
+            let mut candidates = vec![format!("{}/target/release/{}", dir, dir_name)];
             if let Some(ref pkg) = cargo_package_name {
                 candidates.push(format!("{}/target/release/{}", dir, pkg));
 
@@ -921,7 +933,8 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
     let provider_entries = load_raw(data_dir, &PluginYamlType::Provider)?;
 
     // Group discovered plugins by key (directory name)
-    let mut groups: std::collections::BTreeMap<String, PluginSourceGroup> = std::collections::BTreeMap::new();
+    let mut groups: std::collections::BTreeMap<String, PluginSourceGroup> =
+        std::collections::BTreeMap::new();
 
     for (manifest, source, base_path) in &discovered {
         let raw_key = crate::plugin::installer::extract_plugin_key_from_path(base_path);
@@ -939,16 +952,20 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                 PluginYamlType::Provider => remote_plugins.providers.as_ref(),
             };
             if let Some(entries) = entries {
-                entries.iter().find_map(|(repo_name, info)| {
-                    let subpath = info.path.as_deref().unwrap_or("");
-                    if !subpath.is_empty() && base_path.ends_with(&format!("/{}/plugin.json", subpath)) {
-                        Some(repo_name.clone())
-                    } else if base_path.contains(&format!("/.remote/{}/", repo_name)) {
-                        Some(repo_name.clone())
-                    } else {
-                        None
-                    }
-                }).unwrap_or(raw_key.clone())
+                entries
+                    .iter()
+                    .find_map(|(repo_name, info)| {
+                        let subpath = info.path.as_deref().unwrap_or("");
+                        if (!subpath.is_empty()
+                            && base_path.ends_with(&format!("/{}/plugin.json", subpath)))
+                            || base_path.contains(&format!("/.remote/{}/", repo_name))
+                        {
+                            Some(repo_name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(raw_key.clone())
             } else {
                 raw_key.clone()
             }
@@ -965,20 +982,26 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         // Remote sources show if YAML entry has source: remote,
         // OR if remote.yml has an entry for this plugin.
         if source == "remote" {
-            let has_source = yaml_entry.map(|e| e.source.as_str() == "remote").unwrap_or(false);
+            let has_source = yaml_entry
+                .map(|e| e.source.as_str() == "remote")
+                .unwrap_or(false);
             let has_store = get_remote_plugin(data_dir, &yaml_type, &key).is_some();
             if !has_source && !has_store {
                 continue;
             }
         }
 
-        let entry = groups.entry(key.clone()).or_insert_with(|| PluginSourceGroup {
-            key: key.clone(),
-            sources: Vec::new(),
-            yaml_type: None,
-            yaml_entry: None,
-        });
-        entry.sources.push((manifest.clone(), source.clone(), base_path.clone()));
+        let entry = groups
+            .entry(key.clone())
+            .or_insert_with(|| PluginSourceGroup {
+                key: key.clone(),
+                sources: Vec::new(),
+                yaml_type: None,
+                yaml_entry: None,
+            });
+        entry
+            .sources
+            .push((manifest.clone(), source.clone(), base_path.clone()));
         // Only set YAML info on first insertion (all sources share the same YAML)
         if entry.yaml_type.is_none() {
             entry.yaml_type = Some(yaml_type);
@@ -1019,16 +1042,20 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                         let key = name.clone();
                         // Add to existing group or create new one
                         if let Some(group) = groups.get_mut(name) {
-                            group.sources.push((manifest, "remote".to_string(), base_path));
+                            group
+                                .sources
+                                .push((manifest, "remote".to_string(), base_path));
                         } else {
-                            let mut sources = Vec::new();
-                            sources.push((manifest, "remote".to_string(), base_path));
-                            groups.insert(key, PluginSourceGroup {
-                                key: name.clone(),
-                                sources,
-                                yaml_type: Some(yaml_type.clone()),
-                                yaml_entry: Some(entry.clone()),
-                            });
+                            let sources = vec![(manifest, "remote".to_string(), base_path)];
+                            groups.insert(
+                                key,
+                                PluginSourceGroup {
+                                    key: name.clone(),
+                                    sources,
+                                    yaml_type: Some(yaml_type.clone()),
+                                    yaml_entry: Some(entry.clone()),
+                                },
+                            );
                         }
                     }
                 }
@@ -1041,24 +1068,22 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
     for (key, group) in &groups {
         let primary_idx = pick_primary_source(group);
 
-        let yaml_type = group.yaml_type.as_ref().unwrap_or(&PluginYamlType::Tool);
+        let _yaml_type = group.yaml_type.as_ref().unwrap_or(&PluginYamlType::Tool);
         let yaml_entry_ref = group.yaml_entry.as_ref();
 
         for (i, (manifest, source, base_path)) in group.sources.iter().enumerate() {
             let is_primary = i == primary_idx;
 
             // Plugin directory is the parent of the base_path
-            let plugin_dir = std::path::Path::new(base_path).parent().and_then(|p| p.to_str());
+            let plugin_dir = std::path::Path::new(base_path)
+                .parent()
+                .and_then(|p| p.to_str());
 
             // For the primary source, pass the real YAML entry; for duplicates, pass None
             // to trigger default (disabled for built-in, and forced "duplicated" status)
-            let detail_yaml_entry = if is_primary {
-                yaml_entry_ref
-            } else {
-                None
-            };
+            let detail_yaml_entry = if is_primary { yaml_entry_ref } else { None };
 
-            let mut detail = build_plugin_detail(
+            let detail = build_plugin_detail(
                 manifest,
                 source,
                 detail_yaml_entry,
@@ -1075,7 +1100,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
 
             results.push(detail);
         }
-    }  // end of groups loop
+    } // end of groups loop
 
     // ── "Not found" entries: YAML entries with no discovered source on disk ──
     // Check all YAML entries and add synthetic entries for those without matching groups.
@@ -1149,7 +1174,8 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
     let provider_entries = load_raw(data_dir, &PluginYamlType::Provider)?;
 
     // Group by key (same logic as list_plugins)
-    let mut groups: std::collections::BTreeMap<String, PluginSourceGroup> = std::collections::BTreeMap::new();
+    let mut groups: std::collections::BTreeMap<String, PluginSourceGroup> =
+        std::collections::BTreeMap::new();
 
     for (manifest, source, base_path) in &discovered {
         let raw_key = crate::plugin::installer::extract_plugin_key_from_path(base_path);
@@ -1169,16 +1195,20 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
                 PluginYamlType::Provider => remote_plugins.providers.as_ref(),
             };
             if let Some(entries) = entries {
-                entries.iter().find_map(|(repo_name, info)| {
-                    let subpath = info.path.as_deref().unwrap_or("");
-                    if !subpath.is_empty() && base_path.ends_with(&format!("/{}/plugin.json", subpath)) {
-                        Some(repo_name.clone())
-                    } else if base_path.contains(&format!("/.remote/{}/", repo_name)) {
-                        Some(repo_name.clone())
-                    } else {
-                        None
-                    }
-                }).unwrap_or(raw_key.clone())
+                entries
+                    .iter()
+                    .find_map(|(repo_name, info)| {
+                        let subpath = info.path.as_deref().unwrap_or("");
+                        if (!subpath.is_empty()
+                            && base_path.ends_with(&format!("/{}/plugin.json", subpath)))
+                            || base_path.contains(&format!("/.remote/{}/", repo_name))
+                        {
+                            Some(repo_name.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(raw_key.clone())
             } else {
                 raw_key.clone()
             }
@@ -1195,20 +1225,26 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
         // Remote sources show if YAML entry has source: remote,
         // OR if remote.yml has an entry for this plugin.
         if source == "remote" {
-            let has_source = yaml_entry.map(|e| e.source.as_str() == "remote").unwrap_or(false);
+            let has_source = yaml_entry
+                .map(|e| e.source.as_str() == "remote")
+                .unwrap_or(false);
             let has_store = get_remote_plugin(data_dir, &yaml_type, &key).is_some();
             if !has_source && !has_store {
                 continue;
             }
         }
 
-        let entry = groups.entry(key.clone()).or_insert_with(|| PluginSourceGroup {
-            key: key.clone(),
-            sources: Vec::new(),
-            yaml_type: None,
-            yaml_entry: None,
-        });
-        entry.sources.push((manifest.clone(), source.clone(), base_path.clone()));
+        let entry = groups
+            .entry(key.clone())
+            .or_insert_with(|| PluginSourceGroup {
+                key: key.clone(),
+                sources: Vec::new(),
+                yaml_type: None,
+                yaml_entry: None,
+            });
+        entry
+            .sources
+            .push((manifest.clone(), source.clone(), base_path.clone()));
         if entry.yaml_type.is_none() {
             entry.yaml_type = Some(yaml_type);
             entry.yaml_entry = yaml_entry.cloned();
@@ -1220,8 +1256,7 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
     // (e.g., "cron" group + "cron-echo" group both match name "cron").
     let mut merged_group: Option<PluginSourceGroup> = None;
     for (key, group) in &groups {
-        let matches = key == name
-            || group.sources.iter().any(|(m, _, _)| m.name == name);
+        let matches = key == name || group.sources.iter().any(|(m, _, _)| m.name == name);
         if !matches {
             continue;
         }
@@ -1242,9 +1277,11 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
     if let Some(group) = merged_group {
         let primary_idx = pick_primary_source(&group);
         let (manifest, source, base_path) = &group.sources[primary_idx];
-        let yaml_type = group.yaml_type.as_ref().unwrap_or(&PluginYamlType::Tool);
+        let _yaml_type = group.yaml_type.as_ref().unwrap_or(&PluginYamlType::Tool);
         let yaml_entry = group.yaml_entry.as_ref();
-        let plugin_dir = std::path::Path::new(base_path).parent().and_then(|p| p.to_str());
+        let plugin_dir = std::path::Path::new(base_path)
+            .parent()
+            .and_then(|p| p.to_str());
 
         return Ok(Some(build_plugin_detail(
             manifest,
@@ -1258,7 +1295,13 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
     }
 
     // Not found via discovery — check YAML entries directly (YAML-only entry with no disk source)
-    if let Some(detail) = build_not_found_from_yaml(data_dir, name, &platform_entries, &tool_entries, &provider_entries) {
+    if let Some(detail) = build_not_found_from_yaml(
+        data_dir,
+        name,
+        &platform_entries,
+        &tool_entries,
+        &provider_entries,
+    ) {
         return Ok(Some(detail));
     }
 
@@ -1401,11 +1444,20 @@ pub fn get_disk_plugin_type(data_dir: &str, name: &str) -> AppResult<Option<Stri
     // Fallback: check YAML entries for remote.path — the plugin may exist at
     // .remote/<name>/{path}/plugin.json which may not be in the root-level scan.
     for (yaml_type, entries) in &[
-        (PluginYamlType::Platform, load_raw(data_dir, &PluginYamlType::Platform)?),
-        (PluginYamlType::Tool, load_raw(data_dir, &PluginYamlType::Tool)?),
-        (PluginYamlType::Provider, load_raw(data_dir, &PluginYamlType::Provider)?),
+        (
+            PluginYamlType::Platform,
+            load_raw(data_dir, &PluginYamlType::Platform)?,
+        ),
+        (
+            PluginYamlType::Tool,
+            load_raw(data_dir, &PluginYamlType::Tool)?,
+        ),
+        (
+            PluginYamlType::Provider,
+            load_raw(data_dir, &PluginYamlType::Provider)?,
+        ),
     ] {
-        if let Some(entry) = entries.get(name) {
+        if let Some(_entry) = entries.get(name) {
             if let Some(ref remote) = get_remote_plugin(data_dir, yaml_type, name) {
                 if let Some(ref remote_path) = remote.path {
                     let type_dir = yaml_type.type_dir_name();
@@ -1495,10 +1547,7 @@ pub async fn fetch_enum_values(url: &str, api_key: Option<&str>) -> AppResult<Ve
     if let Some(key) = api_key {
         req = req.header("Authorization", format!("Bearer {}", key));
     }
-    let resp = req
-        .send()
-        .await
-        .ctx(format!("Failed to fetch {}", url))?;
+    let resp = req.send().await.ctx(format!("Failed to fetch {}", url))?;
     let json: serde_json::Value = resp
         .json()
         .await
@@ -1553,7 +1602,8 @@ pub async fn refresh_plugin_models(data_dir: &str, name: &str) -> AppResult<Opti
         had_refresh = true;
 
         // Resolve API key from the provider's resolved plugin config
-        let api_key = detail.config
+        let api_key = detail
+            .config
             .get("api_key")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
@@ -1892,7 +1942,10 @@ platforms:
         env.insert("MATTERMOST_TOKEN".to_string(), "abc".to_string());
         merge_yaml_config_into_env(&mut env, "mattermost", &path, &PluginYamlType::Platform);
         assert_eq!(env.get("MATTERMOST_CONNECTION_MODE").unwrap(), "websocket");
-        assert_eq!(env.get("MATTERMOST_SERVER_URL").unwrap(), "https://mm.example.com");
+        assert_eq!(
+            env.get("MATTERMOST_SERVER_URL").unwrap(),
+            "https://mm.example.com"
+        );
         assert_eq!(env.get("MATTERMOST_TOKEN").unwrap(), "abc"); // original key preserved
     }
 
@@ -1913,7 +1966,10 @@ tools:
         );
         let mut env = HashMap::new();
         merge_yaml_config_into_env(&mut env, "my-tool", &path, &PluginYamlType::Tool);
-        assert_eq!(env.get("MY_TOOL_API_URL").unwrap(), "https://api.example.com/v1");
+        assert_eq!(
+            env.get("MY_TOOL_API_URL").unwrap(),
+            "https://api.example.com/v1"
+        );
         assert_eq!(env.get("MY_TOOL_TIMEOUT").unwrap(), "30");
     }
 
@@ -1934,8 +1990,14 @@ providers:
         );
         let mut env = HashMap::new();
         merge_yaml_config_into_env(&mut env, "deepseek", &path, &PluginYamlType::Provider);
-        assert_eq!(env.get("DEEPSEEK_DEFAULT_MODEL").unwrap(), "deepseek-v4-flash");
-        assert_eq!(env.get("DEEPSEEK_API_BASE").unwrap(), "https://api.deepseek.com");
+        assert_eq!(
+            env.get("DEEPSEEK_DEFAULT_MODEL").unwrap(),
+            "deepseek-v4-flash"
+        );
+        assert_eq!(
+            env.get("DEEPSEEK_API_BASE").unwrap(),
+            "https://api.deepseek.com"
+        );
     }
 
     #[test]
@@ -1986,5 +2048,3 @@ tools:
         assert_eq!(env.get("MCP_SERVER_FOO_MY_SETTING").unwrap(), "bar");
     }
 }
-
-

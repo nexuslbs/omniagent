@@ -159,7 +159,7 @@ async fn list_threads_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ThreadsQueryParams>,
 ) -> impl IntoResponse {
-    let limit = params.limit.unwrap_or(50).min(500).max(1);
+    let limit = params.limit.unwrap_or(50).clamp(1, 500);
     let offset = params.offset.unwrap_or(0).max(0);
 
     let status = params.status.unwrap_or_default();
@@ -183,7 +183,7 @@ async fn list_threads_handler(
           :cause = &cause,
           :channel_id = params.channel_id.unwrap_or(0),
           :id = params.id.unwrap_or(0),
-          :parent_id = params.parent_id.unwrap_or(0) as i64 )
+          :parent_id = params.parent_id.unwrap_or(0) )
     )
     .fetch_one(&state.pool)
     .await
@@ -191,10 +191,7 @@ async fn list_threads_handler(
         Ok(row) => row.total.unwrap_or(0),
         Err(e) => {
             error!("[threads] count query failed: {:?}", e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to count threads",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to count threads");
         }
     };
 
@@ -243,7 +240,7 @@ async fn list_threads_handler(
           :cause = &cause,
           :channel_id = params.channel_id.unwrap_or(0),
           :id = params.id.unwrap_or(0),
-          :parent_id = params.parent_id.unwrap_or(0) as i64,
+          :parent_id = params.parent_id.unwrap_or(0),
           :limit_val = limit,
           :offset_val = offset )
     )
@@ -272,7 +269,9 @@ async fn list_threads_handler(
             provider: r.provider,
             model: r.model,
             created_at: r.created_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            ended_at: r.ended_at.map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+            ended_at: r
+                .ended_at
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
             duration_ms: r.duration_ms.map(|v| v as i64),
             input_tokens: r.input_tokens.map(|v| v as i64),
             output_tokens: r.output_tokens.map(|v| v as i64),
@@ -282,7 +281,9 @@ async fn list_threads_handler(
             msg_count: r.msg_count.unwrap_or(0),
             last_message: r.last_message,
             planning_mode: r.planning_mode,
-            started_at: r.started_at.map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+            started_at: r
+                .started_at
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
             cause_content_preview: r.cause_content_preview,
             cause_msg_type: r.cause_msg_type,
             cause_msg_subtype: r.cause_msg_subtype,
@@ -299,9 +300,7 @@ async fn list_threads_handler(
 }
 
 /// GET /threads/filters — distinct statuses and causes
-async fn thread_filters_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn thread_filters_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let statuses = match sql_forge!(
         StatusRow,
         r#"SELECT DISTINCT status FROM threads WHERE status IS NOT NULL ORDER BY status"#,
@@ -309,7 +308,10 @@ async fn thread_filters_handler(
     .fetch_all(&state.pool)
     .await
     {
-        Ok(rows) => rows.into_iter().filter_map(|r| r.status).collect::<Vec<_>>(),
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|r| r.status)
+            .collect::<Vec<_>>(),
         Err(e) => {
             error!("[threads/filters] statuses query failed: {:?}", e);
             return err_json(
@@ -367,9 +369,9 @@ async fn thread_subtasks_handler(
                 id: r.id,
                 description: r.description,
                 status: r.status,
-                created_at: r.created_at.map(|dt| {
-                    dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
-                }),
+                created_at: r
+                    .created_at
+                    .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
             })
             .collect::<Vec<_>>(),
         Err(e) => {

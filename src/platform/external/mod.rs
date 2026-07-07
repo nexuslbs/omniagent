@@ -89,14 +89,22 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
         let content = match std::fs::read_to_string(&plugin_json_path) {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!("Failed to read platform manifest {}: {:?}", plugin_json_path.display(), e);
+                tracing::warn!(
+                    "Failed to read platform manifest {}: {:?}",
+                    plugin_json_path.display(),
+                    e
+                );
                 continue;
             }
         };
         let manifest = match serde_json::from_str::<crate::plugin::PluginManifest>(&content) {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!("Failed to parse platform manifest {}: {:?}", plugin_json_path.display(), e);
+                tracing::warn!(
+                    "Failed to parse platform manifest {}: {:?}",
+                    plugin_json_path.display(),
+                    e
+                );
                 continue;
             }
         };
@@ -494,8 +502,7 @@ pub fn build_react_request(id: u64, params: &ReactParams) -> String {
 
 /// Parse a JSON response line from a plugin.
 pub fn parse_response(line: &str) -> AppResult<PluginResponse> {
-    serde_json::from_str(line)
-        .map_err(|e| err_str!("Failed to parse plugin response: {}", e))
+    serde_json::from_str(line).map_err(|e| err_str!("Failed to parse plugin response: {}", e))
 }
 
 // ---------------------------------------------------------------------------
@@ -574,14 +581,21 @@ impl FileReader for MattermostFileReader {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
-            .map_err(|e| crate::error::Error::Message(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| {
+                crate::error::Error::Message(format!("Failed to create HTTP client: {}", e))
+            })?;
 
         let resp = client
             .get(&url)
             .header("Authorization", format!("Bearer {}", self.access_token))
             .send()
             .await
-            .map_err(|e| crate::error::Error::Message(format!("HTTP request failed for file {}: {}", file_id, e)))?;
+            .map_err(|e| {
+                crate::error::Error::Message(format!(
+                    "HTTP request failed for file {}: {}",
+                    file_id, e
+                ))
+            })?;
 
         if !resp.status().is_success() {
             return Err(crate::error::Error::Message(format!(
@@ -592,10 +606,9 @@ impl FileReader for MattermostFileReader {
             )));
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| crate::error::Error::Message(format!("Failed to read file body: {}", e)))?;
+        let bytes = resp.bytes().await.map_err(|e| {
+            crate::error::Error::Message(format!("Failed to read file body: {}", e))
+        })?;
 
         Ok(bytes.to_vec())
     }

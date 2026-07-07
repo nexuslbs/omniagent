@@ -26,6 +26,9 @@ use tokio::select;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 
+/// Type alias for platform restart signals map.
+type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>>;
+
 // ---------------------------------------------------------------------------
 // Circuit breaker
 // ---------------------------------------------------------------------------
@@ -109,7 +112,7 @@ impl ExternalPlatformClient {
     pub async fn new(
         config: PlatformPluginConfig,
         data_dir: &str,
-        platform_restart_signals: Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>>,
+        platform_restart_signals: PlatformRestartSignals,
     ) -> Self {
         let max_retries = config.max_retries;
         let name = config.name.clone();

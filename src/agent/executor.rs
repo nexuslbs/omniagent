@@ -1,9 +1,8 @@
-use crate::error::AppResult;
 use crate::err_msg;
+use crate::error::AppResult;
 use tracing::{error, info, warn};
 
 use crate::agent::config::AgentContext;
-use tokio::task::JoinSet;
 use crate::agent::helpers;
 use crate::db::types as queries;
 use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
@@ -11,6 +10,7 @@ use crate::llm::{ChatMessage, CompletionRequest, LLMClient, LLMConfig, ProviderI
 use crate::mcp::McpToolCall;
 use crate::mcp::{truncate_content, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
 use crate::prompt_builder::{format_subtask_section, PlanningPromptParams};
+use tokio::task::JoinSet;
 
 /// Process a single pending thread through the state machine:
 ///
@@ -62,7 +62,7 @@ pub async fn process_thread(
                 "Invalid configuration: profile='{}', provider={:?}, model={:?} — profile name is empty. Set a profile on the channel or thread.",
                 profile_name, provider_name, model_name
             ),
-            thread_sequence: { let v = next_seq; v },
+            thread_sequence: {  next_seq },
             external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
             metadata: serde_json::json!({
                 "error_type": "configuration",
@@ -110,10 +110,7 @@ pub async fn process_thread(
                 "Invalid configuration: profile='{}' does not exist.",
                 profile_name
             ),
-            thread_sequence: {
-                let v = next_seq;
-                v
-            },
+            thread_sequence: { next_seq },
             external_id: Some(format!(
                 "validation-error:{}:{}",
                 thread.id,
@@ -166,7 +163,7 @@ pub async fn process_thread(
                 "Invalid configuration: provider is not set on thread {}. Ensure the thread has a provider stamped at creation time. Check channel.current_provider, profile provider, or LLM_PROVIDER env var.",
                 thread.id
             ),
-            thread_sequence: { let v = next_seq; v },
+            thread_sequence: {  next_seq },
             external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
             metadata: serde_json::json!({
                 "error_type": "configuration",
@@ -215,7 +212,7 @@ pub async fn process_thread(
                 "Invalid configuration: model is not set on thread {}. Ensure the thread has a model stamped at creation time. Check channel.current_model, profile model, or provider plugin default_model.",
                 thread.id
             ),
-            thread_sequence: { let v = next_seq; v },
+            thread_sequence: {  next_seq },
             external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
             metadata: serde_json::json!({
                 "error_type": "configuration",
@@ -274,16 +271,18 @@ pub async fn process_thread(
                 // Resolve $secret: references in resolved_env for full resolution
                 crate::plugins_yaml::resolve_config_refs(&mut detail.resolved_env, &cfg.pool).await;
                 // Check resolved_env first (has all refs resolved), then fall back to config
-                detail.resolved_env
+                detail
+                    .resolved_env
                     .get("api_key")
                     .filter(|s| !s.is_empty())
                     .cloned()
                     .or_else(|| {
-                        detail.config
+                        detail
+                            .config
                             .get("api_key")
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.is_empty())
-                            .map(|s| crate::plugins_yaml::resolve_config_value(s))
+                            .map(crate::plugins_yaml::resolve_config_value)
                     })
                     .unwrap_or_default()
             }
@@ -302,7 +301,14 @@ pub async fn process_thread(
     };
 
     // 4. Build the initial message history with the structured system prompt
-    let tool_names: Vec<String> = cfg.mcp.read().unwrap().all().iter().map(|t| t.name.clone()).collect();
+    let tool_names: Vec<String> = cfg
+        .mcp
+        .read()
+        .unwrap()
+        .all()
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
     let system_prompt = crate::prompt_builder::build_system_prompt(
         &cfg.ctx.memory_store,
         "",   // platform — will be enriched from channel metadata in the future
@@ -413,14 +419,7 @@ pub async fn process_thread(
                     "Delivering system cause (thread {}) to platform {:?}:{:?}",
                     thread.id, channel.platform, channel.resource_identifier
                 );
-                helpers::enqueue_delivery(
-                    &cfg.ctx,
-                    cause_msg,
-                    &channel,
-                    thread,
-                    None,
-                )
-                .await;
+                helpers::enqueue_delivery(&cfg.ctx, cause_msg, &channel, thread, None).await;
             }
         }
     }
@@ -531,9 +530,13 @@ pub async fn process_thread(
             // system prompt + context is the important one for debugging.
             // Subtype "plan" indicates this is the first prompt to create a plan.
             if prompt_log_level != "off" {
-                let prompt_seq = { let v = next_seq; next_seq += 1; v };
-                let prompt_content = serde_json::to_string(&planning_messages)
-                    .unwrap_or_else(|_| String::new());
+                let prompt_seq = {
+                    let v = next_seq;
+                    next_seq += 1;
+                    v
+                };
+                let prompt_content =
+                    serde_json::to_string(&planning_messages).unwrap_or_else(|_| String::new());
                 let prompt_msg = MessageNew {
                     thread_id: thread.id,
                     role: "system".to_string(),
@@ -553,7 +556,10 @@ pub async fn process_thread(
                     iteration_number: 0,
                 };
                 if let Err(e) = queries::create_message(&cfg.pool, &prompt_msg).await {
-                    warn!("[prompt] Failed to persist planning prompt for thread {}: {:?}", thread.id, e);
+                    warn!(
+                        "[prompt] Failed to persist planning prompt for thread {}: {:?}",
+                        thread.id, e
+                    );
                 }
             }
 
@@ -645,10 +651,8 @@ pub async fn process_thread(
                                     let total = steps.len().min(6);
                                     for (i, step_val) in steps.iter().enumerate().take(6) {
                                         if let Some(step) = step_val.as_str() {
-                                            let clean = step
-                                                .trim()
-                                                .trim_end_matches(|c: char| c == '*' || c == '`')
-                                                .trim();
+                                            let clean =
+                                                step.trim().trim_end_matches(['*', '`']).trim();
                                             if !clean.is_empty() {
                                                 let priority = (total - i) as i32;
                                                 if let Err(e) = crate::subtask::add_subtask(
@@ -771,7 +775,8 @@ pub async fn process_thread(
 
     // 6. Tool-calling loop — max iterations controls total LLM calls
     let iter_limit =
-        queries::max_iterations_for_planning_mode(&cfg.config_snapshot(), &thread.planning_mode) as i32;
+        queries::max_iterations_for_planning_mode(&cfg.config_snapshot(), &thread.planning_mode)
+            as i32;
     // The plan phase consumed 1 iteration (if it ran). Subtract it so the
     // tool-calling loop gets the remaining budget.
     let plan_consumed = if should_plan { 1 } else { 0 };
@@ -944,9 +949,12 @@ pub async fn process_thread(
             _ => false,
         };
         if should_log_prompt {
-            let prompt_seq = { let v = next_seq; next_seq += 1; v };
-            let prompt_content = serde_json::to_string(&messages)
-                .unwrap_or_else(|_| String::new());
+            let prompt_seq = {
+                let v = next_seq;
+                next_seq += 1;
+                v
+            };
+            let prompt_content = serde_json::to_string(&messages).unwrap_or_else(|_| String::new());
             let prompt_msg = MessageNew {
                 thread_id: thread.id,
                 role: "system".to_string(),
@@ -968,7 +976,10 @@ pub async fn process_thread(
                 iteration_number: current_iter,
             };
             if let Err(e) = queries::create_message(&cfg.pool, &prompt_msg).await {
-                warn!("[prompt] Failed to persist prompt for thread {}: {:?}", thread.id, e);
+                warn!(
+                    "[prompt] Failed to persist prompt for thread {}: {:?}",
+                    thread.id, e
+                );
             }
             has_logged_first_prompt = true;
         }
@@ -1207,7 +1218,7 @@ pub async fn process_thread(
                 is_summary: false,
                 msg_type: "multi-tool".to_string(),
                 msg_subtype: None,
-                iteration_number: current_iter as i32,
+                iteration_number: current_iter,
             };
             match helpers::persist_or_abort(&cfg.pool, &multi_msg, thread.id).await {
                 helpers::CreateMessageResult::FkViolation => {
@@ -1271,7 +1282,7 @@ pub async fn process_thread(
             let mcp = mcp_registry.clone();
             let seq = result_seqs[idx];
             let tid = thread.id;
-            let iter_num = current_iter as i32;
+            let iter_num = current_iter;
 
             join_set.spawn(async move {
                 // Clone the registry snapshot under the lock, then drop the lock
@@ -1282,13 +1293,18 @@ pub async fn process_thread(
                 // blocking the entire thread forever. Uses a generous default
                 // (15 min) that covers the timeout_secs of all MCP servers.
                 let timeout_dur = std::time::Duration::from_secs(900);
-                let result = match tokio::time::timeout(timeout_dur, mcp_snapshot.execute(&mcp_call, tool_ctx)).await
+                let result = match tokio::time::timeout(
+                    timeout_dur,
+                    mcp_snapshot.execute(&mcp_call, tool_ctx),
+                )
+                .await
                 {
                     Ok(result) => result,
                     Err(_) => {
                         let msg = format!(
                             "Tool '{}' exceeded maximum execution time ({}s) and was aborted",
-                            tool_name, timeout_dur.as_secs(),
+                            tool_name,
+                            timeout_dur.as_secs(),
                         );
                         error!("{}", msg);
                         Err(crate::error::Error::Message(msg))
@@ -1300,10 +1316,7 @@ pub async fn process_thread(
                             truncate_content(&res.content, DEFAULT_MAX_TOOL_OUTPUT_CHARS);
                         (truncated, false)
                     }
-                    Err(e) => (
-                        format!("Error executing tool '{}': {}", tool_name, e),
-                        true,
-                    ),
+                    Err(e) => (format!("Error executing tool '{}': {}", tool_name, e), true),
                 };
 
                 // Build consolidated JSON: {tool, input, output}
@@ -1471,7 +1484,7 @@ pub async fn process_thread(
                 is_summary: false,
                 msg_type: "reasoning".to_string(),
                 msg_subtype: None,
-                iteration_number: current_iter as i32,
+                iteration_number: current_iter,
             };
             let reasoning_saved = queries::create_message(&cfg.pool, &reasoning_msg).await?;
             helpers::enqueue_delivery(
@@ -1524,7 +1537,10 @@ pub async fn process_thread(
         };
 
         let _summary_start = std::time::Instant::now();
-        let (summary_text, _summary_token_usage) = match per_thread_llm.completion(summary_request).await {
+        let (summary_text, _summary_token_usage) = match per_thread_llm
+            .completion(summary_request)
+            .await
+        {
             Ok(resp) => {
                 let usage = resp.usage.clone();
                 helpers::merge_usage(&mut cumulative_usage, resp.usage);
@@ -1559,7 +1575,6 @@ pub async fn process_thread(
             }
         };
 
-
         let summary_msg = MessageNew {
             thread_id: thread.id,
             role: "agent".to_string(),
@@ -1573,7 +1588,7 @@ pub async fn process_thread(
             msg_type: "summary".to_string(),
             msg_subtype: Some("interrupted".to_string()),
 
-            iteration_number: current_iter as i32,
+            iteration_number: current_iter,
         };
 
         let summary_saved = queries::create_message(&cfg.pool, &summary_msg).await?;
@@ -1614,7 +1629,7 @@ pub async fn process_thread(
             msg_type: "error".to_string(),
             msg_subtype: Some("empty_response".to_string()),
 
-            iteration_number: current_iter as i32,
+            iteration_number: current_iter,
         };
         let saved = queries::create_message(&cfg.pool, &agent_msg).await?;
         helpers::enqueue_delivery(
@@ -1644,7 +1659,7 @@ pub async fn process_thread(
             msg_type: "summary".to_string(),
             msg_subtype: None,
 
-            iteration_number: current_iter as i32,
+            iteration_number: current_iter,
         };
         let saved = queries::create_message(&cfg.pool, &agent_msg).await?;
         helpers::enqueue_delivery(
@@ -1702,9 +1717,18 @@ pub async fn process_thread(
         thread.id,
         final_status,
         CompleteThreadStats {
-            input_tokens: cumulative_usage.as_ref().map(|u| u.prompt_tokens as i32).unwrap_or(0),
-            cached_tokens: cumulative_usage.as_ref().map(|u| u.cached_tokens.unwrap_or(0) as i32).unwrap_or(0),
-            output_tokens: cumulative_usage.as_ref().map(|u| u.completion_tokens as i32).unwrap_or(0),
+            input_tokens: cumulative_usage
+                .as_ref()
+                .map(|u| u.prompt_tokens as i32)
+                .unwrap_or(0),
+            cached_tokens: cumulative_usage
+                .as_ref()
+                .map(|u| u.cached_tokens.unwrap_or(0) as i32)
+                .unwrap_or(0),
+            output_tokens: cumulative_usage
+                .as_ref()
+                .map(|u| u.completion_tokens as i32)
+                .unwrap_or(0),
             duration_ms: agent_elapsed_ms,
         },
     )
@@ -1731,13 +1755,7 @@ pub async fn process_thread(
                     "interrupted" => ":broken_heart:",
                     _ => ":o:",
                 };
-                helpers::enqueue_reaction(
-                    &cfg.ctx,
-                    platform,
-                    resource,
-                    ext_id,
-                    emoji,
-                ).await;
+                helpers::enqueue_reaction(&cfg.ctx, platform, resource, ext_id, emoji).await;
             }
         }
     }

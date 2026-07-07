@@ -8,7 +8,6 @@
 
 use crate::err_msg;
 use crate::error::{AppResult, Error, ErrorContext};
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::plugin::{load_manifest, PluginManifest, PluginType};
@@ -79,7 +78,7 @@ fn install_from_url_inner(
 
     if url_lower.ends_with(".tar.gz") || url_lower.ends_with(".tgz") {
         archive_path = temp_path.join("plugin.tar.gz");
-        std::fs::write(&archive_path, &bytes)
+        std::fs::write(&archive_path, bytes)
             .ctx("Failed to write downloaded archive to temp dir")?;
 
         // Extract using tar
@@ -87,7 +86,7 @@ fn install_from_url_inner(
             .arg("-xzf")
             .arg(&archive_path)
             .arg("-C")
-            .arg(&temp_path)
+            .arg(temp_path)
             .status()
             .ctx("Failed to execute tar command")?;
 
@@ -96,7 +95,7 @@ fn install_from_url_inner(
         }
     } else if url_lower.ends_with(".zip") {
         archive_path = temp_path.join("plugin.zip");
-        std::fs::write(&archive_path, &bytes)
+        std::fs::write(&archive_path, bytes)
             .ctx("Failed to write downloaded archive to temp dir")?;
 
         // Extract using unzip
@@ -104,7 +103,7 @@ fn install_from_url_inner(
             .arg("-o")
             .arg(&archive_path)
             .arg("-d")
-            .arg(&temp_path)
+            .arg(temp_path)
             .status()
             .ctx("Failed to execute unzip command")?;
 
@@ -119,7 +118,7 @@ fn install_from_url_inner(
     }
 
     // Find plugin.json in the extracted directory
-    let plugin_json = find_plugin_json(&temp_path)?;
+    let plugin_json = find_plugin_json(temp_path)?;
     let manifest = load_manifest(&plugin_json)?;
 
     // Install to the correct type directory under data_dir
@@ -486,7 +485,12 @@ pub fn discover_plugins(
                 continue;
             }
             // Skip .remote/ directories at the type level — handled separately (section C)
-            if type_path.file_name().and_then(|n| n.to_str()).map(|s| s.starts_with('.')).unwrap_or(false) {
+            if type_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.starts_with('.'))
+                .unwrap_or(false)
+            {
                 continue;
             }
             // type_path is like plugins/providers, plugins/platforms, plugins/mcp
@@ -497,7 +501,12 @@ pub fn discover_plugins(
                         continue;
                     }
                     // Skip .remote/ hidden directories
-                    if plugin_path.file_name().and_then(|n| n.to_str()).map(|s| s.starts_with('.')).unwrap_or(false) {
+                    if plugin_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.starts_with('.'))
+                        .unwrap_or(false)
+                    {
                         continue;
                     }
                     let manifest_path = plugin_path.join("plugin.json");
@@ -533,7 +542,12 @@ pub fn discover_plugins(
                 continue;
             }
             // Skip .remote/ directories at the type level
-            if type_path.file_name().and_then(|n| n.to_str()).map(|s| s.starts_with('.')).unwrap_or(false) {
+            if type_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.starts_with('.'))
+                .unwrap_or(false)
+            {
                 continue;
             }
             // type_path is like plugins/mcp or plugins/platform
@@ -544,7 +558,12 @@ pub fn discover_plugins(
                         continue;
                     }
                     // Skip .remote/ hidden directories
-                    if plugin_path.file_name().and_then(|n| n.to_str()).map(|s| s.starts_with('.')).unwrap_or(false) {
+                    if plugin_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.starts_with('.'))
+                        .unwrap_or(false)
+                    {
                         continue;
                     }
                     let manifest_path = plugin_path.join("plugin.json");
@@ -605,7 +624,8 @@ pub fn discover_plugins(
                             Err(e) => {
                                 tracing::warn!(
                                     "Failed to load remote plugin manifest at {}: {:?}",
-                                    manifest_path, e
+                                    manifest_path,
+                                    e
                                 );
                             }
                         }
@@ -643,13 +663,17 @@ pub fn discover_plugins(
                     continue;
                 }
 
-                let dir_name = plugin_path.file_name()
+                let dir_name = plugin_path
+                    .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("")
                     .to_string();
 
                 if has_plugin_json {
-                    let path_str = plugin_path.join("plugin.json").to_string_lossy().to_string();
+                    let path_str = plugin_path
+                        .join("plugin.json")
+                        .to_string_lossy()
+                        .to_string();
                     match load_manifest(&path_str) {
                         Ok(manifest) => {
                             results.push((manifest, "built-in".to_string(), path_str));
@@ -710,23 +734,27 @@ pub fn discover_plugins(
     // that aren't covered by bundled/remote/builtin plugin.json files.
     // These get synthetic manifests but won't have config_schema unless
     // a plugin.json is also present.
-    let mcp_plugin_servers = crate::mcp::external::config::discover_plugin_servers(data_dir, workspace_dir);
+    let mcp_plugin_servers =
+        crate::mcp::external::config::discover_plugin_servers(data_dir, workspace_dir);
     for srv in &mcp_plugin_servers {
-        let already_exists = results.iter().any(|(m, _, base_path): &(PluginManifest, String, String)| {
-            if m.name == srv.name {
-                return true;
-            }
-            if let Some(parent_dir) = std::path::Path::new(base_path).parent() {
-                if let Some(dir_name) = parent_dir.file_name().and_then(|n| n.to_str()) {
-                    let dir_normalized = dir_name.replace('-', "_");
-                    let srv_normalized = srv.name.replace('-', "_");
-                    if dir_normalized == srv_normalized || dir_name == srv.name {
+        let already_exists =
+            results
+                .iter()
+                .any(|(m, _, base_path): &(PluginManifest, String, String)| {
+                    if m.name == srv.name {
                         return true;
                     }
-                }
-            }
-            false
-        });
+                    if let Some(parent_dir) = std::path::Path::new(base_path).parent() {
+                        if let Some(dir_name) = parent_dir.file_name().and_then(|n| n.to_str()) {
+                            let dir_normalized = dir_name.replace('-', "_");
+                            let srv_normalized = srv.name.replace('-', "_");
+                            if dir_normalized == srv_normalized || dir_name == srv.name {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                });
         if !already_exists {
             let transport_str = match srv.transport {
                 crate::mcp::external::config::McpTransport::Stdio => "stdio",
@@ -814,7 +842,7 @@ mod tests {
             data_dir.path().to_str().unwrap(),
             workspace_dir.path().to_str().unwrap(),
         );
-        assert!(plugins.len() >= 1);
+        assert!(!plugins.is_empty());
         let found = plugins
             .iter()
             .any(|(m, s, _)| m.name == "my-plugin" && s == "bundled");
@@ -849,7 +877,7 @@ mod tests {
             data_dir.path().to_str().unwrap(),
             workspace_dir.path().to_str().unwrap(),
         );
-        assert!(plugins.len() >= 1);
+        assert!(!plugins.is_empty());
         let found = plugins
             .iter()
             .any(|(m, s, _)| m.name == "my-remote-plugin" && s == "remote");
@@ -942,6 +970,4 @@ mod tests {
             "content1"
         );
     }
-
 }
-

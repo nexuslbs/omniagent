@@ -101,7 +101,8 @@ pub struct AppContext {
     /// Per-platform file readers for the `read_attached_file` MCP tool.
     /// Keyed by platform name (e.g. "mattermost"). Each reader knows how to
     /// fetch file content from that platform's API using file_id + server_url.
-    pub platform_file_readers: HashMap<String, Arc<dyn crate::platform::external::FileReader + Send + Sync>>,
+    pub platform_file_readers:
+        HashMap<String, Arc<dyn crate::platform::external::FileReader + Send + Sync>>,
 }
 
 impl AppContext {
@@ -115,7 +116,11 @@ impl AppContext {
         platform_senders: HashMap<String, OutboundSender>,
     ) -> Self {
         // Load memory store from the default profile's memories directory
-        let profile_path = format!("{}/profiles/{}", data_dir, crate::profile::default_profile_name());
+        let profile_path = format!(
+            "{}/profiles/{}",
+            data_dir,
+            crate::profile::default_profile_name()
+        );
         let mut memory_store = MemoryStore::new(&profile_path);
         memory_store.load_from_disk();
 
@@ -137,8 +142,11 @@ impl AppContext {
 }
 
 /// Async handler type for MCP tool execution.
-pub type McpToolHandler =
-    Arc<dyn Fn(Value, AppContext) -> Pin<Box<dyn Future<Output = AppResult<McpToolResult>> + Send>> + Send + Sync>;
+pub type McpToolHandler = Arc<
+    dyn Fn(Value, AppContext) -> Pin<Box<dyn Future<Output = AppResult<McpToolResult>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Build a fully-qualified tool name using the unified format:
 /// `{server}_{tool-name-with-dashes}`
@@ -151,8 +159,12 @@ pub fn tool_qualify(server: &str, tool_name: &str) -> String {
     // Strip redundant server prefix from tool name if present
     let tool = if let Some(rest) = tool_name.strip_prefix(server) {
         // Remove any leading separator character after the prefix
-        let trimmed = rest.trim_start_matches(|c| c == '-' || c == '_' || c == '.');
-        if trimmed.is_empty() { tool_name } else { trimmed }
+        let trimmed = rest.trim_start_matches(['-', '_', '.']);
+        if trimmed.is_empty() {
+            tool_name
+        } else {
+            trimmed
+        }
     } else {
         tool_name
     };
@@ -178,6 +190,12 @@ pub struct McpTool {
 #[derive(Clone)]
 pub struct McpRegistry {
     tools: HashMap<String, McpTool>,
+}
+
+impl Default for McpRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl McpRegistry {
@@ -299,11 +317,7 @@ impl McpRegistry {
             .map(|(name, _)| *name);
         if let Some(suggested) = suggestion {
             // Execute the suggested tool instead
-            tracing::info!(
-                "Fuzzy-matched tool '{}' -> '{}'",
-                call.name,
-                suggested
-            );
+            tracing::info!("Fuzzy-matched tool '{}' -> '{}'", call.name, suggested);
             if let Some(tool) = self.get(suggested) {
                 let tool = tool.clone();
                 let args = call.arguments.clone();
@@ -361,7 +375,7 @@ impl McpRegistry {
 /// Build the `read_attached_file` tool: fetch file content from a platform
 /// on demand, avoiding inlining large files in the prompt or DB.
 fn read_attached_file_tool() -> McpTool {
-    use base64::{Engine, engine::general_purpose};
+    use base64::{engine::general_purpose, Engine};
 
     McpTool {
         name: "read_attached_file".to_string(),
@@ -645,7 +659,8 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
     // External servers are auto-discovered via load_servers_config() below.
 
     // External MCP servers (load from config + plugins/mcp/, best-effort)
-    let external_tools = external::client::initialize_external_tools(&ctx.data_dir, &ctx.workspace_dir).await;
+    let external_tools =
+        external::client::initialize_external_tools(&ctx.data_dir, &ctx.workspace_dir).await;
     for tool in external_tools {
         registry.register(tool);
     }
@@ -694,7 +709,11 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     for i in 1..=a_len {
         curr[0] = i;
         for j in 1..=b_len {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
             curr[j] = std::cmp::min(
                 std::cmp::min(curr[j - 1] + 1, prev[j] + 1),
                 prev[j - 1] + cost,

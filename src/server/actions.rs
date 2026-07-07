@@ -78,14 +78,12 @@ fn actions_path(data_dir: &str) -> String {
 fn load_actions(data_dir: &str) -> ActionsFile {
     let path = actions_path(data_dir);
     match std::fs::read_to_string(&path) {
-        Ok(content) => {
-            serde_yaml::from_str(&content).unwrap_or_else(|e| {
-                error!("Failed to parse actions.yml: {:?}", e);
-                ActionsFile {
-                    actions: HashMap::new(),
-                }
-            })
-        }
+        Ok(content) => serde_yaml::from_str(&content).unwrap_or_else(|e| {
+            error!("Failed to parse actions.yml: {:?}", e);
+            ActionsFile {
+                actions: HashMap::new(),
+            }
+        }),
         Err(_) => ActionsFile {
             actions: HashMap::new(),
         },
@@ -94,14 +92,16 @@ fn load_actions(data_dir: &str) -> ActionsFile {
 
 fn save_actions(data_dir: &str, file: &ActionsFile) -> AppResult<()> {
     let path = actions_path(data_dir);
-    let content = serde_yaml::to_string(file)
-        .map_err(|e| crate::error::Error::Message(format!("Failed to serialize actions.yml: {}", e)))?;
+    let content = serde_yaml::to_string(file).map_err(|e| {
+        crate::error::Error::Message(format!("Failed to serialize actions.yml: {}", e))
+    })?;
     // Atomic write with .tmp rename
     let tmp_path = format!("{}.tmp", path);
     std::fs::write(&tmp_path, &content)
         .map_err(|e| crate::error::Error::Message(format!("Failed to write actions.yml: {}", e)))?;
-    std::fs::rename(&tmp_path, &path)
-        .map_err(|e| crate::error::Error::Message(format!("Failed to rename actions.yml: {}", e)))?;
+    std::fs::rename(&tmp_path, &path).map_err(|e| {
+        crate::error::Error::Message(format!("Failed to rename actions.yml: {}", e))
+    })?;
     Ok(())
 }
 
@@ -110,7 +110,11 @@ fn entry_to_response(id: &str, entry: &ActionEntry) -> ActionResponse {
         .description
         .as_deref()
         .and_then(|d| {
-            if d.is_empty() { None } else { Some(d.to_string()) }
+            if d.is_empty() {
+                None
+            } else {
+                Some(d.to_string())
+            }
         })
         .unwrap_or_else(|| id.replace("builtin_", ""))
         .trim()
@@ -324,9 +328,7 @@ pub(crate) async fn run_action_handler(
     // Clone the registry snapshot under the lock, then drop the lock
     // before the async execute call (RwLockReadGuard is !Send).
     let mcp_snapshot = state.tool_registry.read().unwrap().clone();
-    match mcp_snapshot.execute(&call, state.app_context.clone())
-        .await
-    {
+    match mcp_snapshot.execute(&call, state.app_context.clone()).await {
         Ok(result) => {
             let response = serde_json::json!({
                 "result": result.content,

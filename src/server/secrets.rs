@@ -6,7 +6,6 @@
 //! - `GET /api/secrets/:name/versions` — list all versions of a secret
 //! - `DELETE /api/secrets/:name` — delete a secret and all its versions
 
-use sql_forge::sql_forge;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -15,6 +14,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use sql_forge::sql_forge;
 use std::sync::Arc;
 use tracing::{error, info};
 
@@ -283,7 +283,9 @@ async fn update_secret_handler(
         .await
         .unwrap_or(None);
 
-        let next_ver = max_ver.map(|row| row.coalesce.unwrap_or(0) + 1).unwrap_or(1);
+        let next_ver = max_ver
+            .map(|row| row.coalesce.unwrap_or(0) + 1)
+            .unwrap_or(1);
 
         if let Err(e) = sql_forge!(
             r#"
@@ -359,10 +361,10 @@ async fn list_versions_handler(
         Ok(Some(row)) => row.id,
         Ok(None) => return err_json(StatusCode::NOT_FOUND, "Secret not found"),
         Err(e) => {
-                error!("Failed to find secret '{}': {:?}", name, e);
-                return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
-            }
-        };
+            error!("Failed to find secret '{}': {:?}", name, e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Database error");
+        }
+    };
 
     let rows = match sql_forge!(
         SecretVersionRow,

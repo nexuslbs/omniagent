@@ -190,10 +190,7 @@ async fn stats_handler(
         Ok(row) => row.cnt.unwrap_or(0),
         Err(e) => {
             error!("[memory/stats] threads count failed: {:?}", e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to count threads",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to count threads");
         }
     };
 
@@ -303,10 +300,7 @@ async fn stats_handler(
         Ok(row) => row.cnt.unwrap_or(0),
         Err(e) => {
             error!("[memory/stats] vectors count failed: {:?}", e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to count vectors",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to count vectors");
         }
     };
 
@@ -329,15 +323,12 @@ async fn search_handler(
 ) -> impl IntoResponse {
     let q = params.q.trim().to_string();
     if q.is_empty() {
-        return err_json(
-            StatusCode::BAD_REQUEST,
-            "Query parameter 'q' is required",
-        );
+        return err_json(StatusCode::BAD_REQUEST, "Query parameter 'q' is required");
     }
 
     let profile = params.profile.unwrap_or_default();
     let channel_id = params.channel.unwrap_or(0);
-    let limit = params.limit.unwrap_or(10).min(500).max(1);
+    let limit = params.limit.unwrap_or(10).clamp(1, 500);
     let pattern = format!("%{}%", q);
 
     let rows = match sql_forge!(
@@ -436,7 +427,12 @@ fn resolve_memory_path(data_dir: &str, profile: &str, mem_type: &str) -> Result<
     let file_name = match mem_type {
         "memory" => "MEMORY.md",
         "soul" => "USER.md",
-        _ => return Err(format!("Type must be 'memory' or 'soul', got '{}'", mem_type)),
+        _ => {
+            return Err(format!(
+                "Type must be 'memory' or 'soul', got '{}'",
+                mem_type
+            ))
+        }
     };
 
     let profile_path = format!("{}/profiles/{}/memories/{}", data_dir, profile, file_name);
@@ -527,10 +523,7 @@ async fn upload_handler(
             ok_json(serde_json::json!({ "success": true, "size": size, "path": dest_path }))
         }
         Err(e) => {
-            error!(
-                "[memory/upload] failed to write {}: {:?}",
-                dest_path, e
-            );
+            error!("[memory/upload] failed to write {}: {:?}", dest_path, e);
             err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to write memory file",

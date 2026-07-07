@@ -8,13 +8,7 @@
 //! into individual queries (one per section) and assembled in Rust rather
 //! than using PostgreSQL's `row_to_json` / `json_agg`.
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-    Router,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
 use serde::Serialize;
 use sql_forge::sql_forge;
 use sqlx::FromRow;
@@ -180,9 +174,7 @@ struct DashboardResponse {
 /// GET /overview — recent 50 threads
 ///
 /// Mirrors the original dashboard overview query exactly.
-async fn overview_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn overview_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let rows = match sql_forge!(
         OverviewRow,
         r#"
@@ -220,21 +212,22 @@ async fn overview_handler(
 
     let entries: Vec<OverviewEntry> = rows
         .into_iter()
-        .map(|r| {
-            OverviewEntry {
-                id: r.id,
-                channel_id: r.channel_id,
-                thread_id: r.thread_id,
-                content_preview: r.content_preview.unwrap_or_default(),
-                status: r.status.unwrap_or_default(),
-                processing_time_ms: r.processing_time_ms.map(|v| v as i64),
-                prompt_tokens: 0,
-                completion_tokens: r.total_tokens.map(|v| v as i64).unwrap_or(0),
-                created_at: r.created_at.map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()).unwrap_or_default(),
-                channel_name: r.channel_name.unwrap_or_default(),
-                thread_count: r.thread_count.unwrap_or(0),
-                model: r.model,
-            }
+        .map(|r| OverviewEntry {
+            id: r.id,
+            channel_id: r.channel_id,
+            thread_id: r.thread_id,
+            content_preview: r.content_preview.unwrap_or_default(),
+            status: r.status.unwrap_or_default(),
+            processing_time_ms: r.processing_time_ms.map(|v| v as i64),
+            prompt_tokens: 0,
+            completion_tokens: r.total_tokens.map(|v| v as i64).unwrap_or(0),
+            created_at: r
+                .created_at
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .unwrap_or_default(),
+            channel_name: r.channel_name.unwrap_or_default(),
+            thread_count: r.thread_count.unwrap_or(0),
+            model: r.model,
         })
         .collect();
 
@@ -246,9 +239,7 @@ async fn overview_handler(
 /// The original Express query used a single multi-CTE query with
 /// `row_to_json` and `json_agg`. This Rust version runs individual
 /// `sql_forge!()` queries for each section and assembles the response.
-async fn dashboard_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // ── 1. KPIs ────────────────────────────────────────────────────────────
     let kpis = match sql_forge!(
         KpiRow,
@@ -310,7 +301,10 @@ async fn dashboard_handler(
         Ok(rows) => rows
             .into_iter()
             .map(|r| HourlyEntry {
-                bucket: r.bucket.map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()).unwrap_or_default(),
+                bucket: r
+                    .bucket
+                    .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                    .unwrap_or_default(),
                 count: r.count.unwrap_or(0),
             })
             .collect::<Vec<_>>(),
@@ -427,7 +421,10 @@ async fn dashboard_handler(
                     processing_time_ms: r.processing_time_ms.map(|v| v as i64),
                     prompt_tokens: 0,
                     completion_tokens: completion,
-                    created_at: r.created_at.map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()).unwrap_or_default(),
+                    created_at: r
+                        .created_at
+                        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                        .unwrap_or_default(),
                     channel_name: r.channel_name.unwrap_or_default(),
                     thread_count: r.thread_count.unwrap_or(0),
                     model: r.model,

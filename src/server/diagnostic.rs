@@ -2,10 +2,10 @@
 
 use super::AppState;
 use axum::extract::State;
-use std::sync::Arc;
-use std::time::Duration;
 use sql_forge::sql_forge;
 use sqlx::FromRow;
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(FromRow)]
 struct OneRow {
@@ -21,11 +21,7 @@ pub async fn check_state(State(_state): State<Arc<AppState>>) -> &'static str {
 pub async fn check_db(State(state): State<Arc<AppState>>) -> String {
     match tokio::time::timeout(
         Duration::from_secs(5),
-        sql_forge!(
-            OneRow,
-            "SELECT 1 AS id"
-        )
-        .fetch_one(&state.pool),
+        sql_forge!(OneRow, "SELECT 1 AS id").fetch_one(&state.pool),
     )
     .await
     {
@@ -83,13 +79,7 @@ pub async fn check_enrich_json(State(state): State<Arc<AppState>>) -> String {
 
 /// Check environment variables (for debugging env resolution).
 pub async fn check_env_read(State(state): State<Arc<AppState>>) -> String {
-    let vars = [
-        "OMNI_DIR",
-        "WORKSPACE_DIR",
-        "LLM_PROVIDER",
-        "HOST",
-        "PORT",
-    ];
+    let vars = ["OMNI_DIR", "WORKSPACE_DIR", "LLM_PROVIDER", "HOST", "PORT"];
     let mut result = String::new();
     for var in &vars {
         let val = std::env::var(var).unwrap_or_else(|_| "(not set)".to_string());

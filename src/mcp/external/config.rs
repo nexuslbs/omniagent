@@ -339,7 +339,7 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
     let has_plugin_json = path.join("plugin.json").exists();
 
     // Skip utility libs (no manifest files at all)
-    if !config_file.exists() && !(has_cargo_toml && has_plugin_json) {
+    if !(config_file.exists() || has_cargo_toml && has_plugin_json) {
         return None;
     }
 

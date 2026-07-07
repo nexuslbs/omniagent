@@ -8,8 +8,8 @@
 //! - If 0 rows affected, another tick already claimed it → skip
 //! - After firing, `running` is cleared and timestamps updated
 
-use crate::error::{Error, AppResult};
 use crate::err_msg;
+use crate::error::{AppResult, Error};
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use sql_forge::sql_forge;
@@ -63,7 +63,10 @@ pub fn spawn(
                     );
                 }
             }
-            Err(e) => error!("[cron-scheduler] Failed to clear stale running flags: {:?}", e),
+            Err(e) => error!(
+                "[cron-scheduler] Failed to clear stale running flags: {:?}",
+                e
+            ),
         }
     });
 
@@ -130,7 +133,7 @@ async fn tick(
         if !validate_cron_schedule_5field(&job.schedule) {
             warn!(
                 "[cron-scheduler] Job '{}' has invalid cron schedule '{}': expected 5 fields (min hour dom month dow), got {} fields. Job will be skipped.",
-                display_name, job.schedule, job.schedule.trim().split_whitespace().count()
+                display_name, job.schedule, job.schedule.split_whitespace().count()
             );
             let new_next = calculate_next_run(&job.schedule, &now);
             release_job(pool, &job.id, &now, &new_next).await?;
@@ -145,10 +148,17 @@ async fn tick(
             // Action mode: execute the MCP tool directly via the registry.
             // Non-silent: creates a system thread with the result message.
             // Silent: executes silently, only creates a thread on failure.
-            handle_action_mode(
-                pool, data_dir, mcp_registry, app_context,
-                &job, display_name, &now, "system",
-            ).await;
+            handle_action_mode(ActionModeCtx {
+                pool,
+                data_dir,
+                mcp_registry,
+                app_context,
+                job: &job,
+                display_name,
+                now: &now,
+                cause: "system",
+            })
+            .await;
 
             // Release the job claim and update timestamps
             let new_next = calculate_next_run(&job.schedule, &now);
@@ -395,17 +405,16 @@ fn resolve_action(data_dir: &str, action_id: &str) -> AppResult<McpToolCall> {
     }
 
     let path = format!("{}/actions.yml", data_dir);
-    let content = std::fs::read_to_string(&path).map_err(|e| {
-        Error::Message(format!("Failed to read actions.yml: {}", e))
-    })?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| Error::Message(format!("Failed to read actions.yml: {}", e)))?;
 
-    let file: ActionsFile = serde_yaml::from_str(&content).map_err(|e| {
-        Error::Message(format!("Failed to parse actions.yml: {}", e))
-    })?;
+    let file: ActionsFile = serde_yaml::from_str(&content)
+        .map_err(|e| Error::Message(format!("Failed to parse actions.yml: {}", e)))?;
 
-    let entry = file.actions.get(action_id).ok_or_else(|| {
-        Error::ActionNotFound(action_id.to_string())
-    })?;
+    let entry = file
+        .actions
+        .get(action_id)
+        .ok_or_else(|| Error::ActionNotFound(action_id.to_string()))?;
 
     if !entry.enabled {
         return Err(Error::Message(format!(
@@ -423,41 +432,44 @@ fn resolve_action(data_dir: &str, action_id: &str) -> AppResult<McpToolCall> {
 
 // ─── Action mode helpers ────────────────────────────────────────────────────
 
+/// Context for `handle_action_mode` — groups 8 params to stay under clippy's 7-arg limit.
+struct ActionModeCtx<'a> {
+    pool: &'a PgPool,
+    data_dir: &'a str,
+    mcp_registry: &'a Arc<std::sync::RwLock<McpRegistry>>,
+    app_context: &'a AppContext,
+    job: &'a CronJobDueRow,
+    display_name: &'a str,
+    now: &'a DateTime<Utc>,
+    cause: &'a str,
+}
+
 /// Handle action mode cron job execution.
 ///
 /// For non-silent jobs: executes the tool and creates a system thread
 /// with the result. For silent jobs: executes silently, only creates
 /// a thread on failure. Returns the thread_id if one was created.
-async fn handle_action_mode(
-    pool: &PgPool,
-    data_dir: &str,
-    mcp_registry: &Arc<std::sync::RwLock<McpRegistry>>,
-    app_context: &AppContext,
-    job: &CronJobDueRow,
-    display_name: &str,
-    now: &DateTime<Utc>,
-    cause: &str,
-) -> Option<i64> {
-    let is_silent = job.silent.unwrap_or(false);
+async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
+    let is_silent = ctx.job.silent.unwrap_or(false);
 
-    let action_id = match job.action_id {
+    let action_id = match ctx.job.action_id {
         Some(ref id) => id.clone(),
         None => {
             error!(
                 "[cron-action] Job '{}' has mode=action but no action_id set, skipping",
-                display_name
+                ctx.display_name
             );
             return None;
         }
     };
 
     // Resolve the tool call from actions.yml
-    let tool_call = match resolve_action(data_dir, &action_id) {
+    let tool_call = match resolve_action(ctx.data_dir, &action_id) {
         Ok(tc) => tc,
         Err(e) => {
             error!(
                 "[cron-action] Failed to resolve action '{}' for job '{}': {}",
-                action_id, display_name, e
+                action_id, ctx.display_name, e
             );
             return None;
         }
@@ -465,41 +477,44 @@ async fn handle_action_mode(
 
     info!(
         "[cron-action] Executing action job '{}' (tool: {}, action_id: {})",
-        display_name, tool_call.name, action_id
+        ctx.display_name, tool_call.name, action_id
     );
 
     // Execute the tool first, THEN create the thread with the result.
     // This avoids the executor picking up a pending thread before it's terminal.
     // Clone the registry snapshot under the lock (RwLockReadGuard is !Send, can't cross .await).
-    let mcp_snapshot = mcp_registry.read().unwrap().clone();
-    match mcp_snapshot.execute(&tool_call, app_context.clone()).await {
+    let mcp_snapshot = ctx.mcp_registry.read().unwrap().clone();
+    match mcp_snapshot
+        .execute(&tool_call, ctx.app_context.clone())
+        .await
+    {
         Ok(result) => {
             let is_error = result.is_error;
 
             if is_error {
                 error!(
                     "[cron-action] Action job '{}' (action_id={}) returned error: {}",
-                    display_name, action_id, result.content
+                    ctx.display_name, action_id, result.content
                 );
             } else if !is_silent {
                 info!(
                     "[cron-action] Action job '{}' (action_id={}) completed successfully",
-                    display_name, action_id
+                    ctx.display_name, action_id
                 );
             }
 
             // Create thread if non-silent (always) OR silent with error
             if !is_silent || is_error {
-                match create_action_thread(
-                    pool,
-                    data_dir,
-                    job,
-                    now,
-                    display_name,
-                    &result.content,
+                match create_action_thread(ActionThreadCtx {
+                    pool: ctx.pool,
+                    data_dir: ctx.data_dir,
+                    job: ctx.job,
+                    now: ctx.now,
+                    display_name: ctx.display_name,
+                    result_content: &result.content,
                     is_error,
-                    cause,
-                )
+                    cause: ctx.cause,
+                })
                 .await
                 {
                     Ok(tid) => Some(tid),
@@ -519,22 +534,23 @@ async fn handle_action_mode(
         Err(e) => {
             error!(
                 "[cron-action] Action job '{}' (action_id={}) execution failed: {}",
-                display_name, action_id, e
+                ctx.display_name, action_id, e
             );
 
             // Always create a failure thread for visible error trail
             let err_content = format!("Action execution failed: {}", e);
-            match create_action_thread(
-                pool,
-                data_dir,
-                job,
-                now,
-                display_name,
-                &err_content,
-                true,
-                cause,
-            )
-            .await {
+            match create_action_thread(ActionThreadCtx {
+                pool: ctx.pool,
+                data_dir: ctx.data_dir,
+                job: ctx.job,
+                now: ctx.now,
+                display_name: ctx.display_name,
+                result_content: &err_content,
+                is_error: true,
+                cause: ctx.cause,
+            })
+            .await
+            {
                 Ok(tid) => Some(tid),
                 Err(e2) => {
                     error!(
@@ -548,68 +564,71 @@ async fn handle_action_mode(
     }
 }
 
+/// Context for `create_action_thread` — groups 8 params to stay under clippy's 7-arg limit.
+struct ActionThreadCtx<'a> {
+    pool: &'a PgPool,
+    data_dir: &'a str,
+    job: &'a CronJobDueRow,
+    now: &'a DateTime<Utc>,
+    display_name: &'a str,
+    result_content: &'a str,
+    is_error: bool,
+    cause: &'a str,
+}
+
 /// Create a system/user thread with the action result saved as a message.
 ///
 /// Creates a thread with the given cause ('system' for scheduled, 'user'
 /// for manual run), a seq-0 cause message (msg_type='cron', msg_subtype
 /// = cron job name), saves the tool result as a seq-1 message, then
 /// marks the thread as terminal (system for success, failed for error).
-async fn create_action_thread(
-    pool: &PgPool,
-    data_dir: &str,
-    job: &CronJobDueRow,
-    now: &DateTime<Utc>,
-    display_name: &str,
-    result_content: &str,
-    is_error: bool,
-    cause: &str,
-) -> AppResult<i64> {
+async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
     // Resolve the channel the same way as the agentic mode path
-    let channel = if let Some(cid) = job.channel_id {
-        match queries::find_channel_by_id(pool, cid).await {
+    let channel = if let Some(cid) = ctx.job.channel_id {
+        match queries::find_channel_by_id(ctx.pool, cid).await {
             Ok(Some(ch)) => ch,
-            _ => ensure_cron_channel(pool).await?,
+            _ => ensure_cron_channel(ctx.pool).await?,
         }
     } else {
-        ensure_cron_channel(pool).await?
+        ensure_cron_channel(ctx.pool).await?
     };
 
     // Resolve profile
-    let profile_name = if let Some(ref p) = job.profile {
+    let profile_name = if let Some(ref p) = ctx.job.profile {
         p.clone()
     } else {
         channel.current_profile.clone()
     };
 
-    let subtype = job.name.clone().unwrap_or_default();
-    let prompt_content = format!("Cron: {}", display_name);
+    let subtype = ctx.job.name.clone().unwrap_or_default();
+    let prompt_content = format!("Cron: {}", ctx.display_name);
 
     // Create the thread with the given cause and a seq-0 cause message (msg_type='cron')
     let (thread, _cause_msg) = queries::create_thread_with_cause(
-        pool,
-        data_dir,
-        cause,
+        ctx.pool,
+        ctx.data_dir,
+        ctx.cause,
         channel.id,
         &profile_name,
         queries::ThreadCauseParams {
             provider: None,
             model: None,
             task_id: None,
-            schedule_task_id: Some(job.id.clone()),
+            schedule_task_id: Some(ctx.job.id.clone()),
             content: prompt_content,
-            external_id: Some(format!("cron:{}:{}", job.id, now.timestamp())),
+            external_id: Some(format!("cron:{}:{}", ctx.job.id, ctx.now.timestamp())),
             metadata: serde_json::json!({
-                "cron_job_id": job.id,
-                "cron_job_name": job.name,
-                "cron_display_name": display_name,
-                "scheduled_at": job.schedule,
+                "cron_job_id": ctx.job.id,
+                "cron_job_name": ctx.job.name,
+                "cron_display_name": ctx.display_name,
+                "scheduled_at": ctx.job.schedule,
                 "channel_id": channel.id,
                 "profile": profile_name,
-                "template": job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()).unwrap_or_default(),
+                "template": ctx.job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()).unwrap_or_default(),
             }),
             msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
-            task_planning_mode: job.planning_mode.clone().unwrap_or_default(),
+            task_planning_mode: ctx.job.planning_mode.clone().unwrap_or_default(),
             parent_external_id: None,
         },
     )
@@ -619,12 +638,16 @@ async fn create_action_thread(
     let result_msg = queries::MessageNew {
         thread_id: thread.id,
         role: "agent".to_string(),
-        content: result_content.to_string(),
+        content: ctx.result_content.to_string(),
         thread_sequence: 1,
-        external_id: Some(format!("cron:{}:{}:result", job.id, now.timestamp())),
+        external_id: Some(format!(
+            "cron:{}:{}:result",
+            ctx.job.id,
+            ctx.now.timestamp()
+        )),
         metadata: serde_json::json!({
-            "cron_job_id": job.id,
-            "is_error": is_error,
+            "cron_job_id": ctx.job.id,
+            "is_error": ctx.is_error,
         }),
         embedding: None,
         summary_text: None,
@@ -633,20 +656,20 @@ async fn create_action_thread(
         msg_subtype: None,
         iteration_number: 0,
     };
-    let _ = queries::create_message(pool, &result_msg).await;
+    let _ = queries::create_message(ctx.pool, &result_msg).await;
 
     // Mark thread as terminal (system for success, failed for error)
-    if is_error {
-        queries::set_thread_failed(pool, thread.id).await?;
+    if ctx.is_error {
+        queries::set_thread_failed(ctx.pool, thread.id).await?;
         info!(
             "[cron-action] Created failure thread {} for action job '{}'",
-            thread.id, display_name
+            thread.id, ctx.display_name
         );
     } else {
-        queries::set_thread_system(pool, thread.id).await?;
+        queries::set_thread_system(ctx.pool, thread.id).await?;
         info!(
             "[cron-action] Created result thread {} for action job '{}'",
-            thread.id, display_name
+            thread.id, ctx.display_name
         );
     }
 
@@ -794,7 +817,10 @@ pub async fn fire_cron_job_by_id(
     .await?;
 
     if !active && !force {
-        err_msg!("Job '{}' is not active. Use force=true to run anyway.", schedule_id);
+        err_msg!(
+            "Job '{}' is not active. Use force=true to run anyway.",
+            schedule_id
+        );
     }
 
     // Validate 5-field cron format
@@ -802,7 +828,7 @@ pub async fn fire_cron_job_by_id(
         let j_name = job.display_name.as_str();
         err_msg!(
             "Invalid cron schedule '{}' for job '{}': expected exactly 5 fields (min hour dom month dow), got {} fields. Use standard Linux crontab format, e.g. '0 9 * * 1-5' for weekdays at 9am.",
-            job.schedule, j_name, job.schedule.trim().split_whitespace().count()
+            job.schedule, j_name, job.schedule.split_whitespace().count()
         );
     }
 
@@ -815,10 +841,17 @@ pub async fn fire_cron_job_by_id(
 
     // ── Handle mode='action' ──
     if job.mode.as_deref() == Some("action") {
-        let tid = handle_action_mode(
-            pool, data_dir, mcp_registry, app_context,
-            &job, display_name, &now, "user",
-        ).await;
+        let tid = handle_action_mode(ActionModeCtx {
+            pool,
+            data_dir,
+            mcp_registry,
+            app_context,
+            job: &job,
+            display_name,
+            now: &now,
+            cause: "user",
+        })
+        .await;
         return Ok(tid);
     }
 
@@ -933,9 +966,12 @@ mod tests {
     #[test]
     fn test_profile_from_channel_when_task_none() {
         let cfg = resolve_thread_config(
-            None, "channel-profile",
-            Some("deepseek"), Some("deepseek-v4-flash"),
-            None, None,
+            None,
+            "channel-profile",
+            Some("deepseek"),
+            Some("deepseek-v4-flash"),
+            None,
+            None,
         );
         assert_eq!(cfg.unwrap().profile_name, "channel-profile");
     }
@@ -943,9 +979,12 @@ mod tests {
     #[test]
     fn test_profile_from_channel_when_task_empty() {
         let cfg = resolve_thread_config(
-            Some(""), "channel-profile",
-            Some("deepseek"), Some("deepseek-v4-flash"),
-            None, None,
+            Some(""),
+            "channel-profile",
+            Some("deepseek"),
+            Some("deepseek-v4-flash"),
+            None,
+            None,
         );
         assert_eq!(cfg.unwrap().profile_name, "channel-profile");
     }

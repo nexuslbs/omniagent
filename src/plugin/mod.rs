@@ -10,8 +10,8 @@
 
 pub mod installer;
 
-use crate::error::{AppResult, ErrorContext};
 use crate::err_msg;
+use crate::error::{AppResult, ErrorContext};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -137,10 +137,10 @@ pub fn default_transport() -> String {
 
 /// Read and validate a plugin.json file from disk.
 pub fn load_manifest(path: &str) -> AppResult<PluginManifest> {
-    let content = std::fs::read_to_string(path)
-        .ctx(format!("Failed to read plugin manifest: {}", path))?;
-    let manifest: PluginManifest = serde_json::from_str(&content)
-        .ctx(format!("Failed to parse plugin manifest: {}", path))?;
+    let content =
+        std::fs::read_to_string(path).ctx(format!("Failed to read plugin manifest: {}", path))?;
+    let manifest: PluginManifest =
+        serde_json::from_str(&content).ctx(format!("Failed to parse plugin manifest: {}", path))?;
     if manifest.name.is_empty() {
         err_msg!("Plugin manifest has empty 'name' field: {}", path);
     }

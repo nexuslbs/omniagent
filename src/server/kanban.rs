@@ -61,13 +61,19 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
         // 2. Task detail
         .route("/kanban/tasks/{id}", get(get_task_handler))
         // 3. Dependencies list
-        .route("/kanban/tasks/{id}/dependencies", get(list_dependencies_handler))
+        .route(
+            "/kanban/tasks/{id}/dependencies",
+            get(list_dependencies_handler),
+        )
         // 4. Create task
         .route("/kanban/tasks", post(create_task_handler))
         // 5. Change status
         .route("/kanban/tasks/{id}/status", patch(change_status_handler))
         // 6. Change position
-        .route("/kanban/tasks/{id}/position", patch(change_position_handler))
+        .route(
+            "/kanban/tasks/{id}/position",
+            patch(change_position_handler),
+        )
         // 7. Update task fields
         .route("/kanban/tasks/{id}", patch(update_task_handler))
         // 8. Delete task
@@ -75,7 +81,10 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
         // 9. Threads
         .route("/kanban/tasks/{id}/threads", get(list_threads_handler))
         // 10. Add dependency
-        .route("/kanban/tasks/{id}/dependencies", post(add_dependency_handler))
+        .route(
+            "/kanban/tasks/{id}/dependencies",
+            post(add_dependency_handler),
+        )
         // 11. Remove dependency
         .route(
             "/kanban/tasks/{id}/dependencies/{depId}",
@@ -372,8 +381,12 @@ fn task_row_to_entry(r: KanbanTaskRow) -> KanbanTaskEntry {
         archived: r.archived.unwrap_or(false),
         template: r.template,
         planning_mode: r.planning_mode,
-        created_at: r.created_at.map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-        updated_at: r.updated_at.map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+        created_at: r
+            .created_at
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+        updated_at: r
+            .updated_at
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
     }
 }
 
@@ -383,7 +396,9 @@ fn dep_row_to_entry(r: DependencyRow) -> DependencyEntry {
         title: r.title,
         status: r.status,
         priority: r.priority.unwrap_or(0),
-        created_at: r.created_at.map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+        created_at: r
+            .created_at
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
     }
 }
 
@@ -407,8 +422,12 @@ fn subtask_row_to_entry(r: SubtaskRow) -> SubtaskEntry {
         priority: r.priority.unwrap_or(0),
         thread_id: r.thread_id,
         thread_title: Some(r.thread_title.unwrap_or_default()),
-        created_at: r.created_at.map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-        updated_at: r.updated_at.map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+        created_at: r
+            .created_at
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+        updated_at: r
+            .updated_at
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
     }
 }
 
@@ -441,7 +460,12 @@ async fn list_tasks_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
-    let show_archived_bool = params.show_archived.as_deref().unwrap_or("").parse::<bool>().unwrap_or(false);
+    let show_archived_bool = params
+        .show_archived
+        .as_deref()
+        .unwrap_or("")
+        .parse::<bool>()
+        .unwrap_or(false);
 
     let rows = match sql_forge!(
         KanbanTaskRow,
@@ -503,10 +527,7 @@ async fn get_task_handler(
         }
         Err(e) => {
             error!("[kanban/tasks/{}] get query failed: {:?}", id, e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to fetch task",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch task");
         }
     };
 
@@ -641,10 +662,7 @@ async fn create_task_handler(
         // Non-fatal — task was already created
     }
 
-    ok_json(CreateTaskResponse {
-        success: true,
-        id,
-    })
+    ok_json(CreateTaskResponse { success: true, id })
 }
 
 // ---------------------------------------------------------------------------
@@ -659,10 +677,7 @@ async fn change_status_handler(
     if !validate_status(&body.status) {
         return err_json(
             StatusCode::BAD_REQUEST,
-            &format!(
-                "Status must be one of: {}",
-                VALID_STATUSES.join(", ")
-            ),
+            &format!("Status must be one of: {}", VALID_STATUSES.join(", ")),
         );
     }
 
@@ -684,10 +699,7 @@ async fn change_status_handler(
         Ok(None) => return err_json(StatusCode::NOT_FOUND, "Task not found"),
         Err(e) => {
             error!("[kanban/tasks/{}/status] check query failed: {:?}", id, e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to check task",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to check task");
         }
     };
 
@@ -830,10 +842,7 @@ async fn change_position_handler(
         Ok(None) => return err_json(StatusCode::NOT_FOUND, "Task not found"),
         Err(e) => {
             error!("[kanban/tasks/{}/position] check query failed: {:?}", id, e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to check task",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to check task");
         }
     };
 
@@ -846,10 +855,7 @@ async fn change_position_handler(
         if !validate_status(s) {
             return err_json(
                 StatusCode::BAD_REQUEST,
-                &format!(
-                    "Status must be one of: {}",
-                    VALID_STATUSES.join(", ")
-                ),
+                &format!("Status must be one of: {}", VALID_STATUSES.join(", ")),
             );
         }
     }
@@ -975,10 +981,7 @@ async fn update_task_handler(
         Ok(None) => return err_json(StatusCode::NOT_FOUND, "Task not found"),
         Err(e) => {
             error!("[kanban/tasks/{}] check query failed: {:?}", id, e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to check task",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to check task");
         }
     };
 
@@ -994,10 +997,7 @@ async fn update_task_handler(
         if !validate_status(status) {
             return err_json(
                 StatusCode::BAD_REQUEST,
-                &format!(
-                    "Status must be one of: {}",
-                    VALID_STATUSES.join(", ")
-                ),
+                &format!("Status must be one of: {}", VALID_STATUSES.join(", ")),
             );
         }
     }
@@ -1159,10 +1159,7 @@ async fn delete_task_handler(
         Ok(None) => return err_json(StatusCode::NOT_FOUND, "Task not found"),
         Err(e) => {
             error!("[kanban/tasks/{}] check query failed: {:?}", id, e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to check task",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to check task");
         }
     };
 
@@ -1234,10 +1231,7 @@ async fn delete_task_handler(
         Ok(None) => false,
         Err(e) => {
             error!("[kanban/tasks/{}] delete failed: {:?}", id, e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to delete task",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete task");
         }
     };
 
@@ -1258,7 +1252,7 @@ async fn list_threads_handler(
     Query(params): Query<ThreadsQuery>,
 ) -> impl IntoResponse {
     let offset = params.offset.unwrap_or(0).max(0);
-    let limit = params.limit.unwrap_or(10).max(1).min(100);
+    let limit = params.limit.unwrap_or(10).clamp(1, 100);
     let order = match params.order.as_deref() {
         Some("asc") => "ASC",
         _ => "DESC",
@@ -1276,10 +1270,7 @@ async fn list_threads_handler(
         Ok(row) => row.total.unwrap_or(0),
         Err(e) => {
             error!("[kanban/tasks/{}/threads] count query failed: {:?}", id, e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to count threads",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to count threads");
         }
     };
 
@@ -1331,10 +1322,7 @@ async fn list_threads_handler(
         Ok(rows) => rows,
         Err(e) => {
             error!("[kanban/tasks/{}/threads] data query failed: {:?}", id, e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to fetch threads",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch threads");
         }
     };
 
@@ -1353,16 +1341,19 @@ async fn list_threads_handler(
             token_usage: r.token_usage,
             iteration_number: r.iteration_number,
             thread_sequence: r.thread_sequence,
-            created_at: r.created_at.map(|dt| {
-                dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
-            }),
+            created_at: r
+                .created_at
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
             metadata: r.metadata,
             thread_status: r.thread_status,
             channel_name: r.channel_name,
         })
         .collect();
 
-    ok_json(ThreadsResponse { rows: entries, total })
+    ok_json(ThreadsResponse {
+        rows: entries,
+        total,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1379,10 +1370,7 @@ async fn add_dependency_handler(
 
     // Validate: cannot depend on itself
     if task_id == depends_on_id {
-        return err_json(
-            StatusCode::BAD_REQUEST,
-            "A task cannot depend on itself",
-        );
+        return err_json(StatusCode::BAD_REQUEST, "A task cannot depend on itself");
     }
 
     // 1. Check that the dependency target exists
@@ -1540,7 +1528,7 @@ async fn list_history_handler(
     Query(params): Query<HistoryQuery>,
 ) -> impl IntoResponse {
     let action_filter = params.action.as_deref().unwrap_or("");
-    let limit = params.limit.unwrap_or(200).max(1).min(500);
+    let limit = params.limit.unwrap_or(200).clamp(1, 500);
     let offset = params.offset.unwrap_or(0).max(0);
 
     let rows = match sql_forge!(
@@ -1565,10 +1553,7 @@ async fn list_history_handler(
         Ok(rows) => rows,
         Err(e) => {
             error!("[kanban/tasks/{}/history] query failed: {:?}", id, e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to fetch history",
-            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch history");
         }
     };
 

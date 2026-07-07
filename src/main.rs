@@ -7,13 +7,16 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
-use omniagent::{agent, db, mcp, platform, profile, scheduler, server, vectorizer};
 use omniagent::error::{AppResult, Error};
 use omniagent::server::plugins::refresh_env_from_file;
+use omniagent::{agent, db, mcp, platform, profile, scheduler, server, vectorizer};
 
 /// OmniAgent — autonomous agent system with Postgres, pgvector, MCP tools.
-
 /// Read an environment variable with a fallback default value.
+///
+/// Type alias for platform restart signals map.
+type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>>;
+
 fn env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -51,7 +54,9 @@ async fn run_server() -> AppResult<()> {
     tracing::info!("Connected to PostgreSQL");
 
     // Run migrations
-    db::migrations::run(&pool).await.map_err(|e| Error::Message(format!("Migration failed: {}", e)))?;
+    db::migrations::run(&pool)
+        .await
+        .map_err(|e| Error::Message(format!("Migration failed: {}", e)))?;
     tracing::info!("Database migrations completed");
 
     // Determine data directory from OMNI_DIR env var (required)
@@ -89,8 +94,7 @@ async fn run_server() -> AppResult<()> {
     );
 
     // Create shared platform restart signals map (for hot-reload)
-    let platform_restart_signals: Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let platform_restart_signals: PlatformRestartSignals = Arc::new(Mutex::new(HashMap::new()));
 
     // Create platform registry and register platforms
     let mut registry = platform::PlatformRegistry::new();
@@ -135,20 +139,21 @@ async fn run_server() -> AppResult<()> {
 
     // Register platform-specific file readers for the read_attached_file tool
     if let Some(reader) = crate::platform::external::MattermostFileReader::new() {
-        ctx.platform_file_readers.insert(
-            "mattermost".to_string(),
-            std::sync::Arc::new(reader),
-        );
+        ctx.platform_file_readers
+            .insert("mattermost".to_string(), std::sync::Arc::new(reader));
         tracing::info!("Registered MattermostFileReader for read_attached_file");
     } else {
-        tracing::warn!(
-            "MATTERMOST_ACCESS_TOKEN not set — Mattermost file reading unavailable"
-        );
+        tracing::warn!("MATTERMOST_ACCESS_TOKEN not set — Mattermost file reading unavailable");
     }
 
     // Build the agent with shared mutable config
     let shared_config_for_agent = shared_config.clone();
-    let agent = agent::Agent::new(pool.clone(), shared_config_for_agent, mcp_shared.clone(), ctx.clone());
+    let agent = agent::Agent::new(
+        pool.clone(),
+        shared_config_for_agent,
+        mcp_shared.clone(),
+        ctx.clone(),
+    );
 
     // ── STARTUP: Skip pending/processing messages BEFORE spawning any concurrent tasks ──
     match agent::skip_on_startup(&pool).await {
@@ -158,7 +163,10 @@ async fn run_server() -> AppResult<()> {
             }
         }
         Err(e) => {
-            tracing::error!("Failed to skip pending/processing threads on startup: {:?}", e);
+            tracing::error!(
+                "Failed to skip pending/processing threads on startup: {:?}",
+                e
+            );
         }
     }
 
@@ -250,11 +258,21 @@ async fn run_server() -> AppResult<()> {
     let data_dir_for_vectorizer = data_dir.clone();
     let shared_config_for_vectorizer = shared_config.clone();
     let vectorizer_handle = tokio::spawn(async move {
-        vectorizer::spawn_vectorizers(pool_vectorizer, shared_config_for_vectorizer, &data_dir_for_vectorizer).await;
+        vectorizer::spawn_vectorizers(
+            pool_vectorizer,
+            shared_config_for_vectorizer,
+            &data_dir_for_vectorizer,
+        )
+        .await;
     });
 
     // Spawn cron scheduler
-    let cron_handle = scheduler::spawn(pool.clone(), data_dir.clone(), mcp_shared.clone(), ctx.clone());
+    let cron_handle = scheduler::spawn(
+        pool.clone(),
+        data_dir.clone(),
+        mcp_shared.clone(),
+        ctx.clone(),
+    );
 
     // Graceful shutdown
     tokio::select! {

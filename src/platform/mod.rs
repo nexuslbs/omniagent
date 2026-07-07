@@ -46,6 +46,12 @@ pub struct PlatformRegistry {
     receivers: Vec<OutboundReceiver>,
 }
 
+impl Default for PlatformRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PlatformRegistry {
     pub fn new() -> Self {
         Self {
@@ -84,7 +90,7 @@ impl PlatformRegistry {
     pub fn start_all(self, pool: PgPool) -> Vec<tokio::task::JoinHandle<()>> {
         let mut handles = Vec::new();
 
-        for (platform, receiver) in self.platforms.into_iter().zip(self.receivers.into_iter()) {
+        for (platform, receiver) in self.platforms.into_iter().zip(self.receivers) {
             let name = platform.name().to_string();
             let pool = pool.clone();
             handles.push(tokio::spawn(async move {

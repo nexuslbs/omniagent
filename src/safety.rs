@@ -35,12 +35,14 @@ static SECRET_PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
         ),
         // Private keys
         (
-            Regex::new(r"-----BEGIN\s?(RSA|EC|DSA|OPENSSH)?\s?PRIVATE KEY-----").expect("built-in regex should be valid"),
+            Regex::new(r"-----BEGIN\s?(RSA|EC|DSA|OPENSSH)?\s?PRIVATE KEY-----")
+                .expect("built-in regex should be valid"),
             "Private key",
         ),
         // Slack/Hub tokens
         (
-            Regex::new(r"(?i)\b(xox[baprs]-[0-9a-z]{10,})\b").expect("built-in regex should be valid"),
+            Regex::new(r"(?i)\b(xox[baprs]-[0-9a-z]{10,})\b")
+                .expect("built-in regex should be valid"),
             "Slack token",
         ),
         // Generic: long base64 strings that look like tokens
@@ -89,7 +91,7 @@ pub fn redact_secrets(content: &str) -> String {
 
     // Collect all matches sorted by start position (reverse order for safe replacement)
     let mut matches = scan_for_secrets(content);
-    matches.sort_by(|a, b| b.start.cmp(&a.start)); // reverse: replace from end to preserve positions
+    matches.sort_by_key(|b| std::cmp::Reverse(b.start)); // reverse: replace from end to preserve positions
 
     for m in &matches {
         let replacement = format!("[REDACTED {}]", m.pattern);

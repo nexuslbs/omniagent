@@ -16,9 +16,9 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime};
 
-use crate::error::{Error, ErrorContext, AppResult};
 use crate::err_msg;
 use crate::err_str;
+use crate::error::{AppResult, Error, ErrorContext};
 
 // ---------------------------------------------------------------------------
 // EmbeddingProtocol
@@ -681,7 +681,11 @@ pub struct MessageEmbeddingRow {
 /// This function does not return until cancellation (i.e., it loops forever
 /// via `futures::future::pending()`). It is intended to be spawned as its own
 /// tokio task from main.
-pub async fn spawn_vectorizers(pool: PgPool, config: Arc<RwLock<crate::agent::AgentConfig>>, data_dir: &str) {
+pub async fn spawn_vectorizers(
+    pool: PgPool,
+    config: Arc<RwLock<crate::agent::AgentConfig>>,
+    data_dir: &str,
+) {
     struct MakeVectorizerConfig<'a> {
         api_url: &'a Option<String>,
         protocol: &'a str,
@@ -738,11 +742,23 @@ pub async fn spawn_vectorizers(pool: PgPool, config: Arc<RwLock<crate::agent::Ag
         }
     }
 
-    let (vectorize_messages, messages_method, messages_api_url, messages_protocol,
-          messages_api_key, messages_api_model, messages_interval,
-          vectorize_wiki, wiki_method, wiki_api_url, wiki_protocol,
-          wiki_api_key, wiki_api_model, wiki_interval,
-          qdrant_url) = {
+    let (
+        vectorize_messages,
+        messages_method,
+        messages_api_url,
+        messages_protocol,
+        messages_api_key,
+        messages_api_model,
+        messages_interval,
+        vectorize_wiki,
+        wiki_method,
+        wiki_api_url,
+        wiki_protocol,
+        wiki_api_key,
+        wiki_api_model,
+        wiki_interval,
+        qdrant_url,
+    ) = {
         let cfg = config.read().unwrap();
         (
             cfg.vectorize_messages,
@@ -809,7 +825,11 @@ pub async fn spawn_vectorizers(pool: PgPool, config: Arc<RwLock<crate::agent::Ag
             ..Default::default()
         };
         let wiki_vec = WikiVectorizer::new(
-            format!("{}/profiles/{}/wiki", data_dir, crate::profile::default_profile_name()),
+            format!(
+                "{}/profiles/{}/wiki",
+                data_dir,
+                crate::profile::default_profile_name()
+            ),
             qdrant_url.clone(),
             make_vectorizer(
                 &wiki_config.method,

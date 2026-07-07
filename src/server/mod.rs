@@ -10,18 +10,17 @@
 //! - `POST /prompt-preview/{channel_name}` — preview full prompt (no DB writes), optionally plan
 //! - `POST /run-cron/{schedule_id}` — manually trigger a cron job (proxied from dashboard)
 
-
-pub(crate) mod messages;
-pub(crate) mod channels;
-pub(crate) mod threads;
-pub(crate) mod overview;
-mod secrets;
-mod settings;
 pub(crate) mod actions;
+pub(crate) mod channels;
+pub(crate) mod kanban;
 pub(crate) mod memory;
+pub(crate) mod messages;
+pub(crate) mod overview;
 pub(crate) mod platforms;
 pub(crate) mod schedule;
-pub(crate) mod kanban;
+mod secrets;
+mod settings;
+pub(crate) mod threads;
 use crate::error::{AppResult, ErrorContext};
 use axum::{
     extract::{Path, Query, State},
@@ -46,8 +45,8 @@ use crate::db::types as queries;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient};
 use crate::mcp::{AppContext, McpRegistry};
 use crate::prompt_builder::{
-    build_planning_prompt, build_system_prompt, build_system_prompt_parts,
-    MemoryStore, PlanningPromptParams,
+    build_planning_prompt, build_system_prompt, build_system_prompt_parts, MemoryStore,
+    PlanningPromptParams,
 };
 use sql_forge::sql_forge;
 use std::sync::RwLock;
@@ -74,6 +73,10 @@ pub(crate) fn err_json(status: StatusCode, msg: &str) -> (StatusCode, Json<serde
     )
 }
 pub mod plugins;
+
+/// Type alias for the platform restart signals map.
+type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>>;
+
 /// Shared application state for the HTTP server.
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -93,7 +96,7 @@ pub(crate) struct AppState {
     /// Shared mutable config for hot-reload support
     shared_config: Arc<RwLock<AgentConfig>>,
     /// Per-platform restart signal flags + notify (keyed by plugin name)
-    platform_restart_signals: Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>>,
+    platform_restart_signals: PlatformRestartSignals,
 }
 
 /// Configuration for the HTTP server.
@@ -109,7 +112,7 @@ pub struct ServerConfig {
     pub tool_registry: Arc<std::sync::RwLock<McpRegistry>>,
     pub app_context: AppContext,
     pub shared_config: Arc<RwLock<AgentConfig>>,
-    pub platform_restart_signals: Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>>,
+    pub platform_restart_signals: PlatformRestartSignals,
 }
 
 /// Start the HTTP server on the given host and port.
@@ -158,8 +161,14 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
             "/api/plugins/check-enrich",
             get(diagnostic::check_enrich_json),
         )
-        .route("/api/plugins/install-git", post(plugins::install_git_handler))
-        .route("/api/plugins/install-url", post(plugins::install_url_handler))
+        .route(
+            "/api/plugins/install-git",
+            post(plugins::install_git_handler),
+        )
+        .route(
+            "/api/plugins/install-url",
+            post(plugins::install_url_handler),
+        )
         .route("/api/plugins", get(plugins::list_plugins_handler))
         .route("/api/plugins/{name}", get(plugins::get_plugin_handler))
         .route(
@@ -355,17 +364,24 @@ async fn stop_thread_handler(
 
     // 4. Send :o: reaction to the platform if the thread has a cause message with an external_id
     if skipped > 0 {
-        if let Ok(Some(cause_msg)) = crate::db::threads::get_cause_message(&state.pool, thread_id).await {
+        if let Ok(Some(cause_msg)) =
+            crate::db::threads::get_cause_message(&state.pool, thread_id).await
+        {
             if let Some(ref ext_id) = cause_msg.external_id {
-                if let Ok(Some(channel)) = crate::db::channels::get_channel_by_id(&state.pool, channel_id).await {
-                    if let (Some(ref platform), Some(ref resource)) = (channel.platform, channel.resource_identifier) {
+                if let Ok(Some(channel)) =
+                    crate::db::channels::get_channel_by_id(&state.pool, channel_id).await
+                {
+                    if let (Some(ref platform), Some(ref resource)) =
+                        (channel.platform, channel.resource_identifier)
+                    {
                         helpers::enqueue_reaction(
                             &state.app_context,
                             platform,
                             resource,
                             ext_id,
                             ":o:",
-                        ).await;
+                        )
+                        .await;
                         info!(
                             "Stop-thread: sent :o: reaction for thread {} on {}",
                             thread_id, platform
@@ -542,7 +558,14 @@ async fn prompt_handler(
         .as_ref()
         .and_then(|c| c.platform.as_deref())
         .unwrap_or("");
-    let tool_names: Vec<String> = state.tool_registry.read().unwrap().all().iter().map(|t| t.name.clone()).collect();
+    let tool_names: Vec<String> = state
+        .tool_registry
+        .read()
+        .unwrap()
+        .all()
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
     let parts = build_system_prompt_parts(&memory_store, platform, None, profile_name, &tool_names);
 
     // Build system prompt TEMPLATE — stable + context + volatile placeholders
@@ -642,8 +665,16 @@ async fn prompt_preview_handler(
         .as_ref()
         .and_then(|c| c.platform.as_deref())
         .unwrap_or("");
-    let tool_names: Vec<String> = state.tool_registry.read().unwrap().all().iter().map(|t| t.name.clone()).collect();
-    let system_prompt = build_system_prompt(&memory_store, platform, None, profile_name, &tool_names);
+    let tool_names: Vec<String> = state
+        .tool_registry
+        .read()
+        .unwrap()
+        .all()
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    let system_prompt =
+        build_system_prompt(&memory_store, platform, None, profile_name, &tool_names);
 
     let mut messages = vec![serde_json::json!({ "role": "system", "content": &system_prompt })];
 
@@ -780,7 +811,8 @@ async fn prompt_preview_handler(
 
         // Look up api_key from the provider's resolved plugin config
         let api_key = match crate::plugins_yaml::get_plugin(&state.data_dir, &provider_name) {
-            Ok(Some(detail)) => detail.config
+            Ok(Some(detail)) => detail
+                .config
                 .get("api_key")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())

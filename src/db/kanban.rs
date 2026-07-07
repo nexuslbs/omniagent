@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use sql_forge::sql_forge;
 use sqlx::PgPool;
 
-use crate::error::AppResult;
 use crate::err_str;
+use crate::error::AppResult;
 
 /// Update a kanban task's status and record the transition in history — atomically.
 ///
@@ -146,7 +146,7 @@ pub async fn list_kanban_history(
     pool: &PgPool,
     params: &KanbanHistoryParams,
 ) -> AppResult<Vec<KanbanHistoryRow>> {
-    let limit: i64 = params.limit.unwrap_or(50).max(0).min(500);
+    let limit: i64 = params.limit.unwrap_or(50).clamp(0, 500);
     let offset: i64 = params.offset.unwrap_or(0).max(0);
     let task_id_filter = params.task_id.as_deref().unwrap_or("");
     let action_filter = params.action.as_deref().unwrap_or("");

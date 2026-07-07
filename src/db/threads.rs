@@ -6,8 +6,8 @@ use crate::db::types::{
     CompleteThreadStats, CreateThreadParams, Message, MessageDb, MessageNew, Thread,
     ThreadCauseParams, ThreadDb,
 };
-use crate::error::{Error, AppResult};
 use crate::err_msg;
+use crate::error::{AppResult, Error};
 
 // ---------------------------------------------------------------------------
 // Thread query functions
@@ -158,7 +158,11 @@ fn resolve_max_plan(global_mode: &str) -> String {
 /// - `PLANNING_COMPLEXITY_KEYWORDS` (default comma-separated list)
 ///
 /// Returns one of: "prompt_only", "auto_plan", "auto_subtasks".
-fn classify_complexity_for_planning(content: &str, msg_type: &str, global_planning_mode: &str) -> String {
+fn classify_complexity_for_planning(
+    content: &str,
+    msg_type: &str,
+    global_planning_mode: &str,
+) -> String {
     use crate::complexity::{classify_complexity, Complexity};
 
     let classified = match classify_complexity(content, msg_type, None) {
@@ -199,10 +203,7 @@ pub fn max_iterations_for_planning_mode(config: &AgentConfig, planning_mode: &st
 }
 
 /// Create the seq-0 (cause) message and set the thread to pending in a single transaction.
-pub async fn create_cause_and_set_pending(
-    pool: &PgPool,
-    msg: &MessageNew,
-) -> AppResult<Message> {
+pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> AppResult<Message> {
     let mut tx = pool.begin().await?;
     let metadata_val: serde_json::Value =
         serde_json::from_str(&msg.metadata.to_string()).unwrap_or_default();
@@ -311,9 +312,7 @@ pub async fn create_thread_with_cause(
     }
     // Validate msg_type — 'user' is no longer valid for seq-0 messages
     if p.msg_type == "user" {
-        err_msg!(
-            "msg_type 'user' is no longer valid for seq-0 messages — use 'Cause' instead"
-        );
+        err_msg!("msg_type 'user' is no longer valid for seq-0 messages — use 'Cause' instead");
     }
     // 1. Get channel for its planning_mode override and current_* fields
     let channel = crate::db::channels::get_channel_by_id(pool, channel_id)
@@ -355,23 +354,34 @@ pub async fn create_thread_with_cause(
     let (resolved_provider, resolved_model) = {
         // If the caller already resolved provider+model (cron, platform), use those
         if let Some(prov) = p.provider.as_deref().filter(|s| !s.is_empty()) {
-            let model = p.model.as_deref()
+            let model = p
+                .model
+                .as_deref()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
                 .or_else(|| crate::llm::resolve_default_model(prov));
             (prov.to_string(), model)
         }
         // Channel level: provider in channel → use model from channel or provider default
-        else if let Some(prov) = channel.current_provider.as_deref().filter(|s| !s.is_empty()) {
-            let model = channel.current_model.as_deref()
+        else if let Some(prov) = channel
+            .current_provider
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
+            let model = channel
+                .current_model
+                .as_deref()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
                 .or_else(|| crate::llm::resolve_default_model(prov));
             (prov.to_string(), model)
         }
         // Profile level: provider in profile → use model from profile or provider default
-        else if let Some(prov) = profile_data.and_then(|p| p.provider.as_deref().filter(|s| !s.is_empty())) {
-            let model = profile_data.and_then(|p| p.model.as_deref())
+        else if let Some(prov) =
+            profile_data.and_then(|p| p.provider.as_deref().filter(|s| !s.is_empty()))
+        {
+            let model = profile_data
+                .and_then(|p| p.model.as_deref())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
                 .or_else(|| crate::llm::resolve_default_model(prov));

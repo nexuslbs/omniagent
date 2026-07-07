@@ -68,10 +68,9 @@ impl TryFrom<ThreadDb> for Thread {
                 })?,
             started_at: if let Some(ref s) = db.started_at {
                 if !s.is_empty() {
-                    Some(
-                        s.parse::<DateTime<Utc>>()
-                            .map_err(|e| crate::error::Error::Message(format!("Invalid timestamp '{}': {}", s, e)))?,
-                    )
+                    Some(s.parse::<DateTime<Utc>>().map_err(|e| {
+                        crate::error::Error::Message(format!("Invalid timestamp '{}': {}", s, e))
+                    })?)
                 } else {
                     None
                 }
@@ -80,10 +79,9 @@ impl TryFrom<ThreadDb> for Thread {
             },
             ended_at: if let Some(ref s) = db.ended_at {
                 if !s.is_empty() {
-                    Some(
-                        s.parse::<DateTime<Utc>>()
-                            .map_err(|e| crate::error::Error::Message(format!("Invalid timestamp '{}': {}", s, e)))?,
-                    )
+                    Some(s.parse::<DateTime<Utc>>().map_err(|e| {
+                        crate::error::Error::Message(format!("Invalid timestamp '{}': {}", s, e))
+                    })?)
                 } else {
                     None
                 }
@@ -596,12 +594,13 @@ pub async fn search_wiki_qdrant(
         .json(&payload)
         .send()
         .await
-        .map_err(|e| crate::error::Error::Message(format!("Qdrant search request failed: {}", e)))?;
+        .map_err(|e| {
+            crate::error::Error::Message(format!("Qdrant search request failed: {}", e))
+        })?;
 
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| crate::error::Error::Message(format!("Qdrant search response parse failed: {}", e)))?;
+    let body: serde_json::Value = resp.json().await.map_err(|e| {
+        crate::error::Error::Message(format!("Qdrant search response parse failed: {}", e))
+    })?;
 
     let mut results = Vec::new();
     if let Some(points) = body["result"].as_array() {

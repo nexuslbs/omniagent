@@ -446,12 +446,11 @@ async fn create_indexes(pool: &PgPool) -> Result<()> {
 // ── Vector support (conditional on pgvector) ────────────────────────────────
 
 async fn create_vector_support(pool: &PgPool) -> Result<()> {
-    let vector_available: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or(false);
+    let vector_available: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(false);
 
     if vector_available {
         sqlx::query(

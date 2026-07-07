@@ -131,9 +131,7 @@ struct ChannelRow {
 // ---------------------------------------------------------------------------
 
 /// GET /platforms — distinct platform names
-async fn list_platforms_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn list_platforms_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let platforms = match sql_forge!(
         PlatformNameRow,
         r#"SELECT DISTINCT platform FROM channels WHERE platform IS NOT NULL AND platform != '' ORDER BY platform"#,
@@ -214,10 +212,7 @@ async fn platform_subscriptions_handler(
     {
         Ok(rows) => rows,
         Err(e) => {
-            error!(
-                "[platforms/{}/subscriptions] query failed: {:?}",
-                name, e
-            );
+            error!("[platforms/{}/subscriptions] query failed: {:?}", name, e);
             return err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to fetch subscriptions",
@@ -251,16 +246,10 @@ async fn add_subscription_handler(
             channel_id: row.channel_id,
         },
         Ok(None) => {
-            return err_json(
-                StatusCode::CONFLICT,
-                "Subscription already exists",
-            );
+            return err_json(StatusCode::CONFLICT, "Subscription already exists");
         }
         Err(e) => {
-            error!(
-                "[platforms/subscriptions] insert failed: {:?}",
-                e
-            );
+            error!("[platforms/subscriptions] insert failed: {:?}", e);
             return err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to add subscription",
@@ -285,16 +274,10 @@ async fn remove_subscription_handler(
     {
         Ok(result) if result.rows_affected() > 0 => (),
         Ok(_) => {
-            return err_json(
-                StatusCode::NOT_FOUND,
-                "Subscription not found",
-            );
+            return err_json(StatusCode::NOT_FOUND, "Subscription not found");
         }
         Err(e) => {
-            error!(
-                "[platforms/subscriptions/{}] delete failed: {:?}",
-                id, e
-            );
+            error!("[platforms/subscriptions/{}] delete failed: {:?}", id, e);
             return err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to remove subscription",
@@ -306,9 +289,7 @@ async fn remove_subscription_handler(
 }
 
 /// GET /channels/all — all channels (for subscription UI)
-async fn all_channels_handler(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn all_channels_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let channels = match sql_forge!(
         ChannelRow,
         r#"

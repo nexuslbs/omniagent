@@ -214,10 +214,7 @@ pub async fn delete_old_messages(
 }
 
 /// Get the latest seq-0 message in a channel (for context preview).
-pub async fn get_latest_seq0_message(
-    pool: &PgPool,
-    channel_id: i64,
-) -> AppResult<Option<Message>> {
+pub async fn get_latest_seq0_message(pool: &PgPool, channel_id: i64) -> AppResult<Option<Message>> {
     #[derive(Debug, sqlx::FromRow)]
     struct IdContent {
         id: i64,

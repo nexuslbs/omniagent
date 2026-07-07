@@ -505,9 +505,7 @@ async fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 
 async fn handle_generate_initial_prompt(data_dir: &str, args: &Value) -> Result<(String, bool)> {
     let _default_profile = omniagent::profile::default_profile_name();
-    let profile_name = args["profile_name"]
-        .as_str()
-        .unwrap_or(&_default_profile);
+    let profile_name = args["profile_name"].as_str().unwrap_or(&_default_profile);
     let platform = args["platform"].as_str().unwrap_or("");
     let system_message = args["system_message"].as_str();
     let user_message = args["user_message"].as_str().unwrap_or("");
@@ -566,15 +564,14 @@ async fn handle_generate_initial_prompt(data_dir: &str, args: &Value) -> Result<
 // ---------------------------------------------------------------------------
 
 async fn handle_compact_messages(_data_dir: &str, args: &Value) -> Result<(String, bool)> {
-    let messages_arr = args["messages"]
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'messages' (array of ChatMessage)"))?;
+    let messages_arr = args["messages"].as_array().ok_or_else(|| {
+        anyhow::anyhow!("Missing required argument: 'messages' (array of ChatMessage)")
+    })?;
     let keep_recent = args["keep_recent"].as_u64().unwrap_or(3) as usize;
 
-    let mut messages: Vec<omniagent::llm::ChatMessage> = serde_json::from_value(
-        serde_json::Value::Array(messages_arr.clone()),
-    )
-    .map_err(|e| anyhow::anyhow!("Failed to parse messages: {}", e))?;
+    let mut messages: Vec<omniagent::llm::ChatMessage> =
+        serde_json::from_value(serde_json::Value::Array(messages_arr.clone()))
+            .map_err(|e| anyhow::anyhow!("Failed to parse messages: {}", e))?;
 
     let before = messages.len();
     omniagent::agent::helpers::compact_old_assistant_messages(&mut messages, keep_recent);
@@ -613,11 +610,12 @@ async fn main() -> Result<()> {
     });
 
     let dd_list = data_dir.clone();
-    let list_handler: ToolHandler =
-        Box::new(move |args: Value| Box::pin({
+    let list_handler: ToolHandler = Box::new(move |args: Value| {
+        Box::pin({
             let value = dd_list.clone();
             async move { handle_list(&value, &args).await }
-        }));
+        })
+    });
 
     let dd_review = data_dir.clone();
     let review_handler: ToolHandler = Box::new(move |args: Value| {

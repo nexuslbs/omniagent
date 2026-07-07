@@ -502,7 +502,10 @@ pub async fn check_and_generate_summary(
 ) {
     let (window, summary_tokens) = {
         let cfg_snapshot = config.read().unwrap();
-        (cfg_snapshot.summary_window as i64, cfg_snapshot.channel_summary_tokens)
+        (
+            cfg_snapshot.summary_window as i64,
+            cfg_snapshot.channel_summary_tokens,
+        )
     };
     if window == 0 {
         return; // summaries disabled
@@ -516,19 +519,24 @@ pub async fn check_and_generate_summary(
     };
 
     // 2. Fetch completed threads since the last summary
-    let completed_threads =
-        match queries::get_completed_seq0_threads_since(pool, channel_id, since_id, trigger_count, None)
-            .await
-        {
-            Ok(threads) => threads,
-            Err(e) => {
-                warn!(
-                    "[thread-summary] Failed to fetch completed threads for channel {}: {:?}",
-                    channel_id, e
-                );
-                return;
-            }
-        };
+    let completed_threads = match queries::get_completed_seq0_threads_since(
+        pool,
+        channel_id,
+        since_id,
+        trigger_count,
+        None,
+    )
+    .await
+    {
+        Ok(threads) => threads,
+        Err(e) => {
+            warn!(
+                "[thread-summary] Failed to fetch completed threads for channel {}: {:?}",
+                channel_id, e
+            );
+            return;
+        }
+    };
 
     if (completed_threads.len() as i64) < trigger_count {
         // Not enough threads yet
@@ -630,7 +638,7 @@ pub async fn check_and_generate_summary(
     // 6. Call LLM for summary
     let summary_request = CompletionRequest {
         messages: vec![
-            ChatMessage::system(&system_summarizer_prompt),
+            ChatMessage::system(system_summarizer_prompt),
             ChatMessage::user(&summary_prompt),
         ],
         max_tokens: summary_tokens,
@@ -736,15 +744,14 @@ pub async fn enqueue_delivery(
     // prefix to the seq-0 message so the platform channel lists it with
     // context: "[{type} - {subtype} - Thread: #{id}] {content}".
     let envelope_content = if thread.cause != "user" && saved.thread_sequence == 0 {
-        let subtype = saved.msg_subtype.as_deref()
+        let subtype = saved
+            .msg_subtype
+            .as_deref()
             .filter(|s| !s.is_empty())
             .unwrap_or("-");
         format!(
             "[{} - {} - Thread: #{}]\n\n{}",
-            saved.msg_type,
-            subtype,
-            saved.thread_id,
-            saved.content
+            saved.msg_type, subtype, saved.thread_id, saved.content
         )
     } else if saved.msg_type == "summary" && platform == "cli" {
         // Quote the seq-0 message for CLI delivery (not needed for Telegram — it uses reply threading)
@@ -799,7 +806,8 @@ pub async fn enqueue_delivery(
                 .ok()
                 .flatten()
                 .and_then(|m| {
-                    m.metadata.get("root_id")
+                    m.metadata
+                        .get("root_id")
                         .and_then(|v| v.as_str())
                         .filter(|s| !s.is_empty())
                         .map(|s| s.to_string())

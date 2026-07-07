@@ -6,12 +6,12 @@
 //! - `GET /messages/filters` — filter options (channels, roles, types, etc.)
 //! - `GET /messages/events` — paginated messages with optional filters
 
-use axum::{Json,
+use axum::{
     extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::get,
-    Router,
+    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use sql_forge::sql_forge;
@@ -318,10 +318,7 @@ async fn filters_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     .fetch_all(&state.pool)
     .await
     {
-        Ok(rows) => rows
-            .into_iter()
-            .filter_map(|r| r.model)
-            .collect::<Vec<_>>(),
+        Ok(rows) => rows.into_iter().filter_map(|r| r.model).collect::<Vec<_>>(),
         Err(e) => {
             error!("[messages/filters] models query failed: {:?}", e);
             return err_json(
@@ -352,7 +349,7 @@ async fn events_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<EventsQueryParams>,
 ) -> impl IntoResponse {
-    let limit = params.limit.unwrap_or(50).min(500).max(1);
+    let limit = params.limit.unwrap_or(50).clamp(1, 500);
     let offset = params.offset.unwrap_or(0).max(0);
     let order_desc = params.order.as_deref() != Some("asc");
 
@@ -582,7 +579,10 @@ async fn events_handler(
             thread_cached_tokens: r.thread_cached_tokens,
             channel_name: r.channel_name,
             processing_time_ms: r.thread_duration_ms,
-            token_usage: if r.thread_input_tokens.is_some() || r.thread_output_tokens.is_some() || r.thread_cached_tokens.is_some() {
+            token_usage: if r.thread_input_tokens.is_some()
+                || r.thread_output_tokens.is_some()
+                || r.thread_cached_tokens.is_some()
+            {
                 Some(serde_json::json!({
                     "prompt_tokens": r.thread_input_tokens,
                     "completion_tokens": r.thread_output_tokens,
