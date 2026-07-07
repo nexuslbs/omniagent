@@ -79,15 +79,17 @@ A plugin's **source** is determined **solely by its physical location on disk**.
 
 ### Display Rules (Tools Page)
 
-The `/api/plugins` response groups plugins by name and assigns a **primary source** based on YAML:
+The `/api/plugins` response groups plugins by name and assigns a **primary source** based on YAML.
+`is_duplicated` is determined by `pick_primary_source()` in `plugins_yaml.rs`:
 
-1. YAML entry with `source: remote` → primary = remote.
-2. YAML entry with `source: built-in` → primary = built-in.
-3. YAML entry with `source: bundled` → primary = bundled.
-4. **No YAML entry** → primary = built-in (so Install/Enable buttons are available).
-5. Fallback → first source in discovery order.
+1. **YAML entry exists** with `source: X` → source X is primary (`is_duplicated=false`). Other sources with same name get `is_duplicated=true`.
+2. **YAML entry exists** but source not on disk → fallback to priority: built-in → bundled → remote.
+3. **No YAML entry + 2+ sources** with same name → **no primary**. All sources get `is_duplicated=true`.
+4. **No YAML entry + single source** → `is_duplicated=false` (no other source to conflict with).
 
-Each non-primary source gets `is_duplicated: true`.
+**Key behavior change (2026-07-07):** When there is no YAML entry, `pick_primary_source()` returns `None`, and `is_duplicated` is set to `group.sources.len() > 1` — meaning all sources in a multi-source group show as duplicated. This ensures the YAML-configured source is always the authority; without YAML, all sources are equal.
+
+**Enabling a source** (via dashboard or API) creates a YAML entry with that `source`, making it primary and marking all others as duplicated.
 
 ### Plugin Display Rules (Dashboard)
 
