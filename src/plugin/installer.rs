@@ -254,10 +254,10 @@ pub fn install_from_git(
     data_dir: &str,
     repo_path: Option<&str>,
 ) -> AppResult<PluginManifest> {
-    // ── Clone into data_dir/plugins/mcp/.remote/<name> first ──
-    // We clone into mcp first because that's the most common type. If the
+    // ── Clone into data_dir/plugins/tools/.remote/<name> first ──
+    // We clone into tools first because that's the most common type. If the
     // manifest says otherwise, we rename to the correct type dir afterwards.
-    let initial_remote_dir = format!("{}/plugins/mcp/.remote/{}", data_dir, name);
+    let initial_remote_dir = format!("{}/plugins/tools/.remote/{}", data_dir, name);
     let initial_remote_path = std::path::Path::new(&initial_remote_dir);
 
     // Remove existing clone if present
@@ -337,12 +337,12 @@ pub fn install_from_git(
     // Determine the correct type directory from the manifest
     let type_dir = match manifest.plugin_type {
         PluginType::Platform => "platforms",
-        PluginType::Mcp => "mcp",
+        PluginType::Mcp => "tools",
         PluginType::Provider => "providers",
     };
 
-    // If the type is not mcp, rename the .remote/ dir to the correct type directory
-    if type_dir != "mcp" {
+    // If the type is not tools, rename the .remote/ dir to the correct type directory
+    if type_dir != "tools" {
         let final_remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, name);
         let final_remote_path = std::path::Path::new(&final_remote_dir);
         if final_remote_path.exists() {
@@ -365,11 +365,12 @@ pub fn install_from_git(
     }
 
     // Verify the manifest from the .remote/ location
-    let final_type_dir = if type_dir != "mcp" { type_dir } else { "mcp" };
-    let check_remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, final_type_dir, name);
+    // After the type rename above, the plugin is at {data_dir}/plugins/{type_dir}/.remote/{name}/
+    let final_type_dir = type_dir; // Already correct after rename
+    let final_remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, final_type_dir, name);
     let check_search_dir = match repo_path {
-        Some(p) if !p.is_empty() => std::path::Path::new(&check_remote_dir).join(p),
-        _ => std::path::PathBuf::from(&check_remote_dir),
+        Some(p) if !p.is_empty() => std::path::Path::new(&final_remote_dir).join(p),
+        _ => std::path::PathBuf::from(&final_remote_dir),
     };
     let final_manifest_path = check_search_dir.join("plugin.json");
     let manifest = load_manifest(&final_manifest_path.to_string_lossy()).ctx(format!(

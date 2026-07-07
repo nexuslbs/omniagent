@@ -2129,14 +2129,31 @@ pub(crate) async fn install_git_handler(
         body.url, body.git_ref
     );
 
-    // Clone directly to .remote/ directory (no copy step)
-    let initial_name = body.name.as_deref()
-        .map(sanitize_plugin_name)
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "temp-git-plugin".to_string());
+    // Resolve the target directory name — this is the FINAL name, no renames later.
+    // Priority: 1) explicit name 2) last segment of path 3) repo name from URL
+    let target_name = {
+        let raw = if let Some(ref n) = body.name {
+            n.clone()
+        } else if let Some(ref p) = body.path {
+            p.rsplit('/').next().unwrap_or(p).to_string()
+        } else {
+            // Extract repo name from URL
+            body.url
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("plugin")
+                .trim_end_matches(".git")
+                .to_string()
+        };
+        sanitize_plugin_name(&raw)
+    };
+
+    info!("Installing git plugin: target_name='{}'", target_name);
+
     let manifest = match plugin::installer::install_from_git(
         &body.url,
-        &initial_name,
+        &target_name,
         body.git_ref.as_deref(),
         &state.workspace_dir,
         &state.data_dir,
@@ -2156,30 +2173,18 @@ pub(crate) async fn install_git_handler(
         }
     };
 
-    let raw_name = body.name.clone().unwrap_or_else(|| manifest.name.clone());
-    if let Some(ref requested_name) = body.name {
-        if *requested_name != manifest.name {
-            tracing::warn!(
-                "Requested name '{}' differs from manifest name '{}'. Using manifest name.",
-                requested_name, manifest.name
-            );
-        }
-    }
-
-    let actual_name = sanitize_plugin_name(&raw_name);
-    if actual_name != raw_name {
-        tracing::info!(
-            "Sanitized plugin name: '{}' -> '{}'",
-            raw_name, actual_name
+    // The directory name IS the plugin key — use target_name for YAML regardless of manifest name.
+    // If the manifest name differs, log a warning but keep target_name as the key.
+    if target_name != manifest.name {
+        tracing::warn!(
+            "Requested name '{}' differs from manifest name '{}'. Using requested name as the key.",
+            target_name, manifest.name
         );
     }
-
+    let actual_name = target_name;
     // Determine type directory from manifest
-    let type_dir_str = match manifest.plugin_type {
-        plugin::PluginType::Platform => "platforms",
-        plugin::PluginType::Mcp => "mcp",
-        plugin::PluginType::Provider => "providers",
-    };
+    let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
+    let type_dir_str = yaml_type.type_dir_name();
 
     // Compile if Rust crate — compile from .remote/ location
     let plugin_dir = format!(
@@ -2394,13 +2399,9 @@ pub(crate) async fn download_plugin_handler(
             ).into_response();
         }
     };
-
-    // Compile if Rust crate
-    let type_dir_str = match manifest.plugin_type {
-        plugin::PluginType::Platform => "platforms",
-        plugin::PluginType::Mcp => "mcp",
-        plugin::PluginType::Provider => "providers",
-    };
+    // Determine type directory from manifest
+    let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
+    let type_dir_str = yaml_type.type_dir_name();
     let plugin_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir_str, name);
     let effective_dir = match remote_info.path {
         Some(ref p) if !p.is_empty() => format!("{}/{}", plugin_dir, p),
