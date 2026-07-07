@@ -78,11 +78,12 @@ Each non-primary source gets `is_duplicated: true`.
 
 ### Plugin Display Rules (Dashboard)
 
-- **Remote Rust plugins that need build** (`needs_build=true`): Show **Remove + Install** buttons (NOT Update).
-  - "Update" is only for non-compilable (script/no-source) remote plugins.
-- **Non-remote Rust plugins that need build**: Show **Install** button.
-- **Installed Rust plugins**: Show **Uninstall + Reinstall** buttons.
+- **Any Rust plugin needing build** (`source_code=true, !is_script, needs_build=true`): Show **Install** button (purple). This applies to built-in, bundled, and remote sources alike.
+  - "Update" is only for non-compilable (script/no-source) remote plugins — they show **Remove + Update** buttons (since they need re-cloning, not compilation).
+- **Installed Rust plugins** (`needs_build=false`): Show **Uninstall + Reinstall** buttons.
+- **Non-remote Rust plugins needing build**: Show **Install** button (same as remote — no distinction).
 - **Script/no-source plugins**: Show **Remove + Update** buttons (remote) or no build buttons (non-remote).
+- **Duplicated entries** (non-primary source in a multi-source group): Show no action buttons (status indicator only).
 
 ### Plugin Discovery Rules
 

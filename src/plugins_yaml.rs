@@ -297,11 +297,23 @@ pub fn set_entry(
 
 /// Helper: determine if a plugin is built-in by checking if its source lives
 /// under the plugin source directory at /app/plugins/ (workspace source dir).
+/// For Tool type, checks both `tools/` and the legacy `mcp/` directory.
 pub fn is_plugin_builtin(_data_dir: &str, name: &str, plugin_type: &PluginYamlType) -> bool {
     let type_dir = plugin_type.type_dir_name();
     let source_dir = format!("/app/plugins/{}/{}", type_dir, name);
-    std::path::Path::new(&source_dir).join("Cargo.toml").exists()
+    if std::path::Path::new(&source_dir).join("Cargo.toml").exists()
         || std::path::Path::new(&source_dir).join("plugin.json").exists()
+    {
+        return true;
+    }
+    // Also check legacy `mcp/` directory for Tool type
+    if matches!(plugin_type, PluginYamlType::Tool) {
+        let legacy_dir = format!("/app/plugins/mcp/{}", name);
+        std::path::Path::new(&legacy_dir).join("Cargo.toml").exists()
+            || std::path::Path::new(&legacy_dir).join("plugin.json").exists()
+    } else {
+        false
+    }
 }
 
 /// Set a plugin entry with an explicit source override.

@@ -151,6 +151,14 @@ fn get_plugin_dir_for_category(
             let dir = format!("/app/plugins/{}/{}", type_dir, name);
             if std::path::Path::new(&dir).exists() {
                 Some(dir)
+            } else if matches!(yaml_type, plugins_yaml::PluginYamlType::Tool) {
+                // Also check legacy `mcp/` directory for Tool type
+                let legacy_dir = format!("/app/plugins/mcp/{}", name);
+                if std::path::Path::new(&legacy_dir).exists() {
+                    Some(legacy_dir)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -878,10 +886,19 @@ pub(crate) async fn install_plugin_handler(
         None => {
             // Fallback: try Builtin source before giving up
             if !matches!(category, PluginCategory::Builtin) {
+                let mut found_builtin_dir = None;
                 let builtin_dir = format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name);
                 if std::path::Path::new(&builtin_dir).join("Cargo.toml").exists() {
+                    found_builtin_dir = Some(builtin_dir);
+                } else if matches!(yaml_type, plugins_yaml::PluginYamlType::Tool) {
+                    let legacy_dir = format!("/app/plugins/mcp/{}", name);
+                    if std::path::Path::new(&legacy_dir).join("Cargo.toml").exists() {
+                        found_builtin_dir = Some(legacy_dir);
+                    }
+                }
+                if let Some(dir) = found_builtin_dir {
                     info!("Install: falling back to built-in source for '{}'", name);
-                    (builtin_dir, PluginCategory::Builtin)
+                    (dir, PluginCategory::Builtin)
                 } else if matches!(category, PluginCategory::Remote) {
                     return (
                         StatusCode::BAD_REQUEST,
@@ -1122,10 +1139,19 @@ pub(crate) async fn reinstall_plugin_handler(
         None => {
             // Fallback: try Builtin source before giving up
             if !matches!(category, PluginCategory::Builtin) {
+                let mut found_builtin_dir = None;
                 let builtin_dir = format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name);
                 if std::path::Path::new(&builtin_dir).join("Cargo.toml").exists() {
+                    found_builtin_dir = Some(builtin_dir);
+                } else if matches!(yaml_type, plugins_yaml::PluginYamlType::Tool) {
+                    let legacy_dir = format!("/app/plugins/mcp/{}", name);
+                    if std::path::Path::new(&legacy_dir).join("Cargo.toml").exists() {
+                        found_builtin_dir = Some(legacy_dir);
+                    }
+                }
+                if let Some(dir) = found_builtin_dir {
                     info!("Reinstall: falling back to built-in source for '{}'", name);
-                    (builtin_dir, PluginCategory::Builtin)
+                    (dir, PluginCategory::Builtin)
                 } else {
                     return (
                         StatusCode::NOT_FOUND,
