@@ -178,6 +178,10 @@ pub struct PluginDetail {
     /// Script MCPs don't need compilation — they run via the configured command directly.
     #[serde(default)]
     pub is_script: bool,
+    /// Human-readable explanation when status is "error".
+    /// Empty string when status is not "error".
+    #[serde(default)]
+    pub status_message: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +446,11 @@ pub fn get_remote_plugin(data_dir: &str, pt: &PluginYamlType, name: &str) -> Opt
         PluginYamlType::Provider => store.providers.as_ref()?,
     };
     entries.get(name).cloned()
+}
+
+/// Check if a remote plugin entry exists in remote.yml.
+pub fn has_remote_entry(data_dir: &str, pt: &PluginYamlType, name: &str) -> bool {
+    get_remote_plugin(data_dir, pt, name).is_some()
 }
 
 /// Update only the config of a plugin.
@@ -835,6 +844,7 @@ fn build_plugin_detail(
         is_duplicated,
         has_source_code,
         is_script,
+        status_message: String::new(),
     }
 }
 
@@ -843,7 +853,7 @@ fn build_plugin_detail(
 // ---------------------------------------------------------------------------
 
 /// A single plugin's discovered sources, grouped by key (directory name).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PluginSourceGroup {
     key: String,
     sources: Vec<(PluginManifest, String, String)>,
@@ -914,11 +924,38 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
     let mut groups: std::collections::BTreeMap<String, PluginSourceGroup> = std::collections::BTreeMap::new();
 
     for (manifest, source, base_path) in &discovered {
-        let key = crate::plugin::installer::extract_plugin_key_from_path(base_path);
-        if key.is_empty() {
+        let raw_key = crate::plugin::installer::extract_plugin_key_from_path(base_path);
+        if raw_key.is_empty() {
             continue;
         }
         let yaml_type = PluginYamlType::from_plugin_type(&manifest.plugin_type);
+
+        // For remote sources, resolve key via remote.yml (e.g. "cron-echo" → "cron")
+        let key = if *source == "remote" {
+            let remote_plugins = load_remote_plugins(data_dir);
+            let entries = match &yaml_type {
+                PluginYamlType::Tool => remote_plugins.tools.as_ref(),
+                PluginYamlType::Platform => remote_plugins.platforms.as_ref(),
+                PluginYamlType::Provider => remote_plugins.providers.as_ref(),
+            };
+            if let Some(entries) = entries {
+                entries.iter().find_map(|(repo_name, info)| {
+                    let subpath = info.path.as_deref().unwrap_or("");
+                    if !subpath.is_empty() && base_path.ends_with(&format!("/{}/plugin.json", subpath)) {
+                        Some(repo_name.clone())
+                    } else if base_path.contains(&format!("/.remote/{}/", repo_name)) {
+                        Some(repo_name.clone())
+                    } else {
+                        None
+                    }
+                }).unwrap_or(raw_key.clone())
+            } else {
+                raw_key.clone()
+            }
+        } else {
+            raw_key.clone()
+        };
+
         let yaml_entry = match &yaml_type {
             PluginYamlType::Platform => platform_entries.get(&key),
             PluginYamlType::Tool => tool_entries.get(&key),
@@ -952,7 +989,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
     // After standard discovery + YAML remote path, check YAML entries for remote.path subdirectories.
     // A remote plugin at .remote/<name>/ with remote.path: "tools/<name>" has its
     // plugin.json at .remote/<name>/tools/<name>/plugin.json — not at the root level
-    // that find_remote_plugin_json() searches. Use the YAML remote.path to construct
+    // that remote.yml-driven discovery covers. Use the YAML remote.path to construct
     // the exact path and discover these deterministicly.
     for (yaml_type, yaml_entries) in &[
         (PluginYamlType::Platform, &platform_entries),
@@ -1115,11 +1152,40 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
     let mut groups: std::collections::BTreeMap<String, PluginSourceGroup> = std::collections::BTreeMap::new();
 
     for (manifest, source, base_path) in &discovered {
-        let key = crate::plugin::installer::extract_plugin_key_from_path(base_path);
-        if key.is_empty() {
+        let raw_key = crate::plugin::installer::extract_plugin_key_from_path(base_path);
+        if raw_key.is_empty() {
             continue;
         }
         let yaml_type = PluginYamlType::from_plugin_type(&manifest.plugin_type);
+
+        // For remote sources, the key extracted from the path may be a subdirectory
+        // (e.g. "cron-echo") while the remote.yml key is the repo name ("cron").
+        // Resolve to the correct key so the group merges properly.
+        let key = if *source == "remote" {
+            let remote_plugins = load_remote_plugins(data_dir);
+            let entries = match &yaml_type {
+                PluginYamlType::Tool => remote_plugins.tools.as_ref(),
+                PluginYamlType::Platform => remote_plugins.platforms.as_ref(),
+                PluginYamlType::Provider => remote_plugins.providers.as_ref(),
+            };
+            if let Some(entries) = entries {
+                entries.iter().find_map(|(repo_name, info)| {
+                    let subpath = info.path.as_deref().unwrap_or("");
+                    if !subpath.is_empty() && base_path.ends_with(&format!("/{}/plugin.json", subpath)) {
+                        Some(repo_name.clone())
+                    } else if base_path.contains(&format!("/.remote/{}/", repo_name)) {
+                        Some(repo_name.clone())
+                    } else {
+                        None
+                    }
+                }).unwrap_or(raw_key.clone())
+            } else {
+                raw_key.clone()
+            }
+        } else {
+            raw_key.clone()
+        };
+
         let yaml_entry = match &yaml_type {
             PluginYamlType::Platform => platform_entries.get(&key),
             PluginYamlType::Tool => tool_entries.get(&key),
@@ -1149,16 +1215,32 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
         }
     }
 
-    // Find the group matching the requested name
+    // Find ALL groups matching the requested name and merge their sources.
+    // A plugin name may span multiple groups when remote sources have subpath keys
+    // (e.g., "cron" group + "cron-echo" group both match name "cron").
+    let mut merged_group: Option<PluginSourceGroup> = None;
     for (key, group) in &groups {
-        // Match by key (directory name) or manifest name
         let matches = key == name
             || group.sources.iter().any(|(m, _, _)| m.name == name);
         if !matches {
             continue;
         }
+        if let Some(ref mut mg) = merged_group {
+            for (m, s, bp) in &group.sources {
+                mg.sources.push((m.clone(), s.clone(), bp.clone()));
+            }
+            // Prefer the group that has a YAML entry
+            if mg.yaml_entry.is_none() && group.yaml_entry.is_some() {
+                mg.yaml_type = group.yaml_type.clone();
+                mg.yaml_entry = group.yaml_entry.clone();
+            }
+        } else {
+            merged_group = Some(group.clone());
+        }
+    }
 
-        let primary_idx = pick_primary_source(group);
+    if let Some(group) = merged_group {
+        let primary_idx = pick_primary_source(&group);
         let (manifest, source, base_path) = &group.sources[primary_idx];
         let yaml_type = group.yaml_type.as_ref().unwrap_or(&PluginYamlType::Tool);
         let yaml_entry = group.yaml_entry.as_ref();
@@ -1168,7 +1250,7 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
             manifest,
             source,
             yaml_entry,
-            Some(key),
+            Some(&group.key),
             plugin_dir,
             data_dir,
             false, // get_plugin always returns the primary (is_duplicated=false)
@@ -1317,7 +1399,7 @@ pub fn get_disk_plugin_type(data_dir: &str, name: &str) -> AppResult<Option<Stri
     }
 
     // Fallback: check YAML entries for remote.path — the plugin may exist at
-    // .remote/<name>/{path}/plugin.json which find_remote_plugin_json does not find.
+    // .remote/<name>/{path}/plugin.json which may not be in the root-level scan.
     for (yaml_type, entries) in &[
         (PluginYamlType::Platform, load_raw(data_dir, &PluginYamlType::Platform)?),
         (PluginYamlType::Tool, load_raw(data_dir, &PluginYamlType::Tool)?),
@@ -1340,6 +1422,46 @@ pub fn get_disk_plugin_type(data_dir: &str, name: &str) -> AppResult<Option<Stri
                         return Ok(Some(type_str.to_string()));
                     }
                 }
+            }
+        }
+    }
+
+    // Second fallback: check remote.yml directly (no YAML entry needed)
+    // for plugins that have been cloned but not yet registered in plugins.yml.
+    for yaml_type in &[
+        PluginYamlType::Tool,
+        PluginYamlType::Platform,
+        PluginYamlType::Provider,
+    ] {
+        if let Some(remote) = get_remote_plugin(data_dir, yaml_type, name) {
+            if let Some(ref remote_path) = remote.path {
+                let type_dir = yaml_type.type_dir_name();
+                let manifest_path = format!(
+                    "{}/plugins/{}/.remote/{}/{}/plugin.json",
+                    data_dir, type_dir, name, remote_path
+                );
+                if std::path::Path::new(&manifest_path).exists() {
+                    let type_str = match yaml_type {
+                        PluginYamlType::Platform => "platform",
+                        PluginYamlType::Tool => "mcp",
+                        PluginYamlType::Provider => "provider",
+                    };
+                    return Ok(Some(type_str.to_string()));
+                }
+            }
+            // Also check for plugin.json at .remote/<name>/ root (1 level)
+            let type_dir = yaml_type.type_dir_name();
+            let manifest_path = format!(
+                "{}/plugins/{}/.remote/{}/plugin.json",
+                data_dir, type_dir, name
+            );
+            if std::path::Path::new(&manifest_path).exists() {
+                let type_str = match yaml_type {
+                    PluginYamlType::Platform => "platform",
+                    PluginYamlType::Tool => "mcp",
+                    PluginYamlType::Provider => "provider",
+                };
+                return Ok(Some(type_str.to_string()));
             }
         }
     }

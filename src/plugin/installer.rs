@@ -8,6 +8,7 @@
 
 use crate::err_msg;
 use crate::error::{AppResult, Error, ErrorContext};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::plugin::{load_manifest, PluginManifest, PluginType};
@@ -573,26 +574,50 @@ pub fn discover_plugins(
         }
     }
 
-    // C. Scan remote plugins: <data_dir>/plugins/<type>/.remote/<name>/plugin.json
-    for type_name in &["tools", "platforms", "providers"] {
-        let remote_base = format!("{}/plugins/{}/.remote", data_dir, type_name);
-        if let Ok(remote_entries) = std::fs::read_dir(&remote_base) {
-            for entry in remote_entries.flatten() {
-                let plugin_path = entry.path();
-                if !plugin_path.is_dir() {
-                    continue;
-                }
-                // Search for plugin.json one level deep (to handle repo_path subdirectories)
-                let manifest = find_remote_plugin_json(&plugin_path);
-                if let Some((manifest, manifest_path_str)) = manifest {
-                    let key = extract_plugin_key_from_path(&manifest_path_str);
-                    if !results.iter().any(|(m, _, _): &(PluginManifest, String, String)| m.name == manifest.name) {
-                        results.push((manifest, "remote".to_string(), manifest_path_str));
+    // C. Scan remote plugins using remote.yml for exact path resolution.
+    // C1: remote.yml-driven using exact manifest paths
+    // C2: fallback directory scan for orphan .remote/ dirs
+    let remote_plugins = crate::plugins_yaml::load_remote_plugins(data_dir);
+    let mut remote_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Helper to process entries for a given type
+    macro_rules! process_remote_entries {
+        ($type_name:expr, $map:expr) => {
+            if let Some(ref entries) = $map {
+                for (name, remote_info) in entries {
+                    let subpath = remote_info.path.as_deref().unwrap_or("");
+                    let manifest_path = format!(
+                        "{}/plugins/{}/.remote/{}/{}/plugin.json",
+                        data_dir, $type_name, name, subpath
+                    );
+                    if std::path::Path::new(&manifest_path).exists() {
+                        match load_manifest(&manifest_path) {
+                            Ok(manifest) => {
+                                // Key is the remote.yml key (repo name), NOT the subdirectory name.
+                                // e.g., for remote.yml key "cron" with path "tools/cron-echo",
+                                // the key is "cron" so it groups with built-in/bundled cron.
+                                let key = name.clone();
+                                remote_seen.insert(key.clone());
+                                // Always add remote sources — they provide the manifest for
+                                // grouping in plugins_yaml.rs. Dedup is handled there.
+                                results.push((manifest, "remote".to_string(), manifest_path));
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to load remote plugin manifest at {}: {:?}",
+                                    manifest_path, e
+                                );
+                            }
+                        }
                     }
                 }
             }
-        }
+        };
     }
+
+    process_remote_entries!("tools", remote_plugins.tools);
+    process_remote_entries!("platforms", remote_plugins.platforms);
+    process_remote_entries!("providers", remote_plugins.providers);
 
     // D. Scan builtin plugins: /app/plugins/<type>/<name>/
     // These are workspace member crates that have Cargo.toml (and optionally mcp-config.json
@@ -729,33 +754,6 @@ pub fn discover_plugins(
     }
 
     results
-}
-
-/// Find plugin.json in a remote plugin directory (searches top-level and one level deep).
-fn find_remote_plugin_json(dir: &Path) -> Option<(PluginManifest, String)> {
-    let top = dir.join("plugin.json");
-    if top.exists() {
-        let path_str = top.to_string_lossy().to_string();
-        return load_manifest(&path_str).ok().map(|m| (m, path_str));
-    }
-
-    // Search one level deep (legacy layout where the whole repo is the plugin)
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let candidate = path.join("plugin.json");
-                if candidate.exists() {
-                    let path_str = candidate.to_string_lossy().to_string();
-                    if let Ok(manifest) = load_manifest(&path_str) {
-                        return Some((manifest, path_str));
-                    }
-                }
-            }
-        }
-    }
-
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -945,39 +943,5 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_find_remote_plugin_json_top() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("plugin.json"),
-            r#"{"name":"test-remote","type":"mcp","entrypoint":{"command":"test"}}"#,
-        )
-        .unwrap();
-        let found = find_remote_plugin_json(dir.path());
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().0.name, "test-remote");
-    }
-
-    #[test]
-    fn test_find_remote_plugin_json_nested() {
-        let dir = tempfile::tempdir().unwrap();
-        let nested = dir.path().join("subdir");
-        std::fs::create_dir(&nested).unwrap();
-        std::fs::write(
-            nested.join("plugin.json"),
-            r#"{"name":"test-remote-nested","type":"mcp","entrypoint":{"command":"test"}}"#,
-        )
-        .unwrap();
-        let found = find_remote_plugin_json(dir.path());
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().0.name, "test-remote-nested");
-    }
-
-    #[test]
-    fn test_find_remote_plugin_json_not_found() {
-        let dir = tempfile::tempdir().unwrap();
-        let found = find_remote_plugin_json(dir.path());
-        assert!(found.is_none());
-    }
 }
 

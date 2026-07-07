@@ -9,7 +9,9 @@ scripts/__pycache__/
 /omniagent
 
 # Plugin build artifacts (Rust MCP tools)
-plugins/mcp/*/target/
+plugins/*/target/
+# Legacy directory (renamed to tools/)
+plugins/mcp
 
 # Remote plugin clones (git-installed plugins live under .remote/)
 .remote/

@@ -96,7 +96,7 @@ pub(crate) struct RenameRequest {
 // ---------------------------------------------------------------------------
 
 /// The three plugin location types.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum PluginCategory {
     /// builtin: true in YAML, source at /app/plugins/
     Builtin,
@@ -199,16 +199,8 @@ fn detect_plugin_category_cross_type(data_dir: &str, name: &str) -> Option<(plug
             return Some((pt.clone(), cat));
         }
     }
-    // Fallback: check disk state — plugin exists on disk even without YAML entry
-    if let Ok(Some(type_str)) = plugins_yaml::get_disk_plugin_type(data_dir, name) {
-        let pt = plugins_yaml::PluginYamlType::from_type_str(&type_str);
-        // Check if builtin source directory exists (e.g., /app/plugins/<type>/<name>/)
-        // BEFORE defaulting to OmniStack so install/reinstall handlers find the right dir.
-        if plugins_yaml::is_plugin_builtin(data_dir, name, &pt) {
-            return Some((pt, PluginCategory::Builtin));
-        }
-        return Some((pt, PluginCategory::OmniStack));
-    }
+    // No YAML entry → return None. The caller (install/reinstall handler) has its own
+    // multi-source fallback logic that checks all physical locations independently.
     None
 }
 
@@ -373,6 +365,16 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
                         });
                         if !has_tools {
                             detail.status = "error".to_string();
+                            let no_source = !detail.has_source_code;
+                            let no_binary_note = if no_source {
+                                " — no source code (no Cargo.toml) and pre-compiled binary not found"
+                            } else {
+                                " — binary may not have compiled successfully"
+                            };
+                            detail.status_message = format!(
+                                "MCP server failed to start{}",
+                                no_binary_note
+                            );
                         }
                     }
                 }
@@ -449,6 +451,16 @@ pub(crate) async fn get_plugin_handler(
                     .any(|t| t.server_name.as_deref() == Some(&detail.name));
                 if !has_tools {
                     detail.status = "error".to_string();
+                    let no_source = !detail.has_source_code;
+                    let no_binary_note = if no_source {
+                        " — no source code (no Cargo.toml) and pre-compiled binary not found"
+                    } else {
+                        " — binary may not have compiled successfully"
+                    };
+                    detail.status_message = format!(
+                        "MCP server failed to start{}",
+                        no_binary_note
+                    );
                 }
             }
 
@@ -839,7 +851,10 @@ pub(crate) async fn install_plugin_handler(
 
     // 1. Find the plugin type
     let (yaml_type, category) = match detect_plugin_category_cross_type(data_dir, &name) {
-        Some((t, c)) => (t, c),
+        Some((t, c)) => {
+            info!("Install: detected '{}' as type={:?} category={:?}", name, t, c);
+            (t, c)
+        }
         None => {
             // Try to determine type from disk discovery
             let disk_type = match plugins_yaml::get_disk_plugin_type(data_dir, &name) {
@@ -855,9 +870,13 @@ pub(crate) async fn install_plugin_handler(
                         .into_response();
                 }
             };
-            // Default to omni-stack for newly discovered plugins, but check
-            // for builtin source first (the plugin may live at /app/plugins/ without YAML entry)
-            let category = if plugins_yaml::is_plugin_builtin(data_dir, &name, &disk_type) {
+            // When no YAML entry exists, determine install source from disk.
+            // Check remote.yml first: if the user ran install-git, they explicitly
+            // want the remote version. This is install-specific, not a general priority.
+            let category = if plugins_yaml::has_remote_entry(data_dir, &disk_type, &name) {
+                info!("Install: detected '{}' as remote plugin from remote.yml", name);
+                PluginCategory::Remote
+            } else if plugins_yaml::is_plugin_builtin(data_dir, &name, &disk_type) {
                 PluginCategory::Builtin
             } else {
                 PluginCategory::OmniStack
@@ -866,7 +885,11 @@ pub(crate) async fn install_plugin_handler(
         }
     };
 
-    // 2. Get the plugin source directory with fallback
+    // 2. Get the plugin source directory with fallback.
+    // The category may be downgraded for compilation (e.g. Remote → Builtin when
+    // the remote dir has no source), but we track the original category separately
+    // so YAML registration uses the correct source.
+    let yaml_category = category.clone(); // preserve original for YAML
     let (mut plugin_dir, mut category) = match get_plugin_dir_for_category(
         data_dir,
         workspace_dir,
@@ -889,7 +912,7 @@ pub(crate) async fn install_plugin_handler(
                     }
                 }
                 if let Some(dir) = found_builtin_dir {
-                    info!("Install: falling back to built-in source for '{}'", name);
+                    info!("Install: falling back to built-in source for compilation of '{}'", name);
                     (dir, PluginCategory::Builtin)
                 } else if matches!(category, PluginCategory::Remote) {
                     return (
@@ -989,54 +1012,59 @@ pub(crate) async fn install_plugin_handler(
     );
 
     let category_source = category_to_source(&category);
+    let yaml_source = category_to_source(&yaml_category);
 
-    // 3. Register in YAML with enabled=false FIRST (before async compile)
+    // 3. Compile FIRST — synchronous, no background spawn
     info!(
-        "Install: registering plugin '{}' in YAML before background compile",
+        "Install: compiling plugin '{}' from {} (source: {})",
+        name, plugin_dir, category_source
+    );
+    match compile_rust_crate(&plugin_dir, &name, category_source).await {
+        Ok(true) | Ok(false) => {
+            info!("Install: compilation succeeded for '{}'", name);
+        }
+        Err(e) => {
+            let msg = format!("Install: compilation failed for '{}': {}", name, e);
+            tracing::error!("{}", msg);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": msg,
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // 4. Register in YAML with enabled=true only after successful compile
+    info!(
+        "Install: registering plugin '{}' in YAML with enabled=true",
         name
     );
-    match plugins_yaml::set_entry(
+    match plugins_yaml::set_entry_with_source(
         data_dir,
         &yaml_type,
         &name,
-        false,
+        true,
+        yaml_source,
         serde_json::json!({}),
     ) {
         Ok(_entry) => {
-            // Register in YAML succeeded — now spawn compile in background
-            let plugin_dir_clone = plugin_dir.clone();
-            let name_clone = name.clone();
-            let source_clone = category_source.to_string();
-            tokio::spawn(async move {
-                info!(
-                    "Background compile: starting for '{}' from {} (source: {})",
-                    name_clone, plugin_dir_clone, source_clone
-                );
-                match compile_rust_crate(&plugin_dir_clone, &name_clone, &source_clone).await {
-                    Ok(_) => info!(
-                        "Background compile: '{}' completed successfully",
-                        name_clone
-                    ),
-                    Err(e) => {
-                        tracing::error!(
-                            "Background compile: '{}' failed: {}",
-                            name_clone,
-                            e
-                        );
-                    }
-                }
-            });
+            // 5. Hot-reload the tool plugin so the MCP server starts immediately
+            if yaml_type == plugins_yaml::PluginYamlType::Tool {
+                reload_tool_plugin(&state, &name).await;
+            }
 
-            // Return immediately — plugin is registered even if compile hasn't finished
+            // 6. Return the installed plugin detail
             match plugins_yaml::get_plugin(data_dir, &name) {
                 Ok(Some(detail)) => {
-                    info!("Installed plugin '{}' (registered, compile in background)", name);
+                    info!("Installed plugin '{}' successfully", name);
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({
                             "success": true,
                             "data": detail,
-                            "background_compile": true,
                         })),
                     )
                         .into_response()
@@ -1097,38 +1125,11 @@ pub(crate) async fn reinstall_plugin_handler(
         yaml_type.file_name(), name, category
     );
 
-    // 2. Handle remote plugins: re-clone first
-    if matches!(category, PluginCategory::Remote) {
-    let remote_info = plugins_yaml::get_remote_plugin(data_dir, &yaml_type, &name);
+    // Note: For remote plugins, this does NOT re-clone the git repository.
+    // It only recompiles the existing source code in .remote/<name>/.
+    // To update from git, use the Download endpoint instead.
 
-        if let Some(ref remote) = remote_info {
-            info!(
-                "Reinstall: re-cloning git plugin '{}' from {} (ref: {:?})",
-                name, remote.url, remote.git_ref
-            );
-            if let Err(e) = plugin::installer::install_from_git(
-                &remote.url,
-                &name,
-                remote.git_ref.as_deref(),
-                workspace_dir,
-                data_dir,
-                remote.path.as_deref(),
-            ) {
-                let msg = format!("Reinstall: failed to re-clone git plugin '{}': {}", name, e);
-                tracing::error!("{}", msg);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": msg,
-                    })),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    // 3. Get plugin source directory with Builtin fallback
+    // 2. Get plugin source directory with Builtin fallback
     let (mut plugin_dir, mut category) = match get_plugin_dir_for_category(data_dir, workspace_dir, &yaml_type, &name, &category) {
         Some(d) => (d, category),
         None => {
@@ -1899,28 +1900,22 @@ pub(crate) async fn delete_plugin_handler(
 
     if is_uninstall_mode {
         // ── Uninstall mode ──
-        // For remote: remove .remote/ dir, set enabled=false (keep YAML entry)
-        // For non-remote: remove from YAML (source stays in repo)
+        // For remote: remove target/ dir, set enabled=false (keep .remote/ source)
+        // For non-remote: remove from YAML + remove compiled target/ directory
         let is_remote = match detect_plugin_category_cross_type(data_dir, &name) {
             Some((_, PluginCategory::Remote)) => true,
             _ => false,
         };
 
         if is_remote {
-            let mut removed_binary = false;
-            for t in &["tools", "platforms", "providers"] {
-                let remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, t, name);
-                let remote_path = std::path::Path::new(&remote_dir);
-                if remote_path.exists() && remote_path.is_dir() {
-                    match std::fs::remove_dir_all(remote_path) {
-                        Ok(()) => {
-                            tracing::info!("Uninstall: removed .remote/ directory for plugin '{}'", name);
-                            removed_binary = true;
-                        }
-                        Err(e) => {
-                            tracing::warn!("Uninstall: failed to remove .remote/ for '{}': {:?}", name, e);
-                        }
-                    }
+            // Remove target/ directory (compiled binary), keep .remote/ source
+            if let Some((yaml_type, _category)) = detect_plugin_category_cross_type(data_dir, &name) {
+                let type_dir = yaml_type.file_name();
+                let target_dir = format!("{}/plugins/{}/.remote/{}/target", data_dir, type_dir, name);
+                let target_path = std::path::Path::new(&target_dir);
+                if target_path.exists() && target_path.is_dir() {
+                    let _ = std::fs::remove_dir_all(target_path);
+                    tracing::info!("Uninstall: removed target/ directory for remote plugin '{}'", name);
                 }
             }
 
