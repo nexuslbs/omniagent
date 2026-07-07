@@ -91,14 +91,38 @@ The `/api/plugins` response groups plugins by name and assigns a **primary sourc
 
 **Enabling a source** (via dashboard or API) creates a YAML entry with that `source`, making it primary and marking all others as duplicated.
 
-### Plugin Display Rules (Dashboard)
+### Plugin Action Buttons (Dashboard — tools.ts)
 
-- **Any Rust plugin needing build** (`source_code=true, !is_script, needs_build=true`): Show **Install** button (purple). This applies to built-in, bundled, and remote sources alike.
-  - "Update" is only for non-compilable (script/no-source) remote plugins — they show **Remove + Update** buttons (since they need re-cloning, not compilation).
-- **Installed Rust plugins** (`needs_build=false`): Show **Uninstall + Reinstall** buttons.
-- **Non-remote Rust plugins needing build**: Show **Install** button (same as remote — no distinction).
-- **Script/no-source plugins**: Show **Remove + Update** buttons (remote) or no build buttons (non-remote).
-- **Duplicated entries** (non-primary source in a multi-source group): Show no action buttons (status indicator only).
+Action buttons are determined by `renderActionButtons()` based on the plugin's source, build state, and type. The `is_duplicated` flag does NOT suppress buttons — duplicated sources with source code are still actionable.
+
+**Remove button rule:** Remove (`plugin-delete-btn`) shows for non-builtin plugins when the plugin is NOT installed (needs_build=true) OR is a script plugin. For installed Rust plugins, use Uninstall instead.
+
+| Scenario | `hasRemote` | `hasCompilableSource` | `needsBuild` | Buttons |
+|----------|-------------|-----------------|---------------|---------|
+| Remote script/no-source | ✅ | ❌ | — | **Remove + Update** |
+| Remote Rust, not yet built | ✅ | ✅ | ✅ | **Remove + Install + Update** |
+| Remote Rust, already built | ✅ | ✅ | ❌ | **Uninstall + Reinstall + Update** |
+| Bundled script/no-source | ❌ | ❌ | — | **Remove** |
+| Bundled Rust, not yet built | ❌ | ✅ | ✅ | **Install + Remove** |
+| Bundled Rust, already built | ❌ | ✅ | ❌ | **Reinstall + Uninstall** |
+| Built-in script/no-source | ❌ | ❌ | — | *(no buttons)* |
+| Built-in Rust, not yet built | ❌ | ✅ | ✅ | *(no buttons)* |
+| Built-in Rust, already built | ❌ | ✅ | ❌ | *(no buttons)* |
+
+**Button actions:**
+- **Remove** (`plugin-delete-btn`): Calls `DELETE /api/plugins/{name}` — removes YAML entry
+- **Install** (`plugin-install-btn`): Calls `POST /api/plugins/{name}/install` — compiles + registers
+- **Uninstall** (`plugin-remove-btn`): Calls `DELETE /api/plugins/{name}?mode=uninstall` — removes binary + disables
+- **Reinstall** (`plugin-reinstall-btn`): Calls `POST /api/plugins/{name}/reinstall` — recompiles binary
+- **Update** (`plugin-update-btn`): Calls `POST /api/plugins/{name}/download` — re-clones from git + recompiles (remote only)
+- **Enable/Disable** (`plugin-toggle-btn`): Calls `POST /api/plugins/{name}/enable` or `/disable`
+
+**Update vs Reinstall vs Install:**
+- **Update** (remote only): re-clones from git repository (removes existing clone, fresh shallow clone), then recompiles if Rust
+- **Reinstall**: recompiles the existing source code on disk (no git pull)
+- **Install**: compiles from existing source and registers in YAML
+
+### Plugin Display Rules (Dashboard — backend data)
 
 ### Plugin Discovery Rules
 
@@ -165,7 +189,10 @@ When a plugin exists in `plugins.yml` but has no source on disk, a synthetic "no
 
 ### Bundled Plugin Buttons (Dashboard)
 
-- **Bundled plugins always show a Remove button** — there is no Update button (the code lives in the omni-stack repo, there's no external repository to update).
+See "Plugin Action Buttons" table above for full rules. Key bundled specifics:
+- **Bundled script/no-source**: Remove button only (runs directly, no compilation needed).
+- **Bundled Rust, not yet installed**: Install + Remove.
+- **Bundled Rust, installed**: Reinstall + Uninstall (no Remove — it's installed, use Uninstall instead).
+- There is no Update button for bundled plugins (the code lives in the omni-stack repo, not an external git repo).
 - The Remove button calls `DELETE /api/plugins/{name}` (remove mode), which removes the YAML entry and the compiled `target/` directory.
-- Bundled plugins with `source: bundled` in `plugins.yml` can be removed via this endpoint. If the entry is not in `plugins.yml`, the Remove button still shows for discovery-purposes only (removes any stale YAML entry).
 - The Install button for bundled plugins compiles synchronously, writes `enabled: true` to `plugins.yml`, and hot-reloads the MCP server — all in one synchronous API call. No more background compile.

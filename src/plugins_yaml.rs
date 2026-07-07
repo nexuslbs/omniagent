@@ -1086,7 +1086,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                 Some(key),
                 plugin_dir,
                 data_dir,
-                !is_primary.unwrap_or(true),
+                !is_primary.unwrap_or(group.sources.len() > 1),
             );
 
             // is_duplicated is now set via the build_plugin_detail parameter,
