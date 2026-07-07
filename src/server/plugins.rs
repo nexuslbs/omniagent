@@ -1161,18 +1161,32 @@ pub(crate) async fn reinstall_plugin_handler(
     let data_dir = &state.data_dir;
     let workspace_dir = &state.workspace_dir;
 
-    // 1. Detect plugin type
+    // 1. Detect plugin type — fall back to disk discovery if no YAML entry
     let (yaml_type, category) = match detect_plugin_category_cross_type(data_dir, &name) {
         Some((t, c)) => (t, c),
         None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": format!("Plugin '{}' not found in YAML configuration", name)
-                })),
-            )
-                .into_response();
+            // Try to determine type from disk discovery (like install handler)
+            let disk_type = match plugins_yaml::get_disk_plugin_type(data_dir, &name) {
+                Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
+                _ => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": format!("Plugin '{}' not found on disk", name)
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+            let category = if plugins_yaml::has_remote_entry(data_dir, &disk_type, &name) {
+                PluginCategory::Remote
+            } else if plugins_yaml::is_plugin_builtin(data_dir, &name, &disk_type) {
+                PluginCategory::Builtin
+            } else {
+                PluginCategory::OmniStack
+            };
+            (disk_type, category)
         }
     };
 
