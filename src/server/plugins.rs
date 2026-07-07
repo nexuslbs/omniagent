@@ -697,6 +697,8 @@ pub(crate) async fn enable_plugin_handler(
     let existing_remote = plugins_yaml::get_remote_plugin(&state.data_dir, &yaml_type, &name);
 
     // Upsert with enabled=true and explicit source
+    // Do this FIRST so the YAML is written before server initialization.
+    // If the server fails to start, we'll roll back by deleting the YAML entry.
     match plugins_yaml::set_entry_with_source(
         &state.data_dir,
         &yaml_type,
@@ -737,11 +739,29 @@ pub(crate) async fn enable_plugin_handler(
                         );
                     }
                     Err(e) => {
+                        // MCP server failed to start — roll back the YAML enable
+                        // so the plugin doesn't show as "enabled" when it can't serve tools.
                         tracing::warn!(
-                            "Hot-reload of MCP server '{}' failed (will retry on next restart): {}",
+                            "Hot-reload of MCP server '{}' failed, rolling back enable: {}",
                             name,
                             e
                         );
+                        let _ = plugins_yaml::remove_entry(
+                            &state.data_dir,
+                            &yaml_type,
+                            &name,
+                        );
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({
+                                "success": false,
+                                "error": format!(
+                                    "MCP server for '{}' failed to start. {}",
+                                    name, e
+                                )
+                            })),
+                        )
+                            .into_response();
                     }
                 }
             }
