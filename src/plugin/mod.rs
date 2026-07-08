@@ -43,9 +43,16 @@ pub struct PluginManifest {
     /// Default base URL for provider plugins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_base_url: Option<String>,
-    /// API mode for provider plugins ("chat_completions", "anthropic_messages", "dynamic").
+    /// Default API mode for provider plugins ("chat_completions", "anthropic_messages").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_mode: Option<String>,
+    /// Per-model overrides for the API mode.
+    /// Keys are API modes ("chat_completions", "anthropic_messages"), values are lists
+    /// of wildcard patterns to match against the model name.
+    /// `*` matches any sequence of characters. The first matching key wins.
+    /// Example: `{"anthropic_messages": ["minimax-*", "claude-*-thinking"]}`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_modes: Option<std::collections::HashMap<String, Vec<String>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

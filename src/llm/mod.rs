@@ -58,6 +58,9 @@ pub struct ProviderMetadata {
     pub name: String,
     pub default_base_url: String,
     pub api_mode: String,
+    /// Per-model overrides: API mode → list of model prefixes.
+    /// The first matching prefix wins when resolving for a specific model.
+    pub api_modes: HashMap<String, Vec<String>>,
     pub default_model: String,
 }
 
@@ -127,6 +130,25 @@ fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("chat_completions")
                 .to_string();
+            let api_modes: HashMap<String, Vec<String>> = manifest
+                .get("api_modes")
+                .and_then(|v| {
+                    v.as_object().map(|obj| {
+                        obj.iter()
+                            .filter_map(|(key, val)| {
+                                val.as_array().map(|arr| {
+                                    (
+                                        key.clone(),
+                                        arr.iter()
+                                            .filter_map(|v| v.as_str().map(String::from))
+                                            .collect(),
+                                    )
+                                })
+                            })
+                            .collect()
+                    })
+                })
+                .unwrap_or_default();
             let default_model = extract_default_model(&manifest);
             map.insert(
                 name.clone(),
@@ -134,6 +156,7 @@ fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
                     name,
                     default_base_url,
                     api_mode,
+                    api_modes,
                     default_model,
                 },
             );
@@ -164,12 +187,18 @@ pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::ne
 
     // If no providers found, add minimal builtin defaults as last resort
     if map.is_empty() {
+        let mut opencode_api_modes = HashMap::new();
+        opencode_api_modes.insert(
+            "anthropic_messages".to_string(),
+            vec!["minimax-*".to_string(), "qwen3.7-max*".to_string()],
+        );
         map.insert(
             "opencode-go".to_string(),
             ProviderMetadata {
                 name: "opencode-go".to_string(),
                 default_base_url: "https://opencode.ai/zen/go/v1".to_string(),
-                api_mode: "dynamic".to_string(),
+                api_mode: "chat_completions".to_string(),
+                api_modes: opencode_api_modes,
                 default_model: "deepseek-v4-flash".to_string(),
             },
         );
@@ -179,6 +208,7 @@ pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::ne
                 name: "deepseek".to_string(),
                 default_base_url: "https://api.deepseek.com/v1".to_string(),
                 api_mode: "chat_completions".to_string(),
+                api_modes: HashMap::new(),
                 default_model: "deepseek-v4-flash".to_string(),
             },
         );
@@ -228,29 +258,45 @@ pub enum ApiMode {
     AnthropicMessages,
 }
 
-/// Determine the API mode for an OpenCode Go model.
-///
-/// Mirrors Hermes' `opencode_model_api_mode()` logic:
-/// - MiniMax models → `anthropic_messages`
-/// - Qwen 3.7 Max → `anthropic_messages`
-/// - Everything else (GLM, Kimi, DeepSeek, etc.) → `chat_completions`
-pub fn opencode_model_api_mode(model_id: &str) -> ApiMode {
+/// Match a model against a provider's per-model API mode overrides.
+/// Checks the provider's `api_modes` map (API mode → list of wildcard patterns).
+/// Wildcards (`*`) match any sequence of characters. The first matching pattern wins.
+/// Falls back to the provider's default `api_mode`.
+fn match_model_api_mode(provider_name: &str, model_id: &str) -> Option<ApiMode> {
     let normalized = model_id.trim().to_lowercase();
-    if normalized.starts_with("minimax-") || normalized.starts_with("qwen3.7-max") {
-        ApiMode::AnthropicMessages
-    } else {
-        ApiMode::ChatCompletions
+    let metadata = PROVIDER_METADATA.get(provider_name)?;
+    for (mode, patterns) in &metadata.api_modes {
+        for pattern in patterns {
+            let pattern_lower = pattern.to_lowercase();
+            // Convert wildcard pattern to regex: escape all chars, then unescape `\*` → `.*`
+            let escaped = regex::escape(&pattern_lower);
+            let regex_str = escaped.replace(r"\*", ".*");
+            if let Ok(re) = regex::Regex::new(&format!("^{}$", regex_str)) {
+                if re.is_match(&normalized) {
+                    return match mode.as_str() {
+                        "anthropic_messages" => Some(ApiMode::AnthropicMessages),
+                        _ => Some(ApiMode::ChatCompletions),
+                    };
+                }
+            }
+        }
     }
+    None
 }
 
 impl ApiMode {
     /// Resolve the API mode for a given provider + model combination.
     /// Provider defaults come from the plugin manifest (PROVIDER_METADATA).
-    /// The "dynamic" mode auto-detects based on model name (used by opencode-go).
+    /// If the provider has `api_modes` overrides, the model is checked against
+    /// each prefix. The first match wins, otherwise the default `api_mode` is used.
     pub fn resolve(provider_name: &str, model_id: &str) -> Self {
+        // First check per-model overrides
+        if let Some(mode) = match_model_api_mode(provider_name, model_id) {
+            return mode;
+        }
+        // Fall back to the provider's default api_mode
         let mode = resolve_provider_api_mode(provider_name);
         match mode.as_str() {
-            "dynamic" => opencode_model_api_mode(model_id),
             "anthropic_messages" => ApiMode::AnthropicMessages,
             _ => ApiMode::ChatCompletions,
         }
@@ -656,46 +702,71 @@ impl LLMClient {
     pub async fn completion(&self, request: CompletionRequest) -> AppResult<CompletionResponse> {
         let start = std::time::Instant::now();
 
-        // Built-in noop provider — returns a fake response without any HTTP call.
-        // The response quotes the user's last message, just like the original noop
-        // HTTP server. No external container or API key needed.
-        if self.config.provider.0 == "noop" {
-            let user_msg = request
-                .messages
-                .iter()
-                .rev()
-                .find(|m| m.role == "user")
-                .map(|m| m.content.clone())
-                .unwrap_or_default();
-
-            let quoted: Vec<String> = user_msg.lines().map(|l| format!("> {l}")).collect();
-            let resp = CompletionResponse {
-                content: format!(
-                    "This is a reply to your message from the **test provider** `noop` \
-                     using the model **{}**.\n\n\
-                     Your original message:\n\n\
-                     {}\n\n\
-                     You can enable and configure other providers in the provider \
-                     settings of omni-dashboard.",
-                    self.config.model,
-                    quoted.join("\n")
-                ),
-                reasoning: None,
-                tool_calls: vec![],
-                usage: Some(Usage {
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    cached_tokens: None,
-                    reasoning_tokens: None,
-                }),
-                duration_ms: 0,
+        // Check if this provider is an external subprocess provider
+        let provider_name = &self.config.provider.0;
+        // Try external completion — clone Arc first, drop registry guard, then call complete
+        let external_result = {
+            let client_opt = {
+                let registry = crate::provider::registry::PROVIDER_REGISTRY.read().unwrap();
+                registry.get_cloned(provider_name)
             };
-            return Ok(resp);
+            // Registry guard is dropped here — we have an independent Arc<ExternalProviderClient>
+
+            client_opt.map(|client| {
+                let messages: Vec<serde_json::Value> = request.messages.iter()
+                    .map(|m| serde_json::json!({
+                        "role": m.role,
+                        "content": m.content,
+                    }))
+                    .collect();
+
+                let params = crate::provider::external::CompleteParams {
+                    model: self.config.model.clone(),
+                    messages,
+                    max_tokens: request.max_tokens,
+                    temperature: request.temperature,
+                    stream: request.stream,
+                    tools: request.tools.clone(),
+                };
+
+                async move {
+                    match client.complete(&params).await {
+                        Ok(result) => {
+                            Ok(CompletionResponse {
+                                content: result.content,
+                                reasoning: result.reasoning,
+                                tool_calls: result.tool_calls.iter()
+                                    .filter_map(|tc| serde_json::from_value(tc.clone()).ok())
+                                    .collect(),
+                                usage: result.usage.map(|u| Usage {
+                                    prompt_tokens: u.prompt_tokens,
+                                    completion_tokens: u.completion_tokens,
+                                    cached_tokens: u.cached_tokens,
+                                    reasoning_tokens: u.reasoning_tokens,
+                                }),
+                                duration_ms: start.elapsed().as_millis() as u64,
+                            })
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "External provider '{}' completion failed, falling back to HTTP: {}",
+                                provider_name, e
+                            );
+                            Err(e)
+                        }
+                    }
+                }
+            })
+        };
+        if let Some(fut) = external_result {
+            match fut.await {
+                Ok(resp) => return Ok(resp),
+                Err(_) => {} // fall through to HTTP
+            }
         }
 
         // Acquire a per-provider throttle permit before making the request.
-        // The permit is held for the entire duration of the API call.
-        let _permit = self.throttle.acquire(&self.config.provider.0).await;
+        let _permit = self.throttle.acquire(provider_name).await;
 
         let mut resp = match self.config.api_mode {
             ApiMode::ChatCompletions => self.completion_openai(request).await,

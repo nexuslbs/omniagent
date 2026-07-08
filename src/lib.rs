@@ -13,6 +13,7 @@ pub mod error;
 pub mod llm;
 pub mod mcp;
 pub mod platform;
+pub mod provider;
 pub mod plugin;
 pub mod plugins_yaml;
 pub mod profile;

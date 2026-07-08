@@ -1180,6 +1180,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                     env: std::collections::HashMap::new(),
                     default_base_url: None,
                     api_mode: None,
+                    api_modes: None,
                 };
                 let source = if is_remote { "remote" } else { "bundled" };
                 let mut detail = build_plugin_detail(
@@ -1391,6 +1392,7 @@ fn build_not_found_from_yaml(
                 env: std::collections::HashMap::new(),
                 default_base_url: None,
                 api_mode: None,
+                api_modes: None,
             };
             let source = if is_remote { "remote" } else { "bundled" };
             let mut detail = build_plugin_detail(

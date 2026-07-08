@@ -945,9 +945,76 @@ pub(crate) async fn enable_plugin_handler(
                 }
             }
 
+            // Hot-reload: if this is a provider plugin with an entrypoint, start the subprocess
+            if yaml_type == plugins_yaml::PluginYamlType::Provider {
+                if let Ok(Some(detail)) = plugins_yaml::get_plugin(&state.data_dir, &name) {
+                    // Extract entrypoint from the raw JSON manifest (it's serde_json::Value, not PluginManifest)
+                    let entrypoint = detail.manifest.get("entrypoint").and_then(|ep| {
+                        let command = ep.get("command").and_then(|c| c.as_str())?;
+                        let args: Vec<String> = ep.get("args")
+                            .and_then(|a| a.as_array())
+                            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                            .unwrap_or_default();
+                        Some((command.to_string(), args))
+                    });
+                    if let Some((command, args)) = entrypoint {
+                        info!(
+                            "Starting external provider subprocess '{}' ({} {})",
+                            name, command, args.join(" ")
+                        );
+                        // Register the provider (no async, just inserts into the map)
+                        {
+                            let mut registry = crate::provider::registry::PROVIDER_REGISTRY.write().unwrap();
+                            registry.register(&name, &command, &args);
+                        }
+                        // Start the subprocess (async — drop registry lock first to avoid Send issues)
+                        let start_result = {
+                            let registry = crate::provider::registry::PROVIDER_REGISTRY.read().unwrap();
+                            registry.get_cloned(&name)
+                        };
+                        // Registry guard dropped — we have an independent Arc
+                        match start_result {
+                            Some(client) => {
+                                if let Err(e) = client.start().await {
+                                    tracing::warn!(
+                                        "Failed to start external provider '{}', rolling back enable: {}",
+                                        name, e
+                                    );
+                                    {
+                                        let mut registry = crate::provider::registry::PROVIDER_REGISTRY.write().unwrap();
+                                        registry.remove(&name);
+                                    }
+                                    let _ = plugins_yaml::remove_entry(&state.data_dir, &yaml_type, &name);
+                                    return (
+                                        StatusCode::BAD_REQUEST,
+                                        Json(serde_json::json!({
+                                            "success": false,
+                                            "error": format!(
+                                                "External provider '{}' failed to start. {}",
+                                                name, e
+                                            )
+                                        })),
+                                    )
+                                        .into_response();
+                                }
+                            }
+                            None => {
+                                tracing::warn!(
+                                    "Provider '{}' registered but not found in registry",
+                                    name
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             match plugins_yaml::get_plugin(&state.data_dir, &name) {
                 Ok(Some(detail)) => {
-                    info!("Enabled plugin '{}'", name);
+                    info!(
+                        "Enabled plugin '{}'",
+                        name
+                    );
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({
@@ -1495,6 +1562,8 @@ pub(crate) async fn setup_plugin_handler(
         .args(&entrypoint.args)
         .env_clear()
         .env("RUST_LOG", "info")
+        .env("OMNI_DIR", &state.data_dir)
+        .env("MATTERMOST_SERVER_URL", &setup_val("server_url"))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
