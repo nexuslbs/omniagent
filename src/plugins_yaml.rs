@@ -793,7 +793,12 @@ fn build_plugin_detail(
     // Compute has_source_code: plugin has Cargo.toml OR is a script-based plugin.
     // Binary-only plugins (entrypoint is a bare binary name like "mcp-server-cron")
     // do NOT have source code — they are pre-compiled.
-    let has_source_code = plugin_dir
+    // API-mode providers (api_mode set in plugin.json) have no source code —
+    // they're configured via plugin.json and omniagent handles API calls natively.
+    let has_source_code = if manifest.api_mode.is_some() {
+        false
+    } else {
+        plugin_dir
         .map(|dir| {
             let cargo_toml = std::path::Path::new(dir).join("Cargo.toml");
             if cargo_toml.exists() {
@@ -822,7 +827,8 @@ fn build_plugin_detail(
             }
             false
         })
-        .unwrap_or(false);
+        .unwrap_or(false)
+    };
 
     // Compute is_script: has entrypoint with script runner but no Cargo.toml
     // Note: with the match-based check above, is_script can never be true
@@ -831,7 +837,11 @@ fn build_plugin_detail(
     let is_script = false;
 
     // Detect programming language
-    let language = plugin_dir
+    // API-mode providers (api_mode set) have no language — they're HTTP API based.
+    let language = if manifest.api_mode.is_some() {
+        String::new()
+    } else {
+        plugin_dir
         .map(|dir| {
             let dir_path = std::path::Path::new(dir);
             if dir_path.join("Cargo.toml").exists() {
@@ -865,8 +875,9 @@ fn build_plugin_detail(
                     return "Rust".to_string();
                 }
             }
-            "unknown".to_string()
-        });
+            String::new()
+        })
+    };
 
     PluginDetail {
         id: 0,
