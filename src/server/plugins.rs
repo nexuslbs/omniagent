@@ -311,6 +311,185 @@ fn category_to_source(category: &PluginCategory) -> &'static str {
     }
 }
 
+/// Result of resolving a plugin's source directory for compile operations.
+struct ResolvedPlugin {
+    yaml_type: plugins_yaml::PluginYamlType,
+    category: PluginCategory,
+    plugin_dir: String,
+    has_cargo_toml: bool,
+    has_entrypoint: bool,
+}
+
+/// Shared preamble for install/reinstall: detect type, resolve directory,
+/// handle remote subpath, verify source code availability.
+/// Returns a resolved plugin ready for compilation, or an HTTP error response.
+async fn resolve_plugin_for_compile(
+    data_dir: &str,
+    workspace_dir: &str,
+    name: &str,
+    handler_name: &str,
+) -> Result<ResolvedPlugin, (StatusCode, Json<serde_json::Value>)> {
+    let (yaml_type, category) = match detect_plugin_category_cross_type(data_dir, name) {
+        Some((t, c)) => {
+            info!(
+                "{}: detected '{}' as type={:?} category={:?}",
+                handler_name, name, t, c
+            );
+            (t, c)
+        }
+        None => {
+            // Try to determine type from disk discovery
+            let disk_type = match plugins_yaml::get_disk_plugin_type(data_dir, name) {
+                Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
+                _ => {
+                    let err = Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Plugin '{}' not found on disk", name)
+                    }));
+                    return Err((StatusCode::NOT_FOUND, err));
+                }
+            };
+            let category = if plugins_yaml::has_remote_entry(data_dir, &disk_type, name) {
+                info!(
+                    "{}: detected '{}' as remote plugin from remote.yml",
+                    handler_name, name
+                );
+                PluginCategory::Remote
+            } else if plugins_yaml::is_plugin_builtin(data_dir, name, &disk_type) {
+                PluginCategory::Builtin
+            } else {
+                PluginCategory::OmniStack
+            };
+            (disk_type, category)
+        }
+    };
+
+    // 2. Get plugin source directory with Builtin fallback
+    let (mut plugin_dir, mut category) =
+        match get_plugin_dir_for_category(data_dir, workspace_dir, &yaml_type, name, &category) {
+            Some(d) => (d, category),
+            None => {
+                // Fallback: try Builtin source before giving up
+                if !matches!(category, PluginCategory::Builtin) {
+                    let mut found_builtin_dir = None;
+                    let builtin_dir =
+                        format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name);
+                    if std::path::Path::new(&builtin_dir)
+                        .join("Cargo.toml")
+                        .exists()
+                    {
+                        found_builtin_dir = Some(builtin_dir);
+                    } else if matches!(yaml_type, plugins_yaml::PluginYamlType::Tool) {
+                        let legacy_dir = format!("/app/plugins/mcp/{}", name);
+                        if std::path::Path::new(&legacy_dir)
+                            .join("Cargo.toml")
+                            .exists()
+                        {
+                            found_builtin_dir = Some(legacy_dir);
+                        }
+                    }
+                    if let Some(dir) = found_builtin_dir {
+                        info!(
+                            "{}: falling back to built-in source for '{}'",
+                            handler_name, name
+                        );
+                        (dir, PluginCategory::Builtin)
+                    } else if matches!(category, PluginCategory::Remote) {
+                        let err = Json(serde_json::json!({
+                            "success": false,
+                            "error": format!("Remote plugin '{}' has not been cloned yet. Use /api/plugins/install-git first.", name)
+                        }));
+                        return Err((StatusCode::BAD_REQUEST, err));
+                    } else {
+                        let err = Json(serde_json::json!({
+                            "success": false,
+                            "error": format!("Plugin '{}' source directory not found", name)
+                        }));
+                        return Err((StatusCode::NOT_FOUND, err));
+                    }
+                } else {
+                    let err = Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Plugin '{}' source directory not found", name)
+                    }));
+                    return Err((StatusCode::NOT_FOUND, err));
+                }
+            }
+        };
+
+    // Check if there's actual source code to work with
+    // For remote plugins with a path subdirectory, also check the subpath
+    let mut dir_path = std::path::Path::new(&plugin_dir).to_path_buf();
+    if matches!(category, PluginCategory::Remote) {
+        if let Some(remote) = plugins_yaml::get_remote_plugin(data_dir, &yaml_type, name) {
+            if let Some(ref subpath) = remote.path {
+                let sub = dir_path.join(subpath);
+                if sub.join("Cargo.toml").exists() || sub.join("plugin.json").exists() {
+                    dir_path = sub;
+                    plugin_dir = dir_path.to_string_lossy().to_string();
+                }
+            }
+        }
+    }
+    let mut has_cargo_toml = dir_path.join("Cargo.toml").exists();
+    let has_plugin_json = dir_path.join("plugin.json").exists();
+    let has_entrypoint = if has_plugin_json {
+        std::fs::read_to_string(dir_path.join("plugin.json"))
+            .ok()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .map(|v| {
+                v.get("entrypoint")
+                    .and_then(|e| e.get("command"))
+                    .and_then(|c| c.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    // If the source dir has no Cargo.toml, fall back to Builtin
+    if !has_cargo_toml && !matches!(category, PluginCategory::Builtin) {
+        let builtin_dir = format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name);
+        let builtin_cargo = std::path::Path::new(&builtin_dir).join("Cargo.toml");
+        if builtin_cargo.exists() {
+            info!(
+                "{}: falling back to built-in source for '{}' (dir has no Cargo.toml)",
+                handler_name, name
+            );
+            plugin_dir = builtin_dir;
+            category = PluginCategory::Builtin;
+            has_cargo_toml = true;
+        }
+    }
+
+    if !has_cargo_toml && !has_entrypoint {
+        let err = Json(serde_json::json!({
+            "success": false,
+            "error": format!("Plugin '{}' has no source code — only a pre-built binary exists. {} requires source code (Cargo.toml or plugin.json entrypoint).", name, handler_name)
+        }));
+        return Err((StatusCode::BAD_REQUEST, err));
+    }
+
+    info!(
+        "{}: {} plugin '{}' from {} (category: {:?})",
+        handler_name,
+        yaml_type.file_name(),
+        name,
+        plugin_dir,
+        category
+    );
+
+    Ok(ResolvedPlugin {
+        yaml_type,
+        category,
+        plugin_dir,
+        has_cargo_toml,
+        has_entrypoint,
+    })
+}
+
 /// Build the plugin management router, reusing the main server's state.
 #[allow(dead_code)]
 pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
@@ -906,191 +1085,28 @@ pub(crate) async fn install_plugin_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
-    let workspace_dir = &state.workspace_dir;
 
-    // 1. Find the plugin type
-    let (yaml_type, category) = match detect_plugin_category_cross_type(data_dir, &name) {
-        Some((t, c)) => {
-            info!(
-                "Install: detected '{}' as type={:?} category={:?}",
-                name, t, c
-            );
-            (t, c)
-        }
-        None => {
-            // Try to determine type from disk discovery
-            let disk_type = match plugins_yaml::get_disk_plugin_type(data_dir, &name) {
-                Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
-                _ => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({
-                            "success": false,
-                            "error": format!("Plugin '{}' not found on disk", name)
-                        })),
-                    )
-                        .into_response();
-                }
-            };
-            // When no YAML entry exists, determine install source from disk.
-            // Check remote.yml first: if the user ran install-git, they explicitly
-            // want the remote version. This is install-specific, not a general priority.
-            let category = if plugins_yaml::has_remote_entry(data_dir, &disk_type, &name) {
-                info!(
-                    "Install: detected '{}' as remote plugin from remote.yml",
-                    name
-                );
-                PluginCategory::Remote
-            } else if plugins_yaml::is_plugin_builtin(data_dir, &name, &disk_type) {
-                PluginCategory::Builtin
-            } else {
-                PluginCategory::OmniStack
-            };
-            (disk_type, category)
-        }
-    };
-
-    // 2. Get the plugin source directory with fallback.
-    // The category may be downgraded for compilation (e.g. Remote → Builtin when
-    // the remote dir has no source), but we track the original category separately
-    // so YAML registration uses the correct source.
-    let yaml_category = category.clone(); // preserve original for YAML
-    let (mut plugin_dir, mut category) = match get_plugin_dir_for_category(
+    // 1. Resolve plugin source via shared preamble (detect type, resolve dir, verify source)
+    let resolved = match resolve_plugin_for_compile(
         data_dir,
-        workspace_dir,
-        &yaml_type,
+        &state.workspace_dir,
         &name,
-        &category,
-    ) {
-        Some(d) => (d, category),
-        None => {
-            // Fallback: try Builtin source before giving up
-            if !matches!(category, PluginCategory::Builtin) {
-                let mut found_builtin_dir = None;
-                let builtin_dir = format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name);
-                if std::path::Path::new(&builtin_dir)
-                    .join("Cargo.toml")
-                    .exists()
-                {
-                    found_builtin_dir = Some(builtin_dir);
-                } else if matches!(yaml_type, plugins_yaml::PluginYamlType::Tool) {
-                    let legacy_dir = format!("/app/plugins/mcp/{}", name);
-                    if std::path::Path::new(&legacy_dir)
-                        .join("Cargo.toml")
-                        .exists()
-                    {
-                        found_builtin_dir = Some(legacy_dir);
-                    }
-                }
-                if let Some(dir) = found_builtin_dir {
-                    info!(
-                        "Install: falling back to built-in source for compilation of '{}'",
-                        name
-                    );
-                    (dir, PluginCategory::Builtin)
-                } else if matches!(category, PluginCategory::Remote) {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({
-                            "success": false,
-                            "error": format!("Remote plugin '{}' has not been cloned yet. Use /api/plugins/install-git first.", name)
-                        })),
-                    )
-                        .into_response();
-                } else {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({
-                            "success": false,
-                            "error": format!("Plugin '{}' source directory not found", name)
-                        })),
-                    )
-                        .into_response();
-                }
-            } else {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": format!("Plugin '{}' source directory not found", name)
-                    })),
-                )
-                    .into_response();
-            }
-        }
+        "Install",
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(response) => return response,
     };
 
-    // Check if there's actual source code to work with
-    // For remote plugins with a path subdirectory, also check the subpath
-    let mut dir_path = std::path::Path::new(&plugin_dir).to_path_buf();
-    if matches!(category, PluginCategory::Remote) {
-        if let Some(remote) = plugins_yaml::get_remote_plugin(data_dir, &yaml_type, &name) {
-            if let Some(ref subpath) = remote.path {
-                let sub = dir_path.join(subpath);
-                if sub.join("Cargo.toml").exists() || sub.join("plugin.json").exists() {
-                    dir_path = sub;
-                    // Update plugin_dir to the resolved subpath so compile_rust_crate
-                    // uses the right source directory (not the .remote/{name}/ root)
-                    plugin_dir = dir_path.to_string_lossy().to_string();
-                }
-            }
-        }
-    }
-    let mut has_cargo_toml = dir_path.join("Cargo.toml").exists();
-    let has_plugin_json = dir_path.join("plugin.json").exists();
-    let has_entrypoint = if has_plugin_json {
-        std::fs::read_to_string(dir_path.join("plugin.json"))
-            .ok()
-            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-            .map(|v| {
-                v.get("entrypoint")
-                    .and_then(|e| e.get("command"))
-                    .and_then(|c| c.as_str())
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false)
-    } else {
-        false
-    };
-
-    // If the source dir has no Cargo.toml (binary-only copy or empty dir), fall back to Builtin.
-    // Binary-only bundled copies from omni-stack have plugin.json with a bare binary entrypoint
-    // but no Cargo.toml or src/ — they need to compile from the builtin workspace member crate.
-    if !has_cargo_toml && !matches!(category, PluginCategory::Builtin) {
-        let builtin_dir = format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name);
-        let builtin_cargo = std::path::Path::new(&builtin_dir).join("Cargo.toml");
-        if builtin_cargo.exists() {
-            info!("Install: falling back to built-in source for '{}' (bundled dir has no source code)", name);
-            plugin_dir = builtin_dir;
-            category = PluginCategory::Builtin;
-            has_cargo_toml = true;
-        }
-    }
-
-    if !has_cargo_toml && !has_entrypoint {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "success": false,
-                "error": format!("Plugin '{}' has no source code — only a pre-built binary exists. Install requires source code (Cargo.toml or plugin.json entrypoint).", name)
-            })),
-        )
-            .into_response();
-    }
-
-    info!(
-        "Install: {} plugin '{}' from {} (category: {:?})",
-        yaml_type.file_name(),
-        name,
-        plugin_dir,
-        category
-    );
-
+    let yaml_type = resolved.yaml_type;
+    let category = resolved.category.clone();
+    let yaml_category = category.clone(); // preserve original for YAML
+    let plugin_dir = resolved.plugin_dir;
     let category_source = category_to_source(&category);
     let yaml_source = category_to_source(&yaml_category);
 
-    // 3. Compile FIRST — synchronous, no background spawn
+    // 2. Compile FIRST — synchronous, no background spawn
     info!(
         "Install: compiling plugin '{}' from {} (source: {})",
         name, plugin_dir, category_source
@@ -1108,8 +1124,7 @@ pub(crate) async fn install_plugin_handler(
                     "success": false,
                     "error": msg,
                 })),
-            )
-                .into_response();
+            );
         }
     }
 
@@ -1143,15 +1158,13 @@ pub(crate) async fn install_plugin_handler(
                             "data": detail,
                         })),
                     )
-                        .into_response()
                 }
                 _ => (
                     StatusCode::OK,
                     Json(serde_json::json!({
                         "success": true,
                     })),
-                )
-                    .into_response(),
+                ),
             }
         }
         Err(e) => {
@@ -1163,7 +1176,6 @@ pub(crate) async fn install_plugin_handler(
                     "error": format!("YAML registration failed: {}", e)
                 })),
             )
-                .into_response()
         }
     }
 }
@@ -1179,158 +1191,30 @@ pub(crate) async fn reinstall_plugin_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
-    let workspace_dir = &state.workspace_dir;
 
-    // 1. Detect plugin type — fall back to disk discovery if no YAML entry
-    let (yaml_type, category) = match detect_plugin_category_cross_type(data_dir, &name) {
-        Some((t, c)) => (t, c),
-        None => {
-            // Try to determine type from disk discovery (like install handler)
-            let disk_type = match plugins_yaml::get_disk_plugin_type(data_dir, &name) {
-                Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
-                _ => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({
-                            "success": false,
-                            "error": format!("Plugin '{}' not found on disk", name)
-                        })),
-                    )
-                        .into_response();
-                }
-            };
-            let category = if plugins_yaml::has_remote_entry(data_dir, &disk_type, &name) {
-                PluginCategory::Remote
-            } else if plugins_yaml::is_plugin_builtin(data_dir, &name, &disk_type) {
-                PluginCategory::Builtin
-            } else {
-                PluginCategory::OmniStack
-            };
-            (disk_type, category)
-        }
+    // 1. Resolve plugin source via shared preamble (detect type, resolve dir, verify source)
+    let resolved = match resolve_plugin_for_compile(
+        data_dir,
+        &state.workspace_dir,
+        &name,
+        "Reinstall",
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(response) => return response,
     };
 
-    info!(
-        "Reinstall: {} plugin '{}' (category: {:?})",
-        yaml_type.file_name(),
-        name,
-        category
-    );
+    let _yaml_type = resolved.yaml_type;
+    let category = resolved.category.clone();
+    let plugin_dir = resolved.plugin_dir;
+    let _source = category_to_source(&category);
 
     // Note: For remote plugins, this does NOT re-clone the git repository.
     // It only recompiles the existing source code in .remote/<name>/.
     // To update from git, use the Download endpoint instead.
 
-    // 2. Get plugin source directory with Builtin fallback
-    let (mut plugin_dir, mut category) =
-        match get_plugin_dir_for_category(data_dir, workspace_dir, &yaml_type, &name, &category) {
-            Some(d) => (d, category),
-            None => {
-                // Fallback: try Builtin source before giving up
-                if !matches!(category, PluginCategory::Builtin) {
-                    let mut found_builtin_dir = None;
-                    let builtin_dir =
-                        format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name);
-                    if std::path::Path::new(&builtin_dir)
-                        .join("Cargo.toml")
-                        .exists()
-                    {
-                        found_builtin_dir = Some(builtin_dir);
-                    } else if matches!(yaml_type, plugins_yaml::PluginYamlType::Tool) {
-                        let legacy_dir = format!("/app/plugins/mcp/{}", name);
-                        if std::path::Path::new(&legacy_dir)
-                            .join("Cargo.toml")
-                            .exists()
-                        {
-                            found_builtin_dir = Some(legacy_dir);
-                        }
-                    }
-                    if let Some(dir) = found_builtin_dir {
-                        info!("Reinstall: falling back to built-in source for '{}'", name);
-                        (dir, PluginCategory::Builtin)
-                    } else {
-                        return (
-                            StatusCode::NOT_FOUND,
-                            Json(serde_json::json!({
-                                "success": false,
-                                "error": format!("Plugin '{}' source directory not found", name)
-                            })),
-                        )
-                            .into_response();
-                    }
-                } else {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({
-                            "success": false,
-                            "error": format!("Plugin '{}' source directory not found", name)
-                        })),
-                    )
-                        .into_response();
-                }
-            }
-        };
-
-    // Check if there's actual source code to work with
-    // For remote plugins with a path subdirectory, also check the subpath
-    let mut dir_path = std::path::Path::new(&plugin_dir).to_path_buf();
-    if matches!(category, PluginCategory::Remote) {
-        if let Some(remote) = plugins_yaml::get_remote_plugin(data_dir, &yaml_type, &name) {
-            if let Some(ref subpath) = remote.path {
-                let sub = dir_path.join(subpath);
-                if sub.join("Cargo.toml").exists() || sub.join("plugin.json").exists() {
-                    dir_path = sub;
-                    // Update plugin_dir to the resolved subpath so compile_rust_crate
-                    // uses the right source directory (not the .remote/{name}/ root)
-                    plugin_dir = dir_path.to_string_lossy().to_string();
-                }
-            }
-        }
-    }
-    let mut has_cargo_toml = dir_path.join("Cargo.toml").exists();
-    let has_plugin_json = dir_path.join("plugin.json").exists();
-    let has_entrypoint = if has_plugin_json {
-        std::fs::read_to_string(dir_path.join("plugin.json"))
-            .ok()
-            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-            .map(|v| {
-                v.get("entrypoint")
-                    .and_then(|e| e.get("command"))
-                    .and_then(|c| c.as_str())
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false)
-    } else {
-        false
-    };
-
-    // If the source dir has no Cargo.toml (binary-only copy or empty dir), fall back to Builtin.
-    // Binary-only bundled copies from omni-stack have plugin.json with a bare binary entrypoint
-    // but no Cargo.toml or src/ — they need to compile from the builtin workspace member crate.
-    if !has_cargo_toml && !matches!(category, PluginCategory::Builtin) {
-        let builtin_dir = format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name);
-        let builtin_cargo = std::path::Path::new(&builtin_dir).join("Cargo.toml");
-        if builtin_cargo.exists() {
-            info!("Reinstall: falling back to built-in source for '{}' (bundled dir has no source code)", name);
-            plugin_dir = builtin_dir;
-            category = PluginCategory::Builtin;
-            has_cargo_toml = true;
-        }
-    }
-
-    if !has_cargo_toml && !has_entrypoint {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "success": false,
-                "error": format!("Plugin '{}' has no source code — only a pre-built binary exists. Reinstall requires source code (Cargo.toml or plugin.json entrypoint).", name)
-            })),
-        )
-            .into_response();
-    }
-
-    // 4. Compile
+    // 2. Compile
     let compiled = match compile_rust_crate(&plugin_dir, &name, category_to_source(&category)).await
     {
         Ok(true) => true,
@@ -1344,8 +1228,7 @@ pub(crate) async fn reinstall_plugin_handler(
                     "success": false,
                     "error": msg,
                 })),
-            )
-                .into_response();
+            );
         }
     };
 
@@ -1372,7 +1255,6 @@ pub(crate) async fn reinstall_plugin_handler(
                     "data": detail
                 })),
             )
-                .into_response()
         }
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -1380,16 +1262,14 @@ pub(crate) async fn reinstall_plugin_handler(
                 "success": false,
                 "error": format!("Plugin '{}' not found on disk after re-scan", name)
             })),
-        )
-            .into_response(),
+        ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
                 "success": false,
                 "error": format!("Error checking plugin after reinstall: {}", e)
             })),
-        )
-            .into_response(),
+        ),
     }
 }
 

@@ -70,7 +70,9 @@ A plugin's **source** is determined **solely by its physical location on disk**.
 - **When a builtin plugin has a YAML entry but no explicit `source` field**, it defaults to `built-in` but appears as disabled if enabled=false.
 - **Builtin plugins** are workspace members in `/app/Cargo.toml`.
 - **Only plugins with `plugin.json` at directory root** are considered local/repo plugins. Directories without `plugin.json` (e.g., config-only dirs like `util`) should not appear as discoverable plugins.
-- **Duplicated plugins in the tools page**: When a plugin exists both as builtin (in omniagent `/app/plugins/`) and bundled (in omni-stack `plugins/`), the non-primary source shows as "duplicated" in the dashboard. The omni-stack copy usually takes precedence unless the YAML explicitly sets `source: built-in`.
+| **Duplicated plugins in the tools page**: When a plugin exists both as builtin (in omniagent `/app/plugins/`) and bundled (in omni-stack `plugins/`), the non-primary source shows as "duplicated" in the dashboard. The omni-stack copy usually takes precedence unless the YAML explicitly sets `source: built-in`.
+| **No hardcoded built-in list in frontend**: BUILT_IN_TOOLS was removed (2026-07-07). All tools come from the backend's `/api/plugins` endpoint. The frontend no longer hardcodes "actions" or any other plugin — the backend discovers everything.
+| **`util` and similar config-only directories**: Directories without `plugin.json` at root are NOT discoverable as plugins. A dir like `util` (which only has Cargo.toml or config files, no plugin.json) should not appear in the /tools page unless explicitly defined in plugins.yml.
 
 ### Bundled Plugin Rules (Omni-Stack)
 
@@ -134,6 +136,32 @@ Action buttons are determined by `renderActionButtons()` based on the plugin's s
 ### Install / Reinstall with Builtin Fallback
 
 When Install/Reinstall is called and the categorized source directory has no Cargo.toml (only pre-compiled binary), the handler falls back to the builtin source.
+
+### Shared Plugin Resolution (Install/Reinstall)
+
+The `resolve_plugin_for_compile()` function (added 2026-07-07) extracts the common preamble from both Install and Reinstall handlers:
+- Plugin type detection (YAML cross-type + disk discovery)
+- Plugin directory resolution with Builtin fallback
+- Remote subpath resolution (e.g., `.remote/{name}/tools/test-rust-tool/`)
+- Source code verification (Cargo.toml, plugin.json, entrypoint)
+- Returns `ResolvedPlugin` struct with `yaml_type`, `category`, `plugin_dir`, `has_cargo_toml`, `has_entrypoint`
+
+Both handlers now call this shared function instead of duplicating ~160 lines each. Bug fixes to directory resolution or subpath handling now apply uniformly to both Install and Reinstall.
+
+### Test Improvements (2026-07-07)
+
+The integration tests in `omni-stack/scripts/tests.py` were hardened:
+
+- **Fixed broken regex** in `target_dir_exists()`: `\\\\s+` → `\\s+` (matched literal `\s` instead of whitespace — the function always returned False for remote plugins with indented YAML)
+- **Added binary-absence check** after Uninstall: `assert_eq(binary_exists(name, plugin_type), False)` — this is the critical assertion that would have caught the subpath `target/` bug
+- **Made functions type-aware**: `binary_exists()`, `target_dir_exists()`, `install_plugin()`, `uninstall_plugin()`, `add_remote_plugin()`, `test_rust_tool()` all accept a `plugin_type` parameter ("tools", "platforms", "providers")
+- **Full lifecycle verification** for each operation:
+  - Install: binary exists, needs_build=False, status=enabled, no background_compile
+  - Uninstall: binary gone, target/ removed, .remote/ preserved, MCP tools deregistered, YAML has enabled=false
+  - Remove: .remote/ preserved (source kept)
+  - Download: remote.yml preserved
+  - Enable/Disable: YAML content verified
+  - Reinstall: binary still exists after recompile
 
 ### Git Install (install-git)
 
