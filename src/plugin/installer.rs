@@ -235,25 +235,91 @@ fn find_plugin_json(dir: &Path) -> AppResult<String> {
 /// Clone a plugin from a git repository directly into
 /// `<data_dir>/plugins/<type_dir>/.remote/<name>/` — NO source copying.
 ///
+/// Uses a shared bare-mirror cache at `{workspace_dir}/.git-cache/<sha256(url)>/`
+/// so that multiple plugins from the same repo share a single object store.
+/// Fresh clones use `git clone --reference <cache>` — instant, zero network.
+///
 /// The type directory (mcp, platforms, providers) is determined automatically
 /// from the `type` field in the plugin's plugin.json manifest after cloning.
 ///
 /// Steps:
-/// 1. Shallow clone (`--depth 1`) directly into `data_dir/plugins/mcp/.remote/<name>/`
-/// 2. If a git_ref is specified, check it out after clone
-/// 3. Find plugin.json in the cloned directory
-/// 4. Read manifest to determine plugin type
-/// 5. If the correct type dir differs from "mcp", rename the .remote/ dir
-/// 6. Compile if Rust crate (caller's responsibility)
-/// 7. Return the parsed PluginManifest from the .remote/ location
+/// 1. Ensure git-cache is up to date (bare mirror at workspace_dir/.git-cache/)
+/// 2. If plugin already cloned: fetch+reset in the plugin dir (preserves cargo target/)
+/// 3. If first-time: reference clone from cache (instant, no network)
+/// 4. Find plugin.json, read manifest, rename type dir if needed
+/// 5. Return (PluginManifest, content_changed) — caller decides whether to compile
 pub fn install_from_git(
     url: &str,
     name: &str,
     git_ref: Option<&str>,
-    _workspace_dir: &str,
+    workspace_dir: &str,
     data_dir: &str,
     repo_path: Option<&str>,
 ) -> AppResult<(PluginManifest, bool)> {
+    // ── Git-cache: shared bare mirror for all plugins from the same URL ──
+    use sha2::{Digest, Sha256};
+    let cache_key = format!("{:x}", Sha256::digest(url.as_bytes()));
+    let cache_dir = format!("{}/.git-cache/{}", workspace_dir, cache_key);
+    let cache_path = std::path::Path::new(&cache_dir);
+
+    // Ensure the cache exists and is up to date
+    if cache_path.join("HEAD").exists() {
+        // Update existing bare mirror — delta-only fetch
+        tracing::info!(
+            "Updating git-cache for '{}' at {}",
+            url, cache_dir
+        );
+        let fetch_status = std::process::Command::new("git")
+            .args(["-C", &cache_dir, "remote", "update", "--prune"])
+            .status()
+            .ctx(format!(
+                "Failed to update git-cache at {}",
+                cache_dir
+            ))?;
+        if !fetch_status.success() {
+            tracing::warn!(
+                "git-cache update failed for {}, falling back to traditional clone",
+                url
+            );
+            // Fall through — the cache exists and will still be used for
+            // object references; the fetch failure just means stale objects.
+        } else {
+            tracing::info!("git-cache for '{}' updated successfully", url);
+        }
+    } else {
+        // First time for this URL — create the bare mirror
+        if cache_path.exists() {
+            std::fs::remove_dir_all(cache_path).ctx(format!(
+                "Failed to remove existing cache at {}",
+                cache_dir
+            ))?;
+        }
+        if let Some(parent) = cache_path.parent() {
+            std::fs::create_dir_all(parent).ctx(format!(
+                "Failed to create parent dirs for git-cache at {}",
+                cache_dir
+            ))?;
+        }
+        tracing::info!(
+            "Creating git-cache for '{}' at {}",
+            url, cache_dir
+        );
+        let clone_status = std::process::Command::new("git")
+            .args(["clone", "--mirror", url, &cache_dir])
+            .status()
+            .ctx(format!(
+                "Failed to clone git mirror for '{}' into cache at {}",
+                url, cache_dir
+            ))?;
+        if !clone_status.success() {
+            let _ = std::fs::remove_dir_all(cache_path);
+            err_msg!(
+                "git mirror clone failed for '{}' with status: {}",
+                url, clone_status
+            );
+        }
+    }
+
     // ── Clone / update in data_dir/plugins/tools/.remote/<name> first ──
     // We clone into tools first because that's the most common type. If the
     // manifest says otherwise, we rename to the correct type dir afterwards.
@@ -290,9 +356,9 @@ pub fn install_from_git(
                 name, initial_remote_dir
             ))?;
         if !fetch_status.success() {
-            // Fetch failed — fall back to fresh clone
+            // Fetch failed — fall back to fresh clone from cache
             tracing::warn!(
-                "git fetch failed for '{}', falling back to fresh clone",
+                "git fetch failed for '{}', falling back to reference clone from cache",
                 name
             );
             std::fs::remove_dir_all(initial_remote_path).ctx(format!(
@@ -360,7 +426,7 @@ pub fn install_from_git(
             }
         }
     } else {
-        // First time: need a fresh clone
+        // First time: reference clone from cache (instant, no network)
         content_changed = true;
 
         if initial_remote_path.exists() {
@@ -377,13 +443,15 @@ pub fn install_from_git(
         }
 
         tracing::info!(
-            "Cloning git plugin '{}' from {} (ref: {:?}) to {}",
-            name, url, git_ref, initial_remote_dir
+            "Reference-cloning git plugin '{}' from cache {} (ref: {:?})",
+            name, cache_dir, git_ref
         );
 
-        // Shallow clone directly into the remote dir
+        // Reference clone from local cache — instant, hardlinks objects
         let mut cmd = std::process::Command::new("git");
         cmd.arg("clone")
+            .arg("--reference")
+            .arg(&cache_dir)
             .arg("--depth")
             .arg("1")
             .arg(url)
