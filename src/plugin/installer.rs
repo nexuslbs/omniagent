@@ -253,75 +253,174 @@ pub fn install_from_git(
     _workspace_dir: &str,
     data_dir: &str,
     repo_path: Option<&str>,
-) -> AppResult<PluginManifest> {
-    // ── Clone into data_dir/plugins/tools/.remote/<name> first ──
+) -> AppResult<(PluginManifest, bool)> {
+    // ── Clone / update in data_dir/plugins/tools/.remote/<name> first ──
     // We clone into tools first because that's the most common type. If the
     // manifest says otherwise, we rename to the correct type dir afterwards.
     let initial_remote_dir = format!("{}/plugins/tools/.remote/{}", data_dir, name);
     let initial_remote_path = std::path::Path::new(&initial_remote_dir);
 
-    // Remove existing clone if present
-    if initial_remote_path.exists() {
-        std::fs::remove_dir_all(initial_remote_path).ctx(format!(
-            "Failed to remove existing clone at {}",
-            initial_remote_dir
-        ))?;
-    }
-    if let Some(parent) = initial_remote_path.parent() {
-        std::fs::create_dir_all(parent).ctx(format!(
-            "Failed to create parent dirs for {}",
-            initial_remote_dir
-        ))?;
-    }
+    // Track whether the git content actually changed (for callers to decide
+    // whether a recompile is needed).
+    let content_changed: bool;
 
-    tracing::info!(
-        "Cloning git plugin '{}' from {} (ref: {:?}) to {}",
-        name,
-        url,
-        git_ref,
-        initial_remote_dir
-    );
-
-    // Shallow clone directly into the remote dir
-    let mut cmd = std::process::Command::new("git");
-    cmd.arg("clone")
-        .arg("--depth")
-        .arg("1")
-        .arg(url)
-        .arg(&initial_remote_dir);
-    let status = cmd.status().ctx(format!(
-        "Failed to execute git clone for '{}' from {}",
-        name, url
-    ))?;
-    if !status.success() {
-        let _ = std::fs::remove_dir_all(&initial_remote_dir);
-        err_msg!(
-            "git clone failed for '{}' from {} with status: {}",
-            name,
-            url,
-            status
+    // If the directory already exists and has a .git dir, do a fetch+reset
+    // instead of rm -rf + fresh clone. This avoids re-downloading the entire
+    // repo and preserves the incremental cargo build cache.
+    if initial_remote_path.join(".git").exists() {
+        tracing::info!(
+            "Updating existing git plugin '{}' from {} (ref: {:?})",
+            name, url, git_ref
         );
-    }
 
-    // Checkout specific ref if specified
-    if let Some(ref_str) = git_ref {
-        if !ref_str.is_empty() {
-            tracing::info!("Checking out ref '{}' for plugin '{}'", ref_str, name);
-            let checkout_status = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&initial_remote_dir)
-                .arg("checkout")
-                .arg(ref_str)
+        // Record pre-fetch HEAD
+        let pre_fetch = std::process::Command::new("git")
+            .args(["-C", &initial_remote_dir, "rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string());
+
+        // Fetch and reset to latest
+        let fetch_status = std::process::Command::new("git")
+            .args(["-C", &initial_remote_dir, "fetch", "--depth", "1", "origin", "HEAD"])
+            .status()
+            .ctx(format!(
+                "Failed to git fetch for '{}' in {}",
+                name, initial_remote_dir
+            ))?;
+        if !fetch_status.success() {
+            // Fetch failed — fall back to fresh clone
+            tracing::warn!(
+                "git fetch failed for '{}', falling back to fresh clone",
+                name
+            );
+            std::fs::remove_dir_all(initial_remote_path).ctx(format!(
+                "Failed to remove existing clone at {}",
+                initial_remote_dir
+            ))?;
+            content_changed = true;
+            // Fall through to clone below
+        } else {
+            let reset_status = std::process::Command::new("git")
+                .args(["-C", &initial_remote_dir, "reset", "--hard", "FETCH_HEAD"])
                 .status()
-                .ctx(format!("Failed to git checkout {} for '{}'", ref_str, name))?;
-            if !checkout_status.success() {
-                let _ = std::fs::remove_dir_all(&initial_remote_dir);
+                .ctx(format!(
+                    "Failed to git reset for '{}' in {}",
+                    name, initial_remote_dir
+                ))?;
+            if !reset_status.success() {
                 err_msg!(
-                    "git checkout '{}' failed for '{}' with status: {}",
-                    ref_str,
-                    name,
-                    checkout_status
+                    "git reset failed for '{}' with status: {}",
+                    name, reset_status
                 );
+            }
+
+            // Check if anything changed
+            let post_fetch = std::process::Command::new("git")
+                .args(["-C", &initial_remote_dir, "rev-parse", "HEAD"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string());
+
+            content_changed = pre_fetch != post_fetch;
+            if !content_changed {
+                tracing::info!(
+                    "git plugin '{}' is already up to date (no new commits)",
+                    name
+                );
+            } else {
+                tracing::info!(
+                    "git plugin '{}' updated: {} → {}",
+                    name,
+                    pre_fetch.as_deref().unwrap_or("?"),
+                    post_fetch.as_deref().unwrap_or("?")
+                );
+            }
+
+            // Checkout specific ref if specified (skip if not set)
+            if let Some(ref_str) = git_ref {
+                if !ref_str.is_empty() {
+                    let checkout_status = std::process::Command::new("git")
+                        .args(["-C", &initial_remote_dir, "checkout", ref_str])
+                        .status()
+                        .ctx(format!(
+                            "Failed to git checkout {} for '{}'",
+                            ref_str, name
+                        ))?;
+                    if !checkout_status.success() {
+                        let _ = std::fs::remove_dir_all(&initial_remote_dir);
+                        err_msg!(
+                            "git checkout '{}' failed for '{}' with status: {}",
+                            ref_str, name, checkout_status
+                        );
+                    }
+                }
+            }
+        }
+    } else {
+        // First time: need a fresh clone
+        content_changed = true;
+
+        if initial_remote_path.exists() {
+            std::fs::remove_dir_all(initial_remote_path).ctx(format!(
+                "Failed to remove existing clone at {}",
+                initial_remote_dir
+            ))?;
+        }
+        if let Some(parent) = initial_remote_path.parent() {
+            std::fs::create_dir_all(parent).ctx(format!(
+                "Failed to create parent dirs for {}",
+                initial_remote_dir
+            ))?;
+        }
+
+        tracing::info!(
+            "Cloning git plugin '{}' from {} (ref: {:?}) to {}",
+            name, url, git_ref, initial_remote_dir
+        );
+
+        // Shallow clone directly into the remote dir
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("clone")
+            .arg("--depth")
+            .arg("1")
+            .arg(url)
+            .arg(&initial_remote_dir);
+        let status = cmd.status().ctx(format!(
+            "Failed to execute git clone for '{}' from {}",
+            name, url
+        ))?;
+        if !status.success() {
+            let _ = std::fs::remove_dir_all(&initial_remote_dir);
+            err_msg!(
+                "git clone failed for '{}' from {} with status: {}",
+                name, url, status
+            );
+        }
+
+        // Checkout specific ref if specified
+        if let Some(ref_str) = git_ref {
+            if !ref_str.is_empty() {
+                tracing::info!("Checking out ref '{}' for plugin '{}'", ref_str, name);
+                let checkout_status = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&initial_remote_dir)
+                    .arg("checkout")
+                    .arg(ref_str)
+                    .status()
+                    .ctx(format!(
+                        "Failed to git checkout {} for '{}'",
+                        ref_str, name
+                    ))?;
+                if !checkout_status.success() {
+                    let _ = std::fs::remove_dir_all(&initial_remote_dir);
+                    err_msg!(
+                        "git checkout '{}' failed for '{}' with status: {}",
+                        ref_str, name, checkout_status
+                    );
+                }
             }
         }
     }
@@ -386,7 +485,7 @@ pub fn install_from_git(
         git_ref
     );
 
-    Ok(manifest)
+    Ok((manifest, content_changed))
 }
 
 /// Uninstall a plugin from disk.

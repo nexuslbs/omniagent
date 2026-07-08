@@ -2251,7 +2251,7 @@ pub(crate) async fn install_git_handler(
 
     info!("Installing git plugin: target_name='{}'", target_name);
 
-    let manifest = match plugin::installer::install_from_git(
+    let (manifest, _content_changed) = match plugin::installer::install_from_git(
         &body.url,
         &target_name,
         body.git_ref.as_deref(),
@@ -2550,7 +2550,7 @@ pub(crate) async fn download_plugin_handler(
     );
 
     // Clone from git
-    let manifest = match plugin::installer::install_from_git(
+    let (manifest, content_changed) = match plugin::installer::install_from_git(
         &remote_info.url,
         &name,
         remote_info.git_ref.as_deref(),
@@ -2581,7 +2581,12 @@ pub(crate) async fn download_plugin_handler(
         _ => plugin_dir.clone(),
     };
     let cargo_toml = std::path::Path::new(&effective_dir).join("Cargo.toml");
-    if cargo_toml.exists() {
+    if !content_changed {
+        info!(
+            "Download: skipping compilation for '{}' — no new commits fetched",
+            name
+        );
+    } else if cargo_toml.exists() {
         info!("Download: compiling Rust crate at {}", effective_dir);
         match tokio::task::spawn_blocking({
             let dir = effective_dir.clone();
