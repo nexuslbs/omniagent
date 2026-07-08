@@ -790,18 +790,23 @@ fn build_plugin_detail(
         })
         .unwrap_or(false);
 
-    // Compute has_source_code: plugin has Cargo.toml OR is a script-based plugin.
-    // Binary-only plugins (entrypoint is a bare binary name like "mcp-server-cron")
-    // do NOT have source code — they are pre-compiled.
-    // API-mode providers (api_mode set in plugin.json) have no source code —
-    // they're configured via plugin.json and omniagent handles API calls natively.
+    // Compute has_source_code: Cargo.toml, package.json, pyproject.toml, or source
+    // files (.py, .js, .ts) in the plugin directory indicate source code is present.
+    // Bare binary names like "mcp-server-cron" or API-mode providers have no source.
+    // Remote plugins without explicit entrypoint may still have source files.
     let has_source_code = if manifest.api_mode.is_some() {
         false
     } else {
         plugin_dir
         .map(|dir| {
-            let cargo_toml = std::path::Path::new(dir).join("Cargo.toml");
-            if cargo_toml.exists() {
+            let dir_path = std::path::Path::new(dir);
+            if dir_path.join("Cargo.toml").exists() {
+                return true;
+            }
+            if dir_path.join("package.json").exists() {
+                return true;
+            }
+            if dir_path.join("pyproject.toml").exists() {
                 return true;
             }
             // Check if manifest has a script entrypoint (not a bare binary name)
@@ -816,14 +821,17 @@ fn build_plugin_detail(
                     }
                     // Bare binary names like "mcp-server-actions" or "python3" are NOT
                     // source code — they're either pre-compiled binaries or script runners.
-                    // A bare word that ISN'T in the manifest's list of known runners is
-                    // definitely a pre-compiled binary name. Known runners are checked
-                    // by looking at the first word's characteristics:
+                    // Known runners are checked by looking at the first word's characteristics:
                     // - Known script runners always have extensions or are well-known names
                     // - Plugin binaries follow the "mcp-server-*" or similar conventions
                     // We return false here — bare binary name = no source code.
                     return false;
                 }
+            }
+            // Check for source files by extension (covers remote plugins without
+            // explicit entrypoint in plugin.json — e.g. test-js-tool, test-python-tool)
+            if has_source_file_by_extension(dir_path) {
+                return true;
             }
             false
         })
@@ -911,6 +919,38 @@ fn build_plugin_detail(
         status_message: String::new(),
         language,
     }
+}
+
+/// Check if a plugin directory contains source code files by extension.
+/// Returns true if any file with a recognized source extension exists
+/// (excluding typical build output, .git, and node_modules directories).
+fn has_source_file_by_extension(dir_path: &std::path::Path) -> bool {
+    let source_extensions = [
+        ".py", ".js", ".ts", ".jsx", ".tsx", ".rb", ".go", ".sh",
+        ".java", ".kt", ".swift", ".c", ".cpp", ".h", ".hpp",
+    ];
+    walkdir::WalkDir::new(dir_path)
+        .max_depth(3)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .any(|e| {
+            let path = e.path();
+            // Skip .git, target/, node_modules/, .remote/ directories
+            let parent = path.parent().unwrap_or(path);
+            let parent_name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if parent_name == ".git" || parent_name == "target"
+                || parent_name == "node_modules" || parent_name == ".remote"
+            {
+                return false;
+            }
+            if let Some(ext) = path.extension() {
+                let ext_str = format!(".{}", ext.to_string_lossy().to_lowercase());
+                source_extensions.contains(&ext_str.as_str())
+            } else {
+                false
+            }
+        })
 }
 
 // ---------------------------------------------------------------------------
