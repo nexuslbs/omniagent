@@ -185,7 +185,21 @@ When a plugin exists in `plugins.yml` but has no source on disk, a synthetic "no
 - **Uninstall does NOT remove the `.remote/` directory** for remote plugins. It only:
   1. Removes the compiled `target/` directory (`{data_dir}/plugins/{type}/.remote/{name}/target`)
   2. Sets `enabled: false` in `plugins.yml` (keeps the YAML entry and `.remote/` source code)
-- For non-remote plugins, uninstall removes the YAML entry and the compiled `target/` directory.
+  3. **Stops the MCP server** via `clear_server_pools()` + `remove_server_config()` + `remove_by_server()` — without this, the MCP tools remain registered in `/mcp/tools` even though YAML says `enabled: false`
+- For non-remote plugins, uninstall removes the YAML entry and the compiled `target/` directory, and also stops the MCP server.
+- Same MCP server cleanup applies to the default **Remove** mode.
+
+### Download Handler Must Preserve Enabled State
+
+The `download_plugin_handler` (`POST /api/plugins/:name/download`) previously hardcoded `enabled: false` when rewriting the YAML entry after re-cloning from git. This caused every download to disable the plugin.
+
+**Fix applied July 2026:** Reads the current `enabled` state from the existing YAML entry before writing:
+```rust
+let current_enabled = plugins_yaml::get_entry(data_dir, &yaml_type, &name)
+    .ok().flatten()
+    .map(|e| e.enabled)
+    .unwrap_or(true);
+```
 
 ### Bundled Plugin Buttons (Dashboard)
 

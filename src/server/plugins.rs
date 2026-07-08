@@ -2072,6 +2072,15 @@ pub(crate) async fn delete_plugin_handler(
                 }
             }
 
+            // Stop the MCP server and remove its tools from the registry
+            tracing::info!(
+                "Uninstall: stopping MCP server for remote plugin '{}'",
+                name
+            );
+            crate::mcp::external::client::clear_server_pools(&name);
+            crate::mcp::external::client::remove_server_config(&name);
+            state.tool_registry.write().unwrap().remove_by_server(&name);
+
             return (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -2103,6 +2112,15 @@ pub(crate) async fn delete_plugin_handler(
                     }
                 }
             }
+
+            // Stop MCP server if it was running
+            tracing::info!(
+                "Uninstall: stopping MCP server for non-remote plugin '{}'",
+                name
+            );
+            crate::mcp::external::client::clear_server_pools(&name);
+            crate::mcp::external::client::remove_server_config(&name);
+            state.tool_registry.write().unwrap().remove_by_server(&name);
             let mut removed = false;
             for yaml_type in &[
                 plugins_yaml::PluginYamlType::Platform,
@@ -2190,6 +2208,12 @@ pub(crate) async fn delete_plugin_handler(
                 tracing::info!("Cleaned up stale .remote/ directory at {}", alt_remote_dir);
             }
         }
+
+        // Stop MCP server if it was running (for both remote and bundled plugins)
+        tracing::info!("Remove: stopping MCP server for plugin '{}'", name);
+        crate::mcp::external::client::clear_server_pools(&name);
+        crate::mcp::external::client::remove_server_config(&name);
+        state.tool_registry.write().unwrap().remove_by_server(&name);
     }
 
     if removed {
@@ -2710,13 +2734,17 @@ pub(crate) async fn download_plugin_handler(
         }
     }
 
-    // Ensure YAML entry has the remote source field
-    let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
+    // Ensure YAML entry has the remote source field, preserving existing enabled state
+    let current_enabled = plugins_yaml::get_entry(data_dir, &yaml_type, &name)
+        .ok()
+        .flatten()
+        .map(|e| e.enabled)
+        .unwrap_or(true);
     let _ = plugins_yaml::set_entry_with_source(
         data_dir,
         &yaml_type,
         &name,
-        false,
+        current_enabled,
         "remote",
         serde_json::json!({}),
     );
