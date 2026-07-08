@@ -2048,8 +2048,9 @@ pub(crate) async fn delete_plugin_handler(
             if let Some((yaml_type, _category)) = detect_plugin_category_cross_type(data_dir, &name)
             {
                 let type_dir = yaml_type.file_name();
-                let target_dir =
-                    format!("{}/plugins/{}/.remote/{}/target", data_dir, type_dir, name);
+                // Remove base target/ dir
+                let base_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, name);
+                let target_dir = format!("{}/target", base_dir);
                 let target_path = std::path::Path::new(&target_dir);
                 if target_path.exists() && target_path.is_dir() {
                     let _ = std::fs::remove_dir_all(target_path);
@@ -2057,6 +2058,23 @@ pub(crate) async fn delete_plugin_handler(
                         "Uninstall: removed target/ directory for remote plugin '{}'",
                         name
                     );
+                }
+
+                // Also remove target/ in the remote.yml subpath (e.g. tools/test-rust-tool)
+                if let Some(remote) = plugins_yaml::get_remote_plugin(data_dir, &yaml_type, &name) {
+                    if let Some(ref subpath) = remote.path {
+                        if !subpath.is_empty() {
+                            let sub_target = format!("{}/{}/target", base_dir, subpath);
+                            let sub_path = std::path::Path::new(&sub_target);
+                            if sub_path.exists() && sub_path.is_dir() {
+                                let _ = std::fs::remove_dir_all(sub_path);
+                                tracing::info!(
+                                    "Uninstall: removed target/ directory at subpath '{}' for remote plugin '{}'",
+                                    subpath, name
+                                );
+                            }
+                        }
+                    }
                 }
             }
 

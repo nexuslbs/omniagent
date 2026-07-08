@@ -182,6 +182,9 @@ pub struct PluginDetail {
     /// Empty string when status is not "error".
     #[serde(default)]
     pub status_message: String,
+    /// Programming language: "Rust", "Python", "Node.js", or "unknown".
+    #[serde(default)]
+    pub language: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -827,6 +830,44 @@ fn build_plugin_detail(
     // script entrypoints must have path-based commands (e.g., "./plugin.py").
     let is_script = false;
 
+    // Detect programming language
+    let language = plugin_dir
+        .map(|dir| {
+            let dir_path = std::path::Path::new(dir);
+            if dir_path.join("Cargo.toml").exists() {
+                return "Rust".to_string();
+            }
+            if dir_path.join("package.json").exists() {
+                return "Node.js".to_string();
+            }
+            if let Some(ep) = manifest.entrypoint.as_ref() {
+                let cmd = ep.command.to_lowercase();
+                if cmd.contains(".py") || cmd.contains("python") {
+                    return "Python".to_string();
+                }
+                if cmd.contains(".js") || cmd.contains("node ") || cmd.contains("node.") {
+                    return "Node.js".to_string();
+                }
+            }
+            "unknown".to_string()
+        })
+        .unwrap_or_else(|| {
+            // No plugin_dir — try manifest entrypoint
+            if let Some(ep) = manifest.entrypoint.as_ref() {
+                let cmd = ep.command.to_lowercase();
+                if cmd.contains(".py") || cmd.contains("python") {
+                    return "Python".to_string();
+                }
+                if cmd.contains(".js") || cmd.contains("node ") || cmd.contains("node.") {
+                    return "Node.js".to_string();
+                }
+                if cmd.contains("mcp-server-") {
+                    return "Rust".to_string();
+                }
+            }
+            "unknown".to_string()
+        });
+
     PluginDetail {
         id: 0,
         name: display_key,
@@ -857,6 +898,7 @@ fn build_plugin_detail(
         has_source_code,
         is_script,
         status_message: String::new(),
+        language,
     }
 }
 
