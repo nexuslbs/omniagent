@@ -808,12 +808,26 @@ def test_2():
 # ── Test 3: Remote not in plugins.yml → succeed ──────────────────────
 
 def test_3():
-    """Remote (no YAML) → succeed"""
+    """Remote (no YAML) → succeed, restore state for subsequent tests"""
     name = find_plugin("remote", skip_duplicated=False)
     if not name:
         return
-    success, resp = api_delete(f"/plugins/{name}?source=remote")
-    assert success, f"expected success, got success={success}, resp={resp}"
+    # Save state before deletion so other tests (e.g. test_6) can still run
+    remote_yml_bak = f"{WORKSPACE}/remote.yml.bak"
+    shutil.copy2(f"{WORKSPACE}/remote.yml", remote_yml_bak)
+    try:
+        success, resp = api_delete(f"/plugins/{name}?source=remote")
+        assert success, f"expected success, got success={success}, resp={resp}"
+    finally:
+        # Restore remote.yml and re-create .remote dir if needed
+        if os.path.exists(remote_yml_bak):
+            shutil.copy2(remote_yml_bak, f"{WORKSPACE}/remote.yml")
+            os.remove(remote_yml_bak)
+        for t in ["tools", "platforms", "providers"]:
+            remote_dir = f"{WORKSPACE}/plugins/{t}/.remote/{name}"
+            raw = read_remote_yml()
+            if name in raw.get(t, {}) and not os.path.exists(remote_dir):
+                ensure_remote_plugin(name, t)
 
 # ── Test 4: Built-in in plugins.yml → error ──────────────────────────
 
@@ -953,6 +967,114 @@ def test_9():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  GROUP 4 — Source-required validation tests
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Every plugin action MUST receive a `source` parameter. These tests
+# call each action on a valid plugin WITHOUT source and verify the
+# specific "Source is required" error is returned.
+
+EXPECTED_SOURCE_ERROR = "source is required"
+
+def find_any_plugin(status=None):
+    """Find any plugin to use as a test subject."""
+    plugins = api_get("/plugins")["data"]
+    for p in plugins:
+        if status and p.get("status") != status:
+            continue
+        return p["name"]
+    return None
+
+# ── Test S1: DELETE without source → error ────────────────────────────
+
+def test_s1():
+    """DELETE without source → 'Source is required' error"""
+    name = find_any_plugin()
+    if not name:
+        return
+    success, resp = api_delete(f"/plugins/{name}")
+    assert not success, "expected error when source is missing"
+    err_text = json.dumps(resp).lower()
+    assert "source is required" in err_text, \
+        f"expected 'source is required' error, got: {resp}"
+
+# ── Test S2: POST enable without source → error ───────────────────────
+
+def test_s2():
+    """POST enable without source → 'Source is required' error"""
+    name = find_any_plugin()
+    if not name:
+        return
+    try:
+        api_post(f"/plugins/{name}/enable", body={})
+        assert False, "expected error when source is missing"
+    except AssertionError as e:
+        err_text = str(e).lower()
+        assert "source is required" in err_text, \
+            f"expected 'source is required', got: {e}"
+
+# ── Test S3: POST disable without source → error ──────────────────────
+
+def test_s3():
+    """POST disable without source → 'Source is required' error"""
+    name = find_any_plugin()
+    if not name:
+        return
+    try:
+        api_post(f"/plugins/{name}/disable", body={})
+        assert False, "expected error when source is missing"
+    except AssertionError as e:
+        err_text = str(e).lower()
+        assert "source is required" in err_text, \
+            f"expected 'source is required', got: {e}"
+
+# ── Test S4: POST install without source → error ──────────────────────
+
+def test_s4():
+    """POST install without source → 'Source is required' error"""
+    name = find_any_plugin()
+    if not name:
+        return
+    try:
+        api_post(f"/plugins/{name}/install", body={})
+        assert False, "expected error when source is missing"
+    except AssertionError as e:
+        err_text = str(e).lower()
+        assert "source is required" in err_text, \
+            f"expected 'source is required', got: {e}"
+
+# ── Test S5: POST reinstall without source → error ────────────────────
+
+def test_s5():
+    """POST reinstall without source → 'Source is required' error"""
+    name = find_any_plugin()
+    if not name:
+        return
+    try:
+        api_post(f"/plugins/{name}/reinstall", body={})
+        assert False, "expected error when source is missing"
+    except AssertionError as e:
+        err_text = str(e).lower()
+        assert "source is required" in err_text, \
+            f"expected 'source is required', got: {e}"
+
+# ── Test S6: POST download without source → error ─────────────────────
+
+def test_s6():
+    """POST download without source → 'Source is required' error"""
+    name = find_any_plugin()
+    if not name:
+        return
+    try:
+        api_post(f"/plugins/{name}/download", body={})
+        assert False, "expected error when source is missing"
+    except AssertionError as e:
+        err_text = str(e).lower()
+        assert "source is required" in err_text, \
+            f"expected 'source is required', got: {e}"
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Git hygiene
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1029,6 +1151,13 @@ if __name__ == "__main__":
     print(f"{'=' * 60}")
 
     for fn in [test_8, test_9]:
+        test(fn)
+
+    print(f"\n{'=' * 60}")
+    print("GROUP 4 — Source-required validation tests")
+    print(f"{'=' * 60}")
+
+    for fn in [test_s1, test_s2, test_s3, test_s4, test_s5, test_s6]:
         test(fn)
 
     print(f"\n{'=' * 60}")
