@@ -88,15 +88,16 @@ def api_post(path, body=None, files=None, base=None):
         )
     try:
         resp = urllib.request.urlopen(req)
-        body = resp.read()
-        if not body.strip():
+        resp_body = resp.read()
+        if not resp_body.strip():
             return {}  # dashboard may return empty body on success
-        return json.loads(body)
+        return json.loads(resp_body)
     except urllib.error.HTTPError as e:
-        body = e.read()
-        if not body.strip():
+        raw = e.read()
+        if not raw.strip():
             raise AssertionError(f"POST {path} failed (HTTP {e.code}): empty body")
-        raise AssertionError(f"POST {path} failed (HTTP {e.code}): {json.loads(body)}")
+        body_str = raw.decode("utf-8", errors="replace")
+        raise AssertionError(f"POST {path} failed (HTTP {e.code}): {json.loads(body_str)}")
 
 def api_delete(path):
     """Return (success_bool, response_data) regardless of HTTP status"""
