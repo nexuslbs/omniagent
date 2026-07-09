@@ -255,7 +255,7 @@ pub fn load_raw(
 
 /// Save entries to a YAML file (atomic write: .tmp → fsync → rename).
 /// Preserves all three sections (platforms, tools, providers) in the unified plugins.yml.
-fn save_file(
+pub fn save_file(
     data_dir: &str,
     pt: &PluginYamlType,
     entries: BTreeMap<String, PluginYamlEntry>,
@@ -1162,6 +1162,16 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         for (i, (manifest, source, base_path)) in group.sources.iter().enumerate() {
             let is_primary = primary_idx.map(|idx| i == idx);
             // When primary_idx is None (no YAML entry, none enabled), no source is a "duplicate"
+
+            // Skip sources that match a disabled YAML entry — user has explicitly
+            // removed them via the Remove action (wrote enabled: false to plugins.yml).
+            // Suppress all sources regardless of source type mismatch — the plugin
+            // name is the authority, and enabled: false means "don't show this plugin".
+            if let Some(entry) = yaml_entry_ref {
+                if !entry.enabled {
+                    continue;
+                }
+            }
 
             // Plugin directory is the parent of the base_path
             let plugin_dir = std::path::Path::new(base_path)

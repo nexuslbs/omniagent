@@ -355,8 +355,12 @@ async fn search_handler(
             t.output_tokens AS thread_output_tokens,
             t.cached_tokens AS thread_cached_tokens,
             c.name AS channel_name,
-            m.processing_time_ms,
-            m.token_usage::text AS token_usage
+            t.duration_ms AS processing_time_ms,
+            jsonb_build_object(
+                'input_tokens', t.input_tokens,
+                'output_tokens', t.output_tokens,
+                'cached_tokens', t.cached_tokens
+            )::text AS token_usage
         FROM messages m
         JOIN threads t ON t.id = m.thread_id
         JOIN channels c ON c.id = t.channel_id

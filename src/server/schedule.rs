@@ -789,7 +789,7 @@ async fn schedule_threads_handler(
             last_msg.msg_subtype AS subtype,
             t.provider,
             t.model,
-            last_msg.processing_time_ms,
+            t.duration_ms AS processing_time_ms,
             last_msg.token_usage,
             last_msg.iteration_number,
             last_msg.thread_sequence,
@@ -801,7 +801,7 @@ async fn schedule_threads_handler(
         LEFT JOIN channels c ON c.id = t.channel_id
         LEFT JOIN LATERAL (
             SELECT m.id, m.thread_id, m.role, m.content, m.msg_type,
-                   m.msg_subtype, m.processing_time_ms, m.token_usage::text AS token_usage,
+                   m.msg_subtype, m.token_usage::text AS token_usage,
                    m.iteration_number, m.thread_sequence,
                    m.created_at, m.metadata
             FROM messages m

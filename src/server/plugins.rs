@@ -2121,41 +2121,120 @@ pub(crate) async fn delete_plugin_handler(
     }
 
     // ── Remove mode (default) —─
-    // Remove from YAML (all three types, just in case)
+    // Detect plugin state across all three YAML types and disk locations
     let mut removed = false;
-    for yaml_type in &[
+
+    // 1. Find YAML entry (if any)
+    let mut yaml_info: Option<(plugins_yaml::PluginYamlType, String)> = None; // (type, source)
+    for pt in &[
         plugins_yaml::PluginYamlType::Platform,
         plugins_yaml::PluginYamlType::Tool,
         plugins_yaml::PluginYamlType::Provider,
     ] {
-        if let Ok(true) = plugins_yaml::remove_entry(data_dir, yaml_type, &name) {
-            removed = true;
+        if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, pt, &name) {
+            yaml_info = Some((pt.clone(), entry.source.clone()));
+            break;
         }
     }
 
-    // For remote plugins: also remove .remote/ directory
-    if let Some((yaml_type, _category)) = detect_plugin_category_cross_type(data_dir, &name) {
-        let type_dir = yaml_type.file_name();
+    // 2. Check if plugin exists as built-in on disk
+    let on_disk_builtin = plugins_yaml::is_plugin_builtin(data_dir, &name, &plugins_yaml::PluginYamlType::Tool)
+        || plugins_yaml::is_plugin_builtin(data_dir, &name, &plugins_yaml::PluginYamlType::Platform)
+        || plugins_yaml::is_plugin_builtin(data_dir, &name, &plugins_yaml::PluginYamlType::Provider);
 
+    // 3. Check if plugin exists as bundled on disk
+    let on_disk_bundled = {
+        let dirs = ["tools", "platforms", "providers"];
+        dirs.iter().any(|d| {
+            let p = format!("{}/plugins/{}/{}", state.workspace_dir, d, name);
+            std::path::Path::new(&p).join("plugin.json").exists()
+        })
+    };
+
+    // 4. Check if plugin exists as remote on disk (remote.yml is the source of truth)
+    let on_disk_remote = {
+        let ryml = plugins_yaml::load_remote_plugins(data_dir);
+        ryml.tools.as_ref().map(|m| m.contains_key(&name)).unwrap_or(false)
+            || ryml.platforms.as_ref().map(|m| m.contains_key(&name)).unwrap_or(false)
+            || ryml.providers.as_ref().map(|m| m.contains_key(&name)).unwrap_or(false)
+    };
+
+    let yaml_source = yaml_info.as_ref().map(|(_, s)| s.as_str());
+
+    // ── Rule 1: Built-in plugins (on disk) cannot be removed ──
+    // If YAML says built-in AND it exists on disk → error
+    // If no YAML but is built-in on disk → error
+    if yaml_source == Some("built-in") && on_disk_builtin {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Cannot remove built-in plugin '{}'. Built-in plugins are part of the application and can only be disabled.", name)
+            })),
+        ).into_response();
+    }
+    if yaml_source.is_none() && on_disk_builtin {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Cannot remove built-in plugin '{}'. Built-in plugins are part of the application and can only be disabled.", name)
+            })),
+        ).into_response();
+    }
+
+    // ── Rule 2: YAML says built-in but not on disk → just remove YAML entry ──
+    // This handles: plugin was registered as built-in but the source was removed.
+    if yaml_source == Some("built-in") {
+        let (yaml_type, _) = yaml_info.as_ref().unwrap();
+        if let Ok(true) = plugins_yaml::remove_entry(data_dir, yaml_type, &name) {
+            tracing::info!("Remove: removed YAML entry for built-in plugin '{}' (source not on disk)", name);
+        }
+        removed = true;
+    }
+
+    // ── Rule 3: Remote plugin ──
+    // Remove .remote/ directory + remote.yml entry + YAML entry (if source matches)
+    if yaml_source == Some("remote") || (yaml_source.is_none() && on_disk_remote) {
+        let yaml_type = yaml_info.as_ref().map(|(t, _)| t.clone());
+        let actual_type = match yaml_type {
+            Some(ref t) => t.clone(),
+            None => {
+                // Detect type from disk
+                let dirs = [
+                    (plugins_yaml::PluginYamlType::Tool, "tools"),
+                    (plugins_yaml::PluginYamlType::Platform, "platforms"),
+                    (plugins_yaml::PluginYamlType::Provider, "providers"),
+                ];
+                let found = dirs.iter().find(|(_, d)| {
+                    let p = format!("{}/plugins/{}/.remote/{}", data_dir, d, name);
+                    std::path::Path::new(&p).join("plugin.json").exists()
+                });
+                match found {
+                    Some((t, _)) => t.clone(),
+                    None => plugins_yaml::PluginYamlType::Tool,
+                }
+            }
+        };
+
+        let type_dir = actual_type.type_dir_name();
+
+        // Remove .remote/ directory
         let remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, name);
         let remote_path = std::path::Path::new(&remote_dir);
         if remote_path.exists() && remote_path.is_dir() {
             match std::fs::remove_dir_all(remote_path) {
                 Ok(()) => {
-                    tracing::info!("Removed .remote/ directory for plugin '{}'", name);
+                    tracing::info!("Remove: removed .remote/ directory for plugin '{}'", name);
                     removed = true;
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Failed to remove .remote/ directory for '{}': {:?}",
-                        name,
-                        e
-                    );
+                    tracing::warn!("Remove: failed to remove .remote/ directory for '{}': {:?}", name, e);
                 }
             }
         }
 
-        // Clean up .remote/plugins.yml entry for remote plugins
+        // Remove remote.yml entry (for all types)
         for pt in &[
             plugins_yaml::PluginYamlType::Platform,
             plugins_yaml::PluginYamlType::Tool,
@@ -2164,23 +2243,116 @@ pub(crate) async fn delete_plugin_handler(
             let _ = plugins_yaml::remove_remote_plugin(data_dir, pt, &name);
         }
 
+        // Remove stale .remote/ directories from other types
         for t in &["tools", "platforms", "providers"] {
-            if *t == type_dir {
-                continue;
-            }
-            let alt_remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, t, name);
-            let alt_remote_path = std::path::Path::new(&alt_remote_dir);
-            if alt_remote_path.exists() && alt_remote_path.is_dir() {
-                let _ = std::fs::remove_dir_all(alt_remote_path);
-                tracing::info!("Cleaned up stale .remote/ directory at {}", alt_remote_dir);
+            if *t == type_dir { continue; }
+            let alt = format!("{}/plugins/{}/.remote/{}", data_dir, t, name);
+            let alt_path = std::path::Path::new(&alt);
+            if alt_path.exists() && alt_path.is_dir() {
+                let _ = std::fs::remove_dir_all(alt_path);
+                tracing::info!("Remove: cleaned up stale .remote/ directory at {}", alt);
             }
         }
 
-        // Stop MCP server if it was running (for both remote and bundled plugins)
+        // Remove YAML entry ONLY if source matches "remote"
+        if yaml_source == Some("remote") {
+            let _ = plugins_yaml::remove_entry(data_dir, &actual_type, &name);
+            tracing::info!("Remove: removed YAML entry for remote plugin '{}'", name);
+            removed = true;
+        }
+
+        // Stop MCP server
         tracing::info!("Remove: stopping MCP server for plugin '{}'", name);
         crate::mcp::external::client::clear_server_pools(&name);
         crate::mcp::external::client::remove_server_config(&name);
         state.tool_registry.write().unwrap().remove_by_server(&name);
+
+        if removed {
+            info!("Deleted remote plugin '{}'", name);
+            return (StatusCode::OK, Json(serde_json::json!({
+                "success": true, "data": {"deleted": true}
+            }))).into_response();
+        }
+    }
+
+    // ── Rule 4: Bundled (omni-stack) plugin ──
+    // Remove workspace directory + YAML entry (if source matches bundled)
+    if yaml_source == Some("bundled") || yaml_source.as_deref() == Some("omni-stack")
+        || (yaml_source.is_none() && on_disk_bundled)
+    {
+        let yaml_type = yaml_info.as_ref().map(|(t, _)| t.clone());
+        let actual_type = match yaml_type {
+            Some(ref t) => t.clone(),
+            None => {
+                let dirs = [
+                    (plugins_yaml::PluginYamlType::Tool, "tools"),
+                    (plugins_yaml::PluginYamlType::Platform, "platforms"),
+                    (plugins_yaml::PluginYamlType::Provider, "providers"),
+                ];
+                let found = dirs.iter().find(|(_, d)| {
+                    let p = format!("{}/plugins/{}/{}", state.workspace_dir, d, name);
+                    std::path::Path::new(&p).join("plugin.json").exists()
+                });
+                match found {
+                    Some((t, _)) => t.clone(),
+                    None => plugins_yaml::PluginYamlType::Tool,
+                }
+            }
+        };
+
+        let type_dir = actual_type.type_dir_name();
+
+        // Remove the plugin directory from workspace
+        let plugin_dir = format!("{}/plugins/{}/{}", state.workspace_dir, type_dir, name);
+        let plugin_path = std::path::Path::new(&plugin_dir);
+        if plugin_path.exists() && plugin_path.is_dir() {
+            match std::fs::remove_dir_all(plugin_path) {
+                Ok(()) => {
+                    tracing::info!("Remove: removed workspace directory for bundled plugin '{}'", name);
+                    removed = true;
+                }
+                Err(e) => {
+                    tracing::warn!("Remove: failed to remove workspace directory for '{}': {:?}", name, e);
+                }
+            }
+        }
+
+        // Also check data_dir for bundled plugin directory
+        let data_plugin_dir = format!("{}/plugins/{}/{}", data_dir, type_dir, name);
+        let data_plugin_path = std::path::Path::new(&data_plugin_dir);
+        if data_plugin_path.exists() && data_plugin_path.is_dir() {
+            let _ = std::fs::remove_dir_all(data_plugin_path);
+            tracing::info!("Remove: removed data directory for bundled plugin '{}'", name);
+        }
+
+        // Remove YAML entry ONLY if source matches "bundled" (or default/omni-stack)
+        if yaml_source == Some("bundled") || yaml_source.is_none() {
+            let _ = plugins_yaml::remove_entry(data_dir, &actual_type, &name);
+            tracing::info!("Remove: removed YAML entry for bundled plugin '{}'", name);
+            removed = true;
+        }
+
+        // Stop MCP server
+        tracing::info!("Remove: stopping MCP server for plugin '{}'", name);
+        crate::mcp::external::client::clear_server_pools(&name);
+        crate::mcp::external::client::remove_server_config(&name);
+        state.tool_registry.write().unwrap().remove_by_server(&name);
+
+        if removed {
+            info!("Deleted bundled plugin '{}'", name);
+            return (StatusCode::OK, Json(serde_json::json!({
+                "success": true, "data": {"deleted": true}
+            }))).into_response();
+        }
+    }
+
+    // ── Rule 5: YAML entry exists but plugin not on disk (any source type) ──
+    // Just remove the YAML entry. This handles orphaned entries.
+    if let Some((yaml_type, source)) = yaml_info {
+        if let Ok(true) = plugins_yaml::remove_entry(data_dir, &yaml_type, &name) {
+            tracing::info!("Remove: removed orphaned YAML entry for plugin '{}' (source={}, not on disk)", name, source);
+            removed = true;
+        }
     }
 
     if removed {
@@ -2200,6 +2372,32 @@ pub(crate) async fn delete_plugin_handler(
             Json(serde_json::json!({
                 "success": true,
                 "data": {"deleted": true, "note": "not found in YAML"}
+            })),
+        )
+            .into_response()
+    }
+}
+
+/// Helper: build a consistent remove response.
+/// Returns the early-exit shape `into_response()` to satisfy match arm types in the explicit-source path.
+fn respond_removed(name: &str, removed: bool) -> impl IntoResponse {
+    if removed {
+        info!("Deleted plugin '{}'", name);
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "success": true,
+                "data": {"deleted": true}
+            })),
+        )
+            .into_response()
+    } else {
+        info!("Plugin '{}' not found on disk or in YAML", name);
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "success": true,
+                "data": {"deleted": true, "note": "not found"}
             })),
         )
             .into_response()

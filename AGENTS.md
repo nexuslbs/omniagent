@@ -238,3 +238,34 @@ See "Plugin Action Buttons" table above for full rules. Key bundled specifics:
 - There is no Update button for bundled plugins (the code lives in the omni-stack repo, not an external git repo).
 - The Remove button calls `DELETE /api/plugins/{name}` (remove mode), which removes the YAML entry and the compiled `target/` directory.
 - The Install button for bundled plugins compiles synchronously, writes `enabled: true` to `plugins.yml`, and hot-reloads the MCP server — all in one synchronous API call. No more background compile.
+
+### Remove API Behavior (DELETE /api/plugins/:name)
+
+The Remove handler (`delete_plugin_handler`) follows strict source-based rules (rewritten August 2026).
+
+**Core detection order:**
+1. **YAML entry** — `plugins.yml` source field (built-in / bundled / remote)
+2. **Disk state** — built-in on disk (`/app/plugins/`), bundled on disk (`workspace_dir/plugins/`), or remote in `remote.yml`
+
+**Rules (applied in priority order):**
+
+| Condition | Action | YAML Effect | Disk Effect |
+|-----------|--------|-------------|-------------|
+| Built-in on disk + no YAML entry | **Error** | None | None |
+| Built-in on disk + YAML source=built-in | **Error** | None | None |
+| YAML source=built-in + NOT on disk | Remove YAML entry | Entry deleted | None |
+| YAML source=remote (or in remote.yml) | Remove all remote | YAML entry deleted (if source matches) | `.remote/` dir + remote.yml entry |
+| YAML source=remote + bundled disk exists | Remove disk only | YAML entry PRESERVED (source mismatch) | Workspace dir removed only |
+| YAML source=bundled (or disk as bundled) | Remove bundled | YAML entry deleted (if source matches) | Workspace dir + data dir removed |
+| YAML source=bundled + remote in remote.yml | Remove disk only | YAML entry PRESERVED (source mismatch) | Workspace dir removed, `.remote/` preserved |
+| YAML entry exists + no disk source | Remove YAML only | Entry deleted | None |
+| No YAML + no disk | **No-op** (success) | None | None |
+
+**Key behaviors:**
+- **`remote.yml` is the single source of truth** for remote plugin detection. The `.remote/` directory contents are irrelevant — if a plugin name exists in `remote.yml` (loaded via `load_remote_plugins()`), it's treated as remote. No walking of `.remote/` directories needed.
+- **Source mismatches preserve YAML** intentionally. If YAML says `source: bundled` but the plugin is listed in `remote.yml`, removing the plugin deletes the remote files (`remote.yml` entry + `.remote/` dir) but keeps the YAML entry intact. The YAML now correctly points to the bundled source (even if not yet present on disk).
+- **Built-in plugins cannot be removed.** Attempting to remove a built-in plugin returns a 400 error: `"Cannot remove built-in plugin 'X'. Built-in plugins are part of the application and can only be disabled."`
+- **MCP server cleanup** always runs when a `.remote/` directory or workspace plugin directory exists.
+- **Provider and platform removal** works identically — the handler detects `yaml_type` from YAML entry or disk location.
+
+**`list_plugins` filter change:** Any `enabled: false` YAML entry now suppresses ALL sources for that plugin name (removed source-matching requirement). This handles mismatched source types where YAML says `bundled` but disk source is `built-in`.

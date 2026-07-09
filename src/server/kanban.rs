@@ -1288,8 +1288,12 @@ async fn list_threads_handler(
             m.msg_subtype AS msg_subtype,
             t.provider,
             t.model,
-            m.processing_time_ms,
-            m.token_usage,
+            t.duration_ms AS processing_time_ms,
+            jsonb_build_object(
+                'input_tokens', t.input_tokens,
+                'output_tokens', t.output_tokens,
+                'cached_tokens', t.cached_tokens
+            ) AS token_usage,
             m.iteration_number,
             m.thread_sequence,
             m.created_at,
