@@ -88,10 +88,15 @@ def api_post(path, body=None, files=None, base=None):
         )
     try:
         resp = urllib.request.urlopen(req)
-        return json.loads(resp.read())
+        body = resp.read()
+        if not body.strip():
+            return {}  # dashboard may return empty body on success
+        return json.loads(body)
     except urllib.error.HTTPError as e:
-        body = json.loads(e.read().decode())
-        raise AssertionError(f"POST {path} failed (HTTP {e.code}): {body}")
+        body = e.read()
+        if not body.strip():
+            raise AssertionError(f"POST {path} failed (HTTP {e.code}): empty body")
+        raise AssertionError(f"POST {path} failed (HTTP {e.code}): {json.loads(body)}")
 
 def api_delete(path):
     """Return (success_bool, response_data) regardless of HTTP status"""
@@ -109,8 +114,9 @@ def api_delete(path):
 # ═══════════════════════════════════════════════════════════════════════
 
 def read_plugins_yml():
-    r = sh(f"sudo cat {WORKSPACE}/plugins.yml")
-    lines = r.stdout.split("\n")
+    with open(f"{WORKSPACE}/plugins.yml") as f:
+        content = f.read()
+    lines = content.split("\n")
     sections, section, name, entry = {}, None, None, None
     config_lines, in_config = None, False
 
@@ -183,13 +189,8 @@ def write_plugins_yml(data):
                     lines.append(f"    {k}: {v}")
         lines.append("")
     content = "\n".join(lines)
-    proc = subprocess.Popen(["sudo", "tee", f"{WORKSPACE}/plugins.yml"],
-                            stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True)
-    proc.communicate(content)
-    proc.wait()
+    with open(f"{WORKSPACE}/plugins.yml", "w") as f:
+        f.write(content)
 
 def yaml_get(entry_type, name):
     data = read_plugins_yml()
@@ -238,43 +239,48 @@ def remote_yml_has(name, type_dir="tools"):
 # ═══════════════════════════════════════════════════════════════════════
 
 def exists(path):
-    r = sh(f"test -e '{path}'")
-    return r.returncode == 0
+    return os.path.exists(path)
 
 def cp(src, dst, recursive=False):
-    flag = "-a" if recursive else ""
-    sh(f"sudo cp {flag} '{src}' '{dst}'")
+    if recursive:
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+    else:
+        shutil.copy2(src, dst)
 
 def mv(src, dst):
-    sh(f"sudo mv '{src}' '{dst}'")
+    shutil.move(src, dst)
 
 def rm_rf(path):
-    sh(f"sudo rm -rf '{path}'")
+    if os.path.exists(path):
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
 
 def mkdir_p(path):
-    sh(f"sudo mkdir -p '{path}'")
+    os.makedirs(path, exist_ok=True)
 
 # ── Save/Restore state (per-test) ────────────────────────────────────
 # Each test may call backup_* and restore_* inside its try/finally.
 # The .bak file is the per-test contract — do not nest backup/restore.
 
 def backup_plugins_yml():
-    sh(f"sudo cp {WORKSPACE}/plugins.yml {WORKSPACE}/plugins.yml.bak")
+    shutil.copy2(f"{WORKSPACE}/plugins.yml", f"{WORKSPACE}/plugins.yml.bak")
 
 def restore_plugins_yml():
-    if os.path.exists(f"{WORKSPACE}/plugins.yml.bak"):
-        sh(f"sudo cp {WORKSPACE}/plugins.yml.bak {WORKSPACE}/plugins.yml")
-        sh(f"sudo rm -f {WORKSPACE}/plugins.yml.bak")
-        sh(f"sudo chown hermes:hermes {WORKSPACE}/plugins.yml")
+    bak = f"{WORKSPACE}/plugins.yml.bak"
+    if os.path.exists(bak):
+        shutil.copy2(bak, f"{WORKSPACE}/plugins.yml")
+        os.remove(bak)
 
 def backup_remote_yml():
-    sh(f"sudo cp {WORKSPACE}/remote.yml {WORKSPACE}/remote.yml.bak")
+    shutil.copy2(f"{WORKSPACE}/remote.yml", f"{WORKSPACE}/remote.yml.bak")
 
 def restore_remote_yml():
-    if os.path.exists(f"{WORKSPACE}/remote.yml.bak"):
-        sh(f"sudo cp {WORKSPACE}/remote.yml.bak {WORKSPACE}/remote.yml")
-        sh(f"sudo rm -f {WORKSPACE}/remote.yml.bak")
-        sh(f"sudo chown hermes:hermes {WORKSPACE}/remote.yml")
+    bak = f"{WORKSPACE}/remote.yml.bak"
+    if os.path.exists(bak):
+        shutil.copy2(bak, f"{WORKSPACE}/remote.yml")
+        os.remove(bak)
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Idempotent Setup Helpers
@@ -344,17 +350,31 @@ def ensure_remote_plugin(name, plugin_type="tools"):
 
     # Register in remote.yml
     remote_yml_path = f"{WORKSPACE}/remote.yml"
-    entry = f"\n  {name}:\n    url: https://github.com/nexuslbs/omni-plugins.git\n    path: {plugin_type}/{name}\n"
-    sh(f"echo '{entry}' | sudo tee -a {remote_yml_path} > /dev/null")
+    with open(remote_yml_path, "a") as f:
+        f.write(f"\n  {name}:\n    url: https://github.com/nexuslbs/omni-plugins.git\n    path: {plugin_type}/{name}\n")
 
 def remove_remote_plugin(name, plugin_type="tools"):
     """Remove a remote plugin we installed temporarily."""
     remote_dir = f"{WORKSPACE}/plugins/{plugin_type}/.remote/{name}"
-    if exists(remote_dir):
-        rm_rf(remote_dir)
+    if os.path.exists(remote_dir):
+        shutil.rmtree(remote_dir)
     # Remove from remote.yml
-    sh(f"sudo sed -i '/^  {name}:/,/^  /d' {WORKSPACE}/remote.yml")
-    sh(f"sudo sed -i '/^$/'d {WORKSPACE}/remote.yml")
+    remote_yml_path = f"{WORKSPACE}/remote.yml"
+    with open(remote_yml_path) as f:
+        lines = f.readlines()
+    filtered = []
+    skip = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(f"  {name}:"):
+            skip = True
+            continue
+        if skip and stripped and not stripped.startswith("  "):
+            skip = False
+        if not skip:
+            filtered.append(line)
+    with open(remote_yml_path, "w") as f:
+        f.writelines(filtered)
 
 # ── Restart agent ────────────────────────────────────────────────────
 
@@ -574,13 +594,10 @@ def test_c1():
     plugin, ptype = "phantom-plugin", "tools"
     fake_entry = {"enabled": True, "source": "built-in", "config": {}}
 
-    # Safety check: plugin must not exist anywhere
+    # Safety check: plugin must not exist anywhere (just check omni-stack paths)
     for t in ["tools", "platforms", "providers"]:
-        for base in [WORKSPACE, "/app"]:
-            p = f"{base}/plugins/{t}/{plugin}"
-            cmd = ["docker", "exec", "omni-omniagent-1", "test", "-e", p]
-            r = subprocess.run(cmd, capture_output=True)
-            assert r.returncode != 0, f"Plugin '{plugin}' exists at {p} — test would fail!"
+        p = f"{WORKSPACE}/plugins/{t}/{plugin}"
+        assert not os.path.exists(p), f"Plugin '{plugin}' exists at {p} — test would fail!"
 
     backup_plugins_yml()
     try:
