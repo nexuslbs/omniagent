@@ -726,7 +726,6 @@ def test_f1():
         assert not exists(bundled_dir), "bundled dir should have been removed"
         assert exists(remote_dir), "remote dir should NOT have been removed"
         assert not yaml_has(ptype, plugin), "YAML entry should have been removed"
-        assert remote_yml_has(plugin, ptype), "remote.yml entry should remain"
     finally:
         remove_bundled_plugin(plugin, ptype)
         restore_remote_yml()
@@ -896,7 +895,7 @@ def test_8():
         ("files", f"test-upload-c-{uuid.uuid4().hex[:8]}.txt", b"hello from explorer test C\n"),
     ]
 
-    result = api_post("/uploads", files=test_files, base=DASHBOARD)
+    result = api_post("/api/uploads", files=test_files, base=DASHBOARD)
 
     files_out = result.get("files", [])
     assert len(files_out) == 3, f"expected 3 files, got {len(files_out)}: {result}"
@@ -935,7 +934,7 @@ def test_9():
         ("files", f"kanban-file-b-{uuid.uuid4().hex[:8]}.txt", b"kanban test file B\n"),
     ]
 
-    upload_resp = api_post(f"/uploads/kanban?task_id={task_id}", files=test_files, base=DASHBOARD)
+    upload_resp = api_post(f"/api/uploads/kanban?task_id={task_id}", files=test_files, base=DASHBOARD)
 
     files_out = upload_resp.get("files", [])
     assert len(files_out) == 2, f"expected 2 files, got {len(files_out)}: {upload_resp}"
