@@ -3217,8 +3217,6 @@ pub(crate) async fn download_plugin_handler(
 
 use std::future::Future;
 use std::pin::Pin;
-use tokio::sync::oneshot;
-
 /// POST /api/reload — reload environment variables + plugins.
 ///
 /// Re-reads .env and synchronizes runtime plugin state:
