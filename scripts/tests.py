@@ -156,7 +156,7 @@ def test_2():
 
 def test_3():
     """Remote not in plugins.yml → remove disk + remote.yml"""
-    name = find_plugin("remote")
+    name = find_plugin("remote", skip_duplicated=False)
     if not name:
         return None
     success, resp = api_delete(f"/plugins/{name}?source=remote")
@@ -181,7 +181,7 @@ def test_5():
 
 def test_6():
     """Remote in plugins.yml → remove disk + YAML + remote.yml"""
-    name = find_plugin("remote")
+    name = find_plugin("remote", skip_duplicated=False)
     if not name:
         return None
     success, resp = api_delete(f"/plugins/{name}?source=remote")
