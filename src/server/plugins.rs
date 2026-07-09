@@ -59,7 +59,7 @@ pub(crate) struct UpdateConfigRequest {
 pub(crate) struct PluginSourceRequest {
     /// Source identifier: "built-in", "bundled", or "remote".
     /// Required. The handler acts on this exact source.
-    pub source: String,
+    pub source: Option<String>,
     /// Optional remote config to set when enabling a remote source.
     /// When source is "remote" and this is provided, the remote URL/path
     /// is written to the YAML entry. Required when re-enabling a remote
@@ -67,6 +67,20 @@ pub(crate) struct PluginSourceRequest {
     /// or bundled).
     #[serde(default)]
     pub remote: Option<plugins_yaml::PluginRemote>,
+}
+
+/// Validate that a source was provided. Returns an error response if missing.
+pub(crate) fn require_source(source: &Option<String>) -> Result<&str, (StatusCode, Json<serde_json::Value>)> {
+    match source.as_deref() {
+        Some(s) => Ok(s),
+        None => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": "Source is required. Provide a `source` parameter: 'built-in', 'bundled', or 'remote'."
+            })),
+        )),
+    }
 }
 
 #[derive(Deserialize)]
@@ -865,15 +879,19 @@ pub(crate) async fn enable_plugin_handler(
         }
     };
 
-    // Validate source parameter
-    match req.source.as_str() {
+    // Require and validate source parameter
+    let source = match require_source(&req.source) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+    match source {
         "built-in" | "bundled" | "remote" => {}
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "success": false,
-                    "error": format!("Invalid source '{}': must be 'built-in', 'bundled', or 'remote'", req.source)
+                    "error": format!("Invalid source '{}': must be 'built-in', 'bundled', or 'remote'", source)
                 })),
             )
                 .into_response();
@@ -882,7 +900,7 @@ pub(crate) async fn enable_plugin_handler(
 
     // Check if plugin already in the desired state — skip only if source matches
     if let Ok(Some(entry)) = plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name) {
-        if entry.enabled && entry.source == req.source {
+        if entry.enabled && entry.source == source {
             // Already enabled with matching source — no change needed
             if let Ok(Some(detail)) = plugins_yaml::get_plugin(&state.data_dir, &name) {
                 info!(
@@ -912,12 +930,12 @@ pub(crate) async fn enable_plugin_handler(
         &yaml_type,
         &name,
         true,
-        &req.source,
+        &source,
         serde_json::json!({}),
     ) {
         Ok(_entry) => {
             // Save remote info to remote.yml when enabling remote source
-            if req.source.as_str() == "remote" {
+            if source == "remote" {
                 let remote_to_set = req.remote.as_ref().or(existing_remote.as_ref());
                 if let Some(remote) = remote_to_set {
                     let _ = plugins_yaml::save_remote_plugin(
@@ -1097,15 +1115,19 @@ pub(crate) async fn disable_plugin_handler(
         }
     };
 
-    // Validate source
-    match req.source.as_str() {
+    // Require and validate source
+    let source = match require_source(&req.source) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+    match source {
         "built-in" | "bundled" | "remote" => {}
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "success": false,
-                    "error": format!("Invalid source '{}': must be 'built-in', 'bundled', or 'remote'", req.source)
+                    "error": format!("Invalid source '{}': must be 'built-in', 'bundled', or 'remote'", source)
                 })),
             )
                 .into_response();
@@ -1182,7 +1204,7 @@ pub(crate) async fn install_plugin_handler(
     body: Option<Json<PluginSourceRequest>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
-    let explicit_source = body.as_ref().map(|b| b.source.as_str());
+    let explicit_source = body.as_ref().and_then(|b| b.source.as_deref());
 
     // 1. Resolve plugin source via shared preamble (detect type, resolve dir, verify source)
     let resolved = match resolve_plugin_for_compile(
@@ -1291,7 +1313,7 @@ pub(crate) async fn reinstall_plugin_handler(
     body: Option<Json<PluginSourceRequest>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
-    let explicit_source = body.as_ref().map(|b| b.source.as_str());
+    let explicit_source = body.as_ref().and_then(|b| b.source.as_deref());
 
     // 1. Resolve plugin source via shared preamble (detect type, resolve dir, verify source)
     let resolved = match resolve_plugin_for_compile(
@@ -2161,14 +2183,29 @@ pub(crate) async fn delete_plugin_handler(
     }
 
     // ── Remove mode (default) —─
-    // If explicit source is provided, bypass auto-detection and target that source directly.
-    if let Some(source) = explicit_source {
-        return handle_remove_by_source(data_dir, &state.workspace_dir, &name, source, &state)
-            .await
-            .into_response();
+    // Source is required for all remove operations.
+    match &explicit_source {
+        Some(source) => {
+            return handle_remove_by_source(data_dir, &state.workspace_dir, &name, source, &state)
+                .await
+                .into_response();
+        }
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "Source is required. Provide a `source` query parameter: 'built-in', 'bundled', or 'remote'."
+                })),
+            )
+                .into_response();
+        }
     }
 
-    // Detect plugin state across all three YAML types and disk locations
+    // The following auto-detection code is preserved for reference but
+    // unreachable — source must be provided explicitly.
+    #[allow(unreachable_code)]
+    {
     let mut removed = false;
 
     // 1. Find YAML entry (if any)
@@ -2423,6 +2460,7 @@ pub(crate) async fn delete_plugin_handler(
         )
             .into_response()
     }
+    } // close unreachable_code block
 }
 
 /// Handle remove when an explicit `?source=` parameter is provided.
@@ -2951,16 +2989,29 @@ pub(crate) async fn download_plugin_handler(
     let workspace_dir = &state.workspace_dir;
 
     // Validate source — download only makes sense for remote plugins
-    if let Some(ref req) = body {
-        if req.source != "remote" {
+    let source = match &body {
+        Some(req) => match require_source(&req.source) {
+            Ok(s) => s,
+            Err(e) => return e.into_response(),
+        },
+        None => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "success": false,
-                    "error": format!("Invalid source '{}': download only supports 'remote' source", req.source)
+                    "error": "Source is required. Provide a `source` parameter: 'built-in', 'bundled', or 'remote'."
                 })),
             ).into_response();
         }
+    };
+    if source != "remote" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid source '{}': download only supports 'remote' source", source)
+            })),
+        ).into_response();
     }
 
     // Find the YAML entry and extract remote info
