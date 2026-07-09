@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            m.id,\n            t.id AS thread_id,\n            m.role,\n            m.content,\n            m.msg_type AS msg_type,\n            m.msg_subtype AS msg_subtype,\n            t.provider,\n            t.model,\n            m.processing_time_ms,\n            m.token_usage,\n            m.iteration_number,\n            m.thread_sequence,\n            m.created_at,\n            m.metadata,\n            t.status AS thread_status,\n            c.name AS channel_name\n        FROM threads t\n        LEFT JOIN channels c ON c.id = t.channel_id\n        LEFT JOIN LATERAL (\n            SELECT m_sub.*\n            FROM messages m_sub\n            WHERE m_sub.thread_id = t.id\n            ORDER BY m_sub.id DESC\n            LIMIT 1\n        ) m ON true\n        WHERE t.task_id = $1\n        ORDER BY\n            CASE WHEN $2 THEN m.created_at END ASC NULLS LAST,\n            CASE WHEN NOT $3 THEN m.created_at END DESC NULLS LAST\n        LIMIT $4 OFFSET $5\n        ",
+  "query": "\n        SELECT\n            m.id,\n            t.id AS thread_id,\n            m.role,\n            m.content,\n            m.msg_type AS msg_type,\n            m.msg_subtype AS msg_subtype,\n            t.provider,\n            t.model,\n            t.duration_ms AS processing_time_ms,\n            jsonb_build_object(\n                'input_tokens', t.input_tokens,\n                'output_tokens', t.output_tokens,\n                'cached_tokens', t.cached_tokens\n            ) AS token_usage,\n            m.iteration_number,\n            m.thread_sequence,\n            m.created_at,\n            m.metadata,\n            t.status AS thread_status,\n            c.name AS channel_name\n        FROM threads t\n        LEFT JOIN channels c ON c.id = t.channel_id\n        LEFT JOIN LATERAL (\n            SELECT m_sub.*\n            FROM messages m_sub\n            WHERE m_sub.thread_id = t.id\n            ORDER BY m_sub.id DESC\n            LIMIT 1\n        ) m ON true\n        WHERE t.task_id = $1\n        ORDER BY\n            CASE WHEN $2 THEN m.created_at END ASC NULLS LAST,\n            CASE WHEN NOT $3 THEN m.created_at END DESC NULLS LAST\n        LIMIT $4 OFFSET $5\n        ",
   "describe": {
     "columns": [
       {
@@ -97,8 +97,8 @@
         "type_info": "Int4",
         "origin": {
           "Table": {
-            "table": "messages",
-            "name": "processing_time_ms"
+            "table": "threads",
+            "name": "duration_ms"
           }
         }
       },
@@ -106,12 +106,7 @@
         "ordinal": 9,
         "name": "token_usage",
         "type_info": "Jsonb",
-        "origin": {
-          "Table": {
-            "table": "messages",
-            "name": "token_usage"
-          }
-        }
+        "origin": "Expression"
       },
       {
         "ordinal": 10,
@@ -199,7 +194,7 @@
       true,
       true,
       true,
-      true,
+      null,
       false,
       false,
       false,
@@ -208,5 +203,5 @@
       false
     ]
   },
-  "hash": "0c25c7173f0de69224fa0dd0da28dc832510a4706bcac9ebf323237120e59d06"
+  "hash": "0c4b284413991fd37d5c627e3c54c2020fb528ff39e5772b9c43754e4831a286"
 }

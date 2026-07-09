@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            m.id,\n            m.thread_id,\n            m.role,\n            m.content,\n            m.thread_sequence,\n            m.external_id,\n            m.metadata::text AS metadata,\n            m.created_at,\n            m.msg_type,\n            m.msg_subtype,\n            t.channel_id,\n            t.status,\n            t.profile,\n            t.provider,\n            t.model,\n            t.duration_ms AS thread_duration_ms,\n            t.input_tokens AS thread_input_tokens,\n            t.output_tokens AS thread_output_tokens,\n            t.cached_tokens AS thread_cached_tokens,\n            c.name AS channel_name,\n            m.processing_time_ms,\n            m.token_usage::text AS token_usage\n        FROM messages m\n        JOIN threads t ON t.id = m.thread_id\n        JOIN channels c ON c.id = t.channel_id\n        WHERE m.content ILIKE $1\n          AND ($2 = '' OR t.profile = $3)\n          AND ($4 = 0::bigint OR t.channel_id = $5)\n        ORDER BY m.id DESC\n        LIMIT $6\n        ",
+  "query": "\n        SELECT\n            m.id,\n            m.thread_id,\n            m.role,\n            m.content,\n            m.thread_sequence,\n            m.external_id,\n            m.metadata::text AS metadata,\n            m.created_at,\n            m.msg_type,\n            m.msg_subtype,\n            t.channel_id,\n            t.status,\n            t.profile,\n            t.provider,\n            t.model,\n            t.duration_ms AS thread_duration_ms,\n            t.input_tokens AS thread_input_tokens,\n            t.output_tokens AS thread_output_tokens,\n            t.cached_tokens AS thread_cached_tokens,\n            c.name AS channel_name,\n            t.duration_ms AS processing_time_ms,\n            jsonb_build_object(\n                'input_tokens', t.input_tokens,\n                'output_tokens', t.output_tokens,\n                'cached_tokens', t.cached_tokens\n            )::text AS token_usage\n        FROM messages m\n        JOIN threads t ON t.id = m.thread_id\n        JOIN channels c ON c.id = t.channel_id\n        WHERE m.content ILIKE $1\n          AND ($2 = '' OR t.profile = $3)\n          AND ($4 = 0::bigint OR t.channel_id = $5)\n        ORDER BY m.id DESC\n        LIMIT $6\n        ",
   "describe": {
     "columns": [
       {
@@ -224,8 +224,8 @@
         "type_info": "Int4",
         "origin": {
           "Table": {
-            "table": "messages",
-            "name": "processing_time_ms"
+            "table": "threads",
+            "name": "duration_ms"
           }
         }
       },
@@ -271,5 +271,5 @@
       null
     ]
   },
-  "hash": "4a537c1e4cfc0cdf038a56044ac5d20adf0724b64f52d9a0f7c49b5d2b0c626e"
+  "hash": "033274c2dd43623c7dbc64ce3435479770f6f7cd9e7745a760fb1c2501e6e2d2"
 }
