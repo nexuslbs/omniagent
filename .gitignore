@@ -21,3 +21,4 @@ plugins/mcp
 /plugins/platforms/
 /backup/
 /scripts/
+.sqlx/
