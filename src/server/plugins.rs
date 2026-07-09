@@ -1206,18 +1206,33 @@ pub(crate) async fn install_plugin_handler(
     let data_dir = &state.data_dir;
     let explicit_source = body.as_ref().and_then(|b| b.source.as_deref());
 
+    // Require source parameter
+    let source = match explicit_source {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "Source is required. Provide a `source` parameter: 'built-in', 'bundled', or 'remote'."
+                })),
+            )
+                .into_response();
+        }
+    };
+
     // 1. Resolve plugin source via shared preamble (detect type, resolve dir, verify source)
     let resolved = match resolve_plugin_for_compile(
         data_dir,
         &state.workspace_dir,
         &name,
         "Install",
-        explicit_source,
+        Some(source),
     )
     .await
     {
         Ok(r) => r,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
 
     let yaml_type = resolved.yaml_type;
@@ -1245,7 +1260,8 @@ pub(crate) async fn install_plugin_handler(
                     "success": false,
                     "error": msg,
                 })),
-            );
+            )
+                .into_response();
         }
     }
 
@@ -1279,13 +1295,15 @@ pub(crate) async fn install_plugin_handler(
                             "data": detail,
                         })),
                     )
+                        .into_response()
                 }
                 _ => (
                     StatusCode::OK,
                     Json(serde_json::json!({
                         "success": true,
                     })),
-                ),
+                )
+                    .into_response(),
             }
         }
         Err(e) => {
@@ -1297,6 +1315,7 @@ pub(crate) async fn install_plugin_handler(
                     "error": format!("YAML registration failed: {}", e)
                 })),
             )
+                .into_response()
         }
     }
 }
@@ -1315,18 +1334,33 @@ pub(crate) async fn reinstall_plugin_handler(
     let data_dir = &state.data_dir;
     let explicit_source = body.as_ref().and_then(|b| b.source.as_deref());
 
+    // Require source parameter
+    let source = match explicit_source {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "Source is required. Provide a `source` parameter: 'built-in', 'bundled', or 'remote'."
+                })),
+            )
+                .into_response();
+        }
+    };
+
     // 1. Resolve plugin source via shared preamble (detect type, resolve dir, verify source)
     let resolved = match resolve_plugin_for_compile(
         data_dir,
         &state.workspace_dir,
         &name,
         "Reinstall",
-        explicit_source,
+        Some(source),
     )
     .await
     {
         Ok(r) => r,
-        Err(response) => return response,
+        Err(response) => return response.into_response(),
     };
 
     let _yaml_type = resolved.yaml_type;
@@ -1352,7 +1386,8 @@ pub(crate) async fn reinstall_plugin_handler(
                     "success": false,
                     "error": msg,
                 })),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -1379,6 +1414,7 @@ pub(crate) async fn reinstall_plugin_handler(
                     "data": detail
                 })),
             )
+                .into_response()
         }
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -1386,14 +1422,16 @@ pub(crate) async fn reinstall_plugin_handler(
                 "success": false,
                 "error": format!("Plugin '{}' not found on disk after re-scan", name)
             })),
-        ),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
                 "success": false,
                 "error": format!("Error checking plugin after reinstall: {}", e)
             })),
-        ),
+        )
+            .into_response(),
     }
 }
 

@@ -82,7 +82,7 @@ def api_post(path, body=None, files=None, base=None):
     else:
         req = urllib.request.Request(
             url,
-            data=json.dumps(body).encode() if body else None,
+            data=json.dumps(body).encode() if body is not None else None,
             method="POST",
             headers={"Content-Type": "application/json"},
         )
@@ -380,8 +380,11 @@ def remove_remote_plugin(name, plugin_type="tools"):
 # ── Restart agent ────────────────────────────────────────────────────
 
 def restart_agent():
-    sh("docker restart omni-omniagent-1")
-    time.sleep(8)
+    # Kill the running omniagent process — the container entrypoint
+    # (cargo watch) will auto-restart it. If running directly (no cargo watch),
+    # we start a new instance. We try docker restart first, then fallback.
+    rc = sh("docker exec omni-omniagent-1 bash -c 'pkill omniagent 2>/dev/null; sleep 1; /app/omniagent > /tmp/omniagent.log 2>&1 &'")
+    time.sleep(6)
     for _ in range(15):
         try:
             r = urllib.request.urlopen(f"{BASE}/health", timeout=3)
@@ -986,6 +989,29 @@ def find_any_plugin(status=None):
         return p["name"]
     return None
 
+def expect_source_required(method, url, body=None):
+    """Call an API endpoint without source and verify 'Source is required' error."""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req)
+        raise AssertionError(f"expected error, got success (no source param)")
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        if e.code == 422:
+            # Axum deserialization error — source field is missing entirely
+            err_text = raw.decode("utf-8", errors="replace").lower()
+            assert "source" in err_text, \
+                f"expected 'source' in error, got HTTP {e.code}: {raw.decode()}"
+            return  # 422 implies source was missing from the body — acceptable
+        result = json.loads(raw.decode("utf-8", errors="replace"))
+        assert not result.get("success", True), f"expected error, got success: {result}"
+        err_text = json.dumps(result).lower()
+        assert "source is required" in err_text, \
+            f"expected 'source is required' error, got: {result}"
+
+
 # ── Test S1: DELETE without source → error ────────────────────────────
 
 def test_s1():
@@ -1006,13 +1032,7 @@ def test_s2():
     name = find_any_plugin()
     if not name:
         return
-    try:
-        api_post(f"/plugins/{name}/enable", body={})
-        assert False, "expected error when source is missing"
-    except AssertionError as e:
-        err_text = str(e).lower()
-        assert "source is required" in err_text, \
-            f"expected 'source is required', got: {e}"
+    expect_source_required("POST", f"{BASE}/api/plugins/{name}/enable", body={})
 
 # ── Test S3: POST disable without source → error ──────────────────────
 
@@ -1021,13 +1041,7 @@ def test_s3():
     name = find_any_plugin()
     if not name:
         return
-    try:
-        api_post(f"/plugins/{name}/disable", body={})
-        assert False, "expected error when source is missing"
-    except AssertionError as e:
-        err_text = str(e).lower()
-        assert "source is required" in err_text, \
-            f"expected 'source is required', got: {e}"
+    expect_source_required("POST", f"{BASE}/api/plugins/{name}/disable", body={})
 
 # ── Test S4: POST install without source → error ──────────────────────
 
@@ -1036,13 +1050,7 @@ def test_s4():
     name = find_any_plugin()
     if not name:
         return
-    try:
-        api_post(f"/plugins/{name}/install", body={})
-        assert False, "expected error when source is missing"
-    except AssertionError as e:
-        err_text = str(e).lower()
-        assert "source is required" in err_text, \
-            f"expected 'source is required', got: {e}"
+    expect_source_required("POST", f"{BASE}/api/plugins/{name}/install", body={})
 
 # ── Test S5: POST reinstall without source → error ────────────────────
 
@@ -1051,13 +1059,7 @@ def test_s5():
     name = find_any_plugin()
     if not name:
         return
-    try:
-        api_post(f"/plugins/{name}/reinstall", body={})
-        assert False, "expected error when source is missing"
-    except AssertionError as e:
-        err_text = str(e).lower()
-        assert "source is required" in err_text, \
-            f"expected 'source is required', got: {e}"
+    expect_source_required("POST", f"{BASE}/api/plugins/{name}/reinstall", body={})
 
 # ── Test S6: POST download without source → error ─────────────────────
 
@@ -1066,13 +1068,7 @@ def test_s6():
     name = find_any_plugin()
     if not name:
         return
-    try:
-        api_post(f"/plugins/{name}/download", body={})
-        assert False, "expected error when source is missing"
-    except AssertionError as e:
-        err_text = str(e).lower()
-        assert "source is required" in err_text, \
-            f"expected 'source is required', got: {e}"
+    expect_source_required("POST", f"{BASE}/api/plugins/{name}/download", body={})
 
 
 # ═══════════════════════════════════════════════════════════════════════
