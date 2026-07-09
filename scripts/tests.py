@@ -142,7 +142,7 @@ def test_1():
     name = find_plugin("built-in", skip_duplicated=True)
     if not name:
         return None
-    success, resp = api_delete(f"/plugins/{name}")
+    success, resp = api_delete(f"/plugins/{name}?source=built-in")
     expected_fail = not success and "cannot remove built-in" in json.dumps(resp).lower()
     return expected_fail, f"expected error, got success={success}, resp={resp}"
 
@@ -151,15 +151,15 @@ def test_2():
     name = find_plugin("bundled", skip_duplicated=True)
     if not name:
         return None
-    success, resp = api_delete(f"/plugins/{name}")
+    success, resp = api_delete(f"/plugins/{name}?source=bundled")
     return success, f"expected success, got success={success}, resp={resp}"
 
 def test_3():
     """Remote not in plugins.yml → remove disk + remote.yml"""
-    name = find_plugin("remote", skip_duplicated=True)
+    name = find_plugin("remote")
     if not name:
         return None
-    success, resp = api_delete(f"/plugins/{name}")
+    success, resp = api_delete(f"/plugins/{name}?source=remote")
     return success, f"expected success, got success={success}, resp={resp}"
 
 def test_4():
@@ -167,7 +167,7 @@ def test_4():
     name = find_plugin("built-in", skip_duplicated=True)
     if not name:
         return None
-    success, resp = api_delete(f"/plugins/{name}")
+    success, resp = api_delete(f"/plugins/{name}?source=built-in")
     expected_fail = not success and "cannot remove built-in" in json.dumps(resp).lower()
     return expected_fail, f"expected error, got success={success}, resp={resp}"
 
@@ -176,15 +176,15 @@ def test_5():
     name = find_plugin("bundled", skip_duplicated=True)
     if not name:
         return None
-    success, resp = api_delete(f"/plugins/{name}")
+    success, resp = api_delete(f"/plugins/{name}?source=bundled")
     return success, f"expected success, got success={success}, resp={resp}"
 
 def test_6():
     """Remote in plugins.yml → remove disk + YAML + remote.yml"""
-    name = find_plugin("remote", skip_duplicated=True)
+    name = find_plugin("remote")
     if not name:
         return None
-    success, resp = api_delete(f"/plugins/{name}")
+    success, resp = api_delete(f"/plugins/{name}?source=remote")
     return success, f"expected success, got success={success}, resp={resp}"
 
 def test_7():
@@ -193,8 +193,10 @@ def test_7():
     not_found = [p for p in plugins if p.get("status") == "not_found"]
     if not not_found:
         return None
-    name = not_found[0]["name"]
-    success, resp = api_delete(f"/plugins/{name}")
+    target = not_found[0]
+    name = target["name"]
+    source = target.get("source", "bundled")
+    success, resp = api_delete(f"/plugins/{name}?source={source}")
     return success, f"expected success, got success={success}, resp={resp}"
 
 # ── File upload tests (8-9) ──
