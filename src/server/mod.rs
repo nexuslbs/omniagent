@@ -90,7 +90,7 @@ pub(crate) struct AppState {
     /// Path to the .env file for settings API
     env_path: String,
     /// MCP tool registry for executing actions (shared with agent)
-    tool_registry: Arc<std::sync::RwLock<crate::mcp::McpRegistry>>,
+    tool_registry: Arc<tokio::sync::RwLock<crate::mcp::McpRegistry>>,
     /// Application context for MCP tool execution
     app_context: AppContext,
     /// Shared mutable config for hot-reload support
@@ -109,7 +109,7 @@ pub struct ServerConfig {
     pub data_dir: String,
     pub workspace_dir: String,
     pub default_profile: String,
-    pub tool_registry: Arc<std::sync::RwLock<McpRegistry>>,
+    pub tool_registry: Arc<tokio::sync::RwLock<McpRegistry>>,
     pub app_context: AppContext,
     pub shared_config: Arc<RwLock<AgentConfig>>,
     pub platform_restart_signals: PlatformRestartSignals,
@@ -561,7 +561,7 @@ async fn prompt_handler(
     let tool_names: Vec<String> = state
         .tool_registry
         .read()
-        .unwrap()
+        .await
         .all()
         .iter()
         .map(|t| t.name.clone())
@@ -668,7 +668,7 @@ async fn prompt_preview_handler(
     let tool_names: Vec<String> = state
         .tool_registry
         .read()
-        .unwrap()
+        .await
         .all()
         .iter()
         .map(|t| t.name.clone())
@@ -874,7 +874,7 @@ async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serd
     let tools: Vec<serde_json::Value> = state
         .tool_registry
         .read()
-        .unwrap()
+        .await
         .all()
         .iter()
         .map(|tool| {

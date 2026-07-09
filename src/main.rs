@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::sync::RwLock;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -135,7 +134,7 @@ async fn run_server() -> AppResult<()> {
         platform_senders,
     );
     let mcp = mcp::default_registry(&mut ctx).await;
-    let mcp_shared = Arc::new(RwLock::new(mcp));
+    let mcp_shared = Arc::new(tokio::sync::RwLock::new(mcp));
 
     // Register platform-specific file readers for the read_attached_file tool
     if let Some(reader) = crate::platform::external::MattermostFileReader::new() {

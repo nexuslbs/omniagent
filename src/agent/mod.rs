@@ -42,7 +42,7 @@ pub struct Agent {
     pub pool: PgPool,
     pub config: Arc<RwLock<AgentConfig>>,
     pub llm: Arc<LLMClient>,
-    pub mcp: Arc<RwLock<McpRegistry>>,
+    pub mcp: Arc<tokio::sync::RwLock<McpRegistry>>,
     pub ctx: AppContext,
 }
 
@@ -54,7 +54,7 @@ impl Agent {
     pub fn new(
         pool: PgPool,
         config: Arc<RwLock<AgentConfig>>,
-        mcp: Arc<RwLock<McpRegistry>>,
+        mcp: Arc<tokio::sync::RwLock<McpRegistry>>,
         ctx: AppContext,
     ) -> Self {
         let env_cfg = crate::llm::LLMConfig::from_env();

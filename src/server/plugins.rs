@@ -560,7 +560,6 @@ pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
         )
         .route("/api/plugins/{name}/rename", post(rename_plugin_handler))
         .route("/api/plugins/{name}", delete(delete_plugin_handler))
-        .route("/api/reload", post(reload_env_handler))
 }
 
 // ---------------------------------------------------------------------------
@@ -613,7 +612,7 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
             // registered tools, the server failed to initialize — set
             // status to "error" so the frontend shows the right badge.
             {
-                let registry = state.tool_registry.read().unwrap();
+                let registry = state.tool_registry.read().await;
                 let all_tools = registry.all();
                 for detail in details.iter_mut() {
                     if detail.plugin_type == "tool" && detail.status == "enabled" {
@@ -706,7 +705,7 @@ pub(crate) async fn get_plugin_handler(
             // registered tools, the server failed to initialize — set
             // status to "error" so the frontend shows the right badge.
             if detail.plugin_type == "tool" && detail.status == "enabled" {
-                let registry = state.tool_registry.read().unwrap();
+                let registry = state.tool_registry.read().await;
                 let has_tools = registry
                     .all()
                     .iter()
@@ -958,7 +957,7 @@ pub(crate) async fn enable_plugin_handler(
                 {
                     Ok(tools) => {
                         let count = tools.len();
-                        state.tool_registry.write().unwrap().register_all(tools);
+                        state.tool_registry.write().await.register_all(tools);
                         info!(
                             "Hot-reloaded {} tool(s) from MCP server '{}' (no restart needed)",
                             count, name
@@ -1145,7 +1144,7 @@ pub(crate) async fn disable_plugin_handler(
         Ok(_entry) => {
             // Hot-reload: remove this MCP server's tools from the shared registry.
             if yaml_type == plugins_yaml::PluginYamlType::Tool {
-                let removed = state.tool_registry.write().unwrap().remove_by_server(&name);
+                let removed = state.tool_registry.write().await.remove_by_server(&name);
                 if !removed.is_empty() {
                     info!(
                         "Removed {} tool(s) from disabled MCP server '{}' (no restart needed): {:?}",
@@ -2146,7 +2145,7 @@ pub(crate) async fn delete_plugin_handler(
             );
             crate::mcp::external::client::clear_server_pools(&name);
             crate::mcp::external::client::remove_server_config(&name);
-            state.tool_registry.write().unwrap().remove_by_server(&name);
+            state.tool_registry.write().await.remove_by_server(&name);
 
             return (
                 StatusCode::OK,
@@ -2187,7 +2186,7 @@ pub(crate) async fn delete_plugin_handler(
             );
             crate::mcp::external::client::clear_server_pools(&name);
             crate::mcp::external::client::remove_server_config(&name);
-            state.tool_registry.write().unwrap().remove_by_server(&name);
+            state.tool_registry.write().await.remove_by_server(&name);
             let mut removed = false;
             for yaml_type in &[
                 plugins_yaml::PluginYamlType::Platform,
@@ -2387,7 +2386,7 @@ pub(crate) async fn delete_plugin_handler(
         tracing::info!("Remove: stopping MCP server for plugin '{}'", name);
         crate::mcp::external::client::clear_server_pools(&name);
         crate::mcp::external::client::remove_server_config(&name);
-        state.tool_registry.write().unwrap().remove_by_server(&name);
+        state.tool_registry.write().await.remove_by_server(&name);
 
         if removed {
             info!("Deleted remote plugin '{}'", name);
@@ -2458,7 +2457,7 @@ pub(crate) async fn delete_plugin_handler(
         tracing::info!("Remove: stopping MCP server for plugin '{}'", name);
         crate::mcp::external::client::clear_server_pools(&name);
         crate::mcp::external::client::remove_server_config(&name);
-        state.tool_registry.write().unwrap().remove_by_server(&name);
+        state.tool_registry.write().await.remove_by_server(&name);
 
         if removed {
             info!("Deleted bundled plugin '{}'", name);
@@ -2576,7 +2575,7 @@ async fn handle_remove_by_source(
             // Stop MCP server
             crate::mcp::external::client::clear_server_pools(name);
             crate::mcp::external::client::remove_server_config(name);
-            state.tool_registry.write().unwrap().remove_by_server(name);
+            state.tool_registry.write().await.remove_by_server(name);
             return respond_removed(name, removed);
         }
         "bundled" => {
@@ -2614,7 +2613,7 @@ async fn handle_remove_by_source(
             // Stop MCP server
             crate::mcp::external::client::clear_server_pools(name);
             crate::mcp::external::client::remove_server_config(name);
-            state.tool_registry.write().unwrap().remove_by_server(name);
+            state.tool_registry.write().await.remove_by_server(name);
             return respond_removed(name, removed);
         }
         _ => {
@@ -3216,17 +3215,188 @@ pub(crate) async fn download_plugin_handler(
     .into_response()
 }
 
-/// POST /api/reload — reload environment variables from .env file.
-pub(crate) async fn reload_env_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let refreshed = refresh_env_from_file(&state.env_path);
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
+use std::future::Future;
+use std::pin::Pin;
+use tokio::sync::oneshot;
+
+/// POST /api/reload — reload environment variables + plugins.
+///
+/// Re-reads .env and synchronizes runtime plugin state:
+/// starts newly enabled MCP servers / providers, stops newly disabled ones,
+/// cleans up orphaned state. No process restart needed.
+pub(crate) fn reload_env_handler(
+    State(state): State<Arc<AppState>>,
+) -> Pin<Box<dyn Future<Output = Response<Body>> + Send>> {
+    Box::pin(async move {
+        let env_refreshed = refresh_env_from_file(&state.env_path);
+        let result = reload_plugins(state).await;
+        format_reload_response(env_refreshed, result)
+    })
+}
+
+/// Format the reload response (extracted to reduce handler complexity for axum's trait solver).
+fn format_reload_response(
+    env_refreshed: u32,
+    result: Result<(u32, u32, Vec<String>), String>,
+) -> Response<Body> {
+    let is_ok = result.is_ok();
+    let body = match result {
+        Ok((started, stopped, errors)) => serde_json::json!({
             "success": true,
-            "refreshed": refreshed,
-        })),
-    )
-        .into_response()
+            "data": {
+                "env_vars_refreshed": env_refreshed,
+                "plugins": {
+                    "started": started,
+                    "stopped": stopped,
+                    "errors": errors,
+                }
+            }
+        }),
+        Err(ref e) => serde_json::json!({
+            "success": false,
+            "error": e,
+        }),
+    };
+    let status = if is_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, Json(body)).into_response()
+}
+
+/// Helper: reload plugin runtime state from YAML on disk.
+async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Vec<String>), String> {
+    let data_dir = state.data_dir.clone();
+    let all_plugins =
+        tokio::task::spawn_blocking(move || crate::plugins_yaml::list_plugins(&data_dir))
+            .await
+            .map_err(|e| format!("Task join: {}", e))?
+            .map_err(|e| format!("list_plugins: {}", e))?;
+
+    // 2. Snapshot current runtime state (tokio locks, Send-safe)
+    let active_mcp: std::collections::HashSet<String> = {
+        let reg = state.tool_registry.read().await;
+        reg.all().iter().filter_map(|t| t.server_name.clone()).collect()
+    };
+    let active_platforms: std::collections::HashSet<String> = {
+        let sigs = state.platform_restart_signals.lock().await;
+        sigs.keys().cloned().collect()
+    };
+
+    let mut started = 0u32;
+    let mut stopped = 0u32;
+    let mut errors: Vec<String> = Vec::new();
+
+    // 3. Diff and apply
+    for plugin in &all_plugins {
+        let name = &plugin.name;
+        let enabled = plugin.status == "enabled";
+        match plugin.plugin_type.as_str() {
+            "tool" => {
+                let running = active_mcp.contains(name);
+                if enabled && !running {
+                    match crate::mcp::external::client::initialize_single_server_tools(
+                        &state.data_dir,
+                        &state.workspace_dir,
+                        name,
+                    )
+                    .await
+                    {
+                        Ok(ts) => {
+                            state.tool_registry.write().await.register_all(ts);
+                            started += 1;
+                        }
+                        Err(e) => errors.push(format!("{} MCP: {}", name, e)),
+                    }
+                } else if !enabled && running {
+                    state.tool_registry.write().await.remove_by_server(name);
+                    stopped += 1;
+                }
+            }
+            "provider" => {
+                let running = crate::provider::registry::PROVIDER_REGISTRY
+                    .read()
+                    .unwrap()
+                    .has_provider(name);
+                if enabled && !running {
+                    let provider = {
+                        let guard = crate::provider::registry::PROVIDER_REGISTRY
+                            .read()
+                            .unwrap();
+                        if let Some(ep) = plugin.manifest.get("entrypoint") {
+                            if let Some(cmd) = ep.get("command").and_then(|c| c.as_str()) {
+                                let args: Vec<String> = ep
+                                    .get("args")
+                                    .and_then(|a| a.as_array())
+                                    .map(|a| {
+                                        a.iter()
+                                            .filter_map(|v| v.as_str().map(String::from))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                crate::provider::registry::PROVIDER_REGISTRY
+                                    .write()
+                                    .unwrap()
+                                    .register(name, cmd, &args);
+                                guard.get_cloned(name)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(c) = provider {
+                        match c.start().await {
+                            Ok(()) => started += 1,
+                            Err(e) => {
+                                crate::provider::registry::PROVIDER_REGISTRY
+                                    .write()
+                                    .unwrap()
+                                    .remove(name);
+                                errors.push(format!("{} provider: {}", name, e));
+                            }
+                        }
+                    }
+                } else if !enabled && running {
+                    crate::provider::registry::PROVIDER_REGISTRY
+                        .write()
+                        .unwrap()
+                        .remove(name);
+                    stopped += 1;
+                }
+            }
+            "platform" => {
+                if enabled && active_platforms.contains(name) {
+                    if let Some((flag, note)) = state
+                        .platform_restart_signals
+                        .lock()
+                        .await
+                        .get(name)
+                        .cloned()
+                    {
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        note.notify_one();
+                        started += 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 4. Clean orphaned MCP servers (in YAML but not in runtime)
+    let yaml_names: std::collections::HashSet<&str> =
+        all_plugins.iter().map(|p| p.name.as_str()).collect();
+    for srv in &active_mcp {
+        if !yaml_names.contains(srv.as_str()) {
+            state.tool_registry.write().await.remove_by_server(srv);
+            stopped += 1;
+        }
+    }
+
+    Ok((started, stopped, errors))
 }
 
 /// Refresh the process environment by re-reading the .env file.
@@ -3319,8 +3489,8 @@ async fn reload_tool_plugin(state: &Arc<AppState>, name: &str) {
     {
         Ok(tools) => {
             let count = tools.len();
-            state.tool_registry.write().unwrap().remove_by_server(name);
-            state.tool_registry.write().unwrap().register_all(tools);
+            state.tool_registry.write().await.remove_by_server(name);
+            state.tool_registry.write().await.register_all(tools);
             tracing::info!(
                 "Hot-reloaded {} tool(s) from MCP server '{}' after config update (no restart needed)",
                 count,

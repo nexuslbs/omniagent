@@ -43,7 +43,7 @@ struct CronJobDueRow {
 pub fn spawn(
     pool: PgPool,
     data_dir: String,
-    mcp_registry: Arc<std::sync::RwLock<McpRegistry>>,
+    mcp_registry: Arc<tokio::sync::RwLock<McpRegistry>>,
     app_context: AppContext,
 ) -> tokio::task::JoinHandle<()> {
     // Clear stale running flags from previous process life (crash/restart)
@@ -86,7 +86,7 @@ pub fn spawn(
 async fn tick(
     pool: &PgPool,
     data_dir: &str,
-    mcp_registry: &Arc<std::sync::RwLock<McpRegistry>>,
+    mcp_registry: &Arc<tokio::sync::RwLock<McpRegistry>>,
     app_context: &AppContext,
 ) -> AppResult<()> {
     let jobs = fetch_due_jobs(pool).await?;
@@ -436,7 +436,7 @@ fn resolve_action(data_dir: &str, action_id: &str) -> AppResult<McpToolCall> {
 struct ActionModeCtx<'a> {
     pool: &'a PgPool,
     data_dir: &'a str,
-    mcp_registry: &'a Arc<std::sync::RwLock<McpRegistry>>,
+    mcp_registry: &'a Arc<tokio::sync::RwLock<McpRegistry>>,
     app_context: &'a AppContext,
     job: &'a CronJobDueRow,
     display_name: &'a str,
@@ -482,8 +482,8 @@ async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
 
     // Execute the tool first, THEN create the thread with the result.
     // This avoids the executor picking up a pending thread before it's terminal.
-    // Clone the registry snapshot under the lock (RwLockReadGuard is !Send, can't cross .await).
-    let mcp_snapshot = ctx.mcp_registry.read().unwrap().clone();
+    // Snapshot the registry under the lock; tokio::sync::RwLockReadGuard is Send.
+    let mcp_snapshot = ctx.mcp_registry.read().await.clone();
     match mcp_snapshot
         .execute(&tool_call, ctx.app_context.clone())
         .await
@@ -784,7 +784,7 @@ fn extract_error_code(err_msg: &str) -> Option<String> {
 pub async fn fire_cron_job_by_id(
     pool: &PgPool,
     data_dir: &str,
-    mcp_registry: &Arc<std::sync::RwLock<McpRegistry>>,
+    mcp_registry: &Arc<tokio::sync::RwLock<McpRegistry>>,
     app_context: &AppContext,
     schedule_id: &str,
     force: bool,

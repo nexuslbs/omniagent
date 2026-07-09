@@ -304,7 +304,7 @@ pub async fn process_thread(
     let tool_names: Vec<String> = cfg
         .mcp
         .read()
-        .unwrap()
+        .await
         .all()
         .iter()
         .map(|t| t.name.clone())
@@ -771,7 +771,7 @@ pub async fn process_thread(
     messages.push(ChatMessage::user(&cause_msg.content));
 
     // 5. Build tool definitions from the profile's allowed tools
-    let tools_def = cfg.mcp.read().unwrap().to_openai_tools(&prof.allowed_tools);
+    let tools_def = cfg.mcp.read().await.to_openai_tools(&prof.allowed_tools);
 
     // 6. Tool-calling loop — max iterations controls total LLM calls
     let iter_limit =
@@ -1190,13 +1190,14 @@ pub async fn process_thread(
 
         // If multiple tool calls, persist a multi-tool message first
         if response.tool_calls.len() > 1 {
+            let mcp_snapshot = cfg.mcp.read().await;
             let multi_content = response
                 .tool_calls
                 .iter()
                 .map(|tc| {
                     format!(
                         "{}: {}",
-                        cfg.mcp.read().unwrap().qualified_name(&tc.function.name),
+                        mcp_snapshot.qualified_name(&tc.function.name),
                         tc.function.arguments
                     )
                 })
@@ -1264,7 +1265,7 @@ pub async fn process_thread(
             let tool_name = tc.function.name.clone();
             let tool_args = tc.function.arguments.clone();
             let tc_id = tc.id.clone();
-            let qualified_name = mcp_registry.read().unwrap().qualified_name(&tool_name);
+            let qualified_name = mcp_registry.read().await.qualified_name(&tool_name);
 
             let mcp_call = McpToolCall {
                 id: tc.id.clone(),
@@ -1285,9 +1286,8 @@ pub async fn process_thread(
             let iter_num = current_iter;
 
             join_set.spawn(async move {
-                // Clone the registry snapshot under the lock, then drop the lock
-                // before the async execute call (RwLockReadGuard is !Send).
-                let mcp_snapshot = mcp.read().unwrap().clone();
+                // Snapshot the registry under the lock; tokio::sync::RwLockReadGuard is Send.
+                let mcp_snapshot = mcp.read().await.clone();
 
                 // Per-tool timeout — prevents a single hanging tool from
                 // blocking the entire thread forever. Uses a generous default

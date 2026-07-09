@@ -133,7 +133,7 @@ pub struct AgentContext {
     pub pool: PgPool,
     pub llm: Arc<crate::llm::LLMClient>,
     pub config: Arc<RwLock<AgentConfig>>,
-    pub mcp: Arc<RwLock<McpRegistry>>,
+    pub mcp: Arc<tokio::sync::RwLock<McpRegistry>>,
     pub ctx: AppContext,
 }
 
