@@ -26,9 +26,10 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{StatusCode, Response},
     response::IntoResponse,
     routing::{delete, get, post},
+    body::Body,
     Json, Router,
 };
 use serde::Deserialize;
@@ -328,39 +329,67 @@ async fn resolve_plugin_for_compile(
     workspace_dir: &str,
     name: &str,
     handler_name: &str,
+    explicit_source: Option<&str>,
 ) -> Result<ResolvedPlugin, (StatusCode, Json<serde_json::Value>)> {
-    let (yaml_type, category) = match detect_plugin_category_cross_type(data_dir, name) {
-        Some((t, c)) => {
-            info!(
-                "{}: detected '{}' as type={:?} category={:?}",
-                handler_name, name, t, c
-            );
-            (t, c)
-        }
-        None => {
-            // Try to determine type from disk discovery
-            let disk_type = match plugins_yaml::get_disk_plugin_type(data_dir, name) {
-                Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
-                _ => {
-                    let err = Json(serde_json::json!({
-                        "success": false,
-                        "error": format!("Plugin '{}' not found on disk", name)
-                    }));
-                    return Err((StatusCode::NOT_FOUND, err));
-                }
-            };
-            let category = if plugins_yaml::has_remote_entry(data_dir, &disk_type, name) {
+    let (yaml_type, category) = if let Some(source) = explicit_source {
+        // Use the explicit source to determine category, skipping auto-detection
+        let yaml_type = match plugins_yaml::get_disk_plugin_type(data_dir, name) {
+            Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
+            _ => {
+                let err = Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Plugin '{}' not found on disk", name)
+                }));
+                return Err((StatusCode::NOT_FOUND, err));
+            }
+        };
+        let category = match source {
+            "built-in" => PluginCategory::Builtin,
+            "remote" => PluginCategory::Remote,
+            "bundled" => PluginCategory::OmniStack,
+            _ => {
+                let err = Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Invalid source '{}': must be 'built-in', 'bundled', or 'remote'", source)
+                }));
+                return Err((StatusCode::BAD_REQUEST, err));
+            }
+        };
+        (yaml_type, category)
+    } else {
+        match detect_plugin_category_cross_type(data_dir, name) {
+            Some((t, c)) => {
                 info!(
-                    "{}: detected '{}' as remote plugin from remote.yml",
-                    handler_name, name
+                    "{}: detected '{}' as type={:?} category={:?}",
+                    handler_name, name, t, c
                 );
-                PluginCategory::Remote
-            } else if plugins_yaml::is_plugin_builtin(data_dir, name, &disk_type) {
-                PluginCategory::Builtin
-            } else {
-                PluginCategory::OmniStack
-            };
-            (disk_type, category)
+                (t, c)
+            }
+            None => {
+                // Try to determine type from disk discovery
+                let disk_type = match plugins_yaml::get_disk_plugin_type(data_dir, name) {
+                    Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
+                    _ => {
+                        let err = Json(serde_json::json!({
+                            "success": false,
+                            "error": format!("Plugin '{}' not found on disk", name)
+                        }));
+                        return Err((StatusCode::NOT_FOUND, err));
+                    }
+                };
+                let category = if plugins_yaml::has_remote_entry(data_dir, &disk_type, name) {
+                    info!(
+                        "{}: detected '{}' as remote plugin from remote.yml",
+                        handler_name, name
+                    );
+                    PluginCategory::Remote
+                } else if plugins_yaml::is_plugin_builtin(data_dir, name, &disk_type) {
+                    PluginCategory::Builtin
+                } else {
+                    PluginCategory::OmniStack
+                };
+                (disk_type, category)
+            }
         }
     };
 
@@ -1150,8 +1179,10 @@ pub(crate) async fn disable_plugin_handler(
 pub(crate) async fn install_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
+    body: Option<Json<PluginSourceRequest>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
+    let explicit_source = body.as_ref().map(|b| b.source.as_str());
 
     // 1. Resolve plugin source via shared preamble (detect type, resolve dir, verify source)
     let resolved = match resolve_plugin_for_compile(
@@ -1159,6 +1190,7 @@ pub(crate) async fn install_plugin_handler(
         &state.workspace_dir,
         &name,
         "Install",
+        explicit_source,
     )
     .await
     {
@@ -1256,8 +1288,10 @@ pub(crate) async fn install_plugin_handler(
 pub(crate) async fn reinstall_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
+    body: Option<Json<PluginSourceRequest>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
+    let explicit_source = body.as_ref().map(|b| b.source.as_str());
 
     // 1. Resolve plugin source via shared preamble (detect type, resolve dir, verify source)
     let resolved = match resolve_plugin_for_compile(
@@ -1265,6 +1299,7 @@ pub(crate) async fn reinstall_plugin_handler(
         &state.workspace_dir,
         &name,
         "Reinstall",
+        explicit_source,
     )
     .await
     {
@@ -1982,15 +2017,20 @@ pub(crate) async fn delete_plugin_handler(
         .get("mode")
         .map(|s| s == "uninstall")
         .unwrap_or(false);
+    let explicit_source = params.get("source").map(|s| s.as_str());
 
     if is_uninstall_mode {
         // ── Uninstall mode ──
         // For remote: remove target/ dir, set enabled=false (keep .remote/ source)
         // For non-remote: remove from YAML + remove compiled target/ directory
-        let is_remote = matches!(
-            detect_plugin_category_cross_type(data_dir, &name),
-            Some((_, PluginCategory::Remote))
-        );
+        let is_remote = if let Some(source) = explicit_source {
+            source == "remote"
+        } else {
+            matches!(
+                detect_plugin_category_cross_type(data_dir, &name),
+                Some((_, PluginCategory::Remote))
+            )
+        };
 
         if is_remote {
             // Remove target/ directory (compiled binary), keep .remote/ source
@@ -2121,6 +2161,13 @@ pub(crate) async fn delete_plugin_handler(
     }
 
     // ── Remove mode (default) —─
+    // If explicit source is provided, bypass auto-detection and target that source directly.
+    if let Some(source) = explicit_source {
+        return handle_remove_by_source(data_dir, &state.workspace_dir, &name, source, &state)
+            .await
+            .into_response();
+    }
+
     // Detect plugin state across all three YAML types and disk locations
     let mut removed = false;
 
@@ -2378,9 +2425,137 @@ pub(crate) async fn delete_plugin_handler(
     }
 }
 
+/// Handle remove when an explicit `?source=` parameter is provided.
+/// Bypasses auto-detection and directly targets the specified source variant.
+async fn handle_remove_by_source(
+    data_dir: &str,
+    workspace_dir: &str,
+    name: &str,
+    source: &str,
+    state: &Arc<AppState>,
+) -> impl IntoResponse {
+    match source {
+        "built-in" => {
+            // Built-in plugins cannot be removed
+            let on_disk = plugins_yaml::is_plugin_builtin(data_dir, name, &plugins_yaml::PluginYamlType::Tool)
+                || plugins_yaml::is_plugin_builtin(data_dir, name, &plugins_yaml::PluginYamlType::Platform)
+                || plugins_yaml::is_plugin_builtin(data_dir, name, &plugins_yaml::PluginYamlType::Provider);
+            if on_disk {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("Cannot remove built-in plugin '{}'. Built-in plugins are part of the application and can only be disabled.", name)
+                    })),
+                ).into_response();
+            }
+            // YAML says built-in but not on disk → remove YAML only
+            let mut removed = false;
+            for pt in &[
+                plugins_yaml::PluginYamlType::Platform,
+                plugins_yaml::PluginYamlType::Tool,
+                plugins_yaml::PluginYamlType::Provider,
+            ] {
+                if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, pt, name) {
+                    if entry.source == "built-in" {
+                        let _ = plugins_yaml::remove_entry(data_dir, pt, name);
+                        removed = true;
+                        break;
+                    }
+                }
+            }
+            return respond_removed(name, removed);
+        }
+        "remote" => {
+            let mut removed = false;
+            // Find which type has this remote plugin, remove .remote/ dir + remote.yml
+            for (pt, type_str) in &[
+                (plugins_yaml::PluginYamlType::Tool, "tools"),
+                (plugins_yaml::PluginYamlType::Platform, "platforms"),
+                (plugins_yaml::PluginYamlType::Provider, "providers"),
+            ] {
+                let remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_str, name);
+                let remote_path = std::path::Path::new(&remote_dir);
+                if remote_path.exists() && remote_path.is_dir() {
+                    let _ = std::fs::remove_dir_all(remote_path);
+                    tracing::info!("Remove: removed .remote/ directory for '{}' (source=remote)", name);
+                    removed = true;
+                }
+                let _ = plugins_yaml::remove_remote_plugin(data_dir, pt, name);
+            }
+            // Remove YAML only if source matches
+            for pt in &[
+                plugins_yaml::PluginYamlType::Platform,
+                plugins_yaml::PluginYamlType::Tool,
+                plugins_yaml::PluginYamlType::Provider,
+            ] {
+                if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, pt, name) {
+                    if entry.source == "remote" {
+                        let _ = plugins_yaml::remove_entry(data_dir, pt, name);
+                        removed = true;
+                        break;
+                    }
+                }
+            }
+            // Stop MCP server
+            crate::mcp::external::client::clear_server_pools(name);
+            crate::mcp::external::client::remove_server_config(name);
+            state.tool_registry.write().unwrap().remove_by_server(name);
+            return respond_removed(name, removed);
+        }
+        "bundled" => {
+            let mut removed = false;
+            // Remove workspace + data dirs
+            for type_str in &["tools", "platforms", "providers"] {
+                let plugin_dir = format!("{}/plugins/{}/{}", workspace_dir, type_str, name);
+                let plugin_path = std::path::Path::new(&plugin_dir);
+                if plugin_path.exists() && plugin_path.is_dir() {
+                    let _ = std::fs::remove_dir_all(plugin_path);
+                    tracing::info!("Remove: removed workspace directory for '{}' (source=bundled)", name);
+                    removed = true;
+                }
+                let data_plugin_dir = format!("{}/plugins/{}/{}", data_dir, type_str, name);
+                let data_plugin_path = std::path::Path::new(&data_plugin_dir);
+                if data_plugin_path.exists() && data_plugin_path.is_dir() {
+                    let _ = std::fs::remove_dir_all(data_plugin_path);
+                    tracing::info!("Remove: removed data directory for '{}' (source=bundled)", name);
+                }
+            }
+            // Remove YAML only if source matches
+            for pt in &[
+                plugins_yaml::PluginYamlType::Platform,
+                plugins_yaml::PluginYamlType::Tool,
+                plugins_yaml::PluginYamlType::Provider,
+            ] {
+                if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, pt, name) {
+                    if entry.source == "bundled" || entry.source == "omni-stack" {
+                        let _ = plugins_yaml::remove_entry(data_dir, pt, name);
+                        removed = true;
+                        break;
+                    }
+                }
+            }
+            // Stop MCP server
+            crate::mcp::external::client::clear_server_pools(name);
+            crate::mcp::external::client::remove_server_config(name);
+            state.tool_registry.write().unwrap().remove_by_server(name);
+            return respond_removed(name, removed);
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Invalid source '{}': must be 'built-in', 'bundled', or 'remote'", source)
+                })),
+            ).into_response();
+        }
+    }
+}
+
 /// Helper: build a consistent remove response.
-/// Returns the early-exit shape `into_response()` to satisfy match arm types in the explicit-source path.
-fn respond_removed(name: &str, removed: bool) -> impl IntoResponse {
+/// Returns a concrete Response<Body> so it can be used inside async fns returning impl IntoResponse.
+fn respond_removed(name: &str, removed: bool) -> Response<Body> {
     if removed {
         info!("Deleted plugin '{}'", name);
         (
@@ -2770,9 +2945,23 @@ pub(crate) async fn rename_plugin_handler(
 pub(crate) async fn download_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
+    body: Option<Json<PluginSourceRequest>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
     let workspace_dir = &state.workspace_dir;
+
+    // Validate source — download only makes sense for remote plugins
+    if let Some(ref req) = body {
+        if req.source != "remote" {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Invalid source '{}': download only supports 'remote' source", req.source)
+                })),
+            ).into_response();
+        }
+    }
 
     // Find the YAML entry and extract remote info
     let (_yaml_type, remote_info) = match plugins_yaml::get_entry_with_type(data_dir, &name) {

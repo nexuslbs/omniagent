@@ -801,7 +801,7 @@ async fn schedule_threads_handler(
         LEFT JOIN channels c ON c.id = t.channel_id
         LEFT JOIN LATERAL (
             SELECT m.id, m.thread_id, m.role, m.content, m.msg_type,
-                   m.msg_subtype, m.token_usage::text AS token_usage,
+                   m.msg_subtype, NULL::text AS token_usage,
                    m.iteration_number, m.thread_sequence,
                    m.created_at, m.metadata
             FROM messages m
