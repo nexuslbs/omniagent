@@ -15,11 +15,14 @@ Plus file upload tests:
   8. Upload 3 files via explorer, verify files created in data/uploads/
   9. Create kanban task, upload 2 files scoped to task, verify files created
 
-Usage: python3 tests.py [--restore]
+|Usage: python3 tests.py [--restore]
   --restore: Attempt to restore the plugins.yml from git (for running after destructive tests)
 
 Note: Tests 2, 3, 5, 6 are destructive — they REMOVE real plugins. Run against
 a test environment or accept that some plugins will be missing afterward.
+
+Git hygiene: At start, verifies omni-stack repo has no unstaged changes (raises Error if dirty).
+At the end, discards any unstaged changes created during test execution, even on failure.
 """
 
 import sys
@@ -287,21 +290,68 @@ def test_9():
 
 def restore_plugins_yml():
     """Restore plugins.yml from git to undo destructive test effects"""
+    _git_checkout("plugins.yml", OMNI_STACK_DIR)
+
+
+# ── Git hygiene ──
+
+OMNI_STACK_DIR = "/opt/workspace/omni-stack"
+
+def _git_status(repo_dir):
+    """Return unstaged changes as a string, or empty string if clean."""
     import subprocess
-    try:
-        subprocess.run(
-            ["git", "checkout", "--", "plugins.yml"],
-            cwd="/opt/workspace/omni-stack",
-            capture_output=True,
-            check=True,
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def _git_checkout(path, repo_dir):
+    """Discard changes to path in the given repo."""
+    import subprocess
+    subprocess.run(
+        ["git", "checkout", "--", path],
+        cwd=repo_dir,
+        capture_output=True,
+    )
+
+
+def _git_discard_all(repo_dir):
+    """Discard all unstaged changes and untracked files in the given repo."""
+    import subprocess
+    subprocess.run(["git", "checkout", "--", "."], cwd=repo_dir, capture_output=True)
+    subprocess.run(["git", "clean", "-fd"], cwd=repo_dir, capture_output=True)
+
+
+def check_git_clean():
+    """Verify no unstaged changes in omni-stack repo before running tests.
+
+    The destructive tests (2, 3, 5, 6) modify plugins.yml and remove plugin
+    files — ensure we start from a clean slate so we can detect what changed.
+    """
+    dirty = _git_status(OMNI_STACK_DIR)
+    if dirty:
+        raise RuntimeError(
+            f"omni-stack repo has unstaged changes — cannot run tests safely:\n{dirty}"
         )
-        print("  Restored plugins.yml from git")
-    except Exception as e:
-        print(f"  WARN: could not restore plugins.yml: {e}")
+
+
+def discard_all_changes():
+    """Discard all unstaged changes in omni-stack created by test execution.
+
+    Call in finally block so it runs even when tests fail.
+    """
+    _git_discard_all(OMNI_STACK_DIR)
 
 if __name__ == "__main__":
     if "--restore" in sys.argv:
         restore_plugins_yml()
+
+    # Verify clean git state before making any changes
+    check_git_clean()
 
     print("\n=== Remove API Tests ===\n")
 
@@ -345,4 +395,8 @@ if __name__ == "__main__":
             check(False, f"exception: {e}")
 
     print(f"\n=== Results: {tests_passed} passed, {tests_failed} failed, {tests_skipped} skipped ===\n")
+
+    # Discard any unstaged changes created by test execution — runs even on failure
+    discard_all_changes()
+
     sys.exit(0 if tests_failed == 0 else 1)
