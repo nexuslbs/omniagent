@@ -1072,6 +1072,145 @@ def test_s6():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Dashboard page loading tests
+# ═══════════════════════════════════════════════════════════════════════
+
+def _dash_get(path):
+    """GET from the dashboard server, return (status_code, text, parsed_json_or_None)."""
+    try:
+        r = urllib.request.urlopen(f"{DASHBOARD}{path}", timeout=15)
+        text = r.read().decode("utf-8")
+        code = r.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+        text = e.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        return 0, str(e), None
+    try:
+        js = json.loads(text) if text.strip() else {}
+    except (json.JSONDecodeError, ValueError):
+        js = None
+    return code, text, js
+
+
+# ── SPA pages (serve index.html) ──
+
+DASH_PAGES = [
+    "/",
+]
+
+# ── API endpoints that should return valid data (not errors) ──
+
+DASH_API_ENDPOINTS = [
+    # Local routes (served by dashboard server directly)
+    ("GET", "/api/health", 200),
+    ("GET", "/api/templates", 200),
+    # Proxied routes (forwarded to omniagent)
+    ("GET", "/api/plugins", 200),
+    ("GET", "/api/mcp/tools", 200),
+    ("GET", "/api/channels", 200),
+    ("GET", "/api/profiles", 200),
+    ("GET", "/api/schedule", 200),
+    ("GET", "/api/overview/dashboard", 200),
+    ("GET", "/api/threads/filters", 200),
+    ("GET", "/api/fs/list?path=/", 200),
+    # Static assets
+    ("GET", "/assets/index-UgvjgAk1.js", 200),
+    ("GET", "/assets/index-1NcF5H7V.css", 200),
+    ("GET", "/favicon.svg", 200),
+]
+
+
+def test_dashboard_pages():
+    """
+    Verify all omni-dashboard pages load without errors.
+    Tests SPA fallback, static assets, local API routes, and proxied API routes.
+    Any endpoint returning an error message causes test failure.
+    """
+    # ── 1. SPA pages ──
+    for path in DASH_PAGES:
+        code, text, js = _dash_get(path)
+        assert code == 200, f"GET {path} returned {code}, expected 200"
+        assert "index-UgvjgAk1.js" in text or "<!DOCTYPE html>" in text, \
+            f"GET {path} did not return SPA HTML (missing JS bundle reference)"
+        assert '"error":"Not found"' not in text, \
+            f"GET {path} returned 'Not found' error"
+
+    # ── 2. API endpoints ──
+    for method, path, expected_code in DASH_API_ENDPOINTS:
+        code, text, js = _dash_get(path)
+        assert code == expected_code, \
+            f"{method} {path} returned {code}, expected {expected_code}. Body: {text[:200]}"
+        # Verify the response is not an error
+        if js is not None and isinstance(js, dict):
+            err = js.get("error") or ""
+            # "Not found" is a hard failure
+            assert "Not found" not in err, \
+                f"{method} {path} returned error: {err}"
+            # "Plugin not found" from the backend is also a failure
+            assert "Plugin not found" not in err, \
+                f"{method} {path} returned error: {err}"
+
+    # ── 3. Verify `/` does NOT return JSON error ──
+    code, text, js = _dash_get("/")
+    assert code == 200, f"GET / returned {code}"
+    assert js is None or "error" not in js, \
+        f"GET / returned JSON error instead of HTML SPA"
+    assert '"error":"Not found"' not in text, \
+        "SPA fallback returned 'Not found' — dist/index.html is missing or bind mount is stale"
+
+    # ── 4. Verify a page's inner data loading works ──
+    # The tools page does: apiGet("/plugins") + apiGet("/mcp/tools")
+    # We already verified those individually above. Now verify the combined
+    # result would render correctly: non-error response from both.
+    _, _, plugin_js = _dash_get("/api/plugins")
+    assert plugin_js is not None, "/api/plugins must return valid JSON"
+    assert plugin_js.get("success") is True, "/api/plugins must return success=true"
+    assert "data" in plugin_js, "/api/plugins must have 'data' key"
+    assert len(plugin_js["data"]) > 0, "/api/plugins data must not be empty"
+
+    _, _, tools_js = _dash_get("/api/mcp/tools")
+    assert tools_js is not None, "/api/mcp/tools must return valid JSON"
+    tools_list = tools_js if isinstance(tools_js, list) else tools_js.get("tools", tools_js.get("data", []))
+    assert len(tools_list) > 0, "/api/mcp/tools must return at least one tool"
+
+    # ── 5. Verify channels page data ──
+    _, _, channels_js = _dash_get("/api/channels")
+    assert channels_js is not None, "/api/channels must return valid JSON"
+
+    # ── 6. Verify profiles page data ──
+    _, _, profiles_js = _dash_get("/api/profiles")
+    assert profiles_js is not None, "/api/profiles must return valid JSON"
+
+    # ── 7. Verify overview dashboard data ──
+    _, _, overview_js = _dash_get("/api/overview/dashboard")
+    assert overview_js is not None, "/api/overview/dashboard must return valid JSON"
+    assert overview_js.get("success") is True, "/api/overview/dashboard must return success=true"
+
+    # ── 8. Verify threads filters data ──
+    _, _, filters_js = _dash_get("/api/threads/filters")
+    assert filters_js is not None, "/api/threads/filters must return valid JSON"
+
+    # ── 9. Verify schedule data ──
+    _, _, schedule_js = _dash_get("/api/schedule")
+    assert schedule_js is not None, "/api/schedule must return valid JSON"
+
+    # ── 10. Verify filesystem explorer data ──
+    _, _, fs_js = _dash_get("/api/fs/list?path=/")
+    assert fs_js is not None, "/api/fs/list must return valid JSON"
+    assert "entries" in fs_js, "/api/fs/list must have 'entries' key"
+
+    # ── 11. Verify templates data ──
+    _, _, templates_js = _dash_get("/api/templates")
+    assert templates_js is not None, "/api/templates must return valid JSON"
+
+    # ── 12. Verify health endpoint ──
+    _, _, health_js = _dash_get("/api/health")
+    assert health_js is not None, "/api/health must return valid JSON"
+    assert health_js.get("status") == "ok", "/api/health must return status=ok"
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Git hygiene
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1155,6 +1294,13 @@ if __name__ == "__main__":
     print(f"{'=' * 60}")
 
     for fn in [test_s1, test_s2, test_s3, test_s4, test_s5, test_s6]:
+        test(fn)
+
+    print(f"\n{'=' * 60}")
+    print("GROUP 5 — Dashboard page loading tests")
+    print(f"{'=' * 60}")
+
+    for fn in [test_dashboard_pages]:
         test(fn)
 
     print(f"\n{'=' * 60}")

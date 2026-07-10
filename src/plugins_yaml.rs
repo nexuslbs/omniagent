@@ -733,7 +733,7 @@ fn build_plugin_detail(
         }
     }
 
-    // Compute needs_build: Rust crate with no compiled binary
+    // Compute needs_build: compilable crate with no compiled binary
     let needs_build = plugin_dir
         .map(|dir| {
             let cargo_toml = std::path::Path::new(dir).join("Cargo.toml");

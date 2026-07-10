@@ -33,6 +33,8 @@ pub fn truncate_content(content: &str, max_chars: usize) -> String {
 pub const DEFAULT_MAX_TOOL_OUTPUT_CHARS: usize = 50_000;
 
 pub mod external;
+pub mod memory_tools;
+pub mod prompt_tools;
 
 /// A tool call requested by the LLM.
 #[derive(Debug, Clone)]
@@ -678,6 +680,18 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
     // Allows the agent to read file attachments that exceed the inline
     // size limit by delegating to the appropriate platform's FileReader.
     registry.register(read_attached_file_tool());
+
+    // ── Built-in memory tools (replace external mcp-server-memory) ──
+    // manage_memory, promote_to_memory, list_memories, review_memories
+    for tool in memory_tools::all_memory_tools() {
+        registry.register(tool);
+    }
+
+    // ── Built-in prompt tools (stateless prompt generator + condenser) ──
+    // generate_initial_prompt, compact_messages
+    for tool in prompt_tools::all_prompt_tools() {
+        registry.register(tool);
+    }
 
     tracing::info!(
         "MCP registry initialized with {} tools (external + built-in)",

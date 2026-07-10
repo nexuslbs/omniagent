@@ -43,7 +43,7 @@ use crate::agent::config::AgentConfig;
 use crate::agent::helpers;
 use crate::db::types as queries;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient};
-use crate::mcp::{AppContext, McpRegistry};
+use crate::mcp::{AppContext, McpRegistry, McpToolCall};
 use crate::prompt_builder::{
     build_planning_prompt, build_system_prompt, build_system_prompt_parts, MemoryStore,
     PlanningPromptParams,
@@ -146,6 +146,7 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
             post(prompt_preview_handler),
         )
         .route("/mcp/tools", get(list_mcp_tools_handler))
+        .route("/mcp/execute", post(execute_mcp_tool_handler))
         // ── Context preview (section [3] only, no messages written) ──
         .route("/api/context/{channel_name}", get(context_preview_handler))
         // ── Plugin management routes ──
@@ -888,6 +889,47 @@ async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serd
         })
         .collect();
     Json(serde_json::json!(tools))
+}
+
+/// Request body for `POST /mcp/execute`.
+#[derive(serde::Deserialize)]
+struct McpExecuteRequest {
+    name: String,
+    arguments: Option<serde_json::Value>,
+}
+
+/// POST /mcp/execute — execute any registered MCP tool by name.
+/// Stateless: accepts tool name + arguments, returns tool result.
+/// Useful for testing stateless tools like compact_messages and
+/// generate_initial_prompt without needing a channel or database.
+async fn execute_mcp_tool_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<McpExecuteRequest>,
+) -> Json<serde_json::Value> {
+    let args = body.arguments.unwrap_or(serde_json::json!({}));
+    let call = crate::mcp::McpToolCall {
+        id: "api-exec".to_string(),
+        name: body.name,
+        arguments: args,
+    };
+
+    match state
+        .tool_registry
+        .read()
+        .await
+        .execute(&call, state.app_context.clone())
+        .await
+    {
+        Ok(result) => Json(serde_json::json!({
+            "success": true,
+            "content": result.content,
+            "is_error": result.is_error,
+        })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string(),
+        })),
+    }
 }
 
 /// GET /api/context/{channel_name} — preview section [3] Context, read-only.
