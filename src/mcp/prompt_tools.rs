@@ -3,9 +3,13 @@
 //! These are the "memory prompt generator and condenser" — stateless tools that
 //! build system/planning prompts and compact conversation messages.
 //! No database, Qdrant, pgvector, or hindsight dependencies.
+//!
+//! The core logic lives in the standalone `prompt-tools` crate — this file is
+//! just the MCP handler adapter for omniagent.
 
 use crate::mcp::{AppContext, McpTool, McpToolResult};
-use crate::prompt_builder::{self, MemoryStore};
+use prompt_tools::{build_planning_prompt, build_system_prompt, compact_messages};
+use prompt_tools::{ChatMessage, MemoryStore, PlanningPromptParams};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -91,7 +95,7 @@ fn generate_initial_prompt_tool() -> McpTool {
                 let mut memory_store = MemoryStore::new(&base_path);
                 memory_store.load_from_disk();
 
-                let system_prompt = prompt_builder::build_system_prompt(
+                let system_prompt = build_system_prompt(
                     &memory_store,
                     platform,
                     system_message,
@@ -99,9 +103,9 @@ fn generate_initial_prompt_tool() -> McpTool {
                     &tool_names,
                 );
 
-                let planning_prompt = prompt_builder::build_planning_prompt(
+                let planning_prompt = build_planning_prompt(
                     &memory_store,
-                    prompt_builder::PlanningPromptParams {
+                    PlanningPromptParams {
                         platform,
                         profile_name,
                         user_message,
@@ -174,7 +178,7 @@ fn compact_messages_tool() -> McpTool {
 
                 let keep_recent = args["keep_recent"].as_u64().unwrap_or(3) as usize;
 
-                let mut messages: Vec<crate::llm::ChatMessage> =
+                let mut messages: Vec<ChatMessage> =
                     match serde_json::from_value(serde_json::Value::Array(messages_arr.clone())) {
                         Ok(msgs) => msgs,
                         Err(e) => {
@@ -187,7 +191,7 @@ fn compact_messages_tool() -> McpTool {
                     };
 
                 let before = messages.len();
-                crate::agent::helpers::compact_old_assistant_messages(&mut messages, keep_recent);
+                compact_messages(&mut messages, keep_recent);
                 let after = messages.len();
 
                 let result = serde_json::json!({
@@ -216,3 +220,4 @@ fn compact_messages_tool() -> McpTool {
 pub fn all_prompt_tools() -> Vec<McpTool> {
     vec![generate_initial_prompt_tool(), compact_messages_tool()]
 }
+
