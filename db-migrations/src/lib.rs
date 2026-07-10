@@ -33,7 +33,57 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await
         .ok();
-    tracing::info!("[migration] Schema v2 applied successfully");
+
+    // ── Migrate planning_mode string to plan boolean ─────────────────────
+    // Add plan column to threads, backfill from planning_mode
+    sqlx::query("ALTER TABLE threads ADD COLUMN IF NOT EXISTS plan BOOLEAN NOT NULL DEFAULT false")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query(
+        "UPDATE threads SET plan = true WHERE planning_mode IN ('auto_plan', 'auto_subtasks', 'always')"
+    )
+        .execute(pool)
+        .await
+        .ok();
+
+    // Add plan column to kanban_tasks
+    sqlx::query("ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS plan BOOLEAN NOT NULL DEFAULT false")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query(
+        "UPDATE kanban_tasks SET plan = true WHERE planning_mode IN ('auto_plan', 'auto_subtasks', 'always')"
+    )
+        .execute(pool)
+        .await
+        .ok();
+
+    // Add plan column to cron_jobs
+    sqlx::query("ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS plan BOOLEAN NOT NULL DEFAULT false")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query(
+        "UPDATE cron_jobs SET plan = true WHERE planning_mode IN ('auto_plan', 'auto_subtasks', 'always')"
+    )
+        .execute(pool)
+        .await
+        .ok();
+
+    // Add plan column to channels
+    sqlx::query("ALTER TABLE channels ADD COLUMN IF NOT EXISTS plan BOOLEAN NOT NULL DEFAULT false")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query(
+        "UPDATE channels SET plan = true WHERE planning_mode IN ('auto_plan', 'auto_subtasks', 'always')"
+    )
+        .execute(pool)
+        .await
+        .ok();
+
+    tracing::info!("[migration] Schema v3 — plan boolean columns added");
     Ok(())
 }
 

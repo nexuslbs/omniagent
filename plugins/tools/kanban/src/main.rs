@@ -73,7 +73,7 @@ fn task_to_json(task: &db::kanban::KanbanTaskDb) -> serde_json::Value {
         "template": task.template,
         "archived": task.archived,
         "channel_id": task.channel_id,
-        "planning_mode": task.planning_mode,
+        "plan": task.plan,
     })
 }
 
@@ -581,37 +581,37 @@ async fn main() -> Result<()> {
 
     // Wrap each handler to capture a clone of the pool
     let p_create = pool.clone();
-    let create_handler: ToolHandler = Box::new(move |args: Value| {
+    let create_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_create.clone();
         Box::pin(async move { handle_create(&p, &args).await })
     });
 
     let p_list = pool.clone();
-    let list_handler: ToolHandler = Box::new(move |args: Value| {
+    let list_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_list.clone();
         Box::pin(async move { handle_list(&p, &args).await })
     });
 
     let p_update = pool.clone();
-    let update_handler: ToolHandler = Box::new(move |args: Value| {
+    let update_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_update.clone();
         Box::pin(async move { handle_update(&p, &args).await })
     });
 
     let p_delete = pool.clone();
-    let delete_handler: ToolHandler = Box::new(move |args: Value| {
+    let delete_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_delete.clone();
         Box::pin(async move { handle_delete(&p, &args).await })
     });
 
     let p_add_dep = pool.clone();
-    let add_dep_handler: ToolHandler = Box::new(move |args: Value| {
+    let add_dep_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_add_dep.clone();
         Box::pin(async move { handle_add_dependency(&p, &args).await })
     });
 
     let p_rm_dep = pool.clone();
-    let rm_dep_handler: ToolHandler = Box::new(move |args: Value| {
+    let rm_dep_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_rm_dep.clone();
         Box::pin(async move { handle_remove_dependency(&p, &args).await })
     });

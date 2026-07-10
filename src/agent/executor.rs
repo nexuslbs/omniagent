@@ -9,7 +9,6 @@ use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, LLMConfig, ProviderId, Usage};
 use crate::mcp::McpToolCall;
 use crate::mcp::{truncate_content, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
-use crate::prompt_builder::{format_subtask_section, PlanningPromptParams};
 use tokio::task::JoinSet;
 
 /// Process a single pending thread through the state machine:
@@ -300,7 +299,14 @@ pub async fn process_thread(
         LLMClient::new(llm_cfg)
     };
 
-    // 4. Build the initial message history with the structured system prompt
+    // Query channel metadata for context assembly
+    let channel = queries::get_channel_by_id(&cfg.pool, thread.channel_id)
+        .await?
+        .unwrap_or_default();
+
+    // 4. Build the initial message history via the MCP prompt plugin
+    // The plugin returns 5 parts: system, memory, soul, context, user
+    // Omniagent assembles these parts into the message array
     let tool_names: Vec<String> = cfg
         .mcp
         .read()
@@ -309,56 +315,60 @@ pub async fn process_thread(
         .iter()
         .map(|t| t.name.clone())
         .collect();
-    let system_prompt = crate::prompt_builder::build_system_prompt(
-        &cfg.ctx.memory_store,
-        "",   // platform — will be enriched from channel metadata in the future
-        None, // system_message
-        &profile_name,
-        &tool_names,
-    );
 
-    // 4a. Inject subtask context if the thread has subtasks
-    let subtask_section: Option<String> =
-        match crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
-            Ok(subtask_rows) => {
-                if subtask_rows.is_empty() {
-                    None
-                } else {
-                    let thread_subtasks: Vec<crate::prompt_builder::ThreadSubtask> = subtask_rows
-                        .iter()
-                        .enumerate()
-                        .map(|(i, row)| {
-                            let status = match row.status.as_str() {
-                                "completed" => crate::prompt_builder::SubtaskStatus::Completed,
-                                "cancelled" => crate::prompt_builder::SubtaskStatus::Cancelled,
-                                "error" => crate::prompt_builder::SubtaskStatus::Error,
-                                _ => crate::prompt_builder::SubtaskStatus::Pending,
-                            };
-                            crate::prompt_builder::ThreadSubtask {
-                                name: row.description.clone(),
-                                status,
-                                step_index: i,
-                                total_steps: subtask_rows.len(),
-                            }
-                        })
-                        .collect();
-                    let section = format_subtask_section(&thread_subtasks, thread.id);
-                    if section.is_some() {
-                        info!(
-                            "Injected subtask section into system prompt for thread {}",
-                            thread.id
-                        );
-                    }
-                    section
-                }
-            }
-            Err(e) => {
-                warn!("Failed to query subtasks for thread {}: {:?}", thread.id, e);
-                None
-            }
+    struct PromptParts {
+        system: String,
+        memory: String,
+        soul: String,
+        context: String,
+        user: String,
+        plan: bool,
+    }
+
+    let prompt_parts = {
+        let mcp_call = McpToolCall {
+            id: "sys-prompt-gen".to_string(),
+            name: "generate".to_string(),
+            arguments: serde_json::json!({
+                "profile_name": profile_name,
+                "platform": channel.platform.as_deref().unwrap_or(""),
+                "user_message": cause_msg.content,
+                "tool_names": tool_names,
+                "thread_id": thread.id,
+                "channel_id": thread.channel_id,
+                "plan": thread.plan,
+            }),
         };
+        let result = cfg
+            .mcp
+            .read()
+            .await
+            .execute(&mcp_call, cfg.ctx.clone())
+            .await?;
+        let parsed: serde_json::Value = serde_json::from_str(&result.content)
+            .unwrap_or(serde_json::json!({}));
 
-    // 4b. Load template from cause message metadata (for kanban/cron/user tasks)
+        // If the plugin returned a plan decision, persist it to the thread
+        if parsed.get("plan").is_some() {
+            let plan_val = parsed["plan"].as_bool().unwrap_or(false);
+            sqlx::query("UPDATE threads SET plan = $1 WHERE id = $2")
+                .bind(plan_val)
+                .bind(thread.id)
+                .execute(&cfg.pool)
+                .await?;
+        }
+
+        PromptParts {
+            system: parsed["system"].as_str().unwrap_or("").to_string(),
+            memory: parsed["memory"].as_str().unwrap_or("").to_string(),
+            soul: parsed["soul"].as_str().unwrap_or("").to_string(),
+            context: parsed["context"].as_str().unwrap_or("").to_string(),
+            user: parsed["user"].as_str().unwrap_or("").to_string(),
+            plan: parsed.get("plan").and_then(|v| v.as_bool()).unwrap_or(false),
+        }
+    };
+
+    // 4a. Load template from cause message metadata (for kanban/cron/user tasks)
     let template_section: Option<String> = {
         let msg_type = cause_msg.msg_type.as_str();
         if msg_type == "kanban" || msg_type == "cron" || msg_type == "Cause" {
@@ -366,20 +376,28 @@ pub async fn process_thread(
                 .metadata
                 .get("template")
                 .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .or_else(|| {
-                    cause_msg
-                        .metadata
-                        .get("template")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                });
+                .filter(|s| !s.is_empty());
             if let Some(template) = template_name {
-                let content = crate::prompt_builder::load_template(
-                    &cfg.ctx.data_dir,
-                    &profile_name,
-                    template,
-                );
+                let template_path = if template.ends_with(".md") || template.contains('.') {
+                    std::path::PathBuf::from(&cfg.ctx.data_dir)
+                        .join("profiles")
+                        .join(&profile_name)
+                        .join("templates")
+                        .join(template)
+                } else {
+                    std::path::PathBuf::from(&cfg.ctx.data_dir)
+                        .join("profiles")
+                        .join(&profile_name)
+                        .join("templates")
+                        .join(format!("{}.md", template))
+                };
+                let content = if template_path.exists() {
+                    std::fs::read_to_string(&template_path).ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                } else {
+                    None
+                };
                 if let Some(ref tmpl) = content {
                     info!(
                         "Loaded template '{}' for thread {} ({} chars)",
@@ -402,57 +420,8 @@ pub async fn process_thread(
         }
     };
 
-    // 4c. Assemble additional context blocks via ContextBuilder
-    let ctx_assembly_meta: Option<crate::context_builder::ContextAssemblyMeta>;
-    // For kanban/cron tasks, use task_context mode (skip conversation history, summaries)
-    // even when no template is loaded. The task body IS the primary context.
-    let is_task = cause_msg.msg_type == "kanban" || cause_msg.msg_type == "cron";
-
-    // ── System thread: deliver seq-0 cause to channel's platform ──
-    // If this system thread's channel has a platform (e.g. Mattermost),
-    // enqueue the cause message so it appears as a new post in that channel.
-    // Subsequent messages in this thread will be delivered as replies.
-    if thread.cause == "system" && cause_msg.external_id.is_none() {
-        if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
-            if channel.platform.is_some() && channel.resource_identifier.is_some() {
-                info!(
-                    "Delivering system cause (thread {}) to platform {:?}:{:?}",
-                    thread.id, channel.platform, channel.resource_identifier
-                );
-                helpers::enqueue_delivery(&cfg.ctx, cause_msg, &channel, thread, None).await;
-            }
-        }
-    }
-    let context_messages = {
-        let (context_text, meta) = crate::context_builder::build_thread_context(
-            &cfg.pool,
-            &crate::context_builder::ThreadContextIdentifiers {
-                thread_id: thread.id,
-                channel_id: thread.channel_id,
-                cause_msg_id: cause_msg.id,
-                parent_id: thread.parent_id,
-            },
-            &crate::context_builder::ThreadContextConfig {
-                cause_content: &cause_msg.content,
-                profile_name: &profile_name,
-                data_dir: &cfg.ctx.data_dir,
-                qdrant_url: cfg.ctx.qdrant_url.as_deref(),
-                prompt_budget: prof
-                    .prompt_budget
-                    .unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
-                auto_retrieval_enabled: prof.auto_retrieval_enabled,
-                retrieval_aggressiveness: if is_task || template_section.is_some() {
-                    prof.retrieval_aggressiveness.min(1)
-                } else {
-                    prof.retrieval_aggressiveness
-                },
-                task_context: is_task || template_section.is_some(),
-            },
-        )
-        .await;
-        ctx_assembly_meta = Some(meta);
-        context_text
-    };
+    // Log context assembly metadata (keep for logging, the text comes from the plugin)
+    let ctx_assembly_meta: Option<crate::context_builder::ContextAssemblyMeta> = None;
 
     // Track cumulative token usage across all LLM calls
     let mut cumulative_usage: Option<crate::llm::Usage> = None;
@@ -460,35 +429,19 @@ pub async fn process_thread(
     let mut current_iter: i32;
 
     // ── Planning Phase ──
-    // Read planning_mode from thread (single source of truth, resolved at creation time)
-    let planning_mode = if thread.planning_mode.is_empty() {
-        // Safety net for any remaining empty threads (backfilled to prompt_only)
-        "prompt_only".to_string()
-    } else {
-        thread.planning_mode.clone()
-    };
+    // Plan is a boolean resolved at thread creation time.
+    // When true, the agent runs a planning iteration before the main loop.
+    // The planning prompt itself is generated by the prompt plugin —
+    // the executor just orchestrates the calls.
+    let should_plan = thread.plan;
 
-    // Fetch channel for delivery — cached for use throughout the function
-    let channel = queries::get_channel_by_id(&cfg.pool, thread.channel_id)
-        .await?
-        .unwrap_or_default();
-
-    // Whether subtask creation and enforcement are enabled
-    let enable_subtasks = planning_mode == "auto_subtasks";
+    // Whether subtask tools are enabled for the main loop
+    let enable_subtasks = should_plan;
 
     // Pre-read prompt log level for consistency across planning and main loop
     let prompt_log_level = cfg.config_snapshot().prompt_log_level;
     let prompt_log_level = prompt_log_level.as_str();
     let mut has_logged_first_prompt = false;
-
-    // Determine if we should run the planning phase
-    // The thread's planning_mode was resolved at creation time and is the
-    // single source of truth. Threads always have exactly one of:
-    // "prompt_only" (no plan), "auto_plan" (simple plan), "auto_subtasks" (plan + subtasks).
-    let should_plan = matches!(
-        planning_mode.as_str(),
-        "always" | "auto_plan" | "auto_subtasks"
-    );
 
     let plan_content: Option<String> = if should_plan {
         let max_iter = 0; // one-shot, no refinement iterations
@@ -499,29 +452,55 @@ pub async fn process_thread(
         let mut json_error_msg: Option<String> = None;
 
         for iter in 0..(max_iter + 1) {
-            // Build the planning prompt (lightweight — no tools, no heavy context)
-            let planning_prompt = crate::prompt_builder::build_planning_prompt(
-                &cfg.ctx.memory_store,
-                PlanningPromptParams {
-                    platform: "", // platform
-                    profile_name: &profile_name,
-                    user_message: &cause_msg.content,
-                    plan_iteration: iter,
-                    max_iterations: max_iter,
-                    previous_plan: last_plan.as_deref(),
-                    use_json_plan: enable_subtasks,
-                },
-                &tool_names,
-            );
-
-            let mut planning_messages = vec![ChatMessage::system(&planning_prompt)];
-            if let Some(ref err) = json_error_msg {
-                planning_messages.push(ChatMessage::system(err));
+            // Build planning messages from prompt parts
+            // User's request goes in context; planning instruction goes in user
+            let mut planning_messages = vec![ChatMessage::system(&prompt_parts.system)];
+            if !prompt_parts.memory.is_empty() {
+                planning_messages.push(ChatMessage::system(&prompt_parts.memory));
+            }
+            if !prompt_parts.soul.is_empty() {
+                planning_messages.push(ChatMessage::system(&prompt_parts.soul));
+            }
+            if !prompt_parts.context.is_empty() {
+                planning_messages.push(ChatMessage::system(&format!(
+                    "=== Context ===\n{}", prompt_parts.context
+                )));
             }
             // Inject the task template so the plan is aware of the instructions
             if let Some(ref ts) = template_section {
                 planning_messages.push(ChatMessage::system(ts));
             }
+            if let Some(ref err) = json_error_msg {
+                planning_messages.push(ChatMessage::system(err));
+            }
+            // Planning instruction as user message
+            let tool_list = if tool_names.is_empty() {
+                String::new()
+            } else {
+                format!("Your available tools: {}.", tool_names.join(", "))
+            };
+            let planning_prompt = if iter == 0 {
+                format!(
+                    "## Plan\nBefore responding, create a high-level plan with numbered steps. \
+{tool_list}\nBe specific about which tool to use and what parameters to pass. \
+Aim for the minimum number of steps to complete the task. \
+Wrap your plan in a <plan> block. After delivering the final answer, \
+evaluate: if the task was completed, call the completion tool."
+                )
+            } else {
+                format!(
+                    "## Revised Plan (iteration {}/{})\n\
+Your previous plan did not fully complete the task. \
+Review what was done vs what remains. Identify the specific \
+blockage and create a revised plan. Each step must include \
+which tool to use and what parameters.\n\n\
+Previous plan:\n{}",
+                    iter + 1,
+                    max_iter,
+                    last_plan.as_deref().unwrap_or("(none)")
+                )
+            };
+            planning_messages.push(ChatMessage::user(&planning_prompt));
 
             // ── Optional: insert prompt message before planning LLM call ──
             // Logs the prompt *sent to* the LLM (not the returned plan, which is
@@ -727,7 +706,14 @@ pub async fn process_thread(
         None
     };
 
-    let mut messages = vec![ChatMessage::system(&system_prompt)];
+    // 5. Assemble messages from prompt parts
+    let mut messages = vec![ChatMessage::system(&prompt_parts.system)];
+    if !prompt_parts.memory.is_empty() {
+        messages.push(ChatMessage::system(&prompt_parts.memory));
+    }
+    if !prompt_parts.soul.is_empty() {
+        messages.push(ChatMessage::system(&prompt_parts.soul));
+    }
 
     // Inject task template FIRST (right after system prompt) — highest instruction priority
     // for template-backed tasks (kanban/cron with template).
@@ -736,18 +722,11 @@ pub async fn process_thread(
         messages.push(ChatMessage::system(template_section));
     }
 
-    // Inject subtask context section if the thread has active subtasks
-    if let Some(ref subtask_section) = subtask_section {
-        messages.push(ChatMessage::system(subtask_section));
-    }
-
-    // Add context blocks as system messages (before the user message)
-    // For template-backed tasks (kanban/cron with template), skip conversation context
-    // (recent messages, summaries, hindsight recall) — the template IS the context.
-    if !context_messages.is_empty() {
+    // Add context from plugin as system message (before the user message)
+    if !prompt_parts.context.is_empty() {
         messages.push(ChatMessage::system(&format!(
-            "=== Additional Context ===\n{}",
-            context_messages
+            "=== Context ===\n{}",
+            prompt_parts.context
         )));
     }
 
@@ -767,15 +746,15 @@ pub async fn process_thread(
         );
     }
 
-    // Add the user message (from the cause message)
-    messages.push(ChatMessage::user(&cause_msg.content));
+    // Add the user message (from the prompt parts — the plugin provides this)
+    messages.push(ChatMessage::user(&prompt_parts.user));
 
     // 5. Build tool definitions from the profile's allowed tools
     let tools_def = cfg.mcp.read().await.to_openai_tools(&prof.allowed_tools);
 
     // 6. Tool-calling loop — max iterations controls total LLM calls
     let iter_limit =
-        queries::max_iterations_for_planning_mode(&cfg.config_snapshot(), &thread.planning_mode)
+        queries::max_iterations_for_plan(&cfg.config_snapshot(), thread.plan)
             as i32;
     // The plan phase consumed 1 iteration (if it ran). Subtract it so the
     // tool-calling loop gets the remaining budget.
@@ -1277,6 +1256,9 @@ pub async fn process_thread(
             let mut tool_ctx = cfg.ctx.clone();
             tool_ctx.current_thread_id = Some(thread.id);
             tool_ctx.current_channel_id = Some(thread.channel_id);
+            tool_ctx.current_profile_name = Some(profile_name.clone());
+            tool_ctx.current_channel_name = Some(channel.name.clone());
+            tool_ctx.current_platform = channel.platform.clone();
             tool_ctx.current_allowed_tools = prof.allowed_tools.clone();
 
             let pool = pool.clone();

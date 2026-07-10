@@ -219,13 +219,29 @@ pub trait McpServerClient: Send + Sync {
                             });
                         }
 
-                        let channel_id = ctx.current_channel_id.ok_or_else(|| {
-                            crate::error::Error::Message(
-                                "current_channel_id must be set before tool call".to_string(),
-                            )
-                        })?;
+                        // Build _meta context from AppContext (channel_id always, optional thread/profile/platform)
+                        let mut meta_map = serde_json::Map::new();
+                        if let Some(cid) = ctx.current_channel_id {
+                            meta_map.insert("channel_id".to_string(), serde_json::json!(cid));
+                        }
+                        if let Some(tid) = ctx.current_thread_id {
+                            meta_map.insert("thread_id".to_string(), serde_json::json!(tid));
+                        }
+                        if let Some(ref pn) = ctx.current_profile_name {
+                            meta_map.insert("profile_name".to_string(), serde_json::json!(pn));
+                        }
+                        if let Some(ref plat) = ctx.current_platform {
+                            meta_map.insert("platform".to_string(), serde_json::json!(plat));
+                        }
+                        if let Some(ref cn) = ctx.current_channel_name {
+                            meta_map.insert("channel_name".to_string(), serde_json::json!(cn));
+                        }
+                        let meta = if meta_map.is_empty() { None } else { Some(Value::Object(meta_map)) };
 
-                        match call_tool_pooled_async(&sn, &tn, &args, channel_id, &ctx.pool).await {
+                        // Use channel_id for pool routing if available, otherwise 0 for global pool
+                        let pool_channel_id = ctx.current_channel_id.unwrap_or(0);
+
+                        match call_tool_pooled_async(&sn, &tn, &args, meta, pool_channel_id, &ctx.pool).await {
                             Ok(res) => {
                                 circuit.record_success();
                                 Ok(res)
@@ -255,6 +271,7 @@ async fn call_tool_pooled_async(
     server_name: &str,
     tool_name: &str,
     args: &Value,
+    meta: Option<Value>,
     channel_id: i64,
     pool: &sqlx::PgPool,
 ) -> AppResult<McpToolResult> {
@@ -297,7 +314,7 @@ async fn call_tool_pooled_async(
     };
 
     mcp_pool
-        .call_tool(tool_name, args, config.timeout_secs)
+        .call_tool(tool_name, args, meta, config.timeout_secs)
         .await
 }
 
@@ -649,7 +666,7 @@ impl McpServerClient for StdioMcpClient {
         let server_name = &self.config.name;
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let req = build_call_tool_request(id, name, arguments);
+        let req = build_call_tool_request(id, name, arguments, None);
 
         // Use the configured timeout_secs for the request-response cycle.
         // stdio transport had no timeout before — a hanging server would
@@ -867,7 +884,7 @@ impl McpServerClient for HttpMcpClient {
 
     async fn call_tool(&self, name: &str, arguments: &Value) -> AppResult<McpToolResult> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let req = build_call_tool_request(id, name, arguments);
+        let req = build_call_tool_request(id, name, arguments, None);
         let response = self.post(&req).await?;
 
         let result_value =
@@ -984,6 +1001,7 @@ impl McpClientPool {
         &self,
         name: &str,
         arguments: &Value,
+        meta: Option<Value>,
         timeout_secs: u64,
     ) -> AppResult<McpToolResult> {
         let _permit = self
@@ -1000,7 +1018,7 @@ impl McpClientPool {
         let mut guard = self.processes[idx].lock().await;
         let pooled = &mut *guard;
         let id = pooled.next_id.fetch_add(1, Ordering::SeqCst);
-        let req = build_call_tool_request(id, name, arguments);
+        let req = build_call_tool_request(id, name, arguments, meta);
 
         let timeout_dur = std::time::Duration::from_secs(timeout_secs);
         let response = tokio::time::timeout(

@@ -874,7 +874,7 @@ impl Platform for ExternalPlatformClient {
                                                                     },
                                                                     msg_type: "Cause".to_string(),
                                                                     msg_subtype: Some(plugin_name.clone()),
-                                                                    task_planning_mode: String::new(),
+                                                                    task_plan: Some(false),
                                                                 },
                                                             ).await {
                                                                 // success — message and thread created

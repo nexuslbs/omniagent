@@ -291,27 +291,27 @@ async fn main() -> Result<()> {
 
     // Wrap each handler to capture a clone of the pool
     let p_add = pool.clone();
-    let add_handler: ToolHandler = Box::new(move |args: Value| {
+    let add_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_add.clone();
         Box::pin(async move { handle_add(&p, &args).await })
     });
     let p_list = pool.clone();
-    let list_handler: ToolHandler = Box::new(move |args: Value| {
+    let list_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_list.clone();
         Box::pin(async move { handle_list(&p, &args).await })
     });
     let p_upd = pool.clone();
-    let update_handler: ToolHandler = Box::new(move |args: Value| {
+    let update_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_upd.clone();
         Box::pin(async move { handle_update(&p, &args).await })
     });
     let p_del = pool.clone();
-    let delete_handler: ToolHandler = Box::new(move |args: Value| {
+    let delete_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_del.clone();
         Box::pin(async move { handle_delete(&p, &args).await })
     });
     let p_cnt = pool.clone();
-    let counts_handler: ToolHandler = Box::new(move |args: Value| {
+    let counts_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_cnt.clone();
         Box::pin(async move { handle_get_counts(&p, &args).await })
     });

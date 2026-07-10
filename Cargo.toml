@@ -12,6 +12,7 @@ members = [
     "plugins/tools/plugin-manager",
     "plugins/tools/subtasks",
     "plugins/tools/hindsight",
+    "plugins/tools/prompt",
 ]
 resolver = "2"
 
@@ -37,7 +38,6 @@ sqlx = { version = "0.9", features = ["postgres", "runtime-tokio", "chrono", "uu
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-prompt-tools = { path = "/opt/workspace/prompt-tools" }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

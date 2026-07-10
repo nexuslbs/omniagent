@@ -33,7 +33,7 @@ pub struct ThreadDb {
     pub terminal: bool,
     pub task_id: Option<String>,
     pub schedule_task_id: Option<String>,
-    pub planning_mode: String,
+    pub plan: bool,
     pub parent_id: Option<i64>,
     pub iterations: i32,
 }
@@ -91,7 +91,7 @@ impl TryFrom<ThreadDb> for Thread {
             terminal: db.terminal,
             task_id: db.task_id,
             schedule_task_id: db.schedule_task_id,
-            planning_mode: db.planning_mode,
+            plan: db.plan,
             parent_id: db.parent_id,
             iterations: db.iterations,
         })
@@ -274,7 +274,7 @@ pub struct CreateThreadParams {
     pub model: Option<String>,
     pub task_id: Option<String>,
     pub schedule_task_id: Option<String>,
-    pub planning_mode: String,
+    pub plan: bool,
     pub parent_id: Option<i64>,
 }
 
@@ -305,7 +305,7 @@ pub struct ThreadCauseParams {
     pub metadata: serde_json::Value,
     pub msg_type: String,
     pub msg_subtype: Option<String>,
-    pub task_planning_mode: String,
+    pub task_plan: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -459,7 +459,7 @@ pub struct Thread {
     pub terminal: bool,
     pub task_id: Option<String>,
     pub schedule_task_id: Option<String>,
-    pub planning_mode: String,
+    pub plan: bool,
     pub parent_id: Option<i64>,
     pub iterations: i32,
 }
@@ -474,7 +474,7 @@ pub struct ThreadNew {
     pub model: Option<String>,
     pub task_id: Option<String>,
     pub schedule_task_id: Option<String>,
-    pub planning_mode: String,
+    pub plan: bool,
     pub parent_id: Option<i64>,
 }
 

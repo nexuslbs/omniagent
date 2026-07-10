@@ -6,6 +6,14 @@
 //! 1. Defines its tools in `handle_tools_list()`
 //! 2. Dispatches tool calls via `handle_tools_call()`
 //! 3. Calls `run_server(server_info, handlers)` to start the loop
+//!
+//! # Meta context
+//!
+//! Every `tools/call` request can include a `_meta` field in the params. This
+//! is injected by the MCP client (e.g. omniagent) and contains runtime context
+//! like `channel_id`, `thread_id`, `profile_name`, `platform`. The handler
+//! receives `_meta` as the first argument and tool-specific `arguments` as the
+//! second. Tools that don't need `_meta` can ignore it.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -110,11 +118,31 @@ pub struct McpToolDef {
 // MCP tools/call types
 // ---------------------------------------------------------------------------
 
+/// Metadata context injected by the MCP client (omniagent) with each tool call.
+/// Contains runtime information like channel, thread, profile.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CallToolParams {
     pub name: String,
     #[serde(default)]
     pub arguments: Option<Value>,
+    /// Runtime context injected by the MCP client (underscore prefix = framework-managed).
+    /// Not part of the tool's input schema.
+    #[serde(default, rename = "_meta")]
+    pub meta: Option<McpMeta>,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,9 +170,9 @@ pub struct ServerInfo {
     pub version: String,
 }
 
-/// Handler function type — receives owned tool arguments, returns a future with result text + error flag.
+/// Handler function type — receives tool arguments (+ meta context), returns result text + error flag.
 pub type ToolHandler = Box<
-    dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<(String, bool)>> + Send>> + Send + Sync,
+    dyn Fn(Value, Option<McpMeta>) -> Pin<Box<dyn Future<Output = Result<(String, bool)>> + Send>> + Send + Sync,
 >;
 
 /// A registered tool definition + handler.
@@ -350,7 +378,9 @@ async fn handle_tools_call<W: AsyncWriteExt + Unpin>(
     };
 
     let args = params.arguments.clone().unwrap_or(serde_json::Value::Null);
-    let (text, is_error) = match (entry.handler)(args).await {
+    let meta = params.meta.clone();
+
+    let (text, is_error) = match (entry.handler)(args, meta).await {
         Ok(result) => result,
         Err(e) => {
             send_error(writer, req_id, -32603, format!("Handler error: {e}")).await?;

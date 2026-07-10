@@ -122,7 +122,7 @@ struct ChannelRow {
     current_provider: Option<String>,
     current_model: Option<String>,
     readonly: bool,
-    planning_mode: String,
+    plan: bool,
     template: Option<String>,
 }
 
@@ -295,7 +295,7 @@ async fn all_channels_handler(State(state): State<Arc<AppState>>) -> impl IntoRe
         r#"
         SELECT id, name, platform, resource_identifier, closed,
                current_profile, current_provider, current_model,
-               readonly, planning_mode, template
+               readonly, plan, template
         FROM channels
         ORDER BY name
         "#,

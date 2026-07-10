@@ -34,7 +34,6 @@ pub const DEFAULT_MAX_TOOL_OUTPUT_CHARS: usize = 50_000;
 
 pub mod external;
 pub mod memory_tools;
-pub mod prompt_tools;
 
 /// A tool call requested by the LLM.
 #[derive(Debug, Clone)]
@@ -65,8 +64,6 @@ struct ChannelPlatformRow {
     platform: Option<String>,
 }
 
-use crate::prompt_builder::MemoryStore;
-
 /// Shared application context, available to all MCP tool handlers.
 #[derive(Debug, Clone)]
 pub struct AppContext {
@@ -77,8 +74,6 @@ pub struct AppContext {
     #[allow(dead_code)]
     pub workspace_dir: String,
     pub qdrant_url: Option<String>,
-    /// Read-only memory store (MEMORY.md + USER.md) for system prompt injection.
-    pub memory_store: Arc<MemoryStore>,
     /// Per-platform outbound delivery senders.  Each platform gets its own
     /// mpsc channel so that a slow/failing platform never blocks others.
     pub platform_senders: HashMap<String, OutboundSender>,
@@ -95,6 +90,15 @@ pub struct AppContext {
     /// actually available to the current profile. Empty = no restriction
     /// (all tools allowed).
     pub current_allowed_tools: Vec<String>,
+    /// Current channel name being executed (e.g. "Home", "Engineering").
+    /// Set alongside current_channel_id so MCP tools know the channel identity.
+    pub current_channel_name: Option<String>,
+    /// Current platform identifier (e.g. "telegram", "mattermost").
+    /// Set alongside current_channel_id so MCP tools know the platform.
+    pub current_platform: Option<String>,
+    /// Current profile name being executed.
+    /// Set at thread processing time so MCP tools know the active profile.
+    pub current_profile_name: Option<String>,
     /// Pre-serialized catalog of ALL registered tool definitions in OpenAI
     /// function format. Used by the `list_tool_details` built-in tool so the
     /// LLM can introspect tool parameters at runtime without relying solely on
@@ -108,7 +112,7 @@ pub struct AppContext {
 }
 
 impl AppContext {
-    /// Create a new application context with a loaded memory store.
+    /// Create a new application context.
     pub fn new(
         pool: PgPool,
         readonly_pool: PgPool,
@@ -117,27 +121,20 @@ impl AppContext {
         qdrant_url: Option<String>,
         platform_senders: HashMap<String, OutboundSender>,
     ) -> Self {
-        // Load memory store from the default profile's memories directory
-        let profile_path = format!(
-            "{}/profiles/{}",
-            data_dir,
-            crate::profile::default_profile_name()
-        );
-        let mut memory_store = MemoryStore::new(&profile_path);
-        memory_store.load_from_disk();
-
         Self {
             pool,
             readonly_pool,
             data_dir: data_dir.to_string(),
             workspace_dir: workspace_dir.to_string(),
             qdrant_url,
-            memory_store: Arc::new(memory_store),
             platform_senders,
             platform_file_readers: HashMap::new(),
             current_thread_id: None,
             current_channel_id: None,
             current_allowed_tools: Vec::new(),
+            current_channel_name: None,
+            current_platform: None,
+            current_profile_name: None,
             tool_catalog: Vec::new(),
         }
     }
@@ -684,12 +681,6 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
     // ── Built-in memory tools (replace external mcp-server-memory) ──
     // manage_memory, promote_to_memory, list_memories, review_memories
     for tool in memory_tools::all_memory_tools() {
-        registry.register(tool);
-    }
-
-    // ── Built-in prompt tools (stateless prompt generator + condenser) ──
-    // generate_initial_prompt, compact_messages
-    for tool in prompt_tools::all_prompt_tools() {
         registry.register(tool);
     }
 

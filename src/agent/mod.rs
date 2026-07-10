@@ -305,7 +305,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                     // Check message count limit before claiming the thread
                     // Take a config snapshot for consistent values during this check + processing
                     let cfg_snapshot = cfg.config_snapshot();
-                    let max_iter = queries::max_iterations_for_planning_mode(&cfg_snapshot, &thread.planning_mode);
+                    let max_iter = queries::max_iterations_for_plan(&cfg_snapshot, thread.plan);
                     match queries::count_thread_messages(&cfg.pool, thread.id).await {
                         Ok(count) if count >= max_iter as i32 => {
                             info!(

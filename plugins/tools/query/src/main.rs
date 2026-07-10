@@ -322,7 +322,7 @@ async fn main() -> Result<()> {
     let pool = Arc::new(pool);
 
     let p_query = pool.clone();
-    let query_handler: ToolHandler = Box::new(move |args: Value| {
+    let query_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_query.clone();
         Box::pin(async move { handle_query_database(&p, &args).await })
     });

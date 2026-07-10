@@ -72,7 +72,7 @@ pub struct JobEntry {
     pub status: String,
     pub silent: bool,
     pub template: Option<String>,
-    pub planning_mode: String,
+    pub plan: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -144,7 +144,7 @@ struct CronJobRow {
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     silent: Option<bool>,
     template: Option<String>,
-    planning_mode: Option<String>,
+    plan: Option<bool>,
 }
 
 #[derive(FromRow)]
@@ -212,7 +212,7 @@ pub struct CreateScheduleRequest {
     pub enabled: Option<bool>,
     pub silent: Option<bool>,
     pub template: Option<String>,
-    pub planning_mode: Option<String>,
+    pub plan: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -229,7 +229,7 @@ pub struct UpdateScheduleRequest {
     pub action_id: Option<String>,
     pub silent: Option<bool>,
     pub template: Option<String>,
-    pub planning_mode: Option<String>,
+    pub plan: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -369,7 +369,7 @@ fn job_row_to_entry(row: CronJobRow) -> JobEntry {
         },
         silent,
         template: row.template,
-        planning_mode: row.planning_mode.unwrap_or_default(),
+        plan: row.plan.unwrap_or_default(),
     }
 }
 
@@ -409,7 +409,7 @@ async fn list_schedule_handler(
             cj.created_at,
             cj.silent,
             cj.template,
-            cj.planning_mode
+            cj.plan
         FROM cron_jobs cj
         LEFT JOIN channels ch ON ch.id = cj.channel_id
         WHERE (:active_only = false OR cj.active = true)
@@ -464,7 +464,7 @@ async fn get_schedule_handler(
             cj.created_at,
             cj.silent,
             cj.template,
-            cj.planning_mode
+            cj.plan
         FROM cron_jobs cj
         LEFT JOIN channels ch ON ch.id = cj.channel_id
         WHERE cj.id = :id
@@ -529,12 +529,12 @@ async fn create_schedule_handler(
         INSERT INTO cron_jobs (
             id, name, display_name, schedule, prompt, active,
             channel_id, profile, mode, action_id, enabled,
-            silent, template, planning_mode
+            silent, template, plan
         )
         VALUES (
             :id, :name, :display_name, :schedule, :prompt, :active,
             :channel_id, NULLIF(:profile, '')::text, :mode, :action_id, :enabled,
-            :silent, :template, NULLIF(:planning_mode, '')::text
+            :silent, :template, :plan::boolean
         )
         ON CONFLICT (id) DO UPDATE SET
             name = EXCLUDED.name,
@@ -549,7 +549,7 @@ async fn create_schedule_handler(
             enabled = EXCLUDED.enabled,
             silent = EXCLUDED.silent,
             template = EXCLUDED.template,
-            planning_mode = EXCLUDED.planning_mode,
+            plan = EXCLUDED.plan,
             updated_at = NOW()
         "#,
         ( :id = &job_id,
@@ -565,7 +565,7 @@ async fn create_schedule_handler(
           :enabled = body.enabled.unwrap_or(true),
           :silent = body.silent.unwrap_or(false),
           :template = body.template.as_deref().unwrap_or(""),
-          :planning_mode = body.planning_mode.as_deref().unwrap_or("") )
+          :plan = body.plan.unwrap_or(true), )
     )
     .execute(&state.pool)
     .await
@@ -601,7 +601,7 @@ async fn update_schedule_handler(
             cj.enabled, cj.active, cj.mode, cj.action_id, NULL::TEXT AS action_name, cj.channel_id,
             NULL::TEXT AS channel_name, cj.profile,
             cj.last_run_at, cj.next_run_at, cj.created_at, cj.silent,
-            cj.template, cj.planning_mode
+            cj.template, cj.plan
         FROM cron_jobs cj
         WHERE cj.id = :id
         "#,
@@ -674,10 +674,7 @@ async fn update_schedule_handler(
                 WHEN :template = '' THEN template
                 ELSE NULLIF(:template, '')::text
             END,
-            planning_mode = CASE
-                WHEN :planning_mode = '' THEN planning_mode
-                ELSE NULLIF(:planning_mode, '')::text
-            END,
+            plan = :plan,
             updated_at = NOW()
         WHERE id = :id
         "#,
@@ -694,7 +691,7 @@ async fn update_schedule_handler(
           :active = body.active.unwrap_or(current_job.active.unwrap_or(true)),
           :silent = body.silent.unwrap_or(current_job.silent.unwrap_or(false)),
           :template = body.template.as_deref().unwrap_or(""),
-          :planning_mode = body.planning_mode.as_deref().unwrap_or("") )
+          :plan = body.plan.or(current_job.plan).unwrap_or(true), )
     )
     .execute(&state.pool)
     .await

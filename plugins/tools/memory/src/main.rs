@@ -602,7 +602,7 @@ async fn main() -> Result<()> {
 
     // Wrap each handler to capture clones of data_dir
     let dd_promote = data_dir.clone();
-    let promote_handler: ToolHandler = Box::new(move |args: Value| {
+    let promote_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         Box::pin({
             let value = dd_promote.clone();
             async move { handle_promote(&value, &args).await }
@@ -610,7 +610,7 @@ async fn main() -> Result<()> {
     });
 
     let dd_list = data_dir.clone();
-    let list_handler: ToolHandler = Box::new(move |args: Value| {
+    let list_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         Box::pin({
             let value = dd_list.clone();
             async move { handle_list(&value, &args).await }
@@ -618,7 +618,7 @@ async fn main() -> Result<()> {
     });
 
     let dd_review = data_dir.clone();
-    let review_handler: ToolHandler = Box::new(move |args: Value| {
+    let review_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         Box::pin({
             let value = dd_review.clone();
             async move { handle_review(&value, &args).await }
@@ -626,7 +626,7 @@ async fn main() -> Result<()> {
     });
 
     let dd_manage = data_dir.clone();
-    let manage_handler: ToolHandler = Box::new(move |args: Value| {
+    let manage_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         Box::pin({
             let value = dd_manage.clone();
             async move { handle_manage(&value, &args).await }
@@ -634,7 +634,7 @@ async fn main() -> Result<()> {
     });
 
     let dd_prompt_gen = data_dir.clone();
-    let prompt_gen_handler: ToolHandler = Box::new(move |args: Value| {
+    let prompt_gen_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         Box::pin({
             let value = dd_prompt_gen.clone();
             async move { handle_generate_initial_prompt(&value, &args).await }
@@ -642,7 +642,7 @@ async fn main() -> Result<()> {
     });
 
     let dd_compact = data_dir.clone();
-    let compact_handler: ToolHandler = Box::new(move |args: Value| {
+    let compact_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         Box::pin({
             let value = dd_compact.clone();
             async move { handle_compact_messages(&value, &args).await }

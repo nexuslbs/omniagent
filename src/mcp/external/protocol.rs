@@ -136,6 +136,10 @@ pub struct CallToolParams {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arguments: Option<Value>,
+    /// Runtime context injected by the framework (_meta = underscore prefix = framework-managed).
+    /// Contains channel_id, thread_id, profile_name, platform for tools that need it.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "_meta")]
+    pub meta: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,8 +227,8 @@ pub fn build_list_tools_request(id: u64) -> String {
     serde_json::to_string(&req).unwrap_or_default()
 }
 
-/// Build a tools/call request JSON string.
-pub fn build_call_tool_request(id: u64, name: &str, arguments: &Value) -> String {
+/// Build a tools/call request. Accepts optional _meta context injected by the framework.
+pub fn build_call_tool_request(id: u64, name: &str, arguments: &Value, meta: Option<Value>) -> String {
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(id),
@@ -233,6 +237,7 @@ pub fn build_call_tool_request(id: u64, name: &str, arguments: &Value) -> String
             serde_json::to_value(CallToolParams {
                 name: name.to_string(),
                 arguments: Some(arguments.clone()),
+                meta,
             })
             .unwrap_or_default(),
         ),

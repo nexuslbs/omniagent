@@ -206,13 +206,13 @@ async fn main() -> Result<()> {
 
     let p_search = pool.clone();
 
-    let search_handler: ToolHandler = Box::new(move |args: Value| {
+    let search_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_search.clone();
         Box::pin(async move { handle_search_messages(&p, &args).await })
     });
 
     let wiki_handler: ToolHandler =
-        Box::new(move |args: Value| Box::pin(async move { handle_search_wiki(&args) }));
+        Box::new(move |args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_search_wiki(&args) }));
 
     let tools = vec![
         McpToolEntry {

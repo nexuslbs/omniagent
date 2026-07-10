@@ -1,0 +1,8 @@
+{
+  "servers": [
+    {
+      "name": "prompt",
+      "transport": "stdio"
+    }
+  ]
+}

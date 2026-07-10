@@ -5,7 +5,6 @@
 //! making memory management always available without a subprocess dependency.
 
 use crate::mcp::{AppContext, McpTool, McpToolResult};
-use crate::prompt_builder::{self, MemoryStore};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -264,30 +263,29 @@ fn generate_initial_prompt_tool() -> McpTool {
                 let use_json_plan = args["use_json_plan"].as_bool().unwrap_or(false);
 
                 let base_path = format!("{}/profiles/{}", ctx.data_dir, profile_name);
-                let mut memory_store = MemoryStore::new(&base_path);
-                memory_store.load_from_disk();
+                let memories_dir = std::path::PathBuf::from(&base_path).join("memories");
+                let memory_raw = if memories_dir.join("MEMORY.md").exists() {
+                    std::fs::read_to_string(memories_dir.join("MEMORY.md")).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let user_raw = if memories_dir.join("USER.md").exists() {
+                    std::fs::read_to_string(memories_dir.join("USER.md")).unwrap_or_default()
+                } else {
+                    String::new()
+                };
 
-                let system_prompt = prompt_builder::build_system_prompt(
-                    &memory_store,
-                    platform,
-                    system_message,
-                    profile_name,
-                    &tool_names,
-                );
+                let system_prompt = if memory_raw.is_empty() && user_raw.is_empty() {
+                    format!("You are OmniAgent. Active profile: {}.", profile_name)
+                } else if memory_raw.is_empty() {
+                    format!("You are OmniAgent. Active profile: {}.\n\n## USER PROFILE\n{}", profile_name, user_raw)
+                } else if user_raw.is_empty() {
+                    format!("You are OmniAgent. Active profile: {}.\n\n## MEMORY\n{}", profile_name, memory_raw)
+                } else {
+                    format!("You are OmniAgent. Active profile: {}.\n\n## MEMORY\n{}\n\n## USER PROFILE\n{}", profile_name, memory_raw, user_raw)
+                };
 
-                let planning_prompt = prompt_builder::build_planning_prompt(
-                    &memory_store,
-                    prompt_builder::PlanningPromptParams {
-                        platform,
-                        profile_name,
-                        user_message,
-                        plan_iteration,
-                        max_iterations,
-                        previous_plan,
-                        use_json_plan,
-                    },
-                    &tool_names,
-                );
+                let planning_prompt = format!("## Plan\nBefore responding, create a high-level plan with numbered steps. Your available tools: {}.", tool_names.join(", "));
 
                 let result = serde_json::json!({
                     "system_prompt": system_prompt,

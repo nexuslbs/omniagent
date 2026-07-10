@@ -17,7 +17,6 @@ pub mod provider;
 pub mod plugin;
 pub mod plugins_yaml;
 pub mod profile;
-pub mod prompt_builder;
 pub mod safety;
 pub mod scheduler;
 pub mod server;

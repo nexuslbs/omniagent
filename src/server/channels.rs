@@ -48,7 +48,7 @@ pub struct ChannelEntry {
     pub current_provider: Option<String>,
     pub current_model: Option<String>,
     pub readonly: bool,
-    pub planning_mode: String,
+    pub plan: bool,
     pub template: Option<String>,
 }
 
@@ -67,7 +67,7 @@ struct ChannelRow {
     current_provider: Option<String>,
     current_model: Option<String>,
     readonly: bool,
-    planning_mode: String,
+    plan: bool,
     template: Option<String>,
 }
 
@@ -75,6 +75,7 @@ struct ChannelRow {
 struct ChannelReadonlyRow {
     readonly: bool,
     closed: bool,
+    plan: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +89,7 @@ pub struct UpdateChannelRequest {
     pub current_provider: Option<String>,
     pub current_model: Option<String>,
     pub closed: Option<bool>,
-    pub planning_mode: Option<String>,
+    pub plan: Option<bool>,
     pub template: Option<String>,
 }
 
@@ -111,7 +112,7 @@ async fn list_channels_handler(State(state): State<Arc<AppState>>) -> impl IntoR
             current_provider,
             current_model,
             readonly,
-            planning_mode,
+            plan,
             template
         FROM channels
         ORDER BY name
@@ -132,7 +133,7 @@ async fn list_channels_handler(State(state): State<Arc<AppState>>) -> impl IntoR
                 current_provider: r.current_provider,
                 current_model: r.current_model,
                 readonly: r.readonly,
-                planning_mode: r.planning_mode,
+                plan: r.plan,
                 template: r.template,
             })
             .collect::<Vec<_>>(),
@@ -166,7 +167,7 @@ async fn get_channel_handler(
             current_provider,
             current_model,
             readonly,
-            planning_mode,
+            plan,
             template
         FROM channels
         WHERE id = :id
@@ -186,7 +187,7 @@ async fn get_channel_handler(
             current_provider: r.current_provider,
             current_model: r.current_model,
             readonly: r.readonly,
-            planning_mode: r.planning_mode,
+            plan: r.plan,
             template: r.template,
         },
         Ok(None) => {
@@ -215,7 +216,7 @@ async fn update_channel_handler(
     let existing = match sql_forge!(
         ChannelReadonlyRow,
         r#"
-        SELECT readonly, closed
+        SELECT readonly, closed, plan
         FROM channels
         WHERE id = :id
         "#,
@@ -236,14 +237,14 @@ async fn update_channel_handler(
 
     // ── 2. Enforce readonly constraints ──
     // Readonly channels can only update: closed, current_profile, current_provider, current_model.
-    // They cannot be renamed (name) or have planning_mode/template changed.
+    // They cannot be renamed (name) or have plan/template changed.
     if existing.readonly {
         let allowed = body.closed.is_some()
             || body.current_profile.is_some()
             || body.current_provider.is_some()
             || body.current_model.is_some();
         let blocked =
-            body.name.is_some() || body.planning_mode.is_some() || body.template.is_some();
+            body.name.is_some() || body.plan.is_some() || body.template.is_some();
         if !allowed || blocked {
             return err_json(
                 StatusCode::FORBIDDEN,
@@ -257,7 +258,7 @@ async fn update_channel_handler(
     // Fields not provided in the request body receive the current DB value
     // via COALESCE, preserving existing data.
     //
-    // Note: boolean fields (closed, planning_mode) don't use the NULLIF
+    // Note: boolean fields (closed, plan) don't use the NULLIF
     // pattern since they are not nullable text columns.
     if let Err(e) = sql_forge!(
         r#"
@@ -280,10 +281,7 @@ async fn update_channel_handler(
                 ELSE NULLIF(:current_model, '')::text
             END,
             closed = :closed,
-            planning_mode = CASE
-                WHEN :planning_mode = '' THEN planning_mode
-                ELSE NULLIF(:planning_mode, '')::text
-            END,
+            plan = :plan,
             template = CASE
                 WHEN :template = '' THEN template
                 ELSE NULLIF(:template, '')::text
@@ -296,7 +294,7 @@ async fn update_channel_handler(
           :current_provider = body.current_provider.as_deref().unwrap_or(""),
           :current_model = body.current_model.as_deref().unwrap_or(""),
           :closed = body.closed.unwrap_or(existing.closed),
-          :planning_mode = body.planning_mode.as_deref().unwrap_or(""),
+          :plan = body.plan.unwrap_or(existing.plan),
           :template = body.template.as_deref().unwrap_or(""),
           :id = id )
     )
@@ -325,7 +323,7 @@ async fn update_channel_handler(
             current_provider,
             current_model,
             readonly,
-            planning_mode,
+            plan,
             template
         FROM channels
         WHERE id = :id
@@ -345,7 +343,7 @@ async fn update_channel_handler(
             current_provider: r.current_provider,
             current_model: r.current_model,
             readonly: r.readonly,
-            planning_mode: r.planning_mode,
+            plan: r.plan,
             template: r.template,
         },
         Ok(None) => {

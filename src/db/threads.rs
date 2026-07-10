@@ -31,8 +31,8 @@ pub async fn create_thread(
     let row: ThreadDb = sql_forge!(
         ThreadDb,
         r#"
-        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id, planning_mode, parent_id)
-        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :planning_mode, NULLIF(:parent_id, -1::bigint)::bigint)
+        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id, plan, parent_id)
+        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :plan, NULLIF(:parent_id, -1::bigint)::bigint)
         RETURNING
             id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
             input_tokens, cached_tokens, output_tokens, duration_ms,
@@ -40,11 +40,11 @@ pub async fn create_thread(
             ''::text AS "started_at",
             ''::text AS "ended_at",
             terminal,
-            planning_mode,
+            plan,
             parent_id,
             iterations
         "#,
-        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :planning_mode = &p.planning_mode, :parent_id = p.parent_id.unwrap_or(-1i64) )
+        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :plan = p.plan, :parent_id = p.parent_id.unwrap_or(-1i64) )
     )
     .fetch_one(pool)
     .await?;
@@ -77,128 +77,37 @@ pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> AppResult<()> {
     Ok(())
 }
 
-/// Internal version that also accepts the
-/// prompt content for complexity-based classification (user/cron default).
-/// Used internally by [`create_thread_with_cause`] — callers should not need
-/// to pass content directly.
-fn resolve_thread_planning_mode_with_content(
-    channel_planning_mode: &str,
-    task_planning_mode: &str,
-    msg_type: &str,
-    global_planning_mode: &str,
-    content: &str,
-) -> String {
-    // 1. Cron task with explicit mode (highest priority — cron > channel)
-    if msg_type == "cron" && !task_planning_mode.is_empty() {
-        return resolve_cron_planning_mode(task_planning_mode, global_planning_mode);
-    }
-
-    // 2. Channel override
-    if !channel_planning_mode.is_empty() {
-        return normalize_task_planning_mode(channel_planning_mode);
-    }
-
-    // 3. Kanban — always use max plan mode currently enabled
-    if msg_type == "kanban" {
-        return resolve_max_plan(global_planning_mode);
-    }
-
-    // 4. User / Cron default — classify by prompt complexity,
-    //    capped at the global PLANNING_MODE ceiling
-    classify_complexity_for_planning(content, msg_type, global_planning_mode)
-}
-
-/// Normalize a planning mode value to one of the canonical values.
-fn normalize_task_planning_mode(mode: &str) -> String {
-    match mode {
-        "never" => "prompt_only".to_string(),
-        "always" => "auto_subtasks".to_string(),
-        other => other.to_string(),
-    }
-}
-
-/// Resolve a cron task planning mode to a canonical planning mode value.
-/// Supports:
-/// - `"no_plan"` → `"prompt_only"` (no planning)
-/// - `"simple_plan"` → `"auto_plan"` (single planning step)
-/// - `"plan_with_subtasks"` → `"auto_subtasks"` (full subtask decomposition)
-/// - `"max_plan"` → max of global mode (backward compat)
-/// - anything else → pass through (allows direct values like "auto_subtasks")
-fn resolve_cron_planning_mode(task_mode: &str, global_mode: &str) -> String {
-    match task_mode {
-        "no_plan" => "prompt_only".to_string(),
-        "simple_plan" => "auto_plan".to_string(),
-        "plan_with_subtasks" => "auto_subtasks".to_string(),
-        "max_plan" => resolve_max_plan(global_mode),
-        other => normalize_task_planning_mode(other),
-    }
-}
-
-/// Calculate the maximum plan mode that should be used based on the
-/// global PLANNING_MODE setting. Kanban tasks and max_plan cron jobs use this.
-fn resolve_max_plan(global_mode: &str) -> String {
-    match global_mode {
-        "auto_subtasks" | "always" => "auto_subtasks".to_string(),
-        "auto_plan" => "auto_plan".to_string(),
-        _ => "prompt_only".to_string(),
-    }
-}
-
-/// Classify a prompt by complexity and return the appropriate planning mode,
-/// capped at the global planning mode.
+/// Resolve the plan boolean for a thread.
 ///
-/// The result is never more aggressive than `global_planning_mode` — if the
-/// global max is `auto_plan`, the classifier will not return `auto_subtasks`
-/// regardless of content length or keywords. This ensures the environment-level
-/// `PLANNING_MODE` setting is always the ceiling.
+/// Priority order (highest first):
+/// 1. Task/Cron explicit setting (`task_plan`)
+/// 2. Channel setting (`channel_plan`)
+/// 3. None (let the plugin decide at runtime)
 ///
-/// Reads threshold settings from environment variables:
-/// - `PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS` (default 60)
-/// - `PLANNING_COMPLEXITY_STANDARD_MAX_CHARS` (default 200)
-/// - `PLANNING_COMPLEXITY_KEYWORDS` (default comma-separated list)
-///
-/// Returns one of: "prompt_only", "auto_plan", "auto_subtasks".
-fn classify_complexity_for_planning(
-    content: &str,
-    msg_type: &str,
-    global_planning_mode: &str,
-) -> String {
-    use crate::complexity::{classify_complexity, Complexity};
-
-    let classified = match classify_complexity(content, msg_type, None) {
-        Complexity::Simple => "prompt_only",
-        Complexity::Standard => "auto_plan",
-        Complexity::Complex => "auto_subtasks",
-    };
-
-    // Cap at global planning mode — never exceed the configured ceiling
-    cap_planning_mode(classified, global_planning_mode)
+/// Returns `None` when no explicit preference is set — the plugin
+/// will decide based on its own config (max chars, keywords, etc.).
+pub fn resolve_thread_plan(
+    channel_plan: Option<bool>,
+    task_plan: Option<bool>,
+) -> Option<bool> {
+    // 1. Task/Cron explicit setting (highest priority)
+    if let Some(val) = task_plan {
+        return Some(val);
+    }
+    // 2. Channel setting
+    if let Some(val) = channel_plan {
+        return Some(val);
+    }
+    // 3. None — plugin decides at runtime
+    None
 }
 
-/// Cap a resolved planning mode so it never exceeds the global ceiling.
-/// Values rank: prompt_only (0) < auto_plan (1) < auto_subtasks (2).
-fn cap_planning_mode<'a>(mode: &'a str, global: &'a str) -> String {
-    let rank = |m: &str| match m {
-        "prompt_only" => 0,
-        "auto_plan" => 1,
-        "auto_subtasks" => 2,
-        _ => 1,
-    };
-
-    if rank(mode) > rank(global) {
-        global.to_string()
+/// Resolve the max tool-call iterations based on the thread's plan setting.
+pub fn max_iterations_for_plan(config: &AgentConfig, plan: bool) -> u32 {
+    if plan {
+        config.max_iterations_complex_plan
     } else {
-        mode.to_string()
-    }
-}
-
-/// Resolve the max tool-call iterations based on the thread's planning mode.
-/// These replace the old single MAX_ITERATIONS setting.
-pub fn max_iterations_for_planning_mode(config: &AgentConfig, planning_mode: &str) -> u32 {
-    match planning_mode {
-        "auto_subtasks" | "always" => config.max_iterations_complex_plan,
-        "auto_plan" => config.max_iterations_simple_plan,
-        _ => config.max_iterations_no_plan, // no plan or complexity-based
+        config.max_iterations_no_plan
     }
 }
 
@@ -292,7 +201,7 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
 ///
 /// Resolves the planning mode internally using the prompt content for
 /// complexity-based classification (user/cron default). Callers don't
-/// need to pass planning_mode or resolve it separately.
+/// need to pass plan or resolve it separately.
 ///
 /// Returns the (Thread, Message) pair.
 pub async fn create_thread_with_cause(
@@ -314,27 +223,20 @@ pub async fn create_thread_with_cause(
     if p.msg_type == "user" {
         err_msg!("msg_type 'user' is no longer valid for seq-0 messages — use 'Cause' instead");
     }
-    // 1. Get channel for its planning_mode override and current_* fields
+    // 1. Get channel for its plan override and current_* fields
     let channel = crate::db::channels::get_channel_by_id(pool, channel_id)
         .await?
         .ok_or_else(|| Error::Message(format!("Channel {} not found", channel_id)))?;
 
-    // 2. Get global PLANNING_MODE
-    let global_mode = std::env::var("PLANNING_MODE").unwrap_or_else(|_| "auto_plan".to_string());
-
-    // 3. Resolve planning mode (internal — uses content for complexity classification)
-    let channel_pm = channel
+    // 3. Resolve planning mode (internal — lets plugin decide at runtime)
+    let channel_plan = channel
         .metadata
-        .get("planning_mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let planning_mode = resolve_thread_planning_mode_with_content(
-        channel_pm,
-        &p.task_planning_mode,
-        &p.msg_type,
-        &global_mode,
-        &p.content,
-    );
+        .get("plan")
+        .and_then(|v| v.as_bool());
+    let plan = resolve_thread_plan(
+        channel_plan,
+        p.task_plan,
+    ).unwrap_or(false); // false = placeholder, plugin may override at runtime
 
     // 4. Resolve provider and model
     //
@@ -455,7 +357,7 @@ pub async fn create_thread_with_cause(
             model: p.model.clone().or(Some(resolved_model.clone())),
             task_id: p.task_id.clone(),
             schedule_task_id: p.schedule_task_id.clone(),
-            planning_mode: planning_mode.clone(),
+            plan: plan.clone(),
             parent_id: resolved_parent_id,
         },
     )
@@ -497,7 +399,7 @@ pub async fn find_pending_threads_by_channel(
             COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
             COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
             terminal,
-            planning_mode,
+            plan,
             parent_id,
             iterations
         FROM threads
@@ -733,7 +635,7 @@ pub async fn get_completed_seq0_threads_since(
                     COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
                     COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
                     terminal,
-                    planning_mode,
+                    plan,
                     parent_id,
                     iterations
                 FROM threads
@@ -761,7 +663,7 @@ pub async fn get_completed_seq0_threads_since(
                     COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
                     COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
                     terminal,
-                    planning_mode,
+                    plan,
                     parent_id,
                     iterations
                 FROM threads
@@ -789,7 +691,7 @@ pub async fn get_completed_seq0_threads_since(
                     COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
                     COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
                     terminal,
-                    planning_mode,
+                    plan,
                     parent_id,
                     iterations
                 FROM threads

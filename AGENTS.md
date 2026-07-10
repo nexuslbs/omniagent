@@ -1,5 +1,74 @@
 # OmniAgent — AGENTS.md
 
+## Prompt Architecture — HARD RULE: ZERO PROMPT LOGIC IN OMINAGENT
+
+### Core Principle
+**The prompt plugin configured in settings is the SINGLE SOURCE OF TRUTH for ALL prompt generation.** Omniagent must never build, assemble, or generate prompts inline. No in-process prompt builder, no direct file reads for prompt assembly, no inline planning prompt strings.
+
+### Contract: Prompt Plugin `generate` Tool Returns Parts
+
+The `generate` tool MUST return a structured object with 5 fields — NOT a single concatenated string:
+
+```json
+{
+  "system": "identity + tool guidance + profile hint + platform hint",
+  "memory": "MEMORY.md content (read by the plugin from filesystem)",
+  "soul": "system message override from settings",
+  "context": "thread messages + summaries + skills + subtasks",
+  "user": "the user's actual message"
+}
+```
+
+| Field | Source | Purpose |
+|-------|--------|---------|
+| `system` | Plugin-defined | Stable identity, tool rules, profile/platform hints |
+| `memory` | Plugin reads from disk | MEMORY.md content from profile |
+| `soul` | Passed by omniagent | Optional system message override |
+| `context` | Plugin queries DB | Thread history, summaries, skills, subtasks |
+| `user` | Passed by omniagent | The user's message (or planning instruction) |
+
+Omniagent is responsible ONLY for assembly: it receives these 5 parts and formats them into the message array for the LLM.
+
+### Planning Mode
+
+**Planning is an omniagent concern, NOT the plugin's.** The plugin does not need to know about planning. In plan mode:
+- The user's original request goes into the `context` field (alongside thread history)
+- The `user` field contains the planning instruction: *"Analyze the context above and create a step-by-step plan..."*
+
+This keeps the plugin generic — it just provides parts. Omniagent decides how to arrange them.
+
+### Dashboard Prompt Preview
+
+The `/prompt-preview/{channel_name}` endpoint MUST call the active prompt plugin via MCP `generate` to get the parts, then display them. It MUST NOT read MEMORY.md/USER.md directly or assemble prompts inline.
+
+### No In-Process Fallback
+
+If the prompt plugin's `generate` call fails, propagate the error. Do NOT fall back to in-process prompt building — no fallback exists.
+
+### What This Eliminates
+
+| What | Where it was | Status |
+|------|-------------|--------|
+| `src/prompt_builder.rs` | omniagent core | DELETED |
+| `src/mcp/prompt_tools.rs` | omniagent MCP | DELETED |
+| `src/agent/executor.rs` inline planning | Lines 487-523 | MUST BE REMOVED — use parts approach |
+| `prompt_preview_handler` inline MEMORY.md read | `src/server/mod.rs` | MUST BE REMOVED — call MCP plugin |
+| `build_thread_context` direct call | Both executor + preview | Can remain as a utility, but must NOT be the sole source of context — context comes from the plugin's generate tool |
+| `prompt-tools` crate | Workspace member | DELETED (merged into plugin) |
+
+### Plugin Discovery (`info` tool)
+
+The prompt plugin SHOULD expose an `info` tool that returns:
+```json
+{
+  "parts": ["system", "memory", "soul", "context", "user"],
+  "capabilities": {"planning": false},
+  "version": "1.0"
+}
+```
+
+Omniagent calls `info` to discover what the plugin can provide.
+
 ## Plugin System Rules & Conventions
 
 ### Core Principle

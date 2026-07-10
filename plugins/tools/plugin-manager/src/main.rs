@@ -229,7 +229,7 @@ async fn main() -> Result<()> {
     let data_dir = data_dir();
 
     let dd = data_dir.clone();
-    let handler: ToolHandler = Box::new(move |args: Value| {
+    let handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let dd_inner = dd.clone();
         Box::pin(async move { handle_plugin_manager(&dd_inner, &args).await })
     });

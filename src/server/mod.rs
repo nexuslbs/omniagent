@@ -44,10 +44,6 @@ use crate::agent::helpers;
 use crate::db::types as queries;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient};
 use crate::mcp::{AppContext, McpRegistry, McpToolCall};
-use crate::prompt_builder::{
-    build_planning_prompt, build_system_prompt, build_system_prompt_parts, MemoryStore,
-    PlanningPromptParams,
-};
 use sql_forge::sql_forge;
 use std::sync::RwLock;
 
@@ -552,8 +548,17 @@ async fn prompt_handler(
     };
 
     let profile_path = format!("{}/profiles/{}", state.data_dir, profile_name);
-    let mut memory_store = MemoryStore::new(&profile_path);
-    memory_store.load_from_disk();
+    let memories_dir = std::path::Path::new(&profile_path).join("memories");
+    let memory_raw = if memories_dir.join("MEMORY.md").exists() {
+        std::fs::read_to_string(memories_dir.join("MEMORY.md")).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let user_raw = if memories_dir.join("USER.md").exists() {
+        std::fs::read_to_string(memories_dir.join("USER.md")).unwrap_or_default()
+    } else {
+        String::new()
+    };
 
     let platform = channel
         .as_ref()
@@ -567,41 +572,28 @@ async fn prompt_handler(
         .iter()
         .map(|t| t.name.clone())
         .collect();
-    let parts = build_system_prompt_parts(&memory_store, platform, None, profile_name, &tool_names);
-
-    // Build system prompt TEMPLATE — stable + context + volatile placeholders
+    // Build system prompt TEMPLATE — stable (identity + guidance) + volatile (memory/soul) placeholders
     let mut segments: Vec<String> = Vec::new();
 
-    if !parts.stable.is_empty() {
-        segments.push(parts.stable);
-    }
-    if !parts.context.is_empty() {
-        segments.push(parts.context);
-    }
+    // Stable tier: simple identity + tool guidance
+    let tool_list = if tool_names.is_empty() { String::new() } else { tool_names.join(", ") };
+    segments.push(format!("You are OmniAgent — precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on — don't retry more than twice."));
+    segments.push(format!("Active Hermes profile: {profile_name}."));
 
-    // Build volatile placeholder section — memory/soul headers only, <<memory>> / <<soul>> placeholders
+    // Volatile tier: memory/soul placeholders
     let separator = "═".repeat(46);
     let mut locked_entries: Vec<String> = Vec::new();
 
-    if let Some(mem_block) = memory_store.format_for_system_prompt("memory") {
-        let header_line = mem_block
-            .lines()
-            .nth(1)
-            .unwrap_or("MEMORY (your personal notes)");
+    if !memory_raw.is_empty() {
         locked_entries.push(format!(
-            "{}\n{}\n{}\n\n<<memory>>",
-            separator, header_line, separator
+            "{}\n## MEMORY (your personal notes)\n{}\n\n<<memory>>",
+            separator, separator
         ));
     }
-
-    if let Some(user_block) = memory_store.format_for_system_prompt("user") {
-        let header_line = user_block
-            .lines()
-            .nth(1)
-            .unwrap_or("USER PROFILE (who the user is)");
+    if !user_raw.is_empty() {
         locked_entries.push(format!(
-            "{}\n{}\n{}\n\n<<soul>>",
-            separator, header_line, separator
+            "{}\n## USER PROFILE (who the user is)\n{}\n\n<<soul>>",
+            separator, separator
         ));
     }
 
@@ -630,7 +622,7 @@ struct PromptPreviewRequest {
 struct PromptPreviewResponse {
     system_prompt: String,
     messages: Vec<serde_json::Value>,
-    plan: Option<String>,
+    plan: Option<bool>,
 }
 
 async fn prompt_preview_handler(
@@ -659,8 +651,17 @@ async fn prompt_preview_handler(
     };
 
     let profile_path = format!("{}/profiles/{}", state.data_dir, profile_name);
-    let mut memory_store = MemoryStore::new(&profile_path);
-    memory_store.load_from_disk();
+    let memories_dir = std::path::Path::new(&profile_path).join("memories");
+    let memory_raw = if memories_dir.join("MEMORY.md").exists() {
+        std::fs::read_to_string(memories_dir.join("MEMORY.md")).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let user_raw = if memories_dir.join("USER.md").exists() {
+        std::fs::read_to_string(memories_dir.join("USER.md")).unwrap_or_default()
+    } else {
+        String::new()
+    };
 
     let platform = channel
         .as_ref()
@@ -674,8 +675,10 @@ async fn prompt_preview_handler(
         .iter()
         .map(|t| t.name.clone())
         .collect();
-    let system_prompt =
-        build_system_prompt(&memory_store, platform, None, profile_name, &tool_names);
+    let system_prompt = format!(
+        "You are OmniAgent — precise, efficient, autonomous.\n\nActive Hermes profile: {profile_name}.\n\n{}",
+        if !memory_raw.is_empty() { format!("## MEMORY (your personal notes)\n{memory_raw}") } else { String::new() }
+    );
 
     let mut messages = vec![serde_json::json!({ "role": "system", "content": &system_prompt })];
 
@@ -791,19 +794,15 @@ async fn prompt_preview_handler(
         // Resolve provider enum for the resolved provider name
         let resolved_provider = crate::llm::ProviderId::new(&provider_name);
 
-        // Build planning prompt
-        let planning_prompt = build_planning_prompt(
-            &memory_store,
-            PlanningPromptParams {
-                platform,
-                profile_name,
-                user_message: &body.prompt,
-                plan_iteration: 0,
-                max_iterations: 0,
-                previous_plan: None,
-                use_json_plan: false, // preview route doesn't need JSON plan output
-            },
-            &tool_names,
+        // Build planning prompt inline
+        let tool_list = if tool_names.is_empty() { String::new() } else { format!("Your available tools: {}.", tool_names.join(", ")) };
+        let planning_prompt = format!(
+            "## Plan\nBefore responding, create a high-level plan with numbered steps. \
+{tool_list}\nBe specific about which tool to use and what parameters to pass. \
+Aim for the minimum number of steps to complete the task. \
+Wrap your plan in a <plan> block. After delivering the final answer, \
+evaluate: if the task was completed, call the completion tool.",
+            tool_list = tool_list
         );
 
         // Create LLM client — resolve api_key from provider plugin config

@@ -36,7 +36,7 @@ struct CronJobDueRow {
     action_id: Option<String>,
     silent: Option<bool>,
     template: Option<String>,
-    planning_mode: Option<String>,
+    plan: Option<bool>,
 }
 
 /// Spawn the cron scheduler loop as a background task.
@@ -252,7 +252,7 @@ async fn tick(
                 }),
                 msg_type: "cron".to_string(),
                 msg_subtype: Some(subtype),
-                task_planning_mode: job.planning_mode.clone().unwrap_or_default(),
+                task_plan: job.plan,
                 parent_external_id: None,
             },
         )
@@ -291,7 +291,7 @@ async fn fetch_due_jobs(pool: &PgPool) -> AppResult<Vec<CronJobDueRow>> {
     let rows: Vec<CronJobDueRow> = sql_forge!(
         CronJobDueRow,
         r#"
-        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id, silent, template, planning_mode
+        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id, silent, template, plan
         FROM cron_jobs
         WHERE enabled = true
           AND active = true
@@ -628,7 +628,7 @@ async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
             }),
             msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
-            task_planning_mode: ctx.job.planning_mode.clone().unwrap_or_default(),
+            task_plan: ctx.job.plan,
             parent_external_id: None,
         },
     )
@@ -792,7 +792,7 @@ pub async fn fire_cron_job_by_id(
     let jobs: Vec<CronJobDueRow> = sql_forge!(
         CronJobDueRow,
         r#"
-        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id, silent, template, planning_mode
+        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id, silent, template, plan
         FROM cron_jobs
         WHERE id = :id
         LIMIT 1
@@ -929,7 +929,7 @@ pub async fn fire_cron_job_by_id(
             }),
             msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
-            task_planning_mode: job.planning_mode.clone().unwrap_or_default(),
+            task_plan: job.plan,
             parent_external_id: None,
         },
     )
