@@ -34,6 +34,7 @@ pub fn memory_router() -> Router<Arc<AppState>> {
         .route("/memory/search", get(search_handler))
         .route("/memory/text/{profile}/{type}", get(text_handler))
         .route("/memory/upload/{profile}/{type}", post(upload_handler))
+        .route("/memory/edit/{profile}/{type}", post(edit_handler))
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +451,66 @@ fn resolve_memory_path(data_dir: &str, profile: &str, mem_type: &str) -> Result<
     } else {
         // Default to profile path even if it doesn't exist (for upload)
         Ok(profile_path)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handler: POST /memory/edit/{profile}/{type}
+// ---------------------------------------------------------------------------
+
+/// Edit the MEMORY.md or USER.md file for a given profile.
+/// Accepts JSON: { "content": "..." }
+/// Creates the directory and file if they don't exist.
+async fn edit_handler(
+    State(state): State<Arc<AppState>>,
+    Path((profile, mem_type)): Path<(String, String)>,
+    Json(body): Json<UploadMemoryBody>,
+) -> impl IntoResponse {
+    let file_name = match mem_type.as_str() {
+        "memory" => "MEMORY.md",
+        "soul" => "USER.md",
+        _ => {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                &format!("Type must be 'memory' or 'soul', got '{}'", mem_type),
+            )
+        }
+    };
+
+    let dest_dir = format!("{}/profiles/{}/memories", state.data_dir, profile);
+    let dest_path = format!("{}/{}", dest_dir, file_name);
+
+    // Ensure directory exists
+    if let Err(e) = fs::create_dir_all(&dest_dir).await {
+        error!(
+            "[memory/edit] failed to create directory {}: {:?}",
+            dest_dir, e
+        );
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to create memories directory",
+        );
+    }
+
+    // Write the file
+    match fs::write(&dest_path, body.content.as_bytes()).await {
+        Ok(_) => {
+            let size = body.content.len();
+            ok_json(serde_json::json!({
+                "success": true,
+                "size": size,
+                "path": dest_path,
+                "profile": profile,
+                "type": mem_type
+            }))
+        }
+        Err(e) => {
+            error!("[memory/edit] failed to write {}: {:?}", dest_path, e);
+            err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to write memory file",
+            )
+        }
     }
 }
 

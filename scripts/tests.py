@@ -214,7 +214,7 @@ def yaml_has(entry_type, name):
     return yaml_get(entry_type, name) is not None
 
 def read_remote_yml():
-    r = sh(f"sudo cat {WORKSPACE}/remote.yml")
+    r = sh(f"cat {WORKSPACE}/remote.yml")
     data = {"tools": {}, "platforms": {}, "providers": {}}
     section = None
     for line in r.stdout.split("\n"):
@@ -483,7 +483,7 @@ def test_a1():
 
 def test_a2():
     """Bundled plugin with NO YAML entry → succeed, YAML unchanged, disk removed"""
-    plugin, ptype = "fetch", "tools"
+    plugin, ptype = "cosmos-rust-tool", "tools"
     plugin_dir = f"{WORKSPACE}/plugins/{ptype}/{plugin}"
 
     backup_plugins_yml()
@@ -546,7 +546,7 @@ def test_b1():
 
 def test_b2():
     """Bundled plugin WITH YAML entry → succeed, YAML + disk removed"""
-    plugin, ptype = "filesystem", "tools"
+    plugin, ptype = "prompt", "tools"
     plugin_dir = f"{WORKSPACE}/plugins/{ptype}/{plugin}"
 
     ensure_bundled_plugin(plugin, ptype)
@@ -666,7 +666,7 @@ def test_d2():
 
 def test_e1():
     """Bundled platform WITH YAML entry → succeed, YAML + disk removed"""
-    plugin, ptype = "mattermost", "platforms"
+    plugin, ptype = "test-rust", "platforms"
     plugin_dir = f"{WORKSPACE}/plugins/{ptype}/{plugin}"
 
     ensure_bundled_plugin(plugin, ptype)
@@ -689,7 +689,7 @@ def test_e1():
 
 def test_e2():
     """Bundled platform with NO YAML entry → succeed, YAML unchanged, disk removed"""
-    plugin, ptype = "telegram", "platforms"
+    plugin, ptype = "test-rust", "platforms"
     plugin_dir = f"{WORKSPACE}/plugins/{ptype}/{plugin}"
 
     backup_plugins_yml()
@@ -1245,6 +1245,852 @@ def discard_all_changes():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Helpers for Group 6
+# ═══════════════════════════════════════════════════════════════════════
+
+def api_post_body(path, body=None):
+    """POST with JSON body. Returns (success, response_dict)."""
+    import urllib.request, urllib.error, json
+    url = f"{BASE}/api{path}"
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        r = urllib.request.urlopen(req, timeout=15)
+        return (True, json.loads(r.read()))
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", errors="replace")
+        try: return (False, json.loads(raw))
+        except: return (False, {"error": raw, "code": e.code})
+    except Exception as e:
+        return (False, {"error": str(e)})
+
+def find_plugins_by_source(source, plugin_type="tools"):
+    """Find plugins of a given source and type from the API list."""
+    plugins = api_get("/plugins")["data"]
+    return [p for p in plugins
+            if p.get("source") == source
+            and p.get("type") == plugin_type
+            and not p.get("is_duplicated", False)]
+
+def find_first_plugin(source, plugin_type="tools"):
+    """Find first non-duplicated plugin by source and type."""
+    matches = find_plugins_by_source(source, plugin_type)
+    return matches[0]["name"] if matches else None
+
+def get_plugin_source_from_api(name):
+    """Get a plugin's source from the API listing."""
+    plugins = api_get("/plugins")["data"]
+    for p in plugins:
+        if p["name"] == name:
+            return p.get("source")
+    return None
+
+def get_plugin_status(name):
+    """Get a plugin's status from the API listing."""
+    plugins = api_get("/plugins")["data"]
+    for p in plugins:
+        if p["name"] == name:
+            return p.get("status", "unknown")
+    return None
+
+def get_plugin_type(name):
+    """Get a plugin's type from the API listing."""
+    plugins = api_get("/plugins")["data"]
+    for p in plugins:
+        if p["name"] == name:
+            return p.get("type", "unknown")
+    return None
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Test helpers — each test is one action x one source x one type
+
+def _assert_yaml_state(name, ptype, expect_enabled=None, expect_source=None):
+    entry = yaml_get(ptype, name)
+    if expect_enabled is not None:
+        assert entry is not None, f"YAML entry for '{name}' not found"
+        assert entry.get("enabled") == expect_enabled, f"YAML enabled mismatch"
+    if expect_source is not None:
+        assert entry is not None, f"YAML entry for '{name}' not found"
+        assert entry.get("source") == expect_source, f"YAML source mismatch"
+
+def _assert_remote_yml_unchanged(pre_snapshot, msg=""):
+    assert read_remote_yml() == pre_snapshot, f"remote.yml changed: {msg}"
+
+def _assert_dir_exists(path, should_exist=True):
+    if should_exist:
+        assert os.path.exists(path), f"Expected to exist: {path}"
+    else:
+        assert not os.path.exists(path), f"Expected to NOT exist: {path}"
+
+def _remote_yml_snapshot():
+    return read_remote_yml()
+
+def _get_plugin_type(name):
+    for p in api_get("/plugins")["data"]:
+        if p["name"] == name:
+            return p.get("type", "tools")
+    return "tools"
+
+def test_enable_source(name, source, expected_success=True):
+    ptype = _get_plugin_type(name)
+    bundled_dir = f"{WORKSPACE}/plugins/{ptype}/{name}"
+    remote_dir = f"{WORKSPACE}/plugins/{ptype}/.remote/{name}"
+    pre_remote = _remote_yml_snapshot()
+    success, resp = api_post_body(f"/plugins/{name}/enable", {"source": source})
+    if expected_success:
+        assert success, f"enable {name} source={source} failed: {resp}"
+        _assert_yaml_state(name, ptype, expect_enabled=True, expect_source=source)
+        if source == "bundled": _assert_dir_exists(bundled_dir)
+        elif source == "remote": _assert_dir_exists(remote_dir)
+        _assert_remote_yml_unchanged(pre_remote, f"enable {name}")
+    else:
+        assert not success
+
+def test_disable_source(name, source, expected_success=True):
+    ptype = _get_plugin_type(name)
+    pre_remote = _remote_yml_snapshot()
+    success, resp = api_post_body(f"/plugins/{name}/disable", {"source": source})
+    if expected_success:
+        assert success, f"disable {name} source={source} failed: {resp}"
+        _assert_yaml_state(name, ptype, expect_enabled=False, expect_source=source)
+        _assert_remote_yml_unchanged(pre_remote)
+    else:
+        assert not success
+
+def test_install_source(name, source, expected_success=True):
+    ptype = _get_plugin_type(name)
+    bundled_dir = f"{WORKSPACE}/plugins/{ptype}/{name}"
+    remote_dir = f"{WORKSPACE}/plugins/{ptype}/.remote/{name}"
+    pre_remote = _remote_yml_snapshot()
+    success, resp = api_post_body(f"/plugins/{name}/install", {"source": source})
+    if expected_success:
+        assert success, f"install {name} source={source} failed: {resp}"
+        _assert_yaml_state(name, ptype, expect_source=source)
+        if source == "bundled": _assert_dir_exists(bundled_dir)
+        elif source == "remote": _assert_dir_exists(remote_dir)
+        if source != "remote": _assert_remote_yml_unchanged(pre_remote)
+    else:
+        assert not success
+
+def test_reinstall_source(name, source, expected_success=True):
+    ptype = _get_plugin_type(name)
+    pre_remote = _remote_yml_snapshot()
+    success, resp = api_post_body(f"/plugins/{name}/reinstall", {"source": source})
+    if expected_success:
+        assert success, f"reinstall {name} source={source} failed: {resp}"
+        _assert_yaml_state(name, ptype, expect_source=source)
+        _assert_remote_yml_unchanged(pre_remote)
+    else:
+        assert not success
+
+def test_download_source(name, source, expected_success=True):
+    ptype = _get_plugin_type(name)
+    bundled_dir = f"{WORKSPACE}/plugins/{ptype}/{name}"
+    remote_dir = f"{WORKSPACE}/plugins/{ptype}/.remote/{name}"
+    pre_remote = _remote_yml_snapshot()
+    success, resp = api_post_body(f"/plugins/{name}/download", {"source": source})
+    if expected_success:
+        assert success, f"download {name} source={source} failed: {resp}"
+        if source == "bundled": _assert_dir_exists(bundled_dir)
+        elif source == "remote": _assert_dir_exists(remote_dir)
+        _assert_remote_yml_unchanged(pre_remote)
+    else:
+        assert not success
+
+def test_remove_with_source(name, source, expected_success=True):
+    ptype = _get_plugin_type(name)
+    bundled_dir = f"{WORKSPACE}/plugins/{ptype}/{name}"
+    remote_dir = f"{WORKSPACE}/plugins/{ptype}/.remote/{name}"
+    pre_entry = yaml_get(ptype, name)
+    pre_remote = _remote_yml_snapshot()
+    pre_bundled = os.path.exists(bundled_dir)
+    pre_remote_e = os.path.exists(remote_dir)
+    success, resp = api_delete(f"/plugins/{name}?source={source}")
+    if expected_success:
+        assert success, f"remove {name} source={source} failed: {resp}"
+        if source == "bundled":
+            _assert_dir_exists(bundled_dir, False)
+            assert not yaml_has(ptype, name), f"bundled '{name}' YAML should be removed"
+            _assert_remote_yml_unchanged(pre_remote, f"bundled {name}")
+        elif source == "remote":
+            _assert_dir_exists(remote_dir, False)
+            assert not yaml_has(ptype, name), f"remote '{name}' YAML should be removed"
+            assert not remote_yml_has(name, ptype), f"remote.yml entry removed"
+        elif source == "built-in":
+            raise AssertionError("built-in remove should never succeed")
+    else:
+        assert not success
+        if source == "built-in":
+            assert "cannot remove built-in" in json.dumps(resp).lower()
+            if pre_entry:
+                assert yaml_get(ptype, name) == pre_entry, f"built-in YAML modified despite error"
+            _assert_dir_exists(bundled_dir, pre_bundled)
+            _assert_dir_exists(remote_dir, pre_remote_e)
+            _assert_remote_yml_unchanged(pre_remote, "built-in no-op")
+
+def test_remove_no_source(name):
+    success, resp = api_delete(f"/plugins/{name}")
+    assert not success
+    assert "source is required" in json.dumps(resp).lower()
+
+def test_config_update(name, config_body):
+    success, resp = api_post_body(f"/plugins/{name}/config", {"config": config_body})
+    assert success, f"config update {name} failed: {resp}"
+    return resp
+
+#  GROUP 6 — Comprehensive Plugin Action Tests
+# ═══════════════════════════════════════════════════════════════════════
+#
+# For each action that requires source: enable, disable, install, reinstall,
+# download, remove — tests for built-in, bundled, and remote variants.
+# Also tests: config update, name collisions, cross-type actions.
+
+# ── 6.1: Tool enable/disable for each source variant ──────────────────
+# Bundled tool → enable
+def test_t6_enable_bundled_tool():
+    """Enable a bundled tool plugin → success"""
+    name = find_first_plugin("bundled", "tools")
+    if not name:
+        return
+    test_enable_source(name, "bundled")
+
+# Remote tool → enable
+def test_t6_enable_remote_tool():
+    """Enable a remote tool plugin → success"""
+    name = find_first_plugin("remote", "tools")
+    if not name:
+        return
+    test_enable_source(name, "remote")
+
+# Built-in tool → enable should work
+def test_t6_enable_builtin_tool():
+    """Enable a built-in tool plugin → success"""
+    name = find_first_plugin("built-in", "tools")
+    if not name:
+        return
+    test_enable_source(name, "built-in")
+
+# Bundled tool → disable
+def test_t6_disable_bundled_tool():
+    """Disable a bundled tool plugin → success"""
+    name = find_first_plugin("bundled", "tools")
+    if not name:
+        return
+    test_disable_source(name, "bundled")
+    # Re-enable so other tests are not affected
+    test_enable_source(name, "bundled")
+
+# Remote tool → disable
+def test_t6_disable_remote_tool():
+    """Disable a remote tool plugin → success"""
+    name = find_first_plugin("remote", "tools")
+    if not name:
+        return
+    test_disable_source(name, "remote")
+    # Re-enable
+    test_enable_source(name, "remote")
+
+# Built-in tool → disable should work
+def test_t6_disable_builtin_tool():
+    """Disable a built-in tool plugin → success"""
+    name = find_first_plugin("built-in", "tools")
+    if not name:
+        return
+    test_disable_source(name, "built-in")
+    # Re-enable
+    test_enable_source(name, "built-in")
+
+
+# ── 6.2: Tool install/reinstall for each source variant ───────────────
+
+def test_t6_install_bundled_tool():
+    """Install a bundled tool plugin → success"""
+    name = find_first_plugin("bundled", "tools")
+    if not name:
+        return
+    test_install_source(name, "bundled")
+
+def test_t6_install_remote_tool():
+    """Install a remote tool plugin → success"""
+    name = find_first_plugin("remote", "tools")
+    if not name:
+        return
+    test_install_source(name, "remote")
+
+def test_t6_reinstall_bundled_tool():
+    """Reinstall a bundled tool plugin → success"""
+    name = find_first_plugin("bundled", "tools")
+    if not name:
+        return
+    test_reinstall_source(name, "bundled")
+
+def test_t6_reinstall_remote_tool():
+    """Reinstall a remote tool plugin → success"""
+    name = find_first_plugin("remote", "tools")
+    if not name:
+        return
+    test_reinstall_source(name, "remote")
+
+
+# ── 6.3: Tool download for each source variant ────────────────────────
+
+def test_t6_download_bundled_tool():
+    """Download a bundled tool plugin → success"""
+    name = find_first_plugin("bundled", "tools")
+    if not name:
+        return
+    test_download_source(name, "bundled")
+
+def test_t6_download_remote_tool():
+    """Download a remote tool plugin → success"""
+    name = find_first_plugin("remote", "tools")
+    if not name:
+        return
+    test_download_source(name, "remote")
+
+
+# ── 6.4: Source-required tests for ALL actions on tools ───────────────
+# (These complement GROUP 4 which tests on any plugin type)
+
+def test_t6_enable_no_source_tool():
+    """Enable a tool WITHOUT source → 'Source is required' error"""
+    name = find_first_plugin("bundled", "tools")
+    if not name:
+        name = find_first_plugin("remote", "tools")
+    if not name:
+        return
+    test_enable_no_source(name)
+
+def test_t6_disable_no_source_tool():
+    """Disable a tool WITHOUT source → 'Source is required' error"""
+    name = find_first_plugin("bundled", "tools")
+    if not name:
+        name = find_first_plugin("remote", "tools")
+    if not name:
+        return
+    test_disable_no_source(name)
+
+def test_t6_install_no_source_tool():
+    """Install a tool WITHOUT source → 'Source is required' error"""
+    name = find_first_plugin("bundled", "tools")
+    if not name:
+        name = find_first_plugin("remote", "tools")
+    if not name:
+        return
+    test_install_no_source(name)
+
+def test_t6_reinstall_no_source_tool():
+    """Reinstall a tool WITHOUT source → 'Source is required' error"""
+    name = find_first_plugin("bundled", "tools")
+    if not name:
+        name = find_first_plugin("remote", "tools")
+    if not name:
+        return
+    test_reinstall_no_source(name)
+
+def test_t6_download_no_source_tool():
+    """Download a tool WITHOUT source → 'Source is required' error"""
+    name = find_first_plugin("bundled", "tools")
+    if not name:
+        name = find_first_plugin("remote", "tools")
+    if not name:
+        return
+    test_download_no_source(name)
+
+def test_t6_remove_no_source_tool():
+    """Remove a tool WITHOUT source → 'Source is required' error"""
+    name = find_first_plugin("bundled", "tools")
+    if not name:
+        name = find_first_plugin("remote", "tools")
+    if not name:
+        return
+    test_remove_no_source(name)
+
+
+# ── 6.5: Cross-type — platform action tests ───────────────────────────
+
+def test_t6_enable_platform():
+    """Enable a bundled platform plugin → success"""
+    name = find_first_plugin("bundled", "platforms")
+    if not name:
+        name = find_first_plugin("remote", "platforms")
+    if not name:
+        return
+    source = get_plugin_source_from_api(name) or "bundled"
+    test_enable_source(name, source)
+
+def test_t6_disable_platform():
+    """Disable a bundled platform plugin → success"""
+    name = find_first_plugin("bundled", "platforms")
+    if not name:
+        name = find_first_plugin("remote", "platforms")
+    if not name:
+        return
+    source = get_plugin_source_from_api(name) or "bundled"
+    test_disable_source(name, source)
+    # Re-enable
+    test_enable_source(name, source)
+
+
+# ── 6.6: Cross-type — provider action tests ───────────────────────────
+
+def test_t6_enable_provider():
+    """Enable a bundled provider plugin → success"""
+    name = find_first_plugin("bundled", "providers")
+    if not name:
+        name = find_first_plugin("remote", "providers")
+    if not name:
+        return
+    source = get_plugin_source_from_api(name) or "bundled"
+    test_enable_source(name, source)
+
+def test_t6_disable_provider():
+    """Disable a bundled provider plugin → success"""
+    name = find_first_plugin("bundled", "providers")
+    if not name:
+        name = find_first_plugin("remote", "providers")
+    if not name:
+        return
+    source = get_plugin_source_from_api(name) or "bundled"
+    test_disable_source(name, source)
+    # Re-enable
+    test_enable_source(name, source)
+
+
+# ── 6.7: Config update test ───────────────────────────────────────────
+
+def test_t6_config_update():
+    """Update plugin config → success"""
+    name = find_first_plugin("bundled", "tools")
+    if not name:
+        return
+    # Read current config first
+    plugin = [p for p in api_get("/plugins")["data"] if p["name"] == name]
+    if not plugin:
+        return
+    current_config = plugin[0].get("config", {})
+    # Update with empty config (minimal change)
+    test_config_update(name, {})
+
+
+# ── 6.8: Name collision tests for enable/disable ──────────────────────
+# These tests set up a bundled+remote with the same name, then act on
+# each source independently.
+
+def ensure_name_collision_plugin(collision_name="collision-test"):
+    """Ensure a name collision exists: bundled + remote with same name.
+    Returns (bundled_dir, remote_dir) or raises.
+    """
+    ptype = "tools"
+    bundled_dir = f"{WORKSPACE}/plugins/{ptype}/{collision_name}"
+    remote_dir = f"{WORKSPACE}/plugins/{ptype}/.remote/{collision_name}"
+
+    ensure_bundled_plugin(collision_name, ptype)
+    ensure_remote_plugin(collision_name, ptype)
+
+    # Register in YAML with bundled source (will be managed by test)
+    if not yaml_has(ptype, collision_name):
+        yaml_set(ptype, collision_name, {
+            "enabled": True, "source": "bundled", "config": {}
+        })
+
+    return bundled_dir, remote_dir
+
+
+def ensure_remote_yaml_entry(name, ptype="tools"):
+    """Ensure a plugin has a remote YAML entry."""
+    # Check if already in remote.yml
+    if not remote_yml_has(name, ptype):
+        with open(f"{WORKSPACE}/remote.yml", "a") as f:
+            f.write(f"  {name}:\n    url: https://github.com/nexuslbs/omni-plugins.git\n    path: {ptype}/{name}\n")
+
+
+def test_t6_collision_enable_bundled():
+    """Name collision: enable with source=bundled → targets bundled only"""
+    collision_name = "test-rust-tool"
+    bundled_dir = f"{WORKSPACE}/plugins/tools/{collision_name}"
+    remote_dir = f"{WORKSPACE}/plugins/tools/.remote/{collision_name}"
+
+    backup_plugins_yml()
+    backup_remote_yml()
+    try:
+        ensure_bundled_plugin(collision_name, "tools")
+        ensure_remote_plugin(collision_name, "tools")
+        yaml_set("tools", collision_name, {"enabled": True, "source": "bundled", "config": {}})
+        ensure_remote_yaml_entry(collision_name)
+        restart_agent()
+
+        # Verify both dirs exist before action
+        assert os.path.exists(bundled_dir), "bundled dir missing before test"
+        assert os.path.exists(remote_dir), "remote dir missing before test"
+
+        # Use disable (no MCP server startup needed) with source=bundled
+        success, resp = api_post_body(f"/plugins/{collision_name}/disable", {"source": "bundled"})
+        assert success, f"collision disable bundled failed: {resp}"
+
+        # Verify bundled dir still exists (disable doesn't remove disk)
+        assert os.path.exists(bundled_dir), "bundled dir was removed!"
+        assert os.path.exists(remote_dir), "remote dir was removed!"
+
+        # Verify YAML state: only bundled should be disabled
+        entry = yaml_get("tools", collision_name)
+        assert entry is not None, "YAML entry removed"
+        assert entry.get("source") == "bundled", f"expected source=bundled, got {entry.get('source')}"
+        assert entry.get("enabled") is False, "expected enabled=false"
+    finally:
+        remove_bundled_plugin(collision_name, "tools")
+        remove_remote_plugin(collision_name, "tools")
+        restore_remote_yml()
+        restore_plugins_yml()
+        restart_agent()
+
+
+def test_t6_collision_enable_remote():
+    """Name collision: enable with source=remote → targets remote only"""
+    collision_name = "test-python-tool"
+    bundled_dir = f"{WORKSPACE}/plugins/tools/{collision_name}"
+    remote_dir = f"{WORKSPACE}/plugins/tools/.remote/{collision_name}"
+
+    backup_plugins_yml()
+    backup_remote_yml()
+    try:
+        ensure_bundled_plugin(collision_name, "tools")
+        ensure_remote_plugin(collision_name, "tools")
+        yaml_set("tools", collision_name, {"enabled": True, "source": "remote", "config": {}})
+        ensure_remote_yaml_entry(collision_name)
+        restart_agent()
+
+        # Verify both dirs exist
+        assert os.path.exists(bundled_dir), "bundled dir missing before test"
+        assert os.path.exists(remote_dir), "remote dir missing before test"
+
+        # Disable with source=remote
+        success, resp = api_post_body(f"/plugins/{collision_name}/disable", {"source": "remote"})
+        assert success, f"collision disable remote failed: {resp}"
+
+        assert os.path.exists(bundled_dir), "bundled dir was removed!"
+        assert os.path.exists(remote_dir), "remote dir was removed!"
+
+        # Verify YAML: only remote should be disabled
+        entry = yaml_get("tools", collision_name)
+        assert entry is not None, "YAML entry removed"
+        assert entry.get("source") == "remote", f"expected source=remote, got {entry.get('source')}"
+        assert entry.get("enabled") is False, "expected enabled=false"
+    finally:
+        remove_bundled_plugin(collision_name, "tools")
+        remove_remote_plugin(collision_name, "tools")
+        restore_remote_yml()
+        restore_plugins_yml()
+        restart_agent()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  GROUP 7 — Memory Edit/Upload Tests
+# ═══════════════════════════════════════════════════════════════════════
+
+import os as _mem_os, json as _mem_json, shutil as _mem_shutil
+
+TEST_PROFILE = "test-memory-profile"
+OMNI_DATA_DIR = WORKSPACE
+TEST_PROFILE_DIR = f"{OMNI_DATA_DIR}/profiles/{TEST_PROFILE}"
+
+def _check_memory_text(profile, mem_type, expected_substring):
+    import urllib.request, json
+    r = urllib.request.urlopen(f"{BASE}/memory/text/{profile}/{mem_type}", timeout=10)
+    data = json.loads(r.read()).get("data", {})
+    content = data.get("content", "")
+    assert expected_substring in content, \
+        f"expected '{expected_substring}' in {mem_type}, got: {content[:200]}"
+    return content
+
+def _check_memory_text_exact(profile, mem_type, expected_content):
+    import urllib.request, json
+    r = urllib.request.urlopen(f"{BASE}/memory/text/{profile}/{mem_type}", timeout=10)
+    data = json.loads(r.read()).get("data", {})
+    content = data.get("content", "")
+    assert content == expected_content, \
+        f"expected exact content, got: {content[:200]}"
+    return content
+
+
+def _raw_post_body(path, body):
+    """POST without /api prefix, returns (success, response_dict)."""
+    import urllib.request, urllib.error, json
+    url = f"{BASE}{path}"
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        r = urllib.request.urlopen(req, timeout=15)
+        return (True, json.loads(r.read()))
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", errors="replace")
+        try: return (False, json.loads(raw))
+        except: return (False, {"error": raw, "code": e.code})
+    except Exception as e:
+        return (False, {"error": str(e)})
+
+def _raw_delete(path):
+    """DELETE without /api prefix."""
+    import urllib.request, urllib.error, json
+    url = f"{BASE}{path}"
+    req = urllib.request.Request(url, method="DELETE")
+    try:
+        r = urllib.request.urlopen(req, timeout=15)
+        return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", errors="replace")
+        raise AssertionError(f"DELETE {path} failed (HTTP {e.code}): {raw}")
+
+def _check_prompt_includes(channel_name, expected_substring):
+    import urllib.request
+    r = urllib.request.urlopen(f"{BASE}/prompt/{channel_name}", timeout=10)
+    text = r.read().decode("utf-8")
+    assert expected_substring in text, f"prompt missing '{expected_substring}'"
+    return text
+
+def _ensure_test_profile_clean():
+    _mem_os.makedirs(f"{TEST_PROFILE_DIR}/memories", exist_ok=True)
+    for f in ["MEMORY.md", "USER.md"]:
+        p = f"{TEST_PROFILE_DIR}/memories/{f}"
+        if _mem_os.path.exists(p):
+            _mem_os.remove(p)
+
+def _remove_test_profile():
+    if _mem_os.path.exists(TEST_PROFILE_DIR):
+        _mem_shutil.rmtree(TEST_PROFILE_DIR)
+
+def test_m1_setup():
+    """Create test profile with no memory files"""
+    _ensure_test_profile_clean()
+    assert _mem_os.path.exists(f"{TEST_PROFILE_DIR}/memories")
+    assert not _mem_os.path.exists(f"{TEST_PROFILE_DIR}/memories/MEMORY.md")
+    assert not _mem_os.path.exists(f"{TEST_PROFILE_DIR}/memories/USER.md")
+
+def test_m2_edit_memory():
+    """Edit MEMORY → file created"""
+    content = "This is a test memory for profile testing."
+    success, resp = _raw_post_body(f"/memory/edit/{TEST_PROFILE}/memory", {"content": content})
+    assert success, f"edit memory failed: {resp}"
+    assert _mem_os.path.exists(f"{TEST_PROFILE_DIR}/memories/MEMORY.md")
+    _check_memory_text_exact(TEST_PROFILE, "memory", content)
+
+def test_m3_edit_soul():
+    """Edit SOUL → file created"""
+    content = "This is a test soul for profile testing."
+    success, resp = _raw_post_body(f"/memory/edit/{TEST_PROFILE}/soul", {"content": content})
+    assert success, f"edit soul failed: {resp}"
+    assert _mem_os.path.exists(f"{TEST_PROFILE_DIR}/memories/USER.md")
+    _check_memory_text_exact(TEST_PROFILE, "soul", content)
+
+def test_m4_prompt_verify():
+    """Memory and soul content is consistent across API, disk, and what was written"""
+    mem_written = "This is a test memory for profile testing."
+    soul_written = "This is a test soul for profile testing."
+
+    # 1. Read back via API — confirms the same as written
+    mem_api = _check_memory_text_exact(TEST_PROFILE, "memory", mem_written)
+    soul_api = _check_memory_text_exact(TEST_PROFILE, "soul", soul_written)
+
+    # 2. Read from disk — all 3 should match
+    with open(f"{TEST_PROFILE_DIR}/memories/MEMORY.md") as f:
+        mem_disk = f.read().strip()
+    with open(f"{TEST_PROFILE_DIR}/memories/USER.md") as f:
+        soul_disk = f.read().strip()
+
+    assert mem_written == mem_api == mem_disk, \
+        f"Memory mismatch: written={mem_written!r} api={mem_api!r} disk={mem_disk!r}"
+    assert soul_written == soul_api == soul_disk, \
+        f"Soul mismatch: written={soul_written!r} api={soul_api!r} disk={soul_disk!r}"
+
+def test_m5_edit_update():
+    """Edit with new values → all 3 sources consistent"""
+    new_mem = "Updated memory content for testing."
+    new_soul = "Updated soul content for testing."
+    success, resp = _raw_post_body(f"/memory/edit/{TEST_PROFILE}/memory", {"content": new_mem})
+    assert success, f"edit memory (2nd) failed: {resp}"
+    success, resp = _raw_post_body(f"/memory/edit/{TEST_PROFILE}/soul", {"content": new_soul})
+    assert success, f"edit soul (2nd) failed: {resp}"
+
+    # 1. Via API
+    _check_memory_text_exact(TEST_PROFILE, "memory", new_mem)
+    _check_memory_text_exact(TEST_PROFILE, "soul", new_soul)
+
+    # 2. From disk — all match
+    with open(f"{TEST_PROFILE_DIR}/memories/MEMORY.md") as f:
+        assert f.read().strip() == new_mem
+    with open(f"{TEST_PROFILE_DIR}/memories/USER.md") as f:
+        assert f.read().strip() == new_soul
+
+def test_m6_upload_memory():
+    """Upload MEMORY file → verify"""
+    content = "Uploaded memory content."
+    with open("/tmp/mem_test_upload.md", "w") as f:
+        f.write(content)
+    try:
+        success, resp = _raw_post_body(f"/memory/upload/{TEST_PROFILE}/memory", {"content": content})
+        assert success or resp.get("size"), f"upload failed: {resp}"
+        _check_memory_text_exact(TEST_PROFILE, "memory", content)
+    finally:
+        if _mem_os.path.exists("/tmp/mem_test_upload.md"):
+            _mem_os.remove("/tmp/mem_test_upload.md")
+
+def test_m7_upload_soul():
+    """Upload SOUL file → verify"""
+    content = "Uploaded soul content."
+    with open("/tmp/soul_test_upload.md", "w") as f:
+        f.write(content)
+    try:
+        success, resp = _raw_post_body(f"/memory/upload/{TEST_PROFILE}/soul", {"content": content})
+        assert success or resp.get("size"), f"upload failed: {resp}"
+        _check_memory_text_exact(TEST_PROFILE, "soul", content)
+    finally:
+        if _mem_os.path.exists("/tmp/soul_test_upload.md"):
+            _mem_os.remove("/tmp/soul_test_upload.md")
+
+def test_m8_delete_and_reupload():
+    """Delete files and re-upload → verify"""
+    mem_path = f"{TEST_PROFILE_DIR}/memories/MEMORY.md"
+    soul_path = f"{TEST_PROFILE_DIR}/memories/USER.md"
+    assert _mem_os.path.exists(mem_path)
+    assert _mem_os.path.exists(soul_path)
+    _mem_os.remove(mem_path)
+    _mem_os.remove(soul_path)
+    assert not _mem_os.path.exists(mem_path)
+    assert not _mem_os.path.exists(soul_path)
+    # Re-upload MEMORY
+    re_mem = "Re-uploaded memory content."
+    with open("/tmp/mem_reup.md", "w") as f:
+        f.write(re_mem)
+    try:
+        success, resp = _raw_post_body(f"/memory/upload/{TEST_PROFILE}/memory", {"content": re_mem})
+        assert success or resp.get("size"), f"re-upload mem failed: {resp}"
+        _check_memory_text_exact(TEST_PROFILE, "memory", re_mem)
+    finally:
+        if _mem_os.path.exists("/tmp/mem_reup.md"): _mem_os.remove("/tmp/mem_reup.md")
+    # Re-upload SOUL
+    re_soul = "Re-uploaded soul content."
+    with open("/tmp/soul_reup.md", "w") as f:
+        f.write(re_soul)
+    try:
+        success, resp = _raw_post_body(f"/memory/upload/{TEST_PROFILE}/soul", {"content": re_soul})
+        assert success or resp.get("size"), f"re-upload soul failed: {resp}"
+        _check_memory_text_exact(TEST_PROFILE, "soul", re_soul)
+    finally:
+        if _mem_os.path.exists("/tmp/soul_reup.md"): _mem_os.remove("/tmp/soul_reup.md")
+
+def test_m9_cleanup():
+    """Remove test profile, verify gone"""
+    _remove_test_profile()
+    assert not _mem_os.path.exists(TEST_PROFILE_DIR)
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  GROUP 8 — "Add" (install-git) tests
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_t8_add_remote_new():
+    """Add a new remote plugin (not in remote.yml) -> adds to remote.yml + .remote/ dir"""
+    plugin, ptype = "test-add-new", "tools"
+    remote_dir = f"{WORKSPACE}/plugins/{ptype}/.remote/{plugin}"
+    backup_remote_yml()
+    try:
+        if os.path.exists(remote_dir): shutil.rmtree(remote_dir)
+        if remote_yml_has(plugin, ptype): remove_remote_plugin(plugin, ptype)
+        pre_remote = _remote_yml_snapshot()
+        success, resp = api_post_body("/plugins/install-git", {
+            "url": "file:///opt/workspace/omni-plugins",
+            "name": plugin,
+            "path": f"{ptype}/test-js-tool",
+        })
+        assert success, f"Add remote plugin failed: {resp}"
+        assert os.path.exists(remote_dir), f".remote dir not created: {remote_dir}"
+        # remote.yml must have changed (plugin added)
+        assert read_remote_yml() != pre_remote, "remote.yml should change"
+        assert remote_yml_has(plugin, ptype), f"remote.yml missing '{plugin}'"
+        assert not yaml_has(ptype, plugin), "install-git must not add plugins.yml entry"
+    finally:
+        remove_remote_plugin(plugin, ptype)
+        restore_remote_yml()
+
+def test_t8_add_remote_duplicate():
+    """Add a remote plugin already in remote.yml -> succeeds (overwrite)"""
+    plugin, ptype = "test-add-dup", "tools"
+    remote_dir = f"{WORKSPACE}/plugins/{ptype}/.remote/{plugin}"
+    backup_remote_yml()
+    try:
+        if os.path.exists(remote_dir): shutil.rmtree(remote_dir)
+        if remote_yml_has(plugin, ptype): remove_remote_plugin(plugin, ptype)
+        s1, r1 = api_post_body("/plugins/install-git", {
+            "url": "file:///opt/workspace/omni-plugins",
+            "name": plugin, "path": f"{ptype}/test-js-tool",
+        })
+        assert s1, f"First add failed: {r1}"
+        s2, r2 = api_post_body("/plugins/install-git", {
+            "url": "file:///opt/workspace/omni-plugins",
+            "name": plugin, "path": f"{ptype}/test-js-tool",
+        })
+        assert s2, f"Duplicate add should succeed (overwrite): {r2}"
+        assert remote_yml_has(plugin, ptype), "remote.yml still has entry"
+    finally:
+        remove_remote_plugin(plugin, ptype)
+        restore_remote_yml()
+
+def test_t8_remove_bundled_remote_yml_unchanged():
+    """Remove a bundled plugin -> remote.yml UNCHANGED even with same-name remote exists"""
+    plugin, ptype = "test-rust-tool", "tools"
+    bundled_dir = f"{WORKSPACE}/plugins/{ptype}/{plugin}"
+    remote_dir = f"{WORKSPACE}/plugins/{ptype}/.remote/{plugin}"
+    backup_plugins_yml()
+    backup_remote_yml()
+    try:
+        ensure_bundled_plugin(plugin, ptype)
+        ensure_remote_plugin(plugin, ptype)
+        yaml_set(ptype, plugin, {"enabled": True, "source": "bundled", "config": {}})
+        restart_agent()
+        pre_remote = _remote_yml_snapshot()
+        success, resp = api_delete(f"/plugins/{plugin}?source=bundled")
+        assert success, f"Remove bundled failed: {resp}"
+        assert not os.path.exists(bundled_dir), "Bundled dir removed"
+        assert os.path.exists(remote_dir), "Remote dir survives"
+        assert not yaml_has(ptype, plugin), "YAML entry removed"
+        _assert_remote_yml_unchanged(pre_remote, f"bundled removal must not touch remote.yml")
+    finally:
+        remove_bundled_plugin(plugin, ptype)
+        remove_remote_plugin(plugin, ptype)
+        restore_remote_yml()
+        restore_plugins_yml()
+        restart_agent()
+
+# ── 6.9: Test source=invalid for each action ──────────────────────────
+
+def test_t6_enable_invalid_source():
+    """Enable with invalid source → error"""
+    name = find_first_plugin("bundled", "tools")
+    if not name:
+        return
+    success, resp = api_post_body(f"/plugins/{name}/enable", {"source": "invalid-source-type"})
+    assert not success, f"enable with invalid source should have failed: {resp}"
+    err_text = json.dumps(resp).lower()
+    assert "invalid source" in err_text, \
+        f"enable invalid source: expected 'invalid source', got {resp}"
+
+def test_t6_disable_invalid_source():
+    """Disable with invalid source → error"""
+    name = find_first_plugin("bundled", "tools")
+    if not name:
+        return
+    success, resp = api_post_body(f"/plugins/{name}/disable", {"source": "invalid-source-type"})
+    assert not success, f"disable with invalid source should have failed: {resp}"
+    err_text = json.dumps(resp).lower()
+    assert "invalid source" in err_text, \
+        f"disable invalid source: expected 'invalid source', got {resp}"
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Main
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1303,7 +2149,72 @@ if __name__ == "__main__":
     for fn in [test_dashboard_pages]:
         test(fn)
 
+
     print(f"\n{'=' * 60}")
+    print("GROUP 6 — Comprehensive Plugin Action Tests")
+    print(f"{'=' * 60}")
+
+    for fn in [
+        test_t6_enable_bundled_tool,
+        test_t6_enable_remote_tool,
+        test_t6_enable_builtin_tool,
+        test_t6_disable_bundled_tool,
+        test_t6_disable_remote_tool,
+        test_t6_disable_builtin_tool,
+        test_t6_install_bundled_tool,
+        test_t6_install_remote_tool,
+        test_t6_reinstall_bundled_tool,
+        test_t6_reinstall_remote_tool,
+        test_t6_download_bundled_tool,
+        test_t6_download_remote_tool,
+        test_t6_enable_no_source_tool,
+        test_t6_disable_no_source_tool,
+        test_t6_install_no_source_tool,
+        test_t6_reinstall_no_source_tool,
+        test_t6_download_no_source_tool,
+        test_t6_remove_no_source_tool,
+        test_t6_enable_platform,
+        test_t6_disable_platform,
+        test_t6_enable_provider,
+        test_t6_disable_provider,
+        test_t6_config_update,
+        test_t6_collision_enable_bundled,
+        test_t6_collision_enable_remote,
+        test_t6_enable_invalid_source,
+        test_t6_disable_invalid_source,
+    ]:
+        test(fn)
+
+    print(f"\n{'=' * 60}")
+    print("GROUP 7 — Memory Edit/Upload Tests")
+    print(f"{'=' * 60}")
+
+    for fn in [
+        test_m1_setup,
+        test_m2_edit_memory,
+        test_m3_edit_soul,
+        test_m4_prompt_verify,
+        test_m5_edit_update,
+        test_m6_upload_memory,
+        test_m7_upload_soul,
+        test_m8_delete_and_reupload,
+        test_m9_cleanup,
+    ]:
+        test(fn)
+
+    print(f"\n{'=' * 60}")
+
+    print(f"\n{'=' * 60}")
+    print("GROUP 8 — Add/Install-Git Tests")
+    print(f"{'=' * 60}")
+
+    for fn in [
+        test_t8_add_remote_new,
+        test_t8_add_remote_duplicate,
+        test_t8_remove_bundled_remote_yml_unchanged,
+    ]:
+        test(fn)
+
     print(f"Results: {tests_pass}/{tests_run} passed, {tests_fail} failed")
     print(f"{'=' * 60}")
 

@@ -8,6 +8,12 @@ WORKDIR /app
 # Rust dev components (fast — no compilation, just downloads)
 RUN rustup component add rustfmt clippy
 
+# Trust all repos under /opt/workspace (container mounts host git repos)
+RUN git config --global --add safe.directory /opt/workspace/omni-stack/.git \
+    && git config --global --add safe.directory /opt/workspace/omni-plugins/.git \
+    && git config --global --add safe.directory /opt/workspace/omni-dashboard/.git \
+    && git config --global --add safe.directory /opt/workspace/omniagent/.git
+
 # cargo-binstall + cargo-watch (pre-built binaries, no compilation)
 RUN curl -fsSLo /tmp/cargo-binstall.tgz \
       "https://github.com/ryankurte/cargo-binstall/releases/latest/download/cargo-binstall-x86_64-unknown-linux-musl.tgz" \
