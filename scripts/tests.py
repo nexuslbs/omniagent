@@ -644,13 +644,7 @@ def test_d1():
         assert not yaml_has(ptype, plugin), "YAML entry still present"
     finally:
         restore_plugins_yml()
-        # Use the download API to restore the bundled plugin directory
-        # instead of manually copying files — validates the download endpoint
-        # with source=bundled and a proper YAML entry
-        try:
-            api_post(f"/plugins/{plugin}/download", {"source": "bundled"})
-        except Exception:
-            pass
+        ensure_bundled_plugin(plugin, ptype)
         restart_agent()
 
 
@@ -674,11 +668,7 @@ def test_d2():
         assert not yaml_has(ptype, plugin), "YAML was affected but shouldn't have been"
     finally:
         restore_plugins_yml()
-        # Use download API to restore bundled plugin instead of manual copy
-        try:
-            api_post(f"/plugins/{plugin}/download", {"source": "bundled"})
-        except Exception:
-            pass
+        ensure_bundled_plugin(plugin, ptype)
         restart_agent()
 
 
