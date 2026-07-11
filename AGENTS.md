@@ -78,6 +78,36 @@ A plugin **can** exist at multiple sources simultaneously (e.g., a builtin crate
 
 **At most one source can be enabled per plugin name.** Enabling a different source overwrites the YAML entry for that name.
 
+### Plugin Config — HARD RULE: Use Plugin Config, NOT Direct Env Vars
+
+**Plugins MUST use their own plugin config (`config_schema` in `plugin.json`) for ALL configurable values.** Plugins may reference environment variables via `$env:VAR_NAME` as default values in `config_schema`, but the runtime value must come from the plugin's resolved config (which the plugin system provides via the `config` field).
+
+**Correct pattern:**
+```json
+// plugin.json config_schema
+"config_schema": [
+  {
+    "key": "MY_PARAM",
+    "label": "My Parameter",
+    "type": "string",
+    "default": "$env:MY_ENV_VAR",
+    "description": "..."
+  }
+]
+```
+
+The plugin reads from its resolved config at startup, not by calling `std::env::var("MY_PARAM")` directly. The plugin system resolves `$env:` references automatically.
+
+**Incorrect — do NOT do this:**
+```rust
+// ❌ Plugin reads env var directly
+let value = std::env::var("MY_PARAM").unwrap_or_default();
+```
+
+**Exception:** The core omniagent process (not a plugin) may still read env vars directly for settings that are global to the agent process. But plugins must use plugin config.
+
+This rule applies to ALL plugin types: tools, platforms, and providers.
+
 ### Configuration Files (omni-stack)
 
 | File | Purpose |

@@ -1,15 +1,12 @@
 use sqlx::PgPool;
 use tracing::{error, info, warn};
 
-use crate::agent::config::AgentConfig;
 use crate::db::types as queries;
 use crate::db::types::{Channel, CompleteThreadStats, Message, MessageNew, Thread};
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
 use crate::mcp::AppContext;
 use crate::platform::enqueue_notification;
 use crate::platform::queue::OutboundEnvelope;
-use std::sync::Arc;
-use std::sync::RwLock;
 
 /// Merge cumulative usage with a new usage value.
 pub fn merge_usage(cumulative: &mut Option<Usage>, new_usage: Option<Usage>) {
@@ -497,16 +494,16 @@ pub fn condense_messages(
 pub async fn check_and_generate_summary(
     pool: &PgPool,
     llm: &LLMClient,
-    config: &Arc<RwLock<AgentConfig>>,
     channel_id: i64,
 ) {
-    let (window, summary_tokens) = {
-        let cfg_snapshot = config.read().unwrap();
-        (
-            cfg_snapshot.summary_window as i64,
-            cfg_snapshot.channel_summary_tokens,
-        )
-    };
+    let window = std::env::var("SUMMARY_WINDOW")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(10);
+    let summary_tokens = std::env::var("CHANNEL_SUMMARY_TOKENS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(4096);
     if window == 0 {
         return; // summaries disabled
     }

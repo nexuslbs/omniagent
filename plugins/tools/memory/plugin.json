@@ -1,0 +1,35 @@
+{
+  "name": "Memory MCP Server",
+  "id": "mcp-server-memory",
+  "version": "0.1.0",
+  "description": "Memory management MCP server — manage persistent memory entries with character limits",
+  "type": "mcp",
+  "entrypoint": {
+    "command": "mcp-server-memory",
+    "args": [],
+    "transport": "stdio"
+  },
+  "config_schema": [
+    {
+      "key": "SUMMARIZE_AFTER_DAYS",
+      "label": "Summarize After Days",
+      "type": "integer",
+      "default": "$env:SUMMARIZE_AFTER_DAYS",
+      "description": "Days of inactivity before auto-summarizing threads"
+    },
+    {
+      "key": "SUMMARY_WINDOW",
+      "label": "Summary Window",
+      "type": "integer",
+      "default": "$env:SUMMARY_WINDOW",
+      "description": "Number of threads in a summary generation window"
+    },
+    {
+      "key": "CHANNEL_SUMMARY_TOKENS",
+      "label": "Channel Summary Tokens",
+      "type": "integer",
+      "default": "$env:CHANNEL_SUMMARY_TOKENS",
+      "description": "Maximum tokens for channel-level summary generation"
+    }
+  ]
+}

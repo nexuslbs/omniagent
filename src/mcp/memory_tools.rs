@@ -1,8 +1,6 @@
-//! Built-in memory MCP tools — manage_memory, generate_initial_prompt,
-//! compact_messages, promote/list/review memories.
+//! Built-in memory MCP tools — manage_memory, promote/list/review memories.
 //!
-//! These replace the external subprocess MCP server (`mcp-server-memory`),
-//! making memory management always available without a subprocess dependency.
+//! These provide always-available memory management without a subprocess dependency.
 
 use crate::mcp::{AppContext, McpTool, McpToolResult};
 use serde_json::Value;
