@@ -325,10 +325,13 @@ pub async fn process_thread(
         plan: bool,
     }
 
+
+
     let prompt_parts = {
+        let prompt_tool_name = cfg.config_snapshot().prompt_tool_name;
         let mcp_call = McpToolCall {
             id: "sys-prompt-gen".to_string(),
-            name: "generate".to_string(),
+            name: prompt_tool_name,
             arguments: serde_json::json!({
                 "profile_name": profile_name,
                 "platform": channel.platform.as_deref().unwrap_or(""),
@@ -366,9 +369,7 @@ pub async fn process_thread(
             user: parsed["user"].as_str().unwrap_or("").to_string(),
             plan: parsed.get("plan").and_then(|v| v.as_bool()).unwrap_or(false),
         }
-    };
-
-    // 4a. Load template from cause message metadata (for kanban/cron/user tasks)
+    };    // 4a. Load template from cause message metadata (for kanban/cron/user tasks)
     let template_section: Option<String> = {
         let msg_type = cause_msg.msg_type.as_str();
         if msg_type == "kanban" || msg_type == "cron" || msg_type == "Cause" {

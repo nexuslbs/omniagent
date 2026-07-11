@@ -102,6 +102,13 @@ pub struct AgentConfig {
     /// - "all" — insert every prompt before every LLM call
     pub prompt_log_level: String,
 
+    /// MCP tool name for generating the LLM prompt (system prompt + context assembly).
+    /// The tool is called by the executor before each LLM invocation to build
+    /// the complete prompt from profile, memory, skills, thread context, etc.
+    /// Default: "prompt_generate" — change this if the prompt plugin is registered
+    /// under a different name.
+    pub prompt_tool_name: String,
+
     // Infrastructure config (merged from former config::Config)
     pub database_url: String,
     pub database_readonly_url: String,
@@ -248,6 +255,8 @@ impl AgentConfig {
 
             prompt_log_level: std::env::var("PROMPT_LOG_LEVEL")
                 .unwrap_or_else(|_| "first".to_string()),
+            prompt_tool_name: std::env::var("PROMPT_TOOL_NAME")
+                .unwrap_or_else(|_| "prompt_generate".to_string()),
 
             // Infrastructure config (merged from former config::Config)
             database_url: std::env::var("DATABASE_URL").ctx("DATABASE_URL must be set")?,

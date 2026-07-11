@@ -380,9 +380,9 @@ async fn handle_generate_full(pool: &PgPool, args: &Value, meta: Option<McpMeta>
                     .ok()
                     .and_then(|v| v.parse::<usize>().ok())
                     .unwrap_or(2000);
-                let keywords: Vec<&str> = std::env::var("PROMPT_PLAN_KEYWORDS")
-                    .ok()
-                    .unwrap_or_default()
+                let keywords_str = std::env::var("PROMPT_PLAN_KEYWORDS")
+                    .unwrap_or_default();
+                let keywords: Vec<&str> = keywords_str
                     .split(',')
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())
@@ -483,7 +483,7 @@ async fn main() -> Result<()> {
     let tools = vec![
         McpToolEntry {
             def: McpToolDef {
-                name: "generate".to_string(),
+                name: "prompt_generate".to_string(),
                 description:
                     "Generate the complete LLM prompt for a conversation, including system prompt \
                      (identity, tool guidance, memory, user profile), thread context (recent messages, \
