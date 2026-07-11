@@ -105,7 +105,7 @@ pub fn resolve_thread_plan(
 /// Resolve the max tool-call iterations based on the thread's plan setting.
 pub fn max_iterations_for_plan(config: &AgentConfig, plan: bool) -> u32 {
     if plan {
-        config.max_iterations_complex_plan
+        config.max_iterations_plan
     } else {
         config.max_iterations_no_plan
     }

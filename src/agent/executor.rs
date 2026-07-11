@@ -446,8 +446,7 @@ pub async fn process_thread(
 
     let plan_content: Option<String> = if should_plan {
         let max_iter = 0; // one-shot, no refinement iterations
-        let cfg_snapshot = cfg.config_snapshot();
-        let max_tokens = cfg_snapshot.prompt_plan_max_tokens;
+        let max_tokens = 2048u32; // planning token limit — previously from config
         let mut last_plan: Option<String> = None;
         let mut json_failure_count: u32 = 0;
         let mut json_error_msg: Option<String> = None;

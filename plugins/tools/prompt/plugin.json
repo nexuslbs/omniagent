@@ -1,0 +1,35 @@
+{
+  "name": "Prompt MCP Server",
+  "id": "mcp-server-prompt",
+  "version": "0.1.0",
+  "description": "Prompt generation MCP server — generates the full LLM prompt including system prompt, thread context, and message compaction",
+  "type": "mcp",
+  "entrypoint": {
+    "command": "mcp-server-prompt",
+    "args": [],
+    "transport": "stdio"
+  },
+  "config_schema": [
+    {
+      "key": "planning_complexity_max_chars",
+      "label": "Complexity Max Chars",
+      "type": "number",
+      "default": 60,
+      "description": "Max character count for simple prompts (greetings, short commands) — these get no plan"
+    },
+    {
+      "key": "planning_complexity_keywords",
+      "label": "Complexity Keywords",
+      "type": "text",
+      "default": "implement,refactor,redesign,architecture,create,build,design,develop,migrate,restructure,overhaul,rewrite,configure,set up,deploy,integrate,add feature,fix bug,resolve issue,multi-step,complex",
+      "description": "Comma-separated keywords that trigger planning"
+    },
+    {
+      "key": "prompt_plan_max_tokens",
+      "label": "Plan Max Tokens",
+      "type": "number",
+      "default": 2048,
+      "description": "Maximum tokens for the planning LLM call"
+    }
+  ]
+}

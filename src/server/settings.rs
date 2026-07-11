@@ -154,32 +154,21 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
             get_env_or_default("MAX_ITERATIONS_NO_PLAN", "30"),
             SettingMeta {
                 field_type: "number".into(),
-                description: "Max tool-call iterations for threads with no planning (complexity-based)".into(),
+                description: "Max tool-call iterations for threads with no planning".into(),
                 options: None,
                 readonly: false,
                 default: Some("30".into()),
             },
         ),
         (
-            "MAX_ITERATIONS_SIMPLE_PLAN".into(),
-            get_env_or_default("MAX_ITERATIONS_SIMPLE_PLAN", "120"),
+            "MAX_ITERATIONS_PLAN".into(),
+            get_env_or_default("MAX_ITERATIONS_PLAN", "120"),
             SettingMeta {
                 field_type: "number".into(),
-                description: "Max tool-call iterations for threads with simple planning (auto_plan)".into(),
+                description: "Max tool-call iterations for threads with planning enabled".into(),
                 options: None,
                 readonly: false,
                 default: Some("120".into()),
-            },
-        ),
-        (
-            "MAX_ITERATIONS_COMPLEX_PLAN".into(),
-            get_env_or_default("MAX_ITERATIONS_COMPLEX_PLAN", "600"),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Max tool-call iterations for threads with complex planning + subtasks (auto_subtasks)".into(),
-                options: None,
-                readonly: false,
-                default: Some("600".into()),
             },
         ),
         (
@@ -191,33 +180,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 options: None,
                 readonly: false,
                 default: Some("8192".into()),
-            },
-        ),
-        // ── Planning ──
-        (
-            "PLANNING_MODE".into(),
-            get_env_or_default("PLANNING_MODE", "auto_plan"),
-            SettingMeta {
-                field_type: "select".into(),
-                description: "How tasks are planned: Prompt Only (no plan), Auto-Plan (plan context only), or Auto-Plan + Subtasks (with step tracking and enforcement)".into(),
-                options: Some(vec![
-                    SettingOption { id: "prompt_only".into(), name: "Prompt Only — send as is, no planning".into() },
-                    SettingOption { id: "auto_plan".into(), name: "Auto-Plan — create plan for context (no subtasks)".into() },
-                    SettingOption { id: "auto_subtasks".into(), name: "Auto-Plan + Subtasks — enforce completion via subtasks".into() },
-                ]),
-                readonly: false,
-                default: Some("auto_plan".into()),
-            },
-        ),
-        (
-            "PROMPT_PLAN_MAX_TOKENS".into(),
-            get_env_or_default("PROMPT_PLAN_MAX_TOKENS", "2048"),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Maximum tokens for the planning LLM call".into(),
-                options: None,
-                readonly: false,
-                default: Some("2048".into()),
             },
         ),
         (
@@ -232,39 +194,25 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
             },
         ),
         (
-            "PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS".into(),
-            get_env_or_default("PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS", "60"),
+            "PROMPT_GENERATE_TOOL".into(),
+            get_env_or_default("PROMPT_GENERATE_TOOL", "prompt_generate"),
             SettingMeta {
-                field_type: "number".into(),
-                description: "Max character count for simple prompts (greetings, short commands) — these get no plan".into(),
+                field_type: "select".into(),
+                description: "Name of the MCP tool to call for generating prompts".into(),
                 options: None,
                 readonly: false,
-                default: Some("60".into()),
+                default: Some("prompt_generate".into()),
             },
         ),
         (
-            "PLANNING_COMPLEXITY_STANDARD_MAX_CHARS".into(),
-            get_env_or_default("PLANNING_COMPLEXITY_STANDARD_MAX_CHARS", "200"),
+            "PROMPT_COMPACT_MESSAGES_TOOL".into(),
+            get_env_or_default("PROMPT_COMPACT_MESSAGES_TOOL", "prompt_compact-messages"),
             SettingMeta {
-                field_type: "number".into(),
-                description: "Max character count for standard prompts — prompts above this get full planning with subtasks".into(),
+                field_type: "select".into(),
+                description: "Name of the MCP tool to call for compacting conversation history".into(),
                 options: None,
                 readonly: false,
-                default: Some("200".into()),
-            },
-        ),
-        (
-            "PLANNING_COMPLEXITY_KEYWORDS".into(),
-            get_env_or_default(
-                "PLANNING_COMPLEXITY_KEYWORDS",
-                "implement,refactor,redesign,architecture,create,build,design,develop,migrate,restructure,overhaul,rewrite,configure,set up,deploy,integrate,add feature,fix bug,resolve issue,multi-step,complex",
-            ),
-            SettingMeta {
-                field_type: "textarea".into(),
-                description: "Comma-separated keywords that trigger complex planning with subtasks".into(),
-                options: None,
-                readonly: false,
-                default: Some("implement,refactor,redesign,architecture,create,build,design,develop,migrate,restructure,overhaul,rewrite,configure,set up,deploy,integrate,add feature,fix bug,resolve issue,multi-step,complex".into()),
+                default: Some("prompt_compact-messages".into()),
             },
         ),
         // ── Memory & Retention ──
@@ -496,14 +444,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
         let cat_name = match name.as_str() {
             "MAX_TOKENS" | "TEMPERATURE" | "LLM_MAX_TOKENS" => "general",
             "MAX_ITERATIONS_NO_PLAN"
-            | "MAX_ITERATIONS_SIMPLE_PLAN"
-            | "MAX_ITERATIONS_COMPLEX_PLAN" => "general",
-            "PLANNING_MODE"
-            | "PROMPT_PLAN_MAX_TOKENS"
-            | "MAX_UNFINISHED_SUBTASK_RETRIES"
-            | "PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS"
-            | "PLANNING_COMPLEXITY_STANDARD_MAX_CHARS"
-            | "PLANNING_COMPLEXITY_KEYWORDS" => "planning",
+            | "MAX_ITERATIONS_PLAN" => "general",
             "SUMMARIZE_AFTER_DAYS"
             | "DELETE_AFTER_DAYS"
             | "SUMMARY_WINDOW"
@@ -511,7 +452,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "THREAD_SUMMARY_TOKENS"
             | "MEMORY_MAX_CHARS"
             | "USER_MAX_CHARS" => "memory",
-            "LLM_PROVIDER" | "PROMPT_LOG_LEVEL" | "MAX_INLINE_FILE_KB" => "general",
+            "LLM_PROVIDER" | "PROMPT_LOG_LEVEL" | "MAX_INLINE_FILE_KB" | "MAX_UNFINISHED_SUBTASK_RETRIES" | "PROMPT_GENERATE_TOOL" | "PROMPT_COMPACT_MESSAGES_TOOL" => "general",
             "MAX_POOL_CONNECTIONS" => "general",
             _ => "system",
         };
@@ -601,12 +542,11 @@ pub async fn update_settings_handler(
         "MAX_TOKENS",
         "TEMPERATURE",
         "MAX_ITERATIONS_NO_PLAN",
-        "MAX_ITERATIONS_SIMPLE_PLAN",
-        "MAX_ITERATIONS_COMPLEX_PLAN",
+        "MAX_ITERATIONS_PLAN",
         "LLM_MAX_TOKENS",
-        "PROMPT_PLAN_MAX_TOKENS",
-        "PLANNING_MODE",
         "MAX_UNFINISHED_SUBTASK_RETRIES",
+        "PROMPT_GENERATE_TOOL",
+        "PROMPT_COMPACT_MESSAGES_TOOL",
         "SUMMARIZE_AFTER_DAYS",
         "DELETE_AFTER_DAYS",
         "SUMMARY_WINDOW",

@@ -58,10 +58,8 @@ pub struct AgentConfig {
     pub summarize_after_days: u32,
     /// Max iterations for threads with no planning mode (complexity-based).
     pub max_iterations_no_plan: u32,
-    /// Max iterations for threads with simple planning (auto_plan).
-    pub max_iterations_simple_plan: u32,
-    /// Max iterations for threads with complex planning + subtasks (auto_subtasks).
-    pub max_iterations_complex_plan: u32,
+    /// Max iterations for threads with planning enabled.
+    pub max_iterations_plan: u32,
     /// Number of threads per half-window for summary generation.
     /// A summary is generated every 2*summary_window completed threads.
     pub summary_window: u32,
@@ -71,8 +69,15 @@ pub struct AgentConfig {
     pub thread_summary_tokens: u32,
     /// Days before old messages and summaries are deleted.
     pub delete_after_days: u32,
-    /// Max output tokens for the planning LLM call.
-    pub prompt_plan_max_tokens: u32,
+    /// MCP tool name for generating the LLM prompt (system prompt + context assembly).
+    /// The tool is called by the executor before each LLM invocation to build
+    /// the complete prompt from profile, memory, skills, thread context, etc.
+    /// Default: "prompt_generate" — change this if the prompt plugin is registered
+    /// under a different name.
+    pub prompt_tool_name: String,
+    /// MCP tool name for compacting conversation history.
+    /// Default: "prompt_compact-messages".
+    pub compact_messages_tool_name: String,
 
     // Context management / token explosion prevention
     /// Soft char budget for the prompt. When exceeded, condense every STATE_BLOCK_UPDATE_INTERVAL turns.
@@ -101,13 +106,6 @@ pub struct AgentConfig {
     /// - "first+compact" — first prompt + prompts after context compaction
     /// - "all" — insert every prompt before every LLM call
     pub prompt_log_level: String,
-
-    /// MCP tool name for generating the LLM prompt (system prompt + context assembly).
-    /// The tool is called by the executor before each LLM invocation to build
-    /// the complete prompt from profile, memory, skills, thread context, etc.
-    /// Default: "prompt_generate" — change this if the prompt plugin is registered
-    /// under a different name.
-    pub prompt_tool_name: String,
 
     // Infrastructure config (merged from former config::Config)
     pub database_url: String,
@@ -185,14 +183,10 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .unwrap_or(30),
-            max_iterations_simple_plan: std::env::var("MAX_ITERATIONS_SIMPLE_PLAN")
+            max_iterations_plan: std::env::var("MAX_ITERATIONS_PLAN")
                 .unwrap_or_else(|_| "120".to_string())
                 .parse()
                 .unwrap_or(120),
-            max_iterations_complex_plan: std::env::var("MAX_ITERATIONS_COMPLEX_PLAN")
-                .unwrap_or_else(|_| "600".to_string())
-                .parse()
-                .unwrap_or(600),
             summary_window: std::env::var("SUMMARY_WINDOW")
                 .unwrap_or_else(|_| "10".to_string())
                 .parse()
@@ -209,10 +203,10 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .unwrap_or(30),
-            prompt_plan_max_tokens: std::env::var("PROMPT_PLAN_MAX_TOKENS")
-                .unwrap_or_else(|_| "2048".to_string())
-                .parse()
-                .unwrap_or(2048),
+            prompt_tool_name: std::env::var("PROMPT_GENERATE_TOOL")
+                .unwrap_or_else(|_| "prompt_generate".to_string()),
+            compact_messages_tool_name: std::env::var("PROMPT_COMPACT_MESSAGES_TOOL")
+                .unwrap_or_else(|_| "prompt_compact-messages".to_string()),
 
             // Context management thresholds
             prompt_char_budget_soft: std::env::var("PROMPT_CHAR_BUDGET_SOFT")
@@ -255,8 +249,6 @@ impl AgentConfig {
 
             prompt_log_level: std::env::var("PROMPT_LOG_LEVEL")
                 .unwrap_or_else(|_| "first".to_string()),
-            prompt_tool_name: std::env::var("PROMPT_TOOL_NAME")
-                .unwrap_or_else(|_| "prompt_generate".to_string()),
 
             // Infrastructure config (merged from former config::Config)
             database_url: std::env::var("DATABASE_URL").ctx("DATABASE_URL must be set")?,

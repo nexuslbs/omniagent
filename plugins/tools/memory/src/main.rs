@@ -500,94 +500,6 @@ async fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: generate_initial_prompt
-// ---------------------------------------------------------------------------
-
-async fn handle_generate_initial_prompt(data_dir: &str, args: &Value) -> Result<(String, bool)> {
-    let _default_profile = omniagent::profile::default_profile_name();
-    let profile_name = args["profile_name"].as_str().unwrap_or(&_default_profile);
-    let platform = args["platform"].as_str().unwrap_or("");
-    let system_message = args["system_message"].as_str();
-    let user_message = args["user_message"].as_str().unwrap_or("");
-    let tool_names: Vec<String> = args["tool_names"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let plan_iteration = args["plan_iteration"].as_u64().unwrap_or(0) as u32;
-    let max_iterations = args["max_iterations"].as_u64().unwrap_or(5) as u32;
-    let previous_plan = args["previous_plan"].as_str();
-    let use_json_plan = args["use_json_plan"].as_bool().unwrap_or(false);
-
-    // Build memory store from profile
-    let base_path = format!("{}/profiles/{}", data_dir, profile_name);
-    let mut memory_store = omniagent::prompt_builder::MemoryStore::new(&base_path);
-    memory_store.load_from_disk();
-
-    // Build system prompt (same as executor.rs line 306)
-    let system_prompt = omniagent::prompt_builder::build_system_prompt(
-        &memory_store,
-        platform,
-        system_message,
-        &profile_name,
-        &tool_names,
-    );
-
-    // Build planning prompt (same as executor.rs line 504)
-    let planning_prompt = omniagent::prompt_builder::build_planning_prompt(
-        &memory_store,
-        omniagent::prompt_builder::PlanningPromptParams {
-            platform,
-            profile_name: &profile_name,
-            user_message,
-            plan_iteration,
-            max_iterations,
-            previous_plan,
-            use_json_plan,
-        },
-        &tool_names,
-    );
-
-    let result = serde_json::json!({
-        "system_prompt": system_prompt,
-        "planning_prompt": planning_prompt,
-    });
-
-    Ok((serde_json::to_string(&result)?, false))
-}
-
-// ---------------------------------------------------------------------------
-// Tool: compact_messages
-// ---------------------------------------------------------------------------
-
-async fn handle_compact_messages(_data_dir: &str, args: &Value) -> Result<(String, bool)> {
-    let messages_arr = args["messages"].as_array().ok_or_else(|| {
-        anyhow::anyhow!("Missing required argument: 'messages' (array of ChatMessage)")
-    })?;
-    let keep_recent = args["keep_recent"].as_u64().unwrap_or(3) as usize;
-
-    let mut messages: Vec<omniagent::llm::ChatMessage> =
-        serde_json::from_value(serde_json::Value::Array(messages_arr.clone()))
-            .map_err(|e| anyhow::anyhow!("Failed to parse messages: {}", e))?;
-
-    let before = messages.len();
-    omniagent::agent::helpers::compact_old_assistant_messages(&mut messages, keep_recent);
-    let after = messages.len();
-
-    let result = serde_json::json!({
-        "messages": messages,
-        "was_compacted": before != after,
-        "before_count": before,
-        "after_count": after,
-    });
-
-    Ok((serde_json::to_string(&result)?, false))
-}
-
-// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -630,22 +542,6 @@ async fn main() -> Result<()> {
         Box::pin({
             let value = dd_manage.clone();
             async move { handle_manage(&value, &args).await }
-        })
-    });
-
-    let dd_prompt_gen = data_dir.clone();
-    let prompt_gen_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
-        Box::pin({
-            let value = dd_prompt_gen.clone();
-            async move { handle_generate_initial_prompt(&value, &args).await }
-        })
-    });
-
-    let dd_compact = data_dir.clone();
-    let compact_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
-        Box::pin({
-            let value = dd_compact.clone();
-            async move { handle_compact_messages(&value, &args).await }
         })
     });
 
@@ -782,88 +678,6 @@ async fn main() -> Result<()> {
                 }),
             },
             handler: manage_handler,
-        },
-        McpToolEntry {
-            def: McpToolDef {
-                name: "generate_initial_prompt".to_string(),
-                description:
-                    "Generate the initial system prompt and planning prompt for a conversation. \
-                     Mirrors the built-in prompt_builder logic: uses profile memories, \
-                     platform identity, tool names, and optional system message to produce \
-                     the same 3-tier (stable/context/volatile) system prompt that the executor \
-                     would build internally."
-                        .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "profile_name": {
-                            "type": "string",
-                            "description": "Profile name (default: 'default')"
-                        },
-                        "platform": {
-                            "type": "string",
-                            "description": "Platform name (e.g. 'telegram', 'discord')"
-                        },
-                        "system_message": {
-                            "type": "string",
-                            "description": "Optional system message override"
-                        },
-                        "user_message": {
-                            "type": "string",
-                            "description": "User message for the planning prompt"
-                        },
-                        "tool_names": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Tool names available in the session"
-                        },
-                        "plan_iteration": {
-                            "type": "integer",
-                            "description": "Iteration number for planning prompt (default: 0)"
-                        },
-                        "max_iterations": {
-                            "type": "integer",
-                            "description": "Max iterations for planning prompt (default: 5)"
-                        },
-                        "previous_plan": {
-                            "type": "string",
-                            "description": "Previous plan content for refinement"
-                        },
-                        "use_json_plan": {
-                            "type": "boolean",
-                            "description": "Whether to use JSON plan format (default: false)"
-                        }
-                    }
-                }),
-            },
-            handler: prompt_gen_handler,
-        },
-        McpToolEntry {
-            def: McpToolDef {
-                name: "compact_messages".to_string(),
-                description:
-                    "Compact old assistant tool-call messages in a conversation history. \
-                     Mirrors the built-in helpers::compact_old_assistant_messages logic: strips \
-                     old tool_calls JSON from assistant messages and removes orphaned tool \
-                     messages. Returns the compacted message list with a 'was_compacted' flag."
-                        .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "messages": {
-                            "type": "array",
-                            "items": {"type": "object"},
-                            "description": "Array of ChatMessage objects to compact"
-                        },
-                        "keep_recent": {
-                            "type": "integer",
-                            "description": "Number of recent tool-calling rounds to preserve (default: 3)"
-                        }
-                    },
-                    "required": ["messages"]
-                }),
-            },
-            handler: compact_handler,
         },
     ];
 
