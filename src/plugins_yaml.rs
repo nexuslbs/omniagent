@@ -1163,15 +1163,8 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
             let is_primary = primary_idx.map(|idx| i == idx);
             // When primary_idx is None (no YAML entry, none enabled), no source is a "duplicate"
 
-            // Skip sources that match a disabled YAML entry — user has explicitly
-            // removed them via the Remove action (wrote enabled: false to plugins.yml).
-            // Suppress all sources regardless of source type mismatch — the plugin
-            // name is the authority, and enabled: false means "don't show this plugin".
-            if let Some(entry) = yaml_entry_ref {
-                if !entry.enabled {
-                    continue;
-                }
-            }
+            // Don't hide disabled plugins — show them with status "disabled"
+            // so the user can re-enable from the dashboard.
 
             // Plugin directory is the parent of the base_path
             let plugin_dir = std::path::Path::new(base_path)
