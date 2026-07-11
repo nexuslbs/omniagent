@@ -1284,10 +1284,13 @@ def api_post_body(path, body=None):
 
 def find_plugins_by_source(source, plugin_type="tools"):
     """Find plugins of a given source and type from the API list."""
+    # The API returns plugin_type as singular ("tool", "platform", "provider"),
+    # but callers pass plural ("tools", "platforms", "providers")
+    singular_type = plugin_type.rstrip("s")
     plugins = api_get("/plugins")["data"]
     return [p for p in plugins
             if p.get("source") == source
-            and p.get("type") == plugin_type
+            and p.get("plugin_type") == singular_type
             and not p.get("is_duplicated", False)]
 
 def find_first_plugin(source, plugin_type="tools"):
@@ -1553,11 +1556,11 @@ def test_t6_reinstall_remote_tool():
 # ── 6.3: Tool download for each source variant ────────────────────────
 
 def test_t6_download_bundled_tool():
-    """Download a bundled tool plugin → success"""
+    """Download a bundled tool plugin → error (download only supports remote)"""
     name = find_first_plugin("bundled", "tools")
     if not name:
         return
-    test_download_source(name, "bundled")
+    test_download_source(name, "bundled", expected_success=False)
 
 def test_t6_download_remote_tool():
     """Download a remote tool plugin → success"""
