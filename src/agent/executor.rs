@@ -1753,7 +1753,7 @@ Previous plan:\n{}",
     }
 
     // 11. Trigger cross-thread summary check
-    helpers::check_and_generate_summary(&cfg.pool, &cfg.llm, &cfg.config, thread.channel_id).await;
+    helpers::check_and_generate_summary(&cfg.pool, &cfg.llm, thread.channel_id).await;
 
     Ok(saved)
 }

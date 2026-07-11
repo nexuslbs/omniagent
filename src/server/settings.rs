@@ -228,17 +228,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
             },
         ),
         (
-            "SUMMARIZE_AFTER_DAYS".into(),
-            get_env_or_default("SUMMARIZE_AFTER_DAYS", "7"),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Days of inactivity before auto-summarizing threads".into(),
-                options: None,
-                readonly: false,
-                default: Some("7".into()),
-            },
-        ),
-        (
             "DELETE_AFTER_DAYS".into(),
             get_env_or_default("DELETE_AFTER_DAYS", "30"),
             SettingMeta {
@@ -247,28 +236,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 options: None,
                 readonly: false,
                 default: Some("30".into()),
-            },
-        ),
-        (
-            "SUMMARY_WINDOW".into(),
-            get_env_or_default("SUMMARY_WINDOW", "10"),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Threads per summary generation window".into(),
-                options: None,
-                readonly: false,
-                default: Some("10".into()),
-            },
-        ),
-        (
-            "CHANNEL_SUMMARY_TOKENS".into(),
-            get_env_or_default("CHANNEL_SUMMARY_TOKENS", "4096"),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Maximum tokens for channel-level summary generation".into(),
-                options: None,
-                readonly: false,
-                default: Some("4096".into()),
             },
         ),
         (
@@ -423,10 +390,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             "MAX_TOKENS" | "TEMPERATURE" => "general",
             "MAX_ITERATIONS_NO_PLAN"
             | "MAX_ITERATIONS_PLAN" => "general",
-            "SUMMARIZE_AFTER_DAYS"
-            | "DELETE_AFTER_DAYS"
-            | "SUMMARY_WINDOW"
-            | "CHANNEL_SUMMARY_TOKENS"
+            "DELETE_AFTER_DAYS"
             | "THREAD_SUMMARY_TOKENS"
             | "MEMORY_MAX_CHARS"
             | "SOUL_MAX_CHARS" => "memory",
@@ -543,10 +507,7 @@ pub async fn update_settings_handler(
         "MAX_UNFINISHED_SUBTASK_RETRIES",
         "PROMPT_GENERATE_TOOL",
         "PROMPT_COMPACT_MESSAGES_TOOL",
-        "SUMMARIZE_AFTER_DAYS",
         "DELETE_AFTER_DAYS",
-        "SUMMARY_WINDOW",
-        "CHANNEL_SUMMARY_TOKENS",
         "THREAD_SUMMARY_TOKENS",
         "MEMORY_MAX_CHARS",
         "SOUL_MAX_CHARS",

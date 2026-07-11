@@ -54,17 +54,10 @@ pub struct AgentConfig {
     pub llm_provider: String,
     pub max_tokens: u32,
     pub temperature: f32,
-    #[allow(dead_code)]
-    pub summarize_after_days: u32,
     /// Max iterations for threads with no planning mode (complexity-based).
     pub max_iterations_no_plan: u32,
     /// Max iterations for threads with planning enabled.
     pub max_iterations_plan: u32,
-    /// Number of threads per half-window for summary generation.
-    /// A summary is generated every 2*summary_window completed threads.
-    pub summary_window: u32,
-    /// Max tokens for the channel-level summary generation LLM call.
-    pub channel_summary_tokens: u32,
     /// Max tokens for the per-thread end-of-execution summary LLM call.
     pub thread_summary_tokens: u32,
     /// Days before old messages and summaries are deleted.
@@ -175,10 +168,6 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "0.7".to_string())
                 .parse()
                 .unwrap_or(0.7),
-            summarize_after_days: std::env::var("SUMMARIZE_AFTER_DAYS")
-                .unwrap_or_else(|_| "7".to_string())
-                .parse()
-                .unwrap_or(7),
             max_iterations_no_plan: std::env::var("MAX_ITERATIONS_NO_PLAN")
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
@@ -187,14 +176,6 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "120".to_string())
                 .parse()
                 .unwrap_or(120),
-            summary_window: std::env::var("SUMMARY_WINDOW")
-                .unwrap_or_else(|_| "10".to_string())
-                .parse()
-                .unwrap_or(10),
-            channel_summary_tokens: std::env::var("CHANNEL_SUMMARY_TOKENS")
-                .unwrap_or_else(|_| "4096".to_string())
-                .parse()
-                .unwrap_or(4096),
             thread_summary_tokens: std::env::var("THREAD_SUMMARY_TOKENS")
                 .unwrap_or_else(|_| "2048".to_string())
                 .parse()
