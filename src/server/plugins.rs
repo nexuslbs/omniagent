@@ -3015,8 +3015,9 @@ pub(crate) async fn rename_plugin_handler(
         .into_response()
 }
 
-/// POST /api/plugins/{name}/download — download a remote plugin that exists in YAML but not on disk.
-/// Reads the remote field from the YAML entry and runs git clone + compile.
+/// POST /api/plugins/{name}/download — restore a plugin that has a YAML entry but no disk directory.
+/// For `source=remote`: clones from git via remote.yml.
+/// For `source=bundled`: restores from the git workspace checkout.
 pub(crate) async fn download_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -3025,7 +3026,7 @@ pub(crate) async fn download_plugin_handler(
     let data_dir = &state.data_dir;
     let workspace_dir = &state.workspace_dir;
 
-    // Validate source — download only makes sense for remote plugins
+    // Validate source — download supports 'remote' and 'bundled'
     let source = match &body {
         Some(req) => match require_source(&req.source) {
             Ok(s) => s,
@@ -3041,18 +3042,28 @@ pub(crate) async fn download_plugin_handler(
             ).into_response();
         }
     };
-    if source != "remote" {
-        return (
+
+    return match source {
+        "remote" => download_remote_plugin(data_dir, workspace_dir, &name).await.into_response(),
+        "bundled" => download_bundled_plugin(workspace_dir, data_dir, &name).await.into_response(),
+        other => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "success": false,
-                "error": format!("Invalid source '{}': download only supports 'remote' source", source)
+                "error": format!("Invalid source '{}': download only supports 'remote' or 'bundled' source", other)
             })),
-        ).into_response();
-    }
+        ).into_response(),
+    };
+}
 
+/// Download/restore a remote plugin by cloning from git (remote.yml).
+async fn download_remote_plugin(
+    data_dir: &str,
+    workspace_dir: &str,
+    name: &str,
+) -> impl IntoResponse {
     // Find the YAML entry and extract remote info
-    let (_yaml_type, remote_info) = match plugins_yaml::get_entry_with_type(data_dir, &name) {
+    let (_yaml_type, remote_info) = match plugins_yaml::get_entry_with_type(data_dir, name) {
         Ok(Some((pt, _entry))) => {
             if let Some(remote) = plugins_yaml::get_remote_plugin(data_dir, &pt, &name) {
                 (pt, remote.clone())
@@ -3207,6 +3218,125 @@ pub(crate) async fn download_plugin_handler(
         _ => {
             info!(
                 "Downloaded remote plugin '{}' but could not re-read detail",
+                name
+            );
+            (StatusCode::OK, Json(serde_json::json!({"success": true})))
+        }
+    }
+    .into_response()
+}
+
+/// Download/restore a bundled plugin by restoring from the git workspace checkout.
+/// This is used when a bundled plugin has a YAML entry but its directory was removed from disk.
+async fn download_bundled_plugin(
+    workspace_dir: &str,
+    data_dir: &str,
+    name: &str,
+) -> impl IntoResponse {
+    // Find the YAML entry — must have source=bundled
+    let (yaml_type, entry) = match plugins_yaml::get_entry_with_type(data_dir, name) {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Plugin '{}' not found in YAML configuration", name)
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to read YAML: {}", e)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Verify source is bundled
+    if entry.source != "bundled" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Plugin '{}' has source='{}', download with source=bundled requires source='bundled' in YAML", name, entry.source)
+            })),
+        ).into_response();
+    }
+
+    let type_dir = yaml_type.type_dir_name();
+    let plugin_path = format!("plugins/{}/{}", type_dir, name);
+
+    info!(
+        "Download: restoring bundled plugin '{}' from git workspace at {}",
+        name, plugin_path
+    );
+
+    // Run git checkout in the workspace directory to restore the deleted files
+    let status = std::process::Command::new("git")
+        .args(["checkout", "--", &plugin_path])
+        .current_dir(workspace_dir)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            info!("Download: restored bundled plugin '{}' successfully", name);
+        }
+        Ok(s) => {
+            let msg = format!(
+                "Download: git checkout failed for '{}' with exit code {:?}",
+                name,
+                s.code()
+            );
+            tracing::error!("{}", msg);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"success": false, "error": msg})),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            let msg = format!("Download: failed to run git for '{}': {}", name, e);
+            tracing::error!("{}", msg);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"success": false, "error": msg})),
+            )
+                .into_response();
+        }
+    }
+
+    // Ensure YAML entry has source=bundled, preserving enabled state
+    let current_enabled = plugins_yaml::get_entry(data_dir, &yaml_type, name)
+        .ok()
+        .flatten()
+        .map(|e| e.enabled)
+        .unwrap_or(true);
+    let _ = plugins_yaml::set_entry_with_source(
+        data_dir,
+        &yaml_type,
+        name,
+        current_enabled,
+        "bundled",
+        serde_json::json!({}),
+    );
+
+    match plugins_yaml::get_plugin(data_dir, name) {
+        Ok(Some(detail)) => {
+            info!("Downloaded bundled plugin '{}' successfully", name);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"success": true, "data": detail})),
+            )
+        }
+        _ => {
+            info!(
+                "Downloaded bundled plugin '{}' but could not re-read detail",
                 name
             );
             (StatusCode::OK, Json(serde_json::json!({"success": true})))
