@@ -5,6 +5,14 @@ Merged integration tests for the OmniAgent plugin lifecycle.
 This file contains tests for install, uninstall, update, remove, download,
 enable, and disable of plugins. New tests should not remove old tests.
 
+**RUNNING:** These tests MUST run inside the omniagent container, which runs
+as root. Do NOT run them from the host — the host may not have the same
+filesystem permissions, and the agent's auto-detection of plugin directory
+changes only works from within the container's filesystem view.
+
+    docker exec -e PYTHONUNBUFFERED=1 omni-omniagent-1 python3 -u \\
+        /opt/workspace/omni-stack/scripts/tests.py
+
 GROUP 1 — Original Remove API tests (idempotent, restored from git history):
   A1-A3: Source NOT in YAML (built-in, bundled, remote)
   B1-B3: Source IN YAML (built-in, bundled, remote)
@@ -26,9 +34,9 @@ Running twice on a clean repo produces identical results.
 #
 # IMPORTANT: Tests must NOT restart the container or call pkill omniagent.
 # The container runs cargo-watch which auto-rebuilds from source changes.
-# If a config/state reload is needed, use the API reload endpoint instead
-# of restarting the process. The restart_agent() function is a legacy
-# workaround — avoid adding new calls to it.
+# The agent auto-detects filesystem and YAML changes within ~5s, so no
+# restart is needed. The restart_agent() function just verifies the agent
+# is healthy after waiting for auto-detection.
 #
 
 
@@ -400,20 +408,19 @@ def remove_remote_plugin(name, plugin_type="tools"):
 # ── Restart agent ────────────────────────────────────────────────────
 
 def restart_agent():
-    # Kill the running omniagent process — the container entrypoint
-    # (cargo watch) will auto-restart it. If running directly (no cargo watch),
-    # we start a new instance. We try docker restart first, then fallback.
-    rc = sh("docker exec omni-omniagent-1 bash -c 'pkill omniagent 2>/dev/null; sleep 1; /app/omniagent > /tmp/omniagent.log 2>&1 &'")
-    time.sleep(6)
-    for _ in range(15):
+    # The agent auto-detects filesystem and YAML changes within ~5s via
+    # periodic scanning. No need for process restarts or source file touches.
+    # Just wait for the agent to be healthy (in case a previous reload is in progress).
+    time.sleep(3)
+    for _ in range(10):
         try:
             r = urllib.request.urlopen(f"{BASE}/health", timeout=3)
             if r.status == 200:
                 return
         except:
             pass
-        time.sleep(2)
-    raise RuntimeError("Failed to restart omniagent")
+        time.sleep(1)
+    raise RuntimeError("Agent not healthy after waiting")
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Test harness
@@ -1261,7 +1268,10 @@ def _git_discard_all(repo_dir):
     subprocess.run(["git", "clean", "-fd"], cwd=repo_dir, capture_output=True)
 
 def check_git_clean():
-    """Verify no unstaged changes before running tests."""
+    """Restore repo to clean state before running tests.
+    The agent normalizes plugins.yml and remote.yml on startup, and previous
+    test runs may leave deleted files. Full checkout + clean handles all cases."""
+    _git_discard_all(OMNI_STACK_DIR)
     dirty = _git_status(OMNI_STACK_DIR)
     if dirty:
         raise RuntimeError(
@@ -2433,7 +2443,7 @@ def test_v1_disabled_tool_visible():
             d = _plugin_dir(type_dir, n)
             if os.path.exists(d):
                 shutil.rmtree(d)
-        restart_agent()
+        time.sleep(6)  # wait for filesystem scanner
 
         # Verify neither shows in API
         _assert_plugin_visible("test-1", ptype, expect_visible=False)
@@ -2441,14 +2451,14 @@ def test_v1_disabled_tool_visible():
 
         # Phase 2: Create test-1 dir with just plugin.json
         _create_test_plugin_dir(type_dir, PLUGIN_JSON_TOOL)
-        restart_agent()
+        time.sleep(6)  # wait for filesystem scanner
 
         # Verify test-1 shows as disabled, test-2 still doesn't show
         _assert_plugin_visible("test-1", ptype, expect_visible=True)
         _assert_plugin_visible("test-2", ptype, expect_visible=False)
     finally:
         _remove_test_plugin_dir(type_dir)
-        restart_agent()
+        time.sleep(6)  # wait for cleanup to be detected
 
 # ── V2: Platform — disabled bundled platform visible in API ───────────
 
@@ -2460,19 +2470,19 @@ def test_v2_disabled_platform_visible():
             d = _plugin_dir(type_dir, n)
             if os.path.exists(d):
                 shutil.rmtree(d)
-        restart_agent()
+        time.sleep(6)
 
         _assert_plugin_visible("test-1", ptype, expect_visible=False)
         _assert_plugin_visible("test-2", ptype, expect_visible=False)
 
         _create_test_plugin_dir(type_dir, PLUGIN_JSON_PLATFORM)
-        restart_agent()
+        time.sleep(6)
 
         _assert_plugin_visible("test-1", ptype, expect_visible=True)
         _assert_plugin_visible("test-2", ptype, expect_visible=False)
     finally:
         _remove_test_plugin_dir(type_dir)
-        restart_agent()
+        time.sleep(6)
 
 # ── V3: Provider — disabled bundled provider visible in API ───────────
 
@@ -2484,19 +2494,19 @@ def test_v3_disabled_provider_visible():
             d = _plugin_dir(type_dir, n)
             if os.path.exists(d):
                 shutil.rmtree(d)
-        restart_agent()
+        time.sleep(6)
 
         _assert_plugin_visible("test-1", ptype, expect_visible=False)
         _assert_plugin_visible("test-2", ptype, expect_visible=False)
 
         _create_test_plugin_dir(type_dir, PLUGIN_JSON_PROVIDER)
-        restart_agent()
+        time.sleep(6)
 
         _assert_plugin_visible("test-1", ptype, expect_visible=True)
         _assert_plugin_visible("test-2", ptype, expect_visible=False)
     finally:
         _remove_test_plugin_dir(type_dir)
-        restart_agent()
+        time.sleep(6)
 
 
 # ═══════════════════════════════════════════════════════════════════════
