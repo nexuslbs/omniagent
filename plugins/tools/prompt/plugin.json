@@ -13,21 +13,21 @@
     {
       "key": "planning_complexity_max_chars",
       "label": "Complexity Max Chars",
-      "type": "number",
+      "type": "integer",
       "default": 60,
       "description": "Max character count for simple prompts (greetings, short commands) — these get no plan"
     },
     {
       "key": "planning_complexity_keywords",
       "label": "Complexity Keywords",
-      "type": "text",
+      "type": "string",
       "default": "implement,refactor,redesign,architecture,create,build,design,develop,migrate,restructure,overhaul,rewrite,configure,set up,deploy,integrate,add feature,fix bug,resolve issue,multi-step,complex",
       "description": "Comma-separated keywords that trigger planning"
     },
     {
       "key": "prompt_plan_max_tokens",
       "label": "Plan Max Tokens",
-      "type": "number",
+      "type": "integer",
       "default": 2048,
       "description": "Maximum tokens for the planning LLM call"
     }

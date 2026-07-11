@@ -172,17 +172,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
             },
         ),
         (
-            "LLM_MAX_TOKENS".into(),
-            get_env_or_default("LLM_MAX_TOKENS", "8192"),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Maximum tokens for the LLM client".into(),
-                options: None,
-                readonly: false,
-                default: Some("8192".into()),
-            },
-        ),
-        (
             "MAX_UNFINISHED_SUBTASK_RETRIES".into(),
             get_env_or_default("MAX_UNFINISHED_SUBTASK_RETRIES", "3"),
             SettingMeta {
@@ -228,11 +217,11 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
             },
         ),
         (
-            "USER_MAX_CHARS".into(),
-            get_env_or_default("USER_MAX_CHARS", "1000"),
+            "SOUL_MAX_CHARS".into(),
+            get_env_or_default("SOUL_MAX_CHARS", "1000"),
             SettingMeta {
                 field_type: "number".into(),
-                description: "Max characters for USER.md in the system prompt".into(),
+                description: "Max characters for SOUL.md in the system prompt".into(),
                 options: None,
                 readonly: false,
                 default: Some("1000".into()),
@@ -358,17 +347,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
             },
         ),
         (
-            "QDRANT_URL".into(),
-            get_env_or_default("QDRANT_URL", "http://qdrant:6333"),
-            SettingMeta {
-                field_type: "text".into(),
-                description: "Qdrant vector database URL".into(),
-                options: None,
-                readonly: true,
-                default: Some("http://qdrant:6333".into()),
-            },
-        ),
-        (
             "OMNI_DIR".into(),
             get_env_or_default("OMNI_DIR", ""),
             SettingMeta {
@@ -442,7 +420,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
 
     for (name, value, meta) in defs {
         let cat_name = match name.as_str() {
-            "MAX_TOKENS" | "TEMPERATURE" | "LLM_MAX_TOKENS" => "general",
+            "MAX_TOKENS" | "TEMPERATURE" => "general",
             "MAX_ITERATIONS_NO_PLAN"
             | "MAX_ITERATIONS_PLAN" => "general",
             "SUMMARIZE_AFTER_DAYS"
@@ -451,7 +429,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "CHANNEL_SUMMARY_TOKENS"
             | "THREAD_SUMMARY_TOKENS"
             | "MEMORY_MAX_CHARS"
-            | "USER_MAX_CHARS" => "memory",
+            | "SOUL_MAX_CHARS" => "memory",
             "LLM_PROVIDER" | "PROMPT_LOG_LEVEL" | "MAX_INLINE_FILE_KB" | "MAX_UNFINISHED_SUBTASK_RETRIES" | "PROMPT_GENERATE_TOOL" | "PROMPT_COMPACT_MESSAGES_TOOL" => "general",
             "MAX_POOL_CONNECTIONS" => "general",
             _ => "system",
@@ -499,6 +477,25 @@ pub async fn get_settings_handler(State(state): State<Arc<AppState>>) -> Json<Se
         enrich_provider_options(meta, &state.data_dir);
     }
 
+    // Enrich PROMPT_GENERATE_TOOL and PROMPT_COMPACT_MESSAGES_TOOL with available MCP tools
+    let registry = state.tool_registry.read().await;
+    let mcp_tools: Vec<&crate::mcp::McpTool> = registry.all();
+    for tool_key in ["PROMPT_GENERATE_TOOL", "PROMPT_COMPACT_MESSAGES_TOOL"] {
+        if let Some((_, _, ref mut meta)) = defs.iter_mut().find(|(name, _, _)| name.as_str() == tool_key)
+        {
+            let mut options: Vec<SettingOption> = mcp_tools
+                .iter()
+                .map(|t| {
+                    let id = t.full_name.clone();
+                    SettingOption { id: id.clone(), name: id }
+                })
+                .collect();
+            // Sort alphabetically
+            options.sort_by(|a, b| a.name.cmp(&b.name));
+            meta.options = Some(options);
+        }
+    }
+
     Json(SettingsResponse {
         categories: categorize_settings(defs),
     })
@@ -543,7 +540,6 @@ pub async fn update_settings_handler(
         "TEMPERATURE",
         "MAX_ITERATIONS_NO_PLAN",
         "MAX_ITERATIONS_PLAN",
-        "LLM_MAX_TOKENS",
         "MAX_UNFINISHED_SUBTASK_RETRIES",
         "PROMPT_GENERATE_TOOL",
         "PROMPT_COMPACT_MESSAGES_TOOL",
@@ -553,7 +549,7 @@ pub async fn update_settings_handler(
         "CHANNEL_SUMMARY_TOKENS",
         "THREAD_SUMMARY_TOKENS",
         "MEMORY_MAX_CHARS",
-        "USER_MAX_CHARS",
+        "SOUL_MAX_CHARS",
         "LLM_PROVIDER",
         "MAX_POOL_CONNECTIONS",
         "MAX_INLINE_FILE_KB",
