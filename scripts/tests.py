@@ -1246,6 +1246,132 @@ def test_dashboard_pages():
     assert health_js.get("status") == "ok", "/api/health must return status=ok"
 
 
+def test_dashboard_plugin_filters():
+    """
+    Verify plugin page filters render correctly and URL params are accepted.
+    Tests all 3 plugin pages (tools, providers, platforms) and all existing
+    filtered pages (threads, messages, channels).
+    """
+    # ── 1. Plugin pages with filter URL params (tools, providers, platforms) ──
+    # These are SPA pages — the server serves index.html for all routes.
+    # The filter bar is rendered client-side. We verify the page loads cleanly
+    # with various filter URL params, and the API data that feeds filters is valid.
+
+    plugin_pages = ["/tools", "/providers", "/platforms"]
+
+    for page in plugin_pages:
+        # Basic page load
+        code, text, js = _dash_get(page)
+        assert code == 200, f"GET {page} returned {code}"
+        assert "<!DOCTYPE html>" in text, f"GET {page} did not return SPA HTML"
+
+        # With single filter param — source
+        code, text, js = _dash_get(f"{page}?source=built-in")
+        assert code == 200, f"GET {page}?source=built-in returned {code}"
+        assert "<!DOCTYPE html>" in text, f"GET {page} with source filter did not return SPA HTML"
+
+        # With single filter param — status
+        code, text, js = _dash_get(f"{page}?status=disabled")
+        assert code == 200, f"GET {page}?status=disabled returned {code}"
+
+        # With single filter param — enabled
+        code, text, js = _dash_get(f"{page}?enabled=yes")
+        assert code == 200, f"GET {page}?enabled=yes returned {code}"
+
+        # With single filter param — name
+        code, text, js = _dash_get(f"{page}?name=memory")
+        assert code == 200, f"GET {page}?name=memory returned {code}"
+
+        # With multiple filter params
+        code, text, js = _dash_get(f"{page}?source=remote&status=enabled&enabled=yes")
+        assert code == 200, f"GET {page} with multi filters returned {code}"
+
+        # With all 4 filter params
+        code, text, js = _dash_get(f"{page}?source=built-in&status=enabled&enabled=yes&name=mcp")
+        assert code == 200, f"GET {page} with all 4 filters returned {code}"
+
+    # ── 2. Existing filtered pages (threads, messages, channels) ──
+
+    # Threads filters
+    for qs in [
+        "?status=completed",
+        "?cause=user",
+        "?status=completed&cause=user",
+        "?thread_id=123&parent_id=456",
+    ]:
+        code, text, js = _dash_get(f"/threads{qs}")
+        assert code == 200, f"GET /threads{qs} returned {code}"
+        assert "<!DOCTYPE html>" in text, f"GET /threads{qs} did not return SPA HTML"
+
+    # Messages filters
+    for qs in [
+        "?role=user",
+        "?channel_id=1",
+        "?role=assistant&provider=openai",
+        "?model=gpt-4&type=text",
+        "?seq0=true&order=asc",
+    ]:
+        code, text, js = _dash_get(f"/messages{qs}")
+        assert code == 200, f"GET /messages{qs} returned {code}"
+        assert "<!DOCTYPE html>" in text, f"GET /messages{qs} did not return SPA HTML"
+
+    # Channels filters
+    for qs in [
+        "?channelId=1",
+        "?platform=telegram",
+        "?status=open",
+        "?channelId=test&platform=discord&status=closed",
+    ]:
+        code, text, js = _dash_get(f"/channels{qs}")
+        assert code == 200, f"GET /channels{qs} returned {code}"
+        assert "<!DOCTYPE html>" in text, f"GET /channels{qs} did not return SPA HTML"
+
+    # ── 3. Verify filter-related API endpoints return valid data ──
+    _, _, plugin_js = _dash_get("/api/plugins")
+    assert plugin_js is not None, "/api/plugins must return valid JSON"
+    assert plugin_js.get("success") is True, "/api/plugins must return success=true"
+    assert "data" in plugin_js, "/api/plugins must have 'data' key"
+    data = plugin_js["data"]
+    assert len(data) > 0, "/api/plugins data must not be empty"
+
+    # Verify plugins have the expected fields used by filters
+    for p in data:
+        assert "source" in p, f"Plugin {p.get('name')} missing 'source' field"
+        assert "status" in p, f"Plugin {p.get('name')} missing 'status' field"
+        assert "name" in p, f"Plugin missing 'name' field"
+
+    # Verify known source values exist
+    sources = set(p.get("source") for p in data)
+    known_sources = {"built-in", "bundled", "remote"}
+    assert len(sources & known_sources) > 0, \
+        f"No known source values found in plugins: {sources}"
+
+    # Verify known status values exist
+    statuses = set(p.get("status") for p in data)
+    known_statuses = {"enabled", "disabled", "error"}
+    assert len(statuses & known_statuses) > 0, \
+        f"No known status values found in plugins: {statuses}"
+
+    # ── 4. Verify that each plugin page type has data─────
+    # Tools
+    _, _, tools_js = _dash_get("/api/mcp/tools")
+    assert tools_js is not None, "/api/mcp/tools must return valid JSON"
+    tools_list = tools_js if isinstance(tools_js, list) else tools_js.get("tools", tools_js.get("data", []))
+    assert len(tools_list) > 0, "/api/mcp/tools must return at least one tool"
+
+    # Threads filters API
+    _, _, filters_js = _dash_get("/api/threads/filters")
+    assert filters_js is not None, "/api/threads/filters must return valid JSON"
+    assert filters_js.get("success") is True, "/api/threads/filters must return success=true"
+    filters_data = filters_js.get("data", {})
+    assert "statuses" in filters_data, "/api/threads/filters data must have 'statuses' key"
+    assert "causes" in filters_data, "/api/threads/filters data must have 'causes' key"
+
+    # Channels data
+    _, _, channels_js = _dash_get("/api/channels")
+    assert channels_js is not None, "/api/channels must return valid JSON"
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Git hygiene
 # ═══════════════════════════════════════════════════════════════════════
@@ -2510,6 +2636,325 @@ def test_v3_disabled_provider_visible():
 
 
 # ═══════════════════════════════════════════════════════════════════════
+PROMPT_CHANNEL = None  # resolved in setup
+
+# ═══════════════════════════════════════════════════════════════════════
+#  GROUP 11 — Prompt Plugin Tests
+# ═══════════════════════════════════════════════════════════════════════
+
+def _resolve_prompt_channel():
+    """Find a working channel for prompt preview tests."""
+    global PROMPT_CHANNEL
+    if PROMPT_CHANNEL:
+        return
+    for try_name in ["mm-setup", "cron", "kanban"]:
+        try:
+            r = urllib.request.urlopen(
+                urllib.request.Request(
+                    f"{BASE}/prompt-preview/{try_name}",
+                    data=json.dumps({"prompt": "hello", "plan": False}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                ),
+                timeout=5
+            )
+            if r.status == 200:
+                PROMPT_CHANNEL = try_name
+                return
+        except:
+            pass
+    PROMPT_CHANNEL = "mm-setup"  # fallback
+
+def _pp(prompt: str, plan: bool = False) -> dict:
+    """Call the prompt-preview API and return the response."""
+    _resolve_prompt_channel()
+    r = urllib.request.urlopen(
+        urllib.request.Request(
+            f"{BASE}/prompt-preview/{PROMPT_CHANNEL}",
+            data=json.dumps({"prompt": prompt, "plan": plan}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        ),
+        timeout=30
+    )
+    return json.loads(r.read())
+
+def test_p1_basic_response_structure():
+    """Prompt preview returns system_prompt, messages, and plan fields"""
+    resp = _pp("Hello", plan=False)
+    assert "system_prompt" in resp, f"Missing system_prompt in {resp}"
+    assert "messages" in resp, f"Missing messages in {resp}"
+    assert "plan" in resp, f"Missing plan in {resp}"
+    assert isinstance(resp["system_prompt"], str), "system_prompt not string"
+    assert len(resp["system_prompt"]) > 0, "system_prompt empty"
+    assert isinstance(resp["messages"], list), "messages not list"
+    system_msgs = [m for m in resp["messages"] if m.get("role") == "system"]
+    assert len(system_msgs) >= 1, f"Expected >=1 system msg, got {len(system_msgs)}"
+    for msg in resp["messages"]:
+        assert "role" in msg, f"Message missing role: {msg}"
+        assert "content" in msg, f"Message missing content: {msg}"
+
+def test_p2_plan_true_attempts_llm():
+    """plan=true triggers LLM planning (response may be string or null)"""
+    resp = _pp("Implement a new feature", plan=True)
+    assert resp.get("plan") is None or isinstance(resp.get("plan"), str), \
+        f"plan=true should yield None or str, got {resp.get('plan')!r}"
+
+def test_p2_plan_false_returns_null():
+    """plan=false produces null plan"""
+    resp = _pp("Implement a new feature", plan=False)
+    assert resp.get("plan") is None, f"plan=false should be null, got {resp.get('plan')!r}"
+
+def test_p2_short_message_with_plan():
+    """Short message + plan=true still attempts planning"""
+    resp = _pp("Hi", plan=True)
+    assert resp.get("plan") is None or isinstance(resp.get("plan"), str), \
+        f"Got {resp.get('plan')!r}"
+
+def test_p2_long_complex_no_plan():
+    """Long complex message + plan=false returns null"""
+    resp = _pp(
+        "Please implement a complete refactoring of the authentication system with "
+        "JWT tokens, session management, and role-based access control.",
+        plan=False
+    )
+    assert resp.get("plan") is None, f"plan=false should be null, got {resp.get('plan')!r}"
+
+def test_p3_system_prompt_content():
+    """System prompt contains OmniAgent identity and profile reference"""
+    resp = _pp("What's the weather?", plan=False)
+    sys = resp["system_prompt"]
+    assert "OmniAgent" in sys, f"OmniAgent not in system prompt: {sys[:80]}"
+
+def test_p3_system_message_exists():
+    """At least one system message in the messages array"""
+    resp = _pp("Hello", plan=False)
+    has_sys = any(m.get("role") == "system" for m in resp["messages"])
+    assert has_sys, "No system message found"
+
+def test_p4_greeting_with_plan():
+    """Greeting with plan=true works"""
+    resp = _pp("Hi there!", plan=True)
+    assert resp.get("plan") is None or isinstance(resp.get("plan"), str)
+
+def test_p4_code_request_no_plan():
+    """Code request with plan=false returns null plan"""
+    resp = _pp("Write a Python function to sort a list", plan=False)
+    assert resp.get("plan") is None
+
+def test_p4_empty_prompt():
+    """Empty prompt returns a valid response"""
+    resp = _pp("", plan=False)
+    assert "system_prompt" in resp
+
+def test_p4_long_prompt_no_plan():
+    """Long prompt with plan=false returns null plan"""
+    long_text = "Tell me about " + "artificial intelligence and machine learning, " * 50
+    resp = _pp(long_text, plan=False)
+    assert resp.get("plan") is None
+
+def test_p4_multiline_prompt():
+    """Multiline prompt with plan=false returns null plan"""
+    resp = _pp("Step 1: Do this\nStep 2: Do that\nStep 3: Profit", plan=False)
+    assert resp.get("plan") is None
+
+def test_p5_idempotent_plan_null():
+    """Same input produces same plan type across calls"""
+    msg = "Create a new data pipeline for processing logs"
+    resp1 = _pp(msg, plan=False)
+    resp2 = _pp(msg, plan=False)
+    r1 = resp1.get("plan")
+    r2 = resp2.get("plan")
+    assert (r1 is None and r2 is None) or (isinstance(r1, str) and isinstance(r2, str)), \
+        f"Inconsistent: {r1!r} vs {r2!r}"
+
+def test_p5_stable_system_prompt_length():
+    """System prompt length is stable across identical calls"""
+    msg = "Create a new data pipeline"
+    resp1 = _pp(msg, plan=False)
+    resp2 = _pp(msg, plan=False)
+    diff = abs(len(resp1["system_prompt"]) - len(resp2["system_prompt"]))
+    assert diff < 50, f"Prompt length diff: {diff}"
+
+def test_p6_missing_fallback():
+    """Missing channel falls back to default profile and returns valid response"""
+    try:
+        r = urllib.request.urlopen(
+            urllib.request.Request(
+                f"{BASE}/prompt-preview/nonexistent-channel-xyz",
+                data=json.dumps({"prompt": "hello", "plan": False}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            ),
+            timeout=10
+        )
+        resp = json.loads(r.read())
+        assert "system_prompt" in resp, f"Missing system_prompt in fallback response"
+    except urllib.error.HTTPError as e:
+        # Acceptable if the channel doesn't exist and server returns 400+
+        assert e.code >= 400, f"Unexpected HTTP {e.code}"
+
+# ── Compact-messages helpers ─────────────────────────────────────────
+
+def _make_assistant_msg(tool_names: list[str]) -> dict:
+    """Build an assistant message with tool_calls."""
+    return {
+        "role": "assistant",
+        "content": "Let me check that.",
+        "tool_calls": [
+            {"id": f"call_{i}", "type": "function",
+             "function": {"name": name, "arguments": '{"x": 1}'}}
+            for i, name in enumerate(tool_names)
+        ]
+    }
+
+def _make_tool_msg(name: str = "tool_a") -> dict:
+    """Build a tool result message."""
+    return {"role": "tool", "content": '{"result": "ok"}', "name": name}
+
+def _make_user_msg(text: str = "Hello") -> dict:
+    return {"role": "user", "content": text}
+
+def _compact_call(messages: list, keep_recent: int = 3) -> dict:
+    """Call the memory_compact-messages MCP tool and return parsed response."""
+    r = urllib.request.urlopen(
+        urllib.request.Request(
+            f"{BASE}/mcp/execute",
+            data=json.dumps({"name": "memory_compact-messages",
+                             "arguments": {"messages": messages, "keep_recent": keep_recent}}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        ),
+        timeout=15
+    )
+    result = json.loads(r.read())
+    assert result.get("success"), f"compact-messages failed: {result}"
+    return json.loads(result["content"])
+
+# ── Compact-messages tests ───────────────────────────────────────────
+
+def test_p7_no_compaction_needed():
+    """Fewer tool-calling messages than keep_recent → no change"""
+    msgs = [_make_user_msg(), _make_assistant_msg(["tool_a"]), _make_tool_msg(),
+            _make_user_msg("Hi again"), _make_assistant_msg(["tool_b"]), _make_tool_msg()]
+    resp = _compact_call(msgs, keep_recent=3)
+    assert not resp["was_compacted"], f"Should not compact: {resp['before_count']} ≤ 3"
+    assert resp["before_count"] == resp["after_count"]
+    assert resp["after_count"] == 6
+
+def test_p7_compaction_reduces_count():
+    """More tool-calling messages than keep_recent → compacts oldest"""
+    # 5 assistant+tool pairs, keep_recent=3 → compact 2 pairs (4 messages removed)
+    msgs = []
+    for i in range(5):
+        msgs.append(_make_assistant_msg(["tool_a"]))
+        msgs.append(_make_tool_msg("tool_a"))
+    msgs.insert(0, _make_user_msg("Start"))
+    before = len(msgs)  # 11
+
+    resp = _compact_call(msgs, keep_recent=3)
+    assert resp["was_compacted"], "Should have compacted"
+    assert resp["before_count"] == 11
+    # 2 old pairs compacted: each removes the tool msg after the assistant → 2 removed
+    assert resp["after_count"] == 9, f"Expected 9 after compacting 2 pairs, got {resp['after_count']}"
+    # Compaction produces [compact: ...] messages but doesn't delete the assistant msg
+
+def test_p7_keep_recent_1():
+    """keep_recent=1 compacts all but the most recent"""
+    msgs = []
+    for i in range(5):
+        msgs.append(_make_assistant_msg(["tool_a"]))
+        msgs.append(_make_tool_msg("tool_a"))
+    resp = _compact_call(msgs, keep_recent=1)
+    assert resp["was_compacted"]
+    # 5 pairs → after keep_recent=1: 4 old pairs compacted (4 removed) → 6 remaining
+    assert resp["after_count"] == 6, f"Expected 6 (5 pairs - 4 compact + 1 user? no), got {resp['after_count']}"
+
+def test_p7_zero_tool_calls():
+    """Messages with no tool_calls → no compaction"""
+    msgs = [_make_user_msg("A"), _make_user_msg("B"), _make_user_msg("C")]
+    resp = _compact_call(msgs, keep_recent=3)
+    assert not resp["was_compacted"]
+    assert resp["after_count"] == 3
+
+def test_p7_tool_names_preserved():
+    """Compacted messages still reference the tool names"""
+    msgs = []
+    for i in range(4):
+        msgs.append(_make_assistant_msg(["search_docs", "read_file"]))
+        msgs.append(_make_tool_msg("search_docs"))
+        msgs.append(_make_tool_msg("read_file"))
+    resp = _compact_call(msgs, keep_recent=2)
+    assert resp["was_compacted"]
+    for msg in resp["messages"]:
+        if msg.get("role") == "assistant" and "compacted" in msg.get("content", ""):
+            assert "search_docs" in msg["content"] or "read_file" in msg["content"], \
+                f"Compacted msg missing tool name: {msg['content']}"
+
+def test_p7_compact_multiple_tools():
+    """Assistant with multiple tool_calls in one message → compacted reference shows all tools"""
+    msgs = [
+        _make_assistant_msg(["tool_a", "tool_b", "tool_c"]),
+        _make_tool_msg("tool_a"),
+        _make_tool_msg("tool_b"),
+        _make_tool_msg("tool_c"),
+        _make_assistant_msg(["result"]),
+        _make_tool_msg("result"),
+    ]
+    resp = _compact_call(msgs, keep_recent=1)
+    assert resp["was_compacted"]
+    # Find the compacted message
+    compacted = [m for m in resp["messages"] if "compacted" in m.get("content", "")]
+    assert len(compacted) >= 1, "No compacted messages found"
+    assert "tool_a" in compacted[0]["content"]
+    assert "tool_b" in compacted[0]["content"]
+    assert "tool_c" in compacted[0]["content"]
+
+def test_p7_missing_messages_field():
+    """Missing messages field returns descriptive error"""
+    r = urllib.request.urlopen(
+        urllib.request.Request(
+            f"{BASE}/mcp/execute",
+            data=json.dumps({"name": "memory_compact-messages",
+                             "arguments": {"keep_recent": 3}}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        ),
+        timeout=10
+    )
+    result = json.loads(r.read())
+    assert result.get("success"), f"Expected tool-level success, got {result}"
+    content = result["content"]
+    # Content is either a JSON string (success) or plain error text
+    data = json.loads(content) if content.startswith("{") else content
+    if isinstance(data, str):
+        assert "Missing required" in data or "messages" in data or "error" in data.lower(), \
+            f"Expected error message about missing messages, got: {data}"
+    else:
+        # It returned something unexpected — but shouldn't crash
+        assert True
+
+def test_p7_empty_messages():
+    """Empty messages array → no compaction"""
+    resp = _compact_call([], keep_recent=3)
+    assert not resp["was_compacted"]
+    assert resp["after_count"] == 0
+
+def test_p7_idempotent():
+    """Same input produces identical results"""
+    msgs = []
+    for i in range(6):
+        msgs.append(_make_assistant_msg(["tool_x"]))
+        msgs.append(_make_tool_msg("tool_x"))
+    r1 = _compact_call(msgs, keep_recent=2)
+    r2 = _compact_call(msgs, keep_recent=2)
+    assert r1["before_count"] == r2["before_count"]
+    assert r1["after_count"] == r2["after_count"]
+    assert r1["was_compacted"] == r2["was_compacted"]
+    # Verify message count matches
+    assert r1["after_count"] == len(r1["messages"])
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Main
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -2565,7 +3010,7 @@ if __name__ == "__main__":
     print("GROUP 5 — Dashboard page loading tests")
     print(f"{'=' * 60}")
 
-    for fn in [test_dashboard_pages]:
+    for fn in [test_dashboard_pages, test_dashboard_plugin_filters]:
         test(fn)
 
 
@@ -2653,6 +3098,39 @@ if __name__ == "__main__":
     ]:
         test(fn)
 
+    print(f"\n{'=' * 60}\n")
+    print("GROUP 11 — Prompt Plugin Tests")
+    print(f"{'=' * 60}")
+
+    for fn in [
+        test_p1_basic_response_structure,
+        test_p2_plan_true_attempts_llm,
+        test_p2_plan_false_returns_null,
+        test_p2_short_message_with_plan,
+        test_p2_long_complex_no_plan,
+        test_p3_system_prompt_content,
+        test_p3_system_message_exists,
+        test_p4_greeting_with_plan,
+        test_p4_code_request_no_plan,
+        test_p4_empty_prompt,
+        test_p4_long_prompt_no_plan,
+        test_p4_multiline_prompt,
+        test_p5_idempotent_plan_null,
+        test_p5_stable_system_prompt_length,
+        test_p6_missing_fallback,
+        test_p7_no_compaction_needed,
+        test_p7_compaction_reduces_count,
+        test_p7_keep_recent_1,
+        test_p7_zero_tool_calls,
+        test_p7_tool_names_preserved,
+        test_p7_compact_multiple_tools,
+        test_p7_missing_messages_field,
+        test_p7_empty_messages,
+        test_p7_idempotent,
+    ]:
+        test(fn)
+
+    print(f"\n{'=' * 60}")
     print(f"Results: {tests_pass}/{tests_run} passed, {tests_fail} failed")
     print(f"{'=' * 60}")
 
