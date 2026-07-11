@@ -1178,12 +1178,12 @@ mod tests {
         let resp = PromptPreviewResponse {
             system_prompt: "test system".to_string(),
             messages: vec![serde_json::json!({ "role": "system", "content": "test" })],
-            plan: Some("my plan".to_string()),
+            plan: Some(true),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["system_prompt"], "test system");
         assert_eq!(json["messages"][0]["role"], "system");
-        assert_eq!(json["plan"], "my plan");
+        assert_eq!(json["plan"], true);
     }
 
     #[test]
