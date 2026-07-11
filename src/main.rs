@@ -86,10 +86,9 @@ async fn run_server() -> AppResult<()> {
         cfg.temperature,
     );
     tracing::info!(
-        "Iteration limits — no_plan: {}, simple_plan: {}, complex_plan: {}",
+        "Iteration limits — no_plan: {}, plan: {}",
         cfg.max_iterations_no_plan,
-        cfg.max_iterations_simple_plan,
-        cfg.max_iterations_complex_plan,
+        cfg.max_iterations_plan,
     );
 
     // Create shared platform restart signals map (for hot-reload)

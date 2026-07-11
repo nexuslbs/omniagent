@@ -368,36 +368,27 @@ async fn handle_generate_full(pool: &PgPool, args: &Value, meta: Option<McpMeta>
     let plan = match plan_input {
         Some(val) => val,
         None => {
-            // Plugin-level config: plan_enabled, plan_max_chars, plan_keywords
-            // Default: false (plan disabled) until config is provided
-            let plan_enabled = std::env::var("PROMPT_PLAN_ENABLED")
+            // Plugin-level config: complexity thresholds
+            // When plan is null/None, the plugin decides based on message complexity
+            let max_chars = std::env::var("PROMPT_PLANNING_COMPLEXITY_MAX_CHARS")
                 .ok()
-                .and_then(|v| v.parse::<bool>().ok())
-                .unwrap_or(false);
-            if plan_enabled {
-                // Optional: check user_message length vs plan_max_chars threshold
-                let max_chars = std::env::var("PROMPT_PLAN_MAX_CHARS")
-                    .ok()
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(2000);
-                let keywords_str = std::env::var("PROMPT_PLAN_KEYWORDS")
-                    .unwrap_or_default();
-                let keywords: Vec<&str> = keywords_str
-                    .split(',')
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                // Plan if message is complex (long) or contains keywords
-                let has_keyword = if keywords.is_empty() {
-                    false
-                } else {
-                    let lower = user.to_lowercase();
-                    keywords.iter().any(|k| lower.contains(k))
-                };
-                user.len() > max_chars || has_keyword
-            } else {
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(60);
+            let keywords_str = std::env::var("PROMPT_PLANNING_COMPLEXITY_KEYWORDS")
+                .unwrap_or_default();
+            let keywords: Vec<&str> = keywords_str
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            // Plan if message is complex (long) or contains keywords
+            let has_keyword = if keywords.is_empty() {
                 false
-            }
+            } else {
+                let lower = user.to_lowercase();
+                keywords.iter().any(|k| lower.contains(k))
+            };
+            user.len() > max_chars || has_keyword
         }
     };
 
