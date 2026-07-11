@@ -10,8 +10,8 @@ use crate::memory_store::MemoryStore;
 fn memory_max_chars() -> usize {
     std::env::var("MEMORY_MAX_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(5_000)
 }
-fn user_max_chars() -> usize {
-    std::env::var("USER_MAX_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(1_000)
+fn soul_max_chars() -> usize {
+    std::env::var("SOUL_MAX_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(1_000)
 }
 
 // ── Stable identity / guidance texts ────────────────────────────
@@ -131,9 +131,9 @@ fn read_memory_section(memory_store: &MemoryStore) -> String {
 fn read_user_profile_section(memory_store: &MemoryStore) -> String {
     let raw = memory_store.get_user_raw();
     if raw.is_empty() { return String::new(); }
-    let truncated = truncate_content(raw, user_max_chars());
-    let header = if raw.len() > user_max_chars() {
-        format!("## USER PROFILE (who the user is) [TRUNCATED — showing first {} of {} chars]", user_max_chars(), raw.len())
+    let truncated = truncate_content(raw, soul_max_chars());
+    let header = if raw.len() > soul_max_chars() {
+        format!("## USER PROFILE (who the user is) [TRUNCATED — showing first {} of {} chars]", soul_max_chars(), raw.len())
     } else {
         format!("## USER PROFILE (who the user is) [{}% — {}/{} chars]", 100, raw.len(), raw.len())
     };
