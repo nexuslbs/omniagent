@@ -544,26 +544,42 @@ async fn call_proxy_llm(
 /// Called by the omniagent executor after a thread completes. Queries completed
 /// threads, builds a summarization prompt, calls the LLM, and saves the result
 /// to the database.
+///
+/// Reads config from plugin config (plugins_yaml::get_plugin) — not from env vars.
 async fn handle_generate_summary(
     pool: &PgPool,
+    data_dir: &str,
     args: &Value,
 ) -> Result<(String, bool)> {
-    let window = std::env::var("SUMMARY_WINDOW")
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(10);
-    let summary_tokens = std::env::var("CHANNEL_SUMMARY_TOKENS")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(4096);
-    let agent_url = std::env::var("AGENT_API_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
-    let summary_provider = std::env::var("SUMMARY_PROVIDER").ok();
-    let summary_model = std::env::var("SUMMARY_MODEL").ok();
+    // Read config from the memory plugin's own config via plugin system
+    let (window, summary_tokens, provider, model) =
+        match omniagent::plugins_yaml::get_plugin(data_dir, "memory") {
+            Ok(Some(detail)) => {
+                let cfg = &detail.config;
+                let w = cfg.get("summarize_after_days")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(7);
+                let tokens = cfg.get("channel_summary_tokens")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32)
+                    .unwrap_or(500);
+                let prov = cfg.get("summary_provider")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let mdl = cfg.get("summary_model")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                (w, tokens, prov, mdl)
+            }
+            _ => (7, 500u32, None, None),
+        };
 
-    // LLM config is optional — if not set, summarization is skipped gracefully
-    let (Some(provider), Some(model)) = (&summary_provider, &summary_model) else {
-        return Ok(("Summarization LLM not configured (set SUMMARY_PROVIDER and SUMMARY_MODEL in memory plugin config)".to_string(), false));
+    let (Some(ref provider_name), Some(ref model_name)) = (provider.as_deref(), model.as_deref()) else {
+        return Ok(("Summarization not configured — set summary_provider and summary_model in memory plugin config".to_string(), false));
     };
+
+    let window = window.max(1);
+    let summary_tokens = summary_tokens.max(256);
 
     if window == 0 {
         return Ok(("Summaries disabled (window=0)".to_string(), false));
@@ -697,10 +713,11 @@ async fn handle_generate_summary(
     };
 
     // 6. Call LLM for summary via omniagent proxy
+    let agent_url = "http://localhost:8080";
     let summary_content = match call_proxy_llm(
-        &agent_url,
-        provider,
-        model,
+        agent_url,
+        provider_name,
+        model_name,
         summary_tokens,
         system_summarizer_prompt,
         &summary_prompt,
@@ -811,11 +828,13 @@ async fn main() -> Result<()> {
         })
     });
 
-    // generate_summary handler — captures pool
+    // generate_summary handler — captures pool and data_dir
     let p_summary = pool.clone();
+    let dd_summary = data_dir.clone();
     let generate_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let pool = p_summary.clone();
-        Box::pin(async move { handle_generate_summary(&pool, &args).await })
+        let dd = dd_summary.clone();
+        Box::pin(async move { handle_generate_summary(&pool, &dd, &args).await })
     });
 
     let tools = vec![
