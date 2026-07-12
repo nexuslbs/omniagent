@@ -503,6 +503,29 @@ async fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
+// Plugin config — received via configure message
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+struct PluginConfig {
+    summarize_after_days: i64,
+    channel_summary_tokens: u32,
+    summary_provider: Option<String>,
+    summary_model: Option<String>,
+}
+
+impl PluginConfig {
+    fn from_value(v: &serde_json::Value) -> Self {
+        Self {
+            summarize_after_days: v.get("summarize_after_days").and_then(|v| v.as_i64()).unwrap_or(7),
+            channel_summary_tokens: v.get("channel_summary_tokens").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(500),
+            summary_provider: v.get("summary_provider").and_then(|v| v.as_str()).map(String::from),
+            summary_model: v.get("summary_model").and_then(|v| v.as_str()).map(String::from),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tool: generate_summary
 // ---------------------------------------------------------------------------
 
@@ -548,38 +571,15 @@ async fn call_proxy_llm(
 /// Reads config from plugin config (plugins_yaml::get_plugin) — not from env vars.
 async fn handle_generate_summary(
     pool: &PgPool,
-    data_dir: &str,
+    config: &PluginConfig,
     args: &Value,
 ) -> Result<(String, bool)> {
-    // Read config from the memory plugin's own config via plugin system
-    let (window, summary_tokens, provider, model) =
-        match omniagent::plugins_yaml::get_plugin(data_dir, "memory") {
-            Ok(Some(detail)) => {
-                let cfg = &detail.config;
-                let w = cfg.get("summarize_after_days")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(7);
-                let tokens = cfg.get("channel_summary_tokens")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u32)
-                    .unwrap_or(500);
-                let prov = cfg.get("summary_provider")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let mdl = cfg.get("summary_model")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                (w, tokens, prov, mdl)
-            }
-            _ => (7, 500u32, None, None),
-        };
+    let window = config.summarize_after_days.max(1);
+    let summary_tokens = config.channel_summary_tokens.max(256);
 
-    let (Some(ref provider_name), Some(ref model_name)) = (provider.as_deref(), model.as_deref()) else {
+    let (Some(ref provider_name), Some(ref model_name)) = (config.summary_provider.as_ref(), config.summary_model.as_ref()) else {
         return Ok(("Summarization not configured — set summary_provider and summary_model in memory plugin config".to_string(), false));
     };
-
-    let window = window.max(1);
-    let summary_tokens = summary_tokens.max(256);
 
     if window == 0 {
         return Ok(("Summaries disabled (window=0)".to_string(), false));
@@ -828,13 +828,20 @@ async fn main() -> Result<()> {
         })
     });
 
-    // generate_summary handler — captures pool and data_dir
+    // Shared config — populated via configure message from omniagent
+    let plugin_config: std::sync::Arc<std::sync::Mutex<PluginConfig>> =
+        std::sync::Arc::new(std::sync::Mutex::new(PluginConfig::default()));
+
+    // generate_summary handler — captures pool and config
     let p_summary = pool.clone();
-    let dd_summary = data_dir.clone();
+    let cfg_gen = plugin_config.clone();
     let generate_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let pool = p_summary.clone();
-        let dd = dd_summary.clone();
-        Box::pin(async move { handle_generate_summary(&pool, &dd, &args).await })
+        let cfg = cfg_gen.clone();
+        Box::pin(async move {
+            let config = cfg.lock().unwrap().clone();
+            handle_generate_summary(&pool, &config, &args).await
+        })
     });
 
     let tools = vec![
@@ -1000,5 +1007,13 @@ async fn main() -> Result<()> {
         version: "0.1.0".to_string(),
     };
 
-    run_server(server_info, tools).await
+    // Set up configure callback that populates plugin config
+    let cfg_callback = plugin_config.clone();
+    let on_configure = Some(move |params: serde_json::Value| {
+        let mut config = cfg_callback.lock().unwrap();
+        *config = PluginConfig::from_value(&params);
+        tracing::info!("Memory plugin configured");
+    });
+
+    run_server_with_config(server_info, tools, on_configure).await
 }
