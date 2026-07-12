@@ -113,6 +113,11 @@ pub struct ConfigSchemaField {
     /// When set, `allowed_values` is populated from this endpoint instead of the hardcoded list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_url: Option<String>,
+    /// For `type: "model"` fields, references the key of a `type: "provider"` field
+    /// that this model selection depends on. The allowed models are filtered by
+    /// the selected provider's available models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -124,6 +129,15 @@ pub enum FieldType {
     Integer,
     Enum,
     MultiSelect,
+    /// Select a provider plugin — options populated from discovered provider plugins
+    Provider,
+    /// Select a model — depends on a `type: "provider"` field via `depends_on`.
+    /// Options populated from the selected provider's available models.
+    Model,
+    /// Select a tool plugin — options populated from discovered tool plugins
+    Tool,
+    /// Select a platform plugin — options populated from discovered platform plugins
+    Platform,
 }
 
 // ---------------------------------------------------------------------------
