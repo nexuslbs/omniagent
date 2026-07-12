@@ -506,10 +506,11 @@ async fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 // Tool: generate_summary
 // ---------------------------------------------------------------------------
 
-/// Call the LLM (OpenAI-compatible) and return the response text.
-async fn call_llm(
-    api_url: &str,
-    api_key: &str,
+/// Call the LLM via omniagent's provider proxy.
+/// The plugin knows only the provider name and model name — no API keys or URLs.
+async fn call_proxy_llm(
+    agent_url: &str,
+    provider: &str,
     model: &str,
     max_tokens: u32,
     system_prompt: &str,
@@ -517,9 +518,9 @@ async fn call_llm(
 ) -> Result<String> {
     let client = reqwest::Client::new();
     let resp = client
-        .post(api_url)
-        .header("Authorization", format!("Bearer {}", api_key))
+        .post(format!("{}/api/llm/chat", agent_url))
         .json(&serde_json::json!({
+            "provider": provider,
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -530,12 +531,12 @@ async fn call_llm(
         }))
         .send()
         .await
-        .context("LLM request failed")?;
-    let body: Value = resp.json().await.context("Failed to parse LLM response")?;
-    body["choices"][0]["message"]["content"]
+        .context("LLM proxy request failed")?;
+    let body: Value = resp.json().await.context("Failed to parse LLM proxy response")?;
+    body["content"]
         .as_str()
         .map(|s| s.to_string())
-        .ok_or_else(|| anyhow::anyhow!("LLM response missing content: {}", body))
+        .ok_or_else(|| anyhow::anyhow!("LLM proxy response missing content: {}", body))
 }
 
 /// Generate a cross-thread summary for a channel.
@@ -555,13 +556,13 @@ async fn handle_generate_summary(
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(4096);
-    let llm_api_url = std::env::var("SUMMARY_LLM_API_URL").ok();
-    let llm_api_key = std::env::var("SUMMARY_LLM_API_KEY").ok();
-    let llm_model = std::env::var("SUMMARY_LLM_MODEL").ok();
+    let agent_url = std::env::var("AGENT_API_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let summary_provider = std::env::var("SUMMARY_PROVIDER").ok();
+    let summary_model = std::env::var("SUMMARY_MODEL").ok();
 
     // LLM config is optional — if not set, summarization is skipped gracefully
-    let (Some(llm_api_url), Some(llm_api_key), Some(llm_model)) = (&llm_api_url, &llm_api_key, &llm_model) else {
-        return Ok(("Summarization LLM not configured (set SUMMARY_LLM_API_URL, SUMMARY_LLM_API_KEY, SUMMARY_LLM_MODEL in memory plugin config)".to_string(), false));
+    let (Some(provider), Some(model)) = (&summary_provider, &summary_model) else {
+        return Ok(("Summarization LLM not configured (set SUMMARY_PROVIDER and SUMMARY_MODEL in memory plugin config)".to_string(), false));
     };
 
     if window == 0 {
@@ -695,11 +696,11 @@ async fn handle_generate_summary(
         )
     };
 
-    // 6. Call LLM for summary
-    let summary_content = match call_llm(
-        &llm_api_url,
-        &llm_api_key,
-        &llm_model,
+    // 6. Call LLM for summary via omniagent proxy
+    let summary_content = match call_proxy_llm(
+        &agent_url,
+        provider,
+        model,
         summary_tokens,
         system_summarizer_prompt,
         &summary_prompt,
