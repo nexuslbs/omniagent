@@ -100,6 +100,11 @@ pub struct AgentConfig {
     /// - "all" — insert every prompt before every LLM call
     pub prompt_log_level: String,
 
+    /// Global watchdog configuration for tools that don't have their own.
+    /// Applied to all tool calls that don't have a per-tool watchdog defined.
+    /// If None, no watchdog runs for tools without their own configuration.
+    pub global_watchdog: Option<crate::mcp::WatchdogConfig>,
+
     // Infrastructure config (merged from former config::Config)
     pub database_url: String,
     pub database_readonly_url: String,
@@ -229,6 +234,10 @@ impl AgentConfig {
 
             prompt_log_level: std::env::var("PROMPT_LOG_LEVEL")
                 .unwrap_or_else(|_| "first".to_string()),
+
+            global_watchdog: std::env::var("WATCHDOG_DEFAULT").ok().and_then(|v| {
+                serde_json::from_str::<crate::mcp::WatchdogConfig>(&v).ok()
+            }),
 
             // Infrastructure config (merged from former config::Config)
             database_url: std::env::var("DATABASE_URL").ctx("DATABASE_URL must be set")?,

@@ -7,8 +7,7 @@ use crate::agent::helpers;
 use crate::db::types as queries;
 use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, LLMConfig, ProviderId, Usage};
-use crate::mcp::McpToolCall;
-use crate::mcp::{truncate_content, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
+use crate::mcp::{truncate_content, McpToolCall, WatchdogAction, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
 use tokio::task::JoinSet;
 
 /// Process a single pending thread through the state machine:
@@ -1240,6 +1239,8 @@ Previous plan:\n{}",
         let mcp_registry = cfg.mcp.clone();
         let mut join_set = JoinSet::new();
 
+        use std::sync::Arc as StdArc;
+
         for (idx, tc) in response.tool_calls.iter().enumerate() {
             let tool_name = tc.function.name.clone();
             let tool_args = tc.function.arguments.clone();
@@ -1267,31 +1268,120 @@ Previous plan:\n{}",
             let tid = thread.id;
             let iter_num = current_iter;
 
-            join_set.spawn(async move {
-                // Snapshot the registry under the lock; tokio::sync::RwLockReadGuard is Send.
-                let mcp_snapshot = mcp.read().await.clone();
+            // --- Phase 1: Read per-tool timeout from registry ---
+            // Snapshot the registry outside the spawned task so we only read the lock once.
+            let mcp_snapshot = mcp.read().await.clone();
+            let timeout_secs = mcp_snapshot.get_timeout_secs(&tool_name);
+            let timeout_dur = std::time::Duration::from_secs(timeout_secs);
 
-                // Per-tool timeout — prevents a single hanging tool from
-                // blocking the entire thread forever. Uses a generous default
-                // (15 min) that covers the timeout_secs of all MCP servers.
-                let timeout_dur = std::time::Duration::from_secs(900);
-                let result = match tokio::time::timeout(
-                    timeout_dur,
-                    mcp_snapshot.execute(&mcp_call, tool_ctx),
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => {
+            // --- Phase 3: Resolve watchdog config ---
+            // 1. Per-tool watchdog from the tool's registration
+            // 2. Fallback to global watchdog from cfg.config
+            // 3. If neither, no watchdog
+            let watchdog = mcp_snapshot.get_watchdog(&tool_name).or_else(|| {
+                cfg.config.read().ok().and_then(|c| c.global_watchdog.clone())
+            });
+
+            // Shared cancel signal between watchdog and tool execution
+            let cancel_token = StdArc::new(tokio::sync::Notify::new());
+            let cancel_token_clone = cancel_token.clone();
+
+            // Channel for progress messages from watchdog
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+            // --- Spawn watchdog task (Phase 2 + Phase 3) ---
+            if let Some(wd) = watchdog {
+                let wd_timeout = timeout_secs;
+                let wd_cancel = cancel_token_clone;
+                let wd_progress = progress_tx.clone();
+                let wd_tool_name = tool_name.clone();
+                tokio::spawn(async move {
+                    let started = std::time::Instant::now();
+                    let mut sorted = wd.thresholds.clone();
+                    sorted.sort_by(|a, b| a.at_percent.partial_cmp(&b.at_percent).unwrap_or(std::cmp::Ordering::Equal));
+
+                    for threshold in &sorted {
+                        let delay_secs = (wd_timeout as f64 * threshold.at_percent).max(0.1);
+                        tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs - started.elapsed().as_secs_f64().max(0.0))).await;
+                        match &threshold.action {
+                            WatchdogAction::Notify { message } => {
+                                let elapsed = started.elapsed().as_secs_f64();
+                                let pct = (elapsed / wd_timeout as f64 * 100.0) as u32;
+                                let notif = format!("[Watchdog] {} ({}s elapsed, ~{}%)", message, elapsed as u64, pct);
+                                tracing::info!("Watchdog({}): {}", wd_tool_name, notif);
+                                let _ = wd_progress.send(notif);
+                            }
+                            WatchdogAction::Cancel => {
+                                tracing::warn!("Watchdog cancelling tool '{}' after {}s ({}% of timeout)",
+                                    wd_tool_name, started.elapsed().as_secs_f64() as u64,
+                                    (started.elapsed().as_secs_f64() / wd_timeout as f64 * 100.0) as u32);
+                                wd_cancel.notify_one();
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+
+            join_set.spawn(async move {
+                // --- Phase 2: Progress reporting ---
+                // Forward progress notifications to the DB while tool executes.
+                // Run this alongside the tool execution.
+                let pool_for_progress = pool.clone();
+                let tool_name_for_progress = tool_name.clone();
+                let progress_task = tokio::spawn(async move {
+                    while let Some(progress_msg) = progress_rx.recv().await {
+                        let next_seq = queries::get_max_thread_sequence(&pool_for_progress, tid)
+                            .await.unwrap_or(0) + 1;
+                        let progress_entry = MessageNew {
+                            thread_id: tid,
+                            role: "agent".to_string(),
+                            content: progress_msg,
+                            thread_sequence: next_seq,
+                            external_id: None,
+                            metadata: serde_json::json!({"progress": true}),
+                            embedding: None,
+                            summary_text: None,
+                            is_summary: false,
+                            msg_type: "tool_progress".to_string(),
+                            msg_subtype: Some(tool_name_for_progress.clone()),
+                            iteration_number: iter_num,
+                        };
+                        let _ = queries::create_message(&pool_for_progress, &progress_entry).await;
+                    }
+                });
+
+                // Execute with per-tool timeout and watchdog cancel support
+                let tool_future = mcp_snapshot.execute(&mcp_call, tool_ctx);
+
+                let result = tokio::select! {
+                    biased;
+                    _ = cancel_token.notified() => {
                         let msg = format!(
-                            "Tool '{}' exceeded maximum execution time ({}s) and was aborted",
+                            "Tool '{}' was cancelled by watchdog",
                             tool_name,
-                            timeout_dur.as_secs(),
                         );
                         error!("{}", msg);
                         Err(crate::error::Error::Message(msg))
                     }
+                    result = tokio::time::timeout(timeout_dur, tool_future) => {
+                        match result {
+                            Ok(result) => result,
+                            Err(_) => {
+                                let msg = format!(
+                                    "Tool '{}' exceeded maximum execution time ({}s) and was aborted",
+                                    tool_name,
+                                    timeout_dur.as_secs(),
+                                );
+                                error!("{}", msg);
+                                Err(crate::error::Error::Message(msg))
+                            }
+                        }
+                    }
                 };
+                // Stop progress task
+                progress_task.abort();
+
                 let (output, is_error) = match &result {
                     Ok(res) => {
                         let truncated =
