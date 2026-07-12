@@ -3102,6 +3102,28 @@ if __name__ == "__main__":
     print("GROUP 11 — Prompt Plugin Tests")
     print(f"{'=' * 60}")
 
+    # Enable the prompt plugin before running its tests (it's disabled by default)
+    enable_success, enable_resp = api_post_body("/plugins/prompt/enable", {"source": "built-in"})
+    if not enable_success:
+        print(f"  ⚠ Failed to enable prompt plugin: {enable_resp}")
+    else:
+        print("  ✓ Prompt plugin enabled for GROUP 11")
+
+    # Wait for prompt MCP server to register its tools
+    import time
+    for attempt in range(10):
+        try:
+            r = urllib.request.urlopen(urllib.request.Request(f"{BASE}/mcp/tools"), timeout=5)
+            tools_data = json.loads(r.read())
+            tools = tools_data if isinstance(tools_data, list) else (tools_data.get("tools") or tools_data.get("data") or [])
+            if any("prompt_compact" in (t.get("full_name") or t.get("name") or "") for t in tools):
+                break
+        except:
+            pass
+        time.sleep(1)
+    else:
+        print("  ⚠ Timed out waiting for prompt_compact-messages tool to register")
+
     for fn in [
         test_p1_basic_response_structure,
         test_p2_plan_true_attempts_llm,
@@ -3129,6 +3151,13 @@ if __name__ == "__main__":
         test_p7_idempotent,
     ]:
         test(fn)
+
+    # Disable the prompt plugin after tests (restore default state)
+    disable_success, disable_resp = api_post_body("/plugins/prompt/disable", {"source": "built-in"})
+    if not disable_success:
+        print(f"  ⚠ Failed to disable prompt plugin: {disable_resp}")
+    else:
+        print("  ✓ Prompt plugin disabled after GROUP 11")
 
     print(f"\n{'=' * 60}")
     print(f"Results: {tests_pass}/{tests_run} passed, {tests_fail} failed")
