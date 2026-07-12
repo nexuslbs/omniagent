@@ -616,10 +616,8 @@ Previous plan:\n{}",
 
                     // For complex tasks, auto-create subtasks from JSON plan content
                     if enable_subtasks && plan_content.len() > 100 {
-                        let max_json_retries: u32 = std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES")
-                            .ok()
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(3);
+                        let max_json_retries: u32 =
+                            cfg.config_snapshot().max_unfinished_subtask_retries;
                         match serde_json::from_str::<serde_json::Value>(&plan_content) {
                             Ok(plan_json) => {
                                 if let Some(steps) =
@@ -1009,12 +1007,10 @@ Previous plan:\n{}",
 
                 if !pending_subtasks.is_empty()
                     && unfinished_subtask_retries
-                        < std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES")
-                            .ok()
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(3u32)
+                        < cfg.config_snapshot().max_unfinished_subtask_retries
                 {
                     unfinished_subtask_retries += 1;
+                    let max_retries = cfg.config_snapshot().max_unfinished_subtask_retries;
                     let names: Vec<String> = pending_subtasks
                         .iter()
                         .map(|st| format!("#{}: {} ({})", st.id, st.description, st.status))
@@ -1027,14 +1023,14 @@ Previous plan:\n{}",
                          You will be retried (attempt {}/{}) — use this chance to manage them.",
                         names.join("\n"),
                         unfinished_subtask_retries,
-                        std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(3u32),
+                        max_retries,
                     );
                     messages.push(ChatMessage::system(&feedback));
                     info!(
                         "[subtask] Enforcement: LLM tried to end with {} unfinished subtask(s) (retry {}/{})",
                         pending_subtasks.len(),
                         unfinished_subtask_retries,
-                        std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(3u32),
+                        max_retries,
                     );
                     // Don't consume from the iteration budget — this is enforcement overhead
                     current_iter -= 1;
@@ -1042,10 +1038,11 @@ Previous plan:\n{}",
                 }
 
                 if !pending_subtasks.is_empty() {
+                    let max_retries = cfg.config_snapshot().max_unfinished_subtask_retries;
                     // Exhausted retries — force the thread to fail
                     warn!(
                         "[subtask] Enforcement exhausted after {} retries — {} subtask(s) still unfinished for thread {}",
-                        std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES").ok().and_then(|v| v.parse().ok()).unwrap_or(3u32),
+                        max_retries,
                         pending_subtasks.len(),
                         thread.id,
                     );

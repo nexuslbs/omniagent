@@ -335,6 +335,111 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 default: Some("/opt/workspace".into()),
             },
         ),
+        // ── Context Management ──
+        (
+            "PROMPT_CHAR_BUDGET_SOFT".into(),
+            get_env_or_default("PROMPT_CHAR_BUDGET_SOFT", "350000"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Soft char budget for prompts. When exceeded, context is condensed every N turns.".into(),
+                options: None,
+                readonly: false,
+                default: Some("350000".into()),
+            },
+        ),
+        (
+            "PROMPT_CHAR_BUDGET_HARD".into(),
+            get_env_or_default("PROMPT_CHAR_BUDGET_HARD", "500000"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Hard char budget for prompts. When exceeded, context is condensed before the next LLM call.".into(),
+                options: None,
+                readonly: false,
+                default: Some("500000".into()),
+            },
+        ),
+        (
+            "OLD_MESSAGE_CHAR_BUDGET".into(),
+            get_env_or_default("OLD_MESSAGE_CHAR_BUDGET", "100000"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Max chars for old messages after condensation. The metadata block stays in full.".into(),
+                options: None,
+                readonly: false,
+                default: Some("100000".into()),
+            },
+        ),
+        (
+            "STATE_BLOCK_UPDATE_INTERVAL".into(),
+            get_env_or_default("STATE_BLOCK_UPDATE_INTERVAL", "5"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "How often (in iterations) to refresh the state block when soft budget is exceeded.".into(),
+                options: None,
+                readonly: false,
+                default: Some("5".into()),
+            },
+        ),
+        (
+            "CONDENSE_KEEP_TURNS".into(),
+            get_env_or_default("CONDENSE_KEEP_TURNS", "4"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Number of full assistant→tool cycles to keep verbatim during condensation.".into(),
+                options: None,
+                readonly: false,
+                default: Some("4".into()),
+            },
+        ),
+        // ── Token Budgets ──
+        (
+            "PROMPT_TOKEN_BUDGET_SOFT".into(),
+            get_env_or_default("PROMPT_TOKEN_BUDGET_SOFT", "200000"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Soft token budget for prompts. Triggers condensation when exceeded (uses tiktoken).".into(),
+                options: None,
+                readonly: false,
+                default: Some("200000".into()),
+            },
+        ),
+        (
+            "PROMPT_TOKEN_BUDGET_HARD".into(),
+            get_env_or_default("PROMPT_TOKEN_BUDGET_HARD", "350000"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Hard token budget for prompts. Condenses before any LLM call when exceeded (uses tiktoken).".into(),
+                options: None,
+                readonly: false,
+                default: Some("350000".into()),
+            },
+        ),
+        (
+            "TOKENIZER_ENCODING".into(),
+            get_env_or_default("TOKENIZER_ENCODING", "gpt-4"),
+            SettingMeta {
+                field_type: "select".into(),
+                description: "Tiktoken encoding for token counting. Corresponds to the model provider's tokenizer.".into(),
+                options: Some(vec![
+                    SettingOption { id: "gpt-4".into(), name: "GPT-4 (cl100k_base)".into() },
+                    SettingOption { id: "cl100k_base".into(), name: "cl100k_base".into() },
+                    SettingOption { id: "o200k_base".into(), name: "o200k_base (GPT-4o)".into() },
+                ]),
+                readonly: false,
+                default: Some("gpt-4".into()),
+            },
+        ),
+        (
+            "PROMPT_TOKEN_SAFETY_FACTOR".into(),
+            get_env_or_default("PROMPT_TOKEN_SAFETY_FACTOR", "15.0"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Multiplier to account for provider tokenizer mismatch with tiktoken.".into(),
+                options: None,
+                readonly: false,
+                default: Some("15.0".into()),
+            },
+        ),
         // ── Tool Execution ──
         (
             "WATCHDOG_DEFAULT".into(),
@@ -362,6 +467,176 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 ]),
                 readonly: false,
                 default: Some("first".into()),
+            },
+        ),
+        // ── Vectorization (Messages) ──
+        (
+            "VECTORIZE_MESSAGES".into(),
+            get_env_or_default("VECTORIZE_MESSAGES", "false"),
+            SettingMeta {
+                field_type: "boolean".into(),
+                description: "Enable vectorization of messages for semantic search.".into(),
+                options: None,
+                readonly: false,
+                default: Some("false".into()),
+            },
+        ),
+        (
+            "MESSAGES_VECTORIZATION_METHOD".into(),
+            get_env_or_default("MESSAGES_VECTORIZATION_METHOD", "local"),
+            SettingMeta {
+                field_type: "select".into(),
+                description: "Vectorization method for messages: local (built-in), openai, or custom API.".into(),
+                options: Some(vec![
+                    SettingOption { id: "local".into(), name: "Local".into() },
+                    SettingOption { id: "openai".into(), name: "OpenAI".into() },
+                    SettingOption { id: "custom".into(), name: "Custom API".into() },
+                ]),
+                readonly: false,
+                default: Some("local".into()),
+            },
+        ),
+        (
+            "MESSAGES_VECTORIZATION_API_URL".into(),
+            get_env_or_default("MESSAGES_VECTORIZATION_API_URL", ""),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "API URL for message vectorization (required when method is openai or custom).".into(),
+                options: None,
+                readonly: false,
+                default: Some("".into()),
+            },
+        ),
+        (
+            "MESSAGES_VECTORIZATION_INTERVAL".into(),
+            get_env_or_default("MESSAGES_VECTORIZATION_INTERVAL", "3600"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Interval in seconds between message vectorization runs.".into(),
+                options: None,
+                readonly: false,
+                default: Some("3600".into()),
+            },
+        ),
+        (
+            "MESSAGES_VECTORIZATION_PROTOCOL".into(),
+            get_env_or_default("MESSAGES_VECTORIZATION_PROTOCOL", "openai"),
+            SettingMeta {
+                field_type: "select".into(),
+                description: "API protocol for message vectorization.".into(),
+                options: Some(vec![
+                    SettingOption { id: "openai".into(), name: "OpenAI-compatible".into() },
+                    SettingOption { id: "custom".into(), name: "Custom protocol".into() },
+                ]),
+                readonly: false,
+                default: Some("openai".into()),
+            },
+        ),
+        (
+            "MESSAGES_VECTORIZATION_API_KEY".into(),
+            get_env_or_default("MESSAGES_VECTORIZATION_API_KEY", ""),
+            SettingMeta {
+                field_type: "secret".into(),
+                description: "API key for message vectorization endpoint.".into(),
+                options: None,
+                readonly: false,
+                default: Some("".into()),
+            },
+        ),
+        (
+            "MESSAGES_VECTORIZATION_API_MODEL".into(),
+            get_env_or_default("MESSAGES_VECTORIZATION_API_MODEL", ""),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "Model name for message vectorization (e.g. text-embedding-ada-002).".into(),
+                options: None,
+                readonly: false,
+                default: Some("".into()),
+            },
+        ),
+        // ── Vectorization (Wiki) ──
+        (
+            "VECTORIZE_WIKI".into(),
+            get_env_or_default("VECTORIZE_WIKI", "false"),
+            SettingMeta {
+                field_type: "boolean".into(),
+                description: "Enable vectorization of wiki pages for semantic search.".into(),
+                options: None,
+                readonly: false,
+                default: Some("false".into()),
+            },
+        ),
+        (
+            "WIKI_VECTORIZATION_METHOD".into(),
+            get_env_or_default("WIKI_VECTORIZATION_METHOD", "local"),
+            SettingMeta {
+                field_type: "select".into(),
+                description: "Vectorization method for wiki pages: local (built-in), openai, or custom API.".into(),
+                options: Some(vec![
+                    SettingOption { id: "local".into(), name: "Local".into() },
+                    SettingOption { id: "openai".into(), name: "OpenAI".into() },
+                    SettingOption { id: "custom".into(), name: "Custom API".into() },
+                ]),
+                readonly: false,
+                default: Some("local".into()),
+            },
+        ),
+        (
+            "WIKI_VECTORIZATION_API_URL".into(),
+            get_env_or_default("WIKI_VECTORIZATION_API_URL", ""),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "API URL for wiki vectorization (required when method is openai or custom).".into(),
+                options: None,
+                readonly: false,
+                default: Some("".into()),
+            },
+        ),
+        (
+            "WIKI_VECTORIZATION_INTERVAL".into(),
+            get_env_or_default("WIKI_VECTORIZATION_INTERVAL", "3600"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Interval in seconds between wiki vectorization runs.".into(),
+                options: None,
+                readonly: false,
+                default: Some("3600".into()),
+            },
+        ),
+        (
+            "WIKI_VECTORIZATION_PROTOCOL".into(),
+            get_env_or_default("WIKI_VECTORIZATION_PROTOCOL", "openai"),
+            SettingMeta {
+                field_type: "select".into(),
+                description: "API protocol for wiki vectorization.".into(),
+                options: Some(vec![
+                    SettingOption { id: "openai".into(), name: "OpenAI-compatible".into() },
+                    SettingOption { id: "custom".into(), name: "Custom protocol".into() },
+                ]),
+                readonly: false,
+                default: Some("openai".into()),
+            },
+        ),
+        (
+            "WIKI_VECTORIZATION_API_KEY".into(),
+            get_env_or_default("WIKI_VECTORIZATION_API_KEY", ""),
+            SettingMeta {
+                field_type: "secret".into(),
+                description: "API key for wiki vectorization endpoint.".into(),
+                options: None,
+                readonly: false,
+                default: Some("".into()),
+            },
+        ),
+        (
+            "WIKI_VECTORIZATION_API_MODEL".into(),
+            get_env_or_default("WIKI_VECTORIZATION_API_MODEL", ""),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "Model name for wiki vectorization (e.g. text-embedding-ada-002).".into(),
+                options: None,
+                readonly: false,
+                default: Some("".into()),
             },
         ),
     ]
@@ -406,7 +681,11 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "THREAD_SUMMARY_TOKENS"
             | "MEMORY_MAX_CHARS"
             | "SOUL_MAX_CHARS" => "memory",
-            "LLM_PROVIDER" | "PROMPT_LOG_LEVEL" | "MAX_INLINE_FILE_KB" | "MAX_UNFINISHED_SUBTASK_RETRIES" | "PROMPT_GENERATE_TOOL" | "PROMPT_COMPACT_MESSAGES_TOOL" | "WATCHDOG_DEFAULT" => "general",
+            "LLM_PROVIDER" | "PROMPT_LOG_LEVEL" | "MAX_INLINE_FILE_KB" | "MAX_UNFINISHED_SUBTASK_RETRIES" | "PROMPT_GENERATE_TOOL" | "PROMPT_COMPACT_MESSAGES_TOOL" | "WATCHDOG_DEFAULT"
+            | "PROMPT_CHAR_BUDGET_SOFT" | "PROMPT_CHAR_BUDGET_HARD" | "OLD_MESSAGE_CHAR_BUDGET" | "STATE_BLOCK_UPDATE_INTERVAL" | "CONDENSE_KEEP_TURNS"
+            | "PROMPT_TOKEN_BUDGET_SOFT" | "PROMPT_TOKEN_BUDGET_HARD" | "TOKENIZER_ENCODING" | "PROMPT_TOKEN_SAFETY_FACTOR"
+            | "VECTORIZE_MESSAGES" | "MESSAGES_VECTORIZATION_METHOD" | "MESSAGES_VECTORIZATION_API_URL" | "MESSAGES_VECTORIZATION_INTERVAL" | "MESSAGES_VECTORIZATION_PROTOCOL" | "MESSAGES_VECTORIZATION_API_KEY" | "MESSAGES_VECTORIZATION_API_MODEL"
+            | "VECTORIZE_WIKI" | "WIKI_VECTORIZATION_METHOD" | "WIKI_VECTORIZATION_API_URL" | "WIKI_VECTORIZATION_INTERVAL" | "WIKI_VECTORIZATION_PROTOCOL" | "WIKI_VECTORIZATION_API_KEY" | "WIKI_VECTORIZATION_API_MODEL" => "general",
             "MAX_POOL_CONNECTIONS" => "general",
             _ => "system",
         };
@@ -527,6 +806,29 @@ pub async fn update_settings_handler(
         "MAX_POOL_CONNECTIONS",
         "MAX_INLINE_FILE_KB",
         "WATCHDOG_DEFAULT",
+        "PROMPT_CHAR_BUDGET_SOFT",
+        "PROMPT_CHAR_BUDGET_HARD",
+        "OLD_MESSAGE_CHAR_BUDGET",
+        "STATE_BLOCK_UPDATE_INTERVAL",
+        "CONDENSE_KEEP_TURNS",
+        "PROMPT_TOKEN_BUDGET_SOFT",
+        "PROMPT_TOKEN_BUDGET_HARD",
+        "TOKENIZER_ENCODING",
+        "PROMPT_TOKEN_SAFETY_FACTOR",
+        "VECTORIZE_MESSAGES",
+        "MESSAGES_VECTORIZATION_METHOD",
+        "MESSAGES_VECTORIZATION_API_URL",
+        "MESSAGES_VECTORIZATION_INTERVAL",
+        "MESSAGES_VECTORIZATION_PROTOCOL",
+        "MESSAGES_VECTORIZATION_API_KEY",
+        "MESSAGES_VECTORIZATION_API_MODEL",
+        "VECTORIZE_WIKI",
+        "WIKI_VECTORIZATION_METHOD",
+        "WIKI_VECTORIZATION_API_URL",
+        "WIKI_VECTORIZATION_INTERVAL",
+        "WIKI_VECTORIZATION_PROTOCOL",
+        "WIKI_VECTORIZATION_API_KEY",
+        "WIKI_VECTORIZATION_API_MODEL",
     ]
     .into_iter()
     .collect();

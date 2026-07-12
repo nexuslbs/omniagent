@@ -60,6 +60,8 @@ pub struct AgentConfig {
     pub max_iterations_plan: u32,
     /// Max tokens for the per-thread end-of-execution summary LLM call.
     pub thread_summary_tokens: u32,
+    /// Max retries for unfinished subtasks before marking the thread as failed.
+    pub max_unfinished_subtask_retries: u32,
     /// Days before old messages and summaries are deleted.
     pub delete_after_days: u32,
     /// MCP tool name for generating the LLM prompt (system prompt + context assembly).
@@ -184,6 +186,10 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "2048".to_string())
                 .parse()
                 .unwrap_or(2048),
+            max_unfinished_subtask_retries: std::env::var("MAX_UNFINISHED_SUBTASK_RETRIES")
+                .unwrap_or_else(|_| "3".to_string())
+                .parse()
+                .unwrap_or(3),
             delete_after_days: std::env::var("DELETE_AFTER_DAYS")
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
