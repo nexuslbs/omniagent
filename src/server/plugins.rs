@@ -608,27 +608,43 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
             }
 
             // Cross-reference MCP plugins with the MCP registry:
-            // if a plugin is marked "enabled" but its server has zero
-            // registered tools, the server failed to initialize — set
-            // status to "error" so the frontend shows the right badge.
+            // 1. if a plugin is marked "enabled" but its server has zero
+            //    registered tools, the server failed to initialize — set
+            //    status to "error" so the frontend shows the right badge.
+            // 2. Populate tool_names for all tool plugins (including disabled ones)
+            //    so the frontend can show tool counts even when the server isn't running.
             {
                 let registry = state.tool_registry.read().await;
                 let all_tools = registry.all();
+                let mut server_tools: std::collections::HashMap<&str, Vec<String>> =
+                    std::collections::HashMap::new();
+                for t in all_tools.iter() {
+                    if let Some(ref sn) = t.server_name {
+                        server_tools
+                            .entry(sn.as_str())
+                            .or_default()
+                            .push(t.full_name.clone());
+                    }
+                }
                 for detail in details.iter_mut() {
-                    if detail.plugin_type == "tool" && detail.status == "enabled" {
-                        let has_tools = all_tools
-                            .iter()
-                            .any(|t| t.server_name.as_deref() == Some(&detail.name));
-                        if !has_tools {
-                            detail.status = "error".to_string();
-                            let no_source = !detail.has_source_code;
-                            let no_binary_note = if no_source {
-                                " — no source code (no Cargo.toml) and pre-compiled binary not found"
-                            } else {
-                                " — binary may not have compiled successfully"
-                            };
-                            detail.status_message =
-                                format!("MCP server failed to start{}", no_binary_note);
+                    if detail.plugin_type == "tool" {
+                        if detail.status == "enabled" {
+                            let has_tools = server_tools.contains_key(detail.name.as_str());
+                            if !has_tools {
+                                detail.status = "error".to_string();
+                                let no_source = !detail.has_source_code;
+                                let no_binary_note = if no_source {
+                                    " — no source code (no Cargo.toml) and pre-compiled binary not found"
+                                } else {
+                                    " — binary may not have compiled successfully"
+                                };
+                                detail.status_message =
+                                    format!("MCP server failed to start{}", no_binary_note);
+                            }
+                        }
+                        // Populate tool_names from the registry regardless of status
+                        if let Some(tools) = server_tools.get(detail.name.as_str()) {
+                            detail.tool_names.clone_from(tools);
                         }
                     }
                 }

@@ -185,6 +185,10 @@ pub struct PluginDetail {
     /// Programming language: "Rust", "Python", "Node.js", or "unknown".
     #[serde(default)]
     pub language: String,
+    /// MCP tool names registered by this plugin (tool-type plugins only).
+    /// Populated from the tool registry at API response time.
+    #[serde(default)]
+    pub tool_names: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -955,6 +959,7 @@ fn build_plugin_detail(
         is_script,
         status_message: String::new(),
         language,
+        tool_names: vec![],
     }
 }
 
