@@ -1,4 +1,5 @@
 use serde_json::Value;
+use serde::{Serialize, Deserialize};
 use sql_forge::sql_forge;
 use sqlx::FromRow;
 use sqlx::PgPool;
@@ -181,7 +182,45 @@ pub struct McpTool {
     pub description: String,
     pub input_schema: Value,
     pub server_name: Option<String>,
+    /// Maximum time in seconds to wait for this tool to complete.
+    /// Used by the executor to wrap the tool call in tokio::time::timeout().
+    /// Falls back to DEFAULT_TOOL_TIMEOUT_SECS if not set.
+    pub timeout_secs: u64,
+    /// Optional watchdog configuration for monitoring this tool's execution.
+    /// If None, no watchdog runs for this tool.
+    pub watchdog: Option<WatchdogConfig>,
     pub handler: McpToolHandler,
+}
+
+/// Default timeout for tools that don't specify one (900 seconds = 15 min).
+pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 900;
+
+/// Watchdog configuration for monitoring long-running tool executions.
+/// Defines escalation thresholds that fire at specific fractions of the
+/// tool's timeout. Thresholds are checked sequentially, so they should
+/// be ordered from earliest to latest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchdogConfig {
+    pub thresholds: Vec<WatchdogThreshold>,
+}
+
+/// A single watchdog escalation threshold.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchdogThreshold {
+    /// Fraction of the tool's timeout at which to fire (0.0 to 1.0).
+    /// E.g., 0.5 means fire when 50% of the timeout has elapsed.
+    pub at_percent: f64,
+    /// The action to take when this threshold is reached.
+    pub action: WatchdogAction,
+}
+
+/// Action the watchdog takes when a threshold is reached.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WatchdogAction {
+    /// Send a notification message to the user with the given text.
+    Notify { message: String },
+    /// Cancel the tool call and mark it as timed out.
+    Cancel,
 }
 
 /// Registry of all available MCP tools.
@@ -261,6 +300,19 @@ impl McpRegistry {
     /// so it's returned as-is. Built-in tools have no prefix.
     pub fn qualified_name(&self, name: &str) -> String {
         name.to_string()
+    }
+
+    /// Get the timeout in seconds for a tool by name.
+    /// Returns the tool's configured timeout, or DEFAULT_TOOL_TIMEOUT_SECS if not found.
+    pub fn get_timeout_secs(&self, name: &str) -> u64 {
+        self.get(name)
+            .map(|t| t.timeout_secs)
+            .unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS)
+    }
+
+    /// Get the watchdog configuration for a tool by name.
+    pub fn get_watchdog(&self, name: &str) -> Option<WatchdogConfig> {
+        self.get(name).and_then(|t| t.watchdog.clone())
     }
 
     /// Execute a tool call — directly awaits the async handler (no spawn_blocking).
@@ -398,6 +450,8 @@ fn read_attached_file_tool() -> McpTool {
             "required": ["file_id"]
         }),
         server_name: None,
+        timeout_secs: DEFAULT_TOOL_TIMEOUT_SECS,
+        watchdog: None,
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let file_id = args
@@ -551,6 +605,8 @@ fn list_tool_details_tool() -> McpTool {
             "required": ["tool_name"]
         }),
         server_name: None,
+        timeout_secs: DEFAULT_TOOL_TIMEOUT_SECS,
+        watchdog: None,
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let tool_name = args

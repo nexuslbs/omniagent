@@ -161,6 +161,11 @@ pub trait McpServerClient: Send + Sync {
     #[allow(dead_code)]
     fn health(&self) -> ServerHealth;
 
+    /// Get the server's per-tool timeout in seconds.
+    fn timeout_secs(&self) -> u64 {
+        crate::mcp::DEFAULT_TOOL_TIMEOUT_SECS
+    }
+
     /// Convert external tools to McpTool instances with a circuit-breaking wrapper.
     async fn to_mcp_tools(&mut self) -> Vec<McpTool> {
         let tools = match self.initialize().await {
@@ -201,6 +206,8 @@ pub trait McpServerClient: Send + Sync {
                 description,
                 input_schema: schema,
                 server_name: Some(server_name.clone()),
+                timeout_secs: self.timeout_secs(),
+                watchdog: None,
                 handler: Arc::new(move |args: Value, ctx: crate::mcp::AppContext| {
                     let sn = sn.clone();
                     let tn = tn.clone();
@@ -734,6 +741,10 @@ impl McpServerClient for StdioMcpClient {
             last_error: self.last_error.blocking_lock().clone(),
         }
     }
+
+    fn timeout_secs(&self) -> u64 {
+        self.config.timeout_secs
+    }
 }
 
 impl Drop for StdioMcpClient {
@@ -926,6 +937,10 @@ impl McpServerClient for HttpMcpClient {
             circuit_state: self.circuit.state(),
             last_error: self.last_error.clone(),
         }
+    }
+
+    fn timeout_secs(&self) -> u64 {
+        self.config.timeout_secs
     }
 }
 
