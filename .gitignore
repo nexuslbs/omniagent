@@ -17,3 +17,4 @@ plugins/mcp
 
 # Remote plugin clones (git-installed plugins live under .remote/)
 .remote/
+dashboard/
