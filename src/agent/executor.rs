@@ -420,8 +420,6 @@ pub async fn process_thread(
         }
     };
 
-    // Log context assembly metadata (keep for logging, the text comes from the plugin)
-    let ctx_assembly_meta: Option<crate::context_builder::ContextAssemblyMeta> = None;
 
     // Track cumulative token usage across all LLM calls
     let mut cumulative_usage: Option<crate::llm::Usage> = None;
@@ -1520,14 +1518,7 @@ Previous plan:\n{}",
                 "policy_applied": true,
             }
         });
-        if let Some(ref assembly) = ctx_assembly_meta {
-            meta["context"]["selected_message_ids"] =
-                serde_json::json!(assembly.selected_message_ids);
-            meta["context"]["wiki_files"] = serde_json::json!(assembly.wiki_files);
-            meta["context"]["block_counts"] = serde_json::json!(assembly.block_counts);
-            meta["context"]["dropped_blocks"] = serde_json::json!(assembly.dropped_blocks);
-            meta["context"]["total_chars"] = serde_json::json!(assembly.total_chars);
-        }
+        /* ctx_assembly_meta removed — context comes from prompt tool */
         meta
     };
 

@@ -694,41 +694,15 @@ async fn prompt_preview_handler(
                     .cloned()
                     .unwrap_or_else(|| crate::profile::Profile::default(profile_name));
 
-                // Look up parent_id for context scoping (preview shows thread-isolated context)
-                #[derive(Debug, sqlx::FromRow)]
-                struct PreviewParentRow {
-                    parent_id: Option<i64>,
-                }
-                let pp_row: Option<PreviewParentRow> = sql_forge!(
-                    PreviewParentRow,
-                    "SELECT parent_id FROM threads WHERE id = :id",
-                    ( :id = tid )
-                )
-                .fetch_optional(&state.pool)
-                .await
-                .ok()
-                .flatten();
-                let preview_parent_id = pp_row.and_then(|r| r.parent_id);
-
-                let (context_text, _meta) = crate::context_builder::build_thread_context(
-                    &state.pool,
-                    &crate::context_builder::ThreadContextIdentifiers {
-                        thread_id: tid,
-                        channel_id: ch.id,
-                        cause_msg_id: latest.id,
-                        parent_id: preview_parent_id,
-                    },
-                    &crate::context_builder::ThreadContextConfig {
-                        cause_content: &body.prompt,
-                        profile_name,
-                        data_dir: &state.data_dir,
-                        prompt_budget: prof
-                            .prompt_budget
-                            .unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
-                        auto_retrieval_enabled: prof.auto_retrieval_enabled,
-                        retrieval_aggressiveness: prof.retrieval_aggressiveness,
-                        task_context: false,
-                    },
+                // Use the prompt tool for context (same tool the agent uses)
+                let context_text = call_prompt_context(
+                    &state.tool_registry,
+                    &state.app_context,
+                    profile_name,
+                    platform,
+                    &body.prompt,
+                    tid,
+                    ch.id,
                 )
                 .await;
 
@@ -961,6 +935,7 @@ async fn context_preview_handler(
     } else {
         &channel.current_profile
     };
+    let platform = channel.platform.as_deref().unwrap_or("");
 
     // Get the latest seq-0 message in this channel to use as the cause
     // (so retrieval/search context is based on real content).
@@ -1011,48 +986,75 @@ async fn context_preview_handler(
         .cloned()
         .unwrap_or_else(|| crate::profile::Profile::default(profile_name));
 
-    // Build context — same function the agent uses
-    // Look up parent_id for context scoping (preview shows thread-isolated context)
-    #[derive(Debug, sqlx::FromRow)]
-    struct PreviewParentRow {
-        parent_id: Option<i64>,
-    }
-    let pp_row: Option<PreviewParentRow> = sql_forge!(
-        PreviewParentRow,
-        "SELECT parent_id FROM threads WHERE id = :id",
-        ( :id = thread_id )
-    )
-    .fetch_optional(&state.pool)
-    .await
-    .ok()
-    .flatten();
-    let preview_parent_id = pp_row.and_then(|r| r.parent_id);
-    let (context_text, meta) = crate::context_builder::build_thread_context(
-        &state.pool,
-        &crate::context_builder::ThreadContextIdentifiers {
-            thread_id,
-            channel_id: channel.id,
-            cause_msg_id: cause_id,
-            parent_id: preview_parent_id,
-        },
-        &crate::context_builder::ThreadContextConfig {
-            cause_content: &cause_content,
-            profile_name,
-            data_dir: &state.data_dir,
-            prompt_budget: prof
-                .prompt_budget
-                .unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
-            auto_retrieval_enabled: prof.auto_retrieval_enabled,
-            retrieval_aggressiveness: prof.retrieval_aggressiveness,
-            task_context: false,
-        },
+    // Use the prompt tool for context (same tool the agent uses)
+    let context_text = call_prompt_context(
+        &state.tool_registry,
+        &state.app_context,
+        profile_name,
+        &platform,
+        &cause_content,
+        thread_id,
+        channel.id,
     )
     .await;
 
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "context": context_text, "timings": meta.step_timings_ms })),
+        Json(serde_json::json!({ "context": context_text })),
     )
+}
+
+/// Call the prompt_generate MCP tool to build context — same tool the agent executor uses.
+/// Falls back to empty string if the tool is not registered or fails.
+async fn call_prompt_context(
+    tool_registry: &tokio::sync::RwLock<McpRegistry>,
+    app_context: &AppContext,
+    profile_name: &str,
+    platform: &str,
+    user_message: &str,
+    thread_id: i64,
+    channel_id: i64,
+) -> String {
+    let prompt_tool_name = std::env::var("PROMPT_GENERATE_TOOL")
+        .unwrap_or_else(|_| "prompt_generate".to_string());
+
+    // Collect all available tool names (same as the executor does)
+    let tool_names: Vec<String> = tool_registry
+        .read()
+        .await
+        .all()
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+
+    let mcp_call = McpToolCall {
+        id: "preview-context".to_string(),
+        name: prompt_tool_name,
+        arguments: serde_json::json!({
+            "profile_name": profile_name,
+            "platform": platform,
+            "user_message": user_message,
+            "tool_names": tool_names,
+            "thread_id": thread_id,
+            "channel_id": channel_id,
+        }),
+    };
+
+    let result = tool_registry
+        .read()
+        .await
+        .execute(&mcp_call, app_context.clone())
+        .await;
+
+    match result {
+        Ok(r) if !r.is_error => {
+            serde_json::from_str::<serde_json::Value>(&r.content)
+                .ok()
+                .and_then(|v| v["context"].as_str().map(String::from))
+                .unwrap_or_default()
+        }
+        _ => String::new(),
+    }
 }
 
 /// POST /run-cron/{schedule_id} — manually fire a cron job.

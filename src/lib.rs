@@ -7,7 +7,6 @@
 pub mod agent;
 pub mod commands;
 pub mod complexity;
-pub mod context_builder;
 pub mod db;
 pub mod error;
 pub mod llm;
