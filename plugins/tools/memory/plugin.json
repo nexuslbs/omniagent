@@ -11,53 +11,38 @@
   },
   "config_schema": [
     {
-      "key": "DATABASE_URL",
-      "label": "Database URL",
-      "type": "string",
-      "default": "$env:DATABASE_URL",
-      "description": "PostgreSQL connection string for querying threads and saving summaries"
-    },
-    {
-      "key": "SUMMARIZE_AFTER_DAYS",
+      "key": "summarize_after_days",
       "label": "Summarize After Days",
       "type": "integer",
       "default": "$env:SUMMARIZE_AFTER_DAYS",
       "description": "Days of inactivity before auto-summarizing threads"
     },
     {
-      "key": "SUMMARY_WINDOW",
+      "key": "summary_window",
       "label": "Summary Window",
       "type": "integer",
       "default": "$env:SUMMARY_WINDOW",
       "description": "Number of threads in a summary generation window"
     },
     {
-      "key": "CHANNEL_SUMMARY_TOKENS",
+      "key": "channel_summary_tokens",
       "label": "Channel Summary Tokens",
       "type": "integer",
       "default": "$env:CHANNEL_SUMMARY_TOKENS",
       "description": "Maximum tokens for channel-level summary generation"
     },
     {
-      "key": "SUMMARY_LLM_API_URL",
-      "label": "LLM API URL",
-      "type": "string",
-      "default": "$env:SUMMARY_LLM_API_URL",
-      "description": "OpenAI-compatible LLM API endpoint for summarization"
+      "key": "summary_provider",
+      "label": "Summary Provider",
+      "type": "provider",
+      "description": "LLM provider to use for channel summarization"
     },
     {
-      "key": "SUMMARY_LLM_API_KEY",
-      "label": "LLM API Key",
-      "type": "string",
-      "default": "$env:SUMMARY_LLM_API_KEY",
-      "description": "API key for the summarization LLM"
-    },
-    {
-      "key": "SUMMARY_LLM_MODEL",
-      "label": "LLM Model",
-      "type": "string",
-      "default": "$env:SUMMARY_LLM_MODEL",
-      "description": "Model name for summarization LLM calls"
+      "key": "summary_model",
+      "label": "Summary Model",
+      "type": "model",
+      "depends_on": "summary_provider",
+      "description": "Model to use for channel summarization"
     }
   ]
 }

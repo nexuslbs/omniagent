@@ -694,6 +694,43 @@ fn build_plugin_detail(
         }
     }
 
+    // Populate dynamic options for Provider, Tool, Platform field types
+    for field in config_schema.iter_mut() {
+        match field.field_type {
+            crate::plugin::FieldType::Provider => {
+                if let Ok(yaml) = load_all_sections(data_dir) {
+                    if let Some(providers) = yaml.providers {
+                        let names: Vec<String> = providers.keys().cloned().collect();
+                        if !names.is_empty() {
+                            field.allowed_values = Some(names);
+                        }
+                    }
+                }
+            }
+            crate::plugin::FieldType::Tool => {
+                if let Ok(yaml) = load_all_sections(data_dir) {
+                    if let Some(tools) = yaml.tools {
+                        let names: Vec<String> = tools.keys().cloned().collect();
+                        if !names.is_empty() {
+                            field.allowed_values = Some(names);
+                        }
+                    }
+                }
+            }
+            crate::plugin::FieldType::Platform => {
+                if let Ok(yaml) = load_all_sections(data_dir) {
+                    if let Some(platforms) = yaml.platforms {
+                        let names: Vec<String> = platforms.keys().cloned().collect();
+                        if !names.is_empty() {
+                            field.allowed_values = Some(names);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     // Resolve env vars from manifest's env block, then merge config on top
     let manifest_env = &manifest.env;
     let mut resolved = HashMap::new();
