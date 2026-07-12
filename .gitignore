@@ -10,15 +10,10 @@ scripts/__pycache__/
 
 # Plugin build artifacts (Rust MCP tools)
 plugins/*/target/
+plugins/tools/*/mcp-server-*
+
 # Legacy directory (renamed to tools/)
 plugins/mcp
 
 # Remote plugin clones (git-installed plugins live under .remote/)
 .remote/
-
-# Moved to nexuslbs/omni-stack repo
-/plugins/providers/
-/plugins/platforms/
-/backup/
-/scripts/
-.sqlx/

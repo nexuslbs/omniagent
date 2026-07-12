@@ -189,7 +189,38 @@ pub struct McpToolEntry {
 ///
 /// `server_info`: identity reported in initialize response.
 /// `tools`: list of (tool_def, handler) pairs.
-pub async fn run_server(server_info: ServerInfo, tools: Vec<McpToolEntry>) -> Result<()> {
+pub async fn run_server(
+    server_info: ServerInfo,
+    tools: Vec<McpToolEntry>,
+) -> Result<()> {
+    run_server_inner(server_info, tools, None::<fn(Value)>).await
+}
+
+/// Run the MCP stdio event loop with an optional config handler.
+///
+/// When omniagent sends a `configure` message after initialization, the
+/// `on_configure` callback is invoked with the plugin's config values as JSON.
+/// The plugin can use this to receive its configuration directly from the plugin
+/// config system, rather than reading env vars or YAML files.
+pub async fn run_server_with_config<F>(
+    server_info: ServerInfo,
+    tools: Vec<McpToolEntry>,
+    on_configure: Option<F>,
+) -> Result<()>
+where
+    F: Fn(Value) + Send + Sync + 'static,
+{
+    run_server_inner(server_info, tools, on_configure).await
+}
+
+async fn run_server_inner<F>(
+    server_info: ServerInfo,
+    tools: Vec<McpToolEntry>,
+    on_configure: Option<F>,
+) -> Result<()>
+where
+    F: Fn(Value) + Send + Sync + 'static,
+{
     // Initialize tracing — log to stderr
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
@@ -239,6 +270,25 @@ pub async fn run_server(server_info: ServerInfo, tools: Vec<McpToolEntry>) -> Re
             }
             "notifications/initialized" => {
                 tracing::info!("Client initialized notification received");
+            }
+            "configure" => {
+                if let Some(ref cb) = on_configure {
+                    if let Some(params) = request.params {
+                        cb(params);
+                    }
+                }
+                // Acknowledge configure
+                if let Some(id) = req_id {
+                    let response = JsonRpcSuccess {
+                        jsonrpc: "2.0".to_string(),
+                        id,
+                        result: serde_json::json!({"configured": true}),
+                    };
+                    let json = serde_json::to_string(&response)?;
+                    writer.write_all(json.as_bytes()).await?;
+                    writer.write_all(b"\n").await?;
+                    writer.flush().await?;
+                }
             }
             "tools/list" => {
                 if !initialized {
