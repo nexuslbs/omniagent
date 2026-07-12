@@ -2045,17 +2045,18 @@ providers:
     fn test_file_paths() {
         let dir = tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
+        // All plugin types now use unified plugins.yml
         assert_eq!(
             file_path(path, &PluginYamlType::Platform),
-            PathBuf::from(path).join("platforms.yml")
+            PathBuf::from(path).join("plugins.yml")
         );
         assert_eq!(
             file_path(path, &PluginYamlType::Tool),
-            PathBuf::from(path).join("tools.yml")
+            PathBuf::from(path).join("plugins.yml")
         );
         assert_eq!(
             file_path(path, &PluginYamlType::Provider),
-            PathBuf::from(path).join("providers.yml")
+            PathBuf::from(path).join("plugins.yml")
         );
     }
 
