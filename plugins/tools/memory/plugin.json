@@ -2,7 +2,7 @@
   "name": "Memory MCP Server",
   "id": "mcp-server-memory",
   "version": "0.1.0",
-  "description": "Memory management MCP server — manage persistent memory entries with character limits",
+  "description": "Memory management MCP server — manage persistent memory entries, channel-level thread summarization",
   "type": "mcp",
   "entrypoint": {
     "command": "mcp-server-memory",
@@ -10,6 +10,13 @@
     "transport": "stdio"
   },
   "config_schema": [
+    {
+      "key": "DATABASE_URL",
+      "label": "Database URL",
+      "type": "string",
+      "default": "$env:DATABASE_URL",
+      "description": "PostgreSQL connection string for querying threads and saving summaries"
+    },
     {
       "key": "SUMMARIZE_AFTER_DAYS",
       "label": "Summarize After Days",
@@ -30,6 +37,27 @@
       "type": "integer",
       "default": "$env:CHANNEL_SUMMARY_TOKENS",
       "description": "Maximum tokens for channel-level summary generation"
+    },
+    {
+      "key": "SUMMARY_LLM_API_URL",
+      "label": "LLM API URL",
+      "type": "string",
+      "default": "$env:SUMMARY_LLM_API_URL",
+      "description": "OpenAI-compatible LLM API endpoint for summarization"
+    },
+    {
+      "key": "SUMMARY_LLM_API_KEY",
+      "label": "LLM API Key",
+      "type": "string",
+      "default": "$env:SUMMARY_LLM_API_KEY",
+      "description": "API key for the summarization LLM"
+    },
+    {
+      "key": "SUMMARY_LLM_MODEL",
+      "label": "LLM Model",
+      "type": "string",
+      "default": "$env:SUMMARY_LLM_MODEL",
+      "description": "Model name for summarization LLM calls"
     }
   ]
 }
