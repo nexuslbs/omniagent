@@ -110,7 +110,6 @@ pub struct AgentConfig {
     // Infrastructure config (merged from former config::Config)
     pub database_url: String,
     pub database_readonly_url: String,
-    pub qdrant_url: String,
     pub host: String,
     pub port: u16,
 
@@ -251,8 +250,6 @@ impl AgentConfig {
                 std::env::var("DATABASE_URL")
                     .unwrap_or_else(|_| "postgres://localhost:5432/omniagent".to_string())
             }),
-            qdrant_url: std::env::var("QDRANT_URL")
-                .unwrap_or_else(|_| "http://localhost:6333".to_string()),
             host: std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
             port: std::env::var("PORT")
                 .unwrap_or_else(|_| "8080".to_string())

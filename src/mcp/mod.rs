@@ -70,7 +70,6 @@ pub struct AppContext {
     pub pool: PgPool,
     pub readonly_pool: PgPool,
     pub data_dir: String,
-    pub qdrant_url: Option<String>,
     /// Per-platform outbound delivery senders.  Each platform gets its own
     /// mpsc channel so that a slow/failing platform never blocks others.
     pub platform_senders: HashMap<String, OutboundSender>,
@@ -114,14 +113,12 @@ impl AppContext {
         pool: PgPool,
         readonly_pool: PgPool,
         data_dir: &str,
-        qdrant_url: Option<String>,
         platform_senders: HashMap<String, OutboundSender>,
     ) -> Self {
         Self {
             pool,
             readonly_pool,
             data_dir: data_dir.to_string(),
-            qdrant_url,
             platform_senders,
             platform_file_readers: HashMap::new(),
             current_thread_id: None,

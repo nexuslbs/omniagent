@@ -128,7 +128,6 @@ async fn run_server() -> AppResult<()> {
         pool.clone(),
         readonly_pool,
         &data_dir,
-        Some(cfg.qdrant_url.clone()),
         platform_senders,
     );
     let mcp = mcp::default_registry(&mut ctx).await;

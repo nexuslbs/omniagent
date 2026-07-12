@@ -299,8 +299,6 @@ pub struct ThreadContextConfig<'a> {
     pub profile_name: &'a str,
     /// Base data directory (e.g. `ctx.data_dir` in the agent).
     pub data_dir: &'a str,
-    /// Optional Qdrant URL for semantic wiki search.
-    pub qdrant_url: Option<&'a str>,
     /// Character budget for the assembled context (prompt part only).
     pub prompt_budget: usize,
     /// Whether automatic retrieval (text/semantic search) is enabled.
@@ -625,16 +623,9 @@ pub async fn build_thread_context(
             let _start_wiki = Instant::now();
             let wiki_text_results = queries::search_wiki_text(&wiki_dir, &search_query, 5);
 
-            let qdrant_results = if aggressiveness >= 2 {
-                if let Some(qdrant) = config.qdrant_url {
-                    let hash_vec = HashVectorizer;
-                    let wiki_embedding = hash_vec.generate_embedding(&search_query).await;
-                    queries::search_wiki_qdrant(qdrant, &wiki_embedding, 5)
-                        .await
-                        .unwrap_or_default()
-                } else {
-                    vec![]
-                }
+            let qdrant_results: Vec<(String, String, String)> = if aggressiveness >= 2 {
+                // Qdrant semantic search disabled — moved to plugin concern
+                vec![]
             } else {
                 vec![]
             };

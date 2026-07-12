@@ -693,7 +693,6 @@ async fn prompt_preview_handler(
                     .get(profile_name)
                     .cloned()
                     .unwrap_or_else(|| crate::profile::Profile::default(profile_name));
-                let qdrant_url = std::env::var("QDRANT_URL").ok();
 
                 // Look up parent_id for context scoping (preview shows thread-isolated context)
                 #[derive(Debug, sqlx::FromRow)]
@@ -723,7 +722,6 @@ async fn prompt_preview_handler(
                         cause_content: &body.prompt,
                         profile_name,
                         data_dir: &state.data_dir,
-                        qdrant_url: qdrant_url.as_deref(),
                         prompt_budget: prof
                             .prompt_budget
                             .unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
@@ -1014,7 +1012,6 @@ async fn context_preview_handler(
         .unwrap_or_else(|| crate::profile::Profile::default(profile_name));
 
     // Build context — same function the agent uses
-    let qdrant_url = std::env::var("QDRANT_URL").ok();
     // Look up parent_id for context scoping (preview shows thread-isolated context)
     #[derive(Debug, sqlx::FromRow)]
     struct PreviewParentRow {
@@ -1042,7 +1039,6 @@ async fn context_preview_handler(
             cause_content: &cause_content,
             profile_name,
             data_dir: &state.data_dir,
-            qdrant_url: qdrant_url.as_deref(),
             prompt_budget: prof
                 .prompt_budget
                 .unwrap_or(crate::profile::PROMPT_BUDGET_DEFAULT),
