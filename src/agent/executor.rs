@@ -1752,8 +1752,22 @@ Previous plan:\n{}",
         let _ = queries::update_kanban_task_status(&cfg.pool, task_id, kanban_status).await;
     }
 
-    // 11. Trigger cross-thread summary check
-    helpers::check_and_generate_summary(&cfg.pool, &cfg.llm, thread.channel_id).await;
+    // 11. Trigger cross-thread summary check via memory plugin
+    {
+        let mcp_call = McpToolCall {
+            id: "post-thread-summary".to_string(),
+            name: "memory_generate_summary".to_string(),
+            arguments: serde_json::json!({
+                "channel_id": thread.channel_id,
+            }),
+        };
+        let _ = cfg
+            .mcp
+            .read()
+            .await
+            .execute(&mcp_call, cfg.ctx.clone())
+            .await;
+    }
 
     Ok(saved)
 }

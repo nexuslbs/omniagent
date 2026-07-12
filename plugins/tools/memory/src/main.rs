@@ -21,8 +21,11 @@
 use anyhow::{Context, Result};
 use mcp_server_util::*;
 use omniagent::db;
+use omniagent::db::types as queries;
 use serde_json::Value;
+use sqlx::PgPool;
 use std::path::Path;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -500,6 +503,267 @@ async fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
+// Tool: generate_summary
+// ---------------------------------------------------------------------------
+
+/// Call the LLM (OpenAI-compatible) and return the response text.
+async fn call_llm(
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    max_tokens: u32,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(api_url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&serde_json::json!({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.2,
+        }))
+        .send()
+        .await
+        .context("LLM request failed")?;
+    let body: Value = resp.json().await.context("Failed to parse LLM response")?;
+    body["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("LLM response missing content: {}", body))
+}
+
+/// Generate a cross-thread summary for a channel.
+///
+/// Called by the omniagent executor after a thread completes. Queries completed
+/// threads, builds a summarization prompt, calls the LLM, and saves the result
+/// to the database.
+async fn handle_generate_summary(
+    pool: &PgPool,
+    args: &Value,
+) -> Result<(String, bool)> {
+    let window = std::env::var("SUMMARY_WINDOW")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(10);
+    let summary_tokens = std::env::var("CHANNEL_SUMMARY_TOKENS")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(4096);
+    let llm_api_url = std::env::var("SUMMARY_LLM_API_URL").ok();
+    let llm_api_key = std::env::var("SUMMARY_LLM_API_KEY").ok();
+    let llm_model = std::env::var("SUMMARY_LLM_MODEL").ok();
+
+    // LLM config is optional — if not set, summarization is skipped gracefully
+    let (Some(llm_api_url), Some(llm_api_key), Some(llm_model)) = (&llm_api_url, &llm_api_key, &llm_model) else {
+        return Ok(("Summarization LLM not configured (set SUMMARY_LLM_API_URL, SUMMARY_LLM_API_KEY, SUMMARY_LLM_MODEL in memory plugin config)".to_string(), false));
+    };
+
+    if window == 0 {
+        return Ok(("Summaries disabled (window=0)".to_string(), false));
+    }
+
+    let channel_id = args["channel_id"]
+        .as_i64()
+        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'channel_id'"))?;
+    let trigger_count = window * 2;
+
+    // 1. Get latest summary's next_thread_id
+    let since_id = match queries::get_latest_summary(pool, channel_id).await {
+        Ok(Some(summary)) => summary.next_thread_id,
+        _ => 0i64,
+    };
+
+    // 2. Fetch completed threads since last summary
+    let completed_threads = match queries::get_completed_seq0_threads_since(
+        pool,
+        channel_id,
+        since_id,
+        trigger_count,
+        None,
+    )
+    .await
+    {
+        Ok(threads) => threads,
+        Err(e) => {
+            tracing::warn!(
+                "[generate_summary] Failed to fetch completed threads for channel {}: {:?}",
+                channel_id, e
+            );
+            return Ok((
+                format!("Failed to fetch threads: {}", e),
+                true,
+            ));
+        }
+    };
+
+    if (completed_threads.len() as i64) < trigger_count {
+        return Ok((
+            format!(
+                "Not enough threads: {} < {}",
+                completed_threads.len(),
+                trigger_count
+            ),
+            false,
+        ));
+    }
+
+    let pivot_thread_id = completed_threads[(window - 1) as usize].id;
+    let _first_thread_id = completed_threads[0].id;
+    let _last_thread_id = completed_threads[(trigger_count - 1) as usize].id;
+
+    // 3. Fetch all messages for each thread
+    let mut all_thread_content = String::new();
+    for thread_db in &completed_threads {
+        match queries::get_thread_messages(pool, thread_db.id).await {
+            Ok(thread_msgs) => {
+                all_thread_content.push_str(&format!(
+                    "\n=== Thread #{} (cause: {} at {}) ===\n",
+                    thread_db.id,
+                    thread_db.cause,
+                    thread_db.created_at.as_deref().unwrap_or("?"),
+                ));
+                for m in &thread_msgs {
+                    let role_display = match m.role.as_str() {
+                        "cause" => "User",
+                        "agent" => "Assistant",
+                        "system" => "System",
+                        _ => &m.role,
+                    };
+                    if m.msg_type == "tool-result" || m.msg_type == "tool" {
+                        continue;
+                    }
+                    all_thread_content.push_str(&format!(
+                        "[{}]: {}\n",
+                        role_display,
+                        m.content.chars().take(1000).collect::<String>()
+                    ));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[generate_summary] Failed to fetch messages for thread {}: {:?}",
+                    thread_db.id,
+                    e
+                );
+            }
+        }
+    }
+
+    // 4. Fetch the last summary for context
+    let previous_summary_text = match queries::get_latest_summary(pool, channel_id).await {
+        Ok(Some(s)) => s.content,
+        _ => String::new(),
+    };
+
+    // 5. Build summarization prompt
+    let system_summarizer_prompt =
+        "You are a conversation summarizer for an autonomous agent system. \
+         Produce a structured summary in the exact format below. \
+         Be specific — include file paths, config keys, exact numbers, and command names. \
+         Do NOT repeat information covered in the previous summary (if provided). \
+         Every claim must be grounded in the provided conversation content.\n\n\
+         ## Format:\n\
+         ### Topics\n\
+         - topic: <topic_name> | detail: <one sentence with specifics>\n\n\
+         ### Key Decisions\n\
+         - decision: <what was decided> | context: <why> | files: <affected files, if any>\n\n\
+         ### Action Items\n\
+         - status: <done|pending|failed> | task: <what> | details: <specifics>\n\n\
+         ### Entities Referenced\n\
+         - <entity_name> (<type>): <relation to conversation>\n\n\
+         ### Thread Count\n\
+         - total: <number> | first: <id> | last: <id>\n\n\
+         Keep each entry on a single line. Use | as field separator.";
+
+    let summary_prompt = if previous_summary_text.is_empty() {
+        format!(
+            "Summarize the following conversations from a single channel.\n\n{}",
+            all_thread_content
+        )
+    } else {
+        format!(
+            "PREVIOUS SUMMARY (do NOT repeat):\n{}\n\n---\n\n\
+             Now summarize the following new conversations, \
+             connecting to the previous summary if relevant.\n\n{}",
+            previous_summary_text, all_thread_content
+        )
+    };
+
+    // 6. Call LLM for summary
+    let summary_content = match call_llm(
+        &llm_api_url,
+        &llm_api_key,
+        &llm_model,
+        summary_tokens,
+        system_summarizer_prompt,
+        &summary_prompt,
+    )
+    .await
+    {
+        Ok(content) => {
+            tracing::info!(
+                "[generate_summary] Generated summary for channel {} ({} chars)",
+                channel_id,
+                content.len()
+            );
+            content
+        }
+        Err(e) => {
+            tracing::error!(
+                "[generate_summary] LLM call failed for channel {}: {:?}",
+                channel_id,
+                e
+            );
+            return Ok((format!("LLM call failed: {}", e), true));
+        }
+    };
+
+    // 7. Save summary to database
+    match sqlx::query(
+        "INSERT INTO summaries (channel_id, thread_id_start, thread_id_end, next_thread_id, content) \
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(channel_id)
+    .bind(completed_threads[0].id)
+    .bind(completed_threads[(trigger_count - 1) as usize].id)
+    .bind(pivot_thread_id)
+    .bind(&summary_content)
+    .execute(pool)
+    .await
+    {
+        Ok(_) => {
+            tracing::info!(
+                "[generate_summary] Saved summary for channel {} (pivot={})",
+                channel_id,
+                pivot_thread_id
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                "[generate_summary] Failed to save summary for channel {}: {:?}",
+                channel_id,
+                e
+            );
+            return Ok((format!("Failed to save summary: {}", e), true));
+        }
+    }
+
+    Ok((
+        format!(
+            "Summary generated for channel {}: {} threads (pivot={})",
+            channel_id, trigger_count, pivot_thread_id
+        ),
+        false,
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -508,9 +772,10 @@ async fn main() -> Result<()> {
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
     let data_dir = std::env::var("OMNI_DIR").context("OMNI_DIR must be set")?;
 
-    let _pool = db::connect(&database_url)
+    let pool = db::connect(&database_url)
         .await
         .context("Failed to connect to database")?;
+    let pool = Arc::new(pool);
 
     // Wrap each handler to capture clones of data_dir
     let dd_promote = data_dir.clone();
@@ -543,6 +808,13 @@ async fn main() -> Result<()> {
             let value = dd_manage.clone();
             async move { handle_manage(&value, &args).await }
         })
+    });
+
+    // generate_summary handler — captures pool
+    let p_summary = pool.clone();
+    let generate_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let pool = p_summary.clone();
+        Box::pin(async move { handle_generate_summary(&pool, &args).await })
     });
 
     let tools = vec![
@@ -678,6 +950,28 @@ async fn main() -> Result<()> {
                 }),
             },
             handler: manage_handler,
+        },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "generate_summary".to_string(),
+                description:
+                    "Generate a cross-thread summary for a channel. \
+                     Queries completed threads since the last summary, fetches messages, \
+                     calls the LLM for structured summarization, and persists the result. \
+                     Called automatically by the executor after each thread completes."
+                        .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "channel_id": {
+                            "type": "integer",
+                            "description": "Channel ID to generate summary for"
+                        }
+                    },
+                    "required": ["channel_id"]
+                }),
+            },
+            handler: generate_handler,
         },
     ];
 

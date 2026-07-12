@@ -151,7 +151,6 @@ impl AgentConfig {
     /// - `LLM_PROVIDER` — Provider name (default: "openai")
     /// - `MAX_TOKENS` — Max tokens per response (default: 4096)
     /// - `TEMPERATURE` — Sampling temperature (default: 0.7)
-    /// - `SUMMARIZE_AFTER_DAYS` — Days before auto-summarization (default: 7)
     /// - `MAX_ITERATIONS` — Max agent turns per thread before skipping (default: 60)
     ///
     /// The API key comes from the provider's plugin config (providers.yml with $env:
