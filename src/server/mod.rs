@@ -80,8 +80,6 @@ pub(crate) struct AppState {
     pool: PgPool,
     cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
     data_dir: String,
-    /// Workspace directory for bundled plugin discovery
-    workspace_dir: String,
     /// Default profile name (from DEFAULT_PROFILE env var)
     default_profile: String,
     /// Path to the .env file for settings API
@@ -104,7 +102,6 @@ pub struct ServerConfig {
     pub port: u16,
     pub cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
     pub data_dir: String,
-    pub workspace_dir: String,
     pub default_profile: String,
     pub tool_registry: Arc<tokio::sync::RwLock<McpRegistry>>,
     pub app_context: AppContext,
@@ -118,7 +115,6 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         pool: config.pool,
         cancel_tokens: config.cancel_tokens,
         data_dir: config.data_dir.clone(),
-        workspace_dir: config.workspace_dir.clone(),
         default_profile: config.default_profile.clone(),
         env_path: format!("{}/.env", config.data_dir),
         tool_registry: config.tool_registry,

@@ -324,17 +324,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 default: Some("".into()),
             },
         ),
-        (
-            "WORKSPACE_DIR".into(),
-            get_env_or_default("WORKSPACE_DIR", "/opt/workspace"),
-            SettingMeta {
-                field_type: "text".into(),
-                description: "Workspace directory for projects".into(),
-                options: None,
-                readonly: true,
-                default: Some("/opt/workspace".into()),
-            },
-        ),
         // ── Context Management ──
         (
             "PROMPT_CHAR_BUDGET_SOFT".into(),

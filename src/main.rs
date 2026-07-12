@@ -76,7 +76,7 @@ async fn run_server() -> AppResult<()> {
     }
 
     // Determine workspace directory (default: /opt/workspace)
-    let workspace_dir = env_or_default("WORKSPACE_DIR", "/opt/workspace");
+    let workspace_dir = data_dir.clone();
     tracing::info!("Workspace directory: {}", workspace_dir);
 
     tracing::info!(
@@ -128,7 +128,6 @@ async fn run_server() -> AppResult<()> {
         pool.clone(),
         readonly_pool,
         &data_dir,
-        &workspace_dir,
         Some(cfg.qdrant_url.clone()),
         platform_senders,
     );
@@ -195,7 +194,6 @@ async fn run_server() -> AppResult<()> {
             port: server_port,
             cancel_tokens: cancel_tokens_server,
             data_dir: data_dir_server,
-            workspace_dir,
             default_profile: default_profile.clone(),
             tool_registry: mcp_for_server,
             app_context: ctx_for_server,

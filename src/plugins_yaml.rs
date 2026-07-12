@@ -1052,10 +1052,12 @@ fn pick_primary_source(group: &PluginSourceGroup) -> Option<usize> {
 /// List all plugins, combining disk discovery with YAML overrides.
 /// Groups multiple sources (bundled, built-in, remote) by name.
 /// YAML determines which source is primary; others show as "duplicated".
+
+/// List all plugins, combining disk discovery with YAML overrides.
+/// Groups multiple sources (bundled, built-in, remote) by name.
+/// YAML determines which source is primary; others show as "duplicated".
 pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
-    let workspace_dir =
-        std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
-    let discovered = crate::plugin::installer::discover_plugins(data_dir, &workspace_dir);
+    let discovered = crate::plugin::installer::discover_plugins(data_dir);
 
     // Pre-load all YAML entries for efficient lookup
     let platform_entries = load_raw(data_dir, &PluginYamlType::Platform)?;
@@ -1299,9 +1301,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
 /// Returns the PRIMARY source for that plugin name based on YAML configuration,
 /// unlike list_plugins which returns all sources with is_duplicated flags.
 pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>> {
-    let workspace_dir =
-        std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
-    let discovered = crate::plugin::installer::discover_plugins(data_dir, &workspace_dir);
+    let discovered = crate::plugin::installer::discover_plugins(data_dir);
 
     // Pre-load YAML entries
     let platform_entries = load_raw(data_dir, &PluginYamlType::Platform)?;
@@ -1506,9 +1506,7 @@ fn build_not_found_from_yaml(
 pub fn get_enabled_providers(data_dir: &str) -> AppResult<Vec<(String, String)>> {
     let entries = load_raw(data_dir, &PluginYamlType::Provider)?;
 
-    let workspace_dir =
-        std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
-    let discovered = crate::plugin::installer::discover_plugins(data_dir, &workspace_dir);
+    let discovered = crate::plugin::installer::discover_plugins(data_dir);
 
     let mut providers: Vec<(String, String)> = Vec::new();
 
@@ -1552,9 +1550,7 @@ pub fn provider_exists_and_enabled(data_dir: &str, name: &str) -> AppResult<bool
         return Ok(entry.enabled);
     }
     // Check if plugin exists on disk at all (even if no YAML entry yet)
-    let workspace_dir =
-        std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
-    let discovered = crate::plugin::installer::discover_plugins(data_dir, &workspace_dir);
+    let discovered = crate::plugin::installer::discover_plugins(data_dir);
     Ok(discovered
         .iter()
         .any(|(m, _, _)| m.name == name && m.plugin_type == PluginType::Provider))
@@ -1562,9 +1558,7 @@ pub fn provider_exists_and_enabled(data_dir: &str, name: &str) -> AppResult<bool
 
 /// Get a provider's plugin type from disk discovery.
 pub fn get_disk_plugin_type(data_dir: &str, name: &str) -> AppResult<Option<String>> {
-    let workspace_dir =
-        std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
-    let discovered = crate::plugin::installer::discover_plugins(data_dir, &workspace_dir);
+    let discovered = crate::plugin::installer::discover_plugins(data_dir);
     for (manifest, source, base_path) in &discovered {
         let key = extract_plugin_key(manifest, source, base_path);
         if key == name || manifest.name == name {
@@ -1659,9 +1653,7 @@ pub fn get_disk_plugin_type(data_dir: &str, name: &str) -> AppResult<Option<Stri
 
 /// Get a plugin's manifest (PluginManifest) from disk discovery.
 pub fn get_disk_manifest(data_dir: &str, name: &str) -> AppResult<Option<PluginManifest>> {
-    let workspace_dir =
-        std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
-    let discovered = crate::plugin::installer::discover_plugins(data_dir, &workspace_dir);
+    let discovered = crate::plugin::installer::discover_plugins(data_dir);
     Ok(discovered
         .into_iter()
         .find(|(m, _, _)| m.name == name)

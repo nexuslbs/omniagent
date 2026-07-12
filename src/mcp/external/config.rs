@@ -89,7 +89,7 @@ pub struct McpServersConfig {
 ///
 /// Additionally scans `plugins/mcp/` subdirectories for `mcp-config.json` files.
 /// Returns the merged list of all discovered servers.
-pub fn load_servers_config(data_dir: &str, workspace_dir: &str) -> Vec<McpServerConfig> {
+pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
     let mut all_servers = Vec::new();
 
     // Try config file first
@@ -123,7 +123,7 @@ pub fn load_servers_config(data_dir: &str, workspace_dir: &str) -> Vec<McpServer
     }
 
     // Also scan plugins/tools/ directories for mcp-config.json files
-    let plugin_servers = discover_plugin_servers(data_dir, workspace_dir);
+    let plugin_servers = discover_plugin_servers(data_dir);
     if !plugin_servers.is_empty() {
         tracing::info!(
             "Loaded {} MCP server(s) from plugins/tools/ directories",
@@ -144,7 +144,7 @@ pub fn load_servers_config(data_dir: &str, workspace_dir: &str) -> Vec<McpServer
 /// - `source: built-in` → `/app/plugins/tools/{name}/` (or `/app/plugins/mcp/{name}/`)
 /// - `source: bundled`  → `{data_dir}/plugins/tools/{name}/` or `{workspace_dir}/plugins/tools/{name}/`
 /// - `source: remote`   → `{data_dir}/plugins/tools/.remote/{repo}/{path}/` (resolved from `remote.yml`)
-pub fn discover_plugin_servers(data_dir: &str, workspace_dir: &str) -> Vec<McpServerConfig> {
+pub fn discover_plugin_servers(data_dir: &str) -> Vec<McpServerConfig> {
     let mut servers = Vec::new();
 
     // Read tools from plugins.yml — only scan enabled plugins at their correct source location
@@ -153,7 +153,7 @@ pub fn discover_plugin_servers(data_dir: &str, workspace_dir: &str) -> Vec<McpSe
             Ok(tools) => tools,
             Err(_) => {
                 // Fallback: if plugins.yml can't be read, scan all directories as before
-                return discover_plugin_servers_fallback(data_dir, workspace_dir);
+                return discover_plugin_servers_fallback(data_dir);
             }
         };
 
@@ -176,15 +176,10 @@ pub fn discover_plugin_servers(data_dir: &str, workspace_dir: &str) -> Vec<McpSe
                 }
             }
             "bundled" => {
-                // Bundled plugins: check data_dir first, then workspace_dir
+                // Bundled plugins: check data_dir only
                 let bundled_path = format!("{}/plugins/tools/{}", data_dir, name);
                 if let Some(found) = scan_plugin_dir(&bundled_path, data_dir) {
                     servers.extend(found);
-                } else {
-                    let ws_path = format!("{}/plugins/tools/{}", workspace_dir, name);
-                    if let Some(found) = scan_plugin_dir(&ws_path, data_dir) {
-                        servers.extend(found);
-                    }
                 }
             }
             "remote" => {
@@ -210,7 +205,7 @@ pub fn discover_plugin_servers(data_dir: &str, workspace_dir: &str) -> Vec<McpSe
 }
 
 /// Fallback: scan all directories blindly (used when plugins.yml can't be read).
-fn discover_plugin_servers_fallback(data_dir: &str, workspace_dir: &str) -> Vec<McpServerConfig> {
+fn discover_plugin_servers_fallback(data_dir: &str) -> Vec<McpServerConfig> {
     let mut servers = Vec::new();
 
     let plugins_dir = format!("{}/plugins/tools", data_dir);
@@ -219,25 +214,11 @@ fn discover_plugin_servers_fallback(data_dir: &str, workspace_dir: &str) -> Vec<
         servers.extend(scan_plugin_servers(&plugins_dir, data_dir));
     }
 
-    let ws_plugins_dir = format!("{}/plugins/tools", workspace_dir);
-    let ws_plugins_path = std::path::Path::new(&ws_plugins_dir);
-    if ws_plugins_path.exists() && ws_plugins_path.is_dir() && ws_plugins_dir != plugins_dir {
-        let existing_names: std::collections::HashSet<String> =
-            servers.iter().map(|s| s.name.clone()).collect();
-        let ws_servers = scan_plugin_servers(&ws_plugins_dir, data_dir);
-        for srv in ws_servers {
-            if !existing_names.contains(&srv.name) {
-                servers.push(srv);
-            }
-        }
-    }
-
     let app_plugins_dir = "/app/plugins/tools";
     let app_plugins_path = std::path::Path::new(app_plugins_dir);
     if app_plugins_path.exists()
         && app_plugins_path.is_dir()
         && app_plugins_dir != plugins_dir
-        && app_plugins_dir != ws_plugins_dir
     {
         let existing_names: std::collections::HashSet<String> =
             servers.iter().map(|s| s.name.clone()).collect();
@@ -254,7 +235,7 @@ fn discover_plugin_servers_fallback(data_dir: &str, workspace_dir: &str) -> Vec<
             let cwd_plugins = cwd.join("plugins").join("tools");
             if cwd_plugins.exists() && cwd_plugins.is_dir() {
                 let cwd_str = cwd_plugins.to_string_lossy().to_string();
-                if cwd_str != plugins_dir && cwd_str != ws_plugins_dir {
+                if cwd_str != plugins_dir {
                     servers.extend(scan_plugin_servers(&cwd_str, data_dir));
                 }
             }

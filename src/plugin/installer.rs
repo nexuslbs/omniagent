@@ -636,11 +636,8 @@ pub(crate) fn extract_plugin_key_from_path(base_path: &str) -> String {
 /// - `/app/plugins/<type>/<name>/plugin.json or Cargo.toml` — source: "built-in"
 pub fn discover_plugins(
     data_dir: &str,
-    workspace_dir: &str,
 ) -> Vec<(PluginManifest, String, String)> {
     let mut results = Vec::new();
-    // Track seen keys per source type so we dedup bundled scans (A and B scan same data)
-    let mut bundled_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // A. Scan data_dir plugins: <data_dir>/plugins/<type>/<name>/plugin.json
     // This covers providers, platforms, and MCP tools that live in the plugins/ directory.
@@ -691,7 +688,6 @@ pub fn discover_plugins(
                             }
                         };
                         let key = extract_plugin_key_from_path(&path_str);
-                        bundled_seen.insert(key);
                         results.push((manifest, "bundled".to_string(), path_str));
                     }
                 }
@@ -699,66 +695,8 @@ pub fn discover_plugins(
         }
     }
 
-    // B. Scan workspace bundled plugins: <workspace_dir>/plugins/<type>/<name>/plugin.json
-    // Deduped against data_dir plugins (section A) since they may point to the same directory.
-    let bundled_base = format!("{}/plugins", workspace_dir);
-    if let Ok(bundled_entries) = std::fs::read_dir(&bundled_base) {
-        for entry in bundled_entries.flatten() {
-            let type_path = entry.path();
-            if !type_path.is_dir() {
-                continue;
-            }
-            // Skip .remote/ directories at the type level
-            if type_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|s| s.starts_with('.'))
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            // type_path is like plugins/mcp or plugins/platform
-            if let Ok(plugin_entries) = std::fs::read_dir(&type_path) {
-                for plugin_entry in plugin_entries.flatten() {
-                    let plugin_path = plugin_entry.path();
-                    if !plugin_path.is_dir() {
-                        continue;
-                    }
-                    // Skip .remote/ hidden directories
-                    if plugin_path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|s| s.starts_with('.'))
-                        .unwrap_or(false)
-                    {
-                        continue;
-                    }
-                    let manifest_path = plugin_path.join("plugin.json");
-                    if manifest_path.exists() {
-                        let path_str = manifest_path.to_string_lossy().to_string();
-                        let manifest = match load_manifest(&path_str) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to load bundled plugin manifest at {}: {:?}",
-                                    path_str,
-                                    e
-                                );
-                                continue;
-                            }
-                        };
-                        let key = extract_plugin_key_from_path(&path_str);
-                        // Skip if already discovered from data_dir (same directory)
-                        if bundled_seen.contains(&key) {
-                            continue;
-                        }
-                        bundled_seen.insert(key);
-                        results.push((manifest, "bundled".to_string(), path_str));
-                    }
-                }
-            }
-        }
-    }
+
+
 
     // C. Scan remote plugins using remote.yml for exact path resolution.
     // C1: remote.yml-driven using exact manifest paths
@@ -947,7 +885,7 @@ pub fn discover_plugins(
     // These get synthetic manifests but won't have config_schema unless
     // a plugin.json is also present.
     let mcp_plugin_servers =
-        crate::mcp::external::config::discover_plugin_servers(data_dir, workspace_dir);
+        crate::mcp::external::config::discover_plugin_servers(data_dir);
     for srv in &mcp_plugin_servers {
         let already_exists =
             results
@@ -1013,7 +951,6 @@ mod tests {
         // No plugin dirs exist yet
         let plugins = discover_plugins(
             data_dir.path().to_str().unwrap(),
-            workspace_dir.path().to_str().unwrap(),
         );
         // Builtin plugins may be found from /app/plugins/ but none from temp dirs
         // mcp_config entries also come from the CWD's plugins/ directory
@@ -1053,7 +990,6 @@ mod tests {
 
         let plugins = discover_plugins(
             data_dir.path().to_str().unwrap(),
-            workspace_dir.path().to_str().unwrap(),
         );
         assert!(!plugins.is_empty());
         let found = plugins
@@ -1088,7 +1024,6 @@ mod tests {
 
         let plugins = discover_plugins(
             data_dir.path().to_str().unwrap(),
-            workspace_dir.path().to_str().unwrap(),
         );
         assert!(!plugins.is_empty());
         let found = plugins

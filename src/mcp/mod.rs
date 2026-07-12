@@ -70,9 +70,6 @@ pub struct AppContext {
     pub pool: PgPool,
     pub readonly_pool: PgPool,
     pub data_dir: String,
-    /// Workspace directory for path validation (used by external MCP servers).
-    #[allow(dead_code)]
-    pub workspace_dir: String,
     pub qdrant_url: Option<String>,
     /// Per-platform outbound delivery senders.  Each platform gets its own
     /// mpsc channel so that a slow/failing platform never blocks others.
@@ -117,7 +114,6 @@ impl AppContext {
         pool: PgPool,
         readonly_pool: PgPool,
         data_dir: &str,
-        workspace_dir: &str,
         qdrant_url: Option<String>,
         platform_senders: HashMap<String, OutboundSender>,
     ) -> Self {
@@ -125,7 +121,6 @@ impl AppContext {
             pool,
             readonly_pool,
             data_dir: data_dir.to_string(),
-            workspace_dir: workspace_dir.to_string(),
             qdrant_url,
             platform_senders,
             platform_file_readers: HashMap::new(),
@@ -714,7 +709,7 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
 
     // External MCP servers (load from config + plugins/mcp/, best-effort)
     let external_tools =
-        external::client::initialize_external_tools(&ctx.data_dir, &ctx.workspace_dir).await;
+        external::client::initialize_external_tools(&ctx.data_dir).await;
     for tool in external_tools {
         registry.register(tool);
     }

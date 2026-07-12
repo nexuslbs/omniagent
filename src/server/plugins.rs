@@ -966,7 +966,6 @@ pub(crate) async fn enable_plugin_handler(
             if yaml_type == plugins_yaml::PluginYamlType::Tool {
                 match crate::mcp::external::client::initialize_single_server_tools(
                     &state.data_dir,
-                    &state.workspace_dir,
                     &name,
                 )
                 .await
@@ -1239,7 +1238,7 @@ pub(crate) async fn install_plugin_handler(
     // 1. Resolve plugin source via shared preamble (detect type, resolve dir, verify source)
     let resolved = match resolve_plugin_for_compile(
         data_dir,
-        &state.workspace_dir,
+        &state.data_dir,
         &name,
         "Install",
         Some(source),
@@ -1367,7 +1366,7 @@ pub(crate) async fn reinstall_plugin_handler(
     // 1. Resolve plugin source via shared preamble (detect type, resolve dir, verify source)
     let resolved = match resolve_plugin_for_compile(
         data_dir,
-        &state.workspace_dir,
+        &state.data_dir,
         &name,
         "Reinstall",
         Some(source),
@@ -2178,7 +2177,7 @@ pub(crate) async fn delete_plugin_handler(
             if let Some((yaml_type, _category)) = detect_plugin_category_cross_type(data_dir, &name)
             {
                 let type_dirs = [yaml_type.type_dir_name(), "tools", "platforms", "providers"];
-                let search_dirs = [data_dir, &state.workspace_dir];
+                let search_dirs = [data_dir, &state.data_dir];
                 for type_dir in &type_dirs {
                     for base in &search_dirs {
                         let plugin_dir = format!("{}/plugins/{}/{}", base, type_dir, name);
@@ -2239,7 +2238,7 @@ pub(crate) async fn delete_plugin_handler(
     // Source is required for all remove operations.
     match &explicit_source {
         Some(source) => {
-            return handle_remove_by_source(data_dir, &state.workspace_dir, &name, source, &state)
+            return handle_remove_by_source(data_dir, &state.data_dir, &name, source, &state)
                 .await
                 .into_response();
         }
@@ -2283,7 +2282,7 @@ pub(crate) async fn delete_plugin_handler(
     let on_disk_bundled = {
         let dirs = ["tools", "platforms", "providers"];
         dirs.iter().any(|d| {
-            let p = format!("{}/plugins/{}/{}", state.workspace_dir, d, name);
+            let p = format!("{}/plugins/{}/{}", state.data_dir, d, name);
             std::path::Path::new(&p).join("plugin.json").exists()
         })
     };
@@ -2427,7 +2426,7 @@ pub(crate) async fn delete_plugin_handler(
                     (plugins_yaml::PluginYamlType::Provider, "providers"),
                 ];
                 let found = dirs.iter().find(|(_, d)| {
-                    let p = format!("{}/plugins/{}/{}", state.workspace_dir, d, name);
+                    let p = format!("{}/plugins/{}/{}", state.data_dir, d, name);
                     std::path::Path::new(&p).join("plugin.json").exists()
                 });
                 match found {
@@ -2440,7 +2439,7 @@ pub(crate) async fn delete_plugin_handler(
         let type_dir = actual_type.type_dir_name();
 
         // Remove the plugin directory from workspace
-        let plugin_dir = format!("{}/plugins/{}/{}", state.workspace_dir, type_dir, name);
+        let plugin_dir = format!("{}/plugins/{}/{}", state.data_dir, type_dir, name);
         let plugin_path = std::path::Path::new(&plugin_dir);
         if plugin_path.exists() && plugin_path.is_dir() {
             match std::fs::remove_dir_all(plugin_path) {
@@ -2788,7 +2787,7 @@ pub(crate) async fn install_git_handler(
         &body.url,
         &target_name,
         body.git_ref.as_deref(),
-        &state.workspace_dir,
+        &state.data_dir,
         &state.data_dir,
         body.path.as_deref(),
     ) {
@@ -3039,7 +3038,7 @@ pub(crate) async fn download_plugin_handler(
     body: Option<Json<PluginSourceRequest>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
-    let workspace_dir = &state.workspace_dir;
+    let workspace_dir = &state.data_dir;
 
     // Validate source — download only supports 'remote'
     let source = match &body {
@@ -3312,7 +3311,6 @@ async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Vec<String>),
                 if enabled && !running {
                     match crate::mcp::external::client::initialize_single_server_tools(
                         &state.data_dir,
-                        &state.workspace_dir,
                         name,
                     )
                     .await
@@ -3496,7 +3494,6 @@ async fn reload_tool_plugin(state: &Arc<AppState>, name: &str) {
 
     match crate::mcp::external::client::initialize_single_server_tools(
         &state.data_dir,
-        &state.workspace_dir,
         name,
     )
     .await
