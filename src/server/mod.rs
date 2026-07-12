@@ -13,6 +13,7 @@
 pub(crate) mod actions;
 pub(crate) mod channels;
 pub(crate) mod kanban;
+pub(crate) mod llm_proxy;
 pub(crate) mod memory;
 pub(crate) mod messages;
 pub(crate) mod overview;
@@ -210,6 +211,8 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         )
         // ── Env reload (hot-reload .env without restart) ──
         .route("/api/reload", post(plugins::reload_env_handler))
+        // ── LLM Proxy (allows MCP plugins to use provider infrastructure) ──
+        .route("/api/llm/chat", post(llm_proxy::llm_chat_handler))
         // ── Settings routes ──
         .route("/settings", get(settings::get_settings_handler))
         .route("/settings", put(settings::update_settings_handler))
