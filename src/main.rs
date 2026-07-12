@@ -248,19 +248,6 @@ async fn run_server() -> AppResult<()> {
         }
     });
 
-    // Spawn vectorization workers if enabled
-    let pool_vectorizer = pool.clone();
-    let data_dir_for_vectorizer = data_dir.clone();
-    let shared_config_for_vectorizer = shared_config.clone();
-    let vectorizer_handle = tokio::spawn(async move {
-        vectorizer::spawn_vectorizers(
-            pool_vectorizer,
-            shared_config_for_vectorizer,
-            &data_dir_for_vectorizer,
-        )
-        .await;
-    });
-
     // Spawn cron scheduler
     let cron_handle = scheduler::spawn(
         pool.clone(),
@@ -279,9 +266,6 @@ async fn run_server() -> AppResult<()> {
         }
         _ = cleanup_handle => {
             tracing::info!("Cleanup finished");
-        }
-        _ = vectorizer_handle => {
-            tracing::info!("Vectorizer finished");
         }
         _ = cron_handle => {
             tracing::info!("Cron scheduler finished");
