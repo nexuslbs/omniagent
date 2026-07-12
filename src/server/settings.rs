@@ -335,6 +335,18 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 default: Some("/opt/workspace".into()),
             },
         ),
+        // ── Tool Execution ──
+        (
+            "WATCHDOG_DEFAULT".into(),
+            get_env_or_default("WATCHDOG_DEFAULT", ""),
+            SettingMeta {
+                field_type: "textarea".into(),
+                description: "JSON config for the global tool watchdog (applied to tools without per-tool config). Format: { \"thresholds\": [{ \"at_percent\": 0.5, \"action\": { \"Notify\": { \"message\": \"...\" } } }, { \"at_percent\": 0.8, \"action\": \"Cancel\" }] }".into(),
+                options: None,
+                readonly: false,
+                default: Some("".into()),
+            },
+        ),
         // ── Prompts ──
         (
             "PROMPT_LOG_LEVEL".into(),
@@ -394,7 +406,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "THREAD_SUMMARY_TOKENS"
             | "MEMORY_MAX_CHARS"
             | "SOUL_MAX_CHARS" => "memory",
-            "LLM_PROVIDER" | "PROMPT_LOG_LEVEL" | "MAX_INLINE_FILE_KB" | "MAX_UNFINISHED_SUBTASK_RETRIES" | "PROMPT_GENERATE_TOOL" | "PROMPT_COMPACT_MESSAGES_TOOL" => "general",
+            "LLM_PROVIDER" | "PROMPT_LOG_LEVEL" | "MAX_INLINE_FILE_KB" | "MAX_UNFINISHED_SUBTASK_RETRIES" | "PROMPT_GENERATE_TOOL" | "PROMPT_COMPACT_MESSAGES_TOOL" | "WATCHDOG_DEFAULT" => "general",
             "MAX_POOL_CONNECTIONS" => "general",
             _ => "system",
         };
@@ -514,6 +526,7 @@ pub async fn update_settings_handler(
         "LLM_PROVIDER",
         "MAX_POOL_CONNECTIONS",
         "MAX_INLINE_FILE_KB",
+        "WATCHDOG_DEFAULT",
     ]
     .into_iter()
     .collect();
