@@ -1092,8 +1092,8 @@ pub fn create_client(config: McpServerConfig) -> Box<dyn McpServerClient> {
 
 /// Initialize all external MCP servers and register their tools.
 /// Returns a list of McpTool instances merged from all servers.
-pub async fn initialize_external_tools(data_dir: &str, workspace_dir: &str) -> Vec<McpTool> {
-    let configs = crate::mcp::external::config::load_servers_config(data_dir, workspace_dir);
+pub async fn initialize_external_tools(data_dir: &str) -> Vec<McpTool> {
+    let configs = crate::mcp::external::config::load_servers_config(data_dir);
     let mut all_tools = Vec::new();
     // Build a name→config map for lazy pool creation
     let config_map: std::collections::HashMap<String, McpServerConfig> = configs
@@ -1150,11 +1150,10 @@ pub async fn initialize_external_tools(data_dir: &str, workspace_dir: &str) -> V
 /// Returns an error if the server config is not found or initialization fails.
 pub async fn initialize_single_server_tools(
     data_dir: &str,
-    workspace_dir: &str,
     server_name: &str,
 ) -> Result<Vec<McpTool>, String> {
     // Load all configs to find this server
-    let configs = crate::mcp::external::config::load_servers_config(data_dir, workspace_dir);
+    let configs = crate::mcp::external::config::load_servers_config(data_dir);
     let cfg = configs
         .into_iter()
         .find(|c| c.name == server_name)
