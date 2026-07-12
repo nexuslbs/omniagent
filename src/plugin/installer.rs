@@ -806,6 +806,50 @@ pub fn discover_plugins(
     process_remote_entries!("platforms", remote_plugins.platforms);
     process_remote_entries!("providers", remote_plugins.providers);
 
+    // C2. Fallback: scan .remote/ directories for orphan plugins not listed in remote.yml.
+    // A plugin.json under .remote/<name>/ is treated as remote source even without a
+    // remote.yml entry (e.g. during manual setup or testing).
+    for type_name in &["mcp", "platforms", "providers"] {
+        let remote_dir = format!("{}/plugins/{}/.remote", data_dir, type_name);
+        if let Ok(entries) = std::fs::read_dir(&remote_dir) {
+            for entry in entries.flatten() {
+                let plugin_path = entry.path();
+                if !plugin_path.is_dir() {
+                    continue;
+                }
+                let manifest_path = plugin_path.join("plugin.json");
+                if !manifest_path.exists() {
+                    continue;
+                }
+                let name = plugin_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                // Skip if already discovered via remote.yml (C1)
+                if remote_seen.contains(&name) {
+                    continue;
+                }
+                match load_manifest(&manifest_path.to_string_lossy()) {
+                    Ok(manifest) => {
+                        results.push((
+                            manifest,
+                            "remote".to_string(),
+                            manifest_path.to_string_lossy().to_string(),
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to load orphan remote plugin manifest at {}: {:?}",
+                            manifest_path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // D. Scan builtin plugins: /app/plugins/<type>/<name>/
     // These are workspace member crates that have Cargo.toml (and optionally mcp-config.json
     // or plugin.json). All builtin sources are added; callers handle dedup.
