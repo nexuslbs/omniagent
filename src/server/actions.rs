@@ -133,7 +133,7 @@ fn entry_to_response(id: &str, entry: &ActionEntry) -> ActionResponse {
 
 // ── Handlers ──
 
-/// GET /actions — list all actions.
+/// GET /actions: list all actions.
 pub(crate) async fn list_actions_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<ActionResponse>> {
@@ -148,7 +148,7 @@ pub(crate) async fn list_actions_handler(
     Json(list)
 }
 
-/// POST /actions — create a new action.
+/// POST /actions: create a new action.
 pub(crate) async fn create_action_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateActionRequest>,
@@ -206,7 +206,7 @@ pub(crate) async fn create_action_handler(
     }
 }
 
-/// PUT /actions/{id} — update an action.
+/// PUT /actions/{id}: update an action.
 pub(crate) async fn update_action_handler(
     State(state): State<Arc<AppState>>,
     Path(action_id): Path<String>,
@@ -267,7 +267,7 @@ pub(crate) async fn update_action_handler(
     }
 }
 
-/// DELETE /actions/{id} — delete an action.
+/// DELETE /actions/{id}: delete an action.
 pub(crate) async fn delete_action_handler(
     State(state): State<Arc<AppState>>,
     Path(action_id): Path<String>,
@@ -295,7 +295,7 @@ pub(crate) async fn delete_action_handler(
     }
 }
 
-/// POST /actions/{id}/run — execute a saved action via the MCP registry.
+/// POST /actions/{id}/run: execute a saved action via the MCP registry.
 pub(crate) async fn run_action_handler(
     State(state): State<Arc<AppState>>,
     Path(action_id): Path<String>,

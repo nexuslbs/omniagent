@@ -1,10 +1,10 @@
-# OmniAgent Rust Backend — Code Quality Analysis
+# OmniAgent Rust Backend: Code Quality Analysis
 
 Found **50+ issues** across 7 categories. All are internal refactoring opportunities (no external API/behavior changes needed).
 
 ---
 
-## 1. DEAD CODE — `#[expect(dead_code)]` / `#[allow(dead_code)]` (~47 instances)
+## 1. DEAD CODE: `#[expect(dead_code)]` / `#[allow(dead_code)]` (~47 instances)
 
 **Entire structs/functions that are never used:**
 
@@ -22,8 +22,8 @@ Found **50+ issues** across 7 categories. All are internal refactoring opportuni
 | `src/db/types.rs` | `SummaryDb.channel_id`, `SummaryDb.created_at` fields | 230, 234 |
 | `src/db/types.rs` | `SubscriptionDb.created_at` field | 248-249 |
 | `src/db/types.rs` | `set_thread_pending()` function | 488-498 |
-| `src/models/profile.rs` | `ProfileRow` struct — **entire file is dead** | 7-34 |
-| `src/models/profile.rs` | `ProfileNew` struct — **entire file is dead** | 24-34 |
+| `src/models/profile.rs` | `ProfileRow` struct: **entire file is dead** | 7-34 |
+| `src/models/profile.rs` | `ProfileNew` struct: **entire file is dead** | 24-34 |
 | `src/models/mod.rs` | `#[expect(unused_imports)]` on `ProfileNew`, `ProfileRow` exports | 13-16 |
 | `src/models/thread.rs` | Some field (line 26) | 26 |
 | `src/models/channel.rs` | Some field (line 50) | 50 |
@@ -36,22 +36,22 @@ Found **50+ issues** across 7 categories. All are internal refactoring opportuni
 | `src/mcp/external/client.rs` | 6+ dead code instances | 33, 89, 101, 124, 251, 254, 497, 500 |
 | `src/mcp/external/protocol.rs` | 1 instance | 87 |
 
-**Refactoring suggestion**: Remove or consolidate. The `models/profile.rs` file is entirely unused — it's a DB-backed profile model while the actual profile system uses filesystem-backed `Profile` in `profile/mod.rs`. Similarly, `config.rs:socket_addr()` is never called.
+**Refactoring suggestion**: Remove or consolidate. The `models/profile.rs` file is entirely unused: it's a DB-backed profile model while the actual profile system uses filesystem-backed `Profile` in `profile/mod.rs`. Similarly, `config.rs:socket_addr()` is never called.
 
 ---
 
 ## 2. DUPLICATED CODE
 
-### 2a. Two number-formatting functions — same logic
+### 2a. Two number-formatting functions: same logic
 - `src/main.rs:1578`: `fn format_num(n: i64) -> String`
 - `src/prompt_builder.rs:157`: `fn format_thousands(n: usize) -> String`
 
 Both insert thousands separators with nearly identical implementations. Extract into a shared utility.
 
 ### 2b. Complexity classification duplicated across modules
-- `src/db/types.rs:425`: `classify_complexity_for_planning()` — returns planning mode string
-- `src/context_builder.rs:294`: `classify_complexity()` — returns `Complexity` enum
-- `src/context_builder.rs:332`: `classify_query()` — deprecated wrapper
+- `src/db/types.rs:425`: `classify_complexity_for_planning()`: returns planning mode string
+- `src/context_builder.rs:294`: `classify_complexity()`: returns `Complexity` enum
+- `src/context_builder.rs:332`: `classify_query()`: deprecated wrapper
 
 All three classify messages by length + keywords with slightly different keyword lists and thresholds. Unify into one shared function.
 
@@ -63,10 +63,10 @@ Lines 70, 101, 108, and 112 all read the same env vars with the same fallback. L
 
 ### 2e. LLM_API_KEY fallback pattern duplicated 4×
 The same pattern `{PROVIDER}_API_KEY` → `LLM_API_KEY` fallback appears in:
-1. `agent/mod.rs:97-109` — `AgentConfig::from_env()`
-2. `llm/mod.rs:247-255` — `LLMConfig::from_env()`
-3. `server/mod.rs:483-495` — prompt preview handler
-4. `plugin/mod.rs:376-377, 502-506` — `enrich_plugin()` and `refresh_plugin_models()`
+1. `agent/mod.rs:97-109`: `AgentConfig::from_env()`
+2. `llm/mod.rs:247-255`: `LLMConfig::from_env()`
+3. `server/mod.rs:483-495`: prompt preview handler
+4. `plugin/mod.rs:376-377, 502-506`: `enrich_plugin()` and `refresh_plugin_models()`
 
 Extract into a shared `resolve_api_key(provider_name: &str) -> String` function.
 
@@ -88,12 +88,12 @@ The same ~12-column SELECT with timestamp formatting is repeated in 6+ functions
 
 | Function | Lines | Issues |
 |---|---|---|
-| `main.rs:run_cli()` | ~380 | Contains inline `/new` transaction logic, polling, channel management — split into helper functions |
-| `main.rs:run_server()` | ~200 | Startup orchestration — could separate into smaller builder steps |
-| `main.rs:poll_for_response()` | ~160 | CLI polling loop — tightly coupled to print formatting |
+| `main.rs:run_cli()` | ~380 | Contains inline `/new` transaction logic, polling, channel management: split into helper functions |
+| `main.rs:run_server()` | ~200 | Startup orchestration: could separate into smaller builder steps |
+| `main.rs:poll_for_response()` | ~160 | CLI polling loop: tightly coupled to print formatting |
 | `scheduler.rs:tick()` | ~280 | Both action and agentic cron modes inline |
 | `agent/mod.rs:channel_handler()` inner block | ~150 | Should split thread processing from supervision |
-| `config.rs:from_env()` | ~65 | All sequential env var reads — repetitive |
+| `config.rs:from_env()` | ~65 | All sequential env var reads: repetitive |
 | `agent/mod.rs:from_env()` | ~60 | Same pattern |
 | `context_builder.rs:build_thread_context()` | ~180 | RRF fusion, hindsight recall, retrieval all inline |
 | `mcp/tools/kanban.rs:update_kanban_task_tool()` handler | ~100 | Individual UPDATE per field |
@@ -120,10 +120,10 @@ The `format_num`/`format_thousands` functions use `chars().rev()` to insert thou
 
 | Location | Issue | Severity |
 |---|---|---|
-| `llm/mod.rs:494` | `.expect("Failed to build reqwest Client")` — panics if TLS backend missing | Medium |
-| `profile/mod.rs:218` | `.expect("Default profile must exist")` — panics if default not found | Medium |
-| `plugin/installer.rs:123,127` | `parent().unwrap()` on paths — could panic if path has no parent | Medium |
-| `main.rs:316,454` | `.unwrap()` on `SystemTime::now().duration_since(UNIX_EPOCH)` — could panic if system clock is before epoch | Low |
+| `llm/mod.rs:494` | `.expect("Failed to build reqwest Client")`: panics if TLS backend missing | Medium |
+| `profile/mod.rs:218` | `.expect("Default profile must exist")`: panics if default not found | Medium |
+| `plugin/installer.rs:123,127` | `parent().unwrap()` on paths: could panic if path has no parent | Medium |
+| `main.rs:316,454` | `.unwrap()` on `SystemTime::now().duration_since(UNIX_EPOCH)`: could panic if system clock is before epoch | Low |
 | `main.rs:99` | `.unwrap()` on `SystemTime::now().duration_since(UNIX_EPOCH)` in CLI mode | Low |
 
 ---
@@ -132,14 +132,14 @@ The `format_num`/`format_thousands` functions use `chars().rev()` to insert thou
 
 The following env var names are string literals scattered across multiple files with no shared constants:
 
-- `LLM_API_KEY` — 5+ files
-- `LLM_MODEL`, `LLM_PROVIDER`, `LLM_BASE_URL` — 4+ files
-- `LLM_MAX_TOKENS`, `LLM_TEMPERATURE` — 2 files
-- `OMNI_DIR`, `WORKSPACE_DIR` — 3+ files
-- `PLANNING_MODE` — 2 files
-- `MAX_ITERATIONS_*` — 1 file
+- `LLM_API_KEY`: 5+ files
+- `LLM_MODEL`, `LLM_PROVIDER`, `LLM_BASE_URL`: 4+ files
+- `LLM_MAX_TOKENS`, `LLM_TEMPERATURE`: 2 files
+- `OMNI_DIR`, `WORKSPACE_DIR`: 3+ files
+- `PLANNING_MODE`: 2 files
+- `MAX_ITERATIONS_*`: 1 file
 - All `VECTORIZE_*` and `WIKI_VECTORIZATION_*` vars in `config.rs`
-- `HINDSIGHT_URL`, `HINDSIGHT_BANK` — 2 files
+- `HINDSIGHT_URL`, `HINDSIGHT_BANK`: 2 files
 
 ---
 
@@ -152,7 +152,7 @@ This blanket-allows dead code for the entire file, hiding unused functions like 
 `llm/mod.rs:239-245` and `server/mod.rs:476-482` both have the same match on provider names for default base URLs. This should reference `PROVIDER_METADATA` or be extracted.
 
 ### 7c. `db/types:resolve_thread_planning_mode()` and `resolve_thread_planning_mode_with_content()`
-These two functions are nearly identical — one just falls through to `classify_complexity_for_planning()` at the end while the other returns `"prompt_only"`. Could be unified with a parameter.
+These two functions are nearly identical: one just falls through to `classify_complexity_for_planning()` at the end while the other returns `"prompt_only"`. Could be unified with a parameter.
 
 ### 7d. Unused `HashMap::with_capacity`
 Import of `std::collections::HashMap` with `std::collections::HashMap::new()` used in places where `HashMap::with_capacity()` would be more efficient (known sizes in `context_builder.rs` RRF fusion section).
@@ -171,6 +171,6 @@ Import of `std::collections::HashMap` with `std::collections::HashMap::new()` us
 | Anti-patterns | ~4 patterns | Performance/risk |
 
 **Top 3 highest-value refactoring targets:**
-1. Extract shared `resolve_api_key()` function — eliminates 4 copies of same fallback logic
+1. Extract shared `resolve_api_key()` function: eliminates 4 copies of same fallback logic
 2. Remove unused `models/profile.rs` (entire file is dead code) + consolidate dead structs
 3. Extract number formatting + complexity classification into shared utility functions

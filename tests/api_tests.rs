@@ -173,7 +173,7 @@ fn test_schedule() {
 }
 
 // ---------------------------------------------------------------------------
-// /actions  (returns bare JSON array — no {success, data} wrapper)
+// /actions  (returns bare JSON array: no {success, data} wrapper)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -186,7 +186,7 @@ fn test_actions() {
 }
 
 // ---------------------------------------------------------------------------
-// Edge cases — missing query params on handlers that accept them
+// Edge cases: missing query params on handlers that accept them
 // ---------------------------------------------------------------------------
 
 #[test]

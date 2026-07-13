@@ -1,4 +1,4 @@
-//! Outbound delivery queue — one per platform.
+//! Outbound delivery queue: one per platform.
 //!
 //! After the agent saves a message to the database, it enqueues a delivery
 //! envelope.  Each platform gets its own dedicated mpsc channel so that a
@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 
 /// A message ready for delivery to a platform.
 ///
-/// The `platform` is implicit — it is determined by which queue the envelope
+/// The `platform` is implicit: it is determined by which queue the envelope
 /// is sent to.  The envelope only carries the `resource_identifier` that
 /// identifies the specific destination within the platform (chat_id,
 /// terminal session id, etc.).
@@ -35,7 +35,7 @@ pub struct OutboundEnvelope {
     pub thread_id: i64,
     /// Sequence within the thread.
     pub thread_sequence: i32,
-    /// The cause (seq-0) message's external_id — used for threading replies.
+    /// The cause (seq-0) message's external_id: used for threading replies.
     pub cause_external_id: Option<String>,
     /// If the cause message was itself a reply in a thread, this is the
     /// thread root's external_id (e.g. root_id in Mattermost).
@@ -50,10 +50,10 @@ pub struct OutboundEnvelope {
 // Channel type aliases
 // ---------------------------------------------------------------------------
 
-/// Sender half — each platform has its own.
+/// Sender half: each platform has its own.
 pub type OutboundSender = mpsc::Sender<OutboundEnvelope>;
 
-/// Receiver half — each platform gets one to consume its messages.
+/// Receiver half: each platform gets one to consume its messages.
 pub type OutboundReceiver = mpsc::Receiver<OutboundEnvelope>;
 
 /// Create a new outbound delivery channel with the given buffer capacity.

@@ -1,4 +1,4 @@
-//! LLM proxy endpoint — allows MCP server plugins (e.g. memory) to make
+//! LLM proxy endpoint: allows MCP server plugins (e.g. memory) to make
 //! LLM completion calls through omniagent's provider infrastructure without
 //! knowing API keys or URLs.
 //!

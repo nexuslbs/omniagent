@@ -24,7 +24,7 @@ pub struct JsonRpcRequest {
     pub params: Option<Value>,
 }
 
-/// A JSON-RPC notification (no id — no response expected).
+/// A JSON-RPC notification (no id: no response expected).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcNotification {
     pub jsonrpc: String,

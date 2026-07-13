@@ -1,4 +1,4 @@
-//! mcp-server-cron — standalone MCP server for cron job management.
+//! mcp-server-cron: standalone MCP server for cron job management.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
 //! Tools: create_cron_job, list_cron_jobs, delete_cron_job, update_cron_job

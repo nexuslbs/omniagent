@@ -2,7 +2,7 @@
 name = "mcp-server-plugin-manager"
 version = "0.1.0"
 edition = "2021"
-description = "Plugin management MCP server — install, remove, list, reload plugins"
+description = "Plugin management MCP server: install, remove, list, reload plugins"
 
 [dependencies]
 mcp-server-util = { path = "../util" }

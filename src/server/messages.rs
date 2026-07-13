@@ -1,10 +1,10 @@
-//! Messages API — provides filter options and paginated message events.
+//! Messages API: provides filter options and paginated message events.
 //!
 //! These endpoints replace the dashboard's direct PostgreSQL queries,
 //! so the dashboard no longer needs DB credentials.
 //!
-//! - `GET /messages/filters` — filter options (channels, roles, types, etc.)
-//! - `GET /messages/events` — paginated messages with optional filters
+//! - `GET /messages/filters`: filter options (channels, roles, types, etc.)
+//! - `GET /messages/events`: paginated messages with optional filters
 
 use axum::{
     extract::{Query, State},
@@ -32,7 +32,7 @@ pub fn messages_router() -> Router<Arc<AppState>> {
 }
 
 // ---------------------------------------------------------------------------
-// Types — Filters response
+// Types: Filters response
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
@@ -53,7 +53,7 @@ pub struct MessagesFiltersResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Types — Events request / response
+// Types: Events request / response
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -110,7 +110,7 @@ pub struct MessagesEventsResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Row types for sqlx (DB struct pattern — all primitive types)
+// Row types for sqlx (DB struct pattern: all primitive types)
 // ---------------------------------------------------------------------------
 
 #[derive(FromRow)]
@@ -353,7 +353,7 @@ async fn events_handler(
     let offset = params.offset.unwrap_or(0).max(0);
     let order_desc = params.order.as_deref() != Some("asc");
 
-    // Coalesce optional params to empty string — the WHERE clause pattern
+    // Coalesce optional params to empty string: the WHERE clause pattern
     // `(:param = '' OR ...)` short-circuits when the param is empty.
     let channel_id = params.channel_id.unwrap_or_default();
     let thread_id = params.thread_id.unwrap_or_default();
@@ -417,7 +417,7 @@ async fn events_handler(
 
     // ── Data query ──
     // Two compile-time string literals for ORDER BY direction.
-    // sql_forge!() requires a string literal — can't format!() at runtime.
+    // sql_forge!() requires a string literal: can't format!() at runtime.
     // The rest of the SQL (SELECT columns, JOINs, WHERE conditions) is identical.
 
     let rows = if order_desc {

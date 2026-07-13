@@ -2,7 +2,7 @@
   "name": "Memory MCP Server",
   "id": "mcp-server-memory",
   "version": "0.1.0",
-  "description": "Memory management MCP server — manage persistent memory entries, channel-level thread summarization",
+  "description": "Memory management MCP server: manage persistent memory entries, channel-level thread summarization",
   "type": "mcp",
   "entrypoint": {
     "command": "mcp-server-memory",

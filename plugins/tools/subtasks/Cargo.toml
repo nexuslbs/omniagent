@@ -2,7 +2,7 @@
 name = "mcp-server-subtasks"
 version = "0.1.0"
 edition = "2021"
-description = "Subtask management MCP server — add, list, update, delete, count subtasks for threads"
+description = "Subtask management MCP server: add, list, update, delete, count subtasks for threads"
 
 [dependencies]
 mcp-server-util = { path = "../util" }

@@ -1,4 +1,4 @@
-//! External platform plugin integration — config types, protocol types, and helpers.
+//! External platform plugin integration: config types, protocol types, and helpers.
 //!
 //! Platform plugins communicate via JSON-lines over stdin/stdout using a simple
 //! JSON-RPC-like protocol (similar to MCP external plugins but simplified for
@@ -42,7 +42,7 @@ pub struct PlatformPluginConfig {
     pub env: HashMap<String, String>,
     /// Plugin config values from platforms.yml, with original field names
     /// (e.g. "access_token", "server_url"). Resolved from $env:/$secret:
-    /// references. Sent as configure params — plugins are env-var agnostic.
+    /// references. Sent as configure params: plugins are env-var agnostic.
     #[serde(default)]
     pub config: HashMap<String, String>,
     /// Maximum consecutive failures before circuit breaker opens.
@@ -136,7 +136,7 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
                 path.exists()
             }
         } else {
-            // PATH-based command — assume it's available
+            // PATH-based command: assume it's available
             true
         };
 
@@ -168,7 +168,7 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
 /// Convenience wrapper: merge platforms.yml config into a PlatformPluginConfig.
 ///
 /// Populates the `config` field with YAML config values using their original
-/// field names (e.g. "access_token", "server_url") — NOT prefixed env keys.
+/// field names (e.g. "access_token", "server_url"): NOT prefixed env keys.
 /// The `env` field keeps only subprocess runtime vars (e.g. RUST_LOG from plugin.json).
 /// Config $env:/$secret: references are resolved inline.
 fn merge_platform_config_env(
@@ -177,7 +177,7 @@ fn merge_platform_config_env(
     data_dir: &str,
 ) -> PlatformPluginConfig {
     let mut merged_env = config.env.clone();
-    // Only runtime env vars from plugin.json — do NOT merge YAML config into env.
+    // Only runtime env vars from plugin.json: do NOT merge YAML config into env.
     // YAML config values go to the `config` field with original field names.
     crate::plugins_yaml::merge_yaml_config_into_env(
         &mut merged_env,
@@ -220,8 +220,8 @@ fn merge_platform_config_env(
 /// Resolve `$env:VAR` and `$secret:NAME` references in a single value.
 ///
 /// Delegates to the shared `crate::plugins_yaml::resolve_config_ref_value`.
-/// - `$env:VAR` — reads from process environment via `std::env::var`
-/// - `$secret:NAME` — reads from the `secrets` table in the DB
+/// - `$env:VAR`: reads from process environment via `std::env::var`
+/// - `$secret:NAME`: reads from the `secrets` table in the DB
 pub async fn resolve_env_ref_value(value: &str, pool: &sqlx::PgPool) -> String {
     crate::plugins_yaml::resolve_config_ref_value(value, pool).await
 }
@@ -328,7 +328,7 @@ pub struct DeliverParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cause_external_id: Option<String>,
     /// If the cause message was itself a reply in a thread, this is the
-    /// thread root's external_id (e.g. root_id in Mattermost) — used by
+    /// thread root's external_id (e.g. root_id in Mattermost): used by
     /// platform plugins that don't allow nested threads (Mattermost).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause_root_id: Option<String>,
@@ -535,7 +535,7 @@ pub fn decode_base64(encoded: &str) -> Result<Vec<u8>, anyhow::Error> {
 }
 
 // ---------------------------------------------------------------------------
-// File reading — generic trait + HTTP Bearer implementation
+// File reading: generic trait + HTTP Bearer implementation
 // ---------------------------------------------------------------------------
 
 /// A platform-specific file reader.
@@ -546,8 +546,8 @@ pub fn decode_base64(encoded: &str) -> Result<Vec<u8>, anyhow::Error> {
 pub trait FileReader: Send + Sync + std::fmt::Debug {
     /// Read a file from the platform's API.
     ///
-    /// * `file_id` — the file identifier returned by the platform plugin
-    /// * `server_url` — the platform server's base URL (from message metadata)
+    /// * `file_id`: the file identifier returned by the platform plugin
+    /// * `server_url`: the platform server's base URL (from message metadata)
     ///
     /// Returns raw file bytes on success.
     async fn read_file(&self, file_id: &str, server_url: &str) -> crate::error::AppResult<Vec<u8>>;
@@ -615,7 +615,7 @@ impl FileReader for HttpBearerFileReader {
 /// Scan platform plugin configs and register HTTP Bearer file readers for any
 /// plugin that has an `access_token` in its config.
 ///
-/// This is completely generic — no plugin name is hardcoded. Any platform
+/// This is completely generic: no plugin name is hardcoded. Any platform
 /// plugin that exposes a REST API with Bearer token auth at
 /// `{server_url}/api/v4/files/{file_id}` will automatically get a file reader.
 pub fn build_platform_file_readers(

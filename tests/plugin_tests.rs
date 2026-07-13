@@ -126,7 +126,7 @@ fn test_builtins_enabled_only_in_yaml() {
             let name = p["name"].as_str().unwrap_or("");
             // These should all have explicit YAML entries
             eprintln!(
-                "Builtin '{}' is enabled — verify YAML has source: built-in",
+                "Builtin '{}' is enabled: verify YAML has source: built-in",
                 name
             );
         }
@@ -168,7 +168,7 @@ fn test_no_duplicated_primary_enabled() {
 fn test_remote_plugin_install_compile() {
     let name = "test-rust-tool";
 
-    // Ensure clean state — uninstall first
+    // Ensure clean state: uninstall first
     let _ = api_post(&format!("/plugins/{}/disable", name));
     let _ = api_post(&format!("/plugins/{}/delete?mode=uninstall", name));
 
@@ -335,7 +335,7 @@ fn test_no_mcp_directory_references() {
     assert_eq!(
         stdout.trim(),
         "NOT_FOUND",
-        "mcp/ directory should not exist — should be tools/"
+        "mcp/ directory should not exist: should be tools/"
     );
 
     // tools/ should exist

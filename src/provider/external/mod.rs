@@ -1,4 +1,4 @@
-//! External provider plugin integration — protocol types for subprocess-based providers.
+//! External provider plugin integration: protocol types for subprocess-based providers.
 //!
 //! Provider plugins can run as standalone subprocesses (like platform plugins) instead
 //! of being HTTP endpoints that omniagent calls directly. The subprocess communicates
