@@ -916,7 +916,12 @@ pub(crate) async fn enable_plugin_handler(
     // Check if plugin already in the desired state — skip only if source matches
     if let Ok(Some(entry)) = plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name) {
         if entry.enabled && entry.source == source {
-            // Already enabled with matching source — no change needed
+            // Already enabled with matching source — still reload platform subprocess
+            // so the plugin picks up any config/environment changes made since last start
+            if yaml_type == plugins_yaml::PluginYamlType::Platform {
+                reload_platform_plugin(&state, &name).await;
+            }
+
             if let Ok(Some(detail)) = plugins_yaml::get_plugin(&state.data_dir, &name) {
                 info!(
                     "Plugin '{}' is already enabled with matching source — no change needed",
@@ -1004,6 +1009,11 @@ pub(crate) async fn enable_plugin_handler(
                             .into_response();
                     }
                 }
+            }
+
+            // Hot-reload: if this is a platform plugin, trigger subprocess restart
+            if yaml_type == plugins_yaml::PluginYamlType::Platform {
+                reload_platform_plugin(&state, &name).await;
             }
 
             // Hot-reload: if this is a provider plugin with an entrypoint, start the subprocess
@@ -1168,6 +1178,11 @@ pub(crate) async fn disable_plugin_handler(
                         removed
                     );
                 }
+            }
+
+            // Hot-reload: if this is a platform plugin, trigger subprocess restart
+            if yaml_type == plugins_yaml::PluginYamlType::Platform {
+                reload_platform_plugin(&state, &name).await;
             }
 
             match plugins_yaml::get_plugin(&state.data_dir, &name) {
@@ -1672,7 +1687,6 @@ pub(crate) async fn setup_plugin_handler(
         .env_clear()
         .env("RUST_LOG", "info")
         .env("OMNI_DIR", &state.data_dir)
-        .env("MATTERMOST_SERVER_URL", &setup_val("server_url"))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
