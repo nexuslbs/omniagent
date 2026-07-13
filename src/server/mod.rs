@@ -559,7 +559,7 @@ async fn prompt_handler(
         String::new()
     };
 
-    let platform = channel
+    let _platform = channel
         .as_ref()
         .and_then(|c| c.platform.as_deref())
         .unwrap_or("");
@@ -656,11 +656,6 @@ async fn prompt_preview_handler(
     } else {
         String::new()
     };
-    let user_raw = if memories_dir.join("USER.md").exists() {
-        std::fs::read_to_string(memories_dir.join("USER.md")).unwrap_or_default()
-    } else {
-        String::new()
-    };
 
     let platform = channel
         .as_ref()
@@ -689,7 +684,7 @@ async fn prompt_preview_handler(
         if let Ok(Some(latest)) = queries::get_latest_seq0_message(&state.pool, ch.id).await {
             if let Ok(Some(tid)) = queries::get_message_thread(&state.pool, latest.id).await {
                 let profile_registry = crate::profile::ProfileRegistry::new(&state.data_dir);
-                let prof = profile_registry
+                let _prof = profile_registry
                     .get(profile_name)
                     .cloned()
                     .unwrap_or_else(|| crate::profile::Profile::default(profile_name));
@@ -981,7 +976,7 @@ async fn context_preview_handler(
 
     // Resolve profile
     let profile_registry = crate::profile::ProfileRegistry::new(&state.data_dir);
-    let prof = profile_registry
+    let _prof = profile_registry
         .get(profile_name)
         .cloned()
         .unwrap_or_else(|| crate::profile::Profile::default(profile_name));
