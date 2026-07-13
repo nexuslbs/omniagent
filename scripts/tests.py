@@ -2318,14 +2318,19 @@ def _mm_get_posts(base_url, channel_id, token):
     return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
 def test_mm9_e2e():
-    """Full e2e test: mattermost setup -> noop provider response."""
+    """Full e2e test: mattermost setup -> noop provider response.
+
+    The Mattermost setup API (POST /api/plugins/mattermost/setup) handles
+    all infrastructure: creates team, channel, bot user, test user, and
+    access token. No manual Mattermost admin API calls should be needed.
+    """
     import urllib.request, urllib.error, time
     _check_mm_container()
     MM = "http://mattermost:8065"
     test_pass = "Mattermost_Fresh_Start_1"
     test_user = "testuser"
 
-    # 1. Ensure mattermost and noop platforms are enabled (no restart needed)
+    # 1. Ensure mattermost and noop platforms are enabled
     success, resp = api_post_body("/plugins/mattermost/enable", {"source": "bundled"})
     assert success, f"enable mattermost platform failed: {resp}"
     print("[mattermost platform enabled]")
@@ -2340,30 +2345,40 @@ def test_mm9_e2e():
     assert nd.get("status") == "enabled", f"noop status={nd.get('status')}, expected enabled"
     print(f"[noop status=enabled]")
 
-    # 3. Run mattermost setup (idempotent: may already exist)
-    try:
-        req = urllib.request.Request(f"{BASE}/api/plugins/mattermost/setup", method="POST", headers={"Content-Type": "application/json"})
-        r = urllib.request.urlopen(req, timeout=15)
-        body = r.read().decode()
-        if body.strip():
-            print(f"[setup returned: {body[:200]}]")
-    except (urllib.error.HTTPError, urllib.error.URLError, Exception) as e:
-        print(f"[setup error (may be already set up): {e}]")
-
-    # 4. Ensure access_token is in the mattermost config so the platform
-    #    subprocess can connect via WebSocket with inbound capability.
-    #    Setting this via API also triggers a config reload that refreshes
-    #    env vars from .env and restarts the subprocess with the token.
-    api_post_body("/plugins/mattermost/config", {
+    # 3. Set mattermost config with setup params BEFORE running setup.
+    #    The setup API reads these from the plugin config and passes them
+    #    to the mattermost binary's setup mode, which creates team, channel,
+    #    users, and bot token.
+    success, resp = api_post_body("/plugins/mattermost/config", {
         "config": {
-            "access_token": "$env:MATTERMOST_ACCESS_TOKEN",
             "server_url": "http://mattermost:8065",
+            "access_token": "$env:MATTERMOST_ACCESS_TOKEN",
+            "setup_team": "omni",
+            "setup_channel": "setup",
+            "admin_user": "lucasbasquerotto",
+            "admin_password": "MTEnivuUVDZ3",
+            "test_user": "testuser",
+            "test_password": "Mattermost_Fresh_Start_1",
+            "bot_user": "omniagent-bot",
+            "bot_password": "Bot_Password_1",
         }
     })
-    print("[mattermost config updated with access_token]")
+    assert success, f"set mattermost config failed: {resp}"
+    print("[mattermost config set with setup params]")
 
-    # Ensure prompt plugin is enabled: the executor needs prompt_generate
-    # to process incoming messages through the channel handler.
+    # 4. Run mattermost setup (idempotent: may already exist).
+    #    The setup handler creates the omniagent channel and writes the
+    #    bot_token to .env so the subprocess can authenticate.
+    req = urllib.request.Request(f"{BASE}/api/plugins/mattermost/setup", method="POST")
+    r = urllib.request.urlopen(req, timeout=30)
+    setup_resp = json.loads(r.read())
+    assert setup_resp.get("success"), f"setup failed: {setup_resp.get('error', 'unknown')}"
+    setup_data = setup_resp.get("data", {})
+    mm_channel_id = setup_data.get("channel_id")
+    assert mm_channel_id, "Setup did not return a channel_id"
+    print(f"[setup complete: channel_id={mm_channel_id}]")
+
+    # 5. Ensure prompt plugin is enabled
     api_post_body("/plugins/prompt/enable", {"source": "built-in"})
     import time as _time
     for _attempt in range(10):
@@ -2380,7 +2395,7 @@ def test_mm9_e2e():
     else:
         print("[WARN: prompt_generate tool not found after 10s]")
 
-    # Find the omniagent channel ID for mattermost (wait for auto-discovery)
+    # 6. Find the omniagent channel created by the setup handler
     channel_id = None
     for _ in range(15):
         r = urllib.request.urlopen(f"{BASE}/channels", timeout=10)
@@ -2393,7 +2408,7 @@ def test_mm9_e2e():
         time.sleep(2)
     assert channel_id is not None, "No mattermost channel found in omniagent channels after setup"
 
-    # 5. Patch channel to use noop
+    # 7. Patch channel to use noop provider
     req = urllib.request.Request(f"{BASE}/channels/{channel_id}", data=json.dumps({"current_provider": "noop"}).encode(), method="PATCH", headers={"Content-Type": "application/json"})
     try:
         urllib.request.urlopen(req, timeout=10)
@@ -2403,96 +2418,19 @@ def test_mm9_e2e():
 
     time.sleep(5)
 
-    # 6. Login as admin to reset testuser password, then login as testuser
-    admin_data = json.dumps({"login_id": "lucasbasquerotto", "password": "MTEnivuUVDZ3"}).encode()
-    admin_req = urllib.request.Request(f"{MM}/api/v4/users/login", data=admin_data, method="POST", headers={"Content-Type": "application/json"})
-    admin_token = urllib.request.urlopen(admin_req, timeout=10).headers.get("Token")
-    assert admin_token, "Admin login returned no Token header"
-    print("[admin logged in]")
-
-    # Get testuser's user ID to reset password
-    user_resp = json.loads(urllib.request.urlopen(
-        urllib.request.Request(f"{MM}/api/v4/users/username/{test_user}", method="GET",
-                               headers={"Authorization": f"Bearer {admin_token}"})
-    , timeout=10).read())
-    testuser_id = user_resp.get("id")
-    print(f"[testuser id={testuser_id}]")
-
-    # Reset testuser password via admin API: PUT /api/v4/users/{id}/password with {"new_password": "..."}
-    reset_data = json.dumps({"new_password": test_pass}).encode()
-    reset_req = urllib.request.Request(
-        f"{MM}/api/v4/users/{testuser_id}/password",
-        data=reset_data, method="PUT",
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {admin_token}"}
-    )
-    try:
-        urllib.request.urlopen(reset_req, timeout=10)
-        print(f"[testuser password reset]")
-    except urllib.error.HTTPError as e:
-        print(f"[reset password: {e.code} {e.read().decode()[:100]}]")
-
-    # Ensure testuser is in team "omni" and channel "setup"
-    team_resp = json.loads(urllib.request.urlopen(
-        urllib.request.Request(f"{MM}/api/v4/users/me/teams", method="GET",
-                               headers={"Authorization": f"Bearer {admin_token}"})
-    , timeout=10).read())
-    team_id = next((t["id"] for t in team_resp if t["name"] == "omni"), None)
-    if team_id:
-        if testuser_id:
-            # Add testuser to team
-            add_member = json.dumps({"user_id": testuser_id, "team_id": team_id}).encode()
-            try:
-                urllib.request.urlopen(
-                    urllib.request.Request(f"{MM}/api/v4/teams/{team_id}/members",
-                                           data=add_member, method="POST",
-                                           headers={"Content-Type": "application/json", "Authorization": f"Bearer {admin_token}"})
-                , timeout=10)
-                print(f"[testuser added to team omni]")
-            except urllib.error.HTTPError as e:
-                if e.code != 409:  # 409 = already member
-                    raise
-                print(f"[testuser already in team omni]")
-
-            # Add testuser to "setup" channel
-            channels_resp = json.loads(urllib.request.urlopen(
-                urllib.request.Request(f"{MM}/api/v4/teams/{team_id}/channels", method="GET",
-                                       headers={"Authorization": f"Bearer {admin_token}"})
-            , timeout=10).read())
-            setup_ch = next((ch for ch in channels_resp if ch["name"] == "setup"), None)
-            if setup_ch:
-                add_ch = json.dumps({"user_id": testuser_id, "channel_id": setup_ch["id"]}).encode()
-                try:
-                    urllib.request.urlopen(
-                        urllib.request.Request(f"{MM}/api/v4/channels/{setup_ch['id']}/members",
-                                               data=add_ch, method="POST",
-                                               headers={"Content-Type": "application/json", "Authorization": f"Bearer {admin_token}"})
-                    , timeout=10)
-                    print(f"[testuser added to channel setup]")
-                except urllib.error.HTTPError as e:
-                    if e.code != 409:
-                        raise
-                    print(f"[testuser already in channel setup]")
-        print(f"[team omni id={team_id}]")
-
-    # Login as testuser
+    # 8. Login as testuser (setup created this user with known password).
+    #    No manual admin login, password reset, or team/channel membership
+    #    needed — the setup API handled all of that.
     token = _mm_login(MM, test_user, test_pass)
     print("[testuser logged in]")
 
-    # Find the "setup" channel ID in Mattermost via admin API
-    team_channels = json.loads(urllib.request.urlopen(
-        urllib.request.Request(f"{MM}/api/v4/teams/{team_id}/channels", method="GET",
-                               headers={"Authorization": f"Bearer {admin_token}"})
-    , timeout=10).read())
-    mm_channel_id = next((ch["id"] for ch in team_channels if ch["name"] == "setup"), None)
-    assert mm_channel_id, "Cannot find 'setup' channel in Mattermost"
-    print(f"[found mm channel_id={mm_channel_id}]")
-
+    # 9. Send message via Mattermost API (using channel_id from setup)
     import uuid
     test_msg = f"E2E test from {test_user} [{uuid.uuid4().hex[:8]}]"
     msg_resp = _mm_send_message(MM, mm_channel_id, token, test_msg)
     print(f"[message sent: {msg_resp.get('id', '?')}]")
 
-    # 7. Poll for noop response
+    # 10. Poll for noop response
     deadline = time.time() + 35
     while time.time() < deadline:
         time.sleep(4)

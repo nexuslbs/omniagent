@@ -7,7 +7,7 @@ use crate::agent::helpers;
 use crate::db::types as queries;
 use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, LLMConfig, ProviderId, Usage};
-use crate::mcp::{truncate_content, McpToolCall, WatchdogAction, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
+use crate::mcp::{truncate_content, McpToolCall, McpToolResult, WatchdogAction, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
 use tokio::task::JoinSet;
 
 /// Process a single pending thread through the state machine:
@@ -1318,6 +1318,10 @@ Previous plan:\n{}",
                 });
             }
 
+            // Snapshot short timeout BEFORE entering the spawned closure (cfg ref issue)
+            let short_timeout_secs = cfg.config_snapshot().tool_short_timeout_secs;
+            let short_timeout = std::time::Duration::from_secs(short_timeout_secs);
+
             join_set.spawn(async move {
                 // --- Phase 2: Progress reporting ---
                 // Forward progress notifications to the DB while tool executes.
@@ -1346,8 +1350,8 @@ Previous plan:\n{}",
                     }
                 });
 
-                // Execute with per-tool timeout and watchdog cancel support
-                let tool_future = mcp_snapshot.execute(&mcp_call, tool_ctx);
+                // Execute with short timeout (fast path) + background fallback
+                let tool_future = mcp_snapshot.execute(&mcp_call, tool_ctx.clone());
 
                 let result = tokio::select! {
                     biased;
@@ -1359,17 +1363,83 @@ Previous plan:\n{}",
                         error!("{}", msg);
                         Err(crate::error::Error::Message(msg))
                     }
-                    result = tokio::time::timeout(timeout_dur, tool_future) => {
+                    result = tokio::time::timeout(short_timeout, tool_future) => {
                         match result {
                             Ok(result) => result,
-                            Err(_) => {
-                                let msg = format!(
-                                    "Tool '{}' exceeded maximum execution time ({}s) and was aborted",
-                                    tool_name,
-                                    timeout_dur.as_secs(),
-                                );
-                                error!("{}", msg);
-                                Err(crate::error::Error::Message(msg))
+                            Err(_elapsed) => {
+                                // Short timeout exceeded — switch to background mode.
+                                // Register the tool in the task registry for polling.
+                                let registry = crate::agent::task_registry::TASK_REGISTRY
+                                    .get()
+                                    .cloned()
+                                    .expect("TASK_REGISTRY not initialized");
+                                let (task_id, abort_rx, _log_buffer) = registry
+                                    .register(tid, &tool_name)
+                                    .await;
+                                let task_id_bg = task_id.clone();
+
+                                // Spawn background task with the full long timeout
+                                let bg_mcp_call = mcp_call.clone();
+                                let bg_mcp_snapshot = mcp_snapshot.clone();
+                                let bg_timeout = timeout_dur;
+                                let bg_tool_name = tool_name.clone();
+                                let bg_registry = registry.clone();
+
+                                tokio::spawn(async move {
+                                    let bg_tool_future = bg_mcp_snapshot.execute(&bg_mcp_call, tool_ctx);
+                                    let bg_result = tokio::select! {
+                                        _ = abort_rx => {
+                                            bg_registry.set_status(&task_id_bg,
+                                                crate::agent::task_registry::TaskStatus::Cancelled).await;
+                                            bg_registry.append_log(&task_id_bg,
+                                                &format!("Tool '{}' was cancelled", bg_tool_name)).await;
+                                            return;
+                                        }
+                                        result = tokio::time::timeout(bg_timeout, bg_tool_future) => {
+                                            match result {
+                                                Ok(Ok(res)) => {
+                                                    let truncated = truncate_content(
+                                                        &res.content, DEFAULT_MAX_TOOL_OUTPUT_CHARS);
+                                                    bg_registry.set_status(&task_id_bg,
+                                                        crate::agent::task_registry::TaskStatus::Completed(
+                                                            truncated)).await;
+                                                }
+                                                Ok(Err(e)) => {
+                                                    let err = format!("Error: {}", e);
+                                                    bg_registry.set_status(&task_id_bg,
+                                                        crate::agent::task_registry::TaskStatus::Failed(
+                                                            err)).await;
+                                                }
+                                                Err(_) => {
+                                                    let err = format!(
+                                                        "Tool '{}' exceeded long timeout ({}s)",
+                                                        bg_tool_name, bg_timeout.as_secs());
+                                                    bg_registry.set_status(&task_id_bg,
+                                                        crate::agent::task_registry::TaskStatus::Failed(
+                                                            err)).await;
+                                                }
+                                            }
+                                        }
+                                    };
+                                    let _ = bg_result;
+                                });
+
+                                // Return a McpToolResult containing processing status
+                                let processing_json = serde_json::json!({
+                                    "status": "processing",
+                                    "task_id": task_id,
+                                    "tool": qualified_name,
+                                    "timeout_secs": short_timeout.as_secs(),
+                                    "message": format!(
+                                        "Tool '{}' started. Use poll_task, wait_task, or read_task_logs to check progress.",
+                                        tool_name
+                                    ),
+                                });
+                                Ok(McpToolResult {
+                                    call_id: tc_id.clone(),
+                                    content: processing_json.to_string(),
+                                    is_error: false,
+                                })
                             }
                         }
                     }
@@ -1845,6 +1915,19 @@ Previous plan:\n{}",
             .await
             .execute(&mcp_call, cfg.ctx.clone())
             .await;
+    }
+
+    // 12. Cancel any remaining background tasks for this thread
+    {
+        let registry = crate::agent::task_registry::TASK_REGISTRY
+            .get()
+            .cloned();
+        if let Some(reg) = registry {
+            let count = reg.cancel_all_for_thread(thread.id).await;
+            if count > 0 {
+                tracing::info!("Cancelled {} remaining background task(s) for thread {}", count, thread.id);
+            }
+        }
     }
 
     Ok(saved)

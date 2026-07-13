@@ -35,6 +35,7 @@ pub fn truncate_content(content: &str, max_chars: usize) -> String {
 pub const DEFAULT_MAX_TOOL_OUTPUT_CHARS: usize = 50_000;
 
 pub mod external;
+pub mod task_tools;
 
 /// A tool call requested by the LLM.
 #[derive(Debug, Clone)]
@@ -416,6 +417,119 @@ impl McpRegistry {
     }
 }
 
+/// Build the `poll_task` tool: check the status of a background task.
+fn poll_task_tool() -> McpTool {
+    McpTool {
+        name: "poll_task".to_string(),
+        full_name: tool_qualify("builtin", "poll_task"),
+        description: "Check the status of a previously started background tool task. Returns the task's current status (running/completed/failed/cancelled), elapsed time, and result if done.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The task ID returned from a previous tool call that returned status=processing"
+                }
+            },
+            "required": ["task_id"]
+        }),
+        server_name: None,
+        timeout_secs: 10,
+        watchdog: None,
+        handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
+            Box::pin(crate::mcp::task_tools::handle_poll_task(args, ctx))
+        }),
+    }
+}
+
+/// Build the `wait_task` tool: wait for a background task to complete.
+fn wait_task_tool() -> McpTool {
+    McpTool {
+        name: "wait_task".to_string(),
+        full_name: tool_qualify("builtin", "wait_task"),
+        description: "Wait for a background tool task to complete, with a configurable timeout. Polls every 500ms and returns the result when done, or a timeout status if the task doesn't finish in time.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The task ID returned from a previous tool call that returned status=processing"
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Maximum seconds to wait (default: 30, max: 300)",
+                    "default": 30
+                }
+            },
+            "required": ["task_id"]
+        }),
+        server_name: None,
+        timeout_secs: 310,
+        watchdog: None,
+        handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
+            Box::pin(crate::mcp::task_tools::handle_wait_task(args, ctx))
+        }),
+    }
+}
+
+/// Build the `cancel_task` tool: cancel a running background task.
+fn cancel_task_tool() -> McpTool {
+    McpTool {
+        name: "cancel_task".to_string(),
+        full_name: tool_qualify("builtin", "cancel_task"),
+        description: "Cancel a running background task. The task's abort signal is sent and it will stop as soon as possible. Use when the task is no longer needed.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The task ID to cancel"
+                }
+            },
+            "required": ["task_id"]
+        }),
+        server_name: None,
+        timeout_secs: 10,
+        watchdog: None,
+        handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
+            Box::pin(crate::mcp::task_tools::handle_cancel_task(args, ctx))
+        }),
+    }
+}
+
+/// Build the `read_task_logs` tool: stream log output from a background task.
+fn read_task_logs_tool() -> McpTool {
+    McpTool {
+        name: "read_task_logs".to_string(),
+        full_name: tool_qualify("builtin", "read_task_logs"),
+        description: "Read intermediate log output from a running or completed background task. Supports cursor-based pagination for long logs.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "The task ID to read logs from"
+                },
+                "cursor": {
+                    "type": "integer",
+                    "description": "Line offset to start reading from (default: 0)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of lines to return (default: 100, max: 1000)"
+                }
+            },
+            "required": ["task_id"]
+        }),
+        server_name: None,
+        timeout_secs: 10,
+        watchdog: None,
+        handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
+            Box::pin(crate::mcp::task_tools::handle_read_task_logs(args, ctx))
+        }),
+    }
+}
+
 /// Build the `read_attached_file` tool: fetch file content from a platform
 /// on demand, avoiding inlining large files in the prompt or DB.
 fn read_attached_file_tool() -> McpTool {
@@ -727,6 +841,12 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
     // Allows the agent to read file attachments that exceed the inline
     // size limit by delegating to the appropriate platform's FileReader.
     registry.register(read_attached_file_tool());
+
+    // ── Task management tools for non-blocking tool execution ──
+    registry.register(poll_task_tool());
+    registry.register(wait_task_tool());
+    registry.register(cancel_task_tool());
+    registry.register(read_task_logs_tool());
 
     tracing::info!(
         "MCP registry initialized with {} tools (external + built-in)",
