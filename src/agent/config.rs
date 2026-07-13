@@ -107,6 +107,16 @@ pub struct AgentConfig {
     /// If None, no watchdog runs for tools without their own configuration.
     pub global_watchdog: Option<crate::mcp::WatchdogConfig>,
 
+    /// Short timeout (seconds) for the "fast path" — tools that complete within
+    /// this time return normally. Tools that exceed this return a "processing"
+    /// result and continue in the background.
+    /// Default: 5 seconds.
+    pub tool_short_timeout_secs: u64,
+    /// Long timeout (seconds) for background task execution — the maximum time
+    /// a background tool task is allowed to run before being force-cancelled.
+    /// Default: 300 seconds (5 minutes).
+    pub tool_long_timeout_secs: u64,
+
     // Infrastructure config (merged from former config::Config)
     pub database_url: String,
     pub database_readonly_url: String,
@@ -243,6 +253,15 @@ impl AgentConfig {
             global_watchdog: std::env::var("WATCHDOG_DEFAULT").ok().and_then(|v| {
                 serde_json::from_str::<crate::mcp::WatchdogConfig>(&v).ok()
             }),
+
+            tool_short_timeout_secs: std::env::var("TOOL_SHORT_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "5".to_string())
+                .parse()
+                .unwrap_or(5),
+            tool_long_timeout_secs: std::env::var("TOOL_LONG_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "300".to_string())
+                .parse()
+                .unwrap_or(300),
 
             // Infrastructure config (merged from former config::Config)
             database_url: std::env::var("DATABASE_URL").ctx("DATABASE_URL must be set")?,

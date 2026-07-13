@@ -2000,6 +2000,32 @@ pub(crate) async fn setup_plugin_handler(
                     "Registered file reader for plugin '{}' (from setup bot_token)",
                     name
                 );
+
+                // Persist bot_token to .env so the subprocess can authenticate
+                // after restart. The config uses $env:MATTERMOST_ACCESS_TOKEN.
+                let env_path = &state.env_path;
+                let env_var_name = format!("{}_ACCESS_TOKEN", name.to_uppercase());
+                let existing = std::fs::read_to_string(env_path).unwrap_or_default();
+                let updated = {
+                    let mut result = String::new();
+                    let mut replaced = false;
+                    for line in existing.lines() {
+                        if line.starts_with(&format!("{}=", env_var_name)) {
+                            result.push_str(&format!("{}={}\n", env_var_name, bot_token));
+                            replaced = true;
+                        } else {
+                            result.push_str(line);
+                            result.push('\n');
+                        }
+                    }
+                    if !replaced {
+                        result.push_str(&format!("{}={}\n", env_var_name, bot_token));
+                    }
+                    result
+                };
+                let _ = std::fs::write(env_path, &updated);
+                std::env::set_var(&env_var_name, bot_token);
+
                 reload_platform_plugin(&state, &name).await;
             }
 

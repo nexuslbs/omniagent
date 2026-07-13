@@ -44,6 +44,10 @@ async fn run_server() -> AppResult<()> {
     let shared_config = agent::config::init_global(cfg.clone());
     tracing::info!("Global config initialized");
 
+    // Initialize global task registry for non-blocking tool tracking
+    let _task_registry = agent::task_registry::init_registry();
+    tracing::info!("Task registry initialized");
+
     // Connect to PostgreSQL
     let pool = db::connect(&cfg.database_url).await?;
     tracing::info!("Connected to PostgreSQL");

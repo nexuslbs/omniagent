@@ -15,6 +15,7 @@
 pub mod config;
 pub mod executor;
 pub mod helpers;
+pub mod task_registry;
 
 use sql_forge::sql_forge;
 use sqlx::FromRow;
