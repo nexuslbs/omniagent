@@ -28,11 +28,11 @@ use tokio::sync::Mutex;
 /// Circuit breaker states for external MCP servers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CircuitState {
-    /// Normal operation — requests are allowed.
+    /// Normal operation: requests are allowed.
     Closed,
-    /// Too many failures — requests are blocked.
+    /// Too many failures: requests are blocked.
     Open,
-    /// Healing period — one test request is allowed.
+    /// Healing period: one test request is allowed.
     #[allow(dead_code)]
     HalfOpen,
 }
@@ -91,7 +91,7 @@ impl CircuitBreaker {
         }
     }
 
-    /// Record a successful request — resets failure count.
+    /// Record a successful request: resets failure count.
     pub fn record_success(&self) {
         if let Ok(mut inner) = self.state.lock() {
             inner.consecutive_failures = 0;
@@ -189,7 +189,7 @@ pub trait McpServerClient: Send + Sync {
             // in the registry HashMap (e.g., "test-python-tool_echo").
             // Uses the unified tool_qualify() function which handles both
             // already-prefixed names (strips redundant prefix) and bare names.
-            // The output is always {hyphenated-server}_{hyphenated-tool} —
+            // The output is always {hyphenated-server}_{hyphenated-tool}
             // tool_qualify is the single source of truth for tool naming.
             let prefixed_name = crate::mcp::tool_qualify(&server_name, &t.name);
             let schema = convert_input_schema(&t.input_schema);
@@ -306,7 +306,7 @@ async fn call_tool_pooled_async(
             let mut resolved_config = config.clone();
             crate::plugins_yaml::resolve_config_refs(&mut resolved_config.env, pool).await;
             // Create pool outside the lock to avoid holding it during spawn
-            // Use a fixed max pool cap (no env var — pool config comes from plugin config)
+            // Use a fixed max pool cap (no env var: pool config comes from plugin config)
             let max_pool: u32 = 5;
             let pool_size = config.pool_size.max(1).min(max_pool);
             let new_pool = McpClientPool::new(&resolved_config, pool_size)
@@ -366,7 +366,7 @@ pub fn clear_server_pools(server_name: &str) {
     }
 }
 
-/// Register an MCP client in the global registry (legacy — for init handshake only).
+/// Register an MCP client in the global registry (legacy: for init handshake only).
 pub fn register_client(name: &str, client: Box<dyn McpServerClient>) {
     // Client registration no longer needed for tool calls (pools handle that).
     // Keep for backward compat in case any code reads CLIENT_REGISTRY directly.
@@ -375,7 +375,7 @@ pub fn register_client(name: &str, client: Box<dyn McpServerClient>) {
     }
 }
 
-// Legacy client registry — kept for the to_mcp_tools() handshake path.
+// Legacy client registry: kept for the to_mcp_tools() handshake path.
 static CLIENT_REGISTRY: Lazy<std::sync::Mutex<HashMap<String, Arc<dyn McpServerClient>>>> =
     Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
 
@@ -676,7 +676,7 @@ impl McpServerClient for StdioMcpClient {
         let req = build_call_tool_request(id, name, arguments, None);
 
         // Use the configured timeout_secs for the request-response cycle.
-        // stdio transport had no timeout before — a hanging server would
+        // stdio transport had no timeout before: a hanging server would
         // block the caller indefinitely.
         let timeout_dur = std::time::Duration::from_secs(self.config.timeout_secs);
         let response = tokio::time::timeout(timeout_dur, process.send_request(&req, server_name))
@@ -963,7 +963,7 @@ struct McpClientPool {
     server_name: String,
 }
 
-/// One subprocess within a pool — exclusive access via its own Mutex.
+/// One subprocess within a pool: exclusive access via its own Mutex.
 struct PooledProcess {
     process: AsyncChildProcess,
     next_id: AtomicU64,

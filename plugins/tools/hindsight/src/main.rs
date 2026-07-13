@@ -1,9 +1,9 @@
 //! MCP server: hindsight memory recall, retain, and reflect.
 //!
 //! Provides three tools:
-//! - `hindsight_recall` — search memories via the hindsight service
-//! - `hindsight_retain` — store a memory
-//! - `hindsight_reflect` — ask hindsight to synthesize an answer
+//! - `hindsight_recall`: search memories via the hindsight service
+//! - `hindsight_retain`: store a memory
+//! - `hindsight_reflect`: ask hindsight to synthesize an answer
 //!
 //! Configuration is read from environment variables with sensible defaults:
 //! - HINDSIGHT_URL: service URL (default: http://hindsight:8888)
@@ -110,7 +110,7 @@ fn http_client() -> Result<reqwest::Client> {
 
 // ── Tool handlers ──
 
-/// Handle hindsight_recall — search memories.
+/// Handle hindsight_recall: search memories.
 async fn handle_recall(args: Value) -> Result<(String, bool)> {
     let c = config();
     let query = args["query"]
@@ -204,7 +204,7 @@ async fn handle_recall(args: Value) -> Result<(String, bool)> {
     }
 }
 
-/// Handle hindsight_retain — store a memory.
+/// Handle hindsight_retain: store a memory.
 async fn handle_retain(args: Value) -> Result<(String, bool)> {
     let content = args["content"]
         .as_str()
@@ -255,7 +255,7 @@ async fn handle_retain(args: Value) -> Result<(String, bool)> {
     }
 }
 
-/// Handle hindsight_reflect — synthesize an answer from memories.
+/// Handle hindsight_reflect: synthesize an answer from memories.
 async fn handle_reflect(args: Value) -> Result<(String, bool)> {
     let query = args["query"]
         .as_str()
@@ -317,7 +317,7 @@ async fn main() -> Result<()> {
                         "budget": {
                             "type": "string",
                             "enum": ["low", "mid", "high"],
-                            "description": "Recall budget — low is fastest, high is most thorough (default: from config)"
+                            "description": "Recall budget: low is fastest, high is most thorough (default: from config)"
                         },
                         "tags": {
                             "type": "string",

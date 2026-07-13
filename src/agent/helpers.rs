@@ -24,7 +24,7 @@ pub fn merge_usage(cumulative: &mut Option<Usage>, new_usage: Option<Usage>) {
 }
 
 /// Check if a database error is a foreign key violation (PostgreSQL code 23503).
-/// These indicate the thread was deleted or the FK constraint was broken —
+/// These indicate the thread was deleted or the FK constraint was broken
 /// the thread should be marked as failed rather than retried.
 fn is_fk_violation(e: &crate::error::Error) -> bool {
     if let crate::error::Error::Sqlx(sqlx::Error::Database(ref dberr)) = e {
@@ -50,7 +50,7 @@ pub async fn persist_or_abort(
         Ok(saved) => CreateMessageResult::Success(saved),
         Err(e) if is_fk_violation(&e) => {
             error!(
-                "FK violation inserting message for thread {} — marking thread as failed",
+                "FK violation inserting message for thread {}: marking thread as failed",
                 thread_id
             );
             // Mark the thread as failed
@@ -143,7 +143,7 @@ pub fn count_tokens(
         Ok(bpe) => bpe,
         Err(e) => {
             warn!(
-                "[tokens] Failed to load BPE encoding '{}': {} — falling back to char estimate",
+                "[tokens] Failed to load BPE encoding '{}': {}: falling back to char estimate",
                 encoding, e
             );
             return estimate_chars(messages);
@@ -171,7 +171,7 @@ pub fn count_tokens(
 ///   11–15:  truncate bodies >300 chars to 100-char preview
 ///   16+:    replace entire body with metadata-only label
 pub fn prune_old_tool_results(messages: &mut [ChatMessage], current_iter: u32) {
-    // Find the index of the last assistant message with tool_calls — this
+    // Find the index of the last assistant message with tool_calls: this
     // marks the most recent turn boundary. Tool results after it are kept.
     let last_tool_turn_idx = messages
         .iter()
@@ -184,7 +184,7 @@ pub fn prune_old_tool_results(messages: &mut [ChatMessage], current_iter: u32) {
         0..=5 => (usize::MAX, false), // no pruning
         6..=10 => (1000, false),      // moderate truncation
         11..=15 => (300, false),      // aggressive truncation
-        _ => (0, true),               // zero content — just the label
+        _ => (0, true),               // zero content: just the label
     };
 
     for msg in messages.iter_mut().take(keep_from) {
@@ -192,14 +192,14 @@ pub fn prune_old_tool_results(messages: &mut [ChatMessage], current_iter: u32) {
             if compact_mode {
                 let tool_name = msg.name.as_deref().unwrap_or("unknown");
                 msg.content = format!(
-                    "[Tool result for `{}` — {} total chars, omitted]",
+                    "[Tool result for `{}`: {} total chars, omitted]",
                     tool_name,
                     msg.content.len()
                 );
             } else if msg.content.len() > max_body_chars {
                 let preview: String = msg.content.chars().take(200).collect();
                 msg.content = format!(
-                    "[Pruned tool result — was {} chars] {}",
+                    "[Pruned tool result: was {} chars] {}",
                     msg.content.len(),
                     preview
                 );
@@ -214,7 +214,7 @@ pub fn prune_old_tool_results(messages: &mut [ChatMessage], current_iter: u32) {
 /// like `tool_a(), tool_b()` and **removes** the following tool-role
 /// messages entirely. This is necessary because OpenAI-compatible APIs
 /// require every `tool` message to be immediately preceded by an assistant
-/// message with `tool_calls` — keeping tool messages after stripping
+/// message with `tool_calls`: keeping tool messages after stripping
 /// `tool_calls` from the assistant would cause a 400 error.
 ///
 /// Tool messages are removed (not just compacted) because any `role: "tool"`
@@ -283,7 +283,7 @@ pub fn compact_old_assistant_messages(messages: &mut Vec<ChatMessage>, keep_rece
                 );
             }
         }
-        // Continue loop — indices have shifted, re-scan
+        // Continue loop: indices have shifted, re-scan
     }
 }
 
@@ -320,9 +320,9 @@ pub fn build_message_metadata_block(messages: &[ChatMessage], offset: usize) -> 
                     .as_ref()
                     .map(|calls| calls.iter().map(|tc| tc.function.name.as_str()).collect())
                     .unwrap_or_default();
-                format!(" — {}", names.join(", "))
+                format!(": {}", names.join(", "))
             } else if !msg.content.is_empty() && msg.content.len() < 200 {
-                format!(" — {}", msg.content)
+                format!(": {}", msg.content)
             } else {
                 String::new()
             };
@@ -353,7 +353,7 @@ pub fn build_message_metadata_block(messages: &[ChatMessage], offset: usize) -> 
 /// Strategy:
 /// 1. Separate system messages (always keep) from conversation messages.
 /// 2. Safety check: if system messages alone exceed PROMPT_CHAR_BUDGET_SOFT or
-///    comprise >90% of it, the task cannot meaningfully proceed — return an error.
+///    comprise >90% of it, the task cannot meaningfully proceed: return an error.
 /// 3. Keep the last N full assistant→tool cycles verbatim.
 /// 4. Replace everything before that with a compact metadata block.
 /// 5. Trim old messages until old_message_char_budget is satisfied.
@@ -488,7 +488,7 @@ pub fn condense_messages(
 /// seq-1+ messages reply in the platform thread using cause_external_id.
 ///
 /// If cause_external_id is None but the message is seq-1+, fall back to
-/// querying the cause message's external_id from the database — this
+/// querying the cause message's external_id from the database: this
 /// handles system-created threads (cron/kanban) where the seq-0 message
 /// was delivered asynchronously and its platform post_id wasn't available
 /// at enqueue time.
@@ -547,7 +547,7 @@ pub async fn enqueue_delivery(
             saved.msg_type, subtype, saved.thread_id, saved.content
         )
     } else if saved.msg_type == "summary" && platform == "cli" {
-        // Quote the seq-0 message for CLI delivery (not needed for Telegram — it uses reply threading)
+        // Quote the seq-0 message for CLI delivery (not needed for Telegram: it uses reply threading)
         match queries::get_cause_message(&ctx.pool, saved.thread_id).await {
             Ok(Some(cause)) => {
                 let cause_trimmed: String = cause.content.chars().take(100).collect();
@@ -591,7 +591,7 @@ pub async fn enqueue_delivery(
         cause_external_id: resolved_cause_external_id,
         cause_root_id: {
             // Look up the cause message's metadata for root_id (e.g. Mattermost
-            // thread root) — used when the user's message was inside an existing
+            // thread root): used when the user's message was inside an existing
             // thread, so bot replies reference the thread root rather than the
             // intermediate reply (Mattermost doesn't allow nested threads).
             queries::get_cause_message(&ctx.pool, saved.thread_id)

@@ -1,12 +1,12 @@
-//! mcp-server-prompt — standalone MCP server that generates the full LLM prompt.
+//! mcp-server-prompt: standalone MCP server that generates the full LLM prompt.
 //!
 //! Tools:
-//! - `generate` — generates the complete prompt including system prompt,
+//! - `generate`: generates the complete prompt including system prompt,
 //!   thread context, recent messages, summaries, skills, and planning instructions.
-//! - `compact-messages` — compacts a conversation by removing old assistant
+//! - `compact-messages`: compacts a conversation by removing old assistant
 //!   tool-call pairs, preserving the most recent messages.
 //!
-//! Standalone binary — pure prompt assembly inlined from prompt-tools.
+//! Standalone binary: pure prompt assembly inlined from prompt-tools.
 
 mod chat_message;
 mod compact;
@@ -254,7 +254,7 @@ async fn handle_generate_full(pool: &PgPool, args: &Value, meta: Option<McpMeta>
 
     for part in &all_parts {
         if part.starts_with("## MEMORY") || part.starts_with("## USER PROFILE") {
-            // This is the memory or user profile section — extract as memory
+            // This is the memory or user profile section: extract as memory
             if part.starts_with("## USER PROFILE") {
                 memory_text.push_str(part);
                 memory_text.push('\n');
@@ -479,7 +479,7 @@ async fn main() -> Result<()> {
                     "Generate the complete LLM prompt for a conversation, including system prompt \
                      (identity, tool guidance, memory, user profile), thread context (recent messages, \
                      summaries, skills, subtasks), and optional planning instructions. Returns the full \
-                     prompt as a JSON string. This is the single source of truth for prompt building — \
+                     prompt as a JSON string. This is the single source of truth for prompt building: \
                      no other prompt assembly is needed."
                     .to_string(),
                 input_schema: serde_json::json!({

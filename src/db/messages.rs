@@ -5,10 +5,10 @@ use crate::db::types::{Message, MessageDb, MessageNew};
 use crate::error::AppResult;
 
 // ---------------------------------------------------------------------------
-// Message query functions — simplified, no per-thread fields
+// Message query functions: simplified, no per-thread fields
 // ---------------------------------------------------------------------------
 
-/// Insert a new message (no status/channel/provider/model — those are on the thread).
+/// Insert a new message (no status/channel/provider/model: those are on the thread).
 pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> AppResult<Message> {
     let metadata_val: serde_json::Value =
         serde_json::from_str(&msg.metadata.to_string()).unwrap_or_default();
@@ -148,7 +148,7 @@ pub async fn update_message_embedding(
 }
 
 // ---------------------------------------------------------------------------
-// Hybrid retrieval: pgvector semantic search — two-stage recency-weighted
+// Hybrid retrieval: pgvector semantic search: two-stage recency-weighted
 // ---------------------------------------------------------------------------
 
 /// Search messages by embedding similarity with recency-weighted two-stage decay.
@@ -158,7 +158,7 @@ pub async fn update_message_embedding(
 /// rank higher than older ones with similar semantic match.
 ///
 /// The `embedding_vec` column and HNSW index are created by the startup migration.
-/// No fallback to TEXT-cast search — the two-stage decay is the only path.
+/// No fallback to TEXT-cast search: the two-stage decay is the only path.
 pub async fn search_messages_semantic(
     pool: &PgPool,
     embedding_str: &str,

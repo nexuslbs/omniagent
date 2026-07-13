@@ -1,15 +1,15 @@
-//! LLM provider abstraction — supports multiple backends with reasoning and caching.
+//! LLM provider abstraction: supports multiple backends with reasoning and caching.
 //!
 //! Providers are configured via plugin config (providers.yml with $env: references).
 //! The only hardcoded env var names are the infrastructure defaults set by the
 //! deployment repo: `OMNI_DIR`, `WORKSPACE_DIR`, and `LLM_PROVIDER`.
 //!
 //! The API key comes from the provider's plugin config (providers.yml with $env:
-//! references). The startup fallback is empty — no hardcoded env var names.
+//! references). The startup fallback is empty: no hardcoded env var names.
 //!
 //! OpenCode Go serves two API surfaces depending on the model:
-//! - `chat_completions` — OpenAI-compatible `/v1/chat/completions` (GLM, Kimi, DeepSeek)
-//! - `anthropic_messages` — Anthropic-compatible `/v1/messages` (MiniMax, Qwen 3.7)
+//! - `chat_completions`: OpenAI-compatible `/v1/chat/completions` (GLM, Kimi, DeepSeek)
+//! - `anthropic_messages`: Anthropic-compatible `/v1/messages` (MiniMax, Qwen 3.7)
 //!   API mode is auto-detected from the model name.
 
 use crate::err_msg;
@@ -24,10 +24,10 @@ use tokio::sync::Semaphore;
 use tracing::warn;
 
 // ---------------------------------------------------------------------------
-// Provider identification — String-based, extensible via plugin_registry
+// Provider identification: String-based, extensible via plugin_registry
 // ---------------------------------------------------------------------------
 
-/// A provider identifier — stores the plugin name.
+/// A provider identifier: stores the plugin name.
 ///
 /// Custom provider names work out of the box; no enum variants needed.
 /// Resolution against the plugin_registry happens at config-time via
@@ -48,7 +48,7 @@ impl fmt::Display for ProviderId {
 }
 
 // ---------------------------------------------------------------------------
-// Provider metadata — loaded from plugin manifests at startup
+// Provider metadata: loaded from plugin manifests at startup
 // ---------------------------------------------------------------------------
 
 /// Provider defaults loaded from plugin manifests (plugins/providers/*/plugin.json).
@@ -246,10 +246,10 @@ pub fn resolve_provider_api_mode(provider_name: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// API mode — determines which endpoint format to use
+// API mode: determines which endpoint format to use
 // ---------------------------------------------------------------------------
 
-/// API surface mode — some providers serve different endpoints per model.
+/// API surface mode: some providers serve different endpoints per model.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ApiMode {
     /// OpenAI-compatible `/chat/completions` (OpenAI SDK format).
@@ -354,7 +354,7 @@ impl LLMConfig {
 
         let api_mode = ApiMode::resolve(&provider_name, &model);
 
-        // No generic API key fallback — provider api_key comes from plugin config
+        // No generic API key fallback: provider api_key comes from plugin config
         // (providers.yml with $env: references), not from hardcoded env var names.
         let api_key = String::new();
 
@@ -370,7 +370,7 @@ impl LLMConfig {
     }
 }
 // ---------------------------------------------------------------------------
-// Per-provider throttling — limits concurrent API requests per provider
+// Per-provider throttling: limits concurrent API requests per provider
 // ---------------------------------------------------------------------------
 
 /// Per-provider concurrency throttler using semaphores.
@@ -603,7 +603,7 @@ struct OpenAiMessage {
     /// Tool calls requested by the model (OpenAI function calling format).
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallData>>,
-    /// Refusal message — some providers return this instead of content
+    /// Refusal message: some providers return this instead of content
     /// when the model refuses to respond (e.g., content filter).
     #[serde(default)]
     refusal: Option<String>,
@@ -704,13 +704,13 @@ impl LLMClient {
 
         // Check if this provider is an external subprocess provider
         let provider_name = &self.config.provider.0;
-        // Try external completion — clone Arc first, drop registry guard, then call complete
+        // Try external completion: clone Arc first, drop registry guard, then call complete
         let external_result = {
             let client_opt = {
                 let registry = crate::provider::registry::PROVIDER_REGISTRY.read().unwrap();
                 registry.get_cloned(provider_name)
             };
-            // Registry guard is dropped here — we have an independent Arc<ExternalProviderClient>
+            // Registry guard is dropped here: we have an independent Arc<ExternalProviderClient>
 
             client_opt.map(|client| {
                 let messages: Vec<serde_json::Value> = request.messages.iter()
@@ -786,7 +786,7 @@ impl LLMClient {
             self.config.base_url.trim_end_matches('/')
         );
 
-        // Build the JSON body — the opencode-go provider gets an extra
+        // Build the JSON body: the opencode-go provider gets an extra
         // `include_reasoning: true` flag.
         let mut body = serde_json::json!({
             "model": self.config.model,
@@ -990,7 +990,7 @@ impl LLMClient {
             });
         }
 
-        // Build request — auth header differs by provider
+        // Build request: auth header differs by provider
         let mut req = self
             .client
             .post(&url)

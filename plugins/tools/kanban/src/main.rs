@@ -1,4 +1,4 @@
-//! mcp-server-kanban — standalone MCP server for kanban task management.
+//! mcp-server-kanban: standalone MCP server for kanban task management.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
 //! Tools: create_kanban_task, list_kanban_tasks, update_kanban_task,
@@ -383,11 +383,11 @@ async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
             )
             .await?;
         } else if has_field_changes {
-            // Same status, other fields changed — log as "edited" with full previous values
+            // Same status, other fields changed: log as "edited" with full previous values
             insert_history(pool, &id_clone, "edited", None, None, Some(all_previous)).await?;
         }
     } else if has_field_changes {
-        // No status change, other fields changed — log as "edited" with full previous values
+        // No status change, other fields changed: log as "edited" with full previous values
         insert_history(pool, &id_clone, "edited", None, None, Some(all_previous)).await?;
     }
 

@@ -95,8 +95,8 @@ All of this should be plugin concerns. The agent should ask "give me relevant co
 ## Phase 4: Remove Qdrant References from db/types.rs
 
 ### Current:
-- `search_wiki_qdrant()` — Qdrant HTTP API call
-- `search_wiki()` — orchestrates text + Qdrant search
+- `search_wiki_qdrant()`: Qdrant HTTP API call
+- `search_wiki()`: orchestrates text + Qdrant search
 
 ### New:
 - Delete both functions (they're only called from context_builder.rs, which will use MCP tools instead)
@@ -111,32 +111,32 @@ All of this should be plugin concerns. The agent should ask "give me relevant co
 
 ## Implementation Order
 
-1. **Phase 2** (context_builder) — core change, biggest impact
+1. **Phase 2** (context_builder): core change, biggest impact
    - Add MCP tool call mechanism to context_builder
    - Remove wiki text search
    - Remove HashVectorizer
    - Done: core no longer knows about wiki paths or search
 
-2. **Phase 1** (plugin interface) — define the `search_context` tool
+2. **Phase 1** (plugin interface): define the `search_context` tool
    - Create a memory/search plugin with `search_context` tool
    - Plugin handles wiki text + Qdrant search
    - Plugin owns the wiki directory walking and embedding logic
 
-3. **Phase 3** (vectorizer removal) — remove background vectorization from core
+3. **Phase 3** (vectorizer removal): remove background vectorization from core
    - The plugin implements its own vectorization (via cron or timer)
    - Core no longer spawns vectorizer workers
 
-4. **Phase 4+5** (cleanup) — remove dead db functions, config fields, settings
+4. **Phase 4+5** (cleanup): remove dead db functions, config fields, settings
    - Delete `db/types.rs` search functions
    - Remove vectorization from AgentConfig and settings definitions
 
 ## Risks
 
-1. **Context quality regression** — if `search_context` tool is slow or unavailable, context assembly degrades. Solution: graceful fallback (skip search results block, agent still works without enrichment).
+1. **Context quality regression**: if `search_context` tool is slow or unavailable, context assembly degrades. Solution: graceful fallback (skip search results block, agent still works without enrichment).
 
-2. **Plugin development cost** — the memory/search plugin needs to replicate what core currently does (wiki text search, Qdrant integration). But this is the right separation — omni-stack provides the plugin, core stays clean.
+2. **Plugin development cost**: the memory/search plugin needs to replicate what core currently does (wiki text search, Qdrant integration). But this is the right separation: omni-stack provides the plugin, core stays clean.
 
-3. **Scheduling** — vectorization currently runs as a background tokio task. The plugin would need its own scheduling mechanism (Hermes cron job, internal timer, etc.).
+3. **Scheduling**: vectorization currently runs as a background tokio task. The plugin would need its own scheduling mechanism (Hermes cron job, internal timer, etc.).
 
 ## Success Criteria
 

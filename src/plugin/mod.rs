@@ -1,4 +1,4 @@
-//! Plugin management system — manifest types, installer, and dynamic enum refresh.
+//! Plugin management system: manifest types, installer, and dynamic enum refresh.
 //!
 //! This module provides:
 //! - Plugin manifest types (from plugin.json on disk)
@@ -129,14 +129,14 @@ pub enum FieldType {
     Integer,
     Enum,
     MultiSelect,
-    /// Select a provider plugin — options populated from discovered provider plugins
+    /// Select a provider plugin: options populated from discovered provider plugins
     Provider,
-    /// Select a model — depends on a `type: "provider"` field via `depends_on`.
+    /// Select a model: depends on a `type: "provider"` field via `depends_on`.
     /// Options populated from the selected provider's available models.
     Model,
-    /// Select a tool plugin — options populated from discovered tool plugins
+    /// Select a tool plugin: options populated from discovered tool plugins
     Tool,
-    /// Select a platform plugin — options populated from discovered platform plugins
+    /// Select a platform plugin: options populated from discovered platform plugins
     Platform,
 }
 
@@ -169,7 +169,7 @@ pub fn load_manifest(path: &str) -> AppResult<PluginManifest> {
 }
 
 // ---------------------------------------------------------------------------
-// Dynamic enum refresh (refresh_url support) — cache shared with plugins_yaml
+// Dynamic enum refresh (refresh_url support): cache shared with plugins_yaml
 // ---------------------------------------------------------------------------
 
 /// A cached set of dynamic enum values (e.g., model IDs from a /v1/models endpoint).

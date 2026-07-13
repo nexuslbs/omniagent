@@ -6,14 +6,14 @@ This file contains tests for install, uninstall, update, remove, download,
 enable, and disable of plugins. New tests should not remove old tests.
 
 **RUNNING:** These tests MUST run inside the omniagent container, which runs
-as root. Do NOT run them from the host — the host may not have the same
+as root. Do NOT run them from the host: the host may not have the same
 filesystem permissions, and the agent's auto-detection of plugin directory
 changes only works from within the container's filesystem view.
 
     docker exec -e PYTHONUNBUFFERED=1 omni-omniagent-1 python3 -u \\
         /opt/workspace/omni-stack/scripts/tests.py
 
-GROUP 1 — Original Remove API tests (idempotent, restored from git history):
+GROUP 1: Original Remove API tests (idempotent, restored from git history):
   A1-A3: Source NOT in YAML (built-in, bundled, remote)
   B1-B3: Source IN YAML (built-in, bundled, remote)
   C1:    YAML entry but no disk (phantom plugin)
@@ -22,11 +22,11 @@ GROUP 1 — Original Remove API tests (idempotent, restored from git history):
   F1-F2: Name collision tests (bundled + remote same name)
   Each test is self-contained: SETUP → RUN → VERIFY → CLEANUP.
 
-GROUP 2 — Source-aware Remove API tests:
+GROUP 2: Source-aware Remove API tests:
   Tests 1-7: Remove scenarios with explicit source query parameter.
   Git hygiene at start / discard changes at end.
 
-GROUP 3 — File upload tests:
+GROUP 3: File upload tests:
   Tests 8-9: Explorer file upload + Kanban-scoped file upload.
 
 Running twice on a clean repo produces identical results.
@@ -279,7 +279,7 @@ def mkdir_p(path):
 
 # ── Save/Restore state (per-test) ────────────────────────────────────
 # Each test may call backup_* and restore_* inside its try/finally.
-# The .bak file is the per-test contract — do not nest backup/restore.
+# The .bak file is the per-test contract: do not nest backup/restore.
 
 def backup_plugins_yml():
     shutil.copy2(f"{WORKSPACE}/plugins.yml", f"{WORKSPACE}/plugins.yml.bak")
@@ -354,7 +354,7 @@ def remove_bundled_plugin(name, plugin_type="tools"):
 def ensure_remote_plugin(name, plugin_type="tools"):
     """Install a remote plugin from the local repo if not already installed."""
     remote_dir = f"{WORKSPACE}/plugins/{plugin_type}/.remote/{name}"
-    # Check plugin.json exists (not just the directory — may be empty from failed cleanup)
+    # Check plugin.json exists (not just the directory: may be empty from failed cleanup)
     plugin_json = f"{remote_dir}/{plugin_type}/{name}/plugin.json"
     if exists(plugin_json):
         return  # already installed with files
@@ -456,7 +456,7 @@ def expect_error(resp, substring):
     assert substring.lower() in err_text, f"expected '{substring}' in error, got: {resp[1]}"
 
 # ═══════════════════════════════════════════════════════════════════════
-#  GROUP 1 — Original Remove API tests (idempotent, restored from git)
+#  GROUP 1: Original Remove API tests (idempotent, restored from git)
 # ═══════════════════════════════════════════════════════════════════════
 #
 # Group A: Source NOT in YAML (3 tests)
@@ -628,7 +628,7 @@ def test_c1():
     # Safety check: plugin must not exist anywhere (just check omni-stack paths)
     for t in ["tools", "platforms", "providers"]:
         p = f"{WORKSPACE}/plugins/{t}/{plugin}"
-        assert not os.path.exists(p), f"Plugin '{plugin}' exists at {p} — test would fail!"
+        assert not os.path.exists(p), f"Plugin '{plugin}' exists at {p}: test would fail!"
 
     backup_plugins_yml()
     try:
@@ -737,7 +737,7 @@ def test_e2():
         restart_agent()
 
 
-# ── F1: Name collision — bundled source, both exist ──────────────────
+# ── F1: Name collision: bundled source, both exist ──────────────────
 
 def test_f1():
     """Same name bundled+remote, YAML source=bundled → removes bundled only"""
@@ -766,7 +766,7 @@ def test_f1():
         restart_agent()
 
 
-# ── F2: Name collision — remote source, both exist ───────────────────
+# ── F2: Name collision: remote source, both exist ───────────────────
 
 def test_f2():
     """Same name bundled+remote, YAML source=remote → removes remote only"""
@@ -797,7 +797,7 @@ def test_f2():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  GROUP 2 — Source-aware Remove API tests
+#  GROUP 2: Source-aware Remove API tests
 # ═══════════════════════════════════════════════════════════════════════
 #
 # These find applicable plugins at runtime and test with explicit source.
@@ -862,7 +862,7 @@ def test_3():
             shutil.copy2(remote_yml_bak, f"{WORKSPACE}/remote.yml")
             os.remove(remote_yml_bak)
         # Use download API to restore .remote/ directory from git instead of
-        # manually copying files — also validates the download endpoint works
+        # manually copying files: also validates the download endpoint works
         # with a proper remote.yml + plugins.yml entry
         try:
             api_post(f"/plugins/{name}/download", {"source": "remote"})
@@ -916,7 +916,7 @@ def test_7():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  GROUP 3 — File upload tests
+#  GROUP 3: File upload tests
 # ═══════════════════════════════════════════════════════════════════════
 
 _UPLOAD_FILES = []
@@ -1007,7 +1007,7 @@ def test_9():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  GROUP 4 — Source-required validation tests
+#  GROUP 4: Source-required validation tests
 # ═══════════════════════════════════════════════════════════════════════
 #
 # Every plugin action MUST receive a `source` parameter. These tests
@@ -1036,11 +1036,11 @@ def expect_source_required(method, url, body=None):
     except urllib.error.HTTPError as e:
         raw = e.read()
         if e.code == 422:
-            # Axum deserialization error — source field is missing entirely
+            # Axum deserialization error: source field is missing entirely
             err_text = raw.decode("utf-8", errors="replace").lower()
             assert "source" in err_text, \
                 f"expected 'source' in error, got HTTP {e.code}: {raw.decode()}"
-            return  # 422 implies source was missing from the body — acceptable
+            return  # 422 implies source was missing from the body: acceptable
         result = json.loads(raw.decode("utf-8", errors="replace"))
         assert not result.get("success", True), f"expected error, got success: {result}"
         err_text = json.dumps(result).lower()
@@ -1193,7 +1193,7 @@ def test_dashboard_pages():
     assert js is None or "error" not in js, \
         f"GET / returned JSON error instead of HTML SPA"
     assert '"error":"Not found"' not in text, \
-        "SPA fallback returned 'Not found' — dist/index.html is missing or bind mount is stale"
+        "SPA fallback returned 'Not found': dist/index.html is missing or bind mount is stale"
 
     # ── 4. Verify a page's inner data loading works ──
     # The tools page does: apiGet("/plugins") + apiGet("/mcp/tools")
@@ -1253,7 +1253,7 @@ def test_dashboard_plugin_filters():
     filtered pages (threads, messages, channels).
     """
     # ── 1. Plugin pages with filter URL params (tools, providers, platforms) ──
-    # These are SPA pages — the server serves index.html for all routes.
+    # These are SPA pages: the server serves index.html for all routes.
     # The filter bar is rendered client-side. We verify the page loads cleanly
     # with various filter URL params, and the API data that feeds filters is valid.
 
@@ -1265,20 +1265,20 @@ def test_dashboard_plugin_filters():
         assert code == 200, f"GET {page} returned {code}"
         assert "<!DOCTYPE html>" in text, f"GET {page} did not return SPA HTML"
 
-        # With single filter param — source
+        # With single filter param: source
         code, text, js = _dash_get(f"{page}?source=built-in")
         assert code == 200, f"GET {page}?source=built-in returned {code}"
         assert "<!DOCTYPE html>" in text, f"GET {page} with source filter did not return SPA HTML"
 
-        # With single filter param — status
+        # With single filter param: status
         code, text, js = _dash_get(f"{page}?status=disabled")
         assert code == 200, f"GET {page}?status=disabled returned {code}"
 
-        # With single filter param — enabled
+        # With single filter param: enabled
         code, text, js = _dash_get(f"{page}?enabled=yes")
         assert code == 200, f"GET {page}?enabled=yes returned {code}"
 
-        # With single filter param — name
+        # With single filter param: name
         code, text, js = _dash_get(f"{page}?name=memory")
         assert code == 200, f"GET {page}?name=memory returned {code}"
 
@@ -1401,7 +1401,7 @@ def check_git_clean():
     dirty = _git_status(OMNI_STACK_DIR)
     if dirty:
         raise RuntimeError(
-            f"omni-stack repo has unstaged changes — cannot run tests safely:\n{dirty}"
+            f"omni-stack repo has unstaged changes: cannot run tests safely:\n{dirty}"
         )
 
 def discard_all_changes():
@@ -1471,7 +1471,7 @@ def get_plugin_type(name):
     return None
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Test helpers — each test is one action x one source x one type
+#  Test helpers: each test is one action x one source x one type
 
 def _assert_yaml_state(name, ptype, expect_enabled=None, expect_source=None):
     entry = yaml_get(ptype, name)
@@ -1639,11 +1639,11 @@ def test_config_update(name, config_body):
     assert success, f"config update {name} failed: {resp}"
     return resp
 
-#  GROUP 6 — Comprehensive Plugin Action Tests
+#  GROUP 6: Comprehensive Plugin Action Tests
 # ═══════════════════════════════════════════════════════════════════════
 #
 # For each action that requires source: enable, disable, install, reinstall,
-# download, remove — tests for built-in, bundled, and remote variants.
+# download, remove: tests for built-in, bundled, and remote variants.
 # Also tests: config update, name collisions, cross-type actions.
 
 # ── 6.1: Tool enable/disable for each source variant ──────────────────
@@ -1810,7 +1810,7 @@ def test_t6_remove_no_source_tool():
     test_remove_no_source(name)
 
 
-# ── 6.5: Cross-type — platform action tests ───────────────────────────
+# ── 6.5: Cross-type: platform action tests ───────────────────────────
 
 def test_t6_enable_platform():
     """Enable a bundled platform plugin → success"""
@@ -1835,7 +1835,7 @@ def test_t6_disable_platform():
     test_enable_source(name, source)
 
 
-# ── 6.6: Cross-type — provider action tests ───────────────────────────
+# ── 6.6: Cross-type: provider action tests ───────────────────────────
 
 def test_t6_enable_provider():
     """Enable a bundled provider plugin → success"""
@@ -1988,7 +1988,7 @@ def test_t6_collision_enable_remote():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  GROUP 7 — Memory Edit/Upload Tests
+#  GROUP 7: Memory Edit/Upload Tests
 # ═══════════════════════════════════════════════════════════════════════
 
 import os as _mem_os, json as _mem_json, shutil as _mem_shutil
@@ -2091,11 +2091,11 @@ def test_m4_prompt_verify():
     mem_written = "This is a test memory for profile testing."
     soul_written = "This is a test soul for profile testing."
 
-    # 1. Read back via API — confirms the same as written
+    # 1. Read back via API: confirms the same as written
     mem_api = _check_memory_text_exact(TEST_PROFILE, "memory", mem_written)
     soul_api = _check_memory_text_exact(TEST_PROFILE, "soul", soul_written)
 
-    # 2. Read from disk — all 3 should match
+    # 2. Read from disk: all 3 should match
     with open(f"{TEST_PROFILE_DIR}/memories/MEMORY.md") as f:
         mem_disk = f.read().strip()
     with open(f"{TEST_PROFILE_DIR}/memories/USER.md") as f:
@@ -2119,7 +2119,7 @@ def test_m5_edit_update():
     _check_memory_text_exact(TEST_PROFILE, "memory", new_mem)
     _check_memory_text_exact(TEST_PROFILE, "soul", new_soul)
 
-    # 2. From disk — all match
+    # 2. From disk: all match
     with open(f"{TEST_PROFILE_DIR}/memories/MEMORY.md") as f:
         assert f.read().strip() == new_mem
     with open(f"{TEST_PROFILE_DIR}/memories/USER.md") as f:
@@ -2190,7 +2190,7 @@ def test_m9_cleanup():
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  GROUP 8 — "Add" (install-git) tests
+#  GROUP 8: "Add" (install-git) tests
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_t8_add_remote_new():
@@ -2340,7 +2340,7 @@ def test_mm9_e2e():
     assert nd.get("status") == "enabled", f"noop status={nd.get('status')}, expected enabled"
     print(f"[noop status=enabled]")
 
-    # 3. Run mattermost setup (idempotent — may already exist)
+    # 3. Run mattermost setup (idempotent: may already exist)
     try:
         req = urllib.request.Request(f"{BASE}/api/plugins/mattermost/setup", method="POST", headers={"Content-Type": "application/json"})
         r = urllib.request.urlopen(req, timeout=15)
@@ -2362,7 +2362,7 @@ def test_mm9_e2e():
     })
     print("[mattermost config updated with access_token]")
 
-    # Ensure prompt plugin is enabled — the executor needs prompt_generate
+    # Ensure prompt plugin is enabled: the executor needs prompt_generate
     # to process incoming messages through the channel handler.
     api_post_body("/plugins/prompt/enable", {"source": "built-in"})
     import time as _time
@@ -2418,7 +2418,7 @@ def test_mm9_e2e():
     testuser_id = user_resp.get("id")
     print(f"[testuser id={testuser_id}]")
 
-    # Reset testuser password via admin API — PUT /api/v4/users/{id}/password with {"new_password": "..."}
+    # Reset testuser password via admin API: PUT /api/v4/users/{id}/password with {"new_password": "..."}
     reset_data = json.dumps({"new_password": test_pass}).encode()
     reset_req = urllib.request.Request(
         f"{MM}/api/v4/users/{testuser_id}/password",
@@ -2507,7 +2507,7 @@ def test_mm9_e2e():
     assert False, "Noop provider did not respond within 35s"
 
 # ═══════════════════════════════════════════════════════════════════════
-#  GROUP 10 — Disabled Plugin Visibility Regression Tests
+#  GROUP 10: Disabled Plugin Visibility Regression Tests
 # ═══════════════════════════════════════════════════════════════════════
 #  These tests verify that bundled plugins with only a plugin.json file
 #  (no entry in plugins.yml) still appear in the API listing as disabled,
@@ -2588,13 +2588,13 @@ def _assert_plugin_visible(name, plugin_type, expect_visible=True):
         # test-2 should not be visible, and test-1 should not be visible after cleanup
         assert p is None, f"{name} ({plugin_type}) should NOT be visible in API but was found with status={p.get('status')}"
 
-# ── V1: Tool — disabled bundled tool visible in API ───────────────────
+# ── V1: Tool: disabled bundled tool visible in API ───────────────────
 
 def test_v1_disabled_tool_visible():
     """Bundled tool with only plugin.json (no yml entry) → visible as disabled."""
     type_dir, name, ptype = "tools", "test-1", "tool"
     try:
-        # Phase 1: Start clean — remove test-1 and test-2 dirs if they exist
+        # Phase 1: Start clean: remove test-1 and test-2 dirs if they exist
         for n in ["test-1", "test-2"]:
             d = _plugin_dir(type_dir, n)
             if os.path.exists(d):
@@ -2616,7 +2616,7 @@ def test_v1_disabled_tool_visible():
         _remove_test_plugin_dir(type_dir)
         time.sleep(6)  # wait for cleanup to be detected
 
-# ── V2: Platform — disabled bundled platform visible in API ───────────
+# ── V2: Platform: disabled bundled platform visible in API ───────────
 
 def test_v2_disabled_platform_visible():
     """Bundled platform with only plugin.json (no yml entry) → visible as disabled."""
@@ -2640,7 +2640,7 @@ def test_v2_disabled_platform_visible():
         _remove_test_plugin_dir(type_dir)
         time.sleep(6)
 
-# ── V3: Provider — disabled bundled provider visible in API ───────────
+# ── V3: Provider: disabled bundled provider visible in API ───────────
 
 def test_v3_disabled_provider_visible():
     """Bundled provider with only plugin.json (no yml entry) → visible as disabled."""
@@ -2669,7 +2669,7 @@ def test_v3_disabled_provider_visible():
 PROMPT_CHANNEL = None  # resolved in setup
 
 # ═══════════════════════════════════════════════════════════════════════
-#  GROUP 11 — Prompt Plugin Tests
+#  GROUP 11: Prompt Plugin Tests
 # ═══════════════════════════════════════════════════════════════════════
 
 def _resolve_prompt_channel():
@@ -2961,7 +2961,7 @@ def test_p7_missing_messages_field():
         assert "Missing required" in data or "messages" in data or "error" in data.lower(), \
             f"Expected error message about missing messages, got: {data}"
     else:
-        # It returned something unexpected — but shouldn't crash
+        # It returned something unexpected: but shouldn't crash
         assert True
 
 def test_p7_empty_messages():
@@ -3002,7 +3002,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     print("=" * 60)
-    print("GROUP 1 — Original Remove API tests (idempotent)")
+    print("GROUP 1: Original Remove API tests (idempotent)")
     print("=" * 60)
 
     for fn in [
@@ -3016,28 +3016,28 @@ if __name__ == "__main__":
         test(fn)
 
     print(f"\n{'=' * 60}")
-    print("GROUP 2 — Source-aware Remove API tests")
+    print("GROUP 2: Source-aware Remove API tests")
     print(f"{'=' * 60}")
 
     for fn in [test_1, test_2, test_3, test_4, test_5, test_6, test_7]:
         test(fn)
 
     print(f"\n{'=' * 60}")
-    print("GROUP 3 — File upload tests")
+    print("GROUP 3: File upload tests")
     print(f"{'=' * 60}")
 
     for fn in [test_8, test_9]:
         test(fn)
 
     print(f"\n{'=' * 60}")
-    print("GROUP 4 — Source-required validation tests")
+    print("GROUP 4: Source-required validation tests")
     print(f"{'=' * 60}")
 
     for fn in [test_s1, test_s2, test_s3, test_s4, test_s5, test_s6]:
         test(fn)
 
     print(f"\n{'=' * 60}")
-    print("GROUP 5 — Dashboard page loading tests")
+    print("GROUP 5: Dashboard page loading tests")
     print(f"{'=' * 60}")
 
     for fn in [test_dashboard_pages, test_dashboard_plugin_filters]:
@@ -3045,7 +3045,7 @@ if __name__ == "__main__":
 
 
     print(f"\n{'=' * 60}")
-    print("GROUP 6 — Comprehensive Plugin Action Tests")
+    print("GROUP 6: Comprehensive Plugin Action Tests")
     print(f"{'=' * 60}")
 
     for fn in [
@@ -3080,7 +3080,7 @@ if __name__ == "__main__":
         test(fn)
 
     print(f"\n{'=' * 60}")
-    print("GROUP 7 — Memory Edit/Upload Tests")
+    print("GROUP 7: Memory Edit/Upload Tests")
     print(f"{'=' * 60}")
 
     for fn in [
@@ -3107,7 +3107,7 @@ if __name__ == "__main__":
         test(fn)
 
 
-    print("GROUP 8 — Add/Install-Git Tests")
+    print("GROUP 8: Add/Install-Git Tests")
     print(f"{'=' * 60}")
 
     for fn in [
@@ -3118,7 +3118,7 @@ if __name__ == "__main__":
         test(fn)
 
     print(f"\n{'=' * 60}")
-    print("GROUP 10 — Disabled Plugin Visibility Regression Tests")
+    print("GROUP 10: Disabled Plugin Visibility Regression Tests")
     print(f"{'=' * 60}")
 
     for fn in [
@@ -3129,7 +3129,7 @@ if __name__ == "__main__":
         test(fn)
 
     print(f"\n{'=' * 60}\n")
-    print("GROUP 11 — Prompt Plugin Tests")
+    print("GROUP 11: Prompt Plugin Tests")
     print(f"{'=' * 60}")
 
     # Enable the prompt plugin before running its tests (it's disabled by default)
@@ -3193,7 +3193,7 @@ if __name__ == "__main__":
     print(f"Results: {tests_pass}/{tests_run} passed, {tests_fail} failed")
     print(f"{'=' * 60}")
 
-    # Discard any unstaged changes — runs even on failure
+    # Discard any unstaged changes: runs even on failure
     discard_all_changes()
 
     sys.exit(0 if tests_fail == 0 else 1)

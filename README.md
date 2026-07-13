@@ -5,20 +5,20 @@ Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP too
 ## Features
 
 | **Hindsight Memory** | Persistent cross-session memory via omniagent-hindsight, with automatic population from new messages and semantic recall in context assembly |
-| **Hindsight Populator** | Background action (deactivated by default) that retains messages into hindsight every 15 minutes. Activate via `UPDATE cron_jobs SET active = true WHERE id = 'hindsight_populator'`. Cron schedules use standard 5-field Linux format (minute hour day month weekday — the leading seconds field is not used). |
-| **Plugin Config References** | Config values support `$secret:name` (load from secrets DB) and `$env:VAR_NAME` (load from env var) prefixes — keeps secrets out of YAML, single source of truth for shared config. |
+| **Hindsight Populator** | Background action (deactivated by default) that retains messages into hindsight every 15 minutes. Activate via `UPDATE cron_jobs SET active = true WHERE id = 'hindsight_populator'`. Cron schedules use standard 5-field Linux format (minute hour day month weekday: the leading seconds field is not used). |
+| **Plugin Config References** | Config values support `$secret:name` (load from secrets DB) and `$env:VAR_NAME` (load from env var) prefixes: keeps secrets out of YAML, single source of truth for shared config. |
 
 ### 🧠 Context Builder & Grounding
-- **Priority-ranked prompt assembly** (`ContextBuilder`) — NeverTrim (system, MEMORY.md, subtasks) → High (thread messages) → Normal (tool defs) → Low (retrieved content)
-- **Token budgeting** — per-block character caps, lowest-priority blocks dropped when over budget
-- **Grounding policy** — embedded in every system prompt: prefer evidence, state uncertainty, cite references
-- **Evidence metadata** — `messages.metadata` captures context diagnostics (`context.selected_message_ids`, `block_counts`, `dropped_blocks`, `total_chars`) and grounding flags
+- **Priority-ranked prompt assembly** (`ContextBuilder`): NeverTrim (system, MEMORY.md, subtasks) → High (thread messages) → Normal (tool defs) → Low (retrieved content)
+- **Token budgeting**: per-block character caps, lowest-priority blocks dropped when over budget
+- **Grounding policy**: embedded in every system prompt: prefer evidence, state uncertainty, cite references
+- **Evidence metadata**: `messages.metadata` captures context diagnostics (`context.selected_message_ids`, `block_counts`, `dropped_blocks`, `total_chars`) and grounding flags
 
 ### 🔍 Hybrid Retrieval
 - **4-tier retrieval** controlled by profile `retrieval_aggressiveness` (0-3):
   - Level 1: ILIKE text search in messages + wiki text search (walkdir)
   - Level 2+: pgvector semantic search (`<=>` cosine similarity on message embeddings) + Qdrant vector search on wiki content
-- **Query classifier** — heuristic (Greeting/Command/FollowUp/Factual/ExternalQuery) gates whether retrieval runs
+- **Query classifier**: heuristic (Greeting/Command/FollowUp/Factual/ExternalQuery) gates whether retrieval runs
 - Re-ranking with recency and same-thread boosts
 
 ### 💾 Memory Promotion
@@ -32,35 +32,35 @@ Provider plugins can define a `refresh_url` on `enum` type `config_schema` field
 
 **How it works:**
 
-1. **Plugin definition** — a `ConfigSchemaField` with `type: "enum"` and a `refresh_url` pointing to an OpenAI-compatible `/v1/models` endpoint:
+1. **Plugin definition**: a `ConfigSchemaField` with `type: "enum"` and a `refresh_url` pointing to an OpenAI-compatible `/v1/models` endpoint:
    ```json
    { "key": "default_model", "label": "Default Model", "type": "enum", "refresh_url": "https://api.deepseek.com/v1/models" }
    ```
 
-2. **On-demand refresh** — `POST /api/plugins/{name}/refresh-models` fetches models from the URL, parses `{data: [{id: "model-name"}, ...]}` responses, and updates an in-memory cache.
+2. **On-demand refresh**: `POST /api/plugins/{name}/refresh-models` fetches models from the URL, parses `{data: [{id: "model-name"}, ...]}` responses, and updates an in-memory cache.
 
-3. **In-memory cache** — `DYNAMIC_ENUM_CACHE` (Mutex\<HashMap\<String, DynamicEnumEntry\>\>) with a 5-minute TTL. Cache is checked when enriching plugin data for API responses (`enrich_plugin()`).
+3. **In-memory cache**: `DYNAMIC_ENUM_CACHE` (Mutex\<HashMap\<String, DynamicEnumEntry\>\>) with a 5-minute TTL. Cache is checked when enriching plugin data for API responses (`enrich_plugin()`).
 
-4. **API key resolution** — for authenticated endpoints, the key is resolved from the provider's resolved plugin config (`detail.config.api_key`), sent as a `Bearer` token.
+4. **API key resolution**: for authenticated endpoints, the key is resolved from the provider's resolved plugin config (`detail.config.api_key`), sent as a `Bearer` token.
 
-5. **Graceful fallback** — if the fetch fails, existing `allowed_values` are preserved (either hardcoded fallbacks in `plugin.json` or the previous cache entry).
+5. **Graceful fallback**: if the fetch fails, existing `allowed_values` are preserved (either hardcoded fallbacks in `plugin.json` or the previous cache entry).
 
 **Currently used by:**
-- **deepseek** — `refresh_url: "https://api.deepseek.com/v1/models"` with static fallback `["deepseek-v4-flash", "deepseek-v3", "deepseek-r1"]`
-- **opencode-go** — `refresh_url: "https://opencode.ai/zen/go/v1/models"` (no static fallback)
+- **deepseek**: `refresh_url: "https://api.deepseek.com/v1/models"` with static fallback `["deepseek-v4-flash", "deepseek-v3", "deepseek-r1"]`
+- **opencode-go**: `refresh_url: "https://opencode.ai/zen/go/v1/models"` (no static fallback)
 
 ### 🪪 Plugin Config References (`$secret:` / `$env:`)
 
 Plugin config fields can reference values from external sources instead of storing them directly in the YAML file. This keeps secrets out of version control and provides a single source of truth for shared values (URLs, API endpoints, etc.).
 
 **Prefix syntax:**
-- `$secret:name` — load from the `/secrets` page (DB-backed), e.g. `$secret:my_api_key`
-- `$env:VAR_NAME` — load from environment variable, e.g. `$env:DEEPSEEK_API_KEY`
+- `$secret:name`: load from the `/secrets` page (DB-backed), e.g. `$secret:my_api_key`
+- `$env:VAR_NAME`: load from environment variable, e.g. `$env:DEEPSEEK_API_KEY`
 
 **Where it works:**
 Any string or secret field in platform/tool/provider config forms. The prefix is resolved at config consumption time:
-- `$env:` is resolved during `build_plugin_detail()` — synchronous env var lookup
-- `$secret:` is resolved in the HTTP handler — async DB query against the `secrets` table
+- `$env:` is resolved during `build_plugin_detail()`: synchronous env var lookup
+- `$secret:` is resolved in the HTTP handler: async DB query against the `secrets` table
 
 **Example YAML:**
 ```yaml
@@ -84,22 +84,22 @@ opencode-go:
 The value is read from the process environment at runtime.
 
 **Dashboard UI:**
-Every string and secret config field has a 🔗 toggle button. Click it to switch to reference mode — choose between "Secret" (load from secrets DB) or "Env Var" (load from env var), then enter the name.
+Every string and secret config field has a 🔗 toggle button. Click it to switch to reference mode: choose between "Secret" (load from secrets DB) or "Env Var" (load from env var), then enter the name.
 
 ### 🔌 Plugin System (MCP Tools, Platforms, Providers)
 
 OmniAgent has a three-source plugin system:
 
-- **Built-in** (`/app/plugins/{type}/{name}/`) — workspace member crates compiled as part of omniagent
-- **Bundled** (`{workspace_dir}/plugins/{type}/{name}/`) — standalone crates shipped with omni-stack
-- **Remote** (`{data_dir}/plugins/{type}/.remote/{name}/`) — git-cloned plugins from external repos
+- **Built-in** (`/app/plugins/{type}/{name}/`): workspace member crates compiled as part of omniagent
+- **Bundled** (`{workspace_dir}/plugins/{type}/{name}/`): standalone crates shipped with omni-stack
+- **Remote** (`{data_dir}/plugins/{type}/.remote/{name}/`): git-cloned plugins from external repos
 
-Each plugin has a **type** (mcp/tool, platform, provider) and a **category** determined by YAML config and disk state. At most one source can be enabled per plugin name — enabling a different source overwrites the YAML entry.
+Each plugin has a **type** (mcp/tool, platform, provider) and a **category** determined by YAML config and disk state. At most one source can be enabled per plugin name: enabling a different source overwrites the YAML entry.
 
 **Key rules:**
-- Builtin tools are disabled by default — must be explicitly added to YAML with `enabled: true` and `builtin: true`
+- Builtin tools are disabled by default: must be explicitly added to YAML with `enabled: true` and `builtin: true`
 - If YAML has a tool without `builtin: true`, the builtin source is ignored in favor of the bundled/remote one
-- Builtin plugins with no YAML entry appear as disabled — Enable creates a YAML entry with `builtin: true`
+- Builtin plugins with no YAML entry appear as disabled: Enable creates a YAML entry with `builtin: true`
 - Erroneous binary-only bundled copies (cron, kanban, memory, etc.) show as duplicated with a yellow badge
 - Install/Reinstall automatically falls back to the builtin source if the bundled dir has no source code
 
@@ -108,10 +108,10 @@ Managed via the Dashboard UI (/tools, /platforms, /providers pages), YAML files,
 For full internal documentation, see [AGENTS.md](AGENTS.md).
 
 ### 🔌 MCP External Servers
-- **stdio transport** — spawn subprocesses, JSON-RPC 2.0 over stdin/stdout
-- **HTTP transport** — connect to remote MCP servers via HTTP POST
-- **Circuit breaker** — automatic disable after N consecutive failures
-- **Dynamic tool registry** — external tools auto-merge with built-in tools at startup
+- **stdio transport**: spawn subprocesses, JSON-RPC 2.0 over stdin/stdout
+- **HTTP transport**: connect to remote MCP servers via HTTP POST
+- **Circuit breaker**: automatic disable after N consecutive failures
+- **Dynamic tool registry**: external tools auto-merge with built-in tools at startup
 - Configured via `MCP_SERVERS_CONFIG` env var or `<data_dir>/config/mcp-servers.json`
 
 ### 📋 Thread Subtasks
@@ -126,12 +126,12 @@ Thread subtasks enable the LLM to decompose a complex request into trackable sub
 **Current Subtask Logic:**
 - The first pending subtask (ordered by `priority DESC`, `created_at ASC`) is the "current" subtask
 - When all subtasks are completed/cancelled, `current_subtask` is `null`
-- This drives the prompt injection — only the current subtask is prominently displayed
+- This drives the prompt injection: only the current subtask is prominently displayed
 
 **Prompt Injection:**
 - When subtasks exist, a `[Thread Subtasks]` section is injected into the system prompt (NeverTrim tier)
 - Shows current subtask with status emoji, and remaining subtask count
-- Only injected when there are active (non-cancelled) subtasks — empty threads see no section
+- Only injected when there are active (non-cancelled) subtasks: empty threads see no section
 
 **Override Pattern:**
 - To redefine a thread's subtasks, delete all existing ones (`action: delete` for each) then add new ones
@@ -155,9 +155,9 @@ Thread subtasks enable the LLM to decompose a complex request into trackable sub
    cp .env.example .env
    ```
    Edit `.env` and set at minimum:
-   - `LLM_PROVIDER` — your LLM provider (e.g. `opencode-go`, `deepseek`)
-   - `{PROVIDER}_API_KEY` — API key for your chosen provider (e.g. `DEEPSEEK_API_KEY` for deepseek, `OPENCODE_GO_API_KEY` for opencode-go)
-   - `DATABASE_URL` — PostgreSQL connection string (default: `postgres://omniagent:***@postgres:5432/omniagent`)
+   - `LLM_PROVIDER`: your LLM provider (e.g. `opencode-go`, `deepseek`)
+   - `{PROVIDER}_API_KEY`: API key for your chosen provider (e.g. `DEEPSEEK_API_KEY` for deepseek, `OPENCODE_GO_API_KEY` for opencode-go)
+   - `DATABASE_URL`: PostgreSQL connection string (default: `postgres://omniagent:***@postgres:5432/omniagent`)
 
 3. Start the stack:
    ```bash
@@ -165,9 +165,9 @@ Thread subtasks enable the LLM to decompose a complex request into trackable sub
    ```
 
 This starts:
-- **PostgreSQL 16 + pgvector** — message storage with vector embeddings
-- **Qdrant** — vector similarity search (optional, for semantic search)
-- **OmniAgent** — the agent itself, on port 8080
+- **PostgreSQL 16 + pgvector**: message storage with vector embeddings
+- **Qdrant**: vector similarity search (optional, for semantic search)
+- **OmniAgent**: the agent itself, on port 8080
 
 ### Verify
 
@@ -187,7 +187,7 @@ Channels represent communication endpoints. Each channel has its own state, prof
 || `name` | Human-readable channel name |
 || `platform` | Platform identifier (e.g., `telegram`, `api`, `cron`) |
 || `external_id` | Platform-specific address (chat ID, channel name, etc.) |
-|| `resource_identifier` | Canonical resource address — used in (platform, resource_identifier) unique constraint |
+|| `resource_identifier` | Canonical resource address: used in (platform, resource_identifier) unique constraint |
 || `current_profile` | Profile to use for message processing |
 || `current_provider` | Provider override for this channel |
 || `current_model` | Model override for this channel |
@@ -239,7 +239,7 @@ The `channel_subscriptions` table enables cross-platform listening:
 | `subscriber_platform` | Platform of the subscriber |
 | `subscriber_resource` | Resource identifier of the subscriber |
 
-A Telegram channel can subscribe to another channel's summaries — when a summary is generated, it's forwarded to the subscriber. The unique constraint is `(channel_id, subscriber_platform, subscriber_resource)`.
+A Telegram channel can subscribe to another channel's summaries: when a summary is generated, it's forwarded to the subscriber. The unique constraint is `(channel_id, subscriber_platform, subscriber_resource)`.
 
 ```sql
 INSERT INTO channel_subscriptions (channel_id, subscriber_platform, subscriber_resource)
@@ -251,9 +251,9 @@ VALUES (1, 'telegram', 'my-telegram-chat');
 Profiles bundle model configuration, provider, and allowed tools. A `default` profile is created on first startup.
 
 Profile fields:
-- **provider** — LLM provider (e.g., `opencode-go`, `openai`, `anthropic`, `deepseek`)
-- **model** — LLM model name (e.g., `deepseek-v4-flash`, `claude-sonnet-4`)
-- **allowed_tools** — which MCP tools the agent can use
+- **provider**: LLM provider (e.g., `opencode-go`, `openai`, `anthropic`, `deepseek`)
+- **model**: LLM model name (e.g., `deepseek-v4-flash`, `claude-sonnet-4`)
+- **allowed_tools**: which MCP tools the agent can use
 
 ### Creating a Profile
 
@@ -272,10 +272,10 @@ VALUES (
 The effective provider and model for each request are resolved in this order:
 
 **Provider resolution chain:**
-1. **Channel** `current_provider` — if set, this provider is used
-2. **Profile** `provider` — if the channel has no provider, the profile's provider is used
-3. **`LLM_PROVIDER` env var** — if neither channel nor profile defines a provider, the environment variable is used
-4. **Error** — if none of the above is set, the agent returns an error
+1. **Channel** `current_provider`: if set, this provider is used
+2. **Profile** `provider`: if the channel has no provider, the profile's provider is used
+3. **`LLM_PROVIDER` env var**: if neither channel nor profile defines a provider, the environment variable is used
+4. **Error**: if none of the above is set, the agent returns an error
 
 **Model resolution depends on where the provider came from:**
 
@@ -285,7 +285,7 @@ The effective provider and model for each request are resolved in this order:
 - **No model resolved at any level** → the agent returns an error.
 
 **API key resolution:**
-The API key is read from the `{PROVIDER}_API_KEY` environment variable matching the resolved provider name (e.g. `DEEPSEEK_API_KEY` for deepseek, `OPENCODE_GO_API_KEY` for opencode-go). There is no generic fallback — the correct key must be set for the active provider.
+The API key is read from the `{PROVIDER}_API_KEY` environment variable matching the resolved provider name (e.g. `DEEPSEEK_API_KEY` for deepseek, `OPENCODE_GO_API_KEY` for opencode-go). There is no generic fallback: the correct key must be set for the active provider.
 
 **Summary table:**
 
@@ -293,7 +293,7 @@ The API key is read from the `{PROVIDER}_API_KEY` environment variable matching 
 |----------------|-------------|----------------|
 | Channel | Channel model | Provider default_model |
 | Profile | Profile model | Provider default_model |
-| LLM_PROVIDER env | — | Provider default_model |
+| LLM_PROVIDER env | N/A | Provider default_model |
 
 ## Execution Model
 
@@ -366,10 +366,10 @@ Each message stores its own timing and token data:
 
 - **`processing_time_ms`**: Wall-clock time spent processing this message (stored per-message, not thread-level)
 - **`token_usage`**: JSONB object with:
-  - `prompt_tokens` — tokens in the prompt
-  - `completion_tokens` — tokens in the completion
-  - `cached_tokens` — tokens served from cache (if supported by provider)
-  - `reasoning_tokens` — tokens used for reasoning/thinking (if supported)
+  - `prompt_tokens`: tokens in the prompt
+  - `completion_tokens`: tokens in the completion
+  - `cached_tokens`: tokens served from cache (if supported by provider)
+  - `reasoning_tokens`: tokens used for reasoning/thinking (if supported)
 
 ```json
 {
@@ -388,7 +388,7 @@ On startup, the agent runs `skip_on_startup()` which marks all messages with sta
 
 When a message is created (seq-0), the `provider` and `model` fields are **stamped** on the message using this resolution chain:
 
-1. **Message** `profile` field (highest priority) — set per-message for cron/kanban tasks
+1. **Message** `profile` field (highest priority): set per-message for cron/kanban tasks
 2. **Channel** `current_provider` / `current_model` / `current_profile`
 3. **Profile** `provider` / `model` (if set in the profile)
 4. **Environment variable** `LLM_PROVIDER` (model comes from provider plugin's `default_model`)
@@ -408,7 +408,7 @@ When the agent picks up a pending message for processing, it **validates** the s
 3. `provider` must be set and non-empty → fails with `msg_subtype='no-provider'`
 4. `model` must be set and non-empty → fails with `msg_subtype='no-model'`
 
-If validation fails, an error message is inserted into the thread and the original message is marked as `failed`. The agent uses **only** the stamped values — no fallback chain is run during execution.
+If validation fails, an error message is inserted into the thread and the original message is marked as `failed`. The agent uses **only** the stamped values: no fallback chain is run during execution.
 
 For **cron jobs**: profile comes from the cron job's `profile` field, or the channel's `current_profile` if NULL
 For **kanban tasks**: profile comes from the task's `profile` field, or the channel's `current_profile` if NULL
@@ -435,19 +435,19 @@ VALUES ('cron_abc123', 'hourly-report', 'Hourly Report', '0 * * * *', 'Generate 
 |-------|-------------|
 | `channel_id` | Channel to fire in (NULL = default cron channel) |
 | `profile` | Profile to use (NULL = channel's current_profile) |
-| `schedule` | 5-field Linux cron expression (min hour day month weekday) — the scheduler internally prepends `0` (second=0) for the `cron` crate |
+| `schedule` | 5-field Linux cron expression (min hour day month weekday): the scheduler internally prepends `0` (second=0) for the `cron` crate |
 | `prompt` | The message content to execute |
 | `mode` | Execution mode: `agentic` (default), `direct`, or `action` |
 | `direct_task_type` | Task type for `direct` mode (e.g., `kanban_dispatcher`) |
-| `action_id` | Action ID for `action` mode — references the `actions` table |
+| `action_id` | Action ID for `action` mode: references the `actions` table |
 | `template` | Optional template name; loaded from `profiles/<name>/templates/`. Falls back to channel's `template` if not set |
 | `enabled` | Whether the job is active |
 | `active` | Whether the job is currently claimed by a scheduler |
 
 ### Execution Modes
 
-- **`agentic`** (default): Normal cron agent execution — the prompt is sent to the LLM for processing, with full tool access and reasoning. When `template` is set, the template content is injected as a "Task Template" block before the prompt.
-- **`action`**: Executes a registered action from the `actions` table (user-defined or built-in). The action's MCP tool is called with its saved parameters. No LLM call is made — the action runs as a direct Rust function or MCP tool invocation. Optional `silent` mode suppresses thread creation on success (only creates error threads).
+- **`agentic`** (default): Normal cron agent execution: the prompt is sent to the LLM for processing, with full tool access and reasoning. When `template` is set, the template content is injected as a "Task Template" block before the prompt.
+- **`action`**: Executes a registered action from the `actions` table (user-defined or built-in). The action's MCP tool is called with its saved parameters. No LLM call is made: the action runs as a direct Rust function or MCP tool invocation. Optional `silent` mode suppresses thread creation on success (only creates error threads).
 
 ### Cron Planning Mode
 
@@ -468,12 +468,12 @@ The planning mode is resolved at thread creation time via `resolve_thread_planni
 
 The Knowledge Pipeline is a periodic maintenance cron that runs 6 steps:
 
-1. **Per-channel summarization** — cross-thread summaries for channels with enough new completed threads
-2. **Wiki/skill update from messages** — groups completed threads by profile, extracts durable knowledge, updates wiki pages and skills
-3. **Wiki relevance indexing** — scores wiki files by recency and reference count, updates `relevant-index.md`
-4. **Skill relevance indexing** — same scoring for skill files, writes `relevant-skills-index.md`
-5. **Hindsight population** — batch-retains new messages into omniagent-hindsight (skipped if disabled)
-6. **Hindsight consolidation** — triggers the consolidation pipeline (skipped if disabled)
+1. **Per-channel summarization**: cross-thread summaries for channels with enough new completed threads
+2. **Wiki/skill update from messages**: groups completed threads by profile, extracts durable knowledge, updates wiki pages and skills
+3. **Wiki relevance indexing**: scores wiki files by recency and reference count, updates `relevant-index.md`
+4. **Skill relevance indexing**: same scoring for skill files, writes `relevant-skills-index.md`
+5. **Hindsight population**: batch-retains new messages into omniagent-hindsight (skipped if disabled)
+6. **Hindsight consolidation**: triggers the consolidation pipeline (skipped if disabled)
 
 **Setup:** Run the `Setup Knowledge Pipeline` action (built-in, idempotent). Creates a cron job with:
 - Schedule: `0 */6 * * *` (every 6 hours, configurable)
@@ -540,7 +540,7 @@ When a cron job is configured with `mode='direct'` and `direct_task_type='kanban
 4. The task's `body` becomes the prompt for execution
 5. The task's `profile` field (or channel's current_profile) is used for resolution
 
-This enables periodic task processing without human intervention — a cron job can drip-feed todo items into the agent's queue.
+This enables periodic task processing without human intervention: a cron job can drip-feed todo items into the agent's queue.
 
 ### Channel and Profile Assignment
 
@@ -574,18 +574,18 @@ $OMNI_DIR/profiles/<name>/memories/
 | `USER_MAX_CHARS` | `1000` | Maximum characters for user-specific memory |
 | `PLANNING_MODE` | `auto_plan` | Global planning mode: `prompt_only`, `auto_plan`, `auto_subtasks`, or `always` |
 | `PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS` | `60` | Max chars for "simple" (greeting) classification |
-| `PLANNING_COMPLEXITY_STANDARD_MAX_CHARS` | `200` | Max chars for "standard" classification — above this triggers complex planning |
+| `PLANNING_COMPLEXITY_STANDARD_MAX_CHARS` | `200` | Max chars for "standard" classification: above this triggers complex planning |
 | `PLANNING_COMPLEXITY_KEYWORDS` | (built-in list) | Comma-separated keywords that trigger complex planning |
 
 ## Planning Mode
 
-Planning mode controls how the agent approaches a thread — whether it plans ahead, creates subtasks, or responds immediately. The mode is resolved **at thread creation time** and stamped on the `threads.planning_mode` column.
+Planning mode controls how the agent approaches a thread: whether it plans ahead, creates subtasks, or responds immediately. The mode is resolved **at thread creation time** and stamped on the `threads.planning_mode` column.
 
 ### Mode Values
 
 | Mode | Description |
 |------|-------------|
-| `prompt_only` | No planning — LLM responds directly. Used for simple/quick interactions. |
+| `prompt_only` | No planning: LLM responds directly. Used for simple/quick interactions. |
 | `auto_plan` | The LLM gets a planning step before responding. A single plan is created and executed. |
 | `auto_subtasks` | Full subtask-based planning. The LLM decomposes the task into subtasks, then works through them sequentially with tool access. |
 | `always` | Legacy alias for `auto_subtasks` (normalized at resolution time). |
@@ -594,10 +594,10 @@ Planning mode controls how the agent approaches a thread — whether it plans ah
 
 The planning mode is resolved in this order (first non-empty wins):
 
-1. **Task/Job `planning_mode`** — for cron jobs (`cron_jobs.planning_mode`). When non-empty, it overrides everything below. Can be `prompt_only`, `auto_plan`, `auto_subtasks`, or empty (→ complexity-based default).
-2. **Channel `planning_mode`** — set on the `channels` table. Override for an entire channel.
-3. **Kanban tasks** — always resolve to the max plan mode currently available (`max_plan` logic based on global `PLANNING_MODE`). Kanban tasks never go through complexity classification.
-4. **User / Cron default** — classified by prompt **complexity** (see below). Falls through to the global `PLANNING_MODE` env var.
+1. **Task/Job `planning_mode`**: for cron jobs (`cron_jobs.planning_mode`). When non-empty, it overrides everything below. Can be `prompt_only`, `auto_plan`, `auto_subtasks`, or empty (→ complexity-based default).
+2. **Channel `planning_mode`**: set on the `channels` table. Override for an entire channel.
+3. **Kanban tasks**: always resolve to the max plan mode currently available (`max_plan` logic based on global `PLANNING_MODE`). Kanban tasks never go through complexity classification.
+4. **User / Cron default**: classified by prompt **complexity** (see below). Falls through to the global `PLANNING_MODE` env var.
 
 ### Complexity Classification
 
@@ -609,9 +609,9 @@ char_len > STANDARD_MAX (200) OR action keywords present   →  auto_subtasks
 otherwise                                                  →  auto_plan (via PLANNING_MODE)
 ```
 
-**Simple messages** (short, greetings, confirmations: "hi", "ok", "thanks", "done", thumbs up) → `prompt_only` — no planning overhead.
+**Simple messages** (short, greetings, confirmations: "hi", "ok", "thanks", "done", thumbs up) → `prompt_only`: no planning overhead.
 
-**Complex messages** (action keywords: "implement", "refactor", "redesign", "migrate", "multi-step", "fix bug" OR character count > 200) → `auto_subtasks` — full decomposition.
+**Complex messages** (action keywords: "implement", "refactor", "redesign", "migrate", "multi-step", "fix bug" OR character count > 200) → `auto_subtasks`: full decomposition.
 
 **Standard messages** (everything else) → uses the global `PLANNING_MODE` env var (default `auto_plan`)
 
@@ -663,7 +663,7 @@ This will:
 
 - Messages created **before** the stop are skipped
 - Messages created **after** the stop remain pending and will be processed when resumed
-- The channel handler restarts fresh — no state is carried over from before the stop
+- The channel handler restarts fresh: no state is carried over from before the stop
 - If the executor was in the middle of processing a message when `/stop` was called, that message is also marked as skipped
 
 ## Configuration Reference
@@ -675,9 +675,9 @@ This will:
 | `OMNI_DIR` | `/opt/omni` | Profile and tools directory |
 | `DATABASE_URL` | `postgres://omniagent:***@postgres:5432/omniagent` | PostgreSQL connection string |
 | `QDRANT_URL` | `http://localhost:6333` | Qdrant endpoint |
-| `LLM_API_KEY` | — | API key for LLM provider |
+| `LLM_API_KEY` | N/A | API key for LLM provider |
 | `LLM_PROVIDER` | `opencode-go` | Provider: `opencode-go`, `openai`, `anthropic`, `deepseek` |
-| `DEEPSEEK_API_KEY` | — | DeepSeek-specific API key |
+| `DEEPSEEK_API_KEY` | N/A | DeepSeek-specific API key |
 | `DEEPSEEK_BASE_URL` | *default* | DeepSeek API endpoint base URL |
 | `MAX_TOKENS` | `4096` | Max response tokens |
 | `TEMPERATURE` | `0.7` | Sampling temperature |
@@ -690,7 +690,7 @@ This will:
 | `SUMMARY_WINDOW` | `10` | Half-window size for channel summarization |
 | `CHANNEL_SUMMARY_TOKENS` | `4096` | Max tokens for channel-level summary generation |
 | `THREAD_SUMMARY_TOKENS` | `2048` | Max tokens for per-thread end-of-execution summary |
-| `MCP_SERVERS_CONFIG` | — | External MCP servers config file path |
+| `MCP_SERVERS_CONFIG` | N/A | External MCP servers config file path |
 | `VECTORIZE_MESSAGES` | `false` | Enable message embedding generation |
 | `VECTORIZE_WIKI` | `false` | Enable wiki embedding generation |
 | `MEMORY_MAX_CHARS` | `5000` | Max characters in MEMORY.md |
@@ -826,7 +826,7 @@ Output shows:
 
 ## Backup Container
 
-The stack includes a standalone **backup** container for S3 data durability. It is agent-agnostic — does not require the agent to be running, making it suitable for setup on a new machine before the agent starts.
+The stack includes a standalone **backup** container for S3 data durability. It is agent-agnostic: does not require the agent to be running, making it suitable for setup on a new machine before the agent starts.
 
 ### Architecture
 
@@ -858,8 +858,8 @@ Run inside the container (`docker compose exec backup <command>`):
 | `S3_REGION` | `us-east-005` | S3 region |
 | `S3_BUCKET` | `my-bucket` | S3 bucket name |
 | `S3_PATH` | `omni` | Path prefix within the bucket |
-| `S3_ACCESS_KEY` | — | S3 access key ID |
-| `S3_SECRET_KEY` | — | S3 secret access key |
+| `S3_ACCESS_KEY` | N/A | S3 access key ID |
+| `S3_SECRET_KEY` | N/A | S3 secret access key |
 | `CRON_BACKUP` | `"0 5 * * *"` | Backup schedule (empty = disabled) |
 | `CRON_CHECKPOINT` | `"0 3 * * 0"` | Checkpoint schedule (empty = disabled) |
 
@@ -963,7 +963,7 @@ docker compose exec postgres psql -U omniagent -d omniagent
 | Test | Setup | Expected |
 |------|-------|----------|
 | **Single channel, all causes** | 3 threads (user/system for cron/kanban) → same channel → set pending | Processed **sequentially** (one after another). All complete |
-| **Different channels (parallelism)** | 3 threads in 3 different channels → set pending | Processed at the **same second** — each channel handler runs independently |
+| **Different channels (parallelism)** | 3 threads in 3 different channels → set pending | Processed at the **same second**: each channel handler runs independently |
 | **Stop/Resume** | Start a thread → `curl stop/<id>` → verify `skipped` → `resume` → new message | Stopped thread = `skipped`. New thread after resume picks up immediately |
 | **Empty provider** | Thread with `provider=''` | **failed** with clear error: "provider is not set" |
 | **Empty model** | Thread with `model=''` | **failed** with clear error: "model is not set" |

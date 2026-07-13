@@ -1,4 +1,4 @@
-//! System prompt assembly — identity, tool guidance, memory, user profile.
+//! System prompt assembly: identity, tool guidance, memory, user profile.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -61,33 +61,33 @@ fn build_dynamic_identity(tool_names: &[String]) -> String {
 
     let tool_list = if parts.is_empty() { tool_names.join(", ") } else { parts.join(", ") };
 
-    format!("You are OmniAgent — precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on — don't retry more than twice.")
+    format!("You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice.")
 }
 
 const TOOL_GUIDANCE: &str = "TOOL USE RULES (fail the task if you violate these):\n\
-1. CALL TOOLS DIRECTLY — Do NOT search the filesystem, read plugin configs, \
+1. CALL TOOLS DIRECTLY: Do NOT search the filesystem, read plugin configs, \
 read mcp-config.json files, inspect server.py files, or look at docker-compose files \
 to discover what tools exist or how to call them. The function-calling API already \
 shows you every available tool with its name, description, and parameters. \
 If you need information about available tools, use the list_tool_details tool. \
 Reading config files to find tools is always wrong and wastes turns.\n\
-2. SEARCH BEFORE QUERY — Use search (search_messages, search_wiki) before \
+2. SEARCH BEFORE QUERY: Use search (search_messages, search_wiki) before \
 query_database for text/vector searches. Only use query_database for structured \
 aggregations (counts, sums, averages, groupings).\n\
-3. WRITE SINGLE-FIELD FILES — When using filesystem_write_tool, write complete \
+3. WRITE SINGLE-FIELD FILES: When using filesystem_write_tool, write complete \
 single-field content files. Do NOT write partial files and append later. Do NOT \
 write placeholder content expecting to \"fill in\" values afterward.\n\
-4. RENAME INSTEAD OF RECREATE — When a file/directory already exists and you \
+4. RENAME INSTEAD OF RECREATE: When a file/directory already exists and you \
 need to change its name, rename it (filesystem_move). Do NOT delete and recreate.\n\
-5. NO POLLING — Do NOT repeatedly check the same condition. If you're waiting \
+5. NO POLLING: Do NOT repeatedly check the same condition. If you're waiting \
 for something, use the appropriate tool once and wait for the result.\n\
-6. TOGGLE INSTEAD OF CONDITIONAL — For boolean/config values, use the toggle \
+6. TOGGLE INSTEAD OF CONDITIONAL: For boolean/config values, use the toggle \
 endpoint. Do NOT read the current value, compute the negation, and write it back.\n\
-7. COMPLETE WORK — Before presenting results, finish ALL steps. Do not interrupt \
+7. COMPLETE WORK: Before presenting results, finish ALL steps. Do not interrupt \
 your work to show intermediate progress unless asked.\n\
-8. CONFIRM DESTRUCTIVE ACTIONS — Before delete/overwrite/stop operations, \
+8. CONFIRM DESTRUCTIVE ACTIONS: Before delete/overwrite/stop operations, \
 present what you will do and wait for confirmation.\n\
-9. SKIP ON FAILURE — If an operation fails (network error, not found, bad request), \
+9. SKIP ON FAILURE: If an operation fails (network error, not found, bad request), \
 try once more with a different approach, then move on. Do NOT retry the same \
 failing call more than once. There is no hidden state that changes between retries.";
 
@@ -100,7 +100,7 @@ fn build_platform_hint(platform: &str) -> Option<&'static str> {
         "telegram" => Some("You are on a text messaging communication platform, Telegram. \
 Standard markdown is automatically converted to Telegram format. Supported: **bold**, \
 *italic*, ~~strikethrough~~, ||spoiler||, `inline code`, ```code blocks```, [links](url), \
-and ## headers. Telegram has NO table syntax — prefer bullet lists or labeled key: value \
+and ## headers. Telegram has NO table syntax: prefer bullet lists or labeled key: value \
 pairs over pipe tables (any tables you do emit are auto-rewritten into row-group bullets, \
 which you can produce directly for cleaner output). You can send media files natively: \
 to deliver a file to the user, include MEDIA:/absolute/path/to/file in your response. \
@@ -119,10 +119,10 @@ fn read_memory_section(memory_store: &MemoryStore) -> String {
     if raw.is_empty() { return String::new(); }
     let truncated = truncate_content(raw, memory_max_chars());
     let header = if raw.len() > memory_max_chars() {
-        format!("## MEMORY (your personal notes) [TRUNCATED — showing first {} of {} chars]", memory_max_chars(), raw.len())
+        format!("## MEMORY (your personal notes) [TRUNCATED: showing first {} of {} chars]", memory_max_chars(), raw.len())
     } else {
         let line_count = raw.lines().count();
-        format!("## MEMORY (your personal notes) [{}% — {}/{} chars]", 
+        format!("## MEMORY (your personal notes) [{}%: {}/{} chars]", 
             100, raw.len(), raw.len())
     };
     format!("{header}\n{truncated}")
@@ -133,9 +133,9 @@ fn read_user_profile_section(memory_store: &MemoryStore) -> String {
     if raw.is_empty() { return String::new(); }
     let truncated = truncate_content(raw, soul_max_chars());
     let header = if raw.len() > soul_max_chars() {
-        format!("## USER PROFILE (who the user is) [TRUNCATED — showing first {} of {} chars]", soul_max_chars(), raw.len())
+        format!("## USER PROFILE (who the user is) [TRUNCATED: showing first {} of {} chars]", soul_max_chars(), raw.len())
     } else {
-        format!("## USER PROFILE (who the user is) [{}% — {}/{} chars]", 100, raw.len(), raw.len())
+        format!("## USER PROFILE (who the user is) [{}%: {}/{} chars]", 100, raw.len(), raw.len())
     };
     format!("{header}\n{truncated}")
 }
@@ -175,21 +175,21 @@ pub fn build_system_prompt_parts(
 ) -> Vec<String> {
     let mut parts = Vec::new();
 
-    // Tier 1 — Stable
+    // Tier 1: Stable
     let identity = build_dynamic_identity(tool_names);
     parts.push(identity);
     parts.push(TOOL_GUIDANCE.to_string());
     let profile_hint = build_active_profile_hint(profile_name);
     parts.push(profile_hint);
 
-    // Tier 2 — Context / optional system message
+    // Tier 2: Context / optional system message
     if let Some(msg) = system_message {
         if !msg.is_empty() {
             parts.push(msg.to_string());
         }
     }
 
-    // Tier 3 — Volatile
+    // Tier 3: Volatile
     if let Some(hint) = build_platform_hint(platform) {
         parts.push(hint.to_string());
     }

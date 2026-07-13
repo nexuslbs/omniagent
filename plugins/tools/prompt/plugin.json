@@ -2,7 +2,7 @@
   "name": "Prompt MCP Server",
   "id": "mcp-server-prompt",
   "version": "0.1.0",
-  "description": "Prompt generation MCP server — generates the full LLM prompt including system prompt, thread context, and message compaction",
+  "description": "Prompt generation MCP server: generates the full LLM prompt including system prompt, thread context, and message compaction",
   "type": "mcp",
   "entrypoint": {
     "command": "mcp-server-prompt",
@@ -15,7 +15,7 @@
       "label": "Complexity Max Chars",
       "type": "integer",
       "default": 60,
-      "description": "Max character count for simple prompts (greetings, short commands) — these get no plan"
+      "description": "Max character count for simple prompts (greetings, short commands): these get no plan"
     },
     {
       "key": "planning_complexity_keywords",

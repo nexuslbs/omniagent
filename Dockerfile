@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# OmniAgent — production multi-stage build
+# OmniAgent: production multi-stage build
 # Builds the Rust binary, then copies it into a minimal runtime image with Docker CLI.
 
 # Stage 1: Build the Rust binary
@@ -22,7 +22,7 @@ RUN cargo build --release
 # Stage 2: Docker CLI binary
 FROM docker:cli AS docker-cli
 
-# Stage 3: Runtime — slim image matching builder glibc
+# Stage 3: Runtime: slim image matching builder glibc
 FROM debian:trixie-slim
 
 # Install runtime dependencies

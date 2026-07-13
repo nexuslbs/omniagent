@@ -1,14 +1,14 @@
 //! Plugin management API endpoints.
 //!
 //! Provides REST endpoints for listing, installing, configuring, and
-//! managing plugin lifecycle — using YAML files for plugin state
+//! managing plugin lifecycle: using YAML files for plugin state
 //! instead of the old `plugin_registry` database table.
 //!
 //! THREE PLUGIN LOCATION TYPES:
 //!
 //! 1. Builtin plugins (tools.yml/providers.yml/platforms.yml entry has `builtin: true`):
 //!    Source: /app/plugins/{type_dir}/{name}/
-//!    Binary: get_bin_path("mcp-server-{name}") — next to omniagent binary
+//!    Binary: get_bin_path("mcp-server-{name}"): next to omniagent binary
 //!    Install: verify binary exists at get_bin_path(), compile if missing
 //!    Uninstall: YAML removal only (binary stays in get_bin_path())
 //!
@@ -127,7 +127,7 @@ fn detect_plugin_category(
     yaml_type: &plugins_yaml::PluginYamlType,
     name: &str,
 ) -> PluginCategory {
-    // Check YAML entry first — source field is authoritative
+    // Check YAML entry first: source field is authoritative
     if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, yaml_type, name) {
         match entry.source.as_str() {
             "built-in" => return PluginCategory::Builtin,
@@ -136,7 +136,7 @@ fn detect_plugin_category(
         }
     }
 
-    // No YAML entry — check disk for builtin source directory
+    // No YAML entry: check disk for builtin source directory
     if plugins_yaml::is_plugin_builtin(data_dir, name, yaml_type) {
         return PluginCategory::Builtin;
     }
@@ -267,13 +267,13 @@ async fn compile_rust_crate(plugin_dir: &str, name: &str, source: &str) -> Resul
 
     if bin_exists {
         info!(
-            "Compile: binary for '{}' already exists — no compilation needed",
+            "Compile: binary for '{}' already exists: no compilation needed",
             name
         );
         return Ok(true);
     }
 
-    // Build from the EXACT source — no guessing
+    // Build from the EXACT source: no guessing
     let compile_future = async {
         if source == "built-in" {
             // Workspace build (all builtins are workspace members)
@@ -516,7 +516,7 @@ async fn resolve_plugin_for_compile(
     if !has_cargo_toml && !has_entrypoint {
         let err = Json(serde_json::json!({
             "success": false,
-            "error": format!("Plugin '{}' has no source code — only a pre-built binary exists. {} requires source code (Cargo.toml or plugin.json entrypoint).", name, handler_name)
+            "error": format!("Plugin '{}' has no source code: only a pre-built binary exists. {} requires source code (Cargo.toml or plugin.json entrypoint).", name, handler_name)
         }));
         return Err((StatusCode::BAD_REQUEST, err));
     }
@@ -572,7 +572,7 @@ pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// GET /api/plugins — list all plugins (discover from disk + YAML overrides).
+/// GET /api/plugins: list all plugins (discover from disk + YAML overrides).
 pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let data_dir = state.data_dir.clone();
     match tokio::task::spawn_blocking(move || plugins_yaml::list_plugins(&data_dir))
@@ -615,7 +615,7 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
 
             // Cross-reference MCP plugins with the MCP registry:
             // 1. if a plugin is marked "enabled" but its server has zero
-            //    registered tools, the server failed to initialize — set
+            //    registered tools, the server failed to initialize: set
             //    status to "error" so the frontend shows the right badge.
             // 2. Populate tool_names for all tool plugins (including disabled ones)
             //    so the frontend can show tool counts even when the server isn't running.
@@ -640,9 +640,9 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
                                 detail.status = "error".to_string();
                                 let no_source = !detail.has_source_code;
                                 let no_binary_note = if no_source {
-                                    " — no source code (no Cargo.toml) and pre-compiled binary not found"
+                                    ": no source code (no Cargo.toml) and pre-compiled binary not found"
                                 } else {
-                                    " — binary may not have compiled successfully"
+                                    ": binary may not have compiled successfully"
                                 };
                                 detail.status_message =
                                     format!("MCP server failed to start{}", no_binary_note);
@@ -679,7 +679,7 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
     }
 }
 
-/// GET /api/plugins/:name — get single plugin detail.
+/// GET /api/plugins/:name: get single plugin detail.
 pub(crate) async fn get_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -724,7 +724,7 @@ pub(crate) async fn get_plugin_handler(
 
             // Cross-reference MCP plugins with the MCP registry:
             // if a plugin is marked "enabled" but its server has zero
-            // registered tools, the server failed to initialize — set
+            // registered tools, the server failed to initialize: set
             // status to "error" so the frontend shows the right badge.
             if detail.plugin_type == "tool" && detail.status == "enabled" {
                 let registry = state.tool_registry.read().await;
@@ -736,9 +736,9 @@ pub(crate) async fn get_plugin_handler(
                     detail.status = "error".to_string();
                     let no_source = !detail.has_source_code;
                     let no_binary_note = if no_source {
-                        " — no source code (no Cargo.toml) and pre-compiled binary not found"
+                        ": no source code (no Cargo.toml) and pre-compiled binary not found"
                     } else {
-                        " — binary may not have compiled successfully"
+                        ": binary may not have compiled successfully"
                     };
                     detail.status_message = format!("MCP server failed to start{}", no_binary_note);
                 }
@@ -775,7 +775,7 @@ pub(crate) async fn get_plugin_handler(
     }
 }
 
-/// POST /api/plugins/:name/config — update plugin config (writes to YAML).
+/// POST /api/plugins/:name/config: update plugin config (writes to YAML).
 pub(crate) async fn update_config_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -880,7 +880,7 @@ pub(crate) async fn update_config_handler(
     }
 }
 
-/// POST /api/plugins/:name/enable — enable plugin (writes to YAML).
+/// POST /api/plugins/:name/enable: enable plugin (writes to YAML).
 pub(crate) async fn enable_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -919,10 +919,10 @@ pub(crate) async fn enable_plugin_handler(
         }
     };
 
-    // Check if plugin already in the desired state — skip only if source matches
+    // Check if plugin already in the desired state: skip only if source matches
     if let Ok(Some(entry)) = plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name) {
         if entry.enabled && entry.source == source {
-            // Already enabled with matching source — still reload platform subprocess
+            // Already enabled with matching source: still reload platform subprocess
             // so the plugin picks up any config/environment changes made since last start
             if yaml_type == plugins_yaml::PluginYamlType::Platform {
                 reload_platform_plugin(&state, &name).await;
@@ -930,7 +930,7 @@ pub(crate) async fn enable_plugin_handler(
 
             if let Ok(Some(detail)) = plugins_yaml::get_plugin(&state.data_dir, &name) {
                 info!(
-                    "Plugin '{}' is already enabled with matching source — no change needed",
+                    "Plugin '{}' is already enabled with matching source: no change needed",
                     name
                 );
                 return (
@@ -990,7 +990,7 @@ pub(crate) async fn enable_plugin_handler(
                         );
                     }
                     Err(e) => {
-                        // MCP server failed to start — roll back the YAML enable
+                        // MCP server failed to start: roll back the YAML enable
                         // so the plugin doesn't show as "enabled" when it can't serve tools.
                         tracing::warn!(
                             "Hot-reload of MCP server '{}' failed, rolling back enable: {}",
@@ -1044,12 +1044,12 @@ pub(crate) async fn enable_plugin_handler(
                             let mut registry = crate::provider::registry::PROVIDER_REGISTRY.write().unwrap();
                             registry.register(&name, &command, &args);
                         }
-                        // Start the subprocess (async — drop registry lock first to avoid Send issues)
+                        // Start the subprocess (async: drop registry lock first to avoid Send issues)
                         let start_result = {
                             let registry = crate::provider::registry::PROVIDER_REGISTRY.read().unwrap();
                             registry.get_cloned(&name)
                         };
-                        // Registry guard dropped — we have an independent Arc
+                        // Registry guard dropped: we have an independent Arc
                         match start_result {
                             Some(client) => {
                                 if let Err(e) = client.start().await {
@@ -1125,7 +1125,7 @@ pub(crate) async fn enable_plugin_handler(
     }
 }
 
-/// POST /api/plugins/:name/disable — disable plugin (writes to YAML).
+/// POST /api/plugins/:name/disable: disable plugin (writes to YAML).
 pub(crate) async fn disable_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -1164,7 +1164,7 @@ pub(crate) async fn disable_plugin_handler(
         }
     };
 
-    // Upsert with enabled=false — preserve existing source field
+    // Upsert with enabled=false: preserve existing source field
     match plugins_yaml::set_entry(
         &state.data_dir,
         &yaml_type,
@@ -1227,7 +1227,7 @@ pub(crate) async fn disable_plugin_handler(
     }
 }
 
-/// POST /api/plugins/:name/install — compile and register a plugin.
+/// POST /api/plugins/:name/install: compile and register a plugin.
 ///
 /// Handles all three plugin categories:
 /// 1. Builtin: verify binary at get_bin_path() or compile
@@ -1277,7 +1277,7 @@ pub(crate) async fn install_plugin_handler(
     let category_source = category_to_source(&category);
     let yaml_source = category_to_source(&yaml_category);
 
-    // 2. Compile FIRST — synchronous, no background spawn
+    // 2. Compile FIRST: synchronous, no background spawn
     info!(
         "Install: compiling plugin '{}' from {} (source: {})",
         name, plugin_dir, category_source
@@ -1355,7 +1355,7 @@ pub(crate) async fn install_plugin_handler(
     }
 }
 
-/// POST /api/plugins/:name/reinstall — recompile and reload a plugin.
+/// POST /api/plugins/:name/reinstall: recompile and reload a plugin.
 ///
 /// Handles all three plugin categories:
 /// 1. Builtin: recompile, binary goes to get_bin_path()
@@ -1470,7 +1470,7 @@ pub(crate) async fn reinstall_plugin_handler(
     }
 }
 
-/// POST /api/plugins/:name/setup — run platform plugin setup procedure.
+/// POST /api/plugins/:name/setup: run platform plugin setup procedure.
 ///
 /// Only available for platform plugins that advertise `capabilities.setup = true`.
 /// Spawns the plugin binary as a one-shot process with a `"setup"` JSON-RPC
@@ -1563,7 +1563,7 @@ pub(crate) async fn setup_plugin_handler(
     let binary_path = if cmd.is_absolute() {
         cmd.to_path_buf()
     } else {
-        // Try relative to plugin directory — scan possible locations
+        // Try relative to plugin directory: scan possible locations
         let plugin_dirs = [
             format!("{}/plugins/platforms/{}", data_dir, name),
             format!("{}/plugins/tools/{}", data_dir, name),
@@ -2035,7 +2035,7 @@ pub(crate) async fn setup_plugin_handler(
     }
 }
 
-/// POST /api/plugins/:name/refresh-models — refresh dynamic model list from external API.
+/// POST /api/plugins/:name/refresh-models: refresh dynamic model list from external API.
 pub(crate) async fn refresh_models_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -2084,7 +2084,7 @@ pub(crate) async fn refresh_models_handler(
     }
 }
 
-/// DELETE /api/plugins/:name — Remove or Uninstall plugin.
+/// DELETE /api/plugins/:name: Remove or Uninstall plugin.
 ///
 /// Default behavior (Remove): Removes YAML entry entirely. For remote, also removes .remote/ dir.
 /// `?mode=uninstall` (Uninstall): For remote, removes .remote/ dir but keeps YAML entry
@@ -2242,7 +2242,7 @@ pub(crate) async fn delete_plugin_handler(
         }
     }
 
-    // ── Remove mode (default) —─
+    // Remove mode (default)
     // Source is required for all remove operations.
     match &explicit_source {
         Some(source) => {
@@ -2263,7 +2263,7 @@ pub(crate) async fn delete_plugin_handler(
     }
 
     // The following auto-detection code is preserved for reference but
-    // unreachable — source must be provided explicitly.
+    // unreachable: source must be provided explicitly.
     #[allow(unreachable_code)]
     {
     let mut removed = false;
@@ -2677,7 +2677,7 @@ fn respond_removed(name: &str, removed: bool) -> Response<Body> {
     }
 }
 
-/// POST /api/plugins/install-url — install a plugin from a URL and register in YAML.
+/// POST /api/plugins/install-url: install a plugin from a URL and register in YAML.
 pub(crate) async fn install_url_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<InstallUrlRequest>,
@@ -2755,11 +2755,11 @@ pub(crate) async fn install_url_handler(
     }
 }
 
-/// POST /api/plugins/install-git — clone a plugin repository.
+/// POST /api/plugins/install-git: clone a plugin repository.
 ///
 /// Clones DIRECTLY to `data_dir/plugins/<type_dir>/.remote/<name>/` and persists
 /// the remote info to `remote.yml`. Does NOT compile or register in plugins.yml
-/// — that happens via the separate Install action from the dashboard.
+///: that happens via the separate Install action from the dashboard.
 pub(crate) async fn install_git_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<InstallGitRequest>,
@@ -2769,7 +2769,7 @@ pub(crate) async fn install_git_handler(
         body.url, body.git_ref
     );
 
-    // Resolve the target directory name — this is the FINAL name, no renames later.
+    // Resolve the target directory name: this is the FINAL name, no renames later.
     // Priority: 1) explicit name 2) last segment of path 3) repo name from URL
     let target_name = {
         let raw = if let Some(ref n) = body.name {
@@ -2822,7 +2822,7 @@ pub(crate) async fn install_git_handler(
         );
     }
 
-    // Persist to remote.yml only — no YAML entry, no compilation.
+    // Persist to remote.yml only: no YAML entry, no compilation.
     let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
     let remote_info = plugins_yaml::PluginRemote {
         url: body.url.clone(),
@@ -2862,7 +2862,7 @@ pub(crate) async fn install_git_handler(
         .into_response()
 }
 
-/// POST /api/plugins/{name}/rename — rename a remote plugin.
+/// POST /api/plugins/{name}/rename: rename a remote plugin.
 ///
 /// Updates remote.yml key, plugins.yml key (if an entry exists), and renames
 /// the .remote/ directory from the old name to the new name.
@@ -3038,7 +3038,7 @@ pub(crate) async fn rename_plugin_handler(
         .into_response()
 }
 
-/// POST /api/plugins/{name}/download — clone a remote plugin that has a remote.yml entry but no disk directory.
+/// POST /api/plugins/{name}/download: clone a remote plugin that has a remote.yml entry but no disk directory.
 /// For `source=remote`: clones from git via remote.yml.
 pub(crate) async fn download_plugin_handler(
     Path(name): Path<String>,
@@ -3048,7 +3048,7 @@ pub(crate) async fn download_plugin_handler(
     let data_dir = &state.data_dir;
     let workspace_dir = &state.data_dir;
 
-    // Validate source — download only supports 'remote'
+    // Validate source: download only supports 'remote'
     let source = match &body {
         Some(req) => match require_source(&req.source) {
             Ok(s) => s,
@@ -3150,7 +3150,7 @@ pub(crate) async fn download_plugin_handler(
     let cargo_toml = std::path::Path::new(&effective_dir).join("Cargo.toml");
     if !content_changed {
         info!(
-            "Download: skipping compilation for '{}' — no new commits fetched",
+            "Download: skipping compilation for '{}': no new commits fetched",
             name
         );
     } else if cargo_toml.exists() {
@@ -3240,7 +3240,7 @@ pub(crate) async fn download_plugin_handler(
 
 use std::future::Future;
 use std::pin::Pin;
-/// POST /api/reload — reload environment variables + plugins.
+/// POST /api/reload: reload environment variables + plugins.
 ///
 /// Re-reads .env and synchronizes runtime plugin state:
 /// starts newly enabled MCP servers / providers, stops newly disabled ones,
@@ -3473,12 +3473,12 @@ async fn reload_platform_plugin(state: &Arc<AppState>, name: &str) {
         restart_flag.store(true, Ordering::SeqCst);
         restart_notify.notify_one();
         tracing::info!(
-            "Set restart flag for platform plugin '{}' — subprocess will be respawned",
+            "Set restart flag for platform plugin '{}': subprocess will be respawned",
             name
         );
     } else {
         tracing::warn!(
-            "Platform plugin '{}' is not currently registered — restart flag not found. \
+            "Platform plugin '{}' is not currently registered: restart flag not found. \
              The new config will take effect on next omniagent start.",
             name
         );

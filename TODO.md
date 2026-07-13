@@ -5,9 +5,9 @@
 ### ✅ Implemented
 
 #### Leaner System Prompt (prompt_builder.rs)
-- [x] Remove empty constants: `RESEARCH_WORKFLOW`, `SKILLS_GUIDANCE`, `WIKI_GUIDANCE`, `DOCKER_EXECUTION_GUIDANCE` — all `""`, removed
-- [x] Shorten `DB_SCHEMA` — from raw DDL (~500 tokens) to compact summary format (~150 chars)
-- [x] Bench: saves ~600 chars/tokens per turn — immediate token reduction
+- [x] Remove empty constants: `RESEARCH_WORKFLOW`, `SKILLS_GUIDANCE`, `WIKI_GUIDANCE`, `DOCKER_EXECUTION_GUIDANCE`: all `""`, removed
+- [x] Shorten `DB_SCHEMA`: from raw DDL (~500 tokens) to compact summary format (~150 chars)
+- [x] Bench: saves ~600 chars/tokens per turn: immediate token reduction
 
 #### Templates for Kanban & Cron Tasks
 - [x] **Migration:** Add `template TEXT` to `kanban_tasks`, `template TEXT` to `cron_jobs`
@@ -42,7 +42,7 @@
 - [x] Impact: Richer cross-session memory retrieval
 
 ### 🔲 Future Ideas
-- [ ] Cron editing tool (mcp) — add `template`/`template` field to cron edit UI
-- [ ] Kanban task editing tool (mcp) — add `template` field update
+- [ ] Cron editing tool (mcp): add `template`/`template` field to cron edit UI
+- [ ] Kanban task editing tool (mcp): add `template` field update
 - [ ] Template listing/management MCP tool
 - [ ] Dashboard UI for template management
