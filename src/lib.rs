@@ -1,4 +1,4 @@
-//! OmniAgent - library crate shared by the main binary and external MCP servers.
+//! OmniAgent — library crate shared by the main binary and external MCP servers.
 // Items not used within the lib may be used by the main binary or MCP server binaries.
 #![expect(
     dead_code,

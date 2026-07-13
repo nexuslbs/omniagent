@@ -1,7 +1,7 @@
-//! Settings API - read/write environment variables organized by category.
+//! Settings API — read/write environment variables organized by category.
 //!
-//! - `GET /settings` - returns all settings with metadata
-//! - `PUT /settings` - updates one or more values and writes to .env file
+//! - `GET /settings` — returns all settings with metadata
+//! - `PUT /settings` — updates one or more values and writes to .env file
 
 use axum::{
     extract::State,
@@ -449,10 +449,10 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
                 field_type: "select".into(),
                 description: "When to insert prompts as messages (msg_type: \"prompt\") into the messages table: Off (never), First (first LLM call only), First+Compact (first + after context compaction), or All (every LLM call)".into(),
                 options: Some(vec![
-                    SettingOption { id: "off".into(), name: "Off - never insert prompts".into() },
-                    SettingOption { id: "first".into(), name: "First - insert the first prompt only".into() },
-                    SettingOption { id: "first+compact".into(), name: "First+Compact - first prompt + prompts after context compaction".into() },
-                    SettingOption { id: "all".into(), name: "All - insert every prompt before every LLM call".into() },
+                    SettingOption { id: "off".into(), name: "Off — never insert prompts".into() },
+                    SettingOption { id: "first".into(), name: "First — insert the first prompt only".into() },
+                    SettingOption { id: "first+compact".into(), name: "First+Compact — first prompt + prompts after context compaction".into() },
+                    SettingOption { id: "all".into(), name: "All — insert every prompt before every LLM call".into() },
                 ]),
                 readonly: false,
                 default: Some("first".into()),
@@ -694,7 +694,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
 
 // ── Handlers ──
 
-/// GET /settings - return all settings organized by category.
+/// GET /settings — return all settings organized by category.
 pub async fn get_settings_handler(State(state): State<Arc<AppState>>) -> Json<SettingsResponse> {
     // Reload .env file to get current values, then merge with defaults
     let env_path = state.env_path.clone();
@@ -761,7 +761,7 @@ fn enrich_provider_options(meta: &mut SettingMeta, data_dir: &str) {
     );
 }
 
-/// PUT /settings - update one or more settings and write to .env.
+/// PUT /settings — update one or more settings and write to .env.
 pub async fn update_settings_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateSettingsRequest>,

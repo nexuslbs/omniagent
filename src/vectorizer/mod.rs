@@ -775,7 +775,7 @@ pub async fn spawn_vectorizers(
             cfg.wiki_vectorization_api_key.clone(),
             cfg.wiki_vectorization_api_model.clone(),
             cfg.wiki_vectorization_interval_secs,
-            String::new(), // Qdrant - moved to plugin concern
+            String::new(), // Qdrant — moved to plugin concern
         )
     };
 

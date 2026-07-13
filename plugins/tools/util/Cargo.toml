@@ -2,7 +2,7 @@
 name = "mcp-server-util"
 version = "0.1.0"
 edition = "2021"
-description = "Shared MCP server framework - stdio JSON-RPC protocol, helper types"
+description = "Shared MCP server framework — stdio JSON-RPC protocol, helper types"
 
 [dependencies]
 anyhow = "1"

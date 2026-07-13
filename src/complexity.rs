@@ -1,18 +1,18 @@
-//! Shared complexity classification - used by context building and planning mode resolution.
+//! Shared complexity classification — used by context building and planning mode resolution.
 //!
 //! Thresholds are configurable via environment variables:
 //! - `PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS` (default 60)
 //! - `PLANNING_COMPLEXITY_STANDARD_MAX_CHARS` (default 200)
 //! - `PLANNING_COMPLEXITY_KEYWORDS` (default comma-separated list)
 
-/// Complexity tier for a user message - determines planning depth and tooling.
+/// Complexity tier for a user message — determines planning depth and tooling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Complexity {
-    /// Greeting, acknowledgment, simple command - skip planning, execute directly.
+    /// Greeting, acknowledgment, simple command — skip planning, execute directly.
     Simple,
-    /// Standard request - plan as configured.
+    /// Standard request — plan as configured.
     Standard,
-    /// Complex multi-step task (implement, refactor, design, kanban/cron) - plan + auto-subtasks.
+    /// Complex multi-step task (implement, refactor, design, kanban/cron) — plan + auto-subtasks.
     Complex,
 }
 

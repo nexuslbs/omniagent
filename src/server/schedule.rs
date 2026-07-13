@@ -1,16 +1,16 @@
-//! Schedule CRUD API - replaces dashboard's schedule.ts SQL.
+//! Schedule CRUD API — replaces dashboard's schedule.ts SQL.
 //!
 //! All 10 SQL queries from the original TypeScript are replaced with
 //! `sql_forge!()` macros. No raw sqlx query calls.
 //!
-//! - `GET    /schedule`              - list cron jobs (optionally filter by active)
-//! - `GET    /schedule/{id}`         - single cron job detail
-//! - `POST   /schedule`              - create/upsert cron job
-//! - `PATCH  /schedule/{id}`         - update cron job fields (NULLIF pattern)
-//! - `PATCH  /schedule/{id}/toggle`  - toggle active state
-//! - `GET    /schedule/{id}/threads` - threads for a schedule task
-//! - `GET    /schedule/{id}/subtasks` - subtasks for all threads of a job
-//! - `POST   /schedule/{id}/run`     - manually trigger a cron job
+//! - `GET    /schedule`              — list cron jobs (optionally filter by active)
+//! - `GET    /schedule/{id}`         — single cron job detail
+//! - `POST   /schedule`              — create/upsert cron job
+//! - `PATCH  /schedule/{id}`         — update cron job fields (NULLIF pattern)
+//! - `PATCH  /schedule/{id}/toggle`  — toggle active state
+//! - `GET    /schedule/{id}/threads` — threads for a schedule task
+//! - `GET    /schedule/{id}/subtasks` — subtasks for all threads of a job
+//! - `POST   /schedule/{id}/run`     — manually trigger a cron job
 
 use axum::{
     extract::{Path, Query, State},
@@ -377,7 +377,7 @@ fn job_row_to_entry(row: CronJobRow) -> JobEntry {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// GET /schedule - list cron jobs, optionally filtering by active status.
+/// GET /schedule — list cron jobs, optionally filtering by active status.
 ///
 /// SQL queries used: 1 (single SELECT with DISTINCT ON and optional WHERE)
 async fn list_schedule_handler(
@@ -434,7 +434,7 @@ async fn list_schedule_handler(
     ok_json(jobs)
 }
 
-/// GET /schedule/{id} - single cron job detail.
+/// GET /schedule/{id} — single cron job detail.
 ///
 /// SQL queries used: 1 (SELECT with LEFT JOIN and WHERE id = :id)
 async fn get_schedule_handler(
@@ -490,7 +490,7 @@ async fn get_schedule_handler(
     ok_json(job_row_to_entry(row))
 }
 
-/// POST /schedule - create or upsert a cron job.
+/// POST /schedule — create or upsert a cron job.
 ///
 /// SQL queries used: 1 (INSERT with ON CONFLICT DO UPDATE)
 async fn create_schedule_handler(
@@ -581,7 +581,7 @@ async fn create_schedule_handler(
     }
 }
 
-/// PATCH /schedule/{id} - update cron job fields.
+/// PATCH /schedule/{id} — update cron job fields.
 ///
 /// Uses the NULLIF/CASE pattern for text fields to preserve existing values
 /// when a field is not provided (empty string sentinel).
@@ -707,7 +707,7 @@ async fn update_schedule_handler(
     }
 }
 
-/// PATCH /schedule/{id}/toggle - toggle the active state of a cron job.
+/// PATCH /schedule/{id}/toggle — toggle the active state of a cron job.
 ///
 /// SQL queries used: 1 (UPDATE active)
 async fn toggle_schedule_handler(
@@ -743,7 +743,7 @@ async fn toggle_schedule_handler(
     }
 }
 
-/// GET /schedule/{id}/threads - threads for a schedule task with pagination.
+/// GET /schedule/{id}/threads — threads for a schedule task with pagination.
 ///
 /// SQL queries used: 2 (COUNT + paginated SELECT with LATERAL join)
 async fn schedule_threads_handler(
@@ -856,7 +856,7 @@ async fn schedule_threads_handler(
     })
 }
 
-/// GET /schedule/{id}/subtasks - subtasks for all threads of a schedule job.
+/// GET /schedule/{id}/subtasks — subtasks for all threads of a schedule job.
 ///
 /// SQL queries used: 1 (SELECT with JOIN)
 async fn schedule_subtasks_handler(
@@ -912,12 +912,12 @@ async fn schedule_subtasks_handler(
     ok_json(SubtasksResponse { subtasks: entries })
 }
 
-/// POST /schedule/{id}/run - manually trigger a cron job.
+/// POST /schedule/{id}/run — manually trigger a cron job.
 ///
 /// Delegates to `crate::scheduler::fire_cron_job_by_id` (the same function
 /// used by the existing `/run-cron/{schedule_id}` endpoint).
 ///
-/// No SQL queries here - the actual run logic is in the scheduler module.
+/// No SQL queries here — the actual run logic is in the scheduler module.
 async fn run_schedule_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

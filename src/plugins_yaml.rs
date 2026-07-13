@@ -4,7 +4,7 @@
 //! status and configuration for each plugin. The plugin manifests themselves
 //! are loaded from `plugin.json` files on disk via the `plugin::installer` module.
 //!
-//! Reads happen on every access (no caching - files are tiny, parsing is ~50µs).
+//! Reads happen on every access (no caching — files are tiny, parsing is ~50µs).
 //! Writes are atomic: write to `.tmp` → fsync → rename.
 
 use crate::err_msg;
@@ -26,7 +26,7 @@ use std::path::PathBuf;
 pub struct PluginYamlEntry {
     pub enabled: bool,
     /// Source identifier: "built-in", "bundled", or "remote".
-    /// Authoritative - determines which binary/source to use.
+    /// Authoritative — determines which binary/source to use.
     /// No more builtin:bool or remote:{...} guessing.
     #[serde(default = "default_source")]
     pub source: String,
@@ -41,7 +41,7 @@ fn default_source() -> String {
 /// Describes a git remote source for a plugin installed from a git repository.
 ///
 /// The plugin type (mcp, platform, provider) is inferred from the YAML file section
-/// (tools.yml, platforms.yml, providers.yml) - not stored in this struct.
+/// (tools.yml, platforms.yml, providers.yml) — not stored in this struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginRemote {
     /// The git clone URL (https://... or git@...).
@@ -136,7 +136,7 @@ impl PluginYamlType {
 // API response type (backward-compatible with dashboard)
 // ---------------------------------------------------------------------------
 
-/// Plugin detail as returned by the HTTP API - matches the format the frontend expects.
+/// Plugin detail as returned by the HTTP API — matches the format the frontend expects.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginDetail {
     pub id: i64,
@@ -145,7 +145,7 @@ pub struct PluginDetail {
     pub version: String,
     pub source: Option<String>,
     /// Status is one of "enabled" or "disabled" only.
-    /// "duplicated" is NOT a status - use `is_duplicated` flag instead.
+    /// "duplicated" is NOT a status — use `is_duplicated` flag instead.
     pub status: String,
     pub manifest: serde_json::Value,
     pub config: serde_json::Value,
@@ -175,7 +175,7 @@ pub struct PluginDetail {
     #[serde(default)]
     pub has_source_code: bool,
     /// True if this is a script-language MCP (plugin.json entrypoint with non-Rust command).
-    /// Script MCPs don't need compilation - they run via the configured command directly.
+    /// Script MCPs don't need compilation — they run via the configured command directly.
     #[serde(default)]
     pub is_script: bool,
     /// Human-readable explanation when status is "error".
@@ -384,7 +384,7 @@ pub fn set_enabled(
 }
 
 // ---------------------------------------------------------------------------
-// Remote plugin store (.remote/plugins.yml) - persists remote plugin info
+// Remote plugin store (.remote/plugins.yml) — persists remote plugin info
 // independently of the main YAML, so switching sources doesn't lose it.
 // ---------------------------------------------------------------------------
 
@@ -520,7 +520,7 @@ struct SecretValueRow {
 /// (use the async `resolve_config_ref_value` for full resolution with a DB pool).
 ///
 /// This function is for YAML plugin config values ONLY. It does NOT handle
-/// `${VAR}` syntax - that legacy format is only supported in `plugin.json`
+/// `${VAR}` syntax — that legacy format is only supported in `plugin.json`
 /// and `mcp-config.json` env blocks via `resolve_env_var`.
 pub fn resolve_config_value(value: &str) -> String {
     if let Some(var_name) = value.strip_prefix("$env:") {
@@ -529,11 +529,11 @@ pub fn resolve_config_value(value: &str) -> String {
             String::new()
         });
     }
-    // $secret: passes through - can't resolve without DB pool
+    // $secret: passes through — can't resolve without DB pool
     if value.starts_with("$secret:") {
         return value.to_string();
     }
-    // No ${VAR} resolution - YAML config uses $env: and $secret: only
+    // No ${VAR} resolution — YAML config uses $env: and $secret: only
     value.to_string()
 }
 
@@ -555,7 +555,7 @@ fn resolve_env_var(value: &str) -> String {
             String::new()
         });
     }
-    // No ${VAR} support - that syntax is not used anywhere
+    // No ${VAR} support — that syntax is not used anywhere
     value.to_string()
 }
 
@@ -592,11 +592,11 @@ fn resolve_legacy_vars(value: &str) -> String {
 
 /// Resolve `$env:VAR` and `$secret:NAME` references in a single value.
 ///
-/// - `$env:VAR` - reads from process environment via `std::env::var`
-/// - `$secret:NAME` - reads from the `secrets` table in the DB
+/// - `$env:VAR` — reads from process environment via `std::env::var`
+/// - `$secret:NAME` — reads from the `secrets` table in the DB
 ///
 /// For `$secret:`, returns the original string if DB lookup fails.
-/// Does NOT handle `${VAR}` - that legacy syntax is only resolved in
+/// Does NOT handle `${VAR}` — that legacy syntax is only resolved in
 /// `plugin.json`/`mcp-config.json` env blocks via the sync resolve path.
 pub async fn resolve_config_ref_value(value: &str, pool: &sqlx::PgPool) -> String {
     if let Some(var_name) = value.strip_prefix("$env:") {
@@ -820,7 +820,7 @@ fn build_plugin_detail(
                     ));
                 }
 
-                // Check get_bin_path() - resolves binary next to the omniagent executable
+                // Check get_bin_path() — resolves binary next to the omniagent executable
                 // or at /app/target/release/<name>
                 if let Some(bin_path) = crate::mcp::external::config::get_bin_path(pkg) {
                     candidates.push(bin_path);
@@ -861,16 +861,16 @@ fn build_plugin_detail(
                         return true;
                     }
                     // Bare binary names like "mcp-server-actions" or "python3" are NOT
-                    // source code - they're either pre-compiled binaries or script runners.
+                    // source code — they're either pre-compiled binaries or script runners.
                     // Known runners are checked by looking at the first word's characteristics:
                     // - Known script runners always have extensions or are well-known names
                     // - Plugin binaries follow the "mcp-server-*" or similar conventions
-                    // We return false here - bare binary name = no source code.
+                    // We return false here — bare binary name = no source code.
                     return false;
                 }
             }
             // Check for source files by extension (covers remote plugins without
-            // explicit entrypoint in plugin.json - e.g. test-js-tool, test-python-tool)
+            // explicit entrypoint in plugin.json — e.g. test-js-tool, test-python-tool)
             if has_source_file_by_extension(dir_path) {
                 return true;
             }
@@ -886,7 +886,7 @@ fn build_plugin_detail(
     let is_script = false;
 
     // Detect programming language
-    // API-mode providers (api_mode set) have no language - they're HTTP API based.
+    // API-mode providers (api_mode set) have no language — they're HTTP API based.
     let language = if manifest.api_mode.is_some() {
         String::new()
     } else {
@@ -911,7 +911,7 @@ fn build_plugin_detail(
             "unknown".to_string()
         })
         .unwrap_or_else(|| {
-            // No plugin_dir - try manifest entrypoint
+            // No plugin_dir — try manifest entrypoint
             if let Some(ep) = manifest.entrypoint.as_ref() {
                 let cmd = ep.command.to_lowercase();
                 if cmd.contains(".py") || cmd.contains("python") {
@@ -1044,7 +1044,7 @@ fn pick_primary_source(group: &PluginSourceGroup) -> Option<usize> {
     }
 
     // No YAML entry: do NOT designate any source as primary.
-    // All sources are equal - none is "duplicated" over the others.
+    // All sources are equal — none is "duplicated" over the others.
     // The frontend shows the disabled-card styling and buttons on all of them.
     None
 }
@@ -1143,7 +1143,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
 
     // After standard discovery + YAML remote path, check YAML entries for remote.path subdirectories.
     // A remote plugin at .remote/<name>/ with remote.path: "tools/<name>" has its
-    // plugin.json at .remote/<name>/tools/<name>/plugin.json - not at the root level
+    // plugin.json at .remote/<name>/tools/<name>/plugin.json — not at the root level
     // that remote.yml-driven discovery covers. Use the YAML remote.path to construct
     // the exact path and discover these deterministicly.
     for (yaml_type, yaml_entries) in &[
@@ -1207,7 +1207,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
             let is_primary = primary_idx.map(|idx| i == idx);
             // When primary_idx is None (no YAML entry, none enabled), no source is a "duplicate"
 
-            // Don't hide disabled plugins - show them with status "disabled"
+            // Don't hide disabled plugins — show them with status "disabled"
             // so the user can re-enable from the dashboard.
 
             // Plugin directory is the parent of the base_path
@@ -1231,7 +1231,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
 
             // is_duplicated is now set via the build_plugin_detail parameter,
             // NOT by overriding the status. The original status (enabled/disabled)
-            // is preserved for all sources - the frontend uses is_duplicated
+            // is preserved for all sources — the frontend uses is_duplicated
             // to display the duplicate label separately.
 
             results.push(detail);
@@ -1257,7 +1257,7 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
                         PluginYamlType::Provider => PluginType::Provider,
                     },
                     description: Some(if is_remote {
-                        "Remote plugin - not downloaded yet".to_string()
+                        "Remote plugin — not downloaded yet".to_string()
                     } else {
                         "Plugin source not found on disk".to_string()
                     }),
@@ -1429,7 +1429,7 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
         )));
     }
 
-    // Not found via discovery - check YAML entries directly (YAML-only entry with no disk source)
+    // Not found via discovery — check YAML entries directly (YAML-only entry with no disk source)
     if let Some(detail) = build_not_found_from_yaml(
         data_dir,
         name,
@@ -1467,7 +1467,7 @@ fn build_not_found_from_yaml(
                     PluginYamlType::Provider => PluginType::Provider,
                 },
                 description: Some(if is_remote {
-                    "Remote plugin - not downloaded yet".to_string()
+                    "Remote plugin — not downloaded yet".to_string()
                 } else {
                     "Plugin source not found on disk".to_string()
                 }),
@@ -1571,7 +1571,7 @@ pub fn get_disk_plugin_type(data_dir: &str, name: &str) -> AppResult<Option<Stri
         }
     }
 
-    // Fallback: check YAML entries for remote.path - the plugin may exist at
+    // Fallback: check YAML entries for remote.path — the plugin may exist at
     // .remote/<name>/{path}/plugin.json which may not be in the root-level scan.
     for (yaml_type, entries) in &[
         (
@@ -1829,7 +1829,7 @@ pub fn load_plugin_yaml_config(
 ///
 /// This is used by MCP tool servers and provider plugins that need env vars
 /// with prefixed names. For platform plugins, use `load_plugin_yaml_config`
-/// directly - the `config` field (original keys) is sent as configure params.
+/// directly — the `config` field (original keys) is sent as configure params.
 pub fn merge_yaml_config_into_env(
     env: &mut HashMap<String, String>,
     plugin_name: &str,
@@ -2132,7 +2132,7 @@ providers:
     #[test]
     fn test_merge_yaml_config_into_env_no_yaml_file() {
         let (_d, path) = test_data_dir();
-        // No YAML file exists yet - should not error
+        // No YAML file exists yet — should not error
         let mut env = HashMap::new();
         merge_yaml_config_into_env(&mut env, "ghost", &path, &PluginYamlType::Tool);
         assert!(env.is_empty());
@@ -2152,7 +2152,7 @@ platforms:
 "#,
         );
         let mut env = HashMap::new();
-        // Plugin "slack" not in the file - should not error, no env vars added
+        // Plugin "slack" not in the file — should not error, no env vars added
         merge_yaml_config_into_env(&mut env, "slack", &path, &PluginYamlType::Platform);
         assert!(env.is_empty());
     }

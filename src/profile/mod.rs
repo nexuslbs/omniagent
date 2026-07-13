@@ -36,7 +36,7 @@ pub struct Profile {
 /// Default context budget for profiles that don't specify one.
 pub const PROMPT_BUDGET_DEFAULT: usize = 15_000;
 
-/// The list of core native tools - used for multi-select in the dashboard.
+/// The list of core native tools — used for multi-select in the dashboard.
 /// External tools (MCP plugins installed via plugin_registry) are loaded
 /// dynamically at runtime and are not listed here.
 pub const CORE_TOOLS: &[&str] = &[
@@ -128,7 +128,7 @@ impl Profile {
         serde_json::from_str(&content).ok()
     }
 
-    /// Apply a ProfileConfig on top of the default - fields from config override defaults.
+    /// Apply a ProfileConfig on top of the default — fields from config override defaults.
     pub fn with_config(mut self, config: ProfileConfig) -> Self {
         if let Some(p) = config.provider {
             self.provider = Some(p);

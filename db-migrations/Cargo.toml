@@ -2,7 +2,7 @@
 name = "db-migrations"
 version = "0.1.0"
 edition = "2021"
-description = "Standalone database migrator for OmniAgent - applies schema changes without building the full agent"
+description = "Standalone database migrator for OmniAgent — applies schema changes without building the full agent"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

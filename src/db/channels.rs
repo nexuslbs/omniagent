@@ -381,7 +381,7 @@ pub async fn claim_channel_resource(
 // Channel open/close/status queries
 // ---------------------------------------------------------------------------
 
-/// Close a channel - sets closed=true and skips pending/processing threads.
+/// Close a channel — sets closed=true and skips pending/processing threads.
 pub async fn close_channel(pool: &PgPool, channel_id: i64) -> AppResult<()> {
     sql_forge!(
         "UPDATE channels SET closed = true, updated_at = NOW() WHERE id = :id",
@@ -392,7 +392,7 @@ pub async fn close_channel(pool: &PgPool, channel_id: i64) -> AppResult<()> {
     Ok(())
 }
 
-/// Open a channel - sets closed=false so the supervisor spawns a handler.
+/// Open a channel — sets closed=false so the supervisor spawns a handler.
 pub async fn open_channel(pool: &PgPool, channel_id: i64) -> AppResult<()> {
     sql_forge!(
         "UPDATE channels SET closed = false, updated_at = NOW() WHERE id = :id",
@@ -473,11 +473,11 @@ pub async fn get_channel_status(
 }
 
 // ---------------------------------------------------------------------------
-// Channel seq-0 message query - for recent channel context
+// Channel seq-0 message query — for recent channel context
 // ---------------------------------------------------------------------------
 
 /// Get the most recent seq-0 (thread root) messages for a channel.
-/// Filters out cron and kanban system messages - only user-facing conversations.
+/// Filters out cron and kanban system messages — only user-facing conversations.
 pub async fn get_recent_channel_seq0_messages(
     pool: &PgPool,
     channel_id: i64,

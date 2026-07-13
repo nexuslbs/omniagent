@@ -1,4 +1,4 @@
-//! mcp-server-metrics - standalone MCP server for agent metrics queries.
+//! mcp-server-metrics — standalone MCP server for agent metrics queries.
 //! Provides `get_metrics` tool that reports token usage, latency, message counts,
 //! groundedness rate, retrieval hit rate, and hallucination proxy metrics.
 //!
@@ -298,7 +298,7 @@ async fn handle_get_metrics(pool: &PgPool, args: &Value) -> Result<(String, bool
     );
     report.push_str(
         "- **User corrections (proxy)**: Count of user messages containing correction \
-         keywords (wrong, incorrect, etc.) within 5 minutes of an agent response - a proxy \
+         keywords (wrong, incorrect, etc.) within 5 minutes of an agent response — a proxy \
          for hallucination/quality issues\n",
     );
 

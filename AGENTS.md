@@ -1,13 +1,13 @@
-# OmniAgent - AGENTS.md
+# OmniAgent — AGENTS.md
 
-## Prompt Architecture - HARD RULE: ZERO PROMPT LOGIC IN OMINAGENT
+## Prompt Architecture — HARD RULE: ZERO PROMPT LOGIC IN OMINAGENT
 
 ### Core Principle
 **The prompt plugin configured in settings is the SINGLE SOURCE OF TRUTH for ALL prompt generation.** Omniagent must never build, assemble, or generate prompts inline. No in-process prompt builder, no direct file reads for prompt assembly, no inline planning prompt strings.
 
 ### Contract: Prompt Plugin `generate` Tool Returns Parts
 
-The `generate` tool MUST return a structured object with 5 fields - NOT a single concatenated string:
+The `generate` tool MUST return a structured object with 5 fields — NOT a single concatenated string:
 
 ```json
 {
@@ -35,7 +35,7 @@ Omniagent is responsible ONLY for assembly: it receives these 5 parts and format
 - The user's original request goes into the `context` field (alongside thread history)
 - The `user` field contains the planning instruction: *"Analyze the context above and create a step-by-step plan..."*
 
-This keeps the plugin generic - it just provides parts. Omniagent decides how to arrange them.
+This keeps the plugin generic — it just provides parts. Omniagent decides how to arrange them.
 
 ### Dashboard Prompt Preview
 
@@ -43,7 +43,7 @@ The `/prompt-preview/{channel_name}` endpoint MUST call the active prompt plugin
 
 ### No In-Process Fallback
 
-If the prompt plugin's `generate` call fails, propagate the error. Do NOT fall back to in-process prompt building - no fallback exists.
+If the prompt plugin's `generate` call fails, propagate the error. Do NOT fall back to in-process prompt building — no fallback exists.
 
 ### What This Eliminates
 
@@ -51,9 +51,9 @@ If the prompt plugin's `generate` call fails, propagate the error. Do NOT fall b
 |------|-------------|--------|
 | `src/prompt_builder.rs` | omniagent core | DELETED |
 | `src/mcp/prompt_tools.rs` | omniagent MCP | DELETED |
-| `src/agent/executor.rs` inline planning | Lines 487-523 | MUST BE REMOVED - use parts approach |
-| `prompt_preview_handler` inline MEMORY.md read | `src/server/mod.rs` | MUST BE REMOVED - call MCP plugin |
-| `build_thread_context` direct call | Both executor + preview | Can remain as a utility, but must NOT be the sole source of context - context comes from the plugin's generate tool |
+| `src/agent/executor.rs` inline planning | Lines 487-523 | MUST BE REMOVED — use parts approach |
+| `prompt_preview_handler` inline MEMORY.md read | `src/server/mod.rs` | MUST BE REMOVED — call MCP plugin |
+| `build_thread_context` direct call | Both executor + preview | Can remain as a utility, but must NOT be the sole source of context — context comes from the plugin's generate tool |
 | `prompt-tools` crate | Workspace member | DELETED (merged into plugin) |
 
 ### Plugin Discovery (`info` tool)
@@ -72,13 +72,13 @@ Omniagent calls `info` to discover what the plugin can provide.
 ## Plugin System Rules & Conventions
 
 ### Core Principle
-The **source** field in `plugins.yml` is authoritative - it determines which binary/source to use. No more `builtin: bool` or `remote: {...}` guessing.
+The **source** field in `plugins.yml` is authoritative — it determines which binary/source to use. No more `builtin: bool` or `remote: {...}` guessing.
 
 A plugin **can** exist at multiple sources simultaneously (e.g., a builtin crate in omniagent AND a bundled copy in omni-stack). The `source` field unambiguously identifies which one to act on.
 
 **At most one source can be enabled per plugin name.** Enabling a different source overwrites the YAML entry for that name.
 
-### Plugin Config - HARD RULE: Use Plugin Config, NOT Direct Env Vars
+### Plugin Config — HARD RULE: Use Plugin Config, NOT Direct Env Vars
 
 **Plugins MUST use their own plugin config (`config_schema` in `plugin.json`) for ALL configurable values.** Plugins may reference environment variables via `$env:VAR_NAME` as default values in `config_schema`, but the runtime value must come from the plugin's resolved config (which the plugin system provides via the `config` field).
 
@@ -98,7 +98,7 @@ A plugin **can** exist at multiple sources simultaneously (e.g., a builtin crate
 
 The plugin reads from its resolved config at startup, not by calling `std::env::var("MY_PARAM")` directly. The plugin system resolves `$env:` references automatically.
 
-**Incorrect - do NOT do this:**
+**Incorrect — do NOT do this:**
 ```rust
 // ❌ Plugin reads env var directly
 let value = std::env::var("MY_PARAM").unwrap_or_default();
@@ -112,8 +112,8 @@ This rule applies to ALL plugin types: tools, platforms, and providers.
 
 | File | Purpose |
 |------|---------|
-| `plugins.yml` | Unified config - replaces old tools.yml/platforms.yml/providers.yml |
-| `remote.yml` | Remote plugin metadata (URL, path, ref) - versioned in git |
+| `plugins.yml` | Unified config — replaces old tools.yml/platforms.yml/providers.yml |
+| `remote.yml` | Remote plugin metadata (URL, path, ref) — versioned in git |
 
 `plugins.yml` format:
 ```yaml
@@ -141,7 +141,7 @@ tools:
     path: tools/test-rust-tool
 ```
 
-### Source Determination - HARD RULE: NO PRIORITY, NO FALLBACK
+### Source Determination — HARD RULE: NO PRIORITY, NO FALLBACK
 
 A plugin's **source** is determined **solely by its physical location on disk**. There is no priority order between built-in, bundled, and remote. Each stands independently:
 
@@ -155,7 +155,7 @@ A plugin's **source** is determined **solely by its physical location on disk**.
 
 **When there is no YAML entry**, all sources are discovered and shown as disabled. The user can enable any source via the dashboard, which creates a YAML entry with that source.
 
-**No function should guess or fall back between sources.** The `detect_plugin_category_cross_type()` function returns `None` when no YAML entry exists - it does NOT pick a source. Each caller (install handler, enable handler, etc.) has its own source-specific logic.
+**No function should guess or fall back between sources.** The `detect_plugin_category_cross_type()` function returns `None` when no YAML entry exists — it does NOT pick a source. Each caller (install handler, enable handler, etc.) has its own source-specific logic.
 
 **MCP scanner (`discover_plugin_servers`) is source-aware:** It reads `plugins.yml` and only starts MCP servers for enabled plugins at their correct source location. It does NOT scan all directories blindly.
 
@@ -165,12 +165,12 @@ A plugin's **source** is determined **solely by its physical location on disk**.
 ### Builtin Plugin Rules
 
 - **Builtin plugins are disabled by default.** They must be explicitly added to `plugins.yml` with `enabled: true` and `source: built-in`.
-- **If a tool/plugin is defined in YAML** with `source: bundled` or `source: remote` and a builtin with the same name exists, the builtin is ignored - the non-builtin source is the primary. The builtin still shows as an available source but marked as duplicated.
+- **If a tool/plugin is defined in YAML** with `source: bundled` or `source: remote` and a builtin with the same name exists, the builtin is ignored — the non-builtin source is the primary. The builtin still shows as an available source but marked as duplicated.
 - **When a builtin plugin has a YAML entry but no explicit `source` field**, it defaults to `built-in` but appears as disabled if enabled=false.
 - **Builtin plugins** are workspace members in `/app/Cargo.toml`.
 - **Only plugins with `plugin.json` at directory root** are considered local/repo plugins. Directories without `plugin.json` (e.g., config-only dirs like `util`) should not appear as discoverable plugins.
 | **Duplicated plugins in the tools page**: When a plugin exists both as builtin (in omniagent `/app/plugins/`) and bundled (in omni-stack `plugins/`), the non-primary source shows as "duplicated" in the dashboard. The omni-stack copy usually takes precedence unless the YAML explicitly sets `source: built-in`.
-| **No hardcoded built-in list in frontend**: BUILT_IN_TOOLS was removed (2026-07-07). All tools come from the backend's `/api/plugins` endpoint. The frontend no longer hardcodes "actions" or any other plugin - the backend discovers everything.
+| **No hardcoded built-in list in frontend**: BUILT_IN_TOOLS was removed (2026-07-07). All tools come from the backend's `/api/plugins` endpoint. The frontend no longer hardcodes "actions" or any other plugin — the backend discovers everything.
 | **`util` and similar config-only directories**: Directories without `plugin.json` at root are NOT discoverable as plugins. A dir like `util` (which only has Cargo.toml or config files, no plugin.json) should not appear in the /tools page unless explicitly defined in plugins.yml.
 
 ### Bundled Plugin Rules (Omni-Stack)
@@ -188,34 +188,34 @@ The `/api/plugins` response groups plugins by name and assigns a **primary sourc
 3. **No YAML entry + 2+ sources** with same name → **no primary**. All sources get `is_duplicated=true`.
 4. **No YAML entry + single source** → `is_duplicated=false` (no other source to conflict with).
 
-**Key behavior change (2026-07-07):** When there is no YAML entry, `pick_primary_source()` returns `None`, and `is_duplicated` is set to `group.sources.len() > 1` - meaning all sources in a multi-source group show as duplicated. This ensures the YAML-configured source is always the authority; without YAML, all sources are equal.
+**Key behavior change (2026-07-07):** When there is no YAML entry, `pick_primary_source()` returns `None`, and `is_duplicated` is set to `group.sources.len() > 1` — meaning all sources in a multi-source group show as duplicated. This ensures the YAML-configured source is always the authority; without YAML, all sources are equal.
 
 **Enabling a source** (via dashboard or API) creates a YAML entry with that `source`, making it primary and marking all others as duplicated.
 
-### Plugin Action Buttons (Dashboard - tools.ts)
+### Plugin Action Buttons (Dashboard — tools.ts)
 
-Action buttons are determined by `renderActionButtons()` based on the plugin's source, build state, and type. The `is_duplicated` flag does NOT suppress buttons - duplicated sources with source code are still actionable.
+Action buttons are determined by `renderActionButtons()` based on the plugin's source, build state, and type. The `is_duplicated` flag does NOT suppress buttons — duplicated sources with source code are still actionable.
 
 **Remove button rule:** Remove (`plugin-delete-btn`) shows for non-builtin plugins when the plugin is NOT installed (needs_build=true) OR is a script plugin. For installed Rust plugins, use Uninstall instead.
 
 | Scenario | `hasRemote` | `hasCompilableSource` | `needsBuild` | Buttons |
 |----------|-------------|-----------------|---------------|---------|
-| Remote script/no-source | ✅ | ❌ | - | **Remove + Update** |
+| Remote script/no-source | ✅ | ❌ | — | **Remove + Update** |
 | Remote Rust, not yet built | ✅ | ✅ | ✅ | **Remove + Install + Update** |
 | Remote Rust, already built | ✅ | ✅ | ❌ | **Uninstall + Reinstall + Update** |
-| Bundled script/no-source | ❌ | ❌ | - | **Remove** |
+| Bundled script/no-source | ❌ | ❌ | — | **Remove** |
 | Bundled Rust, not yet built | ❌ | ✅ | ✅ | **Install + Remove** |
 | Bundled Rust, already built | ❌ | ✅ | ❌ | **Reinstall + Uninstall** |
-| Built-in script/no-source | ❌ | ❌ | - | *(no buttons)* |
+| Built-in script/no-source | ❌ | ❌ | — | *(no buttons)* |
 | Built-in Rust, not yet built | ❌ | ✅ | ✅ | *(no buttons)* |
 | Built-in Rust, already built | ❌ | ✅ | ❌ | *(no buttons)* |
 
 **Button actions:**
-- **Remove** (`plugin-delete-btn`): Calls `DELETE /api/plugins/{name}` - removes YAML entry
-- **Install** (`plugin-install-btn`): Calls `POST /api/plugins/{name}/install` - compiles + registers
-- **Uninstall** (`plugin-remove-btn`): Calls `DELETE /api/plugins/{name}?mode=uninstall` - removes binary + disables
-- **Reinstall** (`plugin-reinstall-btn`): Calls `POST /api/plugins/{name}/reinstall` - recompiles binary
-- **Update** (`plugin-update-btn`): Calls `POST /api/plugins/{name}/download` - re-clones from git + recompiles (remote only)
+- **Remove** (`plugin-delete-btn`): Calls `DELETE /api/plugins/{name}` — removes YAML entry
+- **Install** (`plugin-install-btn`): Calls `POST /api/plugins/{name}/install` — compiles + registers
+- **Uninstall** (`plugin-remove-btn`): Calls `DELETE /api/plugins/{name}?mode=uninstall` — removes binary + disables
+- **Reinstall** (`plugin-reinstall-btn`): Calls `POST /api/plugins/{name}/reinstall` — recompiles binary
+- **Update** (`plugin-update-btn`): Calls `POST /api/plugins/{name}/download` — re-clones from git + recompiles (remote only)
 - **Enable/Disable** (`plugin-toggle-btn`): Calls `POST /api/plugins/{name}/enable` or `/disable`
 
 **Update vs Reinstall vs Install:**
@@ -223,7 +223,7 @@ Action buttons are determined by `renderActionButtons()` based on the plugin's s
 - **Reinstall**: recompiles the existing source code on disk (no git pull)
 - **Install**: compiles from existing source and registers in YAML
 
-### Plugin Display Rules (Dashboard - backend data)
+### Plugin Display Rules (Dashboard — backend data)
 
 ### Plugin Discovery Rules
 
@@ -251,8 +251,8 @@ Both handlers now call this shared function instead of duplicating ~160 lines ea
 
 The integration tests in `omni-stack/scripts/tests.py` were hardened:
 
-- **Fixed broken regex** in `target_dir_exists()`: `\\\\s+` → `\\s+` (matched literal `\s` instead of whitespace - the function always returned False for remote plugins with indented YAML)
-- **Added binary-absence check** after Uninstall: `assert_eq(binary_exists(name, plugin_type), False)` - this is the critical assertion that would have caught the subpath `target/` bug
+- **Fixed broken regex** in `target_dir_exists()`: `\\\\s+` → `\\s+` (matched literal `\s` instead of whitespace — the function always returned False for remote plugins with indented YAML)
+- **Added binary-absence check** after Uninstall: `assert_eq(binary_exists(name, plugin_type), False)` — this is the critical assertion that would have caught the subpath `target/` bug
 - **Made functions type-aware**: `binary_exists()`, `target_dir_exists()`, `install_plugin()`, `uninstall_plugin()`, `add_remote_plugin()`, `test_rust_tool()` all accept a `plugin_type` parameter ("tools", "platforms", "providers")
 - **Full lifecycle verification** for each operation:
   - Install: binary exists, needs_build=False, status=enabled, no background_compile
@@ -264,7 +264,7 @@ The integration tests in `omni-stack/scripts/tests.py` were hardened:
 
 ### Git Install (install-git)
 
-- **API**: `POST /api/plugins/install-git` - clones a plugin repo and persists to `remote.yml` only.
+- **API**: `POST /api/plugins/install-git` — clones a plugin repo and persists to `remote.yml` only.
 - Does NOT compile or register in `plugins.yml`. 
 - The dashboard handles Install (compile + YAML entry), Enable, Remove as separate steps.
 - Directory naming priority: explicit `name` → last segment of `path` → repo name from URL, sanitized with `sanitize_plugin_name()`.
@@ -294,8 +294,8 @@ Remote plugin info is persisted in `{data_dir}/remote.yml` (root-level, replaces
 ### "Not Found" Status
 
 When a plugin exists in `plugins.yml` but has no source on disk, a synthetic "not found" entry is added:
-- `status: "not_found"` - red badge in dashboard
-- `needs_download: true` - for remote plugins not yet cloned
+- `status: "not_found"` — red badge in dashboard
+- `needs_download: true` — for remote plugins not yet cloned
 
 ### API Type Change
 
@@ -312,7 +312,7 @@ When a plugin exists in `plugins.yml` but has no source on disk, a synthetic "no
 - **Uninstall does NOT remove the `.remote/` directory** for remote plugins. It only:
   1. Removes the compiled `target/` directory (`{data_dir}/plugins/{type}/.remote/{name}/target`)
   2. Sets `enabled: false` in `plugins.yml` (keeps the YAML entry and `.remote/` source code)
-  3. **Stops the MCP server** via `clear_server_pools()` + `remove_server_config()` + `remove_by_server()` - without this, the MCP tools remain registered in `/mcp/tools` even though YAML says `enabled: false`
+  3. **Stops the MCP server** via `clear_server_pools()` + `remove_server_config()` + `remove_by_server()` — without this, the MCP tools remain registered in `/mcp/tools` even though YAML says `enabled: false`
 - For non-remote plugins, uninstall removes the YAML entry and the compiled `target/` directory, and also stops the MCP server.
 - Same MCP server cleanup applies to the default **Remove** mode.
 
@@ -333,18 +333,18 @@ let current_enabled = plugins_yaml::get_entry(data_dir, &yaml_type, &name)
 See "Plugin Action Buttons" table above for full rules. Key bundled specifics:
 - **Bundled script/no-source**: Remove button only (runs directly, no compilation needed).
 - **Bundled Rust, not yet installed**: Install + Remove.
-- **Bundled Rust, installed**: Reinstall + Uninstall (no Remove - it's installed, use Uninstall instead).
+- **Bundled Rust, installed**: Reinstall + Uninstall (no Remove — it's installed, use Uninstall instead).
 - There is no Update button for bundled plugins (the code lives in the omni-stack repo, not an external git repo).
 - The Remove button calls `DELETE /api/plugins/{name}` (remove mode), which removes the YAML entry and the compiled `target/` directory.
-- The Install button for bundled plugins compiles synchronously, writes `enabled: true` to `plugins.yml`, and hot-reloads the MCP server - all in one synchronous API call. No more background compile.
+- The Install button for bundled plugins compiles synchronously, writes `enabled: true` to `plugins.yml`, and hot-reloads the MCP server — all in one synchronous API call. No more background compile.
 
 ### Remove API Behavior (DELETE /api/plugins/:name)
 
 The Remove handler (`delete_plugin_handler`) follows strict source-based rules (rewritten August 2026).
 
 **Core detection order:**
-1. **YAML entry** - `plugins.yml` source field (built-in / bundled / remote)
-2. **Disk state** - built-in on disk (`/app/plugins/`), bundled on disk (`workspace_dir/plugins/`), or remote in `remote.yml`
+1. **YAML entry** — `plugins.yml` source field (built-in / bundled / remote)
+2. **Disk state** — built-in on disk (`/app/plugins/`), bundled on disk (`workspace_dir/plugins/`), or remote in `remote.yml`
 
 **Rules (applied in priority order):**
 
@@ -361,10 +361,10 @@ The Remove handler (`delete_plugin_handler`) follows strict source-based rules (
 | No YAML + no disk | **No-op** (success) | None | None |
 
 **Key behaviors:**
-- **`remote.yml` is the single source of truth** for remote plugin detection. The `.remote/` directory contents are irrelevant - if a plugin name exists in `remote.yml` (loaded via `load_remote_plugins()`), it's treated as remote. No walking of `.remote/` directories needed.
+- **`remote.yml` is the single source of truth** for remote plugin detection. The `.remote/` directory contents are irrelevant — if a plugin name exists in `remote.yml` (loaded via `load_remote_plugins()`), it's treated as remote. No walking of `.remote/` directories needed.
 - **Source mismatches preserve YAML** intentionally. If YAML says `source: bundled` but the plugin is listed in `remote.yml`, removing the plugin deletes the remote files (`remote.yml` entry + `.remote/` dir) but keeps the YAML entry intact. The YAML now correctly points to the bundled source (even if not yet present on disk).
 - **Built-in plugins cannot be removed.** Attempting to remove a built-in plugin returns a 400 error: `"Cannot remove built-in plugin 'X'. Built-in plugins are part of the application and can only be disabled."`
 - **MCP server cleanup** always runs when a `.remote/` directory or workspace plugin directory exists.
-- **Provider and platform removal** works identically - the handler detects `yaml_type` from YAML entry or disk location.
+- **Provider and platform removal** works identically — the handler detects `yaml_type` from YAML entry or disk location.
 
 **`list_plugins` filter change:** Any `enabled: false` YAML entry now suppresses ALL sources for that plugin name (removed source-matching requirement). This handles mismatched source types where YAML says `bundled` but disk source is `built-in`.

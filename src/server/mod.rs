@@ -1,14 +1,14 @@
 //! HTTP server for external control (stop, close, open, status, health)
 //!
 //! Provides endpoints:
-//! - `GET /health` - health check
-//! - `POST|GET /stop/{channel_id}` - skip pending/processing threads (no channel state change)
-//! - `POST|GET /close/{channel_id}` - close channel (skip threads, cancel handler)
-//! - `POST|GET /open/{channel_id}` - open channel (allow handler to start)
-//! - `GET /status/{channel_id}` - channel status info
-//! - `GET /prompt/{channel_name}` - show system prompt for a channel
-//! - `POST /prompt-preview/{channel_name}` - preview full prompt (no DB writes), optionally plan
-//! - `POST /run-cron/{schedule_id}` - manually trigger a cron job (proxied from dashboard)
+//! - `GET /health` — health check
+//! - `POST|GET /stop/{channel_id}` — skip pending/processing threads (no channel state change)
+//! - `POST|GET /close/{channel_id}` — close channel (skip threads, cancel handler)
+//! - `POST|GET /open/{channel_id}` — open channel (allow handler to start)
+//! - `GET /status/{channel_id}` — channel status info
+//! - `GET /prompt/{channel_name}` — show system prompt for a channel
+//! - `POST /prompt-preview/{channel_name}` — preview full prompt (no DB writes), optionally plan
+//! - `POST /run-cron/{schedule_id}` — manually trigger a cron job (proxied from dashboard)
 
 pub(crate) mod actions;
 pub(crate) mod channels;
@@ -254,12 +254,12 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
     Ok(())
 }
 
-/// Simple health check - returns "ok".
+/// Simple health check — returns "ok".
 async fn health_handler() -> &'static str {
     "ok"
 }
 
-/// Stop - mark all pending/processing threads as skipped and cancel
+/// Stop — mark all pending/processing threads as skipped and cancel
 /// the channel's executor so it restarts fresh.
 async fn stop_handler(
     Path(channel_id): Path<i64>,
@@ -300,7 +300,7 @@ async fn stop_handler(
     }))
 }
 
-/// Stop-thread - mark a single pending/processing thread as skipped and
+/// Stop-thread — mark a single pending/processing thread as skipped and
 /// cancel the channel's executor so it restarts and picks up remaining
 /// pending threads.
 async fn stop_thread_handler(
@@ -397,7 +397,7 @@ async fn stop_thread_handler(
     }))
 }
 
-/// Close - close the channel (skips threads, cancels handler).
+/// Close — close the channel (skips threads, cancels handler).
 /// The supervisor will not spawn a new handler until the channel is opened again.
 async fn close_handler(
     Path(channel_id): Path<i64>,
@@ -453,7 +453,7 @@ async fn close_handler(
     }))
 }
 
-/// Open - reopen a closed channel so the supervisor can spawn a handler.
+/// Open — reopen a closed channel so the supervisor can spawn a handler.
 async fn open_handler(
     Path(channel_id): Path<i64>,
     State(state): State<Arc<AppState>>,
@@ -478,7 +478,7 @@ async fn open_handler(
     }
 }
 
-/// Status - show channel info and thread counts.
+/// Status — show channel info and thread counts.
 async fn status_handler(
     Path(channel_id): Path<i64>,
     State(state): State<Arc<AppState>>,
@@ -529,7 +529,7 @@ async fn prompt_handler(
     let channel = match queries::get_channel_by_name(&state.pool, &channel_name).await {
         Ok(Some(ch)) => Some(ch),
         Ok(None) => {
-            // Channel not found - build system prompt using the default profile
+            // Channel not found — build system prompt using the default profile
             None
         }
         Err(e) => {
@@ -571,12 +571,12 @@ async fn prompt_handler(
         .iter()
         .map(|t| t.name.clone())
         .collect();
-    // Build system prompt TEMPLATE - stable (identity + guidance) + volatile (memory/soul) placeholders
+    // Build system prompt TEMPLATE — stable (identity + guidance) + volatile (memory/soul) placeholders
     let mut segments: Vec<String> = Vec::new();
 
     // Stable tier: simple identity + tool guidance
     let tool_list = if tool_names.is_empty() { String::new() } else { tool_names.join(", ") };
-    segments.push(format!("You are OmniAgent - precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on - don't retry more than twice."));
+    segments.push(format!("You are OmniAgent — precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on — don't retry more than twice."));
     segments.push(format!("Active Hermes profile: {profile_name}."));
 
     // Volatile tier: memory/soul placeholders
@@ -632,7 +632,7 @@ async fn prompt_preview_handler(
     let channel = match queries::get_channel_by_name(&state.pool, &channel_name).await {
         Ok(Some(ch)) => Some(ch),
         Ok(None) => {
-            // Channel not found - build system prompt using the default profile
+            // Channel not found — build system prompt using the default profile
             None
         }
         Err(e) => {
@@ -670,7 +670,7 @@ async fn prompt_preview_handler(
         .map(|t| t.name.clone())
         .collect();
     let system_prompt = format!(
-        "You are OmniAgent - precise, efficient, autonomous.\n\nActive Hermes profile: {profile_name}.\n\n{}",
+        "You are OmniAgent — precise, efficient, autonomous.\n\nActive Hermes profile: {profile_name}.\n\n{}",
         if !memory_raw.is_empty() { format!("## MEMORY (your personal notes)\n{memory_raw}") } else { String::new() }
     );
 
@@ -735,7 +735,7 @@ async fn prompt_preview_handler(
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
-                        "error": "No LLM provider configured - set LLM_PROVIDER env var or configure channel/provider profile"
+                        "error": "No LLM provider configured — set LLM_PROVIDER env var or configure channel/provider profile"
                     })),
                 );
             }
@@ -751,7 +751,7 @@ async fn prompt_preview_handler(
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
-                        "error": "No LLM model configured - channel, profile, or provider plugin default_model must define one"
+                        "error": "No LLM model configured — channel, profile, or provider plugin default_model must define one"
                     })),
                 );
             }
@@ -771,7 +771,7 @@ evaluate: if the task was completed, call the completion tool.",
             tool_list = tool_list
         );
 
-        // Create LLM client - resolve api_key from provider plugin config
+        // Create LLM client — resolve api_key from provider plugin config
         // (not from hardcoded {PROVIDER}_API_KEY env var names).
         let base_url = crate::llm::resolve_default_base_url(&provider_name);
 
@@ -835,7 +835,7 @@ evaluate: if the task was completed, call the completion tool.",
     )
 }
 
-/// GET /mcp/tools - list all registered MCP tools with their input schemas.
+/// GET /mcp/tools — list all registered MCP tools with their input schemas.
 async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let tools: Vec<serde_json::Value> = state
         .tool_registry
@@ -863,7 +863,7 @@ struct McpExecuteRequest {
     arguments: Option<serde_json::Value>,
 }
 
-/// POST /mcp/execute - execute any registered MCP tool by name.
+/// POST /mcp/execute — execute any registered MCP tool by name.
 /// Stateless: accepts tool name + arguments, returns tool result.
 /// Useful for testing stateless tools like compact_messages and
 /// generate_initial_prompt without needing a channel or database.
@@ -897,7 +897,7 @@ async fn execute_mcp_tool_handler(
     }
 }
 
-/// GET /api/context/{channel_name} - preview section [3] Context, read-only.
+/// GET /api/context/{channel_name} — preview section [3] Context, read-only.
 ///
 /// Assembles the same ContextBuilder blocks that would be injected into the
 /// prompt for the latest thread in this channel. No messages are written.
@@ -999,7 +999,7 @@ async fn context_preview_handler(
     )
 }
 
-/// Call the prompt_generate MCP tool to build context - same tool the agent executor uses.
+/// Call the prompt_generate MCP tool to build context — same tool the agent executor uses.
 /// Falls back to empty string if the tool is not registered or fails.
 async fn call_prompt_context(
     tool_registry: &tokio::sync::RwLock<McpRegistry>,
@@ -1052,7 +1052,7 @@ async fn call_prompt_context(
     }
 }
 
-/// POST /run-cron/{schedule_id} - manually fire a cron job.
+/// POST /run-cron/{schedule_id} — manually fire a cron job.
 ///
 /// Accepts an optional `?force=true` query parameter. When force is true,
 /// the job is executed even if it's marked inactive.

@@ -1,7 +1,7 @@
 //! DB-focused structs using only primitive types compatible with sql-forge's
 //! compile-time validation. Each struct mirrors a domain model but stores
 //! complex types (DateTime, JSON) as plain strings. Conversion to
-//! domain types is done explicitly in Rust - no SQL type casting.
+//! domain types is done explicitly in Rust — no SQL type casting.
 //!
 //! This file serves as the backward-compatible re-export hub: all query functions
 //! have been split into domain-specific sub-modules, but `use crate::db::types as queries;`
@@ -99,7 +99,7 @@ impl TryFrom<ThreadDb> for Thread {
 }
 
 // ---------------------------------------------------------------------------
-// Message DB struct (for SELECT results) - simplified without per-thread fields
+// Message DB struct (for SELECT results) — simplified without per-thread fields
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -159,7 +159,7 @@ impl TryFrom<MessageDb> for Message {
 }
 
 // ---------------------------------------------------------------------------
-// Channel DB struct (for SELECT results) - unchanged
+// Channel DB struct (for SELECT results) — unchanged
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -367,7 +367,7 @@ pub struct Channel {
     /// Identifier of the resource within the platform (chat_id, terminal
     /// session id, etc.).  NULL when there is no platform.
     pub resource_identifier: Option<String>,
-    /// Legacy alias - kept for backward compatibility.  Same value as
+    /// Legacy alias — kept for backward compatibility.  Same value as
     /// `resource_identifier` when platform is set.
     pub external_id: Option<String>,
     pub cause: String,

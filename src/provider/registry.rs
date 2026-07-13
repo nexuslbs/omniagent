@@ -1,4 +1,4 @@
-//! Provider registry - manages external provider plugin subprocesses.
+//! Provider registry — manages external provider plugin subprocesses.
 //!
 //! Provider plugins that have an `entrypoint` in their plugin.json are started
 //! as child processes and communicate via JSON-lines over stdio.
@@ -71,7 +71,7 @@ pub async fn try_external_completion(
         let registry = PROVIDER_REGISTRY.read().ok()?;
         registry.get_cloned(provider_name)?
     };
-    // Drop registry lock - client is an Arc clone, no borrow on the registry
+    // Drop registry lock — client is an Arc clone, no borrow on the registry
 
     let params = CompleteParams {
         model: model.to_string(),
