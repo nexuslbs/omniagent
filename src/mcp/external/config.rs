@@ -135,7 +135,7 @@ pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
     all_servers
 }
 
-/// Scan `plugins/tools/` subdirectories for `mcp-config.json` files — SOURCE-AWARE.
+/// Scan `plugins/tools/` subdirectories for `mcp-config.json` files - SOURCE-AWARE.
 ///
 /// Instead of blindly scanning all directories, this reads `plugins.yml` to
 /// determine the active source for each enabled tool plugin and only scans the
@@ -147,7 +147,7 @@ pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
 pub fn discover_plugin_servers(data_dir: &str) -> Vec<McpServerConfig> {
     let mut servers = Vec::new();
 
-    // Read tools from plugins.yml — only scan enabled plugins at their correct source location
+    // Read tools from plugins.yml - only scan enabled plugins at their correct source location
     let tools =
         match crate::plugins_yaml::load_raw(data_dir, &crate::plugins_yaml::PluginYamlType::Tool) {
             Ok(tools) => tools,
@@ -301,7 +301,7 @@ pub(crate) fn get_bin_path(name: &str) -> Option<String> {
     None
 }
 
-/// Process a single plugin directory — handles mcp-config.json or Cargo.toml + plugin.json.
+/// Process a single plugin directory - handles mcp-config.json or Cargo.toml + plugin.json.
 /// Returns None if the directory doesn't exist or has no valid plugin manifest.
 fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConfig>> {
     let path = std::path::Path::new(plugin_dir);
@@ -413,9 +413,9 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
                     if srv.transport == McpTransport::Stdio && srv.command.is_none() {
                         if has_cargo_toml {
                             // Resolve binary path by convention:
-                            // 1. {plugin_dir}/target/release/{package_name} — standalone plugin
-                            // 2. {get_bin_path(package_name)} — workspace member (next to omniagent binary)
-                            // 3. {plugin_dir}/target/release/{name} — fallback using server name
+                            // 1. {plugin_dir}/target/release/{package_name} - standalone plugin
+                            // 2. {get_bin_path(package_name)} - workspace member (next to omniagent binary)
+                            // 3. {plugin_dir}/target/release/{name} - fallback using server name
                             let pkg = cargo_package_name
                                 .as_deref()
                                 .unwrap_or(&srv.name);
@@ -450,7 +450,7 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
                                 }
                             }
                         } else {
-                            // No Cargo.toml — try workspace member convention, then
+                            // No Cargo.toml - try workspace member convention, then
                             // plugin-local target/release.
                             let mut candidates = Vec::new();
 

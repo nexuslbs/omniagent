@@ -1,1 +1,1 @@
-// Stats module — currently empty after removing unused functions.
+// Stats module - currently empty after removing unused functions.

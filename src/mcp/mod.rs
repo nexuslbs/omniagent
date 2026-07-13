@@ -273,7 +273,7 @@ impl McpRegistry {
         self.tools.values().collect()
     }
 
-    /// Priority ranking for tool ordering — all tools have equal priority.
+    /// Priority ranking for tool ordering - all tools have equal priority.
     fn tool_priority(_name: &str) -> u8 {
         0
     }
@@ -309,7 +309,7 @@ impl McpRegistry {
         self.get(name).and_then(|t| t.watchdog.clone())
     }
 
-    /// Execute a tool call — directly awaits the async handler (no spawn_blocking).
+    /// Execute a tool call - directly awaits the async handler (no spawn_blocking).
     pub async fn execute(&self, call: &McpToolCall, ctx: AppContext) -> AppResult<McpToolResult> {
         // Try exact match first
         if let Some(tool) = self.get(&call.name) {
@@ -588,7 +588,7 @@ fn list_tool_details_tool() -> McpTool {
     McpTool {
         name: "list_tool_details".to_string(),
         full_name: tool_qualify("builtin", "list_tool_details"),
-        description: "Get the full definition (description, input schema / expected parameters) for a specific tool by name. Use this when a tool call returns an error about missing or invalid parameters — call this first to see the correct parameter names and types before retrying.".to_string(),
+        description: "Get the full definition (description, input schema / expected parameters) for a specific tool by name. Use this when a tool call returns an error about missing or invalid parameters - call this first to see the correct parameter names and types before retrying.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -632,7 +632,7 @@ fn list_tool_details_tool() -> McpTool {
                                 "AVAILABLE".to_string()
                             } else {
                                 format!(
-                                    "RESTRICTED — not in profile allowed_tools ({}/{} tools allowed)",
+                                    "RESTRICTED - not in profile allowed_tools ({}/{} tools allowed)",
                                     allowed.len(),
                                     ctx.tool_catalog.len()
                                 )
@@ -651,7 +651,7 @@ fn list_tool_details_tool() -> McpTool {
                     }
                 }
 
-                // Tool not found — list available tools (restricted by profile if applicable)
+                // Tool not found - list available tools (restricted by profile if applicable)
                 let allowed = &ctx.current_allowed_tools;
                 let is_restricted = !allowed.is_empty();
                 let catalog_tools: Vec<&str> = ctx

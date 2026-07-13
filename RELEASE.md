@@ -1,6 +1,6 @@
 # Release v0.1.0
 
-Initial release of OmniAgent — Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP tool support.
+Initial release of OmniAgent - Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP tool support.
 
 ## Features
 - Context Builder & Grounding

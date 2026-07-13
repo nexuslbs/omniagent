@@ -129,11 +129,11 @@ impl ExternalProviderClient {
     pub async fn complete(&self, params: &CompleteParams) -> AppResult<CompleteResult> {
         if !self.initialized.load(Ordering::SeqCst) {
             return Err(Error::Message(format!(
-                "Provider '{}' not initialized — call start() first", self.name
+                "Provider '{}' not initialized - call start() first", self.name
             )));
         }
 
-        // Write request via stored stdin (tokio::sync::Mutex — Send safe)
+        // Write request via stored stdin (tokio::sync::Mutex - Send safe)
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let request = build_complete_request(id, params) + "\n";
         {

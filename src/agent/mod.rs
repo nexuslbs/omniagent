@@ -1,4 +1,4 @@
-//! Agent module — parallel channel processing supervisor.
+//! Agent module - parallel channel processing supervisor.
 //!
 //! The agent supervisor runs a loop that:
 //! 1. Recovers stale `processing` threads on startup.
@@ -134,7 +134,7 @@ impl Agent {
             // Spawn handlers for channels not yet being processed
             for &channel_id in &channel_ids {
                 if let std::collections::hash_map::Entry::Vacant(e) = tokens.entry(channel_id) {
-                    // Skip spawning if the channel is closed — it will be spawned
+                    // Skip spawning if the channel is closed - it will be spawned
                     // when the channel is opened via the /open endpoint
                     if let Ok(true) = queries::is_channel_closed(&agent_ctx.pool, channel_id).await
                     {
@@ -212,7 +212,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
         tokio::select! {
             _ = cancel.cancelled() => {
                 info!("Channel {} handler cancelled", channel_id);
-                // Don't skip pending threads here — stop_thread_handler already marked the
+                // Don't skip pending threads here - stop_thread_handler already marked the
                 // specific thread as skipped before cancelling. Remaining pending threads
                 // should survive and be picked up when the supervisor respawns this handler.
                 break;
@@ -237,7 +237,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                 for thread in &threads {
                     // Best-effort cancellation check before each thread
                     if cancel.is_cancelled() {
-                        // Don't skip pending threads — stop_thread_handler already handled
+                        // Don't skip pending threads - stop_thread_handler already handled
                         // the target thread. The supervisor will respawn the handler.
                         return;
                     }

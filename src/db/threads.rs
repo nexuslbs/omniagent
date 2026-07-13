@@ -21,7 +21,7 @@ pub async fn create_thread(
     profile: &str,
     p: CreateThreadParams,
 ) -> AppResult<Thread> {
-    // Validate cause — must be 'user' or 'system'
+    // Validate cause - must be 'user' or 'system'
     if cause != "user" && cause != "system" {
         err_msg!(
             "Invalid thread cause '{}': must be 'user' or 'system'",
@@ -52,7 +52,7 @@ pub async fn create_thread(
     row.try_into()
 }
 
-/// Set a thread's status to 'system' (terminal — init messages like /start).
+/// Set a thread's status to 'system' (terminal - init messages like /start).
 /// These threads should never be picked up by the executor.
 pub async fn set_thread_system(pool: &PgPool, thread_id: i64) -> AppResult<()> {
     sql_forge!(
@@ -64,7 +64,7 @@ pub async fn set_thread_system(pool: &PgPool, thread_id: i64) -> AppResult<()> {
     Ok(())
 }
 
-/// Set a thread's status to 'failed' (terminal — action execution failure).
+/// Set a thread's status to 'failed' (terminal - action execution failure).
 /// These threads should never be picked up by the executor.
 #[allow(dead_code)]
 pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> AppResult<()> {
@@ -84,7 +84,7 @@ pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> AppResult<()> {
 /// 2. Channel setting (`channel_plan`)
 /// 3. None (let the plugin decide at runtime)
 ///
-/// Returns `None` when no explicit preference is set — the plugin
+/// Returns `None` when no explicit preference is set - the plugin
 /// will decide based on its own config (max chars, keywords, etc.).
 pub fn resolve_thread_plan(
     channel_plan: Option<bool>,
@@ -98,7 +98,7 @@ pub fn resolve_thread_plan(
     if let Some(val) = channel_plan {
         return Some(val);
     }
-    // 3. None — plugin decides at runtime
+    // 3. None - plugin decides at runtime
     None
 }
 
@@ -212,23 +212,23 @@ pub async fn create_thread_with_cause(
     profile: &str,
     p: ThreadCauseParams,
 ) -> AppResult<(Thread, Message)> {
-    // Validate cause — must be 'user' or 'system'
+    // Validate cause - must be 'user' or 'system'
     if cause != "user" && cause != "system" {
         err_msg!(
             "Invalid thread cause '{}': must be 'user' or 'system'",
             cause
         );
     }
-    // Validate msg_type — 'user' is no longer valid for seq-0 messages
+    // Validate msg_type - 'user' is no longer valid for seq-0 messages
     if p.msg_type == "user" {
-        err_msg!("msg_type 'user' is no longer valid for seq-0 messages — use 'Cause' instead");
+        err_msg!("msg_type 'user' is no longer valid for seq-0 messages - use 'Cause' instead");
     }
     // 1. Get channel for its plan override and current_* fields
     let channel = crate::db::channels::get_channel_by_id(pool, channel_id)
         .await?
         .ok_or_else(|| Error::Message(format!("Channel {} not found", channel_id)))?;
 
-    // 3. Resolve planning mode (internal — lets plugin decide at runtime)
+    // 3. Resolve planning mode (internal - lets plugin decide at runtime)
     let channel_plan = channel
         .metadata
         .get("plan")
@@ -245,7 +245,7 @@ pub async fn create_thread_with_cause(
     //   - Channel level:   use channel.current_model, or provider default_model
     //   - Profile level:   use profile.model,         or provider default_model
     //   - Env var level:   always use provider default_model
-    //   - Not set:         error — no model to use
+    //   - Not set:         error - no model to use
     //
     // When explicit p.provider is passed (e.g. from platform client or scheduler),
     // it represents an already-resolved value and takes precedence over the chain.
@@ -612,8 +612,8 @@ pub async fn get_cause_message(pool: &PgPool, thread_id: i64) -> AppResult<Optio
 /// Get completed seq-0 threads in a channel since a given thread id.
 ///
 /// When `parent_id` is:
-/// - `None`: returns ALL completed threads (no parent filter) — used by summary generation
-/// - `Some(None)`: returns only root threads (parent_id IS NULL) — used by context for root threads
+/// - `None`: returns ALL completed threads (no parent filter) - used by summary generation
+/// - `Some(None)`: returns only root threads (parent_id IS NULL) - used by context for root threads
 /// - `Some(Some(p))`: returns sibling threads (parent_id = p) plus the parent thread itself (id = p)
 pub async fn get_completed_seq0_threads_since(
     pool: &PgPool,
@@ -680,7 +680,7 @@ pub async fn get_completed_seq0_threads_since(
             .await?
         }
         None => {
-            // No parent filter — all threads (used by summary generation)
+            // No parent filter - all threads (used by summary generation)
             sql_forge!(
                 ThreadDb,
                 r#"

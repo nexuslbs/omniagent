@@ -67,7 +67,7 @@
 //
 // ── Extension ─────────────────────────────────────────────────────────────
 //
-//  pgvector (CREATE EXTENSION vector) — provides vector(1536) type for
+//  pgvector (CREATE EXTENSION vector) - provides vector(1536) type for
 //  embedding storage and similarity search. Optional; the DO block in
 //  migrations gracefully handles absence.
 //

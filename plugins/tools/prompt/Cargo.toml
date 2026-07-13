@@ -2,7 +2,7 @@
 name = "mcp-server-prompt"
 version = "0.1.0"
 edition = "2021"
-description = "Prompt generation MCP server — generates the full LLM prompt including system prompt, thread context, and message compaction"
+description = "Prompt generation MCP server - generates the full LLM prompt including system prompt, thread context, and message compaction"
 
 [dependencies]
 mcp-server-util = { path = "../util" }

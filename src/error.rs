@@ -13,7 +13,7 @@ pub type AppResult<T> = std::result::Result<T, Error>;
 /// OmniAgent error enum.
 ///
 /// Every production error path should produce one of these variants.
-/// Test code may still use `.unwrap()` freely — panicking on test failure is acceptable.
+/// Test code may still use `.unwrap()` freely - panicking on test failure is acceptable.
 #[derive(Debug)]
 pub enum Error {
     // ── Wrapped external errors ──

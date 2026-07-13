@@ -233,11 +233,11 @@ fn find_plugin_json(dir: &Path) -> AppResult<String> {
 // ---------------------------------------------------------------------------
 
 /// Clone a plugin from a git repository directly into
-/// `<data_dir>/plugins/<type_dir>/.remote/<name>/` — NO source copying.
+/// `<data_dir>/plugins/<type_dir>/.remote/<name>/` - NO source copying.
 ///
 /// Uses a shared bare-mirror cache at `{workspace_dir}/.git-cache/<sha256(url)>/`
 /// so that multiple plugins from the same repo share a single object store.
-/// Fresh clones use `git clone --reference <cache>` — instant, zero network.
+/// Fresh clones use `git clone --reference <cache>` - instant, zero network.
 ///
 /// The type directory (mcp, platforms, providers) is determined automatically
 /// from the `type` field in the plugin's plugin.json manifest after cloning.
@@ -247,7 +247,7 @@ fn find_plugin_json(dir: &Path) -> AppResult<String> {
 /// 2. If plugin already cloned: fetch+reset in the plugin dir (preserves cargo target/)
 /// 3. If first-time: reference clone from cache (instant, no network)
 /// 4. Find plugin.json, read manifest, rename type dir if needed
-/// 5. Return (PluginManifest, content_changed) — caller decides whether to compile
+/// 5. Return (PluginManifest, content_changed) - caller decides whether to compile
 pub fn install_from_git(
     url: &str,
     name: &str,
@@ -264,7 +264,7 @@ pub fn install_from_git(
 
     // Ensure the cache exists and is up to date
     if cache_path.join("HEAD").exists() {
-        // Update existing bare mirror — delta-only fetch
+        // Update existing bare mirror - delta-only fetch
         tracing::info!(
             "Updating git-cache for '{}' at {}",
             url, cache_dir
@@ -281,13 +281,13 @@ pub fn install_from_git(
                 "git-cache update failed for {}, falling back to traditional clone",
                 url
             );
-            // Fall through — the cache exists and will still be used for
+            // Fall through - the cache exists and will still be used for
             // object references; the fetch failure just means stale objects.
         } else {
             tracing::info!("git-cache for '{}' updated successfully", url);
         }
     } else {
-        // First time for this URL — create the bare mirror
+        // First time for this URL - create the bare mirror
         if cache_path.exists() {
             std::fs::remove_dir_all(cache_path).ctx(format!(
                 "Failed to remove existing cache at {}",
@@ -356,7 +356,7 @@ pub fn install_from_git(
                 name, initial_remote_dir
             ))?;
         if !fetch_status.success() {
-            // Fetch failed — fall back to fresh clone from cache
+            // Fetch failed - fall back to fresh clone from cache
             tracing::warn!(
                 "git fetch failed for '{}', falling back to reference clone from cache",
                 name
@@ -447,7 +447,7 @@ pub fn install_from_git(
             name, cache_dir, git_ref
         );
 
-        // Reference clone from local cache — instant, hardlinks objects
+        // Reference clone from local cache - instant, hardlinks objects
         let mut cmd = std::process::Command::new("git");
         cmd.arg("clone")
             .arg("--reference")
@@ -546,7 +546,7 @@ pub fn install_from_git(
     ))?;
 
     tracing::info!(
-        "Installed git plugin '{}' version {} from {} (ref: {:?}) — in-place at .remote/",
+        "Installed git plugin '{}' version {} from {} (ref: {:?}) - in-place at .remote/",
         manifest.name,
         manifest.version,
         url,
@@ -630,10 +630,10 @@ pub(crate) fn extract_plugin_key_from_path(base_path: &str) -> String {
 /// (e.g., bundled + built-in). Callers must resolve duplicates via YAML configuration.
 ///
 /// Scans:
-/// - `<data_dir>/plugins/<type>/<name>/plugin.json` — source: "bundled" (data level)
-/// - `<workspace_dir>/plugins/<type>/<name>/plugin.json` — source: "bundled" (workspace - deduped against data_dir)
-/// - `<data_dir>/plugins/<type>/.remote/<name>/plugin.json` — source: "remote"
-/// - `/app/plugins/<type>/<name>/plugin.json or Cargo.toml` — source: "built-in"
+/// - `<data_dir>/plugins/<type>/<name>/plugin.json` - source: "bundled" (data level)
+/// - `<workspace_dir>/plugins/<type>/<name>/plugin.json` - source: "bundled" (workspace - deduped against data_dir)
+/// - `<data_dir>/plugins/<type>/.remote/<name>/plugin.json` - source: "remote"
+/// - `/app/plugins/<type>/<name>/plugin.json or Cargo.toml` - source: "built-in"
 pub fn discover_plugins(
     data_dir: &str,
 ) -> Vec<(PluginManifest, String, String)> {
@@ -648,7 +648,7 @@ pub fn discover_plugins(
             if !type_path.is_dir() {
                 continue;
             }
-            // Skip .remote/ directories at the type level — handled separately (section C)
+            // Skip .remote/ directories at the type level - handled separately (section C)
             if type_path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -722,7 +722,7 @@ pub fn discover_plugins(
                                 // the key is "cron" so it groups with built-in/bundled cron.
                                 let key = name.clone();
                                 remote_seen.insert(key.clone());
-                                // Always add remote sources — they provide the manifest for
+                                // Always add remote sources - they provide the manifest for
                                 // grouping in plugins_yaml.rs. Dedup is handled there.
                                 results.push((manifest, "remote".to_string(), manifest_path));
                             }
@@ -808,7 +808,7 @@ pub fn discover_plugins(
                     continue;
                 }
                 if !has_plugin_json && !has_mcp_config {
-                    // Has Cargo.toml but no plugin.json or mcp-config.json — not a plugin
+                    // Has Cargo.toml but no plugin.json or mcp-config.json - not a plugin
                     continue;
                 }
 

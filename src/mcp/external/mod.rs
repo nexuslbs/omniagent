@@ -1,4 +1,4 @@
-//! External MCP server integration — connect to stdio or HTTP/SSE MCP servers.
+//! External MCP server integration - connect to stdio or HTTP/SSE MCP servers.
 //!
 //! Implements the Model Context Protocol (MCP) for connecting to external
 //! tool servers. Supports:

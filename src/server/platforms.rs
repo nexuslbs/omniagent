@@ -1,10 +1,10 @@
-//! Platforms API — platform names, channels, subscriptions.
+//! Platforms API - platform names, channels, subscriptions.
 //!
-//! - `GET /platforms` — distinct platform names
-//! - `GET /platforms/{name}/channels` — channels for a specific platform
-//! - `GET /platforms/{name}/subscriptions` — subscriptions for a platform
-//! - `POST /platforms/subscriptions` — add a channel subscription
-//! - `DELETE /platforms/subscriptions/{id}` — remove a channel subscription
+//! - `GET /platforms` - distinct platform names
+//! - `GET /platforms/{name}/channels` - channels for a specific platform
+//! - `GET /platforms/{name}/subscriptions` - subscriptions for a platform
+//! - `POST /platforms/subscriptions` - add a channel subscription
+//! - `DELETE /platforms/subscriptions/{id}` - remove a channel subscription
 
 use axum::{
     extract::{Path, State},
@@ -130,7 +130,7 @@ struct ChannelRow {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// GET /platforms — distinct platform names
+/// GET /platforms - distinct platform names
 async fn list_platforms_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let platforms = match sql_forge!(
         PlatformNameRow,
@@ -155,7 +155,7 @@ async fn list_platforms_handler(State(state): State<Arc<AppState>>) -> impl Into
     ok_json(platforms)
 }
 
-/// GET /platforms/{name}/channels — channels for a platform
+/// GET /platforms/{name}/channels - channels for a platform
 async fn platform_channels_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -186,7 +186,7 @@ async fn platform_channels_handler(
     ok_json(channels)
 }
 
-/// GET /platforms/{name}/subscriptions — subscriptions for a platform
+/// GET /platforms/{name}/subscriptions - subscriptions for a platform
 async fn platform_subscriptions_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -223,7 +223,7 @@ async fn platform_subscriptions_handler(
     ok_json(subscriptions)
 }
 
-/// POST /platforms/subscriptions — add a channel subscription (ON CONFLICT DO NOTHING)
+/// POST /platforms/subscriptions - add a channel subscription (ON CONFLICT DO NOTHING)
 async fn add_subscription_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<AddSubscriptionBody>,
@@ -260,7 +260,7 @@ async fn add_subscription_handler(
     ok_json(result)
 }
 
-/// DELETE /platforms/subscriptions/{id} — remove a channel subscription
+/// DELETE /platforms/subscriptions/{id} - remove a channel subscription
 async fn remove_subscription_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
@@ -288,7 +288,7 @@ async fn remove_subscription_handler(
     ok_json(serde_json::json!({ "deleted": true }))
 }
 
-/// GET /channels/all — all channels (for subscription UI)
+/// GET /channels/all - all channels (for subscription UI)
 async fn all_channels_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let channels = match sql_forge!(
         ChannelRow,

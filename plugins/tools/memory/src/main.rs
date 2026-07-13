@@ -1,4 +1,4 @@
-//! mcp-server-memory — standalone MCP server for memory promotion, listing,
+//! mcp-server-memory - standalone MCP server for memory promotion, listing,
 //! review, and management.
 //!
 //! Communicates via stdio JSON-RPC (MCP protocol).
@@ -12,8 +12,8 @@
 //! Frontmatter fields:
 //! - `type`: "memory"
 //! - `confidence`: "high" | "medium" | "low"
-//! - `source_message_ids`: [int] — message IDs that support this fact
-//! - `source_tool_outputs`: [string] — tool call IDs that produced evidence
+//! - `source_message_ids`: [int] - message IDs that support this fact
+//! - `source_tool_outputs`: [string] - tool call IDs that produced evidence
 //! - `last_verified_at`: ISO timestamp
 //! - `created_at`: ISO timestamp
 //! - `expires_at`: ISO timestamp (default: 30 days)
@@ -440,7 +440,7 @@ async fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
             }
             if !filepath.exists() {
                 return Ok((
-                    format!("No {} file found — nothing to remove.", filename),
+                    format!("No {} file found - nothing to remove.", filename),
                     false,
                 ));
             }
@@ -489,7 +489,7 @@ async fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
             }
             Ok((
                 format!(
-                    "{} cleared — all entries removed (profile: {}).",
+                    "{} cleared - all entries removed (profile: {}).",
                     filename, profile
                 ),
                 false,
@@ -503,7 +503,7 @@ async fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Plugin config — received via configure message
+// Plugin config - received via configure message
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
@@ -530,7 +530,7 @@ impl PluginConfig {
 // ---------------------------------------------------------------------------
 
 /// Call the LLM via omniagent's provider proxy.
-/// The plugin knows only the provider name and model name — no API keys or URLs.
+/// The plugin knows only the provider name and model name - no API keys or URLs.
 async fn call_proxy_llm(
     agent_url: &str,
     provider: &str,
@@ -568,7 +568,7 @@ async fn call_proxy_llm(
 /// threads, builds a summarization prompt, calls the LLM, and saves the result
 /// to the database.
 ///
-/// Reads config from plugin config (plugins_yaml::get_plugin) — not from env vars.
+/// Reads config from plugin config (plugins_yaml::get_plugin) - not from env vars.
 async fn handle_generate_summary(
     pool: &PgPool,
     config: &PluginConfig,
@@ -578,7 +578,7 @@ async fn handle_generate_summary(
     let summary_tokens = config.channel_summary_tokens.max(256);
 
     let (Some(ref provider_name), Some(ref model_name)) = (config.summary_provider.as_ref(), config.summary_model.as_ref()) else {
-        return Ok(("Summarization not configured — set summary_provider and summary_model in memory plugin config".to_string(), false));
+        return Ok(("Summarization not configured - set summary_provider and summary_model in memory plugin config".to_string(), false));
     };
 
     if window == 0 {
@@ -682,7 +682,7 @@ async fn handle_generate_summary(
     let system_summarizer_prompt =
         "You are a conversation summarizer for an autonomous agent system. \
          Produce a structured summary in the exact format below. \
-         Be specific — include file paths, config keys, exact numbers, and command names. \
+         Be specific - include file paths, config keys, exact numbers, and command names. \
          Do NOT repeat information covered in the previous summary (if provided). \
          Every claim must be grounded in the provided conversation content.\n\n\
          ## Format:\n\
@@ -828,11 +828,11 @@ async fn main() -> Result<()> {
         })
     });
 
-    // Shared config — populated via configure message from omniagent
+    // Shared config - populated via configure message from omniagent
     let plugin_config: std::sync::Arc<std::sync::Mutex<PluginConfig>> =
         std::sync::Arc::new(std::sync::Mutex::new(PluginConfig::default()));
 
-    // generate_summary handler — captures pool and config
+    // generate_summary handler - captures pool and config
     let p_summary = pool.clone();
     let cfg_gen = plugin_config.clone();
     let generate_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {

@@ -1,4 +1,4 @@
-//! Shared MCP server framework — JSON-RPC stdio protocol, types, and helpers.
+//! Shared MCP server framework - JSON-RPC stdio protocol, types, and helpers.
 //!
 //! Provides the runtime loop and type definitions needed by any stdio-based
 //! MCP server.  Each server binary:
@@ -170,7 +170,7 @@ pub struct ServerInfo {
     pub version: String,
 }
 
-/// Handler function type — receives tool arguments (+ meta context), returns result text + error flag.
+/// Handler function type - receives tool arguments (+ meta context), returns result text + error flag.
 pub type ToolHandler = Box<
     dyn Fn(Value, Option<McpMeta>) -> Pin<Box<dyn Future<Output = Result<(String, bool)>> + Send>> + Send + Sync,
 >;
@@ -221,7 +221,7 @@ async fn run_server_inner<F>(
 where
     F: Fn(Value) + Send + Sync + 'static,
 {
-    // Initialize tracing — log to stderr
+    // Initialize tracing - log to stderr
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
