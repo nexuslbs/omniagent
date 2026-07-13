@@ -1,10 +1,10 @@
-//! Secrets API - user-managed key/value store with versioning.
+//! Secrets API — user-managed key/value store with versioning.
 //!
-//! - `GET /api/secrets` - list all secrets with current values
-//! - `POST /api/secrets` - create a new secret
-//! - `PUT /api/secrets/:name` - update a secret (versions the old value)
-//! - `GET /api/secrets/:name/versions` - list all versions of a secret
-//! - `DELETE /api/secrets/:name` - delete a secret and all its versions
+//! - `GET /api/secrets` — list all secrets with current values
+//! - `POST /api/secrets` — create a new secret
+//! - `PUT /api/secrets/:name` — update a secret (versions the old value)
+//! - `GET /api/secrets/:name/versions` — list all versions of a secret
+//! - `DELETE /api/secrets/:name` — delete a secret and all its versions
 
 use axum::{
     extract::{Path, State},
@@ -137,7 +137,7 @@ struct MaxVersionRow {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// GET /api/secrets - list all secrets with current values.
+/// GET /api/secrets — list all secrets with current values.
 async fn list_secrets_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let rows = match sql_forge!(
         SecretRow,
@@ -172,7 +172,7 @@ async fn list_secrets_handler(State(state): State<Arc<AppState>>) -> impl IntoRe
     ok_json(secrets)
 }
 
-/// POST /api/secrets - create a new secret.
+/// POST /api/secrets — create a new secret.
 async fn create_secret_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSecretRequest>,
@@ -231,7 +231,7 @@ async fn create_secret_handler(
     }
 }
 
-/// PUT /api/secrets/:name - update a secret (versions the old value first).
+/// PUT /api/secrets/:name — update a secret (versions the old value first).
 async fn update_secret_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -344,7 +344,7 @@ async fn update_secret_handler(
     }
 }
 
-/// GET /api/secrets/:name/versions - list all versions of a secret.
+/// GET /api/secrets/:name/versions — list all versions of a secret.
 async fn list_versions_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -399,7 +399,7 @@ async fn list_versions_handler(
     ok_json(versions)
 }
 
-/// DELETE /api/secrets/:name - delete a secret and all its versions (CASCADE).
+/// DELETE /api/secrets/:name — delete a secret and all its versions (CASCADE).
 async fn delete_secret_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,

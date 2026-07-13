@@ -1,4 +1,4 @@
-//! Thread subtasks - types and DB query functions using sql_forge!.
+//! Thread subtasks — types and DB query functions using sql_forge!.
 //!
 //! Each subtask belongs to a thread and tracks a single actionable item
 //! with status: pending, completed, cancelled.
@@ -155,7 +155,7 @@ pub async fn delete_subtask(pool: &PgPool, subtask_id: i64) -> anyhow::Result<u6
     Ok(result.rows_affected())
 }
 
-/// Get the current (non-cancelled) subtask for a thread - the first pending one
+/// Get the current (non-cancelled) subtask for a thread — the first pending one
 /// ordered by priority DESC, created_at ASC.
 pub async fn get_current_subtask(
     pool: &PgPool,

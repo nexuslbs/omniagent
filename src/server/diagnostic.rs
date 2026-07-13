@@ -12,12 +12,12 @@ struct OneRow {
     id: Option<i32>,
 }
 
-/// Test endpoint that uses State but returns immediately - no DB calls.
+/// Test endpoint that uses State but returns immediately — no DB calls.
 pub async fn check_state(State(_state): State<Arc<AppState>>) -> &'static str {
     "state ok"
 }
 
-/// Test DB pool - simple query with a short timeout.
+/// Test DB pool — simple query with a short timeout.
 pub async fn check_db(State(state): State<Arc<AppState>>) -> String {
     match tokio::time::timeout(
         Duration::from_secs(5),

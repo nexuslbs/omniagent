@@ -1,11 +1,11 @@
-//! Channels API - list, detail, and update channels.
+//! Channels API — list, detail, and update channels.
 //!
 //! Replaces the dashboard's direct PostgreSQL queries at
 //! `omni-dashboard/repo/server/routes/channels.ts`.
 //!
-//! - `GET  /channels`       - list all channels
-//! - `GET  /channels/{id}`  - get single channel detail
-//! - `PATCH /channels/{id}` - update channel fields (NULLIF pattern)
+//! - `GET  /channels`       — list all channels
+//! - `GET  /channels/{id}`  — get single channel detail
+//! - `PATCH /channels/{id}` — update channel fields (NULLIF pattern)
 
 use axum::{
     extract::{Path, State},
@@ -34,7 +34,7 @@ pub fn channels_router() -> Router<Arc<AppState>> {
 }
 
 // ---------------------------------------------------------------------------
-// Types - Response
+// Types — Response
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize)]
@@ -53,7 +53,7 @@ pub struct ChannelEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Types - Row types for sqlx / sql_forge
+// Types — Row types for sqlx / sql_forge
 // ---------------------------------------------------------------------------
 
 #[derive(FromRow)]
@@ -79,7 +79,7 @@ struct ChannelReadonlyRow {
 }
 
 // ---------------------------------------------------------------------------
-// Types - PATCH request body
+// Types — PATCH request body
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -97,7 +97,7 @@ pub struct UpdateChannelRequest {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// GET /channels - list all channels, ordered by name.
+/// GET /channels — list all channels, ordered by name.
 async fn list_channels_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let channels = match sql_forge!(
         ChannelRow,
@@ -149,7 +149,7 @@ async fn list_channels_handler(State(state): State<Arc<AppState>>) -> impl IntoR
     ok_json(channels)
 }
 
-/// GET /channels/{id} - get a single channel by id.
+/// GET /channels/{id} — get a single channel by id.
 async fn get_channel_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,
@@ -202,7 +202,7 @@ async fn get_channel_handler(
     ok_json(channel)
 }
 
-/// PATCH /channels/{id} - update channel fields.
+/// PATCH /channels/{id} — update channel fields.
 ///
 /// Uses the NULLIF pattern to convert empty strings to NULL, and only
 /// updates fields that are explicitly provided in the request body.

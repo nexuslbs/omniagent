@@ -10,7 +10,7 @@ use omniagent::error::{AppResult, Error};
 use omniagent::server::plugins::refresh_env_from_file;
 use omniagent::{agent, db, mcp, platform, profile, scheduler, server};
 
-/// OmniAgent - autonomous agent system with Postgres, pgvector, MCP tools.
+/// OmniAgent — autonomous agent system with Postgres, pgvector, MCP tools.
 /// Read an environment variable with a fallback default value.
 ///
 /// Type alias for platform restart signals map.
@@ -27,7 +27,7 @@ async fn main() -> AppResult<()> {
 // ── Server mode (original) ──────────────────────────────────────────────────
 
 async fn run_server() -> AppResult<()> {
-    // Initialize tracing - JSON format for journald -> Vector -> Loki -> Grafana
+    // Initialize tracing — JSON format for journald -> Vector -> Loki -> Grafana
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
@@ -40,7 +40,7 @@ async fn run_server() -> AppResult<()> {
     let cfg = agent::AgentConfig::from_env()?;
     tracing::info!("Configuration loaded");
 
-    // Initialize global config - shared Arc<RwLock<>> for hot-reload
+    // Initialize global config — shared Arc<RwLock<>> for hot-reload
     let shared_config = agent::config::init_global(cfg.clone());
     tracing::info!("Global config initialized");
 
@@ -61,7 +61,7 @@ async fn run_server() -> AppResult<()> {
     let default_profile = profile::default_profile_name();
     tracing::info!("Default profile: {}", default_profile);
 
-    // Refresh process environment from .env file - this overrides any stale
+    // Refresh process environment from .env file — this overrides any stale
     // Docker-loaded env vars with the current .env contents, so that $env:
     // references in plugin manifests resolve to current values (e.g.
     // MATTERMOST_ACCESS_TOKEN) even after the .env was modified at runtime.
@@ -76,13 +76,13 @@ async fn run_server() -> AppResult<()> {
     tracing::info!("Workspace directory: {}", workspace_dir);
 
     tracing::info!(
-        "Agent config - provider: {}, max_tokens: {}, temperature: {}",
+        "Agent config — provider: {}, max_tokens: {}, temperature: {}",
         cfg.llm_provider,
         cfg.max_tokens,
         cfg.temperature,
     );
     tracing::info!(
-        "Iteration limits - no_plan: {}, plan: {}",
+        "Iteration limits — no_plan: {}, plan: {}",
         cfg.max_iterations_no_plan,
         cfg.max_iterations_plan,
     );
@@ -130,7 +130,7 @@ async fn run_server() -> AppResult<()> {
     let mcp_shared = Arc::new(tokio::sync::RwLock::new(mcp));
 
     // Register platform-specific file readers for the read_attached_file tool
-    // Scans all configured platform plugins - any with an access_token in their
+    // Scans all configured platform plugins — any with an access_token in their
     // config gets a generic HTTP Bearer file reader. No plugin names are hardcoded.
     let file_readers = crate::platform::external::build_platform_file_readers(&external_plugins);
     for (platform_name, reader) in file_readers {

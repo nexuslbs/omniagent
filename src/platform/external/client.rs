@@ -163,14 +163,14 @@ impl ExternalPlatformClient {
         }
     }
 
-    /// Request a restart - the outer loop will pick this up, kill the old
+    /// Request a restart — the outer loop will pick this up, kill the old
     /// subprocess, reload config from disk, and spawn a new one.
     pub fn request_restart(&self) {
         self.restart_flag.store(true, Ordering::SeqCst);
         self.restart_notify.notify_one();
     }
 
-    /// Request a clean stop - the outer loop will exit gracefully.
+    /// Request a clean stop — the outer loop will exit gracefully.
     pub fn request_stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
         self.restart_notify.notify_one();
@@ -299,7 +299,7 @@ impl Platform for ExternalPlatformClient {
             .unwrap_or(30);
         let mut spawn_failures: u32 = 0;
 
-        // Outer loop - respawns the subprocess when a restart is requested
+        // Outer loop — respawns the subprocess when a restart is requested
         loop {
             // Check if we've been asked to stop
             if self.stopped.load(Ordering::SeqCst) {
@@ -313,7 +313,7 @@ impl Platform for ExternalPlatformClient {
             // Spawn the plugin subprocess
             let (child, mut stdin, stdout) = match self.spawn_plugin(&pool).await {
                 Ok(result) => {
-                    // Success - reset failure counter
+                    // Success — reset failure counter
                     spawn_failures = 0;
                     result
                 }
@@ -688,7 +688,7 @@ impl Platform for ExternalPlatformClient {
                                                         inbound.text.chars().take(50).collect::<String>()
                                                     );
 
-                                                    // Handle $new or /new BEFORE channel lookup - creates a fresh channel
+                                                    // Handle $new or /new BEFORE channel lookup — creates a fresh channel
                                                     if inbound.text.starts_with("$new") || inbound.text.starts_with("//new") {
                                                         let reply = match crate::commands::handle_new_external(
                                                             &pool,
@@ -877,7 +877,7 @@ impl Platform for ExternalPlatformClient {
                                                                     task_plan: Some(false),
                                                                 },
                                                             ).await {
-                                                                // success - message and thread created
+                                                                // success — message and thread created
                                                                 // Send :o: if the thread was auto-skipped (closed channel),
                                                                 // :+1: otherwise (normal acknowledgment)
                                                                 let react_emoji = if thread.status == "skipped" {
@@ -1038,7 +1038,7 @@ impl Platform for ExternalPlatformClient {
                 }
             }
 
-            // ── Inner loop ended - clean up child process ────────────────
+            // ── Inner loop ended — clean up child process ────────────────
             // stdin/stdout are dropped when they go out of scope,
             // which closes the pipes. Kill the child process.
             let child_to_kill = match self.process.lock() {
@@ -1056,7 +1056,7 @@ impl Platform for ExternalPlatformClient {
             // Check if we should restart (reload config from disk and respawn)
             if self.restart_flag.swap(false, Ordering::SeqCst) {
                 tracing::info!(
-                    "Platform plugin '{}' restart triggered - reloading config and respawning",
+                    "Platform plugin '{}' restart triggered — reloading config and respawning",
                     self.name
                 );
                 // Reload config from disk (picks up new YAML/env values)
@@ -1079,7 +1079,7 @@ impl Platform for ExternalPlatformClient {
 
     async fn send_response(&self, _pool: &PgPool, _message_id: i64) -> AppResult<()> {
         tracing::debug!(
-            "send_response called on external platform '{}' - no-op",
+            "send_response called on external platform '{}' — no-op",
             self.name
         );
         Ok(())
@@ -1138,7 +1138,7 @@ async fn handle_external_model_command(
             let provider_display = update_provider.unwrap_or("(unchanged)");
             let model_display = update_model.unwrap_or("(unchanged)");
             format!(
-                "Channel updated - provider: {}, model: {}",
+                "Channel updated — provider: {}, model: {}",
                 provider_display, model_display
             )
         }
@@ -1162,7 +1162,7 @@ async fn handle_external_model_command(
             ];
             let parts: Vec<&str> = parts.into_iter().filter(|s| !s.is_empty()).collect();
             format!(
-                "Channel {} reset - will fall back to profile/env defaults.",
+                "Channel {} reset — will fall back to profile/env defaults.",
                 parts.join(" and ")
             )
         }
@@ -1415,7 +1415,7 @@ async fn handle_message_deleted(
 
     match info.status.as_str() {
         "pending" | "processing" => {
-            // Skip the thread - marks it as skipped + terminal
+            // Skip the thread — marks it as skipped + terminal
             sql_forge!(
                 r#"
                 UPDATE threads
@@ -1443,7 +1443,7 @@ async fn handle_message_deleted(
         }
         _ => {
             tracing::debug!(
-                "message_deleted: thread {} has status '{}' - no action needed (non seq-0 or already terminal)",
+                "message_deleted: thread {} has status '{}' — no action needed (non seq-0 or already terminal)",
                 info.id,
                 info.status
             );
@@ -1504,7 +1504,7 @@ async fn handle_message_edited(
 
     if info.status != "pending" {
         tracing::debug!(
-            "message_edited: thread {} has status '{}' - edit ignored (only pending can be edited)",
+            "message_edited: thread {} has status '{}' — edit ignored (only pending can be edited)",
             info.thread_id,
             info.status
         );

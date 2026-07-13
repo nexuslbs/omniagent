@@ -1,11 +1,11 @@
-//! mcp-server-query - standalone MCP server for read-only database queries.
+//! mcp-server-query — standalone MCP server for read-only database queries.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
 //! Provides a single tool `query_database` with 4 operations:
-//! - search_messages - vector-embedding semantic search
-//! - search_thread_messages - all messages from a thread
-//! - search_channel_prompts - all seq-0 (prompt) messages from a channel
-//! - query - direct SELECT SQL
+//! - search_messages — vector-embedding semantic search
+//! - search_thread_messages — all messages from a thread
+//! - search_channel_prompts — all seq-0 (prompt) messages from a channel
+//! - query — direct SELECT SQL
 //!
 //! All operations use a read-only PostgreSQL user. Writes are blocked at the DB level.
 
@@ -34,7 +34,7 @@ struct MessageResult {
 
 // ── Operations ─────────────────────────────────────────────────────────────
 
-/// search_messages - semantic (vector embedding) search with optional channel filter.
+/// search_messages — semantic (vector embedding) search with optional channel filter.
 async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let query_text = args["query"]
         .as_str()
@@ -111,7 +111,7 @@ async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, 
     Ok(format_results("search_messages", &rows, rows.len() as i64))
 }
 
-/// search_thread_messages - all messages from a thread (sql_forge! validated).
+/// search_thread_messages — all messages from a thread (sql_forge! validated).
 async fn handle_search_thread_messages(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let thread_id = args["thread_id"]
         .as_i64()
@@ -145,7 +145,7 @@ async fn handle_search_thread_messages(pool: &PgPool, args: &Value) -> Result<(S
     ))
 }
 
-/// search_channel_prompts - all seq-0 (prompt) messages from a channel (sql_forge!).
+/// search_channel_prompts — all seq-0 (prompt) messages from a channel (sql_forge!).
 async fn handle_search_channel_prompts(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let channel_id = args["channel_id"]
         .as_i64()
@@ -181,7 +181,7 @@ async fn handle_search_channel_prompts(pool: &PgPool, args: &Value) -> Result<(S
     ))
 }
 
-/// query - direct SQL (runtime only, must be SELECT).
+/// query — direct SQL (runtime only, must be SELECT).
 async fn handle_query(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let sql_owned = args["sql"]
         .as_str()
@@ -332,10 +332,10 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "query_database".to_string(),
                 description: "QUERY THE DATABASE with one of four operations. \
-All operations run against a read-only PostgreSQL user - writes are blocked at the database level.
+All operations run against a read-only PostgreSQL user — writes are blocked at the database level.
 
 Operations:
-- **search_messages** (runtime sqlx - pgvector <=>): Semantic (vector embedding) search on message content. \
+- **search_messages** (runtime sqlx — pgvector <=>): Semantic (vector embedding) search on message content. \
 Parameters: query (required), channel_id (optional), limit (default 10, max 50).
 
 - **search_thread_messages** (sql_forge validated): All messages from a thread, ordered by \
@@ -345,8 +345,8 @@ Returns the prompt (seq=0) + up to N-1 subsequent messages.
 - **search_channel_prompts** (sql_forge validated): All seq-0 (prompt) messages from \
 a channel, newest first. Parameters: channel_id (required), limit (optional, default 10, max 50).
 
-- **query** (runtime only - for any custom SELECT): Run any SELECT SQL. \
-Parameters: sql (required) - must be a SELECT statement. INSERT/UPDATE/DELETE/DROP/ALTER \
+- **query** (runtime only — for any custom SELECT): Run any SELECT SQL. \
+Parameters: sql (required) — must be a SELECT statement. INSERT/UPDATE/DELETE/DROP/ALTER \
 are rejected by the read-only database user. Use this for custom aggregations: \
 COUNT(*), GROUP BY, SUM, JOIN across tables. \
 You MUST include the full schema reference in your query. Available tables: \

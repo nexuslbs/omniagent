@@ -1,4 +1,4 @@
-//! Cron scheduler - polls `cron_jobs` table and fires due jobs by creating
+//! Cron scheduler — polls `cron_jobs` table and fires due jobs by creating
 //! threads with cause='cron' and a cause message, then setting them pending
 //! for the executor to pick up.
 //!
@@ -432,7 +432,7 @@ fn resolve_action(data_dir: &str, action_id: &str) -> AppResult<McpToolCall> {
 
 // ─── Action mode helpers ────────────────────────────────────────────────────
 
-/// Context for `handle_action_mode` - groups 8 params to stay under clippy's 7-arg limit.
+/// Context for `handle_action_mode` — groups 8 params to stay under clippy's 7-arg limit.
 struct ActionModeCtx<'a> {
     pool: &'a PgPool,
     data_dir: &'a str,
@@ -564,7 +564,7 @@ async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
     }
 }
 
-/// Context for `create_action_thread` - groups 8 params to stay under clippy's 7-arg limit.
+/// Context for `create_action_thread` — groups 8 params to stay under clippy's 7-arg limit.
 struct ActionThreadCtx<'a> {
     pool: &'a PgPool,
     data_dir: &'a str,
@@ -777,7 +777,7 @@ fn extract_error_code(err_msg: &str) -> Option<String> {
     None
 }
 
-/// Fire a cron job by schedule_id - used by the HTTP run-cron endpoint.
+/// Fire a cron job by schedule_id — used by the HTTP run-cron endpoint.
 /// This reuses the same scheduler logic (channel resolution, profile/provider/model resolution,
 /// thread creation) so the manual Run button goes through exactly the same code path as the
 /// scheduled tick.
@@ -865,7 +865,7 @@ pub async fn fire_cron_job_by_id(
         return Ok(None);
     }
 
-    // Standard agentic mode - same logic as the scheduler tick
+    // Standard agentic mode — same logic as the scheduler tick
     let channel = if let Some(cid) = job.channel_id {
         match queries::find_channel_by_id(pool, cid).await {
             Ok(Some(ch)) => ch,

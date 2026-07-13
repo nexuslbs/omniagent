@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Comprehensive plugin action tests - appended to tests.py as GROUP 6.
+Comprehensive plugin action tests — appended to tests.py as GROUP 6.
 
 Covers ALL actions: enable, disable, install, reinstall, download, remove, config, add
 Across ALL source types: built-in, bundled, remote
@@ -68,7 +68,7 @@ def get_plugin_type(name):
     return None
 
 # ═══════════════════════════════════════════════════════════════════════
-#  Test helpers - each test is one action × one source × one type
+#  Test helpers — each test is one action × one source × one type
 # ═══════════════════════════════════════════════════════════════════════
 
 def test_enable_source(name, source, expected_success=True):
@@ -182,11 +182,11 @@ def test_config_update(name, config_body):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  GROUP 6 - Comprehensive Plugin Action Tests
+#  GROUP 6 — Comprehensive Plugin Action Tests
 # ═══════════════════════════════════════════════════════════════════════
 #
 # For each action that requires source: enable, disable, install, reinstall,
-# download, remove - tests for built-in, bundled, and remote variants.
+# download, remove — tests for built-in, bundled, and remote variants.
 # Also tests: config update, name collisions, cross-type actions.
 
 # ── 6.1: Tool enable/disable for each source variant ──────────────────
@@ -351,7 +351,7 @@ def test_t6_remove_no_source_tool():
     test_remove_no_source(name)
 
 
-# ── 6.5: Cross-type - platform action tests ───────────────────────────
+# ── 6.5: Cross-type — platform action tests ───────────────────────────
 
 def test_t6_enable_platform():
     """Enable a bundled platform plugin → success"""
@@ -376,7 +376,7 @@ def test_t6_disable_platform():
     test_enable_source(name, source)
 
 
-# ── 6.6: Cross-type - provider action tests ───────────────────────────
+# ── 6.6: Cross-type — provider action tests ───────────────────────────
 
 def test_t6_enable_provider():
     """Enable a bundled provider plugin → success"""

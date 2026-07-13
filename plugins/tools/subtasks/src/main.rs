@@ -1,4 +1,4 @@
-//! mcp-server-subtasks - standalone MCP server for thread subtask management.
+//! mcp-server-subtasks — standalone MCP server for thread subtask management.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
 //! Tools: add_subtask, list_subtasks, update_subtask, delete_subtask, get_subtask_counts

@@ -1,23 +1,23 @@
-//! Kanban API - board view, task CRUD, dependencies, threads, history, subtasks.
+//! Kanban API — board view, task CRUD, dependencies, threads, history, subtasks.
 //!
 //! Replaces ALL SQL in `omni-dashboard/repo/server/routes/kanban.ts` (13 endpoints,
-//! ~40 SQL queries). Every query uses `sql_forge!()` - no raw `sqlx::query` calls.
+//! ~40 SQL queries). Every query uses `sql_forge!()` — no raw `sqlx::query` calls.
 //!
 //! Routes (all under `/kanban`):
 //!
-//!  - GET   /kanban/tasks                           - board tasks (flat list)
-//!  - GET   /kanban/tasks/{id}                      - task detail
-//!  - GET   /kanban/tasks/{id}/dependencies         - task dependencies
-//!  - POST  /kanban/tasks                           - create task
-//!  - PATCH /kanban/tasks/{id}/status               - change status (+ position shift)
-//!  - PATCH /kanban/tasks/{id}/position             - change position (+ cross-column)
-//!  - PATCH /kanban/tasks/{id}                      - update task fields
-//!  - DELETE /kanban/tasks/{id}                     - delete task
-//!  - GET   /kanban/tasks/{id}/threads              - threads for a task
-//!  - POST  /kanban/tasks/{id}/dependencies         - add dependency
-//!  - DELETE /kanban/tasks/{id}/dependencies/{depId}- remove dependency
-//!  - GET   /kanban/tasks/{id}/history              - history log
-//!  - GET   /kanban/tasks/{id}/subtasks             - subtasks
+//!  - GET   /kanban/tasks                           — board tasks (flat list)
+//!  - GET   /kanban/tasks/{id}                      — task detail
+//!  - GET   /kanban/tasks/{id}/dependencies         — task dependencies
+//!  - POST  /kanban/tasks                           — create task
+//!  - PATCH /kanban/tasks/{id}/status               — change status (+ position shift)
+//!  - PATCH /kanban/tasks/{id}/position             — change position (+ cross-column)
+//!  - PATCH /kanban/tasks/{id}                      — update task fields
+//!  - DELETE /kanban/tasks/{id}                     — delete task
+//!  - GET   /kanban/tasks/{id}/threads              — threads for a task
+//!  - POST  /kanban/tasks/{id}/dependencies         — add dependency
+//!  - DELETE /kanban/tasks/{id}/dependencies/{depId}— remove dependency
+//!  - GET   /kanban/tasks/{id}/history              — history log
+//!  - GET   /kanban/tasks/{id}/subtasks             — subtasks
 
 use axum::{
     extract::{Path, Query, State},
@@ -453,7 +453,7 @@ async fn next_position(pool: &sqlx::PgPool, status: &str) -> Result<i32, sqlx::E
 }
 
 // ---------------------------------------------------------------------------
-// 1. GET /kanban/tasks - List all board tasks
+// 1. GET /kanban/tasks — List all board tasks
 // ---------------------------------------------------------------------------
 
 async fn list_tasks_handler(
@@ -499,7 +499,7 @@ async fn list_tasks_handler(
 }
 
 // ---------------------------------------------------------------------------
-// 2. GET /kanban/tasks/{id} - Task detail
+// 2. GET /kanban/tasks/{id} — Task detail
 // ---------------------------------------------------------------------------
 
 async fn get_task_handler(
@@ -535,7 +535,7 @@ async fn get_task_handler(
 }
 
 // ---------------------------------------------------------------------------
-// 3. GET /kanban/tasks/{id}/dependencies - Task dependencies
+// 3. GET /kanban/tasks/{id}/dependencies — Task dependencies
 // ---------------------------------------------------------------------------
 
 async fn list_dependencies_handler(
@@ -576,7 +576,7 @@ async fn list_dependencies_handler(
 }
 
 // ---------------------------------------------------------------------------
-// 4. POST /kanban/tasks - Create a new task
+// 4. POST /kanban/tasks — Create a new task
 // ---------------------------------------------------------------------------
 
 async fn create_task_handler(
@@ -659,14 +659,14 @@ async fn create_task_handler(
     .await
     {
         error!("[kanban/tasks] history insert for create failed: {:?}", e);
-        // Non-fatal - task was already created
+        // Non-fatal — task was already created
     }
 
     ok_json(CreateTaskResponse { success: true, id })
 }
 
 // ---------------------------------------------------------------------------
-// 5. PATCH /kanban/tasks/{id}/status - Change task status (move column)
+// 5. PATCH /kanban/tasks/{id}/status — Change task status (move column)
 // ---------------------------------------------------------------------------
 
 async fn change_status_handler(
@@ -722,7 +722,7 @@ async fn change_status_handler(
     };
 
     if old_status == body.status && old_position == target_position {
-        // No-op - already there
+        // No-op — already there
         return ok_json(serde_json::json!({ "success": true }));
     }
 
@@ -754,7 +754,7 @@ async fn change_status_handler(
     } else {
         // Reorder within the same column
         if target_position > old_position {
-            // Moving down - shift intermediate tasks up
+            // Moving down — shift intermediate tasks up
             if let Err(e) = sql_forge!(
                 r#"UPDATE kanban_tasks SET position = position - 1 WHERE status = :status AND position > :old_pos AND position <= :target AND id != :task_id"#,
                 ( :status = &body.status, :old_pos = old_position, :target = target_position, :task_id = &id )
@@ -766,7 +766,7 @@ async fn change_status_handler(
                 return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to reorder");
             }
         } else if target_position < old_position {
-            // Moving up - shift intermediate tasks down
+            // Moving up — shift intermediate tasks down
             if let Err(e) = sql_forge!(
                 r#"UPDATE kanban_tasks SET position = position + 1 WHERE status = :status AND position >= :target AND position < :old_pos AND id != :task_id"#,
                 ( :status = &body.status, :target = target_position, :old_pos = old_position, :task_id = &id )
@@ -795,7 +795,7 @@ async fn change_status_handler(
         );
     }
 
-    // 5. History - only if status actually changed
+    // 5. History — only if status actually changed
     if old_status != body.status {
         if let Err(e) = sql_forge!(
             r#"
@@ -816,7 +816,7 @@ async fn change_status_handler(
 }
 
 // ---------------------------------------------------------------------------
-// 6. PATCH /kanban/tasks/{id}/position - Change task position
+// 6. PATCH /kanban/tasks/{id}/position — Change task position
 // ---------------------------------------------------------------------------
 
 async fn change_position_handler(
@@ -893,7 +893,7 @@ async fn change_position_handler(
     } else {
         // Reorder within same column
         if body.position > old_position {
-            // Moving down - shift intermediate tasks up
+            // Moving down — shift intermediate tasks up
             if let Err(e) = sql_forge!(
                 r#"UPDATE kanban_tasks SET position = position - 1 WHERE status = :status AND position > :old_pos AND position <= :target AND id != :task_id"#,
                 ( :status = new_status, :old_pos = old_position, :target = body.position, :task_id = &id )
@@ -905,7 +905,7 @@ async fn change_position_handler(
                 return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to reorder");
             }
         } else if body.position < old_position {
-            // Moving up - shift intermediate tasks down
+            // Moving up — shift intermediate tasks down
             if let Err(e) = sql_forge!(
                 r#"UPDATE kanban_tasks SET position = position + 1 WHERE status = :status AND position >= :target AND position < :old_pos AND id != :task_id"#,
                 ( :status = new_status, :target = body.position, :old_pos = old_position, :task_id = &id )
@@ -934,7 +934,7 @@ async fn change_position_handler(
         );
     }
 
-    // 4. History - only if status changed
+    // 4. History — only if status changed
     if old_status != new_status {
         if let Err(e) = sql_forge!(
             r#"
@@ -955,7 +955,7 @@ async fn change_position_handler(
 }
 
 // ---------------------------------------------------------------------------
-// 7. PATCH /kanban/tasks/{id} - Update task fields
+// 7. PATCH /kanban/tasks/{id} — Update task fields
 // ---------------------------------------------------------------------------
 
 async fn update_task_handler(
@@ -1017,7 +1017,7 @@ async fn update_task_handler(
         return err_json(StatusCode::BAD_REQUEST, "No fields to update");
     }
 
-    // 5. Execute the update - use static SQL with sentinel/COALESCE pattern
+    // 5. Execute the update — use static SQL with sentinel/COALESCE pattern
     //    so that fields not provided keep their existing values.
     if let Err(e) = sql_forge!(
         r#"
@@ -1103,7 +1103,7 @@ async fn update_task_handler(
             error!("[kanban/tasks/{}] status history insert failed: {:?}", id, e);
         }
     } else {
-        // Field edit - log with full previous values
+        // Field edit — log with full previous values
         let prev = serde_json::json!({
             "title": before.title,
             "body": before.body,
@@ -1134,7 +1134,7 @@ async fn update_task_handler(
 }
 
 // ---------------------------------------------------------------------------
-// 8. DELETE /kanban/tasks/{id} - Delete task
+// 8. DELETE /kanban/tasks/{id} — Delete task
 // ---------------------------------------------------------------------------
 
 async fn delete_task_handler(
@@ -1203,7 +1203,7 @@ async fn delete_task_handler(
     .await
     {
         error!("[kanban/tasks/{}] dependency delete failed: {:?}", id, e);
-        // Non-fatal - the ON DELETE CASCADE will handle it
+        // Non-fatal — the ON DELETE CASCADE will handle it
     }
 
     // 4. Detach threads
@@ -1243,7 +1243,7 @@ async fn delete_task_handler(
 }
 
 // ---------------------------------------------------------------------------
-// 9. GET /kanban/tasks/{id}/threads - Threads for a task
+// 9. GET /kanban/tasks/{id}/threads — Threads for a task
 // ---------------------------------------------------------------------------
 
 async fn list_threads_handler(
@@ -1274,7 +1274,7 @@ async fn list_threads_handler(
         }
     };
 
-    // Fetch paginated rows - use CASE in ORDER BY for dynamic direction
+    // Fetch paginated rows — use CASE in ORDER BY for dynamic direction
     let order_asc = order == "ASC";
     let rows = match sql_forge!(
         KanbanThreadRow,
@@ -1361,7 +1361,7 @@ async fn list_threads_handler(
 }
 
 // ---------------------------------------------------------------------------
-// 10. POST /kanban/tasks/{id}/dependencies - Add a dependency
+// 10. POST /kanban/tasks/{id}/dependencies — Add a dependency
 // ---------------------------------------------------------------------------
 
 async fn add_dependency_handler(
@@ -1495,7 +1495,7 @@ async fn add_dependency_handler(
 }
 
 // ---------------------------------------------------------------------------
-// 11. DELETE /kanban/tasks/{id}/dependencies/{depId} - Remove dependency
+// 11. DELETE /kanban/tasks/{id}/dependencies/{depId} — Remove dependency
 // ---------------------------------------------------------------------------
 
 async fn remove_dependency_handler(
@@ -1523,7 +1523,7 @@ async fn remove_dependency_handler(
 }
 
 // ---------------------------------------------------------------------------
-// 12. GET /kanban/tasks/{id}/history - History log
+// 12. GET /kanban/tasks/{id}/history — History log
 // ---------------------------------------------------------------------------
 
 async fn list_history_handler(
@@ -1566,7 +1566,7 @@ async fn list_history_handler(
 }
 
 // ---------------------------------------------------------------------------
-// 13. GET /kanban/tasks/{id}/subtasks - Subtasks
+// 13. GET /kanban/tasks/{id}/subtasks — Subtasks
 // ---------------------------------------------------------------------------
 
 async fn list_subtasks_handler(
