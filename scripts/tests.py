@@ -2350,6 +2350,36 @@ def test_mm9_e2e():
     except (urllib.error.HTTPError, urllib.error.URLError, Exception) as e:
         print(f"[setup error (may be already set up): {e}]")
 
+    # 4. Ensure access_token is in the mattermost config so the platform
+    #    subprocess can connect via WebSocket with inbound capability.
+    #    Setting this via API also triggers a config reload that refreshes
+    #    env vars from .env and restarts the subprocess with the token.
+    api_post_body("/plugins/mattermost/config", {
+        "config": {
+            "access_token": "$env:MATTERMOST_ACCESS_TOKEN",
+            "server_url": "http://mattermost:8065",
+        }
+    })
+    print("[mattermost config updated with access_token]")
+
+    # Ensure prompt plugin is enabled — the executor needs prompt_generate
+    # to process incoming messages through the channel handler.
+    api_post_body("/plugins/prompt/enable", {"source": "built-in"})
+    import time as _time
+    for _attempt in range(10):
+        try:
+            r = urllib.request.urlopen(f"{BASE}/mcp/tools", timeout=5)
+            tools = json.loads(r.read())
+            td = tools if isinstance(tools, list) else (tools.get("tools") or tools.get("data") or [])
+            if any("prompt_generate" in (t.get("full_name") or t.get("name") or "") for t in td):
+                print("[prompt plugin enabled and ready]")
+                break
+        except:
+            pass
+        _time.sleep(1)
+    else:
+        print("[WARN: prompt_generate tool not found after 10s]")
+
     # Find the omniagent channel ID for mattermost (wait for auto-discovery)
     channel_id = None
     for _ in range(15):
