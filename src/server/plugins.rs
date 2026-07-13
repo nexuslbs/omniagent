@@ -274,47 +274,53 @@ async fn compile_rust_crate(plugin_dir: &str, name: &str, source: &str) -> Resul
     }
 
     // Build from the EXACT source — no guessing
-    if source == "built-in" {
-        // Workspace build (all builtins are workspace members)
-        if let Some(ref pn) = pkg_name {
+    let compile_future = async {
+        if source == "built-in" {
+            // Workspace build (all builtins are workspace members)
+            if let Some(ref pn) = pkg_name {
+                let mut cmd = tokio::process::Command::new("cargo");
+                cmd.args([
+                    "build",
+                    "--release",
+                    "--manifest-path",
+                    "/app/Cargo.toml",
+                    "-p",
+                    pn,
+                ]);
+                cmd.current_dir("/app");
+                let st = cmd
+                    .status()
+                    .await
+                    .map_err(|e| format!("cargo failed: {}", e))?;
+                if !st.success() {
+                    return Err(format!("Workspace build for '{}' failed: {}", name, st));
+                }
+                info!("Builtin crate '{}' compiled via workspace", name);
+            } else {
+                return Err(format!("Cannot determine package name for '{}'", name));
+            }
+        } else {
+            // Standalone build for bundled or remote
+            let cargo_s = cargo_toml.to_string_lossy().to_string();
             let mut cmd = tokio::process::Command::new("cargo");
-            cmd.args([
-                "build",
-                "--release",
-                "--manifest-path",
-                "/app/Cargo.toml",
-                "-p",
-                pn,
-            ]);
-            cmd.current_dir("/app");
+            cmd.args(["build", "--release", "--manifest-path", &cargo_s]);
+            cmd.current_dir(plugin_dir);
             let st = cmd
                 .status()
                 .await
                 .map_err(|e| format!("cargo failed: {}", e))?;
             if !st.success() {
-                return Err(format!("Workspace build for '{}' failed: {}", name, st));
+                return Err(format!("Standalone build for '{}' failed: {}", name, st));
             }
-            info!("Builtin crate '{}' compiled via workspace", name);
-        } else {
-            return Err(format!("Cannot determine package name for '{}'", name));
+            info!("Standalone crate '{}' compiled", name);
         }
-    } else {
-        // Standalone build for bundled or remote
-        let cargo_s = cargo_toml.to_string_lossy().to_string();
-        let mut cmd = tokio::process::Command::new("cargo");
-        cmd.args(["build", "--release", "--manifest-path", &cargo_s]);
-        cmd.current_dir(plugin_dir);
-        let st = cmd
-            .status()
-            .await
-            .map_err(|e| format!("cargo failed: {}", e))?;
-        if !st.success() {
-            return Err(format!("Standalone build for '{}' failed: {}", name, st));
-        }
-        info!("Standalone crate '{}' compiled", name);
-    }
+        Ok(true)
+    };
 
-    Ok(true)
+    match tokio::time::timeout(std::time::Duration::from_secs(180), compile_future).await {
+        Ok(result) => result,
+        Err(_) => Err(format!("Build for '{}' timed out after 180 seconds", name)),
+    }
 }
 
 /// Map PluginCategory to source string for compile_rust_crate.
