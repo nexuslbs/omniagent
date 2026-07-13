@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use crate::error::{AppResult, Error};
 use crate::platform::OutboundSender;
@@ -89,7 +90,7 @@ pub struct AppContext {
     /// Current channel name being executed (e.g. "Home", "Engineering").
     /// Set alongside current_channel_id so MCP tools know the channel identity.
     pub current_channel_name: Option<String>,
-    /// Current platform identifier (e.g. "telegram", "mattermost").
+    /// Current platform identifier (e.g. &quot;telegram&quot;, &quot;slack&quot;).
     /// Set alongside current_channel_id so MCP tools know the platform.
     pub current_platform: Option<String>,
     /// Current profile name being executed.
@@ -101,10 +102,11 @@ pub struct AppContext {
     /// error messages. Populated by `default_registry()`.
     pub tool_catalog: Vec<Value>,
     /// Per-platform file readers for the `read_attached_file` MCP tool.
-    /// Keyed by platform name (e.g. "mattermost"). Each reader knows how to
-    /// fetch file content from that platform's API using file_id + server_url.
+    /// Keyed by platform name. Each reader knows how to fetch file content
+    /// from that platform's API using file_id + server_url.
+    /// Wrapped in Arc<RwLock> so plugins can register readers dynamically.
     pub platform_file_readers:
-        HashMap<String, Arc<dyn crate::platform::external::FileReader + Send + Sync>>,
+        Arc<RwLock<HashMap<String, Arc<dyn crate::platform::external::FileReader + Send + Sync>>>>,
 }
 
 impl AppContext {
@@ -120,7 +122,7 @@ impl AppContext {
             readonly_pool,
             data_dir: data_dir.to_string(),
             platform_senders,
-            platform_file_readers: HashMap::new(),
+            platform_file_readers: Arc::new(RwLock::new(HashMap::new())),
             current_thread_id: None,
             current_channel_id: None,
             current_allowed_tools: Vec::new(),
@@ -436,7 +438,7 @@ fn read_attached_file_tool() -> McpTool {
                 },
                 "server_url": {
                     "type": "string",
-                    "description": "Optional server URL (e.g. http://mattermost:8065). Auto-detected from message metadata if omitted."
+                    "description": "Optional server URL. Auto-detected from message metadata if omitted."
                 }
             },
             "required": ["file_id"]
@@ -510,35 +512,36 @@ fn read_attached_file_tool() -> McpTool {
                 let platform = if let Some(cid) = ctx.current_channel_id {
                     match sql_forge!(
                         ChannelPlatformRow,
-                        r#"SELECT COALESCE(platform, 'mattermost') AS platform FROM channels WHERE id = :cid"#,
+                        r#"SELECT platform FROM channels WHERE id = :cid"#,
                         ( :cid = cid )
                     )
                     .fetch_optional(&ctx.pool)
                     .await
                     {
-                        Ok(Some(row)) => row.platform.unwrap_or_else(|| "mattermost".to_string()),
-                        _ => "mattermost".to_string(),
+                        Ok(Some(row)) => row.platform.unwrap_or_default(),
+                        _ => String::new(),
                     }
                 } else {
-                    "mattermost".to_string()
+                    String::new()
                 };
 
-                let reader = match ctx.platform_file_readers.get(&platform) {
+                let readers_guard = ctx.platform_file_readers.read().await;
+                let reader = match readers_guard.get(&platform) {
                     Some(r) => r.clone(),
                     None => {
-                        let available: Vec<&String> = ctx.platform_file_readers.keys().collect();
-                        let available_str: Vec<&str> = available.iter().map(|s| s.as_str()).collect();
+                        let available: Vec<String> = readers_guard.keys().cloned().collect();
                         return Ok(McpToolResult {
                             call_id: String::new(),
                             content: format!(
                                 "Error: No file reader for platform '{}'. Available: {}",
                                 platform,
-                                available_str.join(", ")
+                                available.join(", ")
                             ),
                             is_error: true,
                         });
                     }
                 };
+                drop(readers_guard);
 
                 match reader.read_file(&file_id, &server_url).await {
                     Ok(bytes) => {

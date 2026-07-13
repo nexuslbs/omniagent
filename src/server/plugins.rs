@@ -1944,6 +1944,7 @@ pub(crate) async fn setup_plugin_handler(
 
             tracing::info!("Setup completed for plugin '{}'", name);
 
+            // Create omniagent channels for any channel_id returned by setup
             if let Some(channel_id) = result
                 .get("channel_id")
                 .and_then(|v| v.as_str())
@@ -1953,12 +1954,12 @@ pub(crate) async fn setup_plugin_handler(
                     .get("channel_name")
                     .and_then(|v| v.as_str())
                     .unwrap_or("setup");
-                let omni_channel_name = format!("mm-{}", channel_name);
+                let omni_channel_name = format!("{}-{}", name, channel_name);
                 match channels::create_channel(
                     &state.pool,
                     CreateChannelParams {
                         name: omni_channel_name.clone(),
-                        platform: "mattermost".to_string(),
+                        platform: name.clone(),
                         external_id: channel_id.to_string(),
                         resource_identifier: channel_id.to_string(),
                         cause: "setup".to_string(),
@@ -1967,51 +1968,38 @@ pub(crate) async fn setup_plugin_handler(
                 .await
                 {
                     Ok(ch) => tracing::info!(
-                        "Created omniagent channel '{}' (id={}) for Mattermost channel '{}'",
+                        "Setup: created channel '{}' (id={}) for plugin '{}' channel '{}'",
                         ch.name,
                         ch.id,
+                        name,
                         channel_name
                     ),
                     Err(e) => tracing::warn!(
-                        "Failed to create omniagent channel for Mattermost channel '{}': {:?}",
+                        "Setup: failed to create channel for plugin '{}' channel '{}': {:?}",
+                        name,
                         channel_name,
                         e
                     ),
                 }
             }
 
+            // Register file reader for any bot_token returned by setup
             if let Some(bot_token) = result
                 .get("bot_token")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                let env_key = "MATTERMOST_ACCESS_TOKEN";
-                let env_path = state.env_path.clone();
-                let env_key_clone = env_key.to_string();
-                let token_owned = bot_token.to_string();
-                let write_result = tokio::task::spawn_blocking(move || {
-                    let content = std::fs::read_to_string(&env_path).unwrap_or_default();
-                    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-                    let mut found = false;
-                    for line in lines.iter_mut() {
-                        let trimmed = line.trim();
-                        if trimmed.starts_with(&env_key_clone) && trimmed.contains('=') {
-                            *line = format!("{}={}", env_key_clone, token_owned);
-                            found = true;
-                            break;
-                        }
-                    }
-                    if !found {
-                        lines.push(format!("{}={}", env_key_clone, token_owned));
-                    }
-                    let new_content = lines.join("\n") + "\n";
-                    std::fs::write(&env_path, new_content).ok();
-                })
-                .await;
-                if write_result.is_ok() {
-                    std::env::set_var(env_key, bot_token);
-                    tracing::info!("Saved bot access token to .env and process env");
-                }
+                let reader = crate::platform::external::HttpBearerFileReader::new(bot_token.to_string());
+                state
+                    .app_context
+                    .platform_file_readers
+                    .write()
+                    .await
+                    .insert(name.clone(), Arc::new(reader));
+                tracing::info!(
+                    "Registered file reader for plugin '{}' (from setup bot_token)",
+                    name
+                );
                 reload_platform_plugin(&state, &name).await;
             }
 

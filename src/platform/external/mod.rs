@@ -13,6 +13,7 @@ pub mod client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::err_str;
 use crate::error::AppResult;
@@ -534,7 +535,7 @@ pub fn decode_base64(encoded: &str) -> Result<Vec<u8>, anyhow::Error> {
 }
 
 // ---------------------------------------------------------------------------
-// File reading — generic trait + Mattermost implementation
+// File reading — generic trait + HTTP Bearer implementation
 // ---------------------------------------------------------------------------
 
 /// A platform-specific file reader.
@@ -552,28 +553,25 @@ pub trait FileReader: Send + Sync + std::fmt::Debug {
     async fn read_file(&self, file_id: &str, server_url: &str) -> crate::error::AppResult<Vec<u8>>;
 }
 
-/// Reads files from Mattermost by making direct HTTP requests to
-/// the Mattermost REST API. Uses `MATTERMOST_ACCESS_TOKEN` from the
-/// environment for authentication.
+/// A generic HTTP Bearer-token file reader.
+///
+/// Fetches files from any platform that exposes a REST API at
+/// `{server_url}/api/v4/files/{file_id}` authenticated via Bearer token.
+/// Platforms register their own reader instance during setup or at startup.
 #[derive(Debug)]
-pub struct MattermostFileReader {
+pub struct HttpBearerFileReader {
     access_token: String,
 }
 
-impl MattermostFileReader {
-    /// Create a new Mattermost file reader.
-    /// Returns `None` if `MATTERMOST_ACCESS_TOKEN` is not set or empty.
-    pub fn new() -> Option<Self> {
-        let access_token = std::env::var("MATTERMOST_ACCESS_TOKEN").ok()?;
-        if access_token.is_empty() {
-            return None;
-        }
-        Some(Self { access_token })
+impl HttpBearerFileReader {
+    /// Create a new HTTP Bearer file reader with the given access token.
+    pub fn new(access_token: String) -> Self {
+        Self { access_token }
     }
 }
 
 #[async_trait::async_trait]
-impl FileReader for MattermostFileReader {
+impl FileReader for HttpBearerFileReader {
     async fn read_file(&self, file_id: &str, server_url: &str) -> crate::error::AppResult<Vec<u8>> {
         let base_url = server_url.trim_end_matches('/');
         let url = format!("{}/api/v4/files/{}", base_url, file_id);
@@ -612,6 +610,31 @@ impl FileReader for MattermostFileReader {
 
         Ok(bytes.to_vec())
     }
+}
+
+/// Scan platform plugin configs and register HTTP Bearer file readers for any
+/// plugin that has an `access_token` in its config.
+///
+/// This is completely generic — no plugin name is hardcoded. Any platform
+/// plugin that exposes a REST API with Bearer token auth at
+/// `{server_url}/api/v4/files/{file_id}` will automatically get a file reader.
+pub fn build_platform_file_readers(
+    plugins: &[PlatformPluginConfig],
+) -> HashMap<String, Arc<dyn FileReader + Send + Sync>> {
+    let mut readers: HashMap<String, Arc<dyn FileReader + Send + Sync>> = HashMap::new();
+    for plugin in plugins {
+        if let Some(token) = plugin.config.get("access_token") {
+            if !token.is_empty() {
+                let reader = HttpBearerFileReader::new(token.clone());
+                readers.insert(plugin.name.clone(), Arc::new(reader));
+                tracing::info!(
+                    "Registered file reader for platform '{}' (has access_token)",
+                    plugin.name
+                );
+            }
+        }
+    }
+    readers
 }
 
 #[cfg(test)]

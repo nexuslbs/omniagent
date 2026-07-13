@@ -134,12 +134,11 @@ async fn run_server() -> AppResult<()> {
     let mcp_shared = Arc::new(tokio::sync::RwLock::new(mcp));
 
     // Register platform-specific file readers for the read_attached_file tool
-    if let Some(reader) = crate::platform::external::MattermostFileReader::new() {
-        ctx.platform_file_readers
-            .insert("mattermost".to_string(), std::sync::Arc::new(reader));
-        tracing::info!("Registered MattermostFileReader for read_attached_file");
-    } else {
-        tracing::warn!("MATTERMOST_ACCESS_TOKEN not set — Mattermost file reading unavailable");
+    // Scans all configured platform plugins — any with an access_token in their
+    // config gets a generic HTTP Bearer file reader. No plugin names are hardcoded.
+    let file_readers = crate::platform::external::build_platform_file_readers(&external_plugins);
+    for (platform_name, reader) in file_readers {
+        ctx.platform_file_readers.write().await.insert(platform_name, reader);
     }
 
     // Build the agent with shared mutable config
