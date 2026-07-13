@@ -1506,7 +1506,7 @@ Previous plan:\n{}",
 
     // Build evidence metadata from context assembly
     let evidence_metadata = {
-        let mut meta = serde_json::json!({
+        let meta = serde_json::json!({
             "context": {
                 "selected_message_ids": [],
                 "wiki_files": [],

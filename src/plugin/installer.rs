@@ -687,7 +687,7 @@ pub fn discover_plugins(
                                 continue;
                             }
                         };
-                        let key = extract_plugin_key_from_path(&path_str);
+                        let _key = extract_plugin_key_from_path(&path_str);
                         results.push((manifest, "bundled".to_string(), path_str));
                     }
                 }

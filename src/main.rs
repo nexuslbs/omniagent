@@ -16,10 +16,6 @@ use omniagent::{agent, db, mcp, platform, profile, scheduler, server};
 /// Type alias for platform restart signals map.
 type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>>;
 
-fn env_or_default(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
 #[tokio::main]
 async fn main() -> AppResult<()> {
     // Load .env file if present
