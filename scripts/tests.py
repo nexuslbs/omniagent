@@ -1436,10 +1436,16 @@ def find_plugins_by_source(source, plugin_type="tools"):
     # but callers pass plural ("tools", "platforms", "providers")
     singular_type = plugin_type.rstrip("s")
     plugins = api_get("/plugins")["data"]
+    # Skip mono-repo compiled plugins (actions, etc.) that don't follow
+    # the standard bundled lifecycle — their directory is within the
+    # omniagent repo, not the omni-stack workspace, so reinstall and
+    # config-update handlers can't serve them.
+    skip_names = {"actions"}
     return [p for p in plugins
             if p.get("source") == source
             and p.get("plugin_type") == singular_type
-            and not p.get("is_duplicated", False)]
+            and not p.get("is_duplicated", False)
+            and p.get("name") not in skip_names]
 
 def find_first_plugin(source, plugin_type="tools"):
     """Find first non-duplicated plugin by source and type."""
