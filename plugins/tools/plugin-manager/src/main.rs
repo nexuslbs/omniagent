@@ -1,4 +1,4 @@
-//! mcp-server-plugin-manager — standalone MCP server for plugin management.
+//! mcp-server-plugin-manager - standalone MCP server for plugin management.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
 //! Tool: plugin_manager
@@ -29,7 +29,7 @@ fn data_dir() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: plugin_manager — list
+// Tool: plugin_manager - list
 // ---------------------------------------------------------------------------
 
 async fn handle_list(data_dir: &str, _args: &Value) -> Result<(String, bool)> {
@@ -41,7 +41,7 @@ async fn handle_list(data_dir: &str, _args: &Value) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: plugin_manager — install
+// Tool: plugin_manager - install
 // ---------------------------------------------------------------------------
 
 async fn handle_install(data_dir: &str, args: &Value) -> Result<(String, bool)> {
@@ -70,7 +70,7 @@ async fn handle_install(data_dir: &str, args: &Value) -> Result<(String, bool)> 
 }
 
 // ---------------------------------------------------------------------------
-// Tool: plugin_manager — uninstall
+// Tool: plugin_manager - uninstall
 // ---------------------------------------------------------------------------
 
 async fn handle_uninstall(data_dir: &str, args: &Value) -> Result<(String, bool)> {
@@ -90,7 +90,7 @@ async fn handle_uninstall(data_dir: &str, args: &Value) -> Result<(String, bool)
         }
     }
 
-    // Remove from disk — detect type to pass correct arguments
+    // Remove from disk - detect type to pass correct arguments
     let is_remote = plugins_yaml::get_disk_plugin_type(data_dir, name)
         .ok()
         .flatten()
@@ -120,7 +120,7 @@ async fn handle_uninstall(data_dir: &str, args: &Value) -> Result<(String, bool)
 }
 
 // ---------------------------------------------------------------------------
-// Tool: plugin_manager — enable
+// Tool: plugin_manager - enable
 // ---------------------------------------------------------------------------
 
 async fn handle_enable(data_dir: &str, args: &Value) -> Result<(String, bool)> {
@@ -140,7 +140,7 @@ async fn handle_enable(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: plugin_manager — disable
+// Tool: plugin_manager - disable
 // ---------------------------------------------------------------------------
 
 async fn handle_disable(data_dir: &str, args: &Value) -> Result<(String, bool)> {
@@ -160,7 +160,7 @@ async fn handle_disable(data_dir: &str, args: &Value) -> Result<(String, bool)> 
 }
 
 // ---------------------------------------------------------------------------
-// Tool: plugin_manager — config
+// Tool: plugin_manager - config
 // ---------------------------------------------------------------------------
 
 async fn handle_config(data_dir: &str, args: &Value) -> Result<(String, bool)> {
@@ -195,7 +195,7 @@ async fn handle_config(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: plugin_manager — main dispatch
+// Tool: plugin_manager - main dispatch
 // ---------------------------------------------------------------------------
 
 async fn handle_plugin_manager(data_dir: &str, args: &Value) -> Result<(String, bool)> {

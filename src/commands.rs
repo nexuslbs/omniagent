@@ -12,7 +12,7 @@ use crate::db::types::Channel;
 use crate::plugins_yaml;
 
 // ---------------------------------------------------------------------------
-// ModelCommand — parsed result
+// ModelCommand - parsed result
 // ---------------------------------------------------------------------------
 
 /// The parsed result of a `/model` command.
@@ -137,9 +137,9 @@ pub fn validate_provider(data_dir: &str, provider_name: &str) -> AppResult<()> {
 /// Format a status line showing the current provider/model for a channel.
 pub fn format_model_status(provider: Option<&str>, model: Option<&str>) -> String {
     let provider_str =
-        provider.unwrap_or("(not set — will use profile default or LLM_PROVIDER env var)");
+        provider.unwrap_or("(not set - will use profile default or LLM_PROVIDER env var)");
     let model_str =
-        model.unwrap_or("(not set — will use profile default or provider plugin default_model)");
+        model.unwrap_or("(not set - will use profile default or provider plugin default_model)");
     format!(
         "Current channel configuration:\n  Provider: {}\n  Model:    {}",
         provider_str, model_str
@@ -147,7 +147,7 @@ pub fn format_model_status(provider: Option<&str>, model: Option<&str>) -> Strin
 }
 
 // ---------------------------------------------------------------------------
-// NewCommand — parsed result for `/new`
+// NewCommand - parsed result for `/new`
 // ---------------------------------------------------------------------------
 
 /// Parsed `/new` command (no arguments).
@@ -171,7 +171,7 @@ pub fn parse_new_command(input: &str) -> AppResult<NewCommand> {
 }
 
 // ---------------------------------------------------------------------------
-// ChannelCommand — parsed result for `/channel`
+// ChannelCommand - parsed result for `/channel`
 // ---------------------------------------------------------------------------
 
 /// Parsed `/channel` command.
@@ -210,7 +210,7 @@ pub fn parse_channel_command(input: &str) -> AppResult<ChannelCommand> {
 }
 
 // ---------------------------------------------------------------------------
-// ProfileCommand — parsed result for `/profile`
+// ProfileCommand - parsed result for `/profile`
 // ---------------------------------------------------------------------------
 
 /// Parsed `/profile` command.

@@ -2,7 +2,7 @@
 name = "mcp-server-cron"
 version = "0.1.0"
 edition = "2021"
-description = "Cron job MCP server — create, list, delete, update cron jobs"
+description = "Cron job MCP server - create, list, delete, update cron jobs"
 
 [dependencies]
 mcp-server-util = { path = "../util" }

@@ -1,6 +1,6 @@
 # Cargo configuration for omniagent
 # SQL_FORGE_DB_TYPE allows sql_forge! macros to know the dialect at compile time.
-# SQLX_OFFLINE is intentionally unset — it requires a populated .sqlx/ cache
+# SQLX_OFFLINE is intentionally unset - it requires a populated .sqlx/ cache
 # which is generated at build time when DATABASE_URL is available.
 [env]
 SQL_FORGE_DB_TYPE = "sqlx::Postgres"

@@ -1,4 +1,4 @@
-//! Built-in memory MCP tools — manage_memory, promote/list/review memories.
+//! Built-in memory MCP tools - manage_memory, promote/list/review memories.
 //!
 //! These provide always-available memory management without a subprocess dependency.
 
@@ -42,7 +42,7 @@ fn manage_memory_tool() -> McpTool {
                 "target": {
                     "type": "string",
                     "enum": ["memory", "user"],
-                    "description": "Which file to manage: 'memory' (MEMORY.md — agent notes) or 'user' (USER.md — user profile)"
+                    "description": "Which file to manage: 'memory' (MEMORY.md - agent notes) or 'user' (USER.md - user profile)"
                 },
                 "action": {
                     "type": "string",
@@ -138,7 +138,7 @@ fn manage_memory_tool() -> McpTool {
                         if !path.exists() {
                             return Ok(McpToolResult {
                                 call_id: String::new(),
-                                content: format!("No {} file found — nothing to remove.", target),
+                                content: format!("No {} file found - nothing to remove.", target),
                                 is_error: false,
                             });
                         }
@@ -174,7 +174,7 @@ fn manage_memory_tool() -> McpTool {
                         }
                         Ok(McpToolResult {
                             call_id: String::new(),
-                            content: format!("{} cleared — all entries removed (profile: {}).", target, profile),
+                            content: format!("{} cleared - all entries removed (profile: {}).", target, profile),
                             is_error: false,
                         })
                     }

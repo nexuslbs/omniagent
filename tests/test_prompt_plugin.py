@@ -111,7 +111,7 @@ def test(name: str, condition: bool | str, detail: str = ""):
     prefix = "✅ PASS" if condition else "❌ FAIL"
     if not condition:
         FAIL += 1
-        print(f"  {prefix}: {name} — {detail}")
+        print(f"  {prefix}: {name} - {detail}")
     else:
         PASS += 1
         print(f"  {prefix}: {name}")
@@ -131,7 +131,7 @@ def run_tests():
         test("Agent is healthy", healthy, f"code={code}, stdout={stdout!r}")
     except Exception as e:
         test("Agent is healthy", False, str(e))
-        print("\n❌ Cannot proceed — agent not reachable. Is the container running?")
+        print("\n❌ Cannot proceed - agent not reachable. Is the container running?")
         return
 
     if FAIL > 0:
@@ -186,7 +186,7 @@ def run_tests():
 
     # plan=true
     resp_true = prompt_preview(channel_name, "Implement a new feature", plan=True)
-    # When plan=true, the endpoint tries to call the LLM — plan is either a
+    # When plan=true, the endpoint tries to call the LLM - plan is either a
     # string (the plan text) or None if the LLM isn't configured
     test("plan=true returns plan content or null",
          resp_true.get("plan") is None or isinstance(resp_true.get("plan"), str),

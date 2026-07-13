@@ -1,8 +1,8 @@
 //! Overview endpoint handler
 //!
 //! Replaces the dashboard's SQL queries at overview.ts:
-//! - GET /overview — recent 50 threads
-//! - GET /overview/dashboard — KPIs, charts, and analytics
+//! - GET /overview - recent 50 threads
+//! - GET /overview/dashboard - KPIs, charts, and analytics
 //!
 //! All queries use `sql_forge!()`. The multi-CTE dashboard query is split
 //! into individual queries (one per section) and assembled in Rust rather
@@ -102,7 +102,7 @@ struct OverviewEntry {
     content_preview: String,
     status: String,
     processing_time_ms: Option<i64>,
-    /// Always 0 — the original dashboard adds this field
+    /// Always 0 - the original dashboard adds this field
     prompt_tokens: i64,
     /// total_tokens (input + output) mapped to completion_tokens
     completion_tokens: i64,
@@ -171,7 +171,7 @@ struct DashboardResponse {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// GET /overview — recent 50 threads
+/// GET /overview - recent 50 threads
 ///
 /// Mirrors the original dashboard overview query exactly.
 async fn overview_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -234,7 +234,7 @@ async fn overview_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
     ok_json(entries)
 }
 
-/// GET /overview/dashboard — KPIs, time series, and analytics
+/// GET /overview/dashboard - KPIs, time series, and analytics
 ///
 /// The original Express query used a single multi-CTE query with
 /// `row_to_json` and `json_agg`. This Rust version runs individual

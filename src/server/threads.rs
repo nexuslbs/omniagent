@@ -1,8 +1,8 @@
-//! Threads API — threads list with filters, statuses, causes, subtasks.
+//! Threads API - threads list with filters, statuses, causes, subtasks.
 //!
-//! - `GET /threads` — paginated threads list with optional filters
-//! - `GET /threads/filters` — distinct statuses and causes for filter dropdowns
-//! - `GET /threads/{id}/subtasks` — subtasks for a specific thread
+//! - `GET /threads` - paginated threads list with optional filters
+//! - `GET /threads/filters` - distinct statuses and causes for filter dropdowns
+//! - `GET /threads/{id}/subtasks` - subtasks for a specific thread
 
 use axum::{
     extract::{Path, Query, State},
@@ -154,7 +154,7 @@ struct CauseRow {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// GET /threads — list threads with optional filters and pagination
+/// GET /threads - list threads with optional filters and pagination
 async fn list_threads_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ThreadsQueryParams>,
@@ -299,7 +299,7 @@ async fn list_threads_handler(
     })
 }
 
-/// GET /threads/filters — distinct statuses and causes
+/// GET /threads/filters - distinct statuses and causes
 async fn thread_filters_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let statuses = match sql_forge!(
         StatusRow,
@@ -341,7 +341,7 @@ async fn thread_filters_handler(State(state): State<Arc<AppState>>) -> impl Into
     ok_json(ThreadFiltersResponse { statuses, causes })
 }
 
-/// GET /threads/{id}/subtasks — subtasks for a specific thread
+/// GET /threads/{id}/subtasks - subtasks for a specific thread
 async fn thread_subtasks_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<i64>,

@@ -2,7 +2,7 @@
 name = "mcp-server-query"
 version = "0.1.0"
 edition = "2021"
-description = "Database query MCP server — search_messages, search_thread_messages, search_channel_prompts, query"
+description = "Database query MCP server - search_messages, search_thread_messages, search_channel_prompts, query"
 
 [dependencies]
 mcp-server-util = { path = "../util" }

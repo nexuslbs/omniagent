@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use crate::err_str;
 use crate::error::AppResult;
 
-/// Update a kanban task's status and record the transition in history — atomically.
+/// Update a kanban task's status and record the transition in history - atomically.
 ///
 /// Fetches the current status as `initial_board`, updates it, and inserts a
 /// kanban_history row with action = "moved" so the board transition is always tracked.
@@ -141,7 +141,7 @@ pub struct KanbanHistoryParams {
     pub offset: Option<i64>,
 }
 
-/// List kanban history with optional filters — fully parameterized via sql_forge!.
+/// List kanban history with optional filters - fully parameterized via sql_forge!.
 pub async fn list_kanban_history(
     pool: &PgPool,
     params: &KanbanHistoryParams,

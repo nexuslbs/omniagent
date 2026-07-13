@@ -2,7 +2,7 @@
 name = "mcp-server-metrics"
 version = "0.1.0"
 edition = "2021"
-description = "Metrics MCP server — agent metrics (token usage, latency, groundedness, retrieval, corrections)"
+description = "Metrics MCP server - agent metrics (token usage, latency, groundedness, retrieval, corrections)"
 
 [dependencies]
 mcp-server-util = { path = "../util" }

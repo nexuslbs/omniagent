@@ -1,4 +1,4 @@
-//! mcp-server-search — standalone MCP server for searching messages and wiki content.
+//! mcp-server-search - standalone MCP server for searching messages and wiki content.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
 //! Tools: search_messages, search_wiki
@@ -218,7 +218,7 @@ async fn main() -> Result<()> {
         McpToolEntry {
             def: McpToolDef {
                 name: "search_messages".to_string(),
-                description: "Search message history across all channels. Use this tool when the LLM needs to find information from past conversations. Use specific keywords and narrow the scope with channel_id when possible. Does NOT search wiki pages — use search_wiki for that.".to_string(),
+                description: "Search message history across all channels. Use this tool when the LLM needs to find information from past conversations. Use specific keywords and narrow the scope with channel_id when possible. Does NOT search wiki pages - use search_wiki for that.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -244,7 +244,7 @@ async fn main() -> Result<()> {
         McpToolEntry {
             def: McpToolDef {
                 name: "search_wiki".to_string(),
-                description: "Search wiki pages for relevant documentation. Use this to find documentation, guides, and notes. Does NOT search message history — use search_messages for that.".to_string(),
+                description: "Search wiki pages for relevant documentation. Use this to find documentation, guides, and notes. Does NOT search message history - use search_messages for that.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {

@@ -67,7 +67,7 @@ pub struct AgentConfig {
     /// MCP tool name for generating the LLM prompt (system prompt + context assembly).
     /// The tool is called by the executor before each LLM invocation to build
     /// the complete prompt from profile, memory, skills, thread context, etc.
-    /// Default: "prompt_generate" — change this if the prompt plugin is registered
+    /// Default: "prompt_generate" - change this if the prompt plugin is registered
     /// under a different name.
     pub prompt_tool_name: String,
     /// MCP tool name for compacting conversation history.
@@ -86,9 +86,9 @@ pub struct AgentConfig {
     pub state_block_update_interval: u32,
     /// How many full assistant→tool cycles to keep verbatim during condensation.
     pub condense_keep_turns: usize,
-    /// Token budget — soft threshold for condensation (uses tiktoken for accurate counting).
+    /// Token budget - soft threshold for condensation (uses tiktoken for accurate counting).
     pub prompt_token_budget_soft: usize,
-    /// Token budget — hard threshold, condense before any LLM call (uses tiktoken).
+    /// Token budget - hard threshold, condense before any LLM call (uses tiktoken).
     pub prompt_token_budget_hard: usize,
     /// tiktoken encoding/model name ("gpt-4", "cl100k_base", "o200k_base").
     pub tokenizer_encoding: String,
@@ -96,10 +96,10 @@ pub struct AgentConfig {
     pub prompt_token_safety_factor: f64,
 
     /// When to insert prompts as messages (msg_type: "prompt") into the messages table.
-    /// - "off" — never insert
-    /// - "first" — insert the first LLM call's prompt only (default)
-    /// - "first+compact" — first prompt + prompts after context compaction
-    /// - "all" — insert every prompt before every LLM call
+    /// - "off" - never insert
+    /// - "first" - insert the first LLM call's prompt only (default)
+    /// - "first+compact" - first prompt + prompts after context compaction
+    /// - "all" - insert every prompt before every LLM call
     pub prompt_log_level: String,
 
     /// Global watchdog configuration for tools that don't have their own.
@@ -154,10 +154,10 @@ impl AgentConfig {
     /// Load agent configuration from environment variables.
     ///
     /// # Env vars
-    /// - `LLM_PROVIDER` — Provider name (default: "openai")
-    /// - `MAX_TOKENS` — Max tokens per response (default: 4096)
-    /// - `TEMPERATURE` — Sampling temperature (default: 0.7)
-    /// - `MAX_ITERATIONS` — Max agent turns per thread before skipping (default: 60)
+    /// - `LLM_PROVIDER` - Provider name (default: "openai")
+    /// - `MAX_TOKENS` - Max tokens per response (default: 4096)
+    /// - `TEMPERATURE` - Sampling temperature (default: 0.7)
+    /// - `MAX_ITERATIONS` - Max agent turns per thread before skipping (default: 60)
     ///
     /// The API key comes from the provider's plugin config (providers.yml with $env:
     /// references), not from hardcoded env var names.

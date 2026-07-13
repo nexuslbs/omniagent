@@ -1,13 +1,13 @@
 //! Database migrations for OmniAgent.
 //!
-//! Single-phase declarative schema — creates the FINAL state of all tables
+//! Single-phase declarative schema - creates the FINAL state of all tables
 //! as they exist after all incremental migrations are applied.
 //!
 //! No legacy data migrations, no ADD COLUMN / DROP COLUMN evolution steps.
 //! Safe to run on every startup (all statements use IF NOT EXISTS).
 //!
 //! Profile columns (channels.current_profile, threads.profile) have NO
-//! DEFAULT — the application supplies the profile name from DEFAULT_PROFILE
+//! DEFAULT - the application supplies the profile name from DEFAULT_PROFILE
 //! env var at insert time.
 
 use anyhow::Result;
@@ -83,7 +83,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .await
         .ok();
 
-    tracing::info!("[migration] Schema v3 — plan boolean columns added");
+    tracing::info!("[migration] Schema v3 - plan boolean columns added");
     Ok(())
 }
 
@@ -94,7 +94,7 @@ async fn create_extensions(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await?;
 
-    // pgvector is optional — silently skip if not installed
+    // pgvector is optional - silently skip if not installed
     sqlx::query(
         r#"DO $$ BEGIN
             CREATE EXTENSION IF NOT EXISTS vector;
@@ -523,7 +523,7 @@ async fn create_vector_support(pool: &PgPool) -> Result<()> {
 
         tracing::info!("[migration] pgvector HNSW index and embedding_vec column ready");
     } else {
-        tracing::warn!("[migration] pgvector not available — skipping vector column");
+        tracing::warn!("[migration] pgvector not available - skipping vector column");
     }
 
     Ok(())

@@ -1,12 +1,12 @@
-//! Memory API — provides stats and full-text search over stored conversations.
+//! Memory API - provides stats and full-text search over stored conversations.
 //!
 //! Replaces the dashboard's /stats and /search-messages SQL queries so the
 //! dashboard no longer needs direct database credentials.
 //!
-//! - `GET /memory/stats`   — aggregate counts (threads, messages, vectors)
-//! - `GET /memory/search`  — full-text search over message content
-//! - `GET /memory/text/{profile}/{type}`  — read MEMORY.md/USER.md file
-//! - `POST /memory/upload/{profile}/{type}`  — write MEMORY.md/USER.md file
+//! - `GET /memory/stats`   - aggregate counts (threads, messages, vectors)
+//! - `GET /memory/search`  - full-text search over message content
+//! - `GET /memory/text/{profile}/{type}`  - read MEMORY.md/USER.md file
+//! - `POST /memory/upload/{profile}/{type}`  - write MEMORY.md/USER.md file
 
 use axum::{
     extract::{Path, Query, State},
@@ -38,7 +38,7 @@ pub fn memory_router() -> Router<Arc<AppState>> {
 }
 
 // ---------------------------------------------------------------------------
-// Types — Stats query / response
+// Types - Stats query / response
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -57,7 +57,7 @@ pub struct StatsResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Types — Search query / response
+// Types - Search query / response
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -101,7 +101,7 @@ pub struct SearchResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Types — Upload body
+// Types - Upload body
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
