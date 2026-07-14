@@ -623,15 +623,36 @@ pub fn build_platform_file_readers(
 ) -> HashMap<String, Arc<dyn FileReader + Send + Sync>> {
     let mut readers: HashMap<String, Arc<dyn FileReader + Send + Sync>> = HashMap::new();
     for plugin in plugins {
-        if let Some(token) = plugin.config.get("access_token") {
-            if !token.is_empty() {
-                let reader = HttpBearerFileReader::new(token.clone());
-                readers.insert(plugin.name.clone(), Arc::new(reader));
-                tracing::info!(
-                    "Registered file reader for platform '{}' (has access_token)",
-                    plugin.name
+        let raw_token = plugin.config.get("access_token").map(|s| s.as_str()).unwrap_or("");
+        if raw_token.is_empty() {
+            continue;
+        }
+        // Resolve $env:VAR references from the environment
+        let token = if let Some(env_var) = raw_token.strip_prefix("$env:") {
+            std::env::var(env_var).unwrap_or_else(|_| {
+                tracing::warn!(
+                    "Environment variable '{}' not set for platform '{}' access_token",
+                    env_var, plugin.name
                 );
-            }
+                String::new()
+            })
+        } else if raw_token.starts_with("$secret:") {
+            tracing::warn!(
+                "Cannot resolve $secret: reference for platform '{}' access_token",
+                plugin.name
+            );
+            String::new()
+        } else {
+            raw_token.to_string()
+        };
+
+        if !token.is_empty() {
+            let reader = HttpBearerFileReader::new(token);
+            readers.insert(plugin.name.clone(), Arc::new(reader));
+            tracing::info!(
+                "Registered file reader for platform '{}' (has access_token)",
+                plugin.name
+            );
         }
     }
     readers
