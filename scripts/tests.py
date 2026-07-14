@@ -1389,9 +1389,9 @@ def _git_status(repo_dir):
     return result.stdout.strip()
 
 def _git_discard_all(repo_dir):
-    """Discard all unstaged changes and untracked files."""
+    """Restore tracked files to HEAD — does NOT git clean (preserves compiled binaries)."""
     subprocess.run(["git", "checkout", "--", "."], cwd=repo_dir, capture_output=True)
-    subprocess.run(["git", "clean", "-fd"], cwd=repo_dir, capture_output=True)
+    # Intentionally no git clean -fd — that would delete compiled binaries from target/
 
 def check_git_clean():
     """Raise if omni-stack repo has unstaged changes — never auto-discard."""
