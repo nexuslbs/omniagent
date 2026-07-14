@@ -434,6 +434,11 @@ impl AsyncChildProcess {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit());
 
+        // Set working directory if configured (for relative args like ["server.py"])
+        if let Some(dir) = &config.current_dir {
+            command.current_dir(dir);
+        }
+
         for (key, value) in &config.env {
             let resolved = crate::mcp::external::config::resolve_env_vars(value);
             command.env(key, resolved);

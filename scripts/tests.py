@@ -1394,10 +1394,7 @@ def _git_discard_all(repo_dir):
     subprocess.run(["git", "clean", "-fd"], cwd=repo_dir, capture_output=True)
 
 def check_git_clean():
-    """Restore repo to clean state before running tests.
-    The agent normalizes plugins.yml and remote.yml on startup, and previous
-    test runs may leave deleted files. Full checkout + clean handles all cases."""
-    _git_discard_all(OMNI_STACK_DIR)
+    """Raise if omni-stack repo has unstaged changes — never auto-discard."""
     dirty = _git_status(OMNI_STACK_DIR)
     if dirty:
         raise RuntimeError(
@@ -2294,6 +2291,20 @@ def test_t6_disable_invalid_source():
 
 
 # ── GROUP 9: Mattermost + Noop E2E integration test ──────────────────
+MM_PLATFORM_DIR = f"{WORKSPACE}/plugins/platforms/mattermost"
+MM_BINARY = f"{MM_PLATFORM_DIR}/target/release/mattermost-platform"
+
+def _ensure_mm_platform_binary():
+    """Compile mattermost platform binary if missing (target/ is gitignored and may be absent)."""
+    if not os.path.exists(MM_BINARY):
+        print("[compiling mattermost platform binary...]")
+        rc = sh(f"cd {MM_PLATFORM_DIR} && cargo build --release 2>&1")
+        if rc.returncode != 0:
+            print(f"  ⚠ compilation output (last 20 lines):\n" + "\n".join(rc.stdout.split("\n")[-20:]))
+            raise RuntimeError(f"mattermost platform build failed (exit {rc.returncode})")
+        assert os.path.exists(MM_BINARY), "Binary still missing after build"
+        print(f"[mattermost platform binary compiled: {MM_BINARY}]")
+
 def _check_mm_container():
     rc = sh("docker inspect omni-mattermost-1 2>/dev/null | grep -q '\"Running\": true'")
     assert rc.returncode == 0, "Mattermost container (omni-mattermost-1) is not running"
@@ -2325,6 +2336,7 @@ def test_mm9_e2e():
     access token. No manual Mattermost admin API calls should be needed.
     """
     import urllib.request, urllib.error, time
+    _ensure_mm_platform_binary()
     _check_mm_container()
     MM = "http://mattermost:8065"
     test_pass = "Mattermost_Fresh_Start_1"
@@ -2994,12 +3006,38 @@ def test_fn_12_file_upload():
 def test_fn_13_non_blocking():
     """Test lorem/poll_task/wait_task/read_task_logs lifecycle via test-tool-caller.
 
-    Sends a 4-step script via Mattermost. The test-tool-caller model processes
-    one step per iteration, resolving ${name.field} placeholders across steps.
+    Adds test-python-tool for lorem, runs a 4-step script via Mattermost.
+    The test-tool-caller model processes one step per iteration, resolving
+    ${name.field} placeholders across steps.
     Total execution should be ~5s (the lorem duration), not 120s (wait timeout).
+    Cleans up test-python-tool after.
     """
     import urllib.request, urllib.error, time, uuid
     MM = "http://mattermost:8065"
+
+    # Add test-python-tool (remote YAML entry) and download/enable it
+    yaml_set("tools", "test-python-tool", {"enabled": False, "source": "remote", "config": {}})
+    success, resp = api_post_body("/plugins/test-python-tool/download", {"source": "remote"}, timeout=30)
+    if not success:
+        print(f"  ⚠ download failed: {resp}")
+    success, resp = api_post_body("/plugins/test-python-tool/enable", {"source": "remote"}, timeout=15)
+    if not success:
+        print(f"  ⚠ enable failed: {resp}")
+    # Wait for MCP server to register its tools
+    for attempt in range(15):
+        try:
+            r = urllib.request.urlopen(urllib.request.Request(f"{BASE}/mcp/tools"), timeout=5)
+            tools_data = json.loads(r.read())
+            tools = tools_data if isinstance(tools_data, list) else (tools_data.get("tools") or tools_data.get("data") or [])
+            if any("test-python-tool_lorem" in (t.get("full_name") or t.get("name") or "") for t in tools):
+                print("[test-python-tool_lorem registered]")
+                break
+        except:
+            pass
+        time.sleep(2)
+    else:
+        print("  ⚠ Timed out waiting for test-python-tool_lorem to register")
+
     admin_data = json.dumps({"login_id": "lucasbasquerotto", "password": "MTEnivuUVDZ3"}).encode()
     admin_req = urllib.request.Request(f"{MM}/api/v4/users/login", data=admin_data, method="POST", headers={"Content-Type": "application/json"})
     admin_token = urllib.request.urlopen(admin_req, timeout=10).headers.get("Token")
@@ -3032,12 +3070,12 @@ def test_fn_13_non_blocking():
         time.sleep(2)
 
     # 4-step script:
-    # 1. builtin_lorem(5) named "long_run" → returns {task_id, status:processing}
+    # 1. test-python-tool_lorem(5) named "long_run" → returns {task_id, status:processing}
     # 2. builtin_read-task-logs with task_id from step 1
     # 3. builtin_wait-task with task_id from step 1 (timeout 120s)
     # 4. builtin_read-task-logs again to verify summary
     script = json.dumps([
-        {"name": "long_run", "tool": "builtin_lorem", "arguments": {"seconds": 5}},
+        {"name": "long_run", "tool": "test-python-tool_lorem", "arguments": {"seconds": 5}},
         {"name": "logs1", "tool": "builtin_read-task-logs", "arguments": {"task_id": "${long_run.task_id}", "cursor": 0}},
         {"name": "wait", "tool": "builtin_wait-task", "arguments": {"task_id": "${long_run.task_id}", "timeout_secs": 120}},
         {"name": "logs2", "tool": "builtin_read-task-logs", "arguments": {"task_id": "${long_run.task_id}", "cursor": 0}},
@@ -3071,6 +3109,9 @@ def test_fn_13_non_blocking():
                 print("[non-blocking test PASSED]")
                 return
     assert False, "No completion message within 60s"
+
+    # Cleanup: remove test-python-tool
+    yaml_del("tools", "test-python-tool")
 
 # ═══════════════════════════════════════════════════════════════════════
 #  Main
