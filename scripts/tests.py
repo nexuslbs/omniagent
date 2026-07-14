@@ -375,7 +375,7 @@ def ensure_remote_plugin(name, plugin_type="tools"):
     # Pre-build Rust binary so install API doesn't timeout compiling
     cargo_toml = f"{dest_base}/{plugin_type}/{name}/Cargo.toml"
     if os.path.exists(cargo_toml):
-        sh(f"cd {dest_base}/{plugin_type}/{name} && cargo build --release 2>&1")
+        sh(f"cd {dest_base}/{plugin_type}/{name} && timeout 120 cargo build --release 2>&1")
 
     # Register in remote.yml
     remote_yml_path = f"{WORKSPACE}/remote.yml"
@@ -2297,6 +2297,13 @@ MM_BINARY = f"{MM_PLATFORM_DIR}/target/release/mattermost-platform"
 def _ensure_mm_platform_binary():
     """Compile mattermost platform binary if missing (target/ is gitignored and may be absent)."""
     if not os.path.exists(MM_BINARY):
+        # Source may have been deleted by a prior test's cleanup (e.g. git operations
+        # that wipe untracked directories). Restore from git if needed.
+        if not os.path.exists(MM_PLATFORM_DIR):
+            print("[restoring mattermost platform source from git...]")
+            sh(f"cd {WORKSPACE} && git checkout -- plugins/platforms/mattermost 2>&1")
+            assert os.path.exists(MM_PLATFORM_DIR), \
+                f"git restore failed: {MM_PLATFORM_DIR} still missing"
         print("[compiling mattermost platform binary...]")
         rc = sh(f"cd {MM_PLATFORM_DIR} && cargo build --release 2>&1")
         if rc.returncode != 0:
@@ -2337,6 +2344,17 @@ def test_mm9_e2e():
     """
     import urllib.request, urllib.error, time
     _ensure_mm_platform_binary()
+    # Ensure noop provider exists (GROUP 1 tests may have deleted it)
+    noop_dir = f"{WORKSPACE}/plugins/providers/noop"
+    if not os.path.exists(noop_dir):
+        print("[restoring noop provider from backup...]")
+        from shutil import copytree
+        repo_noop = f"{REMOTE_REPO}/providers/noop"
+        if os.path.exists(repo_noop):
+            copytree(repo_noop, noop_dir, dirs_exist_ok=True)
+        else:
+            sh(f"cd {WORKSPACE} && git checkout -- plugins/providers/noop 2>&1")
+        assert os.path.exists(noop_dir), f"Failed to restore noop provider"
     _check_mm_container()
     MM = "http://mattermost:8065"
     test_pass = "Mattermost_Fresh_Start_1"
@@ -2957,11 +2975,15 @@ def test_fn_12_file_upload():
     # Upload file
     test_content = b"Hello Hermes! Test file content: ABC123XYZ"
     boundary = uuid.uuid4().hex
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="filename"; filename="test.txt"\r\n'
-        f"Content-Type: text/plain\r\n\r\n"
-    ).encode() + test_content + f"\r\n--{boundary}--\r\n".encode()
+    body = b""
+    body += f"--{boundary}\r\n".encode()
+    body += f'Content-Disposition: form-data; name="files"; filename="test.txt"\r\n'.encode()
+    body += b"Content-Type: text/plain\r\n\r\n"
+    body += test_content + b"\r\n"
+    body += f"--{boundary}\r\n".encode()
+    body += f'Content-Disposition: form-data; name="channel_id"\r\n\r\n'.encode()
+    body += mm_channel_id.encode() + b"\r\n"
+    body += f"--{boundary}--\r\n".encode()
     file_post = urllib.request.Request(
         f"{MM}/api/v4/files",
         data=body, method="POST",
@@ -3118,6 +3140,16 @@ def test_fn_13_non_blocking():
 # ═══════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
+    # Restore any deleted tracked files from previous test runs (tests.py is
+    # committed, so git checkout won't revert our changes)
+    _git_discard_all(OMNI_STACK_DIR)
+    # Remove untracked test artifact directories that may have been created
+    _tools_dir = f"{WORKSPACE}/plugins/tools"
+    if os.path.isdir(_tools_dir):
+        for _d in sorted(os.listdir(_tools_dir), reverse=True):
+            if _d.startswith("test-"):
+                shutil.rmtree(f"{_tools_dir}/{_d}", ignore_errors=True)
+
     # Verify clean git state before making any changes
     check_git_clean()
 

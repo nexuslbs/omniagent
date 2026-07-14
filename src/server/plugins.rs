@@ -2669,7 +2669,9 @@ async fn handle_remove_by_source(
             ] {
                 if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, pt, name) {
                     if entry.source == "bundled" || entry.source == "omni-stack" {
-                        let _ = plugins_yaml::remove_entry(data_dir, pt, name);
+                        if let Err(e) = plugins_yaml::remove_entry(data_dir, pt, name) {
+                            tracing::error!("Remove: failed to remove YAML entry for '{}': {}", name, e);
+                        }
                         removed = true;
                         break;
                     }
