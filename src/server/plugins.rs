@@ -1635,11 +1635,25 @@ pub(crate) async fn setup_plugin_handler(
         }
     }
 
+    // Inject config values into setup_env so $secret: references get resolved.
+    // Without this, setup_val() returns String::new() for $secret: values.
+    let config = &detail.config;
+    let setup_keys: &[&str] = &[
+        "setup_team", "setup_channel", "bot_user", "admin_user",
+        "admin_password", "test_user", "test_password", "bot_password",
+    ];
+    for key in setup_keys {
+        if !setup_env.contains_key(*key) {
+            if let Some(raw) = config.get(*key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                setup_env.insert(key.to_string(), raw.to_string());
+            }
+        }
+    }
+
     // Resolve $secret: references in setup_env
     crate::plugins_yaml::resolve_config_refs(&mut setup_env, &state.pool).await;
 
     // Build the setup params
-    let config = &detail.config;
     let setup_val = |key: &str| -> String {
         if let Some(v) = setup_env.get(key) {
             if !v.is_empty() {
@@ -1654,6 +1668,8 @@ pub(crate) async fn setup_plugin_handler(
             if raw.starts_with("$env:") {
                 std::env::var(raw.strip_prefix("$env:").unwrap()).unwrap_or_default()
             } else if raw.starts_with("$secret:") {
+                // Already resolved above via setup_env + resolve_config_refs.
+                // This branch is a fallback — see the injection block above.
                 String::new()
             } else {
                 raw.to_string()

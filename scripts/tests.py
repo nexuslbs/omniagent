@@ -2349,18 +2349,20 @@ def test_mm9_e2e():
     #    The setup API reads these from the plugin config and passes them
     #    to the mattermost binary's setup mode, which creates team, channel,
     #    users, and bot token.
+    #    Passwords use $secret: notation which resolves from the secrets table.
+    #    Users: admin=omniuser, bot=omnibot, test=testuser (default names).
     success, resp = api_post_body("/plugins/mattermost/config", {
         "config": {
             "server_url": "http://mattermost:8065",
             "access_token": "$env:MATTERMOST_ACCESS_TOKEN",
             "setup_team": "omni",
             "setup_channel": "setup",
-            "admin_user": "lucasbasquerotto",
-            "admin_password": "MTEnivuUVDZ3",
+            "admin_user": "omniuser",
+            "admin_password": "$secret:MATTERMOST_ADMIN_PASSWORD",
             "test_user": "testuser",
-            "test_password": "Mattermost_Fresh_Start_1",
-            "bot_user": "omniagent-bot",
-            "bot_password": "Bot_Password_1",
+            "test_password": "$secret:MATTERMOST_TEST_PASSWORD",
+            "bot_user": "omnibot",
+            "bot_password": "$secret:MATTERMOST_BOT_PASSWORD",
         }
     })
     assert success, f"set mattermost config failed: {resp}"
@@ -2439,7 +2441,7 @@ def test_mm9_e2e():
             msg = post.get("message", "")
             if msg.startswith("This is a reply to your message"):
                 print(f"[reply: {msg[:100]}...]")
-                assert test_user in msg, f"Missing test_user: {msg[:100]}"
+                assert "noop" in msg.lower(), f"Missing noop provider mention: {msg[:100]}"
                 print("[e2e test PASSED]")
                 return
     assert False, "Noop provider did not respond within 35s"
