@@ -39,6 +39,10 @@ pub struct McpServerConfig {
     /// Environment variables to set for the subprocess.
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Working directory for the spawned process (only for stdio transport).
+    /// If not set, inherits the omniagent process CWD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_dir: Option<String>,
     /// Maximum time in seconds to wait for a tool call response.
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
@@ -357,6 +361,7 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
                 args: vec![],
                 url: None,
                 env: HashMap::new(),
+                current_dir: None,
                 timeout_secs: default_timeout(),
                 max_retries: default_max_retries(),
                 allowed_tools: default_allowed_tools(),
@@ -492,6 +497,12 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
                         &crate::plugins_yaml::PluginYamlType::Tool,
                     );
 
+                    // Set working directory to the plugin directory so relative
+                    // args (e.g. ["server.py"]) resolve correctly.
+                    if srv.current_dir.is_none() {
+                        srv.current_dir = Some(plugin_dir_str.clone());
+                    }
+
                     srv
                 })
                 .collect();
@@ -625,6 +636,7 @@ mod tests {
             args: vec![],
             url: None,
             env: HashMap::new(),
+            current_dir: None,
             timeout_secs: default_timeout(),
             max_retries: default_max_retries(),
             allowed_tools: default_allowed_tools(),
