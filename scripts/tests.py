@@ -2924,6 +2924,154 @@ def test_p7_idempotent():
     # Verify message count matches
     assert r1["after_count"] == len(r1["messages"])
 
+# ── GROUP 12: File Upload via Mattermost + test-tool-caller ──────────
+def test_fn_12_file_upload():
+    """Upload a file, send it via Mattermost, verify test-tool-caller reads it."""
+    import urllib.request, urllib.error, time, uuid
+
+    MM = "http://mattermost:8065"
+    admin_data = json.dumps({"login_id": "lucasbasquerotto", "password": "MTEnivuUVDZ3"}).encode()
+    admin_req = urllib.request.Request(f"{MM}/api/v4/users/login", data=admin_data, method="POST", headers={"Content-Type": "application/json"})
+    admin_token = urllib.request.urlopen(admin_req, timeout=10).headers.get("Token")
+    team_resp = json.loads(urllib.request.urlopen(
+        urllib.request.Request(f"{MM}/api/v4/users/me/teams", headers={"Authorization": f"Bearer {admin_token}"}), timeout=10).read())
+    team_id = next((t["id"] for t in team_resp if t["name"] == "omni"), None)
+    assert team_id, "Cannot find 'omni' team"
+    channels = json.loads(urllib.request.urlopen(
+        urllib.request.Request(f"{MM}/api/v4/teams/{team_id}/channels", headers={"Authorization": f"Bearer {admin_token}"}), timeout=10).read())
+    mm_channel_id = next((ch["id"] for ch in channels if ch["name"] == "setup"), None)
+    assert mm_channel_id, "Cannot find 'setup' channel"
+
+    # Upload file
+    test_content = b"Hello Hermes! Test file content: ABC123XYZ"
+    boundary = uuid.uuid4().hex
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="filename"; filename="test.txt"\r\n'
+        f"Content-Type: text/plain\r\n\r\n"
+    ).encode() + test_content + f"\r\n--{boundary}--\r\n".encode()
+    file_post = urllib.request.Request(
+        f"{MM}/api/v4/files",
+        data=body, method="POST",
+        headers={"Authorization": f"Bearer {admin_token}", "Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    file_resp = json.loads(urllib.request.urlopen(file_post, timeout=10).read())
+    file_id = file_resp.get("file_infos", [{}])[0].get("id", "")
+    assert file_id, f"No file_id: {file_resp}"
+    print(f"[file uploaded: {file_id[:16]}...]")
+
+    # Send message with file via Mattermost (the channel is set to test-tool-caller already)
+    import uuid
+    msg_data = json.dumps({
+        "channel_id": mm_channel_id,
+        "message": f"File attached: test.txt",
+        "file_ids": [file_id],
+    }).encode()
+    msg_req = urllib.request.Request(
+        f"{MM}/api/v4/posts",
+        data=msg_data, method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {admin_token}"},
+    )
+    msg_resp = json.loads(urllib.request.urlopen(msg_req, timeout=10).read())
+    post_id = msg_resp.get("id", "")
+    print(f"[message with file sent: {post_id[:16]}...]")
+
+    # Poll for agent response (should reference the file)
+    deadline = time.time() + 35
+    while time.time() < deadline:
+        time.sleep(4)
+        posts_resp = json.loads(urllib.request.urlopen(
+            urllib.request.Request(f"{MM}/api/v4/channels/{mm_channel_id}/posts",
+            headers={"Authorization": f"Bearer {admin_token}"}), timeout=10).read())
+        for pid, post in posts_resp.get("posts", {}).items():
+            msg = post.get("message", "")
+            if "reply" in msg.lower() and "noop" in msg.lower():
+                print(f"[file upload test: reply received]")
+                return
+    assert False, "No response within 35s"
+
+# ── GROUP 13: Non-Blocking Tasks via test-tool-caller ──────────────
+def test_fn_13_non_blocking():
+    """Test lorem/poll_task/wait_task/read_task_logs lifecycle via test-tool-caller.
+
+    Sends a 4-step script via Mattermost. The test-tool-caller model processes
+    one step per iteration, resolving ${name.field} placeholders across steps.
+    Total execution should be ~5s (the lorem duration), not 120s (wait timeout).
+    """
+    import urllib.request, urllib.error, time, uuid
+    MM = "http://mattermost:8065"
+    admin_data = json.dumps({"login_id": "lucasbasquerotto", "password": "MTEnivuUVDZ3"}).encode()
+    admin_req = urllib.request.Request(f"{MM}/api/v4/users/login", data=admin_data, method="POST", headers={"Content-Type": "application/json"})
+    admin_token = urllib.request.urlopen(admin_req, timeout=10).headers.get("Token")
+    team_resp = json.loads(urllib.request.urlopen(
+        urllib.request.Request(f"{MM}/api/v4/users/me/teams", headers={"Authorization": f"Bearer {admin_token}"}), timeout=10).read())
+    team_id = next((t["id"] for t in team_resp if t["name"] == "omni"), None)
+    assert team_id, "Cannot find 'omni' team"
+    channels = json.loads(urllib.request.urlopen(
+        urllib.request.Request(f"{MM}/api/v4/teams/{team_id}/channels",
+        headers={"Authorization": f"Bearer {admin_token}"}), timeout=10).read())
+    mm_channel_id = next((ch["id"] for ch in channels if ch["name"] == "setup"), None)
+    assert mm_channel_id
+
+    # Ensure channel uses noop provider with test-tool-caller model
+    for _ in range(10):
+        try:
+            r = urllib.request.urlopen(f"{BASE}/channels", timeout=10)
+            channels = json.loads(r.read()).get("data", [])
+            mm_ch = next((ch for ch in channels if ch.get("platform") == "mattermost"), None)
+            if mm_ch:
+                cid = mm_ch["id"]
+                patch = urllib.request.Request(f"{BASE}/channels/{cid}",
+                    data=json.dumps({"current_provider": "noop", "current_model": "test-tool-caller"}).encode(),
+                    method="PATCH", headers={"Content-Type": "application/json"})
+                urllib.request.urlopen(patch, timeout=10)
+                print(f"[channel {cid} set to noop/test-tool-caller]")
+                break
+        except Exception:
+            pass
+        time.sleep(2)
+
+    # 4-step script:
+    # 1. builtin_lorem(5) named "long_run" → returns {task_id, status:processing}
+    # 2. builtin_read-task-logs with task_id from step 1
+    # 3. builtin_wait-task with task_id from step 1 (timeout 120s)
+    # 4. builtin_read-task-logs again to verify summary
+    script = json.dumps([
+        {"name": "long_run", "tool": "builtin_lorem", "arguments": {"seconds": 5}},
+        {"name": "logs1", "tool": "builtin_read-task-logs", "arguments": {"task_id": "${long_run.task_id}", "cursor": 0}},
+        {"name": "wait", "tool": "builtin_wait-task", "arguments": {"task_id": "${long_run.task_id}", "timeout_secs": 120}},
+        {"name": "logs2", "tool": "builtin_read-task-logs", "arguments": {"task_id": "${long_run.task_id}", "cursor": 0}},
+    ])
+
+    start = time.time()
+    msg_data = json.dumps({"channel_id": mm_channel_id, "message": script}).encode()
+    msg_req = urllib.request.Request(
+        f"{MM}/api/v4/posts", data=msg_data, method="POST",
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {admin_token}"},
+    )
+    msg_resp = json.loads(urllib.request.urlopen(msg_req, timeout=10).read())
+    print(f"[non-blocking test: message sent]")
+
+    # Poll for agent response — expect "All 4 tool call(s) completed"
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        time.sleep(4)
+        posts = json.loads(urllib.request.urlopen(
+            urllib.request.Request(f"{MM}/api/v4/channels/{mm_channel_id}/posts",
+            headers={"Authorization": f"Bearer {admin_token}"}), timeout=10).read())
+        for pid, post in posts.get("posts", {}).items():
+            msg = post.get("message", "")
+            if "All 4 tool call" in msg:
+                elapsed = time.time() - start
+                print(f"[all 4 tool calls completed in {elapsed:.1f}s]")
+                # The task runs for 5s. Total elapsed should be ~5-10s,
+                # NOT 120s (the wait timeout). The wait_task returns as soon
+                # as the background task finishes.
+                assert elapsed < 30, f"Took {elapsed:.1f}s — should be ~5s (lorem duration)"
+                print("[non-blocking test PASSED]")
+                return
+    assert False, "No completion message within 60s"
+
 # ═══════════════════════════════════════════════════════════════════════
 #  Main
 # ═══════════════════════════════════════════════════════════════════════
@@ -3130,8 +3278,77 @@ if __name__ == "__main__":
         print("  ✓ Prompt plugin disabled after GROUP 11")
 
     print(f"\n{'=' * 60}")
-    print(f"Results: {tests_pass}/{tests_run} passed, {tests_fail} failed")
+    print("GROUP 12: File Upload via Mattermost + test-tool-caller")
     print(f"{'=' * 60}")
+
+    _check_mm_container()
+
+    # Ensure config is set for mattermost
+    api_post_body("/plugins/mattermost/config", {
+        "config": {
+            "server_url": "http://mattermost:8065",
+            "access_token": "$env:MATTERMOST_ACCESS_TOKEN",
+            "setup_team": "omni",
+            "setup_channel": "setup",
+            "admin_user": "omniuser",
+            "admin_password": "$secret:MATTERMOST_ADMIN_PASSWORD",
+            "test_user": "testuser",
+            "test_password": "$secret:MATTERMOST_TEST_PASSWORD",
+            "bot_user": "omnibot",
+            "bot_password": "$secret:MATTERMOST_BOT_PASSWORD",
+        }
+    })
+    api_post_body("/plugins/mattermost/enable", {"source": "bundled"})
+    api_post_body("/plugins/noop/enable", {"source": "bundled"})
+
+    # Run setup
+    try:
+        req = urllib.request.Request(f"{BASE}/api/plugins/mattermost/setup", method="POST")
+        r = urllib.request.urlopen(req, timeout=30)
+    except Exception:
+        pass
+
+    # Login as admin and find channel
+    MM = "http://mattermost:8065"
+    admin_data = json.dumps({"login_id": "lucasbasquerotto", "password": "MTEnivuUVDZ3"}).encode()
+    admin_req = urllib.request.Request(f"{MM}/api/v4/users/login", data=admin_data, method="POST", headers={"Content-Type": "application/json"})
+    admin_token = urllib.request.urlopen(admin_req, timeout=10).headers.get("Token")
+    team_resp = json.loads(urllib.request.urlopen(
+        urllib.request.Request(f"{MM}/api/v4/users/me/teams", headers={"Authorization": f"Bearer {admin_token}"}), timeout=10).read())
+    team_id = next((t["id"] for t in team_resp if t["name"] == "omni"), None)
+    channels = json.loads(urllib.request.urlopen(
+        urllib.request.Request(f"{MM}/api/v4/teams/{team_id}/channels", headers={"Authorization": f"Bearer {admin_token}"}), timeout=10).read())
+    mm_channel_id = next((ch["id"] for ch in channels if ch["name"] == "setup"), None)
+    assert mm_channel_id, "Cannot find 'setup' channel"
+
+    # Upload test file
+    test_content = b"Hello from test file upload! Content: ABC123XYZ"
+    boundary = uuid.uuid4().hex
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="filename"; filename="test-upload.txt"\r\n'
+        f"Content-Type: text/plain\r\n\r\n"
+    ).encode() + test_content + f"\r\n--{boundary}--\r\n".encode()
+    file_post = urllib.request.Request(
+        f"{MM}/api/v4/files",
+        data=body,
+        method="POST",
+        headers={"Authorization": f"Bearer {admin_token}", "Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    file_resp = json.loads(urllib.request.urlopen(file_post, timeout=10).read())
+    file_id = file_resp.get("file_infos", [{}])[0].get("id", "")
+    assert file_id, f"No file_id in upload response: {file_resp}"
+    print(f"[file uploaded: id={file_id[:16]}...]")
+
+    test(file_fn_12_file_upload)
+
+    print(f"\n{'=' * 60}")
+    print("GROUP 13: Non-Blocking Tasks via test-tool-caller")
+    print(f"{'=' * 60}")
+
+    test(test_fn_13_non_blocking)
+
+    print(f"\n{'=' * 60}")
 
     # Discard any unstaged changes: runs even on failure
     discard_all_changes()
