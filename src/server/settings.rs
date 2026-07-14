@@ -172,6 +172,28 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
             },
         ),
         (
+            "TOOL_SHORT_TIMEOUT_SECS".into(),
+            get_env_or_default("TOOL_SHORT_TIMEOUT_SECS", "5"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Short timeout in seconds for MCP tool calls before switching to background mode".into(),
+                options: None,
+                readonly: false,
+                default: Some("5".into()),
+            },
+        ),
+        (
+            "TOOL_LONG_TIMEOUT_SECS".into(),
+            get_env_or_default("TOOL_LONG_TIMEOUT_SECS", "300"),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Long timeout in seconds for background MCP tool execution".into(),
+                options: None,
+                readonly: false,
+                default: Some("300".into()),
+            },
+        ),
+        (
             "MAX_UNFINISHED_SUBTASK_RETRIES".into(),
             get_env_or_default("MAX_UNFINISHED_SUBTASK_RETRIES", "3"),
             SettingMeta {
@@ -665,7 +687,9 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
         let cat_name = match name.as_str() {
             "MAX_TOKENS" | "TEMPERATURE" => "general",
             "MAX_ITERATIONS_NO_PLAN"
-            | "MAX_ITERATIONS_PLAN" => "general",
+            | "MAX_ITERATIONS_PLAN"
+            | "TOOL_SHORT_TIMEOUT_SECS"
+            | "TOOL_LONG_TIMEOUT_SECS" => "general",
             "DELETE_AFTER_DAYS"
             | "THREAD_SUMMARY_TOKENS"
             | "MEMORY_MAX_CHARS"
@@ -794,6 +818,8 @@ pub async fn update_settings_handler(
         "LLM_PROVIDER",
         "MAX_POOL_CONNECTIONS",
         "MAX_INLINE_FILE_KB",
+        "TOOL_SHORT_TIMEOUT_SECS",
+        "TOOL_LONG_TIMEOUT_SECS",
         "WATCHDOG_DEFAULT",
         "PROMPT_CHAR_BUDGET_SOFT",
         "PROMPT_CHAR_BUDGET_HARD",

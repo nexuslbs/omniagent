@@ -473,6 +473,92 @@ fn wait_task_tool() -> McpTool {
 }
 
 /// Build the `cancel_task` tool: cancel a running background task.
+
+/// Build the `lorem` tool: slowly prints lorem ipsum words for testing background tasks.
+fn lorem_tool() -> McpTool {
+    McpTool {
+        name: "lorem".to_string(),
+        full_name: tool_qualify("builtin", "lorem"),
+        description: "Slowly prints Latin lorem-ipsum style text, one word per second. Use this to test long-running tool execution with log streaming via read_task_logs.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "seconds": {
+                    "type": "number",
+                    "description": "How many seconds to run (1-120)"
+                }
+            },
+            "required": ["seconds"]
+        }),
+        server_name: None,
+        timeout_secs: 120,
+        watchdog: None,
+        handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
+            Box::pin(async move {
+                let seconds = args.get("seconds")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(10.0)
+                    .clamp(1.0, 120.0) as i32;
+
+                let thread_id = ctx.current_thread_id.unwrap_or(0);
+                let registry = crate::agent::task_registry::TASK_REGISTRY
+                    .get()
+                    .cloned()
+                    .expect("TASK_REGISTRY not initialized");
+
+                let (task_id, _abort_rx, _log_buffer) = registry
+                    .register(thread_id, "lorem")
+                    .await;
+
+                let words = vec![
+                    "lorem", "ipsum", "dolor", "sit", "amet", "consectetur",
+                    "adipiscing", "elit", "sed", "do", "eiusmod", "tempor",
+                    "incididunt", "ut", "labore", "et", "dolore", "magna",
+                    "aliqua", "ut", "enim", "ad", "minim", "veniam", "quis",
+                    "nostrud", "exercitation", "ullamco", "laboris", "nisi",
+                    "ut", "aliquip", "ex", "ea", "commodo", "consequat",
+                ];
+
+                let mut full_text = String::new();
+                for i in 0..seconds as usize {
+                    let word = words[i % words.len()];
+                    registry.append_log(&task_id, word).await;
+
+                    // Check if cancelled
+                    let info = registry.get_info(&task_id).await;
+                    let cancelled = matches!(&info, Some(i) if matches!(&i.status, crate::agent::task_registry::TaskStatus::Cancelled));
+                    if cancelled {
+                        let msg = format!("Lorem cancelled after {} words", i);
+                            let _ = full_text.clone();
+                            return Ok(McpToolResult {
+                                call_id: String::new(),
+                                content: serde_json::json!({
+                                    "status": "cancelled",
+                                    "words": i,
+                                    "message": msg,
+                                }).to_string(),
+                            is_error: false,
+                        });
+                    }
+
+                    if !full_text.is_empty() {
+                        full_text.push(' ');
+                    }
+                    full_text.push_str(word);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+
+                registry.set_status(&task_id, crate::agent::task_registry::TaskStatus::Completed(full_text.clone())).await;
+                Ok(McpToolResult {
+                    call_id: String::new(),
+                    content: full_text,
+                    is_error: false,
+                })
+            })
+        }),
+    }
+}
+
 fn cancel_task_tool() -> McpTool {
     McpTool {
         name: "cancel_task".to_string(),
@@ -843,6 +929,7 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
     registry.register(read_attached_file_tool());
 
     // ── Task management tools for non-blocking tool execution ──
+    registry.register(lorem_tool());
     registry.register(poll_task_tool());
     registry.register(wait_task_tool());
     registry.register(cancel_task_tool());
