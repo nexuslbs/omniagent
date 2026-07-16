@@ -29,13 +29,85 @@ The `generate` tool MUST return a structured object with 5 fields: NOT a single 
 
 Omniagent is responsible ONLY for assembly: it receives these 5 parts and formats them into the message array for the LLM.
 
-### Planning Mode
+### Plan Resolution
 
-**Planning is an omniagent concern, NOT the plugin's.** The plugin does not need to know about planning. In plan mode:
-- The user's original request goes into the `context` field (alongside thread history)
-- The `user` field contains the planning instruction: *"Analyze the context above and create a step-by-step plan..."*
+**Plan mode** determines whether the agent runs a planning phase before the main execution loop. Planning creates a structured plan as a message (msg_type=`plan`), optionally generates subtasks from JSON plans, and guides the main loop.
 
-This keeps the plugin generic: it just provides parts. Omniagent decides how to arrange them.
+#### Plan Resolution Priority
+
+The plan boolean for a thread is resolved at creation time through a multi-level chain:
+
+| Priority | Source | Description |
+|----------|--------|-------------|
+| 1 (highest) | `task_plan` | Explicit override from external client (platform plugins: mattermost, telegram) or cron/kanban scheduler. Passed as `ThreadCauseParams.task_plan`. |
+| 2 | channel `plan` column | DB column on `channels` table. Set via `PATCH /api/channels/{id} {"plan": false}`. Accessed via `get_channel_plan()` function. |
+| 3 (deprecated) | channel `metadata["plan"]` | Legacy JSON field for backward compatibility. Only used if the DB column is NULL. |
+| 4 (fallback) | Prompt plugin decides | When neither task_plan nor channel plan is set, the prompt plugin decides at runtime. The builtin prompt plugin uses heuristic (content length, complexity). |
+
+In code: `resolve_thread_plan()` in `db/threads.rs`:
+```rust
+// Priority: task_plan > channel_plan (column > metadata) > None (plugin decides)
+let channel_plan = channel_plan_from_column.or(channel_plan_from_metadata);
+resolve_thread_plan(channel_plan, task_plan)
+// → Some(task_plan) if set
+// → Some(channel_plan) if set
+// → None (let plugin decide)
+```
+
+#### Prompt Plugin Interaction
+
+The prompt plugin (`prompt_generate` tool) receives the resolved plan value as input and **may override it**:
+
+1. Thread is created with `plan` from resolution chain
+2. Executor calls `prompt_generate` with `"plan": thread.plan` in the arguments
+3. Prompt plugin returns `{ "plan": true|false, ... }` in its response
+4. If the response includes a `plan` field, the thread's plan is **updated in the DB**
+5. `should_plan = thread.plan` determines whether the planning phase runs
+
+The **builtin prompt plugin** behavior:
+- If channel plan is explicitly set (`true` or `false`): respects it, returns the same value
+- If channel plan is `None` (not set): decides based on content complexity, returns its decision
+- The decision is persisted to the thread so subsequent checks use the resolved value
+
+#### Configuration via API
+
+Channel-level plan can be set via `PATCH /api/channels/{id}`:
+```json
+{"plan": false}
+```
+
+Global settings that affect planning behavior (via `PUT /settings`):
+- `MAX_ITERATIONS_PLAN`: Max tool-call iterations when plan mode is active (default: 120)
+- `MAX_ITERATIONS_NO_PLAN`: Max iterations without planning (default: 30)
+- `PROMPT_GENERATE_TOOL`: MCP tool name for prompt generation (default: `"prompt_generate"`)
+
+#### Mermaid Diagram
+
+```mermaid
+flowchart LR
+    subgraph Thread_Creation["Thread Creation"]
+        A[External Client] -->|task_plan: Some(false)| B[create_thread_with_cause]
+        C[channels.plan column] -->|get_channel_plan| D{resolve_thread_plan}
+        E[metadata['plan']] -->|deprecated fallback| D
+        B --> D
+        D -->|plan: false| F[Thread created with plan=false]
+    end
+
+    subgraph Execution["Execution"]
+        F --> G[Executor: prompt_generate<br>receives plan=false]
+        G --> H[Prompt plugin returns<br>{plan: false, ...}]
+        H --> I[DB: UPDATE threads<br>SET plan = false]
+        I --> J{should_plan = false}
+        J -->|false| K[Skip planning phase]
+        J -->|true| L[Run planning phase]
+    end
+
+    subgraph Plugin_Restart["Mattermost Platform Plugin"]
+        M[WS reconnect] --> N[init_channel_cursor: finds<br>latest HUMAN post timestamp]
+        N --> O[poll_channel: processes posts<br>with create_at > cursor]
+        O -->|missed message found| B
+    end
+```
 
 ### Dashboard Prompt Preview
 
@@ -247,7 +319,63 @@ The `resolve_plugin_for_compile()` function (added 2026-07-07) extracts the comm
 
 Both handlers now call this shared function instead of duplicating ~160 lines each. Bug fixes to directory resolution or subpath handling now apply uniformly to both Install and Reinstall.
 
-### Test Improvements (2026-07-07)
+## External Platform Plugin Client — Race Condition Prevention
+
+### Core Problem: `tokio::sync::Notify` Stale Notification Bit
+
+The external platform plugin runner (`src/platform/external/client.rs`) uses `tokio::sync::Notify` to signal restart/stop events from the API to the subprocess's inner event loop. This mechanism has a fundamental race condition:
+
+**`tokio::sync::Notify` stores exactly one stale notification bit.** If `notify_one()` is called when no task is waiting on `notified()`, the notification is stored. The next `notified().await` resolves immediately, even if the event that produced it was already handled via a different mechanism (counter comparison).
+
+This caused the mattermost subprocess (and would cause ANY external platform subprocess) to be killed immediately on spawn, preventing the WebSocket from ever establishing.
+
+### Fix: Two-Pronged Defense
+
+```rust
+// FIX 1: Inner loop — ignore stale notifications when counters match
+_ = self.restart_notify.notified() => {
+    let current_restart = self.restart_count.load(Ordering::SeqCst);
+    // If restart count hasn't changed since spawn, the notification
+    // bit is stale — don't kill the subprocess
+    if current_restart == last_restart_count {
+        continue;  // ← KEY: skip break, keep subprocess alive
+    }
+    // Genuine new restart: break inner loop
+    break;
+}
+
+// FIX 2: Before respawn — consume stale notification bit proactively
+if current_restart != last_restart_count {
+    last_restart_count = current_restart;
+    // Consume the pending notification so the next spawn's
+    // inner loop doesn't fire on it
+    self.restart_notify.notified().await;  // ← safe: we know a notification is pending
+    continue;
+}
+```
+
+**FIX 1** (inner loop guard) is the primary defense: it prevents killing a healthy subprocess when a stale notification arrives.
+
+**FIX 2** (pre-respawn consume) is the optimization: it prevents the stale notification from ever reaching the inner loop in the first place.
+
+Both fixes apply to ALL external platform plugins (mattermost, telegram, etc.), not just the one that originally exhibited the bug.
+
+### Additional Fragility Fixes
+
+| Issue | Fix | Location |
+|-------|-----|----------|
+| `self.process.lock().unwrap()` panics on poisoned lock | Changed to `match self.process.lock() { Ok(guard) => ..., Err(e) => return Err(...) }` | Line 360 |
+| Stderr from subprocess was discarded | Changed `stderr(Stdio::null())` to `stderr(Stdio::inherit())` | `spawn_plugin()` |
+
+### Key Rules for Future Development
+
+1. **`tokio::sync::Notify` is single-bit.** It stores at most one notification. Counter-based detection (via `AtomicU64`) is the reliable mechanism; `Notify` is only for waking the waiting task. Always validate the counter before acting on a notification.
+
+2. **Consume notifications before respawn.** When a restart is detected via counter comparison, consume any pending `Notify` bit with `notified().await` before spawning the new subprocess. Otherwise the stale bit will fire in the new subprocess's event loop.
+
+3. **Handle lock poisoning defensively.** `StdMutex` and `RwLock` can become poisoned if another task panics while holding the lock. Use `match lock() { Ok(g) => ..., Err(_) => fallback }` instead of `.unwrap()`.
+
+4. **External platform plugin lifecycle is shared code.** All platforms (mattermost, telegram, etc.) share the same `ExternalPlatformClient` in `client.rs`. A bug fix for one platform fixes it for all. Do NOT add platform-specific hacks in `client.rs`.
 
 The integration tests in `omni-stack/scripts/tests.py` were hardened:
 

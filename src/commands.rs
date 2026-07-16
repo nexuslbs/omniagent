@@ -309,6 +309,7 @@ pub async fn handle_channel_list(pool: &PgPool, platform: &str) -> AppResult<Vec
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
+            COALESCE(plan, true) as "plan",
             '{}'::text AS "metadata",
             COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",

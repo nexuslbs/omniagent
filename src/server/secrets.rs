@@ -85,6 +85,7 @@ pub fn secrets_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/secrets", get(list_secrets_handler))
         .route("/secrets", post(create_secret_handler))
+        .route("/secrets/{name}", get(get_secret_handler))
         .route("/secrets/{name}", put(update_secret_handler))
         .route("/secrets/{name}/versions", get(list_versions_handler))
         .route("/secrets/{name}", delete(delete_secret_handler))
@@ -170,6 +171,45 @@ async fn list_secrets_handler(State(state): State<Arc<AppState>>) -> impl IntoRe
         .collect();
 
     ok_json(secrets)
+}
+
+/// GET /api/secrets/{name}: fetch a single secret by name.
+async fn get_secret_handler(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let row = match sql_forge!(
+        SecretRow,
+        r#"
+        SELECT id, name, field_type, current_value, created_at, updated_at
+        FROM secrets
+        WHERE name = :name
+        "#,
+        ( :name = &name )
+    )
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            return err_json(StatusCode::NOT_FOUND, &format!("Secret '{}' not found", name));
+        }
+        Err(e) => {
+            error!("Failed to fetch secret '{}': {:?}", name, e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to fetch secret '{}'", name));
+        }
+    };
+
+    let secret = SecretEntry {
+        id: row.id,
+        name: row.name,
+        field_type: row.field_type,
+        current_value: row.current_value,
+        created_at: fmt_ts(&row.created_at),
+        updated_at: fmt_ts(&row.updated_at),
+    };
+
+    ok_json(secret)
 }
 
 /// POST /api/secrets: create a new secret.

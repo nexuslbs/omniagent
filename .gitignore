@@ -1,21 +1,49 @@
-/target
-/data
+# omni-stack .gitignore
+# Allow everything by default — only exclude build artifacts, env files, and secrets.
+
+# ── Build artifacts ──
+target/
+node_modules/
+dist/
+
+# ── Environment / secrets ──
 .env
-backup.env
-*.swp
+.env.*.local
+.env.bak
+.env.cron
 
-# MCP script cache
-scripts/__pycache__/
+# ── Temporary / generated files ──
+COMMIT_MSG.txt
+
+# ── Git plugin cache (shared bare mirrors for remote plugin clones) ──
+.git-cache/
+*.bak
+scripts/
+docs/
+notes/
+
+# ── Runtime test artifacts (created by tests.py) ──
+plugins/tools/test-python-tool/
+
+# ── OS files ──
+.DS_Store
+Thumbs.db
+
+# ── Runtime-only: temp, logs ──
+*.log
+tmp/
+profiles/default/tmp/
+
+# ── Eliminated struct — workspace root, each plugin has own Cargo.toml ──
+/Cargo.toml
+
+# ── Data dir (runtime-only: research, generated content) ──
+/data/
+plugins/mcp/.remote/
+plugins/tools/.remote/
+plugins/.remote/
+
+# Compiled binaries
 /omniagent
-
-# Plugin build artifacts (Rust MCP tools)
-plugins/*/target/
-plugins/tools/*/mcp-server-*
-
-# Legacy directory (renamed to tools/)
-plugins/mcp
-
-# Remote plugin clones (git-installed plugins live under .remote/)
-.remote/
-dashboard/
 /omniagent.new
+mcp-server-memory

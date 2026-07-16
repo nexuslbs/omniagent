@@ -175,6 +175,7 @@ pub struct ChannelDb {
     pub current_provider: Option<String>,
     pub readonly: bool,
     pub closed: Option<bool>,
+    pub plan: Option<bool>,
     pub metadata: Option<String>,
     pub template: Option<String>,
     pub created_at: Option<String>,

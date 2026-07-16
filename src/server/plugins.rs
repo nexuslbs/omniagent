@@ -922,10 +922,37 @@ pub(crate) async fn enable_plugin_handler(
     // Check if plugin already in the desired state: skip only if source matches
     if let Ok(Some(entry)) = plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name) {
         if entry.enabled && entry.source == source {
-            // Already enabled with matching source: still reload platform subprocess
-            // so the plugin picks up any config/environment changes made since last start
+            // Already enabled with matching source: still reload subprocess
+            // so the plugin picks up any config/environment changes or re-spawns
+            // a crashed MCP server process.
             if yaml_type == plugins_yaml::PluginYamlType::Platform {
                 reload_platform_plugin(&state, &name).await;
+            } else if yaml_type == plugins_yaml::PluginYamlType::Tool {
+                // Re-initialize the MCP server (handles re-spawn after crash)
+                crate::mcp::external::client::clear_server_pools(&name);
+                crate::mcp::external::client::remove_server_config(&name);
+                match crate::mcp::external::client::initialize_single_server_tools(
+                    &state.data_dir,
+                    &name,
+                )
+                .await
+                {
+                    Ok(tools) => {
+                        let count = tools.len();
+                        state.tool_registry.write().await.remove_by_server(&name);
+                        state.tool_registry.write().await.register_all(tools);
+                        tracing::info!(
+                            "Hot-reloaded {} tool(s) from MCP server '{}' on re-enable",
+                            count, name
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Hot-reload of MCP server '{}' on re-enable failed: {}",
+                            name, e
+                        );
+                    }
+                }
             }
 
             if let Ok(Some(detail)) = plugins_yaml::get_plugin(&state.data_dir, &name) {
@@ -1635,17 +1662,17 @@ pub(crate) async fn setup_plugin_handler(
         }
     }
 
-    // Inject config values into setup_env so $secret: references get resolved.
-    // Without this, setup_val() returns String::new() for $secret: values.
+    // Inject ALL config values into setup_env so they're forwarded to the
+    // plugin binary via the configure message. This avoids maintaining a
+    // hardcoded list of what each plugin needs — the plugin knows its own
+    // config schema. $secret: and $env: references are resolved below.
     let config = &detail.config;
-    let setup_keys: &[&str] = &[
-        "setup_team", "setup_channel", "bot_user", "admin_user",
-        "admin_password", "test_user", "test_password", "bot_password",
-    ];
-    for key in setup_keys {
-        if !setup_env.contains_key(*key) {
-            if let Some(raw) = config.get(*key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-                setup_env.insert(key.to_string(), raw.to_string());
+    if let Some(config_map) = config.as_object() {
+        for (key, value) in config_map {
+            if !setup_env.contains_key(key) {
+                if let Some(raw) = value.as_str().filter(|s| !s.is_empty()) {
+                    setup_env.insert(key.clone(), raw.to_string());
+                }
             }
         }
     }
@@ -1918,7 +1945,7 @@ pub(crate) async fn setup_plugin_handler(
                 break;
             }
             Ok(None) => {
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 continue;
             }
             Err(e) => {
@@ -3440,7 +3467,7 @@ async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Vec<String>),
                         .get(name)
                         .cloned()
                     {
-                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        flag.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         note.notify_one();
                         started += 1;
                     }
@@ -3513,12 +3540,13 @@ async fn reload_platform_plugin(state: &Arc<AppState>, name: &str) {
         signals.get(name).cloned()
     };
 
-    if let Some((restart_flag, restart_notify)) = signal {
-        restart_flag.store(true, Ordering::SeqCst);
+    if let Some((restart_count, restart_notify)) = signal {
+        restart_count.fetch_add(1, Ordering::SeqCst);
         restart_notify.notify_one();
         tracing::info!(
-            "Set restart flag for platform plugin '{}': subprocess will be respawned",
-            name
+            "Set restart counter for platform plugin '{}': subprocess will be respawned (count: {})",
+            name,
+            restart_count.load(Ordering::SeqCst)
         );
     } else {
         tracing::warn!(
