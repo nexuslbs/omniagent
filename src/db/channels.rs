@@ -23,6 +23,7 @@ pub async fn find_all_channels(pool: &PgPool) -> AppResult<Vec<Channel>> {
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
+            COALESCE(plan, true) as "plan",
             '{}'::text AS "metadata",
             COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
@@ -50,6 +51,7 @@ pub async fn get_channel_by_name(pool: &PgPool, name: &str) -> AppResult<Option<
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
+            COALESCE(plan, true) as "plan",
             '{}'::text AS "metadata",
             COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
@@ -82,6 +84,7 @@ pub async fn get_channel_by_platform_name(
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
+            COALESCE(plan, true) as "plan",
             '{}'::text AS "metadata",
             COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
@@ -110,6 +113,7 @@ pub async fn find_channel_by_id(pool: &PgPool, channel_id: i64) -> AppResult<Opt
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
+            COALESCE(plan, true) as "plan",
             '{}'::text AS "metadata",
             COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
@@ -139,6 +143,7 @@ pub async fn get_channel_by_id(pool: &PgPool, channel_id: i64) -> AppResult<Opti
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
+            COALESCE(plan, true) as "plan",
             COALESCE(metadata::text, '{}') AS "metadata",
             COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
@@ -151,6 +156,26 @@ pub async fn get_channel_by_id(pool: &PgPool, channel_id: i64) -> AppResult<Opti
     .fetch_optional(pool)
     .await?;
     row.map(|r| r.try_into()).transpose()
+}
+
+/// Get a channel's plan setting directly from the DB column.
+/// Returns None if the channel is not found.
+pub async fn get_channel_plan(pool: &PgPool, channel_id: i64) -> AppResult<Option<bool>> {
+    // Use raw sqlx query to get the nullable boolean column
+    match sqlx::query_scalar::<_, Option<bool>>(
+        "SELECT plan FROM channels WHERE id = $1"
+    )
+    .bind(channel_id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(Some(val)) => Ok(val),
+        Ok(None) => Ok(None),
+        Err(e) => {
+            tracing::warn!("get_channel_plan failed for channel {}: {:?}", channel_id, e);
+            Ok(None)
+        }
+    }
 }
 
 pub async fn create_channel(pool: &PgPool, p: CreateChannelParams) -> AppResult<Channel> {
@@ -174,6 +199,7 @@ pub async fn create_channel(pool: &PgPool, p: CreateChannelParams) -> AppResult<
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
+            COALESCE(plan, true) as "plan",
             COALESCE(metadata::text, '{}') AS "metadata",
             COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
@@ -205,6 +231,7 @@ pub async fn get_channel_by_platform_and_resource(
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
+            COALESCE(plan, true) as "plan",
             COALESCE(metadata::text, '{}') AS "metadata",
             COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
@@ -249,6 +276,7 @@ pub async fn update_channel_platform(
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
+            COALESCE(plan, true) as "plan",
             '{}'::text AS "metadata",
             COALESCE(template, '') AS "template",
             ''::text AS "created_at",
@@ -417,6 +445,7 @@ pub async fn is_channel_closed(pool: &PgPool, channel_id: i64) -> AppResult<bool
             current_profile, current_model, current_provider,
             readonly,
             COALESCE(closed, false) as "closed",
+            COALESCE(plan, true) as "plan",
             '{}'::text AS "metadata",
             COALESCE(template, '') AS "template",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",

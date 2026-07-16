@@ -456,15 +456,24 @@ pub fn install_from_git(
             .arg("1")
             .arg(url)
             .arg(&initial_remote_dir);
-        let status = cmd.status().ctx(format!(
+        tracing::info!(
+            "Running: git clone --reference {} --depth 1 {} {}",
+            cache_dir, url, initial_remote_dir
+        );
+        let output = cmd.output().ctx(format!(
             "Failed to execute git clone for '{}' from {}",
             name, url
         ))?;
-        if !status.success() {
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::error!(
+                "git clone failed for '{}' from {}. stderr: {}",
+                name, url, stderr
+            );
             let _ = std::fs::remove_dir_all(&initial_remote_dir);
             err_msg!(
-                "git clone failed for '{}' from {} with status: {}",
-                name, url, status
+                "git clone failed for '{}' from {} with status: {}. stderr: {}",
+                name, url, output.status, stderr.trim()
             );
         }
 

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
@@ -14,7 +14,7 @@ use omniagent::{agent, db, mcp, platform, profile, scheduler, server};
 /// Read an environment variable with a fallback default value.
 ///
 /// Type alias for platform restart signals map.
-type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>>;
+type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicU64>, Arc<Notify>)>>>;
 
 #[tokio::main]
 async fn main() -> AppResult<()> {

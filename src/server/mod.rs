@@ -33,7 +33,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
@@ -72,7 +72,7 @@ pub(crate) fn err_json(status: StatusCode, msg: &str) -> (StatusCode, Json<serde
 pub mod plugins;
 
 /// Type alias for the platform restart signals map.
-type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>>;
+type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicU64>, Arc<Notify>)>>>;
 
 /// Shared application state for the HTTP server.
 #[derive(Clone)]

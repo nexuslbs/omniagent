@@ -229,10 +229,18 @@ pub async fn create_thread_with_cause(
         .ok_or_else(|| Error::Message(format!("Channel {} not found", channel_id)))?;
 
     // 3. Resolve planning mode (internal: lets plugin decide at runtime)
-    let channel_plan = channel
+    // Channel-level plan comes from the plan column (if explicitly set) or
+    // from metadata (deprecated JSON field for backward compatibility).
+    // When neither is set, the prompt plugin decides at runtime.
+    // Priority: task_plan > channel.plan (column, if not NULL) > channel.metadata["plan"]
+    let channel_plan_from_column: Option<bool> = crate::db::channels::get_channel_plan(
+        pool, channel_id,
+    ).await?;
+    let channel_plan_from_metadata = channel
         .metadata
         .get("plan")
         .and_then(|v| v.as_bool());
+    let channel_plan = channel_plan_from_column.or(channel_plan_from_metadata);
     let plan = resolve_thread_plan(
         channel_plan,
         p.task_plan,

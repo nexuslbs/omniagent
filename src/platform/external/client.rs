@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 use tokio::sync::Notify;
 
 /// Type alias for platform restart signals map.
-type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicBool>, Arc<Notify>)>>>;
+type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicU64>, Arc<Notify>)>>>;
 
 // ---------------------------------------------------------------------------
 // Circuit breaker
@@ -99,8 +99,8 @@ pub struct ExternalPlatformClient {
     circuit: Arc<StdMutex<CircuitBreaker>>,
     /// Data directory for profile lookups.
     data_dir: String,
-    /// Flag to signal restart to the outer loop.
-    restart_flag: Arc<AtomicBool>,
+    /// Restart counter for tracking how many restarts have been requested.
+    restart_count: Arc<AtomicU64>,
     /// Flag to signal clean stop.
     stopped: Arc<AtomicBool>,
     /// Notifier for waking up the inner loop on restart/stop.
@@ -116,16 +116,16 @@ impl ExternalPlatformClient {
     ) -> Self {
         let max_retries = config.max_retries;
         let name = config.name.clone();
-        let restart_flag = Arc::new(AtomicBool::new(false));
+        let restart_count = Arc::new(AtomicU64::new(0));
         let stopped = Arc::new(AtomicBool::new(false));
         let restart_notify = Arc::new(Notify::new());
 
-        // Register our restart flag and notify in the shared map so the API can signal us
+        // Register our restart count and notify in the shared map so the API can signal us
         {
             let mut signals = platform_restart_signals.lock().await;
             signals.insert(
                 name.clone(),
-                (Arc::clone(&restart_flag), Arc::clone(&restart_notify)),
+                (Arc::clone(&restart_count), Arc::clone(&restart_notify)),
             );
         }
 
@@ -138,7 +138,7 @@ impl ExternalPlatformClient {
             next_id: AtomicU64::new(1),
             circuit: Arc::new(StdMutex::new(CircuitBreaker::new(max_retries))),
             data_dir: data_dir.to_string(),
-            restart_flag,
+            restart_count,
             stopped,
             restart_notify,
         }
@@ -163,10 +163,11 @@ impl ExternalPlatformClient {
         }
     }
 
-    /// Request a restart: the outer loop will pick this up, kill the old
-    /// subprocess, reload config from disk, and spawn a new one.
+    /// Request a restart: increments the restart counter and notifies the main loop.
+    /// Each call creates one "restart debt" — the outer loop respawns until the
+    /// counter matches, even if multiple restarts were requested in quick succession.
     pub fn request_restart(&self) {
-        self.restart_flag.store(true, Ordering::SeqCst);
+        self.restart_count.fetch_add(1, Ordering::SeqCst);
         self.restart_notify.notify_one();
     }
 
@@ -298,6 +299,7 @@ impl Platform for ExternalPlatformClient {
             .parse()
             .unwrap_or(30);
         let mut spawn_failures: u32 = 0;
+        let mut last_restart_count = self.restart_count.load(Ordering::SeqCst);
 
         // Outer loop: respawns the subprocess when a restart is requested
         loop {
@@ -354,9 +356,18 @@ impl Platform for ExternalPlatformClient {
             };
 
             // Store child handle for later cleanup
-            {
-                let mut process_guard = self.process.lock().unwrap();
-                *process_guard = Some(child);
+            match self.process.lock() {
+                Ok(mut guard) => {
+                    *guard = Some(child);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Process lock poisoned for '{}', cannot store child handle: {:?}",
+                        self.name,
+                        e
+                    );
+                    return Err(err_str!("Process lock poisoned for '{}'", self.name));
+                }
             }
 
             // Initialize the plugin using local handles (no locks held across await)
@@ -461,6 +472,29 @@ impl Platform for ExternalPlatformClient {
                 .unwrap_or_else(|| self.name.clone());
 
             tracing::info!("Platform plugin '{}' entering main loop", plugin_name);
+
+            // If a restart was requested during init/configure, don't enter the
+            // inner loop at all. The tokio::sync::Notify stores one stale notification
+            // bit; if reload_platform_plugin called notify_one() while we were
+            // initializing, the select! below would fire immediately and kill this
+            // subprocess for nothing. Instead, skip straight to the outer loop's
+            // cleanup-and-respawn logic.
+            let current_restart = self.restart_count.load(Ordering::SeqCst);
+            if current_restart != last_restart_count {
+                tracing::info!(
+                    "Restart requested during init (count: {}), skipping inner loop",
+                    current_restart
+                );
+                last_restart_count = current_restart;
+                // Consume stale notification bit from tokio::sync::Notify.
+                // Notify stores exactly one notification bit; if we skip the inner
+                // loop via the restart-count check, the notify_one() (from
+                // request_restart) is still pending and will fire the inner loop's
+                // select! immediately on the next spawn, killing the fresh subprocess
+                // for no reason. Consume it here so the next inner loop starts clean.
+                self.restart_notify.notified().await;
+                continue;
+            }
 
             // ── Inner main loop ──────────────────────────────────────────
             let mut reader = BufReader::new(stdout);
@@ -1022,6 +1056,19 @@ impl Platform for ExternalPlatformClient {
 
                     // Restart/stop signal from the API
                     _ = self.restart_notify.notified() => {
+                        // Check for stale notification bit from before the last
+                        // spawn. If the restart was already caught by the stale
+                        // check at line 473 (counters were already updated), the
+                        // inner loop should NOT break — the subprocess is healthy.
+                        let current_restart = self.restart_count.load(Ordering::SeqCst);
+                        if current_restart == last_restart_count {
+                            tracing::debug!(
+                                "Stale restart notification for '{}' (count: {}), ignoring",
+                                plugin_name,
+                                current_restart
+                            );
+                            continue;
+                        }
                         if self.stopped.load(Ordering::SeqCst) {
                             tracing::info!(
                                 "Platform plugin '{}' received stop signal from notifier",
@@ -1049,15 +1096,48 @@ impl Platform for ExternalPlatformClient {
                 }
             };
             if let Some(mut child) = child_to_kill {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
+                // Log exit status for debugging
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        tracing::info!(
+                            "Platform plugin '{}' exited with status: {:?}",
+                            plugin_name,
+                            status.code()
+                        );
+                    }
+                    Ok(None) => {
+                        // Process still running, kill it
+                        let _ = child.kill().await;
+                        let wait_status = child.wait().await;
+                        tracing::info!(
+                            "Platform plugin '{}' killed (exit: {:?})",
+                            plugin_name,
+                            wait_status.ok().and_then(|s| s.code())
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to check exit status for '{}': {:?}",
+                            plugin_name,
+                            e
+                        );
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                    }
+                }
             }
 
             // Check if we should restart (reload config from disk and respawn)
-            if self.restart_flag.swap(false, Ordering::SeqCst) {
+            // Compare current restart counter with the value recorded at spawn time.
+            // If they differ, one or more restarts were requested — keep respawning
+            // until the counter stabilizes.
+            let current_cnt = self.restart_count.load(Ordering::SeqCst);
+            if current_cnt != last_restart_count {
+                last_restart_count = current_cnt;
                 tracing::info!(
-                    "Platform plugin '{}' restart triggered: reloading config and respawning",
-                    self.name
+                    "Platform plugin '{}' restart triggered: reloading config and respawning (count: {})",
+                    self.name,
+                    current_cnt
                 );
                 // Reload config from disk (picks up new YAML/env values)
                 self.reload_config_from_disk();
@@ -1071,9 +1151,41 @@ impl Platform for ExternalPlatformClient {
                 continue;
             }
 
-            // Normal exit (not a restart)
-            tracing::info!("External platform plugin '{}' stopped", plugin_name);
-            return Ok(());
+            // Normal exit (not a restart): wait for restart/stop signals
+            tracing::info!(
+                "External platform plugin '{}' stopped (waiting for restart signal)",
+                plugin_name
+            );
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if self.stopped.load(Ordering::SeqCst) {
+                    tracing::info!(
+                        "Platform plugin '{}' received stop signal, exiting",
+                        self.name
+                    );
+                    return Ok(());
+                }
+                let current_cnt = self.restart_count.load(Ordering::SeqCst);
+                if current_cnt != last_restart_count {
+                    last_restart_count = current_cnt;
+                    tracing::info!(
+                        "Platform plugin '{}' restart triggered (count: {})",
+                        self.name,
+                        current_cnt
+                    );
+                    // Reset next_id for fresh subprocess
+                    self.next_id.store(1, Ordering::SeqCst);
+                    // Reload config from disk (picks up new YAML/env values)
+                    self.reload_config_from_disk();
+                    // Reset circuit breaker for fresh start
+                    if let Ok(mut circuit) = self.circuit.lock() {
+                        *circuit = CircuitBreaker::new(
+                            self.config.read().map(|c| c.max_retries).unwrap_or(3),
+                        );
+                    }
+                    break;
+                }
+            }
         }
     }
 
