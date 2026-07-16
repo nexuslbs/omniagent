@@ -1,7 +1,14 @@
-//! Settings API: read/write environment variables organized by category.
+//! Settings API: read/write settings organized by category.
 //!
-//! - `GET /settings`: returns all settings with metadata
-//! - `PUT /settings`: updates one or more values and writes to .env file
+//! Settings values are stored in `settings.yml` (same directory as `plugins.yml`),
+//! with support for `$env:VAR` and `$secret:NAME` notation to indirectly
+//! reference environment variables or DB-stored secrets.
+//!
+//! Four bootstrap settings are always read-only and come directly from process
+//! environment variables: `HOST`, `PORT`, `DATABASE_URL`, `OMNI_DIR`.
+//!
+//! - `GET /settings`: returns all settings with metadata, values resolved
+//! - `PUT /settings`: updates one or more values and writes to settings.yml
 
 use axum::{
     extract::State,
@@ -39,7 +46,7 @@ pub struct SettingMeta {
     /// Whether the setting is read-only
     #[serde(default)]
     pub readonly: bool,
-    /// Default value if not set in .env
+    /// Default value if not set in settings.yml and not set via env
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
 }
@@ -86,50 +93,88 @@ pub fn settings_router() -> Router<Arc<AppState>> {
         .route("/", put(update_settings_handler))
 }
 
-/// Load current .env file as a HashMap.
-fn load_env_file(env_path: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    let content = match std::fs::read_to_string(env_path) {
+/// Path to the settings.yml file relative to data_dir.
+fn settings_path(data_dir: &str) -> String {
+    format!("{}/settings.yml", data_dir)
+}
+
+/// Load settings.yml as a flat key-value map.
+/// Returns an empty map if the file doesn't exist or can't be parsed.
+fn load_settings_file(data_dir: &str) -> HashMap<String, String> {
+    let path = settings_path(data_dir);
+    let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
-        Err(_) => return map,
+        Err(_) => return HashMap::new(),
     };
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim().to_string();
-            let value = value.trim().to_string();
-            map.insert(key, value);
+    // Parse YAML as a mapping of string → string
+    let raw: serde_yaml::Value = match serde_yaml::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut map = HashMap::new();
+    if let serde_yaml::Value::Mapping(mapping) = raw {
+        for (key, value) in mapping {
+            let k = match key.as_str() {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let v = match value.as_str() {
+                Some(s) => s.to_string(),
+                None => {
+                    // Non-string values: serialize back to YAML string
+                    serde_yaml::to_string(&value)
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string()
+                }
+            };
+            map.insert(k, v);
         }
     }
     map
 }
 
-/// Write HashMap back to .env file.
-fn write_env_file(env_path: &str, vars: &HashMap<String, String>) -> Result<(), String> {
-    let mut content = String::new();
-    let mut keys: Vec<&String> = vars.keys().collect();
-    keys.sort();
+/// Write a key-value map to settings.yml.
+fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result<(), String> {
+    let path = settings_path(data_dir);
 
-    for key in keys {
+    // Build a YAML mapping preserving insertion order (sorted by key)
+    let mut sorted_keys: Vec<&String> = vars.keys().collect();
+    sorted_keys.sort();
+
+    let mut content = String::from("# Settings for OmniAgent\n");
+    content.push_str("# Values support $env:VAR and $secret:NAME refs.\n\n");
+
+    for key in sorted_keys {
         if let Some(value) = vars.get(key) {
-            content.push_str(&format!("{}={}\n", key, value));
+            // If value contains special chars or starts with $, quote it
+            let formatted = if value.starts_with('$')
+                || value.contains(':')
+                || value.contains('#')
+                || value.is_empty()
+            {
+                format!("'{}'\n", value.replace('\'', "''"))
+            } else if value.contains(' ') || value.contains('\n') {
+                format!("'{}'\n", value.replace('\'', "''"))
+            } else {
+                format!("{}\n", value)
+            };
+            content.push_str(&format!("{}: {}", key, formatted));
         }
     }
 
-    std::fs::write(env_path, content).map_err(|e| format!("Failed to write .env: {}", e))
+    std::fs::write(&path, content).map_err(|e| format!("Failed to write settings.yml: {}", e))
 }
 
-/// The canonical list of all settings with their metadata.
-fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
+/// The canonical list of all settings with their metadata (no values).
+/// Values are resolved at request time from settings.yml + env vars.
+fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
     vec![
         // ── General ──
         (
             "MAX_TOKENS".into(),
-            get_env_or_default("MAX_TOKENS", "4096"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Maximum tokens per LLM response".into(),
@@ -140,7 +185,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "TEMPERATURE".into(),
-            get_env_or_default("TEMPERATURE", "0.7"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "LLM sampling temperature (0.0 – 2.0)".into(),
@@ -151,7 +195,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "MAX_ITERATIONS_NO_PLAN".into(),
-            get_env_or_default("MAX_ITERATIONS_NO_PLAN", "30"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Max tool-call iterations for threads with no planning".into(),
@@ -162,7 +205,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "MAX_ITERATIONS_PLAN".into(),
-            get_env_or_default("MAX_ITERATIONS_PLAN", "120"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Max tool-call iterations for threads with planning enabled".into(),
@@ -173,7 +215,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "TOOL_SHORT_TIMEOUT_SECS".into(),
-            get_env_or_default("TOOL_SHORT_TIMEOUT_SECS", "5"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Short timeout in seconds for MCP tool calls before switching to background mode".into(),
@@ -184,7 +225,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "TOOL_LONG_TIMEOUT_SECS".into(),
-            get_env_or_default("TOOL_LONG_TIMEOUT_SECS", "300"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Long timeout in seconds for background MCP tool execution".into(),
@@ -195,7 +235,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "MAX_UNFINISHED_SUBTASK_RETRIES".into(),
-            get_env_or_default("MAX_UNFINISHED_SUBTASK_RETRIES", "3"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Max retries before marking a thread as failed when subtasks remain unfinished or plan JSON is invalid".into(),
@@ -206,7 +245,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "PROMPT_GENERATE_TOOL".into(),
-            get_env_or_default("PROMPT_GENERATE_TOOL", "prompt_generate"),
             SettingMeta {
                 field_type: "select".into(),
                 description: "Name of the MCP tool to call for generating prompts".into(),
@@ -217,7 +255,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "PROMPT_COMPACT_MESSAGES_TOOL".into(),
-            get_env_or_default("PROMPT_COMPACT_MESSAGES_TOOL", "prompt_compact-messages"),
             SettingMeta {
                 field_type: "select".into(),
                 description: "Name of the MCP tool to call for compacting conversation history".into(),
@@ -229,7 +266,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         // ── Memory & Retention ──
         (
             "MEMORY_MAX_CHARS".into(),
-            get_env_or_default("MEMORY_MAX_CHARS", "5000"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Max characters for MEMORY.md in the system prompt".into(),
@@ -240,7 +276,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "SOUL_MAX_CHARS".into(),
-            get_env_or_default("SOUL_MAX_CHARS", "1000"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Max characters for SOUL.md in the system prompt".into(),
@@ -251,7 +286,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "DELETE_AFTER_DAYS".into(),
-            get_env_or_default("DELETE_AFTER_DAYS", "30"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Days before old messages and summaries are deleted".into(),
@@ -262,7 +296,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "THREAD_SUMMARY_TOKENS".into(),
-            get_env_or_default("THREAD_SUMMARY_TOKENS", "2048"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Maximum tokens for per-thread end-of-execution summary".into(),
@@ -274,7 +307,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         // ── Connections ──
         (
             "MAX_POOL_CONNECTIONS".into(),
-            get_env_or_default("MAX_POOL_CONNECTIONS", "5"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Maximum per-channel connections per MCP server. Each channel gets its own pool; this caps how many simultaneous tool calls a single server can handle per channel. Increase for multi-tool workloads, decrease to save memory. Minimum 1.".into(),
@@ -285,7 +317,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "MAX_INLINE_FILE_KB".into(),
-            get_env_or_default("MAX_INLINE_FILE_KB", "100"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Maximum file size (KB) for inline file content in inbound messages. Files larger than this are listed as metadata only. The agent can still read them via MCP tools.".into(),
@@ -297,7 +328,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         // ── General (LLM Provider) ──
         (
             "LLM_PROVIDER".into(),
-            get_env_or_default("LLM_PROVIDER", "opencode-go"),
             SettingMeta {
                 field_type: "select".into(),
                 description: "Default LLM provider backend for channels without an explicit provider".into(),
@@ -312,13 +342,13 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
             },
         ),
         // API keys are now managed per-provider via the Providers page,
-        // ── System (read-only) ──
+        // not settings.yml.
+        // ── System (read-only bootstrap from env vars) ──
         (
             "HOST".into(),
-            get_env_or_default("HOST", "0.0.0.0"),
             SettingMeta {
                 field_type: "text".into(),
-                description: "HTTP server bind address".into(),
+                description: "HTTP server bind address (read-only, from env)".into(),
                 options: None,
                 readonly: true,
                 default: Some("0.0.0.0".into()),
@@ -326,21 +356,29 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "PORT".into(),
-            get_env_or_default("PORT", "8080"),
             SettingMeta {
                 field_type: "number".into(),
-                description: "HTTP server port".into(),
+                description: "HTTP server port (read-only, from env)".into(),
                 options: None,
                 readonly: true,
                 default: Some("8080".into()),
             },
         ),
         (
+            "DATABASE_URL".into(),
+            SettingMeta {
+                field_type: "secret".into(),
+                description: "PostgreSQL connection string (read-only, from env)".into(),
+                options: None,
+                readonly: true,
+                default: Some("".into()),
+            },
+        ),
+        (
             "OMNI_DIR".into(),
-            get_env_or_default("OMNI_DIR", ""),
             SettingMeta {
                 field_type: "text".into(),
-                description: "Data directory for profiles and wiki (must be set via env)".into(),
+                description: "Data directory for profiles and wiki (read-only, from env)".into(),
                 options: None,
                 readonly: true,
                 default: Some("".into()),
@@ -349,7 +387,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         // ── Context Management ──
         (
             "PROMPT_CHAR_BUDGET_SOFT".into(),
-            get_env_or_default("PROMPT_CHAR_BUDGET_SOFT", "350000"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Soft char budget for prompts. When exceeded, context is condensed every N turns.".into(),
@@ -360,7 +397,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "PROMPT_CHAR_BUDGET_HARD".into(),
-            get_env_or_default("PROMPT_CHAR_BUDGET_HARD", "500000"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Hard char budget for prompts. When exceeded, context is condensed before the next LLM call.".into(),
@@ -371,7 +407,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "OLD_MESSAGE_CHAR_BUDGET".into(),
-            get_env_or_default("OLD_MESSAGE_CHAR_BUDGET", "100000"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Max chars for old messages after condensation. The metadata block stays in full.".into(),
@@ -382,7 +417,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "STATE_BLOCK_UPDATE_INTERVAL".into(),
-            get_env_or_default("STATE_BLOCK_UPDATE_INTERVAL", "5"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "How often (in iterations) to refresh the state block when soft budget is exceeded.".into(),
@@ -393,7 +427,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "CONDENSE_KEEP_TURNS".into(),
-            get_env_or_default("CONDENSE_KEEP_TURNS", "4"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Number of full assistant→tool cycles to keep verbatim during condensation.".into(),
@@ -405,7 +438,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         // ── Token Budgets ──
         (
             "PROMPT_TOKEN_BUDGET_SOFT".into(),
-            get_env_or_default("PROMPT_TOKEN_BUDGET_SOFT", "200000"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Soft token budget for prompts. Triggers condensation when exceeded (uses tiktoken).".into(),
@@ -416,7 +448,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "PROMPT_TOKEN_BUDGET_HARD".into(),
-            get_env_or_default("PROMPT_TOKEN_BUDGET_HARD", "350000"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Hard token budget for prompts. Condenses before any LLM call when exceeded (uses tiktoken).".into(),
@@ -427,7 +458,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "TOKENIZER_ENCODING".into(),
-            get_env_or_default("TOKENIZER_ENCODING", "gpt-4"),
             SettingMeta {
                 field_type: "select".into(),
                 description: "Tiktoken encoding for token counting. Corresponds to the model provider's tokenizer.".into(),
@@ -442,7 +472,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "PROMPT_TOKEN_SAFETY_FACTOR".into(),
-            get_env_or_default("PROMPT_TOKEN_SAFETY_FACTOR", "15.0"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Multiplier to account for provider tokenizer mismatch with tiktoken.".into(),
@@ -454,7 +483,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         // ── Tool Execution ──
         (
             "WATCHDOG_DEFAULT".into(),
-            get_env_or_default("WATCHDOG_DEFAULT", ""),
             SettingMeta {
                 field_type: "textarea".into(),
                 description: "JSON config for the global tool watchdog (applied to tools without per-tool config). Format: { \"thresholds\": [{ \"at_percent\": 0.5, \"action\": { \"Notify\": { \"message\": \"...\" } } }, { \"at_percent\": 0.8, \"action\": \"Cancel\" }] }".into(),
@@ -466,7 +494,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         // ── Prompts ──
         (
             "PROMPT_LOG_LEVEL".into(),
-            get_env_or_default("PROMPT_LOG_LEVEL", "first"),
             SettingMeta {
                 field_type: "select".into(),
                 description: "When to insert prompts as messages (msg_type: \"prompt\") into the messages table: Off (never), First (first LLM call only), First+Compact (first + after context compaction), or All (every LLM call)".into(),
@@ -483,7 +510,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         // ── Vectorization (Messages) ──
         (
             "VECTORIZE_MESSAGES".into(),
-            get_env_or_default("VECTORIZE_MESSAGES", "false"),
             SettingMeta {
                 field_type: "boolean".into(),
                 description: "Enable vectorization of messages for semantic search.".into(),
@@ -494,7 +520,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "MESSAGES_VECTORIZATION_METHOD".into(),
-            get_env_or_default("MESSAGES_VECTORIZATION_METHOD", "local"),
             SettingMeta {
                 field_type: "select".into(),
                 description: "Vectorization method for messages: local (built-in), openai, or custom API.".into(),
@@ -509,7 +534,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "MESSAGES_VECTORIZATION_API_URL".into(),
-            get_env_or_default("MESSAGES_VECTORIZATION_API_URL", ""),
             SettingMeta {
                 field_type: "text".into(),
                 description: "API URL for message vectorization (required when method is openai or custom).".into(),
@@ -520,7 +544,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "MESSAGES_VECTORIZATION_INTERVAL".into(),
-            get_env_or_default("MESSAGES_VECTORIZATION_INTERVAL", "3600"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Interval in seconds between message vectorization runs.".into(),
@@ -531,7 +554,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "MESSAGES_VECTORIZATION_PROTOCOL".into(),
-            get_env_or_default("MESSAGES_VECTORIZATION_PROTOCOL", "openai"),
             SettingMeta {
                 field_type: "select".into(),
                 description: "API protocol for message vectorization.".into(),
@@ -545,10 +567,9 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "MESSAGES_VECTORIZATION_API_KEY".into(),
-            get_env_or_default("MESSAGES_VECTORIZATION_API_KEY", ""),
             SettingMeta {
                 field_type: "secret".into(),
-                description: "API key for message vectorization endpoint.".into(),
+                description: "API key for message vectorization endpoint. Use $env:VAR or $secret:NAME to reference external values.".into(),
                 options: None,
                 readonly: false,
                 default: Some("".into()),
@@ -556,7 +577,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "MESSAGES_VECTORIZATION_API_MODEL".into(),
-            get_env_or_default("MESSAGES_VECTORIZATION_API_MODEL", ""),
             SettingMeta {
                 field_type: "text".into(),
                 description: "Model name for message vectorization (e.g. text-embedding-ada-002).".into(),
@@ -568,7 +588,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         // ── Vectorization (Wiki) ──
         (
             "VECTORIZE_WIKI".into(),
-            get_env_or_default("VECTORIZE_WIKI", "false"),
             SettingMeta {
                 field_type: "boolean".into(),
                 description: "Enable vectorization of wiki pages for semantic search.".into(),
@@ -579,7 +598,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "WIKI_VECTORIZATION_METHOD".into(),
-            get_env_or_default("WIKI_VECTORIZATION_METHOD", "local"),
             SettingMeta {
                 field_type: "select".into(),
                 description: "Vectorization method for wiki pages: local (built-in), openai, or custom API.".into(),
@@ -594,7 +612,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "WIKI_VECTORIZATION_API_URL".into(),
-            get_env_or_default("WIKI_VECTORIZATION_API_URL", ""),
             SettingMeta {
                 field_type: "text".into(),
                 description: "API URL for wiki vectorization (required when method is openai or custom).".into(),
@@ -605,7 +622,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "WIKI_VECTORIZATION_INTERVAL".into(),
-            get_env_or_default("WIKI_VECTORIZATION_INTERVAL", "3600"),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Interval in seconds between wiki vectorization runs.".into(),
@@ -616,7 +632,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "WIKI_VECTORIZATION_PROTOCOL".into(),
-            get_env_or_default("WIKI_VECTORIZATION_PROTOCOL", "openai"),
             SettingMeta {
                 field_type: "select".into(),
                 description: "API protocol for wiki vectorization.".into(),
@@ -630,10 +645,9 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "WIKI_VECTORIZATION_API_KEY".into(),
-            get_env_or_default("WIKI_VECTORIZATION_API_KEY", ""),
             SettingMeta {
                 field_type: "secret".into(),
-                description: "API key for wiki vectorization endpoint.".into(),
+                description: "API key for wiki vectorization endpoint. Use $env:VAR or $secret:NAME to reference external values.".into(),
                 options: None,
                 readonly: false,
                 default: Some("".into()),
@@ -641,7 +655,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
         ),
         (
             "WIKI_VECTORIZATION_API_MODEL".into(),
-            get_env_or_default("WIKI_VECTORIZATION_API_MODEL", ""),
             SettingMeta {
                 field_type: "text".into(),
                 description: "Model name for wiki vectorization (e.g. text-embedding-ada-002).".into(),
@@ -651,11 +664,6 @@ fn get_all_setting_definitions() -> Vec<(String, String, SettingMeta)> {
             },
         ),
     ]
-}
-
-/// Get env var value or default, checking both in-process env and .env file.
-fn get_env_or_default(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
 /// Organize setting definitions into categories.
@@ -694,12 +702,16 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "THREAD_SUMMARY_TOKENS"
             | "MEMORY_MAX_CHARS"
             | "SOUL_MAX_CHARS" => "memory",
-            "LLM_PROVIDER" | "PROMPT_LOG_LEVEL" | "MAX_INLINE_FILE_KB" | "MAX_UNFINISHED_SUBTASK_RETRIES" | "PROMPT_GENERATE_TOOL" | "PROMPT_COMPACT_MESSAGES_TOOL" | "WATCHDOG_DEFAULT"
-            | "PROMPT_CHAR_BUDGET_SOFT" | "PROMPT_CHAR_BUDGET_HARD" | "OLD_MESSAGE_CHAR_BUDGET" | "STATE_BLOCK_UPDATE_INTERVAL" | "CONDENSE_KEEP_TURNS"
-            | "PROMPT_TOKEN_BUDGET_SOFT" | "PROMPT_TOKEN_BUDGET_HARD" | "TOKENIZER_ENCODING" | "PROMPT_TOKEN_SAFETY_FACTOR"
+            "MAX_POOL_CONNECTIONS" | "MAX_INLINE_FILE_KB" | "PROMPT_GENERATE_TOOL"
+            | "PROMPT_COMPACT_MESSAGES_TOOL" | "MAX_UNFINISHED_SUBTASK_RETRIES"
+            | "LLM_PROVIDER" | "WATCHDOG_DEFAULT" | "PROMPT_LOG_LEVEL"
+            | "PROMPT_CHAR_BUDGET_SOFT" | "PROMPT_CHAR_BUDGET_HARD"
+            | "OLD_MESSAGE_CHAR_BUDGET" | "STATE_BLOCK_UPDATE_INTERVAL"
+            | "CONDENSE_KEEP_TURNS" | "PROMPT_TOKEN_BUDGET_SOFT"
+            | "PROMPT_TOKEN_BUDGET_HARD" | "TOKENIZER_ENCODING"
+            | "PROMPT_TOKEN_SAFETY_FACTOR"
             | "VECTORIZE_MESSAGES" | "MESSAGES_VECTORIZATION_METHOD" | "MESSAGES_VECTORIZATION_API_URL" | "MESSAGES_VECTORIZATION_INTERVAL" | "MESSAGES_VECTORIZATION_PROTOCOL" | "MESSAGES_VECTORIZATION_API_KEY" | "MESSAGES_VECTORIZATION_API_MODEL"
             | "VECTORIZE_WIKI" | "WIKI_VECTORIZATION_METHOD" | "WIKI_VECTORIZATION_API_URL" | "WIKI_VECTORIZATION_INTERVAL" | "WIKI_VECTORIZATION_PROTOCOL" | "WIKI_VECTORIZATION_API_KEY" | "WIKI_VECTORIZATION_API_MODEL" => "general",
-            "MAX_POOL_CONNECTIONS" => "general",
             _ => "system",
         };
 
@@ -716,25 +728,87 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
     categories
 }
 
+/// The 4 bootstrap settings that are always read-only from process env vars.
+/// These are never stored in settings.yml — they come directly from env.
+const BOOTSTRAP_SETTINGS: &[&str] = &["HOST", "PORT", "DATABASE_URL", "OMNI_DIR"];
+
+/// Resolve a single setting value with $env:/$secret: support.
+async fn resolve_setting_value(
+    raw_value: &str,
+    pool: &sqlx::PgPool,
+) -> String {
+    if raw_value.starts_with("$env:") || raw_value.starts_with("$secret:") {
+        plugins_yaml::resolve_config_ref_value(raw_value, pool).await
+    } else {
+        raw_value.to_string()
+    }
+}
+
+/// Resolve a collection of setting values in place.
+async fn resolve_setting_values(
+    map: &mut HashMap<String, String>,
+    pool: &sqlx::PgPool,
+) {
+    let keys: Vec<String> = map.keys().cloned().collect();
+    for key in keys {
+        if let Some(value) = map.get(&key).cloned() {
+            let resolved = resolve_setting_value(&value, pool).await;
+            map.insert(key, resolved);
+        }
+    }
+}
+
+/// Enrich LLM_PROVIDER setting options with dynamically loaded provider plugins.
+/// Reads enabled providers from providers.yml.
+fn enrich_provider_options(meta: &mut SettingMeta, data_dir: &str) {
+    let providers = match plugins_yaml::get_enabled_providers(data_dir) {
+        Ok(rows) if !rows.is_empty() => rows,
+        _ => return, // Fall back to hardcoded options
+    };
+
+    meta.options = Some(
+        providers
+            .into_iter()
+            .map(|(id, name)| SettingOption { id, name })
+            .collect(),
+    );
+}
+
 // ── Handlers ──
 
 /// GET /settings: return all settings organized by category.
-pub async fn get_settings_handler(State(state): State<Arc<AppState>>) -> Json<SettingsResponse> {
-    // Reload .env file to get current values, then merge with defaults
-    let env_path = state.env_path.clone();
-    let env_vars = tokio::task::spawn_blocking(move || load_env_file(&env_path))
+///
+/// Values are resolved from settings.yml with $env:/$secret: support.
+/// Bootstrap settings (HOST, PORT, DATABASE_URL, OMNI_DIR) always come
+/// from process environment variables.
+pub async fn get_settings_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<SettingsResponse> {
+    // Load raw values from settings.yml
+    let data_dir = state.data_dir.clone();
+    let mut settings_values = tokio::task::spawn_blocking(move || load_settings_file(&data_dir))
         .await
         .unwrap_or_default();
 
+    // Resolve $env:/$secret: references in settings.yml values
+    resolve_setting_values(&mut settings_values, &state.pool).await;
+
+    // Build the list of (name, resolved_value, meta) from definitions
     let mut defs: Vec<(String, String, SettingMeta)> = get_all_setting_definitions()
         .into_iter()
-        .map(|(name, _default_value, meta)| {
-            // Check .env first, then process env, then default
-            let value = env_vars
-                .get(&name)
-                .cloned()
-                .or_else(|| std::env::var(&name).ok())
-                .unwrap_or_else(|| meta.default.clone().unwrap_or_default());
+        .map(|(name, meta)| {
+            // Bootstrap settings always come from env vars — override anything from settings.yml
+            let value = if BOOTSTRAP_SETTINGS.contains(&name.as_str()) {
+                std::env::var(&name).unwrap_or_else(|_| meta.default.clone().unwrap_or_default())
+            } else {
+                // Check settings.yml first, fall back to process env (for backward compat),
+                // then default
+                settings_values
+                    .get(&name)
+                    .cloned()
+                    .or_else(|| std::env::var(&name).ok())
+                    .unwrap_or_else(|| meta.default.clone().unwrap_or_default())
+            };
             (name, value, meta)
         })
         .collect();
@@ -769,23 +843,10 @@ pub async fn get_settings_handler(State(state): State<Arc<AppState>>) -> Json<Se
     })
 }
 
-/// Enrich LLM_PROVIDER setting options with dynamically loaded provider plugins.
-/// Reads enabled providers from providers.yml.
-fn enrich_provider_options(meta: &mut SettingMeta, data_dir: &str) {
-    let providers = match plugins_yaml::get_enabled_providers(data_dir) {
-        Ok(rows) if !rows.is_empty() => rows,
-        _ => return, // Fall back to hardcoded options
-    };
-
-    meta.options = Some(
-        providers
-            .into_iter()
-            .map(|(id, name)| SettingOption { id, name })
-            .collect(),
-    );
-}
-
-/// PUT /settings: update one or more settings and write to .env.
+/// PUT /settings: update one or more settings and write to settings.yml.
+///
+/// Bootstrap settings (HOST, PORT, DATABASE_URL, OMNI_DIR) are read-only
+/// and cannot be updated.
 pub async fn update_settings_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateSettingsRequest>,
@@ -797,12 +858,7 @@ pub async fn update_settings_handler(
         );
     }
 
-    let env_path_read = state.env_path.clone();
-    let mut env_vars = tokio::task::spawn_blocking(move || load_env_file(&env_path_read))
-        .await
-        .unwrap_or_default();
-
-    // Known writable setting names for validation
+    // Known writable setting names (everything except bootstrap env vars)
     let writable_keys: std::collections::HashSet<&str> = [
         "MAX_TOKENS",
         "TEMPERATURE",
@@ -844,9 +900,16 @@ pub async fn update_settings_handler(
         "WIKI_VECTORIZATION_PROTOCOL",
         "WIKI_VECTORIZATION_API_KEY",
         "WIKI_VECTORIZATION_API_MODEL",
+        "PROMPT_LOG_LEVEL",
     ]
     .into_iter()
     .collect();
+
+    // Load current settings.yml values
+    let data_dir = state.data_dir.clone();
+    let mut file_vars = tokio::task::spawn_blocking(move || load_settings_file(&data_dir))
+        .await
+        .unwrap_or_default();
 
     let mut applied: Vec<String> = Vec::new();
 
@@ -860,16 +923,16 @@ pub async fn update_settings_handler(
                 })),
             );
         }
-        env_vars.insert(update.name.clone(), update.value.clone());
+        // Store the raw value (may contain $env: or $secret: refs)
+        file_vars.insert(update.name.clone(), update.value.clone());
         // Also set in the process environment so currently-running
-        // MemoryStore / future loads pick up the change immediately
-        // without requiring a container restart.
+        // consumers pick up the change immediately.
         std::env::set_var(&update.name, &update.value);
         applied.push(update.name.clone());
     }
 
-    let env_path_write = state.env_path.clone();
-    match tokio::task::spawn_blocking(move || write_env_file(&env_path_write, &env_vars))
+    let data_dir_write = state.data_dir.clone();
+    match tokio::task::spawn_blocking(move || write_settings_file(&data_dir_write, &file_vars))
         .await
         .unwrap_or(Err("spawn_blocking failed".to_string()))
     {
@@ -887,7 +950,7 @@ pub async fn update_settings_handler(
             )
         }
         Err(e) => {
-            tracing::error!("Failed to write .env: {}", e);
+            tracing::error!("Failed to write settings.yml: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "error": e })),
