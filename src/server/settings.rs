@@ -5,7 +5,7 @@
 //! reference environment variables or DB-stored secrets.
 //!
 //! Four bootstrap settings are always read-only and come directly from process
-//! environment variables: `HOST`, `PORT`, `DATABASE_URL`, `OMNI_DIR`.
+//! environment variables: `host`, `port`, `database_url`, `omni_dir`.
 //!
 //! - `GET /settings`: returns all settings with metadata, values resolved
 //! - `PUT /settings`: updates one or more values and writes to settings.yml
@@ -117,7 +117,7 @@ fn load_settings_file(data_dir: &str) -> HashMap<String, String> {
     if let serde_yaml::Value::Mapping(mapping) = raw {
         for (key, value) in mapping {
             let k = match key.as_str() {
-                Some(s) => s.to_string(),
+                Some(s) => s.to_lowercase(),
                 None => continue,
             };
             let v = match value.as_str() {
@@ -161,11 +161,16 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
             } else {
                 format!("{}\n", value)
             };
-            content.push_str(&format!("{}: {}", key, formatted));
+            content.push_str(&format!("{}: {}\n", key, formatted.trim_end()));
         }
     }
 
     std::fs::write(&path, content).map_err(|e| format!("Failed to write settings.yml: {}", e))
+}
+
+/// Convert a lower_snake_case setting name to UPPER_SNAKE_CASE for env var lookup.
+fn setting_name_to_env(name: &str) -> String {
+    name.to_uppercase()
 }
 
 /// The canonical list of all settings with their metadata (no values).
@@ -174,7 +179,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
     vec![
         // ── General ──
         (
-            "MAX_TOKENS".into(),
+            "max_tokens".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Maximum tokens per LLM response".into(),
@@ -184,7 +189,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "TEMPERATURE".into(),
+            "temperature".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "LLM sampling temperature (0.0 – 2.0)".into(),
@@ -194,7 +199,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "MAX_ITERATIONS_NO_PLAN".into(),
+            "max_iterations_no_plan".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Max tool-call iterations for threads with no planning".into(),
@@ -204,7 +209,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "MAX_ITERATIONS_PLAN".into(),
+            "max_iterations_plan".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Max tool-call iterations for threads with planning enabled".into(),
@@ -214,7 +219,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "TOOL_SHORT_TIMEOUT_SECS".into(),
+            "tool_short_timeout_secs".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Short timeout in seconds for MCP tool calls before switching to background mode".into(),
@@ -224,7 +229,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "TOOL_LONG_TIMEOUT_SECS".into(),
+            "tool_long_timeout_secs".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Long timeout in seconds for background MCP tool execution".into(),
@@ -234,7 +239,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "MAX_UNFINISHED_SUBTASK_RETRIES".into(),
+            "max_unfinished_subtask_retries".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Max retries before marking a thread as failed when subtasks remain unfinished or plan JSON is invalid".into(),
@@ -244,7 +249,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "PROMPT_GENERATE_TOOL".into(),
+            "prompt_generate_tool".into(),
             SettingMeta {
                 field_type: "select".into(),
                 description: "Name of the MCP tool to call for generating prompts".into(),
@@ -254,7 +259,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "PROMPT_COMPACT_MESSAGES_TOOL".into(),
+            "prompt_compact_messages_tool".into(),
             SettingMeta {
                 field_type: "select".into(),
                 description: "Name of the MCP tool to call for compacting conversation history".into(),
@@ -265,7 +270,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
         ),
         // ── Memory & Retention ──
         (
-            "MEMORY_MAX_CHARS".into(),
+            "memory_max_chars".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Max characters for MEMORY.md in the system prompt".into(),
@@ -275,7 +280,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "SOUL_MAX_CHARS".into(),
+            "soul_max_chars".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Max characters for SOUL.md in the system prompt".into(),
@@ -285,7 +290,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "DELETE_AFTER_DAYS".into(),
+            "delete_after_days".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Days before old messages and summaries are deleted".into(),
@@ -295,7 +300,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "THREAD_SUMMARY_TOKENS".into(),
+            "thread_summary_tokens".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Maximum tokens for per-thread end-of-execution summary".into(),
@@ -306,7 +311,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
         ),
         // ── Connections ──
         (
-            "MAX_POOL_CONNECTIONS".into(),
+            "max_pool_connections".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Maximum per-channel connections per MCP server. Each channel gets its own pool; this caps how many simultaneous tool calls a single server can handle per channel. Increase for multi-tool workloads, decrease to save memory. Minimum 1.".into(),
@@ -316,7 +321,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "MAX_INLINE_FILE_KB".into(),
+            "max_inline_file_kb".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Maximum file size (KB) for inline file content in inbound messages. Files larger than this are listed as metadata only. The agent can still read them via MCP tools.".into(),
@@ -327,7 +332,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
         ),
         // ── General (LLM Provider) ──
         (
-            "LLM_PROVIDER".into(),
+            "llm_provider".into(),
             SettingMeta {
                 field_type: "select".into(),
                 description: "Default LLM provider backend for channels without an explicit provider".into(),
@@ -345,40 +350,40 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
         // not settings.yml.
         // ── System (read-only bootstrap from env vars) ──
         (
-            "HOST".into(),
+            "host".into(),
             SettingMeta {
                 field_type: "text".into(),
-                description: "HTTP server bind address (read-only, from env)".into(),
+                description: "HTTP server bind address (read-only, from env HOST)".into(),
                 options: None,
                 readonly: true,
                 default: Some("0.0.0.0".into()),
             },
         ),
         (
-            "PORT".into(),
+            "port".into(),
             SettingMeta {
                 field_type: "number".into(),
-                description: "HTTP server port (read-only, from env)".into(),
+                description: "HTTP server port (read-only, from env PORT)".into(),
                 options: None,
                 readonly: true,
                 default: Some("8080".into()),
             },
         ),
         (
-            "DATABASE_URL".into(),
+            "database_url".into(),
             SettingMeta {
                 field_type: "secret".into(),
-                description: "PostgreSQL connection string (read-only, from env)".into(),
+                description: "PostgreSQL connection string (read-only, from env DATABASE_URL)".into(),
                 options: None,
                 readonly: true,
                 default: Some("".into()),
             },
         ),
         (
-            "OMNI_DIR".into(),
+            "omni_dir".into(),
             SettingMeta {
                 field_type: "text".into(),
-                description: "Data directory for profiles and wiki (read-only, from env)".into(),
+                description: "Data directory for profiles and wiki (read-only, from env OMNI_DIR)".into(),
                 options: None,
                 readonly: true,
                 default: Some("".into()),
@@ -386,7 +391,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
         ),
         // ── Context Management ──
         (
-            "PROMPT_CHAR_BUDGET_SOFT".into(),
+            "prompt_char_budget_soft".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Soft char budget for prompts. When exceeded, context is condensed every N turns.".into(),
@@ -396,7 +401,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "PROMPT_CHAR_BUDGET_HARD".into(),
+            "prompt_char_budget_hard".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Hard char budget for prompts. When exceeded, context is condensed before the next LLM call.".into(),
@@ -406,7 +411,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "OLD_MESSAGE_CHAR_BUDGET".into(),
+            "old_message_char_budget".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Max chars for old messages after condensation. The metadata block stays in full.".into(),
@@ -416,7 +421,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "STATE_BLOCK_UPDATE_INTERVAL".into(),
+            "state_block_update_interval".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "How often (in iterations) to refresh the state block when soft budget is exceeded.".into(),
@@ -426,7 +431,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "CONDENSE_KEEP_TURNS".into(),
+            "condense_keep_turns".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Number of full assistant→tool cycles to keep verbatim during condensation.".into(),
@@ -437,7 +442,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
         ),
         // ── Token Budgets ──
         (
-            "PROMPT_TOKEN_BUDGET_SOFT".into(),
+            "prompt_token_budget_soft".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Soft token budget for prompts. Triggers condensation when exceeded (uses tiktoken).".into(),
@@ -447,7 +452,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "PROMPT_TOKEN_BUDGET_HARD".into(),
+            "prompt_token_budget_hard".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Hard token budget for prompts. Condenses before any LLM call when exceeded (uses tiktoken).".into(),
@@ -457,7 +462,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "TOKENIZER_ENCODING".into(),
+            "tokenizer_encoding".into(),
             SettingMeta {
                 field_type: "select".into(),
                 description: "Tiktoken encoding for token counting. Corresponds to the model provider's tokenizer.".into(),
@@ -471,7 +476,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "PROMPT_TOKEN_SAFETY_FACTOR".into(),
+            "prompt_token_safety_factor".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Multiplier to account for provider tokenizer mismatch with tiktoken.".into(),
@@ -482,10 +487,10 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
         ),
         // ── Tool Execution ──
         (
-            "WATCHDOG_DEFAULT".into(),
+            "watchdog_default".into(),
             SettingMeta {
                 field_type: "textarea".into(),
-                description: "JSON config for the global tool watchdog (applied to tools without per-tool config). Format: { \"thresholds\": [{ \"at_percent\": 0.5, \"action\": { \"Notify\": { \"message\": \"...\" } } }, { \"at_percent\": 0.8, \"action\": \"Cancel\" }] }".into(),
+                description: "JSON config for the global tool watchdog (applied to tools without per-tool config). Format: { \\\"thresholds\\\": [{ \\\"at_percent\\\": 0.5, \\\"action\\\": { \\\"Notify\\\": { \\\"message\\\": \\\"...\\\" } } }, { \\\"at_percent\\\": 0.8, \\\"action\\\": \\\"Cancel\\\" }] }".into(),
                 options: None,
                 readonly: false,
                 default: Some("".into()),
@@ -493,7 +498,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
         ),
         // ── Prompts ──
         (
-            "PROMPT_LOG_LEVEL".into(),
+            "prompt_log_level".into(),
             SettingMeta {
                 field_type: "select".into(),
                 description: "When to insert prompts as messages (msg_type: \"prompt\") into the messages table: Off (never), First (first LLM call only), First+Compact (first + after context compaction), or All (every LLM call)".into(),
@@ -509,7 +514,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
         ),
         // ── Vectorization (Messages) ──
         (
-            "VECTORIZE_MESSAGES".into(),
+            "vectorize_messages".into(),
             SettingMeta {
                 field_type: "boolean".into(),
                 description: "Enable vectorization of messages for semantic search.".into(),
@@ -519,7 +524,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "MESSAGES_VECTORIZATION_METHOD".into(),
+            "messages_vectorization_method".into(),
             SettingMeta {
                 field_type: "select".into(),
                 description: "Vectorization method for messages: local (built-in), openai, or custom API.".into(),
@@ -533,7 +538,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "MESSAGES_VECTORIZATION_API_URL".into(),
+            "messages_vectorization_api_url".into(),
             SettingMeta {
                 field_type: "text".into(),
                 description: "API URL for message vectorization (required when method is openai or custom).".into(),
@@ -543,7 +548,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "MESSAGES_VECTORIZATION_INTERVAL".into(),
+            "messages_vectorization_interval".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Interval in seconds between message vectorization runs.".into(),
@@ -553,7 +558,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "MESSAGES_VECTORIZATION_PROTOCOL".into(),
+            "messages_vectorization_protocol".into(),
             SettingMeta {
                 field_type: "select".into(),
                 description: "API protocol for message vectorization.".into(),
@@ -566,7 +571,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "MESSAGES_VECTORIZATION_API_KEY".into(),
+            "messages_vectorization_api_key".into(),
             SettingMeta {
                 field_type: "secret".into(),
                 description: "API key for message vectorization endpoint. Use $env:VAR or $secret:NAME to reference external values.".into(),
@@ -576,7 +581,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "MESSAGES_VECTORIZATION_API_MODEL".into(),
+            "messages_vectorization_api_model".into(),
             SettingMeta {
                 field_type: "text".into(),
                 description: "Model name for message vectorization (e.g. text-embedding-ada-002).".into(),
@@ -587,7 +592,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
         ),
         // ── Vectorization (Wiki) ──
         (
-            "VECTORIZE_WIKI".into(),
+            "vectorize_wiki".into(),
             SettingMeta {
                 field_type: "boolean".into(),
                 description: "Enable vectorization of wiki pages for semantic search.".into(),
@@ -597,7 +602,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "WIKI_VECTORIZATION_METHOD".into(),
+            "wiki_vectorization_method".into(),
             SettingMeta {
                 field_type: "select".into(),
                 description: "Vectorization method for wiki pages: local (built-in), openai, or custom API.".into(),
@@ -611,7 +616,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "WIKI_VECTORIZATION_API_URL".into(),
+            "wiki_vectorization_api_url".into(),
             SettingMeta {
                 field_type: "text".into(),
                 description: "API URL for wiki vectorization (required when method is openai or custom).".into(),
@@ -621,7 +626,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "WIKI_VECTORIZATION_INTERVAL".into(),
+            "wiki_vectorization_interval".into(),
             SettingMeta {
                 field_type: "number".into(),
                 description: "Interval in seconds between wiki vectorization runs.".into(),
@@ -631,7 +636,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "WIKI_VECTORIZATION_PROTOCOL".into(),
+            "wiki_vectorization_protocol".into(),
             SettingMeta {
                 field_type: "select".into(),
                 description: "API protocol for wiki vectorization.".into(),
@@ -644,7 +649,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "WIKI_VECTORIZATION_API_KEY".into(),
+            "wiki_vectorization_api_key".into(),
             SettingMeta {
                 field_type: "secret".into(),
                 description: "API key for wiki vectorization endpoint. Use $env:VAR or $secret:NAME to reference external values.".into(),
@@ -654,7 +659,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "WIKI_VECTORIZATION_API_MODEL".into(),
+            "wiki_vectorization_api_model".into(),
             SettingMeta {
                 field_type: "text".into(),
                 description: "Model name for wiki vectorization (e.g. text-embedding-ada-002).".into(),
@@ -693,25 +698,26 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
 
     for (name, value, meta) in defs {
         let cat_name = match name.as_str() {
-            "MAX_TOKENS" | "TEMPERATURE" => "general",
-            "MAX_ITERATIONS_NO_PLAN"
-            | "MAX_ITERATIONS_PLAN"
-            | "TOOL_SHORT_TIMEOUT_SECS"
-            | "TOOL_LONG_TIMEOUT_SECS" => "general",
-            "DELETE_AFTER_DAYS"
-            | "THREAD_SUMMARY_TOKENS"
-            | "MEMORY_MAX_CHARS"
-            | "SOUL_MAX_CHARS" => "memory",
-            "MAX_POOL_CONNECTIONS" | "MAX_INLINE_FILE_KB" | "PROMPT_GENERATE_TOOL"
-            | "PROMPT_COMPACT_MESSAGES_TOOL" | "MAX_UNFINISHED_SUBTASK_RETRIES"
-            | "LLM_PROVIDER" | "WATCHDOG_DEFAULT" | "PROMPT_LOG_LEVEL"
-            | "PROMPT_CHAR_BUDGET_SOFT" | "PROMPT_CHAR_BUDGET_HARD"
-            | "OLD_MESSAGE_CHAR_BUDGET" | "STATE_BLOCK_UPDATE_INTERVAL"
-            | "CONDENSE_KEEP_TURNS" | "PROMPT_TOKEN_BUDGET_SOFT"
-            | "PROMPT_TOKEN_BUDGET_HARD" | "TOKENIZER_ENCODING"
-            | "PROMPT_TOKEN_SAFETY_FACTOR"
-            | "VECTORIZE_MESSAGES" | "MESSAGES_VECTORIZATION_METHOD" | "MESSAGES_VECTORIZATION_API_URL" | "MESSAGES_VECTORIZATION_INTERVAL" | "MESSAGES_VECTORIZATION_PROTOCOL" | "MESSAGES_VECTORIZATION_API_KEY" | "MESSAGES_VECTORIZATION_API_MODEL"
-            | "VECTORIZE_WIKI" | "WIKI_VECTORIZATION_METHOD" | "WIKI_VECTORIZATION_API_URL" | "WIKI_VECTORIZATION_INTERVAL" | "WIKI_VECTORIZATION_PROTOCOL" | "WIKI_VECTORIZATION_API_KEY" | "WIKI_VECTORIZATION_API_MODEL" => "general",
+            "max_tokens" | "temperature" => "general",
+            "max_iterations_no_plan"
+            | "max_iterations_plan"
+            | "tool_short_timeout_secs"
+            | "tool_long_timeout_secs"
+            | "max_unfinished_subtask_retries" => "general",
+            "delete_after_days"
+            | "thread_summary_tokens"
+            | "memory_max_chars"
+            | "soul_max_chars" => "memory",
+            "max_pool_connections" | "max_inline_file_kb" | "prompt_generate_tool"
+            | "prompt_compact_messages_tool" | "llm_provider" | "watchdog_default"
+            | "prompt_log_level"
+            | "prompt_char_budget_soft" | "prompt_char_budget_hard"
+            | "old_message_char_budget" | "state_block_update_interval"
+            | "condense_keep_turns" | "prompt_token_budget_soft"
+            | "prompt_token_budget_hard" | "tokenizer_encoding"
+            | "prompt_token_safety_factor"
+            | "vectorize_messages" | "messages_vectorization_method" | "messages_vectorization_api_url" | "messages_vectorization_interval" | "messages_vectorization_protocol" | "messages_vectorization_api_key" | "messages_vectorization_api_model"
+            | "vectorize_wiki" | "wiki_vectorization_method" | "wiki_vectorization_api_url" | "wiki_vectorization_interval" | "wiki_vectorization_protocol" | "wiki_vectorization_api_key" | "wiki_vectorization_api_model" => "general",
             _ => "system",
         };
 
@@ -730,7 +736,8 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
 
 /// The 4 bootstrap settings that are always read-only from process env vars.
 /// These are never stored in settings.yml — they come directly from env.
-const BOOTSTRAP_SETTINGS: &[&str] = &["HOST", "PORT", "DATABASE_URL", "OMNI_DIR"];
+/// The env var name is the UPPER_SNAKE_CASE version of the setting name.
+const BOOTSTRAP_SETTINGS: &[&str] = &["host", "port", "database_url", "omni_dir"];
 
 /// Resolve a single setting value with $env:/$secret: support.
 async fn resolve_setting_value(
@@ -758,7 +765,7 @@ async fn resolve_setting_values(
     }
 }
 
-/// Enrich LLM_PROVIDER setting options with dynamically loaded provider plugins.
+/// Enrich llm_provider setting options with dynamically loaded provider plugins.
 /// Reads enabled providers from providers.yml.
 fn enrich_provider_options(meta: &mut SettingMeta, data_dir: &str) {
     let providers = match plugins_yaml::get_enabled_providers(data_dir) {
@@ -779,8 +786,8 @@ fn enrich_provider_options(meta: &mut SettingMeta, data_dir: &str) {
 /// GET /settings: return all settings organized by category.
 ///
 /// Values are resolved from settings.yml with $env:/$secret: support.
-/// Bootstrap settings (HOST, PORT, DATABASE_URL, OMNI_DIR) always come
-/// from process environment variables.
+/// Bootstrap settings (host, port, database_url, omni_dir) always come
+/// from process environment variables with UPPER_CASE names.
 pub async fn get_settings_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<SettingsResponse> {
@@ -797,32 +804,36 @@ pub async fn get_settings_handler(
     let mut defs: Vec<(String, String, SettingMeta)> = get_all_setting_definitions()
         .into_iter()
         .map(|(name, meta)| {
-            // Bootstrap settings always come from env vars — override anything from settings.yml
+            // Bootstrap settings always come from env vars — look up by UPPER_CASE name
             let value = if BOOTSTRAP_SETTINGS.contains(&name.as_str()) {
-                std::env::var(&name).unwrap_or_else(|_| meta.default.clone().unwrap_or_default())
+                let env_name = setting_name_to_env(&name);
+                std::env::var(&env_name).unwrap_or_else(|_| meta.default.clone().unwrap_or_default())
             } else {
-                // Check settings.yml first, fall back to process env (for backward compat),
+                // Check settings.yml first, fall back to process env (UPPER_CASE for backward compat),
                 // then default
                 settings_values
                     .get(&name)
                     .cloned()
-                    .or_else(|| std::env::var(&name).ok())
+                    .or_else(|| {
+                        let env_name = setting_name_to_env(&name);
+                        std::env::var(&env_name).ok()
+                    })
                     .unwrap_or_else(|| meta.default.clone().unwrap_or_default())
             };
             (name, value, meta)
         })
         .collect();
 
-    // Enrich LLM_PROVIDER options with dynamically loaded provider plugins
-    if let Some((_, _, ref mut meta)) = defs.iter_mut().find(|(name, _, _)| name == "LLM_PROVIDER")
+    // Enrich llm_provider options with dynamically loaded provider plugins
+    if let Some((_, _, ref mut meta)) = defs.iter_mut().find(|(name, _, _)| name == "llm_provider")
     {
         enrich_provider_options(meta, &state.data_dir);
     }
 
-    // Enrich PROMPT_GENERATE_TOOL and PROMPT_COMPACT_MESSAGES_TOOL with available MCP tools
+    // Enrich prompt_generate_tool and prompt_compact_messages_tool with available MCP tools
     let registry = state.tool_registry.read().await;
     let mcp_tools: Vec<&crate::mcp::McpTool> = registry.all();
-    for tool_key in ["PROMPT_GENERATE_TOOL", "PROMPT_COMPACT_MESSAGES_TOOL"] {
+    for tool_key in ["prompt_generate_tool", "prompt_compact_messages_tool"] {
         if let Some((_, _, ref mut meta)) = defs.iter_mut().find(|(name, _, _)| name.as_str() == tool_key)
         {
             let mut options: Vec<SettingOption> = mcp_tools
@@ -845,7 +856,7 @@ pub async fn get_settings_handler(
 
 /// PUT /settings: update one or more settings and write to settings.yml.
 ///
-/// Bootstrap settings (HOST, PORT, DATABASE_URL, OMNI_DIR) are read-only
+/// Bootstrap settings (host, port, database_url, omni_dir) are read-only
 /// and cannot be updated.
 pub async fn update_settings_handler(
     State(state): State<Arc<AppState>>,
@@ -860,47 +871,47 @@ pub async fn update_settings_handler(
 
     // Known writable setting names (everything except bootstrap env vars)
     let writable_keys: std::collections::HashSet<&str> = [
-        "MAX_TOKENS",
-        "TEMPERATURE",
-        "MAX_ITERATIONS_NO_PLAN",
-        "MAX_ITERATIONS_PLAN",
-        "MAX_UNFINISHED_SUBTASK_RETRIES",
-        "PROMPT_GENERATE_TOOL",
-        "PROMPT_COMPACT_MESSAGES_TOOL",
-        "DELETE_AFTER_DAYS",
-        "THREAD_SUMMARY_TOKENS",
-        "MEMORY_MAX_CHARS",
-        "SOUL_MAX_CHARS",
-        "LLM_PROVIDER",
-        "MAX_POOL_CONNECTIONS",
-        "MAX_INLINE_FILE_KB",
-        "TOOL_SHORT_TIMEOUT_SECS",
-        "TOOL_LONG_TIMEOUT_SECS",
-        "WATCHDOG_DEFAULT",
-        "PROMPT_CHAR_BUDGET_SOFT",
-        "PROMPT_CHAR_BUDGET_HARD",
-        "OLD_MESSAGE_CHAR_BUDGET",
-        "STATE_BLOCK_UPDATE_INTERVAL",
-        "CONDENSE_KEEP_TURNS",
-        "PROMPT_TOKEN_BUDGET_SOFT",
-        "PROMPT_TOKEN_BUDGET_HARD",
-        "TOKENIZER_ENCODING",
-        "PROMPT_TOKEN_SAFETY_FACTOR",
-        "VECTORIZE_MESSAGES",
-        "MESSAGES_VECTORIZATION_METHOD",
-        "MESSAGES_VECTORIZATION_API_URL",
-        "MESSAGES_VECTORIZATION_INTERVAL",
-        "MESSAGES_VECTORIZATION_PROTOCOL",
-        "MESSAGES_VECTORIZATION_API_KEY",
-        "MESSAGES_VECTORIZATION_API_MODEL",
-        "VECTORIZE_WIKI",
-        "WIKI_VECTORIZATION_METHOD",
-        "WIKI_VECTORIZATION_API_URL",
-        "WIKI_VECTORIZATION_INTERVAL",
-        "WIKI_VECTORIZATION_PROTOCOL",
-        "WIKI_VECTORIZATION_API_KEY",
-        "WIKI_VECTORIZATION_API_MODEL",
-        "PROMPT_LOG_LEVEL",
+        "max_tokens",
+        "temperature",
+        "max_iterations_no_plan",
+        "max_iterations_plan",
+        "max_unfinished_subtask_retries",
+        "prompt_generate_tool",
+        "prompt_compact_messages_tool",
+        "delete_after_days",
+        "thread_summary_tokens",
+        "memory_max_chars",
+        "soul_max_chars",
+        "llm_provider",
+        "max_pool_connections",
+        "max_inline_file_kb",
+        "tool_short_timeout_secs",
+        "tool_long_timeout_secs",
+        "watchdog_default",
+        "prompt_char_budget_soft",
+        "prompt_char_budget_hard",
+        "old_message_char_budget",
+        "state_block_update_interval",
+        "condense_keep_turns",
+        "prompt_token_budget_soft",
+        "prompt_token_budget_hard",
+        "tokenizer_encoding",
+        "prompt_token_safety_factor",
+        "vectorize_messages",
+        "messages_vectorization_method",
+        "messages_vectorization_api_url",
+        "messages_vectorization_interval",
+        "messages_vectorization_protocol",
+        "messages_vectorization_api_key",
+        "messages_vectorization_api_model",
+        "vectorize_wiki",
+        "wiki_vectorization_method",
+        "wiki_vectorization_api_url",
+        "wiki_vectorization_interval",
+        "wiki_vectorization_protocol",
+        "wiki_vectorization_api_key",
+        "wiki_vectorization_api_model",
+        "prompt_log_level",
     ]
     .into_iter()
     .collect();
