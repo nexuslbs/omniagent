@@ -116,6 +116,9 @@ pub async fn search_messages_semantic(
     channel_id: i64,
     limit: i64,
 ) -> AppResult<Vec<Message>> {
+    // Uses raw sqlx::query_as instead of sql_forge because:
+    // 1. pgvector's <=> operator and vector(1536) cast aren't supported by sql_forge
+    // 2. The CTE-based SELECT doesn't map 1:1 to MessageDb struct fields
     let rows: Vec<MessageDb> = sqlx::query_as(
         r#"
         WITH vector_candidates AS (
