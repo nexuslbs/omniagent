@@ -169,9 +169,6 @@ fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
 /// Scans development sources first (plugins/providers/), then installed
 /// plugins (data/plugins/installed/). Installed plugins override bundled ones.
 pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::new(|| {
-    let workspace_dir = crate::agent::config::get_global()
-        .map(|g| g.read().unwrap().workspace_dir.clone())
-        .unwrap_or_else(|| "/opt/workspace".to_string());
     let data_dir = match std::env::var("OMNI_DIR") {
         Ok(d) => d,
         Err(_) => {
@@ -180,7 +177,7 @@ pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::ne
         }
     };
 
-    let bundled = format!("{}/plugins/providers", workspace_dir);
+    let bundled = format!("{}/plugins/providers", data_dir);
     let installed = format!("{}/plugins/installed", data_dir);
 
     // Bundled first, then installed overrides

@@ -155,7 +155,7 @@ fn detect_plugin_category(
 /// Get the canonical source directory for a plugin by category.
 fn get_plugin_dir_for_category(
     data_dir: &str,
-    workspace_dir: &str,
+    _workspace_dir: &str,
     yaml_type: &plugins_yaml::PluginYamlType,
     name: &str,
     category: &PluginCategory,
@@ -171,8 +171,8 @@ fn get_plugin_dir_for_category(
             }
         }
         PluginCategory::OmniStack => {
-            // Check workspace_dir first (omni-stack source)
-            let dir = format!("{}/plugins/{}/{}", workspace_dir, type_dir, name);
+            // Check data_dir first (omni-stack source)
+            let dir = format!("{}/plugins/{}/{}", data_dir, type_dir, name);
             if std::path::Path::new(&dir).exists() {
                 Some(dir)
             } else {
@@ -346,7 +346,7 @@ struct ResolvedPlugin {
 /// Returns a resolved plugin ready for compilation, or an HTTP error response.
 async fn resolve_plugin_for_compile(
     data_dir: &str,
-    workspace_dir: &str,
+    _workspace_dir: &str,
     name: &str,
     handler_name: &str,
     explicit_source: Option<&str>,
@@ -415,7 +415,7 @@ async fn resolve_plugin_for_compile(
 
     // 2. Get plugin source directory with Builtin fallback
     let (mut plugin_dir, mut category) =
-        match get_plugin_dir_for_category(data_dir, workspace_dir, &yaml_type, name, &category) {
+        match get_plugin_dir_for_category(data_dir, data_dir, &yaml_type, name, &category) {
             Some(d) => (d, category),
             None => {
                 // Fallback: try Builtin source before giving up
@@ -2596,7 +2596,7 @@ pub(crate) async fn delete_plugin_handler(
 /// Bypasses auto-detection and directly targets the specified source variant.
 async fn handle_remove_by_source(
     data_dir: &str,
-    workspace_dir: &str,
+    _workspace_dir: &str,
     name: &str,
     source: &str,
     state: &Arc<AppState>,
@@ -2674,7 +2674,7 @@ async fn handle_remove_by_source(
             let mut removed = false;
             // Remove workspace + data dirs
             for type_str in &["tools", "platforms", "providers"] {
-                let plugin_dir = format!("{}/plugins/{}/{}", workspace_dir, type_str, name);
+                let plugin_dir = format!("{}/plugins/{}/{}", data_dir, type_str, name);
                 let plugin_path = std::path::Path::new(&plugin_dir);
                 if plugin_path.exists() && plugin_path.is_dir() {
                     let _ = std::fs::remove_dir_all(plugin_path);
@@ -3117,7 +3117,6 @@ pub(crate) async fn download_plugin_handler(
     body: Option<Json<PluginSourceRequest>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
-    let workspace_dir = &state.data_dir;
 
     // Validate source: download only supports 'remote'
     let source = match &body {
@@ -3192,7 +3191,7 @@ pub(crate) async fn download_plugin_handler(
         &remote_info.url,
         &name,
         remote_info.git_ref.as_deref(),
-        workspace_dir,
+        data_dir,
         data_dir,
         remote_info.path.as_deref(),
     ) {

@@ -137,8 +137,6 @@ pub struct AgentConfig {
     pub max_inline_file_kb: u32,
     /// Default profile name (used at login / session start).
     pub default_profile: String,
-    /// Workspace directory path.
-    pub workspace_dir: String,
 }
 
 /// Shared context bundle used by channel_handler and process_thread.
@@ -221,7 +219,6 @@ impl AgentConfig {
             platform_max_spawn_retries: get("platform_max_spawn_retries", "3").parse().unwrap_or(3),
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
             default_profile: get("default_profile", "omni"),
-            workspace_dir: get("workspace_dir", "/opt/workspace"),
         })
     }
 
@@ -292,7 +289,6 @@ impl AgentConfig {
                 .parse()
                 .unwrap_or(100),
             default_profile: get("default_profile", "omni"),
-            workspace_dir: get("workspace_dir", "/opt/workspace"),
         })
     }
 }
