@@ -473,10 +473,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "prompt_compact_messages_tool"
             | "condense_tool"
             | "default_provider"
-            | "tool_bg_secs"
             | "prompt_log_level"
-            | "max_pool_connections"
-            | "max_inline_file_kb"
             | "default_profile"
             | "platform_max_spawn_retries" => "general",
             _ => "system",

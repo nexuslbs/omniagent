@@ -1,5 +1,4 @@
 use serde_json::Value;
-use serde::{Serialize, Deserialize};
 use sql_forge::sql_forge;
 use sqlx::FromRow;
 use sqlx::PgPool;
