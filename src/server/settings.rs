@@ -379,79 +379,17 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 default: Some("".into()),
             },
         ),
-        // ── Context Management ──
+        // ── Context Condensation ──
         (
-            "prompt_char_budget_soft".into(),
+            "condense_tool".into(),
             SettingMeta {
-                field_type: "number".into(),
-                description: "Soft char budget for prompts. When exceeded, context is condensed every N turns.".into(),
+                field_type: "select".into(),
+                description: "Name of the MCP tool to call for condensing conversation context before each LLM call. The tool decides when and how to condense based on its own configuration.".into(),
                 options: None,
                 readonly: false,
-                default: Some("350000".into()),
+                default: Some("prompt_compact-messages".into()),
             },
         ),
-        (
-            "prompt_char_budget_hard".into(),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Hard char budget for prompts. When exceeded, context is condensed before the next LLM call.".into(),
-                options: None,
-                readonly: false,
-                default: Some("500000".into()),
-            },
-        ),
-        (
-            "old_message_char_budget".into(),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Max chars for old messages after condensation. The metadata block stays in full.".into(),
-                options: None,
-                readonly: false,
-                default: Some("100000".into()),
-            },
-        ),
-        (
-            "state_block_update_interval".into(),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "How often (in iterations) to refresh the state block when soft budget is exceeded.".into(),
-                options: None,
-                readonly: false,
-                default: Some("5".into()),
-            },
-        ),
-        (
-            "condense_keep_turns".into(),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Number of full assistant→tool cycles to keep verbatim during condensation.".into(),
-                options: None,
-                readonly: false,
-                default: Some("4".into()),
-            },
-        ),
-        // ── Token Budgets ──
-        (
-            "prompt_token_budget_soft".into(),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Soft token budget for prompts. Triggers condensation when exceeded (uses tiktoken).".into(),
-                options: None,
-                readonly: false,
-                default: Some("200000".into()),
-            },
-        ),
-        (
-            "prompt_token_budget_hard".into(),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Hard token budget for prompts. Condenses before any LLM call when exceeded (uses tiktoken).".into(),
-                options: None,
-                readonly: false,
-                default: Some("350000".into()),
-            },
-        ),
-        // ── Tool Execution ──
         // ── Prompts ──
         (
             "prompt_log_level".into(),
@@ -469,16 +407,6 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         // ── Group 2 settings ──
-        (
-            "tokenizer_encoding_tool".into(),
-            SettingMeta {
-                field_type: "select".into(),
-                description: "MCP tool for token counting. When set, enables token-based budgets instead of char-based estimation. Empty = fall back to prompt_char_budget_soft/hard.".into(),
-                options: None,
-                readonly: false,
-                default: Some("".into()),
-            },
-        ),
         (
             "platform_max_spawn_retries".into(),
             SettingMeta {
@@ -539,13 +467,14 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "thread_summary_tokens"
             | "memory_max_chars"
             | "soul_max_chars" => "memory",
-            "max_pool_connections" | "max_inline_file_kb" | "prompt_generate_tool"
-            | "prompt_compact_messages_tool" | "default_provider" | "tool_bg_secs"
+            "max_pool_connections"
+            | "max_inline_file_kb"
+            | "prompt_generate_tool"
+            | "prompt_compact_messages_tool"
+            | "condense_tool"
+            | "default_provider"
+            | "tool_bg_secs"
             | "prompt_log_level"
-            | "prompt_char_budget_soft" | "prompt_char_budget_hard"
-            | "old_message_char_budget" | "state_block_update_interval"
-            | "condense_keep_turns" | "prompt_token_budget_soft"
-            | "prompt_token_budget_hard"
             | "max_pool_connections"
             | "max_inline_file_kb"
             | "default_profile"
@@ -657,7 +586,7 @@ pub async fn get_settings_handler(
     // Enrich prompt_generate_tool and prompt_compact_messages_tool with available MCP tools
     let registry = state.tool_registry.read().await;
     let mcp_tools: Vec<&crate::mcp::McpTool> = registry.all();
-    for tool_key in ["prompt_generate_tool", "prompt_compact_messages_tool", "tokenizer_encoding_tool"] {
+    for tool_key in ["prompt_generate_tool", "prompt_compact_messages_tool", "condense_tool"] {
         if let Some((_, _, ref mut meta)) = defs.iter_mut().find(|(name, _, _)| name.as_str() == tool_key)
         {
             let mut options: Vec<SettingOption> = mcp_tools
@@ -710,16 +639,8 @@ pub async fn update_settings_handler(
         "max_pool_connections",
         "max_inline_file_kb",
         "tool_bg_secs",
-        "watchdog_default",
-        "prompt_char_budget_soft",
-        "prompt_char_budget_hard",
-        "old_message_char_budget",
-        "state_block_update_interval",
-        "condense_keep_turns",
-        "prompt_token_budget_soft",
-        "prompt_token_budget_hard",
-        "tokenizer_encoding_tool",
         "prompt_log_level",
+        "condense_tool",
         "platform_max_spawn_retries",
         "default_profile",
     ]

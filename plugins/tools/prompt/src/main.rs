@@ -5,8 +5,11 @@
 //!   thread context, recent messages, summaries, skills, and planning instructions.
 //! - `compact-messages`: compacts a conversation by removing old assistant
 //!   tool-call pairs, preserving the most recent messages.
+//! - `condense`: condenses conversation context based on configured thresholds.
 //!
-//! Standalone binary: pure prompt assembly inlined from prompt-tools.
+//! Config is received from the omniagent via the `configure` message at startup.
+//! Plugins never read env vars for config. Users can use $env: notation in
+//! plugins.yaml if they want values from env vars.
 
 mod chat_message;
 mod compact;
@@ -18,12 +21,112 @@ use mcp_server_util::*;
 use serde_json::Value;
 use sqlx::{FromRow, PgPool};
 use std::sync::Arc;
+use tokio::sync::RwLock;
+
+// ---------------------------------------------------------------------------
+// Plugin config — received via configure message, never from env vars
+// ---------------------------------------------------------------------------
+
+/// Plugin-level config with defaults matching the original settings values.
+#[derive(Debug, Clone)]
+pub struct PluginConfig {
+    // Planning
+    pub planning_complexity_max_chars: usize,
+    pub planning_complexity_keywords: String,
+    pub prompt_plan_max_tokens: usize,
+    // Condense
+    pub tokenizer_encoding: String,
+    pub char_budget_soft: usize,
+    pub char_budget_hard: usize,
+    pub token_budget_soft: usize,
+    pub token_budget_hard: usize,
+    pub old_msg_budget: usize,
+    pub condense_keep_turns: usize,
+    // Prompt builder
+    pub memory_max_chars: usize,
+    pub soul_max_chars: usize,
+}
+
+impl PluginConfig {
+    fn default() -> Self {
+        Self {
+            planning_complexity_max_chars: 60,
+            planning_complexity_keywords:
+                "implement,refactor,redesign,architecture,create,build,design,develop,\
+                 migrate,restructure,overhaul,rewrite,configure,set up,deploy,integrate,\
+                 add feature,fix bug,resolve issue,multi-step,complex"
+                    .to_string(),
+            prompt_plan_max_tokens: 2048,
+            tokenizer_encoding: String::new(),
+            char_budget_soft: 350000,
+            char_budget_hard: 500000,
+            token_budget_soft: 200000,
+            token_budget_hard: 350000,
+            old_msg_budget: 100000,
+            condense_keep_turns: 4,
+            memory_max_chars: 5000,
+            soul_max_chars: 1000,
+        }
+    }
+
+    /// Parse config from the JSON value sent by the configure message.
+    /// Unknown keys are silently ignored; missing keys keep defaults.
+    fn from_json(json: &Value) -> Self {
+        let mut cfg = Self::default();
+        if let Some(obj) = json.as_object() {
+            if let Some(v) = obj.get("planning_complexity_max_chars").and_then(|v| v.as_i64()) {
+                cfg.planning_complexity_max_chars = v as usize;
+            }
+            if let Some(v) = obj.get("planning_complexity_keywords").and_then(|v| v.as_str()) {
+                cfg.planning_complexity_keywords = v.to_string();
+            }
+            if let Some(v) = obj.get("prompt_plan_max_tokens").and_then(|v| v.as_i64()) {
+                cfg.prompt_plan_max_tokens = v as usize;
+            }
+            if let Some(v) = obj.get("tokenizer_encoding").and_then(|v| v.as_str()) {
+                cfg.tokenizer_encoding = v.to_string();
+            }
+            if let Some(v) = obj.get("char_budget_soft").and_then(|v| v.as_i64()) {
+                cfg.char_budget_soft = v as usize;
+            }
+            if let Some(v) = obj.get("char_budget_hard").and_then(|v| v.as_i64()) {
+                cfg.char_budget_hard = v as usize;
+            }
+            if let Some(v) = obj.get("token_budget_soft").and_then(|v| v.as_i64()) {
+                cfg.token_budget_soft = v as usize;
+            }
+            if let Some(v) = obj.get("token_budget_hard").and_then(|v| v.as_i64()) {
+                cfg.token_budget_hard = v as usize;
+            }
+            if let Some(v) = obj.get("old_message_char_budget").and_then(|v| v.as_i64()) {
+                cfg.old_msg_budget = v as usize;
+            }
+            if let Some(v) = obj.get("condense_keep_turns").and_then(|v| v.as_i64()) {
+                cfg.condense_keep_turns = (v as usize).max(1);
+            }
+            if let Some(v) = obj.get("memory_max_chars").and_then(|v| v.as_i64()) {
+                cfg.memory_max_chars = v as usize;
+            }
+            if let Some(v) = obj.get("soul_max_chars").and_then(|v| v.as_i64()) {
+                cfg.soul_max_chars = v as usize;
+            }
+        }
+        cfg
+    }
+
+    /// Build a PromptBuilderConfig from this plugin config.
+    fn builder_config(&self) -> prompt_builder::PromptBuilderConfig {
+        prompt_builder::PromptBuilderConfig {
+            memory_max_chars: self.memory_max_chars,
+            soul_max_chars: self.soul_max_chars,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers to extract values from args or _meta (args take priority for standalone calls)
 // ---------------------------------------------------------------------------
 
-/// Extract a value from args first, then fall back to _meta.
 fn extract_i64(args: &Value, meta: &Option<McpMeta>, key: &str) -> Option<i64> {
     args[key].as_i64().or_else(|| {
         meta.as_ref().and_then(|m| match key {
@@ -89,7 +192,6 @@ struct SubtaskRow {
 // DB helpers
 // ---------------------------------------------------------------------------
 
-/// Connect to the Postgres database using DATABASE_URL.
 async fn connect_db() -> Result<PgPool> {
     let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
     let pool = PgPool::connect(&database_url)
@@ -98,7 +200,6 @@ async fn connect_db() -> Result<PgPool> {
     Ok(pool)
 }
 
-/// Get recent messages from a thread.
 async fn get_thread_messages(pool: &PgPool, thread_id: i64, limit: i64) -> Result<Vec<MessageRow>> {
     let rows = sqlx::query_as::<_, MessageRow>(
         r#"
@@ -110,7 +211,7 @@ async fn get_thread_messages(pool: &PgPool, thread_id: i64, limit: i64) -> Resul
           AND msg_type IN ('message', 'reasoning')
         ORDER BY created_at DESC
         LIMIT $2
-        "#
+        "#,
     )
     .bind(thread_id)
     .bind(limit)
@@ -121,7 +222,6 @@ async fn get_thread_messages(pool: &PgPool, thread_id: i64, limit: i64) -> Resul
     Ok(rows)
 }
 
-/// Get the latest summary for a channel.
 async fn get_latest_summary(pool: &PgPool, channel_id: i64) -> Result<Option<SummaryRow>> {
     let row = sqlx::query_as::<_, SummaryRow>(
         r#"
@@ -130,7 +230,7 @@ async fn get_latest_summary(pool: &PgPool, channel_id: i64) -> Result<Option<Sum
         WHERE channel_id = $1
         ORDER BY id DESC
         LIMIT 1
-        "#
+        "#,
     )
     .bind(channel_id)
     .fetch_optional(pool)
@@ -140,7 +240,6 @@ async fn get_latest_summary(pool: &PgPool, channel_id: i64) -> Result<Option<Sum
     Ok(row)
 }
 
-/// Get completed threads since a given thread ID (for summary context).
 async fn get_threads_since(
     pool: &PgPool,
     channel_id: i64,
@@ -156,7 +255,7 @@ async fn get_threads_since(
           AND id > $2
         ORDER BY id ASC
         LIMIT $3
-        "#
+        "#,
     )
     .bind(channel_id)
     .bind(since_id)
@@ -168,7 +267,6 @@ async fn get_threads_since(
     Ok(rows)
 }
 
-/// Get subtasks for a thread.
 async fn get_subtasks(pool: &PgPool, thread_id: i64) -> Result<Vec<SubtaskRow>> {
     let rows = sqlx::query_as::<_, SubtaskRow>(
         r#"
@@ -176,7 +274,7 @@ async fn get_subtasks(pool: &PgPool, thread_id: i64) -> Result<Vec<SubtaskRow>> 
         FROM thread_subtasks
         WHERE thread_id = $1
         ORDER BY id ASC
-        "#
+        "#,
     )
     .bind(thread_id)
     .fetch_all(pool)
@@ -186,7 +284,6 @@ async fn get_subtasks(pool: &PgPool, thread_id: i64) -> Result<Vec<SubtaskRow>> 
     Ok(rows)
 }
 
-/// Get list of skills from the filesystem. Returns formatted descriptions.
 fn get_skills(data_dir: &str, profile_name: &str) -> Vec<String> {
     let skills_dir = format!("{}/profiles/{}/skills", data_dir, profile_name);
     let mut skills = Vec::new();
@@ -195,7 +292,8 @@ fn get_skills(data_dir: &str, profile_name: &str) -> Vec<String> {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("md") {
                 if let Ok(content) = std::fs::read_to_string(&path) {
-                    let name = path.file_stem()
+                    let name = path
+                        .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or("unknown");
                     let first_line = content.lines().next().unwrap_or("").trim();
@@ -217,7 +315,12 @@ fn get_skills(data_dir: &str, profile_name: &str) -> Vec<String> {
 // Tool: prompt_generate_full
 // ---------------------------------------------------------------------------
 
-async fn handle_generate_full(pool: &PgPool, args: &Value, meta: Option<McpMeta>) -> Result<(String, bool)> {
+async fn handle_generate_full(
+    pool: &PgPool,
+    args: &Value,
+    meta: Option<McpMeta>,
+    cfg: &PluginConfig,
+) -> Result<(String, bool)> {
     let profile_name = extract_str(args, &meta, "profile_name").unwrap_or("default");
     let platform = extract_str(args, &meta, "platform").unwrap_or("");
     let system_message = args["system_message"].as_str();
@@ -244,6 +347,7 @@ async fn handle_generate_full(pool: &PgPool, args: &Value, meta: Option<McpMeta>
         system_message,
         profile_name,
         &tool_names,
+        &cfg.builder_config(),
     );
 
     // all_parts contains: [identity, tool_guidance, profile_hint, (system_message?), platform_hint?, memory_section, user_profile_section]
@@ -254,7 +358,6 @@ async fn handle_generate_full(pool: &PgPool, args: &Value, meta: Option<McpMeta>
 
     for part in &all_parts {
         if part.starts_with("## MEMORY") || part.starts_with("## USER PROFILE") {
-            // This is the memory or user profile section: extract as memory
             if part.starts_with("## USER PROFILE") {
                 memory_text.push_str(part);
                 memory_text.push('\n');
@@ -263,7 +366,6 @@ async fn handle_generate_full(pool: &PgPool, args: &Value, meta: Option<McpMeta>
                 memory_text.push('\n');
             }
         } else if system_message.is_some() && !system_message.unwrap().is_empty() && part == system_message.unwrap() {
-            // This is the optional system_message override → soul
             soul_text = part.clone();
         } else {
             system_parts.push(part.clone());
@@ -307,7 +409,6 @@ async fn handle_generate_full(pool: &PgPool, args: &Value, meta: Option<McpMeta>
                     summary.next_thread_id, truncate_str(&summary.content, 4000)
                 ));
 
-                // Threads completed after the summary
                 match get_threads_since(pool, cid, summary.next_thread_id, 5).await {
                     Ok(threads) if !threads.is_empty() => {
                         let thread_info: Vec<String> = threads.iter().map(|t| {
@@ -368,20 +469,13 @@ async fn handle_generate_full(pool: &PgPool, args: &Value, meta: Option<McpMeta>
     let plan = match plan_input {
         Some(val) => val,
         None => {
-            // Plugin-level config: complexity thresholds
-            // When plan is null/None, the plugin decides based on message complexity
-            let max_chars = std::env::var("PROMPT_PLANNING_COMPLEXITY_MAX_CHARS")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(60);
-            let keywords_str = std::env::var("PROMPT_PLANNING_COMPLEXITY_KEYWORDS")
-                .unwrap_or_default();
+            let max_chars = cfg.planning_complexity_max_chars;
+            let keywords_str = &cfg.planning_complexity_keywords;
             let keywords: Vec<&str> = keywords_str
                 .split(',')
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .collect();
-            // Plan if message is complex (long) or contains keywords
             let has_keyword = if keywords.is_empty() {
                 false
             } else {
@@ -437,6 +531,84 @@ async fn handle_compact_messages(args: &Value) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
+// Tool: prompt_condense (threshold-based context condensation)
+// ---------------------------------------------------------------------------
+
+async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bool)> {
+    let messages_arr = match args["messages"].as_array() {
+        Some(arr) => arr,
+        None => return Ok(("Missing required argument: 'messages' (array of ChatMessage)".to_string(), true)),
+    };
+
+    let mut messages: Vec<crate::chat_message::ChatMessage> =
+        match serde_json::from_value(serde_json::Value::Array(messages_arr.clone())) {
+            Ok(msgs) => msgs,
+            Err(e) => return Ok((format!("Failed to parse messages: {}", e), true)),
+        };
+
+    let before = messages.len();
+
+    // Read config from shared plugin config (set by configure message)
+    let use_tokens = !cfg.tokenizer_encoding.is_empty();
+    let soft_budget = if use_tokens {
+        cfg.token_budget_soft.min(cfg.char_budget_soft)
+    } else {
+        cfg.char_budget_soft
+    };
+    let hard_budget = if use_tokens {
+        cfg.token_budget_hard.min(cfg.char_budget_hard)
+    } else {
+        cfg.char_budget_hard
+    };
+    let target_budget = soft_budget.min(hard_budget);
+
+    let current_size: usize = if use_tokens {
+        messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
+    } else {
+        messages.iter().map(|m| m.content.len()).sum::<usize>()
+    };
+
+    let current_iteration = args["current_iteration"].as_i64().unwrap_or(0);
+    let last_condense_iteration = args["last_condense_iteration"].as_i64().unwrap_or(-1);
+    let state_interval: i64 = 5;
+
+    let needs_hard = current_size > hard_budget;
+    let needs_soft = !needs_hard
+        && current_size > soft_budget
+        && state_interval > 0
+        && (current_iteration - last_condense_iteration) >= state_interval;
+
+    let was_condensed = if needs_hard || needs_soft {
+        let condense_keep_turns = cfg.condense_keep_turns;
+        crate::compact::compact_old_assistant_messages(&mut messages, condense_keep_turns);
+
+        let after_size: usize = if use_tokens {
+            messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
+        } else {
+            messages.iter().map(|m| m.content.len()).sum::<usize>()
+        };
+
+        if after_size > target_budget {
+            let aggressive_keep = if condense_keep_turns > 1 { condense_keep_turns - 1 } else { 0 };
+            crate::compact::compact_old_assistant_messages(&mut messages, aggressive_keep);
+        }
+        true
+    } else {
+        false
+    };
+
+    let after = messages.len();
+    let result = serde_json::json!({
+        "messages": messages,
+        "was_condensed": was_condensed,
+        "before_count": before,
+        "after_count": after,
+    });
+
+    Ok((serde_json::to_string_pretty(&result).unwrap_or_else(|_| "Serialization error".to_string()), false))
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -444,7 +616,8 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
     if s.len() <= max_chars {
         return s.to_string();
     }
-    let trunc_at = s.char_indices()
+    let trunc_at = s
+        .char_indices()
         .nth(max_chars)
         .map(|(i, _)| i)
         .unwrap_or(s.len());
@@ -460,16 +633,36 @@ async fn main() -> Result<()> {
     let pool = connect_db().await?;
     let pool = Arc::new(pool);
 
+    // Shared config — updated by configure message at startup
+    let plugin_config = Arc::new(RwLock::new(PluginConfig::default()));
+
     // Generate full prompt handler
     let p_gen = pool.clone();
+    let cfg_gen = plugin_config.clone();
     let gen_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let p = p_gen.clone();
-        Box::pin(async move { handle_generate_full(&p, &args, meta).await })
+        let cfg = cfg_gen.clone();
+        Box::pin(async move {
+            let config = cfg.read().await;
+            handle_generate_full(&p, &args, meta, &config).await
+        })
     });
 
-    // Compact messages handler
+    // Compact messages handler (no config needed)
     let compact_handler: ToolHandler =
-        Box::new(move |args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_compact_messages(&args).await }));
+        Box::new(move |args: Value, _meta: Option<McpMeta>| {
+            Box::pin(async move { handle_compact_messages(&args).await })
+        });
+
+    // Condense handler
+    let cfg_condense = plugin_config.clone();
+    let condense_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let cfg = cfg_condense.clone();
+        Box::pin(async move {
+            let config = cfg.read().await;
+            handle_condense(&args, &config).await
+        })
+    });
 
     let tools = vec![
         McpToolEntry {
@@ -550,6 +743,38 @@ async fn main() -> Result<()> {
             },
             handler: compact_handler,
         },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "condense".to_string(),
+                description:
+                    "Condense conversation context based on configured thresholds. \
+                     Checks current message size against hard/soft budgets (char or token based) \
+                     and compacts old assistant tool-call pairs if over budget. \
+                     The plugin's own thresholds and tokenizer_encoding config determine \
+                     when and how to condense. Returns the (possibly condensed) messages \
+                     with a was_condensed flag."
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "messages": {
+                            "type": "array",
+                            "description": "Array of ChatMessage objects to condense"
+                        },
+                        "current_iteration": {
+                            "type": "integer",
+                            "description": "Current iteration number for soft-budget interval checking"
+                        },
+                        "last_condense_iteration": {
+                            "type": "integer",
+                            "description": "Last iteration when condensation occurred"
+                        }
+                    },
+                    "required": ["messages"]
+                }),
+            },
+            handler: condense_handler,
+        },
     ];
 
     let server_info = ServerInfo {
@@ -557,5 +782,20 @@ async fn main() -> Result<()> {
         version: env!("CARGO_PKG_VERSION").to_string(),
     };
 
-    run_server(server_info, tools).await
+    // Use run_server_with_config so the omniagent can pass plugin config
+    // via the configure message instead of env vars.
+    let on_configure = {
+        let cfg = plugin_config.clone();
+        Some(move |params: Value| {
+            let new_config = PluginConfig::from_json(&params);
+            let mut locked = cfg.blocking_write();
+            *locked = new_config;
+            tracing::info!(
+                "Prompt plugin config updated via configure message: tokenizer_encoding={:?}, char_budget_soft={}, char_budget_hard={}",
+                locked.tokenizer_encoding, locked.char_budget_soft, locked.char_budget_hard
+            );
+        })
+    };
+
+    run_server_with_config(server_info, tools, on_configure).await
 }

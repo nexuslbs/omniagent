@@ -30,6 +30,69 @@
       "type": "integer",
       "default": 2048,
       "description": "Maximum tokens for the planning LLM call"
+    },
+    {
+      "key": "memory_max_chars",
+      "label": "Memory Max Chars",
+      "type": "integer",
+      "default": 5000,
+      "description": "Maximum characters for the memory section in the system prompt"
+    },
+    {
+      "key": "soul_max_chars",
+      "label": "Soul (User Profile) Max Chars",
+      "type": "integer",
+      "default": 1000,
+      "description": "Maximum characters for the user profile section in the system prompt"
+    },
+    {
+      "key": "tokenizer_encoding",
+      "label": "Tokenizer Encoding",
+      "type": "string",
+      "default": "",
+      "description": "Tokenizer encoding for budget calculations (e.g. 'cl100k_base'). Empty = use character counts instead of tokens"
+    },
+    {
+      "key": "char_budget_soft",
+      "label": "Char Budget Soft",
+      "type": "integer",
+      "default": 350000,
+      "description": "Soft character budget: triggers condensation when exceeded and enough iterations have passed since last condense"
+    },
+    {
+      "key": "char_budget_hard",
+      "label": "Char Budget Hard",
+      "type": "integer",
+      "default": 500000,
+      "description": "Hard character budget: condensation triggers immediately when exceeded"
+    },
+    {
+      "key": "token_budget_soft",
+      "label": "Token Budget Soft",
+      "type": "integer",
+      "default": 200000,
+      "description": "Soft token budget (used when tokenizer_encoding is set)"
+    },
+    {
+      "key": "token_budget_hard",
+      "label": "Token Budget Hard",
+      "type": "integer",
+      "default": 350000,
+      "description": "Hard token budget (used when tokenizer_encoding is set)"
+    },
+    {
+      "key": "old_message_char_budget",
+      "label": "Old Message Char Budget",
+      "type": "integer",
+      "default": 100000,
+      "description": "Threshold for trimming old assistant messages during condensation"
+    },
+    {
+      "key": "condense_keep_turns",
+      "label": "Condense Keep Turns",
+      "type": "integer",
+      "default": 4,
+      "description": "Number of most recent assistant turns to preserve when condensing"
     }
   ]
 }

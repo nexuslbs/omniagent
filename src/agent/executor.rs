@@ -781,133 +781,50 @@ Previous plan:\n{}",
             ));
         }
 
-        // ── Context management: budget enforcement ──
-        // Soft budget exceeded → condense every state_block_update_interval turns
-        // Hard budget exceeded → condense before ANY LLM call, bring below soft
-        //
-        // When `tokenizer_encoding_tool` is set (an MCP tool that counts tokens),
-        // it is called to get accurate token counts. When empty, falls back to
-        // char-based budgets (prompt_char_budget_soft/hard).
-
+        // ── Context management: call condense tool ──
+        // Before each LLM call, invoke the configured condense MCP tool.
+        // The tool (plugin-specific) decides whether to condense based on
+        // its own thresholds (configurable via plugin config). The agent
+        // is agnostic to condensation logic — it passes messages and
+        // iteration info and applies whatever the tool returns.
         let cfg_snapshot = cfg.config_snapshot();
-        let prompt_token_soft = cfg_snapshot.prompt_token_budget_soft;
-        let prompt_token_hard = cfg_snapshot.prompt_token_budget_hard;
-        let old_msg_budget = cfg_snapshot.old_message_char_budget;
-        let keep_turns = cfg_snapshot.condense_keep_turns;
-        let state_interval = cfg_snapshot.state_block_update_interval as i32;
-        let tokenizer_tool = cfg_snapshot.tokenizer_encoding_tool.clone();
-
-        // Count tokens using the configured tool, or fall back to char estimation
-        let (current_tokens, raw_tokens, safety_factor, has_tool) =
-            if !tokenizer_tool.is_empty() {
-                // Call the tokenizer tool
-                let token_call = McpToolCall {
-                    name: tokenizer_tool.clone(),
-                    arguments: serde_json::json!({"messages": messages}),
-                    id: String::new(),
-                };
-                match cfg.mcp.read().await.execute(&token_call, cfg.ctx.clone()).await {
-                    Ok(res) => {
-                        let count: usize = serde_json::from_str(&res.content).unwrap_or(0);
-                        (count, count, 1.0, true)
-                    }
-                    Err(_) => {
-                        // Tool failed — fall back to char budgets
-                        (0, 0, 1.0, false)
-                    }
-                }
-            } else {
-                (0, 0, 1.0, false)
+        let condense_tool = cfg_snapshot.condense_tool_name.clone();
+        if !condense_tool.is_empty() {
+            let condense_call = McpToolCall {
+                name: condense_tool.clone(),
+                arguments: serde_json::json!({
+                    "messages": messages,
+                    "current_iteration": current_iter,
+                    "last_condense_iteration": last_condense_iteration,
+                }),
+                id: String::new(),
             };
-
-        let needs_hard_condense = if has_tool {
-            current_tokens > prompt_token_hard
-        } else {
-            false
-        };
-        let needs_soft_condense = if has_tool {
-            current_tokens > prompt_token_soft
-                && state_interval > 0
-                && (current_iter - last_condense_iteration) >= state_interval
-        } else {
-            false
-        };
-
-        if needs_hard_condense || needs_soft_condense {
-            // Use the char budget for the condense_messages function's safety
-            // check (which compares system message CHARS, not tokens).
-            let condense_char_soft = cfg_snapshot.prompt_char_budget_soft;
-
-            match helpers::condense_messages(
-                std::mem::take(&mut messages),
-                old_msg_budget,
-                keep_turns,
-                condense_char_soft,
-            ) {
-                Ok(condensed) => {
-                    let saved = current_tokens.saturating_sub(condensed.len() as usize);
-                    messages = condensed;
-
-                    // If hard budget triggered and we have a tokenizer tool, verify
-                    if has_tool && needs_hard_condense {
-                        let after_raw = messages.iter().map(|m| m.content.len()).sum::<usize>();
-                        let after_tokens = (after_raw as f64 * safety_factor) as usize;
-                        if after_tokens > prompt_token_soft {
-                            // Second pass with more aggressive settings
-                            let aggressive_keep = if keep_turns > 0 {
-                                keep_turns - 1
-                            } else {
-                                0_usize
-                            };
-                            match helpers::condense_messages(
-                                std::mem::take(&mut messages),
-                                old_msg_budget / 2,
-                                aggressive_keep,
-                                condense_char_soft,
-                            ) {
-                                Ok(tighter) => {
-                                    let tighter_raw =
-                                        tighter.iter().map(|m| m.content.len()).sum::<usize>();
-                                    let tighter_tokens = (tighter_raw as f64 * safety_factor) as usize;
-                                    messages = tighter;
-                                    if tighter_tokens > prompt_token_soft {
-                                        warn!(
-                                            "[context] Hard condensation could not bring prompt below soft budget: {} effective tokens (budget: {})",
-                                            tighter_tokens, prompt_token_soft
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!("[context] Second-pass condensation failed: {}", e);
-                                }
+            match cfg.mcp.read().await.execute(&condense_call, cfg.ctx.clone()).await {
+                Ok(res) => {
+                    if let Ok(result) = serde_json::from_str::<serde_json::Value>(&res.content) {
+                        if result.get("was_condensed").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            if let Some(condensed) = result.get("messages").and_then(|v| v.as_array()) {
+                                messages = serde_json::from_value(serde_json::Value::Array(condensed.clone()))
+                                    .unwrap_or(messages);
+                                last_condense_iteration = current_iter;
+                                let before = result.get("before_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let after = result.get("after_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                                info!(
+                                    "[context] Condensed messages via {}: {} → {} (iteration {})",
+                                    condense_tool, before, after, current_iter,
+                                );
                             }
                         }
                     }
-
-                    info!(
-                        "[context] Condensed prompt: {} effective → {} messages (saved {}, iteration {})",
-                        current_tokens,
-                        messages.len(),
-                        saved,
-                        current_iter,
-                    );
                 }
                 Err(e) => {
-                    // Safety check failed: system messages too large
-                    error!("[context] Condensation aborted: {}", e);
-                    force_failed = true;
-                    final_content = format!("Task failed: {}", e);
-                    break;
+                    warn!("[context] Condense tool '{}' failed: {} — continuing without condensation", condense_tool, e);
                 }
             }
-            last_condense_iteration = current_iter;
         }
 
         // Layer 3: iteration-aware tool result pruning
         helpers::prune_old_tool_results(&mut messages, current_iter as u32);
-
-        // Layer 4: compact old assistant tool_calls JSON (only keep recent turns)
-        helpers::compact_old_assistant_messages(&mut messages, keep_turns);
 
         // ── Optional: insert prompt message before LLM call ──
         // Subtypes: "first" (first normal LLM call), "compaction" (after context
@@ -944,7 +861,7 @@ Previous plan:\n{}",
                     "prompt_subtype": prompt_subtype,
                     "num_messages": messages.len(),
                     "iteration": current_iter,
-                    "condensed": needs_hard_condense || needs_soft_condense,
+                    "condensed": current_iter == last_condense_iteration,
                 }),
                 embedding: None,
                 summary_text: None,
