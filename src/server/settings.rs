@@ -100,7 +100,7 @@ fn settings_path(data_dir: &str) -> String {
 
 /// Load settings.yml as a flat key-value map.
 /// Returns an empty map if the file doesn't exist or can't be parsed.
-fn load_settings_file(data_dir: &str) -> HashMap<String, String> {
+pub(crate) fn load_settings_file(data_dir: &str) -> HashMap<String, String> {
     let path = settings_path(data_dir);
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -740,7 +740,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
 const BOOTSTRAP_SETTINGS: &[&str] = &["host", "port", "database_url", "omni_dir"];
 
 /// Resolve a single setting value with $env:/$secret: support.
-async fn resolve_setting_value(
+pub(crate) async fn resolve_setting_value(
     raw_value: &str,
     pool: &sqlx::PgPool,
 ) -> String {
@@ -752,10 +752,7 @@ async fn resolve_setting_value(
 }
 
 /// Resolve a collection of setting values in place.
-async fn resolve_setting_values(
-    map: &mut HashMap<String, String>,
-    pool: &sqlx::PgPool,
-) {
+pub(crate) async fn resolve_setting_values(map: &mut HashMap<String, String>, pool: &sqlx::PgPool) {
     let keys: Vec<String> = map.keys().cloned().collect();
     for key in keys {
         if let Some(value) = map.get(&key).cloned() {
@@ -804,20 +801,15 @@ pub async fn get_settings_handler(
     let mut defs: Vec<(String, String, SettingMeta)> = get_all_setting_definitions()
         .into_iter()
         .map(|(name, meta)| {
-            // Bootstrap settings always come from env vars — look up by UPPER_CASE name
             let value = if BOOTSTRAP_SETTINGS.contains(&name.as_str()) {
                 let env_name = setting_name_to_env(&name);
-                std::env::var(&env_name).unwrap_or_else(|_| meta.default.clone().unwrap_or_default())
+                std::env::var(&env_name)
+                    .unwrap_or_else(|_| meta.default.clone().unwrap_or_default())
             } else {
-                // Check settings.yml first, fall back to process env (UPPER_CASE for backward compat),
-                // then default
+                // Check settings.yml first, then default
                 settings_values
                     .get(&name)
                     .cloned()
-                    .or_else(|| {
-                        let env_name = setting_name_to_env(&name);
-                        std::env::var(&env_name).ok()
-                    })
                     .unwrap_or_else(|| meta.default.clone().unwrap_or_default())
             };
             (name, value, meta)
@@ -936,9 +928,6 @@ pub async fn update_settings_handler(
         }
         // Store the raw value (may contain $env: or $secret: refs)
         file_vars.insert(update.name.clone(), update.value.clone());
-        // Also set in the process environment so currently-running
-        // consumers pick up the change immediately.
-        std::env::set_var(&update.name, &update.value);
         applied.push(update.name.clone());
     }
 
@@ -949,9 +938,13 @@ pub async fn update_settings_handler(
     {
         Ok(()) => {
             tracing::info!("Settings updated: {:?}", applied);
-            // Reload the global config so the change takes effect immediately
-            // without requiring a container restart.
-            crate::agent::config::reload_global();
+            // Reload the global config from settings.yml so the change
+            // takes effect immediately without requiring a container restart.
+            crate::agent::config::reload_global_from_settings(
+                &state.data_dir,
+                &state.pool,
+            )
+            .await;
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
