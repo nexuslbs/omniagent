@@ -96,22 +96,13 @@ pub struct McpServersConfig {
 pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
     let mut all_servers = Vec::new();
 
-    // Try config file first
-    let config_path = crate::agent::config::get_global()
-        .and_then(|g| {
-            let c = g.read().unwrap();
-            let path = c.mcp_servers_config.clone();
-            if path.is_empty() { None } else { Some(path) }
-        })
-        .or_else(|| {
-        let default = format!("{}/config/mcp-servers.json", data_dir);
-        let path = std::path::Path::new(&default);
-        if path.exists() {
-            Some(default)
-        } else {
-            None
-        }
-    });
+    // Use default path in data_dir
+    let default = format!("{}/config/mcp-servers.json", data_dir);
+    let config_path = if std::path::Path::new(&default).exists() {
+        Some(default)
+    } else {
+        None
+    };
 
     match config_path {
         Some(path) => match read_config_file(&path) {
