@@ -127,15 +127,11 @@ pub struct AgentConfig {
     /// If None, no watchdog runs for tools without their own configuration.
     pub global_watchdog: Option<crate::mcp::WatchdogConfig>,
 
-    /// Short timeout (seconds) for the "fast path" — tools that complete within
+    /// Threshold in seconds for background mode — tools that complete within
     /// this time return normally. Tools that exceed this return a "processing"
-    /// result and continue in the background.
-    /// Default: 5 seconds.
-    pub tool_short_timeout_secs: u64,
-    /// Long timeout (seconds) for background task execution — the maximum time
-    /// a background tool task is allowed to run before being force-cancelled.
-    /// Default: 300 seconds (5 minutes).
-    pub tool_long_timeout_secs: u64,
+    /// result with a task ID and continue executing in the background.
+    /// Default: 30 seconds.
+    pub tool_bg_secs: u64,
 
     // Infrastructure config (merged from former config::Config)
     pub database_url: String,
@@ -247,8 +243,7 @@ impl AgentConfig {
                 serde_json::from_str::<crate::mcp::WatchdogConfig>(v).ok()
             }),
 
-            tool_short_timeout_secs: get("tool_short_timeout_secs", "5").parse().unwrap_or(5),
-            tool_long_timeout_secs: get("tool_long_timeout_secs", "300").parse().unwrap_or(300),
+            tool_bg_secs: get("tool_bg_secs", "30").parse().unwrap_or(30),
 
             // Bootstrap: infrastructure from env
             database_url: std::env::var("DATABASE_URL").ctx("DATABASE_URL must be set")?,
@@ -344,8 +339,7 @@ impl AgentConfig {
                 serde_json::from_str::<crate::mcp::WatchdogConfig>(v).ok()
             }),
 
-            tool_short_timeout_secs: get("tool_short_timeout_secs", "5").parse().unwrap_or(5),
-            tool_long_timeout_secs: get("tool_long_timeout_secs", "300").parse().unwrap_or(300),
+            tool_bg_secs: get("tool_bg_secs", "30").parse().unwrap_or(30),
 
             // Bootstrap settings always from process env
             database_url: std::env::var("DATABASE_URL").ctx("DATABASE_URL must be set")?,
