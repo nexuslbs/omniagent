@@ -3218,61 +3218,16 @@ pub(crate) async fn download_plugin_handler(
         Some(ref p) if !p.is_empty() => format!("{}/{}", plugin_dir, p),
         _ => plugin_dir.clone(),
     };
-    let cargo_toml = std::path::Path::new(&effective_dir).join("Cargo.toml");
     if !content_changed {
         info!(
-            "Download: skipping compilation for '{}': no new commits fetched",
+            "Download: no new commits fetched for '{}'",
             name
         );
-    } else if cargo_toml.exists() {
-        info!("Download: compiling Rust crate at {}", effective_dir);
-        match tokio::task::spawn_blocking({
-            let dir = effective_dir.clone();
-            let cargo_path = cargo_toml.to_string_lossy().to_string();
-            move || {
-                let status = std::process::Command::new("cargo")
-                    .args(["build", "--release", "--manifest-path", &cargo_path])
-                    .current_dir(&dir)
-                    .status();
-                status
-            }
-        })
-        .await
-        {
-            Ok(Ok(status)) if status.success() => {
-                info!("Download: Rust compilation succeeded for '{}'", name);
-            }
-            Ok(Ok(status)) => {
-                let msg = format!(
-                    "Download: compilation failed for '{}' with exit code {}",
-                    name, status
-                );
-                tracing::error!("{}", msg);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"success": false, "error": msg})),
-                )
-                    .into_response();
-            }
-            Ok(Err(e)) => {
-                let msg = format!("Download: failed to run cargo for '{}': {}", name, e);
-                tracing::error!("{}", msg);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"success": false, "error": msg})),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                let msg = format!("Download: task join error for '{}': {}", name, e);
-                tracing::error!("{}", msg);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"success": false, "error": msg})),
-                )
-                    .into_response();
-            }
-        }
+    } else {
+        info!(
+            "Download: cloned source for '{}' (compile separately via Install)",
+            name
+        );
     }
 
     // Ensure YAML entry has the remote source field, preserving existing enabled state
