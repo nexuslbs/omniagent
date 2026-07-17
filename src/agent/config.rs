@@ -41,6 +41,26 @@ pub fn reload_global() {
     }
 }
 
+/// Reload the global config from settings.yml, resolving $env:/$secret: refs.
+/// Called after PUT /settings writes to settings.yml so the change takes
+/// effect immediately without a container restart.
+/// Does nothing if the global hasn't been initialized yet.
+pub async fn reload_global_from_settings(data_dir: &str, pool: &PgPool) {
+    if let Some(global) = GLOBAL_CONFIG.get() {
+        match AgentConfig::from_settings_yaml(data_dir, pool).await {
+            Ok(new_config) => {
+                tracing::info!("Reloaded global config from settings.yml");
+                if let Ok(mut guard) = global.write() {
+                    *guard = new_config;
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to reload config from settings.yml: {:?}", e);
+            }
+        }
+    }
+}
+
 /// Get a reference to the global config, if initialized.
 pub fn get_global() -> Option<&'static Arc<RwLock<AgentConfig>>> {
     GLOBAL_CONFIG.get()
@@ -305,6 +325,119 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "openai".to_string()),
             wiki_vectorization_api_key: std::env::var("WIKI_VECTORIZATION_API_KEY").ok(),
             wiki_vectorization_api_model: std::env::var("WIKI_VECTORIZATION_API_MODEL").ok(),
+        })
+    }
+
+    /// Load agent configuration from settings.yml file.
+    /// Resolves $env:/$secret: references. Bootstrap settings (host, port,
+    /// database_url) still come from process environment variables.
+    /// Fields not present in settings.yml use their from_env() defaults.
+    pub async fn from_settings_yaml(data_dir: &str, pool: &PgPool) -> AppResult<Self> {
+        let mut settings = crate::server::settings::load_settings_file(data_dir);
+        crate::server::settings::resolve_setting_values(&mut settings, pool).await;
+
+        // Helper: get a resolved value or default
+        let get = |key: &str, default: &str| -> String {
+            settings
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| default.to_string())
+        };
+
+        Ok(Self {
+            llm_api_key: String::new(),
+            llm_provider: get("llm_provider", "openai"),
+            max_tokens: get("max_tokens", "4096").parse().unwrap_or(4096),
+            temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
+            max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
+            max_iterations_plan: get("max_iterations_plan", "120").parse().unwrap_or(120),
+            thread_summary_tokens: get("thread_summary_tokens", "2048").parse().unwrap_or(2048),
+            max_unfinished_subtask_retries: get("max_unfinished_subtask_retries", "3")
+                .parse()
+                .unwrap_or(3),
+            delete_after_days: get("delete_after_days", "30").parse().unwrap_or(30),
+            prompt_tool_name: get("prompt_generate_tool", "prompt_generate"),
+            compact_messages_tool_name: get("prompt_compact_messages_tool", "prompt_compact-messages"),
+
+            // Context management thresholds
+            prompt_char_budget_soft: get("prompt_char_budget_soft", "350000").parse().unwrap_or(350000),
+            prompt_char_budget_hard: get("prompt_char_budget_hard", "500000").parse().unwrap_or(500000),
+            old_message_char_budget: get("old_message_char_budget", "100000").parse().unwrap_or(100000),
+            state_block_update_interval: get("state_block_update_interval", "5").parse().unwrap_or(5),
+            condense_keep_turns: get("condense_keep_turns", "4").parse().unwrap_or(4).max(1),
+
+            // Token-based budgets
+            prompt_token_budget_soft: get("prompt_token_budget_soft", "200000")
+                .parse()
+                .unwrap_or(200000),
+            prompt_token_budget_hard: get("prompt_token_budget_hard", "350000")
+                .parse()
+                .unwrap_or(350000),
+            tokenizer_encoding: get("tokenizer_encoding", "gpt-4"),
+            prompt_token_safety_factor: get("prompt_token_safety_factor", "15.0")
+                .parse()
+                .unwrap_or(15.0),
+
+            prompt_log_level: get("prompt_log_level", "first"),
+
+            global_watchdog: settings.get("watchdog_default").and_then(|v| {
+                serde_json::from_str::<crate::mcp::WatchdogConfig>(v).ok()
+            }),
+
+            tool_short_timeout_secs: get("tool_short_timeout_secs", "5").parse().unwrap_or(5),
+            tool_long_timeout_secs: get("tool_long_timeout_secs", "300").parse().unwrap_or(300),
+
+            // Bootstrap settings always from process env
+            database_url: std::env::var("DATABASE_URL").ctx("DATABASE_URL must be set")?,
+            database_readonly_url: std::env::var("DATABASE_READONLY_URL").unwrap_or_else(|_| {
+                std::env::var("DATABASE_URL")
+                    .unwrap_or_else(|_| "postgres://localhost:5432/omniagent".to_string())
+            }),
+            host: std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
+            port: std::env::var("PORT")
+                .unwrap_or_else(|_| "8080".to_string())
+                .parse()
+                .ctx("PORT must be a valid number")?,
+            vectorize_messages: get("vectorize_messages", "false")
+                .parse::<bool>()
+                .unwrap_or(false),
+            vectorize_wiki: get("vectorize_wiki", "false")
+                .parse::<bool>()
+                .unwrap_or(false),
+            messages_vectorization_method: get("messages_vectorization_method", "local"),
+            messages_vectorization_api_url: settings
+                .get("messages_vectorization_api_url")
+                .cloned()
+                .filter(|v| !v.is_empty()),
+            messages_vectorization_interval_secs: get("messages_vectorization_interval", "3600")
+                .parse()
+                .unwrap_or(3600),
+            messages_vectorization_protocol: get("messages_vectorization_protocol", "openai"),
+            messages_vectorization_api_key: settings
+                .get("messages_vectorization_api_key")
+                .cloned()
+                .filter(|v| !v.is_empty()),
+            messages_vectorization_api_model: settings
+                .get("messages_vectorization_api_model")
+                .cloned()
+                .filter(|v| !v.is_empty()),
+            wiki_vectorization_method: get("wiki_vectorization_method", "local"),
+            wiki_vectorization_api_url: settings
+                .get("wiki_vectorization_api_url")
+                .cloned()
+                .filter(|v| !v.is_empty()),
+            wiki_vectorization_interval_secs: get("wiki_vectorization_interval", "3600")
+                .parse()
+                .unwrap_or(3600),
+            wiki_vectorization_protocol: get("wiki_vectorization_protocol", "openai"),
+            wiki_vectorization_api_key: settings
+                .get("wiki_vectorization_api_key")
+                .cloned()
+                .filter(|v| !v.is_empty()),
+            wiki_vectorization_api_model: settings
+                .get("wiki_vectorization_api_model")
+                .cloned()
+                .filter(|v| !v.is_empty()),
         })
     }
 }

@@ -20,7 +20,7 @@ pub(crate) mod overview;
 pub(crate) mod platforms;
 pub(crate) mod schedule;
 mod secrets;
-mod settings;
+pub(crate) mod settings;
 pub(crate) mod threads;
 use crate::error::{AppResult, ErrorContext};
 use axum::{
