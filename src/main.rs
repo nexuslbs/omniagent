@@ -75,10 +75,6 @@ async fn run_server() -> AppResult<()> {
         tracing::info!("Refreshed {} env var(s) from .env on startup", refreshed);
     }
 
-    // Determine workspace directory (default: /opt/workspace)
-    let workspace_dir = data_dir.clone();
-    tracing::info!("Workspace directory: {}", workspace_dir);
-
     tracing::info!(
         "Agent config: provider: {}, max_tokens: {}, temperature: {}",
         cfg.default_provider,
