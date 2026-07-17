@@ -499,26 +499,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 default: Some("omni".into()),
             },
         ),
-        (
-            "workspace_dir".into(),
-            SettingMeta {
-                field_type: "text".into(),
-                description: "Workspace directory path for project files".into(),
-                options: None,
-                readonly: false,
-                default: Some("/opt/workspace".into()),
-            },
-        ),
-        (
-            "mcp_servers_config".into(),
-            SettingMeta {
-                field_type: "text".into(),
-                description: "Path to MCP servers config file".into(),
-                options: None,
-                readonly: false,
-                default: Some("".into()),
-            },
-        ),
+
     ]
 }
 
@@ -567,10 +548,8 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "prompt_token_budget_hard"
             | "max_pool_connections"
             | "max_inline_file_kb"
-            | "default_profile" => "general",
-            "delete_after_days"
-            | "workspace_dir"
-            | "mcp_servers_config" => "system",
+            | "default_profile"
+            | "platform_max_spawn_retries" => "general",
             _ => "system",
         };
 
@@ -743,8 +722,6 @@ pub async fn update_settings_handler(
         "prompt_log_level",
         "platform_max_spawn_retries",
         "default_profile",
-        "workspace_dir",
-        "mcp_servers_config",
     ]
     .into_iter()
     .collect();

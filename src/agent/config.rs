@@ -139,8 +139,6 @@ pub struct AgentConfig {
     pub default_profile: String,
     /// Workspace directory path.
     pub workspace_dir: String,
-    /// Path to MCP servers config file.
-    pub mcp_servers_config: String,
 }
 
 /// Shared context bundle used by channel_handler and process_thread.

@@ -3266,7 +3266,46 @@ pub(crate) async fn download_plugin_handler(
 
 use std::future::Future;
 use std::pin::Pin;
-/// POST /api/reload: reload environment variables + plugins.
+/// Re-start a plugin: disable then enable cycle.
+/// This stops and re-starts the plugin's subprocess/MCP server.
+pub(crate) async fn restart_plugin_handler(
+    Path(name): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    // First disable the plugin
+    let disable_resp = disable_plugin_handler(
+        Path(name.clone()),
+        Query(PluginActionQuery {
+            source: None,
+            keep_yaml: None,
+        }),
+        State(state.clone()),
+    )
+    .await;
+
+    // Check if disable succeeded — if it returned non-OK, propagate the error
+    if disable_resp.status() != StatusCode::OK {
+        return disable_resp;
+    }
+
+    // Then re-enable with the original source (or autodetect)
+    let enable_resp = enable_plugin_handler(
+        Path(name.clone()),
+        State(state.clone()),
+    )
+    .await;
+
+    if enable_resp.status() == StatusCode::OK {
+        (StatusCode::OK, Json(serde_json::json!({
+            "success": true,
+            "data": { "restarted": true, "name": name }
+        }))).into_response()
+    } else {
+        enable_resp
+    }
+}
+
+/// Reload all plugins and environment variables.
 ///
 /// Re-reads .env and synchronizes runtime plugin state:
 /// starts newly enabled MCP servers / providers, stops newly disabled ones,
