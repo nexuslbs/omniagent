@@ -69,9 +69,8 @@ def api_get(path):
         r = urllib.request.urlopen(f"{BASE}/api{path}", timeout=10)
         return json.loads(r.read())
     except urllib.error.HTTPError as e:
-        body = e.read().decode()
-        try: return json.loads(body)
-        except: return {"success": False, "error": body}
+        raw = e.read().decode("utf-8", errors="replace")
+        raise AssertionError(f"GET {path} failed (HTTP {e.code}): {raw}")
 
 def api_post(path, body=None, files=None, base=None):
     """POST to BASE (omniagent) or DASHBOARD proxy.
@@ -116,15 +115,14 @@ def api_post(path, body=None, files=None, base=None):
         raise AssertionError(f"POST {path} failed (HTTP {e.code}): {json.loads(body_str)}")
 
 def api_delete(path):
-    """Return (success_bool, response_data) regardless of HTTP status"""
+    """DELETE. Returns response dict. Raises AssertionError on HTTP errors."""
     req = urllib.request.Request(f"{BASE}/api{path}", method="DELETE")
     try:
         r = urllib.request.urlopen(req, timeout=10)
-        return (True, json.loads(r.read()))
+        return json.loads(r.read())
     except urllib.error.HTTPError as e:
-        body = e.read().decode()
-        try: return (False, json.loads(body))
-        except: return (False, {"error": body})
+        raw = e.read().decode("utf-8", errors="replace")
+        raise AssertionError(f"DELETE {path} failed (HTTP {e.code}): {raw}")
 
 # ═══════════════════════════════════════════════════════════════════════
 #  YAML helpers (manual parsing, no pyyaml)
@@ -1451,7 +1449,7 @@ def discard_all_changes():
 # ═══════════════════════════════════════════════════════════════════════
 
 def api_post_body(path, body=None, timeout=15):
-    """POST with JSON body. Returns (success, response_dict)."""
+    """POST with JSON body. Returns response dict. Raises AssertionError on HTTP errors."""
     import urllib.request, urllib.error, json
     url = f"{BASE}/api{path}"
     data = json.dumps(body).encode() if body is not None else None
@@ -1459,13 +1457,11 @@ def api_post_body(path, body=None, timeout=15):
                                  headers={"Content-Type": "application/json"})
     try:
         r = urllib.request.urlopen(req, timeout=timeout)
-        return (True, json.loads(r.read()))
+        resp = r.read()
+        return json.loads(resp) if resp.strip() else {}
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", errors="replace")
-        try: return (False, json.loads(raw))
-        except: return (False, {"error": raw, "code": e.code})
-    except Exception as e:
-        return (False, {"error": str(e)})
+        raise AssertionError(f"POST {path} failed (HTTP {e.code}): {raw}")
 
 def find_plugins_by_source(source, plugin_type="tools"):
     """Find plugins of a given source and type from the API list."""
@@ -2082,7 +2078,7 @@ def _check_memory_text_exact(profile, mem_type, expected_content):
 
 
 def _raw_post_body(path, body):
-    """POST without /api prefix, returns (success, response_dict)."""
+    """POST without /api prefix. Returns response dict. Raises AssertionError on HTTP errors."""
     import urllib.request, urllib.error, json
     url = f"{BASE}{path}"
     data = json.dumps(body).encode()
@@ -2090,7 +2086,7 @@ def _raw_post_body(path, body):
                                  headers={"Content-Type": "application/json"})
     try:
         r = urllib.request.urlopen(req, timeout=15)
-        return (True, json.loads(r.read()))
+        return json.loads(r.read())
     except urllib.error.HTTPError as e:
         raw = e.read().decode("utf-8", errors="replace")
         raise AssertionError(f"POST {path} failed (HTTP {e.code}): {raw}")
