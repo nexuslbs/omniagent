@@ -3213,7 +3213,7 @@ pub(crate) async fn download_plugin_handler(
     let yaml_type = plugins_yaml::PluginYamlType::from_plugin_type(&manifest.plugin_type);
     let type_dir_str = yaml_type.type_dir_name();
     let plugin_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir_str, name);
-    let effective_dir = match remote_info.path {
+    let _effective_dir = match remote_info.path {
         Some(ref p) if !p.is_empty() => format!("{}/{}", plugin_dir, p),
         _ => plugin_dir.clone(),
     };
