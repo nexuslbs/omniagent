@@ -222,7 +222,7 @@ impl AgentConfig {
                 .ctx("PORT must be a valid number")?,
             platform_max_spawn_retries: get("platform_max_spawn_retries", "3").parse().unwrap_or(3),
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
-            default_profile: get("default_profile", "default"),
+            default_profile: get("default_profile", "omni"),
             workspace_dir: get("workspace_dir", "/opt/workspace"),
             mcp_servers_config: get("mcp_servers_config", ""),
         })
@@ -294,7 +294,7 @@ impl AgentConfig {
             max_inline_file_kb: get("max_inline_file_kb", "100")
                 .parse()
                 .unwrap_or(100),
-            default_profile: get("default_profile", "default"),
+            default_profile: get("default_profile", "omni"),
             workspace_dir: get("workspace_dir", "/opt/workspace"),
             mcp_servers_config: get("mcp_servers_config", ""),
         })

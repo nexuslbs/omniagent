@@ -493,10 +493,10 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             "default_profile".into(),
             SettingMeta {
                 field_type: "text".into(),
-                description: "Default profile name used at login / session start".into(),
+                description: "Default profile name used when no profile is specified for a channel".into(),
                 options: None,
                 readonly: false,
-                default: Some("default".into()),
+                default: Some("omni".into()),
             },
         ),
         (
@@ -566,9 +566,9 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "condense_keep_turns" | "prompt_token_budget_soft"
             | "prompt_token_budget_hard"
             | "max_pool_connections"
-            | "max_inline_file_kb" => "general",
+            | "max_inline_file_kb"
+            | "default_profile" => "general",
             "delete_after_days"
-            | "default_profile"
             | "workspace_dir"
             | "mcp_servers_config" => "system",
             _ => "system",
