@@ -3271,9 +3271,35 @@ pub(crate) async fn restart_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Response<Body> {
+    // Look up the plugin's source from the YAML config first
+    let (_yaml_type, yaml_entry) = match plugins_yaml::get_entry_with_type(&state.data_dir, &name) {
+        Ok(Some((t, e))) => (t, e),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Plugin '{}' not found in any YAML config", name)
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("Failed to read plugin config: {}", e)
+                })),
+            )
+                .into_response();
+        }
+    };
+    let source = Some(yaml_entry.source.clone());
+
     // First disable the plugin
     let disable_req = PluginSourceRequest {
-        source: None,
+        source: source.clone(),
         remote: None,
     };
     let disable_resp = disable_plugin_handler(
@@ -3291,7 +3317,7 @@ pub(crate) async fn restart_plugin_handler(
 
     // Then re-enable
     let enable_req = PluginSourceRequest {
-        source: None,
+        source: source.clone(),
         remote: None,
     };
     let enable_resp = enable_plugin_handler(
