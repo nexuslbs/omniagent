@@ -219,23 +219,13 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "tool_short_timeout_secs".into(),
+            "tool_bg_secs".into(),
             SettingMeta {
                 field_type: "number".into(),
-                description: "Short timeout in seconds for MCP tool calls before switching to background mode".into(),
+                description: "Threshold in seconds before switching tool calls to background mode (returns a processing status with task ID)".into(),
                 options: None,
                 readonly: false,
-                default: Some("5".into()),
-            },
-        ),
-        (
-            "tool_long_timeout_secs".into(),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Long timeout in seconds for background MCP tool execution".into(),
-                options: None,
-                readonly: false,
-                default: Some("300".into()),
+                default: Some("30".into()),
             },
         ),
         (
@@ -772,8 +762,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             "max_tokens" | "temperature" => "general",
             "max_iterations_no_plan"
             | "max_iterations_plan"
-            | "tool_short_timeout_secs"
-            | "tool_long_timeout_secs"
+            | "tool_bg_secs"
             | "max_unfinished_subtask_retries" => "general",
             "delete_after_days"
             | "thread_summary_tokens"
@@ -955,8 +944,7 @@ pub async fn update_settings_handler(
         "llm_provider",
         "max_pool_connections",
         "max_inline_file_kb",
-        "tool_short_timeout_secs",
-        "tool_long_timeout_secs",
+        "tool_bg_secs",
         "watchdog_default",
         "prompt_char_budget_soft",
         "prompt_char_budget_hard",

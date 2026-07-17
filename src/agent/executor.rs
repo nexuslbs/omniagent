@@ -1319,8 +1319,8 @@ Previous plan:\n{}",
             }
 
             // Snapshot short timeout BEFORE entering the spawned closure (cfg ref issue)
-            let short_timeout_secs = cfg.config_snapshot().tool_short_timeout_secs;
-            let short_timeout = std::time::Duration::from_secs(short_timeout_secs);
+            let bg_threshold_secs = cfg.config_snapshot().tool_bg_secs;
+            let bg_threshold = std::time::Duration::from_secs(bg_threshold_secs);
 
             join_set.spawn(async move {
                 // --- Phase 2: Progress reporting ---
@@ -1363,7 +1363,7 @@ Previous plan:\n{}",
                         error!("{}", msg);
                         Err(crate::error::Error::Message(msg))
                     }
-                    result = tokio::time::timeout(short_timeout, tool_future) => {
+                    result = tokio::time::timeout(bg_threshold, tool_future) => {
                         match result {
                             Ok(result) => result,
                             Err(_elapsed) => {
@@ -1429,7 +1429,7 @@ Previous plan:\n{}",
                                     "status": "processing",
                                     "task_id": task_id,
                                     "tool": qualified_name,
-                                    "timeout_secs": short_timeout.as_secs(),
+                                    "timeout_secs": bg_threshold.as_secs(),
                                     "message": format!(
                                         "Tool '{}' started. Use poll_task, wait_task, or read_task_logs to check progress.",
                                         tool_name
