@@ -345,7 +345,7 @@ impl LLMConfig {
     /// Panics if `LLM_PROVIDER` contains an unrecognised value.
     pub fn from_env() -> Self {
         let provider_name = crate::agent::config::get_global()
-            .map(|g| g.read().unwrap().llm_provider.clone())
+            .map(|g| g.read().unwrap().default_provider.clone())
             .unwrap_or_else(|| "opencode-go".to_string());
 
         let provider = ProviderId::new(&provider_name);

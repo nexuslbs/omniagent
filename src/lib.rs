@@ -6,7 +6,6 @@
 )]
 pub mod agent;
 pub mod commands;
-pub mod complexity;
 pub mod db;
 pub mod error;
 pub mod llm;
@@ -20,4 +19,3 @@ pub mod safety;
 pub mod scheduler;
 pub mod server;
 pub mod subtask;
-pub mod vectorizer;

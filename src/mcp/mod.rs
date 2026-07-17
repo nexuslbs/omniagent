@@ -181,42 +181,11 @@ pub struct McpTool {
     /// Used by the executor to wrap the tool call in tokio::time::timeout().
     /// Falls back to DEFAULT_TOOL_TIMEOUT_SECS if not set.
     pub timeout_secs: u64,
-    /// Optional watchdog configuration for monitoring this tool's execution.
-    /// If None, no watchdog runs for this tool.
-    pub watchdog: Option<WatchdogConfig>,
     pub handler: McpToolHandler,
 }
 
 /// Default timeout for tools that don't specify one (900 seconds = 15 min).
 pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 900;
-
-/// Watchdog configuration for monitoring long-running tool executions.
-/// Defines escalation thresholds that fire at specific fractions of the
-/// tool's timeout. Thresholds are checked sequentially, so they should
-/// be ordered from earliest to latest.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WatchdogConfig {
-    pub thresholds: Vec<WatchdogThreshold>,
-}
-
-/// A single watchdog escalation threshold.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WatchdogThreshold {
-    /// Fraction of the tool's timeout at which to fire (0.0 to 1.0).
-    /// E.g., 0.5 means fire when 50% of the timeout has elapsed.
-    pub at_percent: f64,
-    /// The action to take when this threshold is reached.
-    pub action: WatchdogAction,
-}
-
-/// Action the watchdog takes when a threshold is reached.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WatchdogAction {
-    /// Send a notification message to the user with the given text.
-    Notify { message: String },
-    /// Cancel the tool call and mark it as timed out.
-    Cancel,
-}
 
 /// Registry of all available MCP tools.
 #[derive(Clone)]
@@ -303,11 +272,6 @@ impl McpRegistry {
         self.get(name)
             .map(|t| t.timeout_secs)
             .unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS)
-    }
-
-    /// Get the watchdog configuration for a tool by name.
-    pub fn get_watchdog(&self, name: &str) -> Option<WatchdogConfig> {
-        self.get(name).and_then(|t| t.watchdog.clone())
     }
 
     /// Execute a tool call: directly awaits the async handler (no spawn_blocking).
@@ -435,7 +399,6 @@ fn poll_task_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: 10,
-        watchdog: None,
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
             Box::pin(crate::mcp::task_tools::handle_poll_task(args, ctx))
         }),
@@ -465,7 +428,6 @@ fn wait_task_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: 310,
-        watchdog: None,
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
             Box::pin(crate::mcp::task_tools::handle_wait_task(args, ctx))
         }),
@@ -490,7 +452,6 @@ fn cancel_task_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: 10,
-        watchdog: None,
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
             Box::pin(crate::mcp::task_tools::handle_cancel_task(args, ctx))
         }),
@@ -523,7 +484,6 @@ fn read_task_logs_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: 10,
-        watchdog: None,
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
             Box::pin(crate::mcp::task_tools::handle_read_task_logs(args, ctx))
         }),
@@ -559,7 +519,6 @@ fn read_attached_file_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: DEFAULT_TOOL_TIMEOUT_SECS,
-        watchdog: None,
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let file_id = args
@@ -715,7 +674,6 @@ fn list_tool_details_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: DEFAULT_TOOL_TIMEOUT_SECS,
-        watchdog: None,
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let tool_name = args

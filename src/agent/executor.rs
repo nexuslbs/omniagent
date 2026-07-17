@@ -7,7 +7,7 @@ use crate::agent::helpers;
 use crate::db::types as queries;
 use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, LLMConfig, ProviderId, Usage};
-use crate::mcp::{truncate_content, McpToolCall, McpToolResult, WatchdogAction, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
+use crate::mcp::{truncate_content, McpToolCall, McpToolResult, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
 use tokio::task::JoinSet;
 
 /// Process a single pending thread through the state machine:
@@ -785,8 +785,9 @@ Previous plan:\n{}",
         // Soft budget exceeded → condense every state_block_update_interval turns
         // Hard budget exceeded → condense before ANY LLM call, bring below soft
         //
-        // Uses tiktoken BPE tokenizer for accurate token counting instead of
-        // character-based estimation (which had ~30% JSON overhead error margin).
+        // When `tokenizer_encoding_tool` is set (an MCP tool that counts tokens),
+        // it is called to get accurate token counts. When empty, falls back to
+        // char-based budgets (prompt_char_budget_soft/hard).
 
         let cfg_snapshot = cfg.config_snapshot();
         let prompt_token_soft = cfg_snapshot.prompt_token_budget_soft;
@@ -794,32 +795,43 @@ Previous plan:\n{}",
         let old_msg_budget = cfg_snapshot.old_message_char_budget;
         let keep_turns = cfg_snapshot.condense_keep_turns;
         let state_interval = cfg_snapshot.state_block_update_interval as i32;
-        let tokenizer_enc = cfg_snapshot.tokenizer_encoding.clone();
+        let tokenizer_tool = cfg_snapshot.tokenizer_encoding_tool.clone();
 
-        // Count actual tokens using tiktoken (fast BPE, no network calls),
-        // then apply safety factor to account for provider tokenizer mismatch.
-        // Include tool definitions in the count since they add 200-300K tokens.
-        let token_tools = if tools_def.is_empty() {
-            None
+        // Count tokens using the configured tool, or fall back to char estimation
+        let (current_tokens, raw_tokens, safety_factor, has_tool) =
+            if !tokenizer_tool.is_empty() {
+                // Call the tokenizer tool
+                let token_call = McpToolCall {
+                    name: tokenizer_tool.clone(),
+                    arguments: serde_json::json!({"messages": messages}),
+                    id: String::new(),
+                };
+                match cfg.mcp.read().await.execute(&token_call, cfg.ctx.clone()).await {
+                    Ok(res) => {
+                        let count: usize = serde_json::from_str(&res.content).unwrap_or(0);
+                        (count, count, 1.0, true)
+                    }
+                    Err(_) => {
+                        // Tool failed — fall back to char budgets
+                        (0, 0, 1.0, false)
+                    }
+                }
+            } else {
+                (0, 0, 1.0, false)
+            };
+
+        let needs_hard_condense = if has_tool {
+            current_tokens > prompt_token_hard
         } else {
-            Some(tools_def.as_slice())
+            false
         };
-        let raw_tokens = helpers::count_tokens(&messages, &tokenizer_enc, token_tools);
-        let safety_factor = cfg_snapshot.prompt_token_safety_factor;
-        let current_tokens = (raw_tokens as f64 * safety_factor) as usize;
-
-        // Log token count every 5 iterations for diagnostics
-        if current_iter % 5 == 0 || current_tokens > 50000 {
-            info!(
-                "[context] Iteration {}: ~{} raw tokens (×{:.1} factor = {} effective) in {} messages (soft: {}, hard: {})",
-                current_iter, raw_tokens, safety_factor, current_tokens, messages.len(), prompt_token_soft, prompt_token_hard,
-            );
-        }
-
-        let needs_hard_condense = current_tokens > prompt_token_hard;
-        let needs_soft_condense = current_tokens > prompt_token_soft
-            && state_interval > 0
-            && (current_iter - last_condense_iteration) >= state_interval;
+        let needs_soft_condense = if has_tool {
+            current_tokens > prompt_token_soft
+                && state_interval > 0
+                && (current_iter - last_condense_iteration) >= state_interval
+        } else {
+            false
+        };
 
         if needs_hard_condense || needs_soft_condense {
             // Use the char budget for the condense_messages function's safety
@@ -833,57 +845,49 @@ Previous plan:\n{}",
                 condense_char_soft,
             ) {
                 Ok(condensed) => {
-                    let condensed_raw =
-                        helpers::count_tokens(&condensed, &tokenizer_enc, token_tools);
-                    let condensed_tokens = (condensed_raw as f64 * safety_factor) as usize;
-                    let saved = current_tokens.saturating_sub(condensed_tokens);
+                    let saved = current_tokens.saturating_sub(condensed.len() as usize);
                     messages = condensed;
 
-                    // If hard budget triggered, verify we're now below soft
-                    let after_raw = helpers::count_tokens(&messages, &tokenizer_enc, token_tools);
-                    let after_tokens = (after_raw as f64 * safety_factor) as usize;
-                    if needs_hard_condense && after_tokens > prompt_token_soft {
-                        // Second pass with more aggressive settings
-                        // Use the configured keep_turns (not hardcoded 1) so the
-                        // escalation is actually more aggressive than the first pass.
-                        let aggressive_keep = if keep_turns > 0 {
-                            keep_turns - 1
-                        } else {
-                            0_usize
-                        };
-                        match helpers::condense_messages(
-                            std::mem::take(&mut messages),
-                            old_msg_budget / 2, // halve the old message budget
-                            aggressive_keep,    // at most keep_turns-1, but at least 0
-                            condense_char_soft,
-                        ) {
-                            Ok(tighter) => {
-                                let tighter_raw =
-                                    helpers::count_tokens(&tighter, &tokenizer_enc, token_tools);
-                                let tighter_tokens = (tighter_raw as f64 * safety_factor) as usize;
-                                messages = tighter;
-                                if tighter_tokens > prompt_token_soft {
-                                    warn!(
-                                        "[context] Hard condensation could not bring prompt below soft budget: {} effective tokens (budget: {})",
-                                        tighter_tokens, prompt_token_soft
-                                    );
-                                    // Template is NOT stripped: even a small template (~600 tokens)
-                                    // is critical for task instructions. Stripping it saves negligible
-                                    // context but loses the entire task specification.
-                                    // The context will self-resolve as old tool results get pruned
-                                    // in subsequent iterations.
+                    // If hard budget triggered and we have a tokenizer tool, verify
+                    if has_tool && needs_hard_condense {
+                        let after_raw = messages.iter().map(|m| m.content.len()).sum::<usize>();
+                        let after_tokens = (after_raw as f64 * safety_factor) as usize;
+                        if after_tokens > prompt_token_soft {
+                            // Second pass with more aggressive settings
+                            let aggressive_keep = if keep_turns > 0 {
+                                keep_turns - 1
+                            } else {
+                                0_usize
+                            };
+                            match helpers::condense_messages(
+                                std::mem::take(&mut messages),
+                                old_msg_budget / 2,
+                                aggressive_keep,
+                                condense_char_soft,
+                            ) {
+                                Ok(tighter) => {
+                                    let tighter_raw =
+                                        tighter.iter().map(|m| m.content.len()).sum::<usize>();
+                                    let tighter_tokens = (tighter_raw as f64 * safety_factor) as usize;
+                                    messages = tighter;
+                                    if tighter_tokens > prompt_token_soft {
+                                        warn!(
+                                            "[context] Hard condensation could not bring prompt below soft budget: {} effective tokens (budget: {})",
+                                            tighter_tokens, prompt_token_soft
+                                        );
+                                    }
                                 }
-                            }
-                            Err(e) => {
-                                warn!("[context] Second-pass condensation failed: {}", e);
+                                Err(e) => {
+                                    warn!("[context] Second-pass condensation failed: {}", e);
+                                }
                             }
                         }
                     }
 
                     info!(
-                        "[context] Condensed prompt: {} effective tokens [raw: {}] → {} effective tokens [raw: {}] (saved {}, iteration {})",
-                        current_tokens, raw_tokens,
-                        condensed_tokens, condensed_raw,
+                        "[context] Condensed prompt: {} effective → {} messages (saved {}, iteration {})",
+                        current_tokens,
+                        messages.len(),
                         saved,
                         current_iter,
                     );
@@ -1234,8 +1238,6 @@ Previous plan:\n{}",
         let mcp_registry = cfg.mcp.clone();
         let mut join_set = JoinSet::new();
 
-        use std::sync::Arc as StdArc;
-
         for (idx, tc) in response.tool_calls.iter().enumerate() {
             let tool_name = tc.function.name.clone();
             let tool_args = tc.function.arguments.clone();
@@ -1269,183 +1271,93 @@ Previous plan:\n{}",
             let timeout_secs = mcp_snapshot.get_timeout_secs(&tool_name);
             let timeout_dur = std::time::Duration::from_secs(timeout_secs);
 
-            // --- Phase 3: Resolve watchdog config ---
-            // 1. Per-tool watchdog from the tool's registration
-            // 2. Fallback to global watchdog from cfg.config
-            // 3. If neither, no watchdog
-            let watchdog = mcp_snapshot.get_watchdog(&tool_name).or_else(|| {
-                cfg.config.read().ok().and_then(|c| c.global_watchdog.clone())
-            });
-
-            // Shared cancel signal between watchdog and tool execution
-            let cancel_token = StdArc::new(tokio::sync::Notify::new());
-            let cancel_token_clone = cancel_token.clone();
-
-            // Channel for progress messages from watchdog
-            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-
-            // --- Spawn watchdog task (Phase 2 + Phase 3) ---
-            if let Some(wd) = watchdog {
-                let wd_timeout = timeout_secs;
-                let wd_cancel = cancel_token_clone;
-                let wd_progress = progress_tx.clone();
-                let wd_tool_name = tool_name.clone();
-                tokio::spawn(async move {
-                    let started = std::time::Instant::now();
-                    let mut sorted = wd.thresholds.clone();
-                    sorted.sort_by(|a, b| a.at_percent.partial_cmp(&b.at_percent).unwrap_or(std::cmp::Ordering::Equal));
-
-                    for threshold in &sorted {
-                        let delay_secs = (wd_timeout as f64 * threshold.at_percent).max(0.1);
-                        tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs - started.elapsed().as_secs_f64().max(0.0))).await;
-                        match &threshold.action {
-                            WatchdogAction::Notify { message } => {
-                                let elapsed = started.elapsed().as_secs_f64();
-                                let pct = (elapsed / wd_timeout as f64 * 100.0) as u32;
-                                let notif = format!("[Watchdog] {} ({}s elapsed, ~{}%)", message, elapsed as u64, pct);
-                                tracing::info!("Watchdog({}): {}", wd_tool_name, notif);
-                                let _ = wd_progress.send(notif);
-                            }
-                            WatchdogAction::Cancel => {
-                                tracing::warn!("Watchdog cancelling tool '{}' after {}s ({}% of timeout)",
-                                    wd_tool_name, started.elapsed().as_secs_f64() as u64,
-                                    (started.elapsed().as_secs_f64() / wd_timeout as f64 * 100.0) as u32);
-                                wd_cancel.notify_one();
-                                break;
-                            }
-                        }
-                    }
-                });
-            }
-
-            // Snapshot short timeout BEFORE entering the spawned closure (cfg ref issue)
+            // Snapshot bg threshold BEFORE entering the spawned closure (cfg ref issue)
             let bg_threshold_secs = cfg.config_snapshot().tool_bg_secs;
             let bg_threshold = std::time::Duration::from_secs(bg_threshold_secs);
 
             join_set.spawn(async move {
-                // --- Phase 2: Progress reporting ---
-                // Forward progress notifications to the DB while tool executes.
-                // Run this alongside the tool execution.
-                let pool_for_progress = pool.clone();
-                let tool_name_for_progress = tool_name.clone();
-                let progress_task = tokio::spawn(async move {
-                    while let Some(progress_msg) = progress_rx.recv().await {
-                        let next_seq = queries::get_max_thread_sequence(&pool_for_progress, tid)
-                            .await.unwrap_or(0) + 1;
-                        let progress_entry = MessageNew {
-                            thread_id: tid,
-                            role: "agent".to_string(),
-                            content: progress_msg,
-                            thread_sequence: next_seq,
-                            external_id: None,
-                            metadata: serde_json::json!({"progress": true}),
-                            embedding: None,
-                            summary_text: None,
-                            is_summary: false,
-                            msg_type: "tool_progress".to_string(),
-                            msg_subtype: Some(tool_name_for_progress.clone()),
-                            iteration_number: iter_num,
-                        };
-                        let _ = queries::create_message(&pool_for_progress, &progress_entry).await;
-                    }
-                });
 
                 // Execute with short timeout (fast path) + background fallback
                 let tool_future = mcp_snapshot.execute(&mcp_call, tool_ctx.clone());
 
-                let result = tokio::select! {
-                    biased;
-                    _ = cancel_token.notified() => {
-                        let msg = format!(
-                            "Tool '{}' was cancelled by watchdog",
-                            tool_name,
-                        );
-                        error!("{}", msg);
-                        Err(crate::error::Error::Message(msg))
-                    }
-                    result = tokio::time::timeout(bg_threshold, tool_future) => {
-                        match result {
-                            Ok(result) => result,
-                            Err(_elapsed) => {
-                                // Short timeout exceeded — switch to background mode.
-                                // Register the tool in the task registry for polling.
-                                let registry = crate::agent::task_registry::TASK_REGISTRY
-                                    .get()
-                                    .cloned()
-                                    .expect("TASK_REGISTRY not initialized");
-                                let (task_id, abort_rx, _log_buffer) = registry
-                                    .register(tid, &tool_name)
-                                    .await;
-                                let task_id_bg = task_id.clone();
+                let result = match tokio::time::timeout(bg_threshold, tool_future).await {
+                    Ok(result) => result,
+                    Err(_elapsed) => {
+                        // Short timeout exceeded — switch to background mode.
+                        // Register the tool in the task registry for polling.
+                        let registry = crate::agent::task_registry::TASK_REGISTRY
+                            .get()
+                            .cloned()
+                            .expect("TASK_REGISTRY not initialized");
+                        let (task_id, abort_rx, _log_buffer) = registry
+                            .register(tid, &tool_name)
+                            .await;
+                        let task_id_bg = task_id.clone();
 
-                                // Spawn background task with the full long timeout
-                                let bg_mcp_call = mcp_call.clone();
-                                let bg_mcp_snapshot = mcp_snapshot.clone();
-                                let bg_timeout = timeout_dur;
-                                let bg_tool_name = tool_name.clone();
-                                let bg_registry = registry.clone();
+                        // Spawn background task with the per-tool timeout
+                        let bg_mcp_call = mcp_call.clone();
+                        let bg_mcp_snapshot = mcp_snapshot.clone();
+                        let bg_timeout = timeout_dur;
+                        let bg_tool_name = tool_name.clone();
+                        let bg_registry = registry.clone();
 
-                                tokio::spawn(async move {
-                                    let bg_tool_future = bg_mcp_snapshot.execute(&bg_mcp_call, tool_ctx);
-                                    let bg_result = tokio::select! {
-                                        _ = abort_rx => {
+                        tokio::spawn(async move {
+                            let bg_tool_future = bg_mcp_snapshot.execute(&bg_mcp_call, tool_ctx);
+                            let bg_result = tokio::select! {
+                                _ = abort_rx => {
+                                    bg_registry.set_status(&task_id_bg,
+                                        crate::agent::task_registry::TaskStatus::Cancelled).await;
+                                    bg_registry.append_log(&task_id_bg,
+                                        &format!("Tool '{}' was cancelled", bg_tool_name)).await;
+                                    return;
+                                }
+                                result = tokio::time::timeout(bg_timeout, bg_tool_future) => {
+                                    match result {
+                                        Ok(Ok(res)) => {
+                                            let truncated = truncate_content(
+                                                &res.content, DEFAULT_MAX_TOOL_OUTPUT_CHARS);
                                             bg_registry.set_status(&task_id_bg,
-                                                crate::agent::task_registry::TaskStatus::Cancelled).await;
-                                            bg_registry.append_log(&task_id_bg,
-                                                &format!("Tool '{}' was cancelled", bg_tool_name)).await;
-                                            return;
+                                                crate::agent::task_registry::TaskStatus::Completed(
+                                                    truncated)).await;
                                         }
-                                        result = tokio::time::timeout(bg_timeout, bg_tool_future) => {
-                                            match result {
-                                                Ok(Ok(res)) => {
-                                                    let truncated = truncate_content(
-                                                        &res.content, DEFAULT_MAX_TOOL_OUTPUT_CHARS);
-                                                    bg_registry.set_status(&task_id_bg,
-                                                        crate::agent::task_registry::TaskStatus::Completed(
-                                                            truncated)).await;
-                                                }
-                                                Ok(Err(e)) => {
-                                                    let err = format!("Error: {}", e);
-                                                    bg_registry.set_status(&task_id_bg,
-                                                        crate::agent::task_registry::TaskStatus::Failed(
-                                                            err)).await;
-                                                }
-                                                Err(_) => {
-                                                    let err = format!(
-                                                        "Tool '{}' exceeded long timeout ({}s)",
-                                                        bg_tool_name, bg_timeout.as_secs());
-                                                    bg_registry.set_status(&task_id_bg,
-                                                        crate::agent::task_registry::TaskStatus::Failed(
-                                                            err)).await;
-                                                }
-                                            }
+                                        Ok(Err(e)) => {
+                                            let err = format!("Error: {}", e);
+                                            bg_registry.set_status(&task_id_bg,
+                                                crate::agent::task_registry::TaskStatus::Failed(
+                                                    err)).await;
                                         }
-                                    };
-                                    let _ = bg_result;
-                                });
+                                        Err(_) => {
+                                            let err = format!(
+                                                "Tool '{}' exceeded long timeout ({}s)",
+                                                bg_tool_name, bg_timeout.as_secs());
+                                            bg_registry.set_status(&task_id_bg,
+                                                crate::agent::task_registry::TaskStatus::Failed(
+                                                    err)).await;
+                                        }
+                                    }
+                                }
+                            };
+                            let _ = bg_result;
+                        });
 
-                                // Return a McpToolResult containing processing status
-                                let processing_json = serde_json::json!({
-                                    "status": "processing",
-                                    "task_id": task_id,
-                                    "tool": qualified_name,
-                                    "timeout_secs": bg_threshold.as_secs(),
-                                    "message": format!(
-                                        "Tool '{}' started. Use poll_task, wait_task, or read_task_logs to check progress.",
-                                        tool_name
-                                    ),
-                                });
-                                Ok(McpToolResult {
-                                    call_id: tc_id.clone(),
-                                    content: processing_json.to_string(),
-                                    is_error: false,
-                                })
-                            }
-                        }
+                        // Return a McpToolResult containing processing status
+                        let processing_json = serde_json::json!({
+                            "status": "processing",
+                            "task_id": task_id,
+                            "tool": qualified_name,
+                            "timeout_secs": bg_threshold.as_secs(),
+                            "message": format!(
+                                "Tool '{}' started. Use poll_task, wait_task, or read_task_logs to check progress.",
+                                tool_name
+                            ),
+                        });
+                        Ok(McpToolResult {
+                            call_id: tc_id.clone(),
+                            content: processing_json.to_string(),
+                            is_error: false,
+                        })
                     }
                 };
-                // Stop progress task
-                progress_task.abort();
 
                 let (output, is_error) = match &result {
                     Ok(res) => {

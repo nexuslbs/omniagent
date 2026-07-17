@@ -61,13 +61,13 @@ impl Agent {
         let env_cfg = crate::llm::LLMConfig::from_env();
         // Read config fields inside a scope so the borrow is dropped before
         // moving `config` into the struct.
-        let (llm_provider, llm_api_key, max_tokens, temperature) = {
+        let (default_provider, llm_api_key, max_tokens, temperature) = {
             let cfg_read = config.read().unwrap();
             (
-                if cfg_read.llm_provider.is_empty() {
+                if cfg_read.default_provider.is_empty() {
                     env_cfg.provider.clone()
                 } else {
-                    crate::llm::ProviderId::new(&cfg_read.llm_provider)
+                    crate::llm::ProviderId::new(&cfg_read.default_provider)
                 },
                 if cfg_read.llm_api_key.is_empty() {
                     env_cfg.api_key.clone()
@@ -79,7 +79,7 @@ impl Agent {
             )
         };
         let llm_config = crate::llm::LLMConfig {
-            provider: llm_provider,
+            provider: default_provider,
             api_key: llm_api_key,
             base_url: env_cfg.base_url,
             model: env_cfg.model,
