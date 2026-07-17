@@ -376,7 +376,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 description: "Data directory for profiles and wiki (read-only, from env OMNI_DIR)".into(),
                 options: None,
                 readonly: true,
-                default: Some("".into()),
+                default: Some("/opt/omni".into()),
             },
         ),
         // ── Prompts ──
@@ -429,8 +429,13 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             settings: vec![],
         },
         SettingCategory {
-            name: "planning".into(),
-            label: "Planning".into(),
+            name: "prompt".into(),
+            label: "Prompt".into(),
+            settings: vec![],
+        },
+        SettingCategory {
+            name: "execution".into(),
+            label: "Execution".into(),
             settings: vec![],
         },
         SettingCategory {
@@ -447,24 +452,27 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
 
     for (name, value, meta) in defs {
         let cat_name = match name.as_str() {
-            "max_tokens" | "temperature" => "general",
+            // prompt category
+            "max_inline_file_kb"
+            | "prompt_generate_tool"
+            | "prompt_compact_messages_tool"
+            | "prompt_log_level" => "prompt",
+            // execution category
             "max_iterations_no_plan"
             | "max_iterations_plan"
-            | "tool_bg_secs"
-            | "max_unfinished_subtask_retries" => "general",
+            | "max_tokens"
+            | "max_unfinished_subtask_retries"
+            | "temperature"
+            | "tool_bg_secs" => "execution",
+            // memory category
             "delete_after_days"
             | "thread_summary_tokens"
             | "memory_max_chars"
             | "soul_max_chars" => "memory",
-            "max_pool_connections"
-            | "max_inline_file_kb"
-            | "prompt_generate_tool"
-            | "prompt_compact_messages_tool"
-            | "default_provider"
-            | "prompt_log_level"
-            | "default_profile"
-            | "platform_max_spawn_retries" => "general",
-            _ => "system",
+            // system — bootstrap from env
+            "host" | "port" | "database_url" | "omni_dir" => "system",
+            // everything else → general
+            _ => "general",
         };
 
         if let Some(cat) = categories.iter_mut().find(|c| c.name == cat_name) {
