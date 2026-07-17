@@ -3415,17 +3415,26 @@ async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Vec<String>),
             "tool" => {
                 let running = active_mcp.contains(name);
                 if enabled && !running {
-                    match crate::mcp::external::client::initialize_single_server_tools(
-                        &state.data_dir,
-                        name,
+                    // Timeout to prevent a hanging MCP subprocess spawn
+                    // from blocking the entire reload endpoint indefinitely.
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(15),
+                        crate::mcp::external::client::initialize_single_server_tools(
+                            &state.data_dir,
+                            name,
+                        ),
                     )
                     .await
                     {
-                        Ok(ts) => {
+                        Ok(Ok(ts)) => {
                             state.tool_registry.write().await.register_all(ts);
                             started += 1;
                         }
-                        Err(e) => errors.push(format!("{} MCP: {}", name, e)),
+                        Ok(Err(e)) => errors.push(format!("{} MCP: {}", name, e)),
+                        Err(_) => errors.push(format!(
+                            "{} MCP: initialization timed out (15s)",
+                            name
+                        )),
                     }
                 } else if !enabled && running {
                     state.tool_registry.write().await.remove_by_server(name);
