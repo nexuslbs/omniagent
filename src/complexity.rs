@@ -32,15 +32,13 @@ pub fn classify_complexity(
     let char_len = trimmed.len();
     let word_count = trimmed.split_whitespace().count();
 
-    // Read thresholds from env with hardcoded defaults matching existing behavior
-    let simple_max: usize = std::env::var("PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS")
-        .unwrap_or_else(|_| "60".to_string())
-        .parse()
-        .unwrap_or(60);
-    let standard_max: usize = std::env::var("PLANNING_COMPLEXITY_STANDARD_MAX_CHARS")
-        .unwrap_or_else(|_| "200".to_string())
-        .parse()
-        .unwrap_or(200);
+    // Read thresholds from global config, used after hot-reload
+    let (simple_max, standard_max) = crate::agent::config::get_global()
+        .map(|g| {
+            let c = g.read().unwrap();
+            (c.planning_complexity_simple_max_chars, c.planning_complexity_standard_max_chars)
+        })
+        .unwrap_or((60, 200));
 
     // Simple: short messages, greetings, acknowledgments
     if char_len < simple_max || word_count <= 3 {
@@ -70,8 +68,10 @@ pub fn classify_complexity(
 
     // Complex: specific action keywords or kanban/cron tasks with content
     let lower = trimmed.to_lowercase();
-    let keywords_raw = std::env::var("PLANNING_COMPLEXITY_KEYWORDS").unwrap_or_else(|_| {
-        "implement,refactor,redesign,architecture,create,build,design,develop,\
+    let keywords_raw = crate::agent::config::get_global()
+        .map(|g| g.read().unwrap().planning_complexity_keywords.clone())
+        .unwrap_or_else(|| {
+            "implement,refactor,redesign,architecture,create,build,design,develop,\
              migrate,restructure,overhaul,rewrite,configure,set up,deploy,integrate,\
              add feature,fix bug,resolve issue,multi-step,complex"
             .to_string()

@@ -297,18 +297,18 @@ pub async fn create_thread_with_cause(
                 .or_else(|| crate::llm::resolve_default_model(prov));
             (prov.to_string(), model)
         }
-        // Env var level: LLM_PROVIDER → always use provider default_model
+        // Global config level: llm_provider from settings.yml
         else {
-            match std::env::var("LLM_PROVIDER") {
-                Ok(prov) if !prov.is_empty() => {
-                    let model = crate::llm::resolve_default_model(&prov);
-                    (prov, model)
-                }
-                _ => {
-                    return Err(Error::Message(
-                        "No LLM provider configured. Set LLM_PROVIDER env var, or configure a provider in the channel or profile.".to_string()
-                    ));
-                }
+            let prov = crate::agent::config::get_global()
+                .map(|g| g.read().unwrap().llm_provider.clone())
+                .unwrap_or_else(|| "openai".to_string());
+            if !prov.is_empty() {
+                let model = crate::llm::resolve_default_model(&prov);
+                (prov, model)
+            } else {
+                return Err(Error::Message(
+                    "No LLM provider configured. Set LLM_PROVIDER env var, or configure a provider in the channel or profile.".to_string()
+                ));
             }
         }
     };

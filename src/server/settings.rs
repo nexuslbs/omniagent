@@ -668,6 +668,77 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 default: Some("".into()),
             },
         ),
+        // ── Group 2 settings ──
+        (
+            "planning_complexity_simple_max_chars".into(),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Max chars for 'simple' complexity classification".into(),
+                options: None,
+                readonly: false,
+                default: Some("60".into()),
+            },
+        ),
+        (
+            "planning_complexity_standard_max_chars".into(),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Max chars for 'standard' complexity classification".into(),
+                options: None,
+                readonly: false,
+                default: Some("200".into()),
+            },
+        ),
+        (
+            "planning_complexity_keywords".into(),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "Comma-separated keywords that trigger 'complex' classification".into(),
+                options: None,
+                readonly: false,
+                default: Some("implement,refactor,redesign,architecture,create,build,design,develop,deploy".into()),
+            },
+        ),
+        (
+            "platform_max_spawn_retries".into(),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Max retries for spawning platform messages (external channels)".into(),
+                options: None,
+                readonly: false,
+                default: Some("3".into()),
+            },
+        ),
+        (
+            "default_profile".into(),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "Default profile name used at login / session start".into(),
+                options: None,
+                readonly: false,
+                default: Some("default".into()),
+            },
+        ),
+        (
+            "workspace_dir".into(),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "Workspace directory path for project files".into(),
+                options: None,
+                readonly: false,
+                default: Some("/opt/workspace".into()),
+            },
+        ),
+        (
+            "mcp_servers_config".into(),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "Path to MCP servers config file".into(),
+                options: None,
+                readonly: false,
+                default: Some("".into()),
+            },
+        ),
     ]
 }
 
@@ -718,6 +789,13 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "prompt_token_safety_factor"
             | "vectorize_messages" | "messages_vectorization_method" | "messages_vectorization_api_url" | "messages_vectorization_interval" | "messages_vectorization_protocol" | "messages_vectorization_api_key" | "messages_vectorization_api_model"
             | "vectorize_wiki" | "wiki_vectorization_method" | "wiki_vectorization_api_url" | "wiki_vectorization_interval" | "wiki_vectorization_protocol" | "wiki_vectorization_api_key" | "wiki_vectorization_api_model" => "general",
+            "planning_complexity_simple_max_chars"
+            | "planning_complexity_standard_max_chars"
+            | "planning_complexity_keywords" => "planning",
+            "platform_max_spawn_retries"
+            | "default_profile"
+            | "workspace_dir"
+            | "mcp_servers_config" => "system",
             _ => "system",
         };
 
@@ -904,6 +982,13 @@ pub async fn update_settings_handler(
         "wiki_vectorization_api_key",
         "wiki_vectorization_api_model",
         "prompt_log_level",
+        "planning_complexity_simple_max_chars",
+        "planning_complexity_standard_max_chars",
+        "planning_complexity_keywords",
+        "platform_max_spawn_retries",
+        "default_profile",
+        "workspace_dir",
+        "mcp_servers_config",
     ]
     .into_iter()
     .collect();

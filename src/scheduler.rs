@@ -735,14 +735,16 @@ pub(crate) fn resolve_thread_config(
                 .or_else(|| crate::llm::resolve_default_model(prov));
             (prov.to_string(), m)
         }
-        // Env var level
+        // Global config level: llm_provider from settings.yml
         else {
-            match std::env::var("LLM_PROVIDER") {
-                Ok(prov) if !prov.is_empty() => {
-                    let m = crate::llm::resolve_default_model(&prov);
-                    (prov, m)
-                }
-                _ => return None,
+            let llm_provider = crate::agent::config::get_global()
+                .map(|g| g.read().unwrap().llm_provider.clone())
+                .unwrap_or_else(|| "openai".to_string());
+            if !llm_provider.is_empty() {
+                let m = crate::llm::resolve_default_model(&llm_provider);
+                (llm_provider, m)
+            } else {
+                return None;
             }
         }
     };

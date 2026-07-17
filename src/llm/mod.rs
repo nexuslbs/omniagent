@@ -169,8 +169,9 @@ fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
 /// Scans development sources first (plugins/providers/), then installed
 /// plugins (data/plugins/installed/). Installed plugins override bundled ones.
 pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::new(|| {
-    let workspace_dir =
-        std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
+    let workspace_dir = crate::agent::config::get_global()
+        .map(|g| g.read().unwrap().workspace_dir.clone())
+        .unwrap_or_else(|| "/opt/workspace".to_string());
     let data_dir = match std::env::var("OMNI_DIR") {
         Ok(d) => d,
         Err(_) => {
@@ -343,8 +344,9 @@ impl LLMConfig {
     ///
     /// Panics if `LLM_PROVIDER` contains an unrecognised value.
     pub fn from_env() -> Self {
-        let provider_name =
-            std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "opencode-go".to_string());
+        let provider_name = crate::agent::config::get_global()
+            .map(|g| g.read().unwrap().llm_provider.clone())
+            .unwrap_or_else(|| "opencode-go".to_string());
 
         let provider = ProviderId::new(&provider_name);
         let base_url = resolve_default_base_url(&provider_name);
