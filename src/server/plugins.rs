@@ -3347,8 +3347,28 @@ pub(crate) fn reload_env_handler(
     State(state): State<Arc<AppState>>,
 ) -> Pin<Box<dyn Future<Output = Response<Body>> + Send>> {
     Box::pin(async move {
-        let env_refreshed = refresh_env_from_file(&state.env_path);
-        let result = reload_plugins(state).await;
+        tracing::info!("Reload: starting");
+        let env_path = state.env_path.clone();
+        tracing::info!("Reload: reading .env from {}", env_path);
+        let env_refreshed = refresh_env_from_file(&env_path);
+        tracing::info!("Reload: .env read ({} vars), now reloading plugins", env_refreshed);
+
+        // Run reload in a spawned task with a 30s timeout so a stuck
+        // spawn_blocking or MCP init can't hang the endpoint forever.
+        let state_clone = state.clone();
+        let result = tokio::select! {
+            result = tokio::spawn(async move { reload_plugins(state_clone).await }) => {
+                match result {
+                    Ok(r) => r,
+                    Err(e) => Err(format!("Reload task panicked: {}", e)),
+                }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                Err("Reload timed out after 30s".to_string())
+            }
+        };
+
+        tracing::info!("Reload: plugins reloaded: {:?}", result.as_ref().ok());
         format_reload_response(env_refreshed, result)
     })
 }
@@ -3392,6 +3412,7 @@ async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Vec<String>),
             .await
             .map_err(|e| format!("Task join: {}", e))?
             .map_err(|e| format!("list_plugins: {}", e))?;
+    tracing::info!("Reload: listed {} plugins", all_plugins.len());
 
     // 2. Snapshot current runtime state (tokio locks, Send-safe)
     let active_mcp: std::collections::HashSet<String> = {
