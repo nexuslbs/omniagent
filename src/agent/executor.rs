@@ -790,7 +790,7 @@ Previous plan:\n{}",
         // is agnostic to condensation logic — it passes messages and
         // iteration info and applies whatever the tool returns.
         let cfg_snapshot = cfg.config_snapshot();
-        let condense_tool = cfg_snapshot.condense_tool_name.clone();
+        let condense_tool = cfg_snapshot.compact_messages_tool_name.clone();
         if !condense_tool.is_empty() {
             let condense_call = McpToolCall {
                 name: condense_tool.clone(),

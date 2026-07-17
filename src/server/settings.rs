@@ -379,17 +379,6 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 default: Some("".into()),
             },
         ),
-        // ── Context Condensation ──
-        (
-            "condense_tool".into(),
-            SettingMeta {
-                field_type: "select".into(),
-                description: "Name of the MCP tool to call for condensing conversation context before each LLM call. The tool decides when and how to condense based on its own configuration.".into(),
-                options: None,
-                readonly: false,
-                default: Some("prompt_compact-messages".into()),
-            },
-        ),
         // ── Prompts ──
         (
             "prompt_log_level".into(),
@@ -471,7 +460,6 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "max_inline_file_kb"
             | "prompt_generate_tool"
             | "prompt_compact_messages_tool"
-            | "condense_tool"
             | "default_provider"
             | "prompt_log_level"
             | "default_profile"
@@ -583,7 +571,7 @@ pub async fn get_settings_handler(
     // Enrich prompt_generate_tool and prompt_compact_messages_tool with available MCP tools
     let registry = state.tool_registry.read().await;
     let mcp_tools: Vec<&crate::mcp::McpTool> = registry.all();
-    for tool_key in ["prompt_generate_tool", "prompt_compact_messages_tool", "condense_tool"] {
+    for tool_key in ["prompt_generate_tool", "prompt_compact_messages_tool"] {
         if let Some((_, _, ref mut meta)) = defs.iter_mut().find(|(name, _, _)| name.as_str() == tool_key)
         {
             let mut options: Vec<SettingOption> = mcp_tools
@@ -637,7 +625,6 @@ pub async fn update_settings_handler(
         "max_inline_file_kb",
         "tool_bg_secs",
         "prompt_log_level",
-        "condense_tool",
         "platform_max_spawn_retries",
         "default_profile",
     ]
