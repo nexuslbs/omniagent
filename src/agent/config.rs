@@ -93,10 +93,6 @@ pub struct AgentConfig {
     /// MCP tool name for compacting conversation history.
     /// Default: "prompt_compact-messages".
     pub compact_messages_tool_name: String,
-    /// Name of the MCP tool to call for condensing conversation context before each LLM call.
-    /// The tool decides when and how to condense based on its own configuration.
-    /// Default: "prompt_compact-messages".
-    pub condense_tool_name: String,
 
     // When to insert prompts as messages (msg_type: "prompt") into the messages table.
     /// - "off": never insert
@@ -174,7 +170,6 @@ impl AgentConfig {
             delete_after_days: get("delete_after_days", "30").parse().unwrap_or(30),
             prompt_tool_name: get("prompt_generate_tool", "prompt_generate"),
             compact_messages_tool_name: get("prompt_compact_messages_tool", "prompt_compact-messages"),
-            condense_tool_name: get("condense_tool", "prompt_compact-messages"),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
@@ -227,7 +222,6 @@ impl AgentConfig {
             delete_after_days: get("delete_after_days", "30").parse().unwrap_or(30),
             prompt_tool_name: get("prompt_generate_tool", "prompt_generate"),
             compact_messages_tool_name: get("prompt_compact_messages_tool", "prompt_compact-messages"),
-            condense_tool_name: get("condense_tool", "prompt_compact-messages"),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
