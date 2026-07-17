@@ -3271,29 +3271,37 @@ use std::pin::Pin;
 pub(crate) async fn restart_plugin_handler(
     Path(name): Path<String>,
     State(state): State<Arc<AppState>>,
-) -> Response {
+) -> Response<Body> {
     // First disable the plugin
+    let disable_req = PluginSourceRequest {
+        source: None,
+        remote: None,
+    };
     let disable_resp = disable_plugin_handler(
         Path(name.clone()),
-        Query(PluginActionQuery {
-            source: None,
-            keep_yaml: None,
-        }),
         State(state.clone()),
+        Json(disable_req),
     )
-    .await;
+    .await
+    .into_response();
 
     // Check if disable succeeded — if it returned non-OK, propagate the error
     if disable_resp.status() != StatusCode::OK {
         return disable_resp;
     }
 
-    // Then re-enable with the original source (or autodetect)
+    // Then re-enable
+    let enable_req = PluginSourceRequest {
+        source: None,
+        remote: None,
+    };
     let enable_resp = enable_plugin_handler(
         Path(name.clone()),
         State(state.clone()),
+        Json(enable_req),
     )
-    .await;
+    .await
+    .into_response();
 
     if enable_resp.status() == StatusCode::OK {
         (StatusCode::OK, Json(serde_json::json!({
