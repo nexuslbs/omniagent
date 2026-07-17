@@ -159,9 +159,11 @@ impl Profile {
     }
 }
 
-/// Read the default profile name from the DEFAULT_PROFILE env var, falling back to "default".
+/// Read the default profile name from the global config, falling back to "default".
 pub fn default_profile_name() -> String {
-    std::env::var("DEFAULT_PROFILE").unwrap_or_else(|_| "default".to_string())
+    crate::agent::config::get_global()
+        .map(|g| g.read().unwrap().default_profile.clone())
+        .unwrap_or_else(|| "default".to_string())
 }
 
 /// The profile configuration loaded from the data directory.

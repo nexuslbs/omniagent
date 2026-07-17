@@ -158,6 +158,24 @@ pub struct AgentConfig {
     pub wiki_vectorization_protocol: String,
     pub wiki_vectorization_api_key: Option<String>,
     pub wiki_vectorization_api_model: Option<String>,
+
+    // ── Settings from settings.yml ──
+    /// Max chars for "simple" classification in complexity analysis.
+    pub planning_complexity_simple_max_chars: usize,
+    /// Max chars for "standard" classification in complexity analysis.
+    pub planning_complexity_standard_max_chars: usize,
+    /// Comma-separated keywords that trigger "complex" classification.
+    pub planning_complexity_keywords: String,
+    /// Max retries for spawning platform messages (external channels).
+    pub platform_max_spawn_retries: u32,
+    /// Max inline file KB for attachments.
+    pub max_inline_file_kb: u32,
+    /// Default profile name (used at login / session start).
+    pub default_profile: String,
+    /// Workspace directory path.
+    pub workspace_dir: String,
+    /// Path to MCP servers config file.
+    pub mcp_servers_config: String,
 }
 
 /// Shared context bundle used by channel_handler and process_thread.
@@ -325,6 +343,30 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "openai".to_string()),
             wiki_vectorization_api_key: std::env::var("WIKI_VECTORIZATION_API_KEY").ok(),
             wiki_vectorization_api_model: std::env::var("WIKI_VECTORIZATION_API_MODEL").ok(),
+
+            // ── Group 2 settings from env ──
+            planning_complexity_simple_max_chars: std::env::var("PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse()
+                .unwrap_or(60),
+            planning_complexity_standard_max_chars: std::env::var("PLANNING_COMPLEXITY_STANDARD_MAX_CHARS")
+                .unwrap_or_else(|_| "200".to_string())
+                .parse()
+                .unwrap_or(200),
+            planning_complexity_keywords: std::env::var("PLANNING_COMPLEXITY_KEYWORDS").unwrap_or_else(|_| {
+                "implement,refactor,redesign,architecture,create,build,design,develop,deploy,test,migrate,integrate,optimize,setup,configure,investigate,debug,fix,resolve,restructure,refactor".to_string()
+            }),
+            platform_max_spawn_retries: std::env::var("PLATFORM_MAX_SPAWN_RETRIES")
+                .unwrap_or_else(|_| "3".to_string())
+                .parse()
+                .unwrap_or(3),
+            max_inline_file_kb: std::env::var("MAX_INLINE_FILE_KB")
+                .unwrap_or_else(|_| "100".to_string())
+                .parse()
+                .unwrap_or(100),
+            default_profile: std::env::var("DEFAULT_PROFILE").unwrap_or_else(|_| "default".to_string()),
+            workspace_dir: std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string()),
+            mcp_servers_config: std::env::var("MCP_SERVERS_CONFIG").unwrap_or_default(),
         })
     }
 
@@ -438,6 +480,24 @@ impl AgentConfig {
                 .get("wiki_vectorization_api_model")
                 .cloned()
                 .filter(|v| !v.is_empty()),
+
+            // ── Group 2 settings ──
+            planning_complexity_simple_max_chars: get("planning_complexity_simple_max_chars", "60")
+                .parse()
+                .unwrap_or(60),
+            planning_complexity_standard_max_chars: get("planning_complexity_standard_max_chars", "200")
+                .parse()
+                .unwrap_or(200),
+            planning_complexity_keywords: get("planning_complexity_keywords", ""),
+            platform_max_spawn_retries: get("platform_max_spawn_retries", "3")
+                .parse()
+                .unwrap_or(3),
+            max_inline_file_kb: get("max_inline_file_kb", "100")
+                .parse()
+                .unwrap_or(100),
+            default_profile: get("default_profile", "default"),
+            workspace_dir: get("workspace_dir", "/opt/workspace"),
+            mcp_servers_config: get("mcp_servers_config", ""),
         })
     }
 }

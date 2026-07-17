@@ -117,15 +117,7 @@ and they will be sent as native photos."),
 fn read_memory_section(memory_store: &MemoryStore) -> String {
     let raw = memory_store.get_memory_raw();
     if raw.is_empty() { return String::new(); }
-    let truncated = truncate_content(raw, memory_max_chars());
-    let header = if raw.len() > memory_max_chars() {
-        format!("## MEMORY (your personal notes) [TRUNCATED: showing first {} of {} chars]", memory_max_chars(), raw.len())
-    } else {
-        let line_count = raw.lines().count();
-        format!("## MEMORY (your personal notes) [{}%: {}/{} chars]", 
-            100, raw.len(), raw.len())
-    };
-    format!("{header}\n{truncated}")
+    format!("## MEMORY (your personal notes)\n{}", raw)
 }
 
 fn read_user_profile_section(memory_store: &MemoryStore) -> String {

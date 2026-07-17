@@ -728,7 +728,11 @@ async fn prompt_preview_handler(
         let provider_name = match ch_provider
             .filter(|s| !s.is_empty())
             .or_else(|| prof.provider.clone().filter(|s| !s.is_empty()))
-            .or_else(|| std::env::var("LLM_PROVIDER").ok().filter(|s| !s.is_empty()))
+            .or_else(|| {
+                crate::agent::config::get_global()
+                    .map(|g| g.read().unwrap().llm_provider.clone())
+                    .filter(|s| !s.is_empty())
+            })
         {
             Some(p) => p,
             None => {
@@ -1010,8 +1014,9 @@ async fn call_prompt_context(
     thread_id: i64,
     channel_id: i64,
 ) -> String {
-    let prompt_tool_name = std::env::var("PROMPT_GENERATE_TOOL")
-        .unwrap_or_else(|_| "prompt_generate".to_string());
+    let prompt_tool_name = crate::agent::config::get_global()
+        .map(|g| g.read().unwrap().prompt_tool_name.clone())
+        .unwrap_or_else(|| "prompt_generate".to_string());
 
     // Collect all available tool names (same as the executor does)
     let tool_names: Vec<String> = tool_registry

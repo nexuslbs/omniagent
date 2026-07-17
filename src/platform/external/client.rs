@@ -294,10 +294,9 @@ impl Platform for ExternalPlatformClient {
         tracing::info!("Starting external platform plugin '{}'", self.name);
 
         // Track consecutive failures with exponential backoff for the spawn loop
-        let max_spawn_retries: u32 = std::env::var("PLATFORM_MAX_SPAWN_RETRIES")
-            .unwrap_or_else(|_| "30".to_string())
-            .parse()
-            .unwrap_or(30);
+        let max_spawn_retries: u32 = crate::agent::config::get_global()
+            .map(|g| g.read().unwrap().platform_max_spawn_retries)
+            .unwrap_or(3);
         let mut spawn_failures: u32 = 0;
         let mut last_restart_count = self.restart_count.load(Ordering::SeqCst);
 
@@ -803,11 +802,10 @@ impl Platform for ExternalPlatformClient {
                                                                 }
 
                                                                 // Apply generic file attachment inlining (handles all platforms uniformly)
-                                                                let max_inline_bytes = std::env::var("MAX_INLINE_FILE_KB")
-                                                                .ok()
-                                                                .and_then(|v| v.parse::<usize>().ok())
-                                                                .unwrap_or(100)
-                                                                * 1024;
+                                                                let max_inline_file_kb = crate::agent::config::get_global()
+                                                                    .map(|g| g.read().unwrap().max_inline_file_kb)
+                                                                    .unwrap_or(100);
+                                                                let max_inline_bytes = max_inline_file_kb as usize * 1024;
 
                                                                 let mut file_lines: Vec<String> = Vec::new();
                                                                 let file_ids: Vec<String> = inbound.metadata.get("file_ids")
