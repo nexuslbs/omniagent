@@ -730,7 +730,7 @@ async fn prompt_preview_handler(
             .or_else(|| prof.provider.clone().filter(|s| !s.is_empty()))
             .or_else(|| {
                 crate::agent::config::get_global()
-                    .map(|g| g.read().unwrap().llm_provider.clone())
+                    .map(|g| g.read().unwrap().default_provider.clone())
                     .filter(|s| !s.is_empty())
             })
         {

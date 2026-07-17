@@ -98,55 +98,6 @@ pub async fn search_messages_text(
     rows.into_iter().map(|r| r.try_into()).collect()
 }
 
-/// Find messages where embedding IS NULL, ordered by created_at, with a limit.
-pub async fn find_messages_without_embeddings(
-    pool: &PgPool,
-    limit: usize,
-) -> AppResult<Vec<crate::vectorizer::MessageEmbeddingRow>> {
-    let rows: Vec<crate::vectorizer::MessageEmbeddingRow> = sql_forge!(
-        crate::vectorizer::MessageEmbeddingRow,
-        r#"
-        SELECT id, content
-        FROM messages
-        WHERE embedding IS NULL
-          AND msg_type IN ('cause', 'summary', 'plan', 'message', 'reasoning', 'error')
-        ORDER BY created_at ASC
-        LIMIT :limit
-        "#,
-        ( :limit = limit as i64 )
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows)
-}
-
-/// Update the embedding column for a given message and keep embedding_vec in sync.
-pub async fn update_message_embedding(
-    pool: &PgPool,
-    message_id: i64,
-    embedding_string: &str,
-) -> AppResult<()> {
-    // Update both the TEXT column (for backward compat / Phase 2 migration) and
-    // the native vector column (for HNSW-indexed two-stage search).
-    // The vector cast is safe because embedding_string is always in `[0.1,0.2,...]` format.
-    // sql_forge! cannot handle the vector cast expression, so use raw sqlx.
-    sqlx::query(
-        r#"
-        UPDATE messages
-        SET embedding = $1,
-            embedding_vec = CASE WHEN $1 IS NOT NULL AND $1 != '' THEN $1::vector(1536) ELSE NULL END
-        WHERE id = $2
-        "#,
-    )
-    .bind(embedding_string)
-    .bind(message_id)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Hybrid retrieval: pgvector semantic search: two-stage recency-weighted
 // ---------------------------------------------------------------------------

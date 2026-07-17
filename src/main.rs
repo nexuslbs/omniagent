@@ -81,7 +81,7 @@ async fn run_server() -> AppResult<()> {
 
     tracing::info!(
         "Agent config: provider: {}, max_tokens: {}, temperature: {}",
-        cfg.llm_provider,
+        cfg.default_provider,
         cfg.max_tokens,
         cfg.temperature,
     );

@@ -62,7 +62,6 @@ fn manage_memory_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: crate::mcp::DEFAULT_TOOL_TIMEOUT_SECS,
-        watchdog: None,
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let target = match args["target"].as_str() {
@@ -242,7 +241,6 @@ fn promote_to_memory_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: crate::mcp::DEFAULT_TOOL_TIMEOUT_SECS,
-        watchdog: None,
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let name = match args["name"].as_str() {
@@ -372,7 +370,6 @@ fn list_memories_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: crate::mcp::DEFAULT_TOOL_TIMEOUT_SECS,
-        watchdog: None,
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let profile = resolve_profile(&ctx, &args);
@@ -473,7 +470,6 @@ fn review_memories_tool() -> McpTool {
         }),
         server_name: None,
         timeout_secs: crate::mcp::DEFAULT_TOOL_TIMEOUT_SECS,
-        watchdog: None,
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let profile = resolve_profile(&ctx, &args);

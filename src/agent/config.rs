@@ -71,7 +71,7 @@ pub fn get_global() -> Option<&'static Arc<RwLock<AgentConfig>>> {
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub llm_api_key: String,
-    pub llm_provider: String,
+    pub default_provider: String,
     pub max_tokens: u32,
     pub temperature: f32,
     /// Max iterations for threads with no planning mode (complexity-based).
@@ -98,7 +98,6 @@ pub struct AgentConfig {
     /// Soft char budget for the prompt. When exceeded, condense every STATE_BLOCK_UPDATE_INTERVAL turns.
     pub prompt_char_budget_soft: usize,
     /// Hard char budget for the prompt. When exceeded, condense before ANY LLM call to bring below soft.
-    #[allow(dead_code)]
     pub prompt_char_budget_hard: usize,
     /// Max chars for old messages after condensation (metadata block stays).
     pub old_message_char_budget: usize,
@@ -106,14 +105,12 @@ pub struct AgentConfig {
     pub state_block_update_interval: u32,
     /// How many full assistant→tool cycles to keep verbatim during condensation.
     pub condense_keep_turns: usize,
-    /// Token budget: soft threshold for condensation (uses tiktoken for accurate counting).
+    /// Token budget: soft threshold for condensation (uses configured tokenizer tool if available, else char budget).
     pub prompt_token_budget_soft: usize,
-    /// Token budget: hard threshold, condense before any LLM call (uses tiktoken).
+    /// Token budget: hard threshold, condense before any LLM call.
     pub prompt_token_budget_hard: usize,
-    /// tiktoken encoding/model name ("gpt-4", "cl100k_base", "o200k_base").
-    pub tokenizer_encoding: String,
-    /// Multiplier to account for provider tokenizer mismatch with tiktoken.
-    pub prompt_token_safety_factor: f64,
+    /// MCP tool name for token counting. Empty = fall back to char budgets.
+    pub tokenizer_encoding_tool: String,
 
     /// When to insert prompts as messages (msg_type: "prompt") into the messages table.
     /// - "off": never insert
@@ -121,11 +118,6 @@ pub struct AgentConfig {
     /// - "first+compact": first prompt + prompts after context compaction
     /// - "all": insert every prompt before every LLM call
     pub prompt_log_level: String,
-
-    /// Global watchdog configuration for tools that don't have their own.
-    /// Applied to all tool calls that don't have a per-tool watchdog defined.
-    /// If None, no watchdog runs for tools without their own configuration.
-    pub global_watchdog: Option<crate::mcp::WatchdogConfig>,
 
     /// Threshold in seconds for background mode — tools that complete within
     /// this time return normally. Tools that exceed this return a "processing"
@@ -139,29 +131,6 @@ pub struct AgentConfig {
     pub host: String,
     pub port: u16,
 
-    // Vectorization settings
-    pub vectorize_messages: bool,
-    pub vectorize_wiki: bool,
-    pub messages_vectorization_method: String,
-    pub messages_vectorization_api_url: Option<String>,
-    pub messages_vectorization_interval_secs: u64,
-    pub messages_vectorization_protocol: String,
-    pub messages_vectorization_api_key: Option<String>,
-    pub messages_vectorization_api_model: Option<String>,
-    pub wiki_vectorization_method: String,
-    pub wiki_vectorization_api_url: Option<String>,
-    pub wiki_vectorization_interval_secs: u64,
-    pub wiki_vectorization_protocol: String,
-    pub wiki_vectorization_api_key: Option<String>,
-    pub wiki_vectorization_api_model: Option<String>,
-
-    // ── Settings from settings.yml ──
-    /// Max chars for "simple" classification in complexity analysis.
-    pub planning_complexity_simple_max_chars: usize,
-    /// Max chars for "standard" classification in complexity analysis.
-    pub planning_complexity_standard_max_chars: usize,
-    /// Comma-separated keywords that trigger "complex" classification.
-    pub planning_complexity_keywords: String,
     /// Max retries for spawning platform messages (external channels).
     pub platform_max_spawn_retries: u32,
     /// Max inline file KB for attachments.
@@ -213,7 +182,7 @@ impl AgentConfig {
 
         Ok(Self {
             llm_api_key: String::new(),
-            llm_provider: get("llm_provider", "openai"),
+            default_provider: get("default_provider", "openai"),
             max_tokens: get("max_tokens", "4096").parse().unwrap_or(4096),
             temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
@@ -234,14 +203,9 @@ impl AgentConfig {
             // Token-based budgets
             prompt_token_budget_soft: get("prompt_token_budget_soft", "200000").parse().unwrap_or(200000),
             prompt_token_budget_hard: get("prompt_token_budget_hard", "350000").parse().unwrap_or(350000),
-            tokenizer_encoding: get("tokenizer_encoding", "gpt-4"),
-            prompt_token_safety_factor: get("prompt_token_safety_factor", "15.0").parse().unwrap_or(15.0),
+            tokenizer_encoding_tool: get("tokenizer_encoding_tool", ""),
 
             prompt_log_level: get("prompt_log_level", "first"),
-
-            global_watchdog: settings.get("watchdog_default").and_then(|v| {
-                serde_json::from_str::<crate::mcp::WatchdogConfig>(v).ok()
-            }),
 
             tool_bg_secs: get("tool_bg_secs", "30").parse().unwrap_or(30),
 
@@ -256,25 +220,6 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "8080".to_string())
                 .parse()
                 .ctx("PORT must be a valid number")?,
-            vectorize_messages: get("vectorize_messages", "false").parse::<bool>().unwrap_or(false),
-            vectorize_wiki: get("vectorize_wiki", "false").parse::<bool>().unwrap_or(false),
-            messages_vectorization_method: get("messages_vectorization_method", "local"),
-            messages_vectorization_api_url: settings.get("messages_vectorization_api_url").cloned().filter(|v| !v.is_empty()),
-            messages_vectorization_interval_secs: get("messages_vectorization_interval", "3600").parse().unwrap_or(3600),
-            messages_vectorization_protocol: get("messages_vectorization_protocol", "openai"),
-            messages_vectorization_api_key: settings.get("messages_vectorization_api_key").cloned().filter(|v| !v.is_empty()),
-            messages_vectorization_api_model: settings.get("messages_vectorization_api_model").cloned().filter(|v| !v.is_empty()),
-            wiki_vectorization_method: get("wiki_vectorization_method", "local"),
-            wiki_vectorization_api_url: settings.get("wiki_vectorization_api_url").cloned().filter(|v| !v.is_empty()),
-            wiki_vectorization_interval_secs: get("wiki_vectorization_interval", "3600").parse().unwrap_or(3600),
-            wiki_vectorization_protocol: get("wiki_vectorization_protocol", "openai"),
-            wiki_vectorization_api_key: settings.get("wiki_vectorization_api_key").cloned().filter(|v| !v.is_empty()),
-            wiki_vectorization_api_model: settings.get("wiki_vectorization_api_model").cloned().filter(|v| !v.is_empty()),
-
-            // Group 2 settings
-            planning_complexity_simple_max_chars: get("planning_complexity_simple_max_chars", "60").parse().unwrap_or(60),
-            planning_complexity_standard_max_chars: get("planning_complexity_standard_max_chars", "200").parse().unwrap_or(200),
-            planning_complexity_keywords: get("planning_complexity_keywords", ""),
             platform_max_spawn_retries: get("platform_max_spawn_retries", "3").parse().unwrap_or(3),
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
             default_profile: get("default_profile", "default"),
@@ -301,7 +246,7 @@ impl AgentConfig {
 
         Ok(Self {
             llm_api_key: String::new(),
-            llm_provider: get("llm_provider", "openai"),
+            default_provider: get("default_provider", "openai"),
             max_tokens: get("max_tokens", "4096").parse().unwrap_or(4096),
             temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
@@ -328,16 +273,9 @@ impl AgentConfig {
             prompt_token_budget_hard: get("prompt_token_budget_hard", "350000")
                 .parse()
                 .unwrap_or(350000),
-            tokenizer_encoding: get("tokenizer_encoding", "gpt-4"),
-            prompt_token_safety_factor: get("prompt_token_safety_factor", "15.0")
-                .parse()
-                .unwrap_or(15.0),
+            tokenizer_encoding_tool: get("tokenizer_encoding_tool", ""),
 
             prompt_log_level: get("prompt_log_level", "first"),
-
-            global_watchdog: settings.get("watchdog_default").and_then(|v| {
-                serde_json::from_str::<crate::mcp::WatchdogConfig>(v).ok()
-            }),
 
             tool_bg_secs: get("tool_bg_secs", "30").parse().unwrap_or(30),
 
@@ -352,58 +290,7 @@ impl AgentConfig {
                 .unwrap_or_else(|_| "8080".to_string())
                 .parse()
                 .ctx("PORT must be a valid number")?,
-            vectorize_messages: get("vectorize_messages", "false")
-                .parse::<bool>()
-                .unwrap_or(false),
-            vectorize_wiki: get("vectorize_wiki", "false")
-                .parse::<bool>()
-                .unwrap_or(false),
-            messages_vectorization_method: get("messages_vectorization_method", "local"),
-            messages_vectorization_api_url: settings
-                .get("messages_vectorization_api_url")
-                .cloned()
-                .filter(|v| !v.is_empty()),
-            messages_vectorization_interval_secs: get("messages_vectorization_interval", "3600")
-                .parse()
-                .unwrap_or(3600),
-            messages_vectorization_protocol: get("messages_vectorization_protocol", "openai"),
-            messages_vectorization_api_key: settings
-                .get("messages_vectorization_api_key")
-                .cloned()
-                .filter(|v| !v.is_empty()),
-            messages_vectorization_api_model: settings
-                .get("messages_vectorization_api_model")
-                .cloned()
-                .filter(|v| !v.is_empty()),
-            wiki_vectorization_method: get("wiki_vectorization_method", "local"),
-            wiki_vectorization_api_url: settings
-                .get("wiki_vectorization_api_url")
-                .cloned()
-                .filter(|v| !v.is_empty()),
-            wiki_vectorization_interval_secs: get("wiki_vectorization_interval", "3600")
-                .parse()
-                .unwrap_or(3600),
-            wiki_vectorization_protocol: get("wiki_vectorization_protocol", "openai"),
-            wiki_vectorization_api_key: settings
-                .get("wiki_vectorization_api_key")
-                .cloned()
-                .filter(|v| !v.is_empty()),
-            wiki_vectorization_api_model: settings
-                .get("wiki_vectorization_api_model")
-                .cloned()
-                .filter(|v| !v.is_empty()),
-
-            // ── Group 2 settings ──
-            planning_complexity_simple_max_chars: get("planning_complexity_simple_max_chars", "60")
-                .parse()
-                .unwrap_or(60),
-            planning_complexity_standard_max_chars: get("planning_complexity_standard_max_chars", "200")
-                .parse()
-                .unwrap_or(200),
-            planning_complexity_keywords: get("planning_complexity_keywords", ""),
-            platform_max_spawn_retries: get("platform_max_spawn_retries", "3")
-                .parse()
-                .unwrap_or(3),
+            platform_max_spawn_retries: get("platform_max_spawn_retries", "3").parse().unwrap_or(3),
             max_inline_file_kb: get("max_inline_file_kb", "100")
                 .parse()
                 .unwrap_or(100),

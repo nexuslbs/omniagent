@@ -207,7 +207,6 @@ pub trait McpServerClient: Send + Sync {
                 input_schema: schema,
                 server_name: Some(server_name.clone()),
                 timeout_secs: self.timeout_secs(),
-                watchdog: None,
                 handler: Arc::new(move |args: Value, ctx: crate::mcp::AppContext| {
                     let sn = sn.clone();
                     let tn = tn.clone();

@@ -297,10 +297,10 @@ pub async fn create_thread_with_cause(
                 .or_else(|| crate::llm::resolve_default_model(prov));
             (prov.to_string(), model)
         }
-        // Global config level: llm_provider from settings.yml
+        // Global config level: default_provider from settings.yml
         else {
             let prov = crate::agent::config::get_global()
-                .map(|g| g.read().unwrap().llm_provider.clone())
+                .map(|g| g.read().unwrap().default_provider.clone())
                 .unwrap_or_else(|| "openai".to_string());
             if !prov.is_empty() {
                 let model = crate::llm::resolve_default_model(&prov);
