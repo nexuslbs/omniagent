@@ -93,26 +93,12 @@ pub struct AgentConfig {
     /// MCP tool name for compacting conversation history.
     /// Default: "prompt_compact-messages".
     pub compact_messages_tool_name: String,
+    /// Name of the MCP tool to call for condensing conversation context before each LLM call.
+    /// The tool decides when and how to condense based on its own configuration.
+    /// Default: "prompt_compact-messages".
+    pub condense_tool_name: String,
 
-    // Context management / token explosion prevention
-    /// Soft char budget for the prompt. When exceeded, condense every STATE_BLOCK_UPDATE_INTERVAL turns.
-    pub prompt_char_budget_soft: usize,
-    /// Hard char budget for the prompt. When exceeded, condense before ANY LLM call to bring below soft.
-    pub prompt_char_budget_hard: usize,
-    /// Max chars for old messages after condensation (metadata block stays).
-    pub old_message_char_budget: usize,
-    /// How often (in iterations) to condense when soft budget is exceeded.
-    pub state_block_update_interval: u32,
-    /// How many full assistant→tool cycles to keep verbatim during condensation.
-    pub condense_keep_turns: usize,
-    /// Token budget: soft threshold for condensation (uses configured tokenizer tool if available, else char budget).
-    pub prompt_token_budget_soft: usize,
-    /// Token budget: hard threshold, condense before any LLM call.
-    pub prompt_token_budget_hard: usize,
-    /// MCP tool name for token counting. Empty = fall back to char budgets.
-    pub tokenizer_encoding_tool: String,
-
-    /// When to insert prompts as messages (msg_type: "prompt") into the messages table.
+    // When to insert prompts as messages (msg_type: "prompt") into the messages table.
     /// - "off": never insert
     /// - "first": insert the first LLM call's prompt only (default)
     /// - "first+compact": first prompt + prompts after context compaction
@@ -188,18 +174,7 @@ impl AgentConfig {
             delete_after_days: get("delete_after_days", "30").parse().unwrap_or(30),
             prompt_tool_name: get("prompt_generate_tool", "prompt_generate"),
             compact_messages_tool_name: get("prompt_compact_messages_tool", "prompt_compact-messages"),
-
-            // Context management thresholds
-            prompt_char_budget_soft: get("prompt_char_budget_soft", "350000").parse().unwrap_or(350000),
-            prompt_char_budget_hard: get("prompt_char_budget_hard", "500000").parse().unwrap_or(500000),
-            old_message_char_budget: get("old_message_char_budget", "100000").parse().unwrap_or(100000),
-            state_block_update_interval: get("state_block_update_interval", "5").parse().unwrap_or(5),
-            condense_keep_turns: get("condense_keep_turns", "4").parse().unwrap_or(4).max(1),
-
-            // Token-based budgets
-            prompt_token_budget_soft: get("prompt_token_budget_soft", "200000").parse().unwrap_or(200000),
-            prompt_token_budget_hard: get("prompt_token_budget_hard", "350000").parse().unwrap_or(350000),
-            tokenizer_encoding_tool: get("tokenizer_encoding_tool", ""),
+            condense_tool_name: get("condense_tool", "prompt_compact-messages"),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
@@ -252,22 +227,7 @@ impl AgentConfig {
             delete_after_days: get("delete_after_days", "30").parse().unwrap_or(30),
             prompt_tool_name: get("prompt_generate_tool", "prompt_generate"),
             compact_messages_tool_name: get("prompt_compact_messages_tool", "prompt_compact-messages"),
-
-            // Context management thresholds
-            prompt_char_budget_soft: get("prompt_char_budget_soft", "350000").parse().unwrap_or(350000),
-            prompt_char_budget_hard: get("prompt_char_budget_hard", "500000").parse().unwrap_or(500000),
-            old_message_char_budget: get("old_message_char_budget", "100000").parse().unwrap_or(100000),
-            state_block_update_interval: get("state_block_update_interval", "5").parse().unwrap_or(5),
-            condense_keep_turns: get("condense_keep_turns", "4").parse().unwrap_or(4).max(1),
-
-            // Token-based budgets
-            prompt_token_budget_soft: get("prompt_token_budget_soft", "200000")
-                .parse()
-                .unwrap_or(200000),
-            prompt_token_budget_hard: get("prompt_token_budget_hard", "350000")
-                .parse()
-                .unwrap_or(350000),
-            tokenizer_encoding_tool: get("tokenizer_encoding_tool", ""),
+            condense_tool_name: get("condense_tool", "prompt_compact-messages"),
 
             prompt_log_level: get("prompt_log_level", "first"),
 

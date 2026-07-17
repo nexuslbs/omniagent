@@ -5,13 +5,23 @@ use std::collections::HashMap;
 
 use crate::memory_store::MemoryStore;
 
-// ── Character limits ────────────────────────────────────────────
+// ── Plugin config ──────────────────────────────────────────────
+//
+// Config values are provided by the omniagent via the configure message
+// at startup. Plugins never read env vars for config. Users can use
+// $env: notation in plugins.yaml if they want values from env vars.
 
-fn memory_max_chars() -> usize {
-    std::env::var("MEMORY_MAX_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(5_000)
+/// Plugin-configurable limits for prompt builder.
+#[derive(Debug, Clone)]
+pub struct PromptBuilderConfig {
+    pub memory_max_chars: usize,
+    pub soul_max_chars: usize,
 }
-fn soul_max_chars() -> usize {
-    std::env::var("SOUL_MAX_CHARS").ok().and_then(|v| v.parse().ok()).unwrap_or(1_000)
+
+impl Default for PromptBuilderConfig {
+    fn default() -> Self {
+        Self { memory_max_chars: 5_000, soul_max_chars: 1_000 }
+    }
 }
 
 // ── Stable identity / guidance texts ────────────────────────────
@@ -120,12 +130,12 @@ fn read_memory_section(memory_store: &MemoryStore) -> String {
     format!("## MEMORY (your personal notes)\n{}", raw)
 }
 
-fn read_user_profile_section(memory_store: &MemoryStore) -> String {
+fn read_user_profile_section(memory_store: &MemoryStore, soul_max_chars: usize) -> String {
     let raw = memory_store.get_user_raw();
     if raw.is_empty() { return String::new(); }
-    let truncated = truncate_content(raw, soul_max_chars());
-    let header = if raw.len() > soul_max_chars() {
-        format!("## USER PROFILE (who the user is) [TRUNCATED: showing first {} of {} chars]", soul_max_chars(), raw.len())
+    let truncated = truncate_content(raw, soul_max_chars);
+    let header = if raw.len() > soul_max_chars {
+        format!("## USER PROFILE (who the user is) [TRUNCATED: showing first {} of {} chars]", soul_max_chars, raw.len())
     } else {
         format!("## USER PROFILE (who the user is) [{}%: {}/{} chars]", 100, raw.len(), raw.len())
     };
@@ -152,8 +162,9 @@ pub fn build_system_prompt(
     system_message: Option<&str>,
     profile_name: &str,
     tool_names: &[String],
+    config: &PromptBuilderConfig,
 ) -> String {
-    let parts = build_system_prompt_parts(memory_store, platform, system_message, profile_name, tool_names);
+    let parts = build_system_prompt_parts(memory_store, platform, system_message, profile_name, tool_names, config);
     parts.join("\n\n")
 }
 
@@ -164,6 +175,7 @@ pub fn build_system_prompt_parts(
     system_message: Option<&str>,
     profile_name: &str,
     tool_names: &[String],
+    config: &PromptBuilderConfig,
 ) -> Vec<String> {
     let mut parts = Vec::new();
 
@@ -191,7 +203,7 @@ pub fn build_system_prompt_parts(
         parts.push(memory_section);
     }
 
-    let user_section = read_user_profile_section(memory_store);
+    let user_section = read_user_profile_section(memory_store, config.soul_max_chars);
     if !user_section.is_empty() {
         parts.push(user_section);
     }
