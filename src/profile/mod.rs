@@ -163,7 +163,7 @@ impl Profile {
 pub fn default_profile_name() -> String {
     crate::agent::config::get_global()
         .map(|g| g.read().unwrap().default_profile.clone())
-        .unwrap_or_else(|| "default".to_string())
+        .unwrap_or_else(|| "omni".to_string())
 }
 
 /// The profile configuration loaded from the data directory.
