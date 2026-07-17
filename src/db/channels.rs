@@ -161,11 +161,12 @@ pub async fn get_channel_by_id(pool: &PgPool, channel_id: i64) -> AppResult<Opti
 /// Get a channel's plan setting directly from the DB column.
 /// Returns None if the channel is not found.
 pub async fn get_channel_plan(pool: &PgPool, channel_id: i64) -> AppResult<Option<bool>> {
-    // Use raw sqlx query to get the nullable boolean column
-    match sqlx::query_scalar::<_, Option<bool>>(
-        "SELECT plan FROM channels WHERE id = $1"
+    // Use sql_forge to get the nullable boolean column
+    match sql_forge!(
+        scalar Option<bool>,
+        "SELECT plan FROM channels WHERE id = :channel_id",
+        ( :channel_id = channel_id )
     )
-    .bind(channel_id)
     .fetch_optional(pool)
     .await
     {

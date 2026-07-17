@@ -9,6 +9,7 @@ use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, LLMConfig, ProviderId, Usage};
 use crate::mcp::{truncate_content, McpToolCall, McpToolResult, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
 use tokio::task::JoinSet;
+use sql_forge::sql_forge;
 
 /// Process a single pending thread through the state machine:
 ///
@@ -353,11 +354,12 @@ pub async fn process_thread(
         // If the plugin returned a plan decision, persist it to the thread
         if parsed.get("plan").is_some() {
             let plan_val = parsed["plan"].as_bool().unwrap_or(false);
-            sqlx::query("UPDATE threads SET plan = $1 WHERE id = $2")
-                .bind(plan_val)
-                .bind(thread.id)
-                .execute(&cfg.pool)
-                .await?;
+            sql_forge!(
+                "UPDATE threads SET plan = :plan WHERE id = :thread_id",
+                ( :plan = plan_val, :thread_id = thread.id )
+            )
+            .execute(&cfg.pool)
+            .await?;
         }
 
         PromptParts {

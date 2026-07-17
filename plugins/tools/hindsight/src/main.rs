@@ -5,24 +5,22 @@
 //! - `hindsight_retain`: store a memory
 //! - `hindsight_reflect`: ask hindsight to synthesize an answer
 //!
-//! Configuration is read from environment variables with sensible defaults:
-//! - HINDSIGHT_URL: service URL (default: http://hindsight:8888)
-//! - HINDSIGHT_BANK: bank ID (default: omniagent)
-//! - HINDSIGHT_LIMIT: max recall results (default: 5)
-//! - HINDSIGHT_BUDGET: recall budget (default: low)
-//! - HINDSIGHT_TAGS: comma-separated tags to filter (default: from_user)
-//! - HINDSIGHT_TAGS_MATCH: tag matching mode (default: any)
-//! - HINDSIGHT_TYPES: comma-separated fact types (default: world)
-//! - HINDSIGHT_TIMEOUT: HTTP timeout in seconds (default: 15)
+//! Configuration is received from the omniagent via the `configure` message
+//! at startup. Plugins never read env vars for config. Users can use $env:
+//! notation in plugins.yaml if they want values from env vars.
 
 use anyhow::{Context, Result};
 use mcp_server_util::*;
 use serde_json::Value;
-use std::sync::OnceLock;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-// ── Config (read from env, cached once) ──
+// ---------------------------------------------------------------------------
+// Plugin config — received via configure message, never from env vars
+// ---------------------------------------------------------------------------
 
-struct HindsightConfig {
+#[derive(Debug, Clone)]
+struct PluginConfig {
     url: String,
     bank_id: String,
     limit: u32,
@@ -33,53 +31,75 @@ struct HindsightConfig {
     timeout_secs: u64,
 }
 
-static CONFIG: OnceLock<HindsightConfig> = OnceLock::new();
+impl PluginConfig {
+    fn default() -> Self {
+        Self {
+            url: "http://hindsight:8888".to_string(),
+            bank_id: "omniagent".to_string(),
+            limit: 5,
+            budget: "low".to_string(),
+            tags: "from_user".to_string(),
+            tags_match: "any".to_string(),
+            types: "world".to_string(),
+            timeout_secs: 15,
+        }
+    }
 
-fn config() -> &'static HindsightConfig {
-    CONFIG.get_or_init(|| HindsightConfig {
-        url: std::env::var("HINDSIGHT_URL").unwrap_or_else(|_| "http://hindsight:8888".to_string()),
-        bank_id: std::env::var("HINDSIGHT_BANK").unwrap_or_else(|_| "omniagent".to_string()),
-        limit: std::env::var("HINDSIGHT_LIMIT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5),
-        budget: std::env::var("HINDSIGHT_BUDGET").unwrap_or_else(|_| "low".to_string()),
-        tags: std::env::var("HINDSIGHT_TAGS").unwrap_or_else(|_| "from_user".to_string()),
-        tags_match: std::env::var("HINDSIGHT_TAGS_MATCH").unwrap_or_else(|_| "any".to_string()),
-        types: std::env::var("HINDSIGHT_TYPES").unwrap_or_else(|_| "world".to_string()),
-        timeout_secs: std::env::var("HINDSIGHT_TIMEOUT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(15),
-    })
+    fn from_json(json: &Value) -> Self {
+        let mut cfg = Self::default();
+        if let Some(obj) = json.as_object() {
+            if let Some(v) = obj.get("hindsight_url").and_then(|v| v.as_str()) {
+                cfg.url = v.to_string();
+            }
+            if let Some(v) = obj.get("hindsight_bank").and_then(|v| v.as_str()) {
+                cfg.bank_id = v.to_string();
+            }
+            if let Some(v) = obj.get("hindsight_limit").and_then(|v| v.as_u64()) {
+                cfg.limit = v as u32;
+            }
+            if let Some(v) = obj.get("hindsight_budget").and_then(|v| v.as_str()) {
+                cfg.budget = v.to_string();
+            }
+            if let Some(v) = obj.get("hindsight_tags").and_then(|v| v.as_str()) {
+                cfg.tags = v.to_string();
+            }
+            if let Some(v) = obj.get("hindsight_tags_match").and_then(|v| v.as_str()) {
+                cfg.tags_match = v.to_string();
+            }
+            if let Some(v) = obj.get("hindsight_types").and_then(|v| v.as_str()) {
+                cfg.types = v.to_string();
+            }
+            if let Some(v) = obj.get("hindsight_timeout").and_then(|v| v.as_u64()) {
+                cfg.timeout_secs = v;
+            }
+        }
+        cfg
+    }
 }
 
 // ── Helpers ──
 
-fn recall_url() -> String {
-    let c = config();
+fn recall_url(cfg: &PluginConfig) -> String {
     format!(
         "{}/v1/default/banks/{}/memories/recall",
-        c.url.trim_end_matches('/'),
-        c.bank_id
+        cfg.url.trim_end_matches('/'),
+        cfg.bank_id
     )
 }
 
-fn retain_url() -> String {
-    let c = config();
+fn retain_url(cfg: &PluginConfig) -> String {
     format!(
         "{}/v1/default/banks/{}/memories",
-        c.url.trim_end_matches('/'),
-        c.bank_id
+        cfg.url.trim_end_matches('/'),
+        cfg.bank_id
     )
 }
 
-fn reflect_url() -> String {
-    let c = config();
+fn reflect_url(cfg: &PluginConfig) -> String {
     format!(
         "{}/v1/default/banks/{}/reflect",
-        c.url.trim_end_matches('/'),
-        c.bank_id
+        cfg.url.trim_end_matches('/'),
+        cfg.bank_id
     )
 }
 
@@ -100,19 +120,16 @@ fn parse_comma_separated(s: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Build an HTTP client with the configured timeout.
-fn http_client() -> Result<reqwest::Client> {
+fn http_client(cfg: &PluginConfig) -> Result<reqwest::Client> {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(config().timeout_secs))
+        .timeout(std::time::Duration::from_secs(cfg.timeout_secs))
         .build()
         .context("Failed to build HTTP client")
 }
 
 // ── Tool handlers ──
 
-/// Handle hindsight_recall: search memories.
-async fn handle_recall(args: Value) -> Result<(String, bool)> {
-    let c = config();
+async fn handle_recall(args: Value, cfg: &PluginConfig) -> Result<(String, bool)> {
     let query = args["query"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'query'"))?;
@@ -125,20 +142,20 @@ async fn handle_recall(args: Value) -> Result<(String, bool)> {
     payload["limit"] = args["limit"]
         .as_u64()
         .map(|v| serde_json::json!(v))
-        .unwrap_or_else(|| serde_json::json!(c.limit));
+        .unwrap_or_else(|| serde_json::json!(cfg.limit));
     payload["budget"] = args["budget"]
         .as_str()
         .map(|s| serde_json::json!(s))
-        .unwrap_or_else(|| serde_json::json!(c.budget));
+        .unwrap_or_else(|| serde_json::json!(cfg.budget));
 
     // Tags: parse from args["tags"] if present, else from config
     let tags = args["tags"]
         .as_str()
         .and_then(|s| parse_comma_separated(s))
-        .or_else(|| parse_comma_separated(&c.tags));
+        .or_else(|| parse_comma_separated(&cfg.tags));
     if let Some(ref t) = tags {
         payload["tags"] = serde_json::json!(t);
-        let tags_match = args["tags_match"].as_str().unwrap_or(&c.tags_match);
+        let tags_match = args["tags_match"].as_str().unwrap_or(&cfg.tags_match);
         payload["tags_match"] = serde_json::json!(tags_match);
     }
 
@@ -146,17 +163,17 @@ async fn handle_recall(args: Value) -> Result<(String, bool)> {
     let types = args["types"]
         .as_str()
         .and_then(|s| parse_comma_separated(s))
-        .or_else(|| parse_comma_separated(&c.types));
+        .or_else(|| parse_comma_separated(&cfg.types));
     if let Some(ref t) = types {
         payload["types"] = serde_json::json!(t);
     }
 
-    let client = match http_client() {
+    let client = match http_client(cfg) {
         Ok(c) => c,
         Err(e) => return Ok((format!("Failed to build HTTP client: {}", e), true)),
     };
 
-    match client.post(&recall_url()).json(&payload).send().await {
+    match client.post(&recall_url(cfg)).json(&payload).send().await {
         Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
             Ok(data) => {
                 let memories = data["results"].as_array().cloned().unwrap_or_default();
@@ -204,8 +221,7 @@ async fn handle_recall(args: Value) -> Result<(String, bool)> {
     }
 }
 
-/// Handle hindsight_retain: store a memory.
-async fn handle_retain(args: Value) -> Result<(String, bool)> {
+async fn handle_retain(args: Value, cfg: &PluginConfig) -> Result<(String, bool)> {
     let content = args["content"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'content'"))?;
@@ -234,12 +250,12 @@ async fn handle_retain(args: Value) -> Result<(String, bool)> {
         "async": false,
     });
 
-    let client = match http_client() {
+    let client = match http_client(cfg) {
         Ok(c) => c,
         Err(e) => return Ok((format!("Failed to build HTTP client: {}", e), true)),
     };
 
-    match client.post(&retain_url()).json(&payload).send().await {
+    match client.post(&retain_url(cfg)).json(&payload).send().await {
         Ok(resp) if resp.status().is_success() => {
             Ok(("Memory retained successfully.".to_string(), false))
         }
@@ -255,23 +271,22 @@ async fn handle_retain(args: Value) -> Result<(String, bool)> {
     }
 }
 
-/// Handle hindsight_reflect: synthesize an answer from memories.
-async fn handle_reflect(args: Value) -> Result<(String, bool)> {
+async fn handle_reflect(args: Value, cfg: &PluginConfig) -> Result<(String, bool)> {
     let query = args["query"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'query'"))?;
 
     let payload = serde_json::json!({
         "query": query,
-        "budget": config().budget,
+        "budget": cfg.budget,
     });
 
-    let client = match http_client() {
+    let client = match http_client(cfg) {
         Ok(c) => c,
         Err(e) => return Ok((format!("Failed to build HTTP client: {}", e), true)),
     };
 
-    match client.post(&reflect_url()).json(&payload).send().await {
+    match client.post(&reflect_url(cfg)).json(&payload).send().await {
         Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
             Ok(data) => {
                 let text = data["text"].as_str().unwrap_or("No reflection");
@@ -295,8 +310,37 @@ async fn handle_reflect(args: Value) -> Result<(String, bool)> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Pre-initialize config before starting the server
-    config();
+    let plugin_config = Arc::new(RwLock::new(PluginConfig::default()));
+
+    // Hindsight_recall handler
+    let cfg_recall = plugin_config.clone();
+    let recall_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let cfg = cfg_recall.clone();
+        Box::pin(async move {
+            let config = cfg.read().await;
+            handle_recall(args, &config).await
+        })
+    });
+
+    // Hindsight_retain handler
+    let cfg_retain = plugin_config.clone();
+    let retain_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let cfg = cfg_retain.clone();
+        Box::pin(async move {
+            let config = cfg.read().await;
+            handle_retain(args, &config).await
+        })
+    });
+
+    // Hindsight_reflect handler
+    let cfg_reflect = plugin_config.clone();
+    let reflect_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let cfg = cfg_reflect.clone();
+        Box::pin(async move {
+            let config = cfg.read().await;
+            handle_reflect(args, &config).await
+        })
+    });
 
     let tools = vec![
         McpToolEntry {
@@ -336,7 +380,7 @@ async fn main() -> Result<()> {
                     "required": ["query"]
                 }),
             },
-            handler: Box::new(|args| Box::pin(handle_recall(args))),
+            handler: recall_handler,
         },
         McpToolEntry {
             def: McpToolDef {
@@ -365,7 +409,7 @@ async fn main() -> Result<()> {
                     "required": ["content"]
                 }),
             },
-            handler: Box::new(|args| Box::pin(handle_retain(args))),
+            handler: retain_handler,
         },
         McpToolEntry {
             def: McpToolDef {
@@ -382,7 +426,7 @@ async fn main() -> Result<()> {
                     "required": ["query"]
                 }),
             },
-            handler: Box::new(|args| Box::pin(handle_reflect(args))),
+            handler: reflect_handler,
         },
     ];
 
@@ -391,5 +435,20 @@ async fn main() -> Result<()> {
         version: "0.1.0".to_string(),
     };
 
-    run_server(server_info, tools).await
+    // Use run_server_with_config so the omniagent can pass plugin config
+    // via the configure message instead of env vars.
+    let on_configure = {
+        let cfg = plugin_config.clone();
+        Some(move |params: Value| {
+            let new_config = PluginConfig::from_json(&params);
+            let mut locked = cfg.blocking_write();
+            *locked = new_config;
+            tracing::info!(
+                "Hindsight plugin config updated via configure message: url={:?}, bank={}, limit={}, budget={}",
+                locked.url, locked.bank_id, locked.limit, locked.budget
+            );
+        })
+    };
+
+    run_server_with_config(server_info, tools, on_configure).await
 }

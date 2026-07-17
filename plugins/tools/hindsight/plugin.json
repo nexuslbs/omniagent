@@ -1,0 +1,70 @@
+{
+  "name": "Hindsight Memory MCP Server",
+  "id": "mcp-server-hindsight",
+  "version": "0.1.0",
+  "description": "Hindsight memory recall, retain, and reflect MCP server",
+  "type": "mcp",
+  "entrypoint": {
+    "command": "mcp-server-hindsight",
+    "args": [],
+    "transport": "stdio"
+  },
+  "config_schema": [
+    {
+      "key": "hindsight_url",
+      "label": "Hindsight Service URL",
+      "type": "string",
+      "default": "http://hindsight:8888",
+      "description": "Base URL for the hindsight memory service"
+    },
+    {
+      "key": "hindsight_bank",
+      "label": "Bank ID",
+      "type": "string",
+      "default": "omniagent",
+      "description": "Memory bank identifier"
+    },
+    {
+      "key": "hindsight_limit",
+      "label": "Recall Limit",
+      "type": "integer",
+      "default": 5,
+      "description": "Maximum number of results returned by recall"
+    },
+    {
+      "key": "hindsight_budget",
+      "label": "Recall Budget",
+      "type": "string",
+      "default": "low",
+      "description": "Recall budget level: low (fast), mid, high (thorough)"
+    },
+    {
+      "key": "hindsight_tags",
+      "label": "Default Tags",
+      "type": "string",
+      "default": "from_user",
+      "description": "Comma-separated tags to filter by default"
+    },
+    {
+      "key": "hindsight_tags_match",
+      "label": "Tag Match Mode",
+      "type": "string",
+      "default": "any",
+      "description": "Tag matching mode: any, all, any_strict, all_strict"
+    },
+    {
+      "key": "hindsight_types",
+      "label": "Default Fact Types",
+      "type": "string",
+      "default": "world",
+      "description": "Comma-separated fact types to filter by default"
+    },
+    {
+      "key": "hindsight_timeout",
+      "label": "HTTP Timeout (seconds)",
+      "type": "integer",
+      "default": 15,
+      "description": "Timeout in seconds for hindsight HTTP requests"
+    }
+  ]
+}
