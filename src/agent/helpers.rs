@@ -23,6 +23,13 @@ pub fn merge_usage(cumulative: &mut Option<Usage>, new_usage: Option<Usage>) {
     }
 }
 
+/// Check if a message type supports structured templates.
+/// Structured types (kanban, cron, Cause) have task metadata that
+/// may include a template name for structured execution.
+pub fn is_structured_msg_type(msg_type: &str) -> bool {
+    matches!(msg_type, "kanban" | "cron" | "Cause")
+}
+
 /// Check if a database error is a foreign key violation (PostgreSQL code 23503).
 /// These indicate the thread was deleted or the FK constraint was broken
 /// the thread should be marked as failed rather than retried.
