@@ -312,6 +312,14 @@ pub async fn process_thread(
         .await?
         .unwrap_or_default();
 
+    // Send typing indicator to the platform (shows "bot is typing..." in Mattermost)
+    if let Some(ref platform_name) = channel.platform {
+        if let Some(ref resource) = channel.resource_identifier {
+            let parent_id = cause_msg.external_id.clone();
+            helpers::enqueue_typing(&cfg.ctx, platform_name, resource, parent_id).await;
+        }
+    }
+
     // 4. Build the initial message history via the MCP prompt plugin
     // The plugin returns 5 parts: system, memory, soul, context, user
     // Omniagent assembles these parts into the message array

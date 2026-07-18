@@ -671,3 +671,35 @@ pub async fn enqueue_reaction(
         tracing::warn!("Failed to enqueue reaction: {:?}", e);
     }
 }
+
+/// Enqueue a typing indicator to a platform channel/thread.
+/// Broadcasts "bot is typing..." while the agent is processing.
+pub async fn enqueue_typing(
+    ctx: &AppContext,
+    platform: &str,
+    resource_identifier: &str,
+    parent_id: Option<String>,
+) {
+    let sender = match ctx.platform_senders.get(platform) {
+        Some(s) => s.clone(),
+        None => return,
+    };
+
+    let envelope = OutboundEnvelope {
+        message_id: 0,
+        resource_identifier: resource_identifier.to_string(),
+        content: String::new(),
+        msg_type: "typing".to_string(),
+        msg_subtype: None,
+        thread_id: 0,
+        thread_sequence: 0,
+        cause_external_id: parent_id,
+        cause_root_id: None,
+        is_summary: false,
+        is_user_thread: false,
+    };
+
+    if let Err(e) = sender.try_send(envelope) {
+        tracing::warn!("Failed to enqueue typing: {:?}", e);
+    }
+}

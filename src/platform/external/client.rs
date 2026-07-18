@@ -9,9 +9,9 @@
 use crate::err_str;
 use crate::error::{AppResult, Error, ErrorContext};
 use crate::platform::external::{
-    build_deliver_request, build_initialize_request, build_react_request, parse_response,
+    build_deliver_request, build_initialize_request, build_react_request, build_typing_request, parse_response,
     DeliverParams, DeliverResult, InitializeResult, PlatformPluginConfig, PluginResponse,
-    ReactParams,
+    ReactParams, TypingParams,
 };
 use crate::platform::{OutboundReceiver, Platform};
 use async_trait::async_trait;
@@ -554,6 +554,46 @@ impl Platform for ExternalPlatformClient {
 
                             if let Err(e) = stdin.write_all(req.as_bytes()).await {
                                 tracing::error!("Failed to write react to plugin '{}' stdin: {:?}", plugin_name, e);
+                                if let Ok(mut circuit) = self.circuit.lock() {
+                                    circuit.record_failure();
+                                }
+                                continue;
+                            }
+                            if let Err(e) = stdin.write_all(b"\n").await {
+                                tracing::error!("Failed to write newline to plugin '{}' stdin: {:?}", plugin_name, e);
+                                if let Ok(mut circuit) = self.circuit.lock() {
+                                    circuit.record_failure();
+                                }
+                                continue;
+                            }
+                            if let Err(e) = stdin.flush().await {
+                                tracing::error!("Failed to flush plugin '{}' stdin: {:?}", plugin_name, e);
+                                if let Ok(mut circuit) = self.circuit.lock() {
+                                    circuit.record_failure();
+                                }
+                                continue;
+                            }
+                            continue;
+                        }
+
+                        // ── Typing envelope: handle as typing request instead of deliver ──
+                        if envelope.msg_type == "typing" {
+                            let typing_params = TypingParams {
+                                resource_identifier: envelope.resource_identifier,
+                                parent_id: envelope.cause_external_id,
+                            };
+                            let id = next_id_val;
+                            next_id_val += 1;
+                            let req = build_typing_request(id, &typing_params);
+
+                            tracing::debug!(
+                                "Sending typing request to '{}' (channel={})",
+                                plugin_name,
+                                typing_params.resource_identifier,
+                            );
+
+                            if let Err(e) = stdin.write_all(req.as_bytes()).await {
+                                tracing::error!("Failed to write typing to plugin '{}' stdin: {:?}", plugin_name, e);
                                 if let Ok(mut circuit) = self.circuit.lock() {
                                     circuit.record_failure();
                                 }
