@@ -72,6 +72,7 @@ pub(crate) fn err_json(status: StatusCode, msg: &str) -> (StatusCode, Json<serde
 pub mod plugins;
 pub mod plugins_compile;
 pub mod plugins_types;
+pub mod plugins_reload;
 
 /// Type alias for the platform restart signals map.
 type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicU64>, Arc<Notify>)>>>;
