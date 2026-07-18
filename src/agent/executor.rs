@@ -19,6 +19,19 @@ use sql_forge::sql_forge;
 /// 4. Call the LLM with system + user messages (and tools if enabled)
 /// 5. If tool calls are returned, execute them and loop back to LLM
 /// 6. If reasoning exists, save as a separate `reasoning` record
+/// Check if this message type supports structured templates.
+/// Structured types (kanban, cron, Cause) have task metadata that
+/// may include a template name for structured execution.
+fn is_structured_msg_type(msg_type: &str) -> bool {
+    matches!(msg_type, "kanban" | "cron" | "Cause")
+}
+
+/// 1. context setup  →  channel, messages, MCP, prompt plugin
+/// 2. prompt building →  system, memory, soul, context, user parts
+/// 3. LLM call       →  plan / answer
+/// 4. tool execution →  MCP loop
+/// 5. response handling →  markdown / images / tool results
+/// 6. deliver reply  →  platform plugin
 /// 7. Save the main agent response (msg_type: `message`)
 /// 8. Generate a per-turn summary (outside iteration limit)
 /// 9. Update thread status → completed/failed, record token_usage + duration
@@ -76,7 +89,7 @@ pub async fn process_thread(
             token_usage: serde_json::json!({}),
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
-        let _ = queries::complete_thread(
+        if let Err(e) = queries::complete_thread(
             &cfg.pool,
             thread.id,
             "failed",
@@ -87,7 +100,10 @@ pub async fn process_thread(
                 duration_ms: 0,
             },
         )
-        .await;
+        .await
+        {
+            tracing::warn!("[executor] Failed to mark thread {} failed (no-profile): {:?}", thread.id, e);
+        }
         // Deliver the error message back to the user's platform
         if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
             helpers::enqueue_delivery(
@@ -131,7 +147,7 @@ pub async fn process_thread(
             token_usage: serde_json::json!({}),
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
-        let _ = queries::complete_thread(
+        if let Err(e) = queries::complete_thread(
             &cfg.pool,
             thread.id,
             "failed",
@@ -142,7 +158,10 @@ pub async fn process_thread(
                 duration_ms: 0,
             },
         )
-        .await;
+        .await
+        {
+            tracing::warn!("[executor] Failed to mark thread {} failed (invalid-profile): {:?}", thread.id, e);
+        }
         // Deliver the error message back to the user's platform
         if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
             helpers::enqueue_delivery(
@@ -182,7 +201,7 @@ pub async fn process_thread(
             token_usage: serde_json::json!({}),
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
-        let _ = queries::complete_thread(
+        if let Err(e) = queries::complete_thread(
             &cfg.pool,
             thread.id,
             "failed",
@@ -193,7 +212,10 @@ pub async fn process_thread(
                 duration_ms: 0,
             },
         )
-        .await;
+        .await
+        {
+            tracing::warn!("[executor] Failed to mark thread {} failed (no-provider): {:?}", thread.id, e);
+        }
         // Deliver the error message back to the user's platform
         if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
             helpers::enqueue_delivery(
@@ -233,7 +255,7 @@ pub async fn process_thread(
             token_usage: serde_json::json!({}),
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
-        let _ = queries::complete_thread(
+        if let Err(e) = queries::complete_thread(
             &cfg.pool,
             thread.id,
             "failed",
@@ -244,7 +266,10 @@ pub async fn process_thread(
                 duration_ms: 0,
             },
         )
-        .await;
+        .await
+        {
+            tracing::warn!("[executor] Failed to mark thread {} failed (no-model): {:?}", thread.id, e);
+        }
         // Deliver the error message back to the user's platform
         if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
             helpers::enqueue_delivery(
@@ -389,7 +414,7 @@ pub async fn process_thread(
     };    // 4a. Load template from cause message metadata (for kanban/cron/user tasks)
     let template_section: Option<String> = {
         let msg_type = cause_msg.msg_type.as_str();
-        if msg_type == "kanban" || msg_type == "cron" || msg_type == "Cause" {
+        if is_structured_msg_type(msg_type) {
             let template_name = cause_msg
                 .metadata
                 .get("template")
@@ -1784,7 +1809,9 @@ Previous plan:\n{}",
         } else {
             "blocked"
         };
-        let _ = queries::update_kanban_task_status(&cfg.pool, task_id, kanban_status).await;
+        if let Err(e) = queries::update_kanban_task_status(&cfg.pool, task_id, kanban_status).await {
+            tracing::warn!("[executor] Failed to update kanban task {} status: {:?}", task_id, e);
+        }
     }
 
     // 11. Trigger cross-thread summary check via memory plugin
@@ -1796,12 +1823,15 @@ Previous plan:\n{}",
                 "channel_id": thread.channel_id,
             }),
         };
-        let _ = cfg
+        if let Err(e) = cfg
             .mcp
             .read()
             .await
             .execute(&mcp_call, cfg.ctx.clone())
-            .await;
+            .await
+        {
+            tracing::debug!("[executor] Post-thread summary failed (non-critical): {:?}", e);
+        }
     }
 
     // 12. Cancel any remaining background tasks for this thread

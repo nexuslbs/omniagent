@@ -304,7 +304,7 @@ pub async fn create_thread_with_cause(
         else {
             let prov = crate::agent::config::get_global()
                 .map(|g| g.read().unwrap().default_provider.clone())
-                .unwrap_or_else(|| "openai".to_string());
+                .unwrap_or_default(); // Empty string hits the error path below
             if !prov.is_empty() {
                 let model = crate::llm::resolve_default_model(&prov);
                 (prov, model)
