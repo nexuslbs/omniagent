@@ -421,6 +421,11 @@ fn wait_task_tool() -> McpTool {
                     "type": "integer",
                     "description": "Maximum seconds to wait (default: 30, max: 300)",
                     "default": 30
+                },
+                "tail": {
+                    "type": "integer",
+                    "description": "Maximum characters of logs to return, truncated from the end (default: 1000, 0 for no limit)",
+                    "default": 1000
                 }
             },
             "required": ["task_id"]

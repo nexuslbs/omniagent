@@ -271,8 +271,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                                 is_summary: false,
                                 msg_type: "error".to_string(),
                                 msg_subtype: Some("no_cause".to_string()),
-
                                 iteration_number: 0,
+                                duration_ms: 0,
+                                token_usage: serde_json::json!({}),
                             };
                             let _ = queries::create_message(&cfg.pool, &err_msg).await;
                             // Mark thread as failed
@@ -294,8 +295,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                                 is_summary: false,
                                 msg_type: "error".to_string(),
                                 msg_subtype: Some("unknown_error".to_string()),
-
                                 iteration_number: 0,
+                                duration_ms: 0,
+                                token_usage: serde_json::json!({}),
                             };
                             let _ = queries::create_message(&cfg.pool, &err_msg).await;
                             let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
@@ -353,9 +355,11 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                             summary_text: None,
                             is_summary: false,
                             msg_type: "error".to_string(),
-                            msg_subtype: Some("unknown_error".to_string()),
-                            iteration_number: 0,
-                        };
+                                                    msg_subtype: Some("spam".to_string()),
+                                                    iteration_number: 0,
+                                                    duration_ms: 0,
+                                                    token_usage: serde_json::json!({}),
+                                                };
                         let _ = queries::create_message(&cfg.pool, &err_msg).await;
                         // Mark thread as failed
                         let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;

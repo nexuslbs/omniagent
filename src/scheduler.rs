@@ -655,6 +655,8 @@ async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
         msg_type: "tool-result".to_string(),
         msg_subtype: None,
         iteration_number: 0,
+        duration_ms: ctx.is_error as i32,
+        token_usage: serde_json::json!({}),
     };
     let _ = queries::create_message(ctx.pool, &result_msg).await;
 

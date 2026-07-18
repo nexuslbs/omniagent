@@ -57,10 +57,25 @@ pub async fn handle_poll_task(args: Value, _ctx: AppContext) -> AppResult<McpToo
 pub async fn handle_wait_task(args: Value, _ctx: AppContext) -> AppResult<McpToolResult> {
     let task_id = get_task_id(&args).unwrap_or_default();
     let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(30);
+    let tail = args.get("tail").and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
     let registry = task_registry::TASK_REGISTRY
         .get()
         .cloned()
         .expect("TASK_REGISTRY not initialized");
+
+    // Helper: read all logs and return last `tail` chars as a truncated string
+    let get_log_tail = || async {
+        let (lines, _) = registry.read_logs(&task_id, None, Some(10_000)).await;
+        let joined = lines.join("\n");
+        if joined.is_empty() || tail == 0 {
+            return joined;
+        }
+        if joined.len() <= tail {
+            return joined;
+        }
+        let truncated: String = joined.chars().rev().take(tail).collect::<String>().chars().rev().collect();
+        format!("...(showing last {} of {} chars)\n{}", tail, joined.len(), truncated)
+    };
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
@@ -73,7 +88,28 @@ pub async fn handle_wait_task(args: Value, _ctx: AppContext) -> AppResult<McpToo
                     | task_registry::TaskStatus::Cancelled
                 );
                 if done {
-                    return handle_poll_task(args, _ctx).await;
+                    let logs = get_log_tail().await;
+                    let mut result = serde_json::json!({
+                        "status": "completed",
+                        "task_id": task_id,
+                        "tool": info.tool_name,
+                        "elapsed_secs": info.start_time.elapsed().as_secs_f64(),
+                        "logs": logs,
+                    });
+                    match &info.status {
+                        task_registry::TaskStatus::Completed(output) => {
+                            result["result"] = Value::String(output.clone());
+                        }
+                        task_registry::TaskStatus::Failed(err) => {
+                            result["error"] = Value::String(err.clone());
+                        }
+                        _ => {}
+                    }
+                    return Ok(McpToolResult {
+                        call_id: String::new(),
+                        content: result.to_string(),
+                        is_error: false,
+                    });
                 }
             }
             None => {
@@ -85,6 +121,7 @@ pub async fn handle_wait_task(args: Value, _ctx: AppContext) -> AppResult<McpToo
             }
         }
         if std::time::Instant::now() >= deadline {
+            let logs = get_log_tail().await;
             let info = registry.get_info(&task_id).await;
             return match info {
                 Some(info) => {
@@ -94,8 +131,10 @@ pub async fn handle_wait_task(args: Value, _ctx: AppContext) -> AppResult<McpToo
                         content: serde_json::json!({
                             "status": "timeout",
                             "task_id": task_id,
+                            "tool": info.tool_name,
                             "elapsed_secs": elapsed,
                             "message": format!("Task still running after {}s timeout", timeout_secs),
+                            "logs": logs,
                         }).to_string(),
                         is_error: false,
                     })

@@ -72,6 +72,8 @@ pub async fn process_thread(
             msg_type: "error".to_string(),
             msg_subtype: Some("no-profile".to_string()),
             iteration_number: 0,
+            duration_ms: 0,
+            token_usage: serde_json::json!({}),
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
         let _ = queries::complete_thread(
@@ -125,6 +127,8 @@ pub async fn process_thread(
             msg_type: "error".to_string(),
             msg_subtype: Some("invalid-profile".to_string()),
             iteration_number: 0,
+            duration_ms: 0,
+            token_usage: serde_json::json!({}),
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
         let _ = queries::complete_thread(
@@ -174,6 +178,8 @@ pub async fn process_thread(
             msg_type: "error".to_string(),
             msg_subtype: Some("no-provider".to_string()),
             iteration_number: 0,
+            duration_ms: 0,
+            token_usage: serde_json::json!({}),
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
         let _ = queries::complete_thread(
@@ -223,6 +229,8 @@ pub async fn process_thread(
             msg_type: "error".to_string(),
             msg_subtype: Some("no-model".to_string()),
             iteration_number: 0,
+            duration_ms: 0,
+            token_usage: serde_json::json!({}),
         };
         let saved = queries::create_message(&cfg.pool, &err_msg).await?;
         let _ = queries::complete_thread(
@@ -532,6 +540,8 @@ Previous plan:\n{}",
                     msg_type: "prompt".to_string(),
                     msg_subtype: Some("plan".to_string()),
                     iteration_number: 0,
+                    duration_ms: 0,
+                    token_usage: serde_json::json!({}),
                 };
                 if let Err(e) = queries::create_message(&cfg.pool, &prompt_msg).await {
                     warn!(
@@ -552,6 +562,13 @@ Previous plan:\n{}",
             match per_thread_llm.completion(plan_request).await {
                 Ok(resp) => {
                     helpers::merge_usage(&mut cumulative_usage, resp.usage.clone());
+                    let plan_token_usage = resp.usage.as_ref().map(|u| serde_json::json!({
+                        "prompt_tokens": u.prompt_tokens,
+                        "completion_tokens": u.completion_tokens,
+                        "cached_tokens": u.cached_tokens,
+                        "reasoning_tokens": u.reasoning_tokens,
+                    })).unwrap_or(serde_json::json!({}));
+                    let plan_duration_ms = resp.duration_ms as i32;
                     // Use reasoning as fallback when plan content is empty (e.g. DeepSeek
                     // puts everything in reasoning/thinking and leaves content empty).
                     let plan_content = if !resp.content.is_empty() {
@@ -595,10 +612,12 @@ Previous plan:\n{}",
                             summary_text: None,
                             is_summary: false,
                             msg_type: "plan".to_string(),
-                            msg_subtype: Some("markdown".to_string()),
-                            iteration_number: 1,
-                        };
-                        match queries::create_message(&cfg.pool, &plan_msg).await {
+                        msg_subtype: Some("markdown".to_string()),
+                        iteration_number: 1,
+                        duration_ms: plan_duration_ms,
+                        token_usage: plan_token_usage,
+                    };
+                                               match queries::create_message(&cfg.pool, &plan_msg).await {
                             Ok(_) => {}
                             Err(e) => warn!(
                                 "[plan] Failed to persist plan for thread {}: {:?}",
@@ -871,6 +890,8 @@ Previous plan:\n{}",
                 msg_type: "prompt".to_string(),
                 msg_subtype: Some(prompt_subtype.to_string()),
                 iteration_number: current_iter,
+                duration_ms: 0,
+                token_usage: serde_json::json!({}),
             };
             if let Err(e) = queries::create_message(&cfg.pool, &prompt_msg).await {
                 warn!(
@@ -1084,56 +1105,70 @@ Previous plan:\n{}",
         assistant_msg.tool_calls = Some(response.tool_calls.clone());
         messages.push(assistant_msg);
 
-        // If multiple tool calls, persist a multi-tool message first
-        if response.tool_calls.len() > 1 {
-            let mcp_snapshot = cfg.mcp.read().await;
-            let multi_content = response
-                .tool_calls
-                .iter()
-                .map(|tc| {
-                    format!(
-                        "{}: {}",
-                        mcp_snapshot.qualified_name(&tc.function.name),
-                        tc.function.arguments
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let multi_msg = MessageNew {
-                thread_id: thread.id,
-                role: "agent".to_string(),
-                content: multi_content,
-                thread_sequence: {
-                    let v = next_seq;
-                    next_seq += 1;
-                    v
-                },
-                external_id: None,
-                metadata: serde_json::json!({}),
-                embedding: None,
-                summary_text: None,
-                is_summary: false,
-                msg_type: "multi-tool".to_string(),
-                msg_subtype: None,
-                iteration_number: current_iter,
-            };
-            match helpers::persist_or_abort(&cfg.pool, &multi_msg, thread.id).await {
-                helpers::CreateMessageResult::FkViolation => {
-                    err_msg!("FK violation: thread {} no longer exists", thread.id);
-                }
-                helpers::CreateMessageResult::OtherError(e) => {
-                    error!("Failed to persist multi-tool message: {:?}", e)
-                }
-                helpers::CreateMessageResult::Success(saved) => {
-                    helpers::enqueue_delivery(
-                        &cfg.ctx,
-                        &saved,
-                        &channel,
-                        thread,
-                        cause_msg.external_id.clone(),
-                    )
-                    .await;
-                }
+        // Persist a message showing what tool(s) the agent called
+        // (single tool → msg_type: \"tool\", batch → msg_type: \"multi-tool\")
+        // Previously only multi-tool was persisted; single tool calls were invisible in the thread.
+        let mcp_snapshot = cfg.mcp.read().await;
+        let tool_content = response
+            .tool_calls
+            .iter()
+            .map(|tc| {
+                format!(
+                    "{}: {}",
+                    mcp_snapshot.qualified_name(&tc.function.name),
+                    tc.function.arguments
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let tool_msg_type = if response.tool_calls.len() > 1 {
+            "multi-tool"
+        } else {
+            "tool"
+        };
+
+        let tool_call_msg = MessageNew {
+            thread_id: thread.id,
+            role: "agent".to_string(),
+            content: tool_content,
+            thread_sequence: {
+                let v = next_seq;
+                next_seq += 1;
+                v
+            },
+            external_id: None,
+            metadata: serde_json::json!({}),
+            embedding: None,
+            summary_text: None,
+            is_summary: false,
+            msg_type: tool_msg_type.to_string(),
+            msg_subtype: None,
+            iteration_number: current_iter,
+            duration_ms: response.duration_ms as i32,
+            token_usage: response.usage.as_ref().map(|u| serde_json::json!({
+                "prompt_tokens": u.prompt_tokens,
+                "completion_tokens": u.completion_tokens,
+                "cached_tokens": u.cached_tokens,
+                "reasoning_tokens": u.reasoning_tokens,
+            })).unwrap_or(serde_json::json!({})),
+        };
+        match helpers::persist_or_abort(&cfg.pool, &tool_call_msg, thread.id).await {
+            helpers::CreateMessageResult::FkViolation => {
+                err_msg!("FK violation: thread {} no longer exists", thread.id);
+            }
+            helpers::CreateMessageResult::OtherError(e) => {
+                error!("Failed to persist tool call message: {:?}", e)
+            }
+            helpers::CreateMessageResult::Success(saved) => {
+                helpers::enqueue_delivery(
+                    &cfg.ctx,
+                    &saved,
+                    &channel,
+                    thread,
+                    cause_msg.external_id.clone(),
+                )
+                .await;
             }
         }
 
@@ -1193,6 +1228,7 @@ Previous plan:\n{}",
             // Snapshot bg threshold BEFORE entering the spawned closure (cfg ref issue)
             let bg_threshold_secs = cfg.config_snapshot().tool_bg_secs;
             let bg_threshold = std::time::Duration::from_secs(bg_threshold_secs);
+            let is_multi_tool = tool_count > 1;
 
             join_set.spawn(async move {
 
@@ -1287,21 +1323,26 @@ Previous plan:\n{}",
                     Err(e) => (format!("Error executing tool '{}': {}", tool_name, e), true),
                 };
 
-                // Build consolidated JSON: {tool, input, output}
-                let args_value: serde_json::Value =
-                    serde_json::from_str(&tool_args).unwrap_or(serde_json::json!(tool_args));
-                let json_content = serde_json::json!({
-                    "tool": qualified_name,
-                    "input": args_value,
-                    "output": output,
-                });
+                // For multi-tool calls: JSON with tool/input/output for disambiguation.
+                // For single tool calls: just the raw output (no wrapping).
+                let content_str = if is_multi_tool {
+                    let args_value: serde_json::Value =
+                        serde_json::from_str(&tool_args).unwrap_or(serde_json::json!(tool_args));
+                    serde_json::json!({
+                        "tool": qualified_name,
+                        "input": args_value,
+                        "output": output,
+                    }).to_string()
+                } else {
+                    output.clone()
+                };
 
                 // Persist single consolidated result message
                 // (no separate "tool" call message anymore)
                 let result_msg = MessageNew {
                     thread_id: tid,
                     role: "agent".to_string(),
-                    content: json_content.to_string(),
+                    content: content_str,
                     thread_sequence: seq,
                     external_id: None,
                     metadata: serde_json::json!({"is_error": is_error}),
@@ -1311,6 +1352,8 @@ Previous plan:\n{}",
                     msg_type: "tool-result".to_string(),
                     msg_subtype: Some(qualified_name.clone()),
                     iteration_number: iter_num,
+                    duration_ms: 0,
+                    token_usage: serde_json::json!({}),
                 };
 
                 match helpers::persist_or_abort(&pool, &result_msg, tid).await {
@@ -1446,6 +1489,8 @@ Previous plan:\n{}",
                 msg_type: "reasoning".to_string(),
                 msg_subtype: None,
                 iteration_number: current_iter,
+                duration_ms: 0,
+                token_usage: serde_json::json!({}),
             };
             let reasoning_saved = queries::create_message(&cfg.pool, &reasoning_msg).await?;
             helpers::enqueue_delivery(
@@ -1548,8 +1593,9 @@ Previous plan:\n{}",
             is_summary: true,
             msg_type: "summary".to_string(),
             msg_subtype: Some("interrupted".to_string()),
-
             iteration_number: current_iter,
+            duration_ms: 0,
+            token_usage: serde_json::json!({}),
         };
 
         let summary_saved = queries::create_message(&cfg.pool, &summary_msg).await?;
@@ -1589,8 +1635,9 @@ Previous plan:\n{}",
             is_summary: false,
             msg_type: "error".to_string(),
             msg_subtype: Some("empty_response".to_string()),
-
             iteration_number: current_iter,
+            duration_ms: 0,
+            token_usage: serde_json::json!({}),
         };
         let saved = queries::create_message(&cfg.pool, &agent_msg).await?;
         helpers::enqueue_delivery(
@@ -1619,8 +1666,9 @@ Previous plan:\n{}",
             is_summary: true,
             msg_type: "summary".to_string(),
             msg_subtype: None,
-
             iteration_number: current_iter,
+            duration_ms: 0,
+            token_usage: serde_json::json!({}),
         };
         let saved = queries::create_message(&cfg.pool, &agent_msg).await?;
         helpers::enqueue_delivery(

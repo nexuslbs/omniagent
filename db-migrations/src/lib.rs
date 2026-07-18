@@ -22,6 +22,23 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     create_readonly_user(pool).await?;
     seed_kanban_channel(pool).await?;
     seed_cron_channel(pool).await?;
+    // All messages store the time it took to produce (LLM call time for
+    // assistant messages, tool execution time for tool results) and the
+    // token usage from the LLM response that produced it.
+    sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS duration_ms INT NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await
+        .ok();
+    // Ensure NOT NULL even if column already existed (idempotent)
+    sqlx::query("ALTER TABLE messages ALTER COLUMN duration_ms SET NOT NULL")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS token_usage JSONB DEFAULT '{}'")
+        .execute(pool)
+        .await
+        .ok();
+
     // ── Column constraint fixes ────────────────────────────────────────────
     // planning_mode columns were created with NOT NULL DEFAULT '' but should
     // accept NULL. These ALTERs are idempotent.
@@ -83,7 +100,24 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .await
         .ok();
 
-    tracing::info!("[migration] Schema v3: plan boolean columns added");
+    // ── Add per-message duration and token tracking ─────────────────────
+    // Each message stores the time it took to produce (LLM call time for
+    // assistant messages, tool execution time for tool results) and the
+    // token usage from the LLM response that produced it.
+    sqlx::query(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS duration_ms INT NOT NULL DEFAULT 0"
+    )
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS token_usage JSONB DEFAULT '{}'"
+    )
+        .execute(pool)
+        .await
+        .ok();
+
+    tracing::info!("[migration] Schema v4: messages.duration_ms + messages.token_usage added");
     Ok(())
 }
 
