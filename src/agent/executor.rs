@@ -19,13 +19,6 @@ use sql_forge::sql_forge;
 /// 4. Call the LLM with system + user messages (and tools if enabled)
 /// 5. If tool calls are returned, execute them and loop back to LLM
 /// 6. If reasoning exists, save as a separate `reasoning` record
-/// Check if this message type supports structured templates.
-/// Structured types (kanban, cron, Cause) have task metadata that
-/// may include a template name for structured execution.
-fn is_structured_msg_type(msg_type: &str) -> bool {
-    matches!(msg_type, "kanban" | "cron" | "Cause")
-}
-
 /// 1. context setup  →  channel, messages, MCP, prompt plugin
 /// 2. prompt building →  system, memory, soul, context, user parts
 /// 3. LLM call       →  plan / answer
@@ -414,7 +407,7 @@ pub async fn process_thread(
     };    // 4a. Load template from cause message metadata (for kanban/cron/user tasks)
     let template_section: Option<String> = {
         let msg_type = cause_msg.msg_type.as_str();
-        if is_structured_msg_type(msg_type) {
+        if helpers::is_structured_msg_type(msg_type) {
             let template_name = cause_msg
                 .metadata
                 .get("template")
@@ -1791,11 +1784,12 @@ Previous plan:\n{}",
     if let Some(ref ext_id) = reaction_ext_id {
         if let Some(ref platform) = channel.platform {
             if let Some(ref resource) = channel.resource_identifier {
+                let cfg_snap = cfg.config_snapshot();
                 let emoji = match final_status {
-                    "completed" => ":white_check_mark:",
-                    "failed" => ":x:",
-                    "interrupted" => ":broken_heart:",
-                    _ => ":o:",
+                    "completed" => &cfg_snap.completed_emoji,
+                    "failed" => &cfg_snap.failed_emoji,
+                    "interrupted" => &cfg_snap.interrupted_emoji,
+                    _ => &cfg_snap.default_emoji,
                 };
                 helpers::enqueue_reaction(&cfg.ctx, platform, resource, ext_id, emoji).await;
             }
@@ -1804,10 +1798,11 @@ Previous plan:\n{}",
 
     // If this thread is linked to a kanban task, update its status
     if let Some(ref task_id) = thread.task_id {
+        let cfg_snap = cfg.config_snapshot();
         let kanban_status = if final_status == "completed" {
-            "review"
+            &cfg_snap.kanban_completed_status
         } else {
-            "blocked"
+            &cfg_snap.kanban_failed_status
         };
         if let Err(e) = queries::update_kanban_task_status(&cfg.pool, task_id, kanban_status).await {
             tracing::warn!("[executor] Failed to update kanban task {} status: {:?}", task_id, e);

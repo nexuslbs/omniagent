@@ -416,6 +416,68 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 default: Some("omni".into()),
             },
         ),
+        // ── Reaction emoji ──
+        (
+            "completed_emoji".into(),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "Emoji sent as a reaction when a thread completes successfully (default: :white_check_mark:)".into(),
+                options: None,
+                readonly: false,
+                default: Some(":white_check_mark:".into()),
+            },
+        ),
+        (
+            "failed_emoji".into(),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "Emoji sent as a reaction when a thread fails (default: :x:)".into(),
+                options: None,
+                readonly: false,
+                default: Some(":x:".into()),
+            },
+        ),
+        (
+            "interrupted_emoji".into(),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "Emoji sent as a reaction when a thread is interrupted (default: :broken_heart:)".into(),
+                options: None,
+                readonly: false,
+                default: Some(":broken_heart:".into()),
+            },
+        ),
+        (
+            "default_emoji".into(),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "Fallback emoji for unknown thread final statuses (default: :o:)".into(),
+                options: None,
+                readonly: false,
+                default: Some(":o:".into()),
+            },
+        ),
+        // ── Kanban status transitions ──
+        (
+            "kanban_completed_status".into(),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "Kanban status set when a task thread completes (default: review)".into(),
+                options: None,
+                readonly: false,
+                default: Some("review".into()),
+            },
+        ),
+        (
+            "kanban_failed_status".into(),
+            SettingMeta {
+                field_type: "text".into(),
+                description: "Kanban status set when a task thread fails (default: blocked)".into(),
+                options: None,
+                readonly: false,
+                default: Some("blocked".into()),
+            },
+        ),
 
     ]
 }
@@ -463,7 +525,13 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "max_tokens"
             | "max_unfinished_subtask_retries"
             | "temperature"
-            | "tool_bg_secs" => "execution",
+            | "tool_bg_secs"
+            | "completed_emoji"
+            | "failed_emoji"
+            | "interrupted_emoji"
+            | "default_emoji"
+            | "kanban_completed_status"
+            | "kanban_failed_status" => "execution",
             // memory category
             "delete_after_days"
             | "thread_summary_tokens"
@@ -639,6 +707,12 @@ pub async fn update_settings_handler(
         "prompt_log_level",
         "platform_max_spawn_retries",
         "default_profile",
+        "completed_emoji",
+        "failed_emoji",
+        "interrupted_emoji",
+        "default_emoji",
+        "kanban_completed_status",
+        "kanban_failed_status",
     ]
     .into_iter()
     .collect();

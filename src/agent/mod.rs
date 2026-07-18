@@ -222,7 +222,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                 // Check if the channel has been closed in the DB
                 if let Ok(true) = queries::is_channel_closed(&cfg.pool, channel_id).await {
                     info!("Channel {} is closed in DB, handler exiting", channel_id);
-                    let _ = queries::skip_channel_threads(&cfg.pool, channel_id).await;
+                    if let Err(e) = queries::skip_channel_threads(&cfg.pool, channel_id).await {
+                        tracing::warn!("[supervisor] Failed to skip threads for channel {}: {:?}", channel_id, e);
+                    }
                     return;
                 }
 
@@ -246,7 +248,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                     // Check if the channel was closed between batches
                     if let Ok(true) = queries::is_channel_closed(&cfg.pool, channel_id).await {
                         info!("Channel {} closed during batch processing", channel_id);
-                        let _ = queries::skip_channel_threads(&cfg.pool, channel_id).await;
+                        if let Err(e) = queries::skip_channel_threads(&cfg.pool, channel_id).await {
+                            tracing::warn!("[supervisor] Failed to skip threads for channel {}: {:?}", channel_id, e);
+                        }
                         return;
                     }
 
