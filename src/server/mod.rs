@@ -574,7 +574,7 @@ async fn prompt_handler(
         .await
         .all()
         .iter()
-        .map(|t| t.name.clone())
+        .map(|t| t.full_name.clone())
         .collect();
     // Build system prompt TEMPLATE: stable (identity + guidance) + volatile (memory/soul) placeholders
     let mut segments: Vec<String> = Vec::new();
@@ -672,10 +672,10 @@ async fn prompt_preview_handler(
         .await
         .all()
         .iter()
-        .map(|t| t.name.clone())
+        .map(|t| t.full_name.clone())
         .collect();
     let system_prompt = format!(
-        "You are OmniAgent: precise, efficient, autonomous.\n\nActive Hermes profile: {profile_name}.\n\n{}",
+        "You are OmniAgent: precise, efficient, autonomous.\n\nActive profile: {profile_name}.\n\n{}",
         if !memory_raw.is_empty() { format!("## MEMORY (your personal notes)\n{memory_raw}") } else { String::new() }
     );
 

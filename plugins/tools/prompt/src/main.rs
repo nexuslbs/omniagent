@@ -648,21 +648,11 @@ async fn main() -> Result<()> {
         })
     });
 
-    // Compact messages handler (no config needed)
+    // Compact messages handler
     let compact_handler: ToolHandler =
         Box::new(move |args: Value, _meta: Option<McpMeta>| {
             Box::pin(async move { handle_compact_messages(&args).await })
         });
-
-    // Condense handler
-    let cfg_condense = plugin_config.clone();
-    let condense_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
-        let cfg = cfg_condense.clone();
-        Box::pin(async move {
-            let config = cfg.read().await;
-            handle_condense(&args, &config).await
-        })
-    });
 
     let tools = vec![
         McpToolEntry {
@@ -719,7 +709,7 @@ async fn main() -> Result<()> {
         },
         McpToolEntry {
             def: McpToolDef {
-                name: "compact-messages".to_string(),
+                name: "prompt_compact-messages".to_string(),
                 description:
                     "Compact old assistant messages in a conversation to save tokens. \
                      Removes redundant assistant tool-call pairs from the middle of the \
@@ -742,38 +732,6 @@ async fn main() -> Result<()> {
                 }),
             },
             handler: compact_handler,
-        },
-        McpToolEntry {
-            def: McpToolDef {
-                name: "condense".to_string(),
-                description:
-                    "Condense conversation context based on configured thresholds. \
-                     Checks current message size against hard/soft budgets (char or token based) \
-                     and compacts old assistant tool-call pairs if over budget. \
-                     The plugin's own thresholds and tokenizer_encoding config determine \
-                     when and how to condense. Returns the (possibly condensed) messages \
-                     with a was_condensed flag."
-                    .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "messages": {
-                            "type": "array",
-                            "description": "Array of ChatMessage objects to condense"
-                        },
-                        "current_iteration": {
-                            "type": "integer",
-                            "description": "Current iteration number for soft-budget interval checking"
-                        },
-                        "last_condense_iteration": {
-                            "type": "integer",
-                            "description": "Last iteration when condensation occurred"
-                        }
-                    },
-                    "required": ["messages"]
-                }),
-            },
-            handler: condense_handler,
         },
     ];
 

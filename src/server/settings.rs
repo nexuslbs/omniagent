@@ -469,7 +469,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "thread_summary_tokens"
             | "memory_max_chars"
             | "soul_max_chars" => "memory",
-            // system — bootstrap from env
+            // system : bootstrap from env
             "host" | "port" | "database_url" | "omni_dir" => "system",
             // everything else → general
             _ => "general",
@@ -484,12 +484,16 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
         }
     }
 
+    for cat in categories.iter_mut() {
+        cat.settings.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+
     categories.retain(|c| !c.settings.is_empty());
     categories
 }
 
 /// The 4 bootstrap settings that are always read-only from process env vars.
-/// These are never stored in settings.yml — they come directly from env.
+/// These are never stored in settings.yml : they come directly from env.
 /// The env var name is the UPPER_SNAKE_CASE version of the setting name.
 const BOOTSTRAP_SETTINGS: &[&str] = &["host", "port", "database_url", "omni_dir"];
 

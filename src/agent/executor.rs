@@ -787,7 +787,7 @@ Previous plan:\n{}",
         // Before each LLM call, invoke the configured condense MCP tool.
         // The tool (plugin-specific) decides whether to condense based on
         // its own thresholds (configurable via plugin config). The agent
-        // is agnostic to condensation logic — it passes messages and
+        // is agnostic to condensation logic : it passes messages and
         // iteration info and applies whatever the tool returns.
         let cfg_snapshot = cfg.config_snapshot();
         let condense_tool = cfg_snapshot.compact_messages_tool_name.clone();
@@ -820,7 +820,7 @@ Previous plan:\n{}",
                     }
                 }
                 Err(e) => {
-                    warn!("[context] Condense tool '{}' failed: {} — continuing without condensation", condense_tool, e);
+                    warn!("[context] Condense tool '{}' failed: {} : continuing without condensation", condense_tool, e);
                 }
             }
         }
@@ -1202,7 +1202,7 @@ Previous plan:\n{}",
                 let result = match tokio::time::timeout(bg_threshold, tool_future).await {
                     Ok(result) => result,
                     Err(_elapsed) => {
-                        // Short timeout exceeded — switch to background mode.
+                        // Short timeout exceeded : switch to background mode.
                         // Register the tool in the task registry for polling.
                         let registry = crate::agent::task_registry::TASK_REGISTRY
                             .get()

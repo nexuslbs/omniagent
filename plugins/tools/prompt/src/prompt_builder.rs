@@ -75,34 +75,32 @@ fn build_dynamic_identity(tool_names: &[String]) -> String {
 }
 
 const TOOL_GUIDANCE: &str = "TOOL USE RULES (fail the task if you violate these):\n\
-1. CALL TOOLS DIRECTLY: Do NOT search the filesystem, read plugin configs, \
-read mcp-config.json files, inspect server.py files, or look at docker-compose files \
-to discover what tools exist or how to call them. The function-calling API already \
-shows you every available tool with its name, description, and parameters. \
-If you need information about available tools, use the list_tool_details tool. \
-Reading config files to find tools is always wrong and wastes turns.\n\
-2. SEARCH BEFORE QUERY: Use search (search_messages, search_wiki) before \
-query_database for text/vector searches. Only use query_database for structured \
-aggregations (counts, sums, averages, groupings).\n\
-3. WRITE SINGLE-FIELD FILES: When using filesystem_write_tool, write complete \
-single-field content files. Do NOT write partial files and append later. Do NOT \
-write placeholder content expecting to \"fill in\" values afterward.\n\
-4. RENAME INSTEAD OF RECREATE: When a file/directory already exists and you \
-need to change its name, rename it (filesystem_move). Do NOT delete and recreate.\n\
+1. CALL TOOLS DIRECTLY: Do NOT search the filesystem, read plugin config files, \
+or inspect server configuration to discover what tools exist or how to call them. \
+Available tools are listed with their name, description, and parameters in the \
+function-calling API. Reading config files to find tools is always wrong and wastes turns.\n\
+2. SEARCH BEFORE QUERY: Use search tools before querying databases for text or \
+vector searches. Only use direct data queries for structured aggregations \
+(counts, sums, averages, groupings).\n\
+3. WRITE COMPLETE FILES: When writing a file, write the entire content in a single \
+operation. Do NOT write partial content and append later, or write placeholder \
+content expecting to fill in values afterward.\n\
+4. RENAME INSTEAD OF RECREATE: When a file or directory already exists and you \
+need to change its name, use the rename tool. Do NOT delete and recreate.\n\
 5. NO POLLING: Do NOT repeatedly check the same condition. If you're waiting \
-for something, use the appropriate tool once and wait for the result.\n\
-6. TOGGLE INSTEAD OF CONDITIONAL: For boolean/config values, use the toggle \
-endpoint. Do NOT read the current value, compute the negation, and write it back.\n\
+for something, make a single request and wait for the result.\n\
+6. SET DIRECTLY: For configuration values, set the new value directly. Do NOT \
+read the current value, flip it, and write it back.\n\
 7. COMPLETE WORK: Before presenting results, finish ALL steps. Do not interrupt \
 your work to show intermediate progress unless asked.\n\
-8. CONFIRM DESTRUCTIVE ACTIONS: Before delete/overwrite/stop operations, \
+8. CONFIRM DESTRUCTIVE ACTIONS: Before delete, overwrite, or stop operations, \
 present what you will do and wait for confirmation.\n\
 9. SKIP ON FAILURE: If an operation fails (network error, not found, bad request), \
 try once more with a different approach, then move on. Do NOT retry the same \
 failing call more than once. There is no hidden state that changes between retries.";
 
 fn build_active_profile_hint(profile_name: &str) -> String {
-    format!("Active Hermes profile: {profile_name}.")
+    format!("Active profile: {profile_name}.")
 }
 
 fn build_platform_hint(platform: &str) -> Option<&'static str> {
@@ -137,7 +135,7 @@ fn read_user_profile_section(memory_store: &MemoryStore, soul_max_chars: usize) 
     let header = if raw.len() > soul_max_chars {
         format!("## USER PROFILE (who the user is) [TRUNCATED: showing first {} of {} chars]", soul_max_chars, raw.len())
     } else {
-        format!("## USER PROFILE (who the user is) [{}%: {}/{} chars]", 100, raw.len(), raw.len())
+        format!("## USER PROFILE (who the user is) [{} chars]", raw.len())
     };
     format!("{header}\n{truncated}")
 }

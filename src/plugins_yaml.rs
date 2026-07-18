@@ -881,7 +881,7 @@ fn build_plugin_detail(
 
     // Compute is_script: plugins with script-based source code that
     // don't need compilation (no Cargo.toml / package.json / pyproject.toml).
-    // Scripts are things like Python, JS, or shell files — they just need
+    // Scripts are things like Python, JS, or shell files : they just need
     // their files copied, no build step. Rust crates and Node.js packages
     // with package.json are NOT scripts (they need compilation or npm install).
     let is_script = if manifest.api_mode.is_some() {
@@ -894,7 +894,7 @@ fn build_plugin_detail(
             else if dir_path.join("package.json").exists() { false }
             else if dir_path.join("pyproject.toml").exists() { false }
             else {
-                // No build config found — check if source files are script-like
+                // No build config found : check if source files are script-like
                 // Path-based entrypoints (e.g., "./plugin.py", "python3 client.py") indicate a script.
                 if let Some(ep) = manifest.entrypoint.as_ref() {
                     if !ep.command.is_empty() {
@@ -904,7 +904,7 @@ fn build_plugin_detail(
                         }
                     }
                 }
-                // Bare entrypoint (e.g., "mcp-server-cron") is a pre-compiled binary — not a script.
+                // Bare entrypoint (e.g., "mcp-server-cron") is a pre-compiled binary : not a script.
                 // But if there are source files by extension AND no build system, it's a script.
                 // has_source_code was set to true by has_source_file_by_extension which found .py/.js/.sh files.
                 // Without Cargo.toml/package.json/pyproject.toml, these are script files.

@@ -101,7 +101,7 @@ pub struct AgentConfig {
     /// - "all": insert every prompt before every LLM call
     pub prompt_log_level: String,
 
-    /// Threshold in seconds for background mode — tools that complete within
+    /// Threshold in seconds for background mode : tools that complete within
     /// this time return normally. Tools that exceed this return a "processing"
     /// result with a task ID and continue executing in the background.
     /// Default: 30 seconds.
@@ -153,7 +153,7 @@ impl AgentConfig {
         let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/omni".to_string());
         let settings = crate::server::settings::load_settings_file(&data_dir);
 
-        // Helper: get a resolved value or default (sync — no $secret: resolution at startup)
+        // Helper: get a resolved value or default (sync : no $secret: resolution at startup)
         let get = |key: &str, default: &str| -> String {
             settings.get(key).cloned().unwrap_or_else(|| default.to_string())
         };

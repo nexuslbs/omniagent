@@ -19,20 +19,20 @@ use super::AppState;
 // ── YAML format ──
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct ActionsFile {
-    actions: HashMap<String, ActionEntry>,
+pub(crate) struct ActionsFile {
+    pub(crate) actions: HashMap<String, ActionEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
-struct ActionEntry {
-    enabled: bool,
-    tool_name: String,
-    params: serde_json::Value,
+pub(crate) struct ActionEntry {
+    pub(crate) enabled: bool,
+    pub(crate) tool_name: String,
+    pub(crate) params: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
+    pub(crate) description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    is_builtin: Option<bool>,
+    pub(crate) is_builtin: Option<bool>,
 }
 
 // ── API response shape ──
@@ -55,6 +55,8 @@ pub(crate) struct CreateActionRequest {
     name: String,
     tool_name: String,
     params: Option<serde_json::Value>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +69,8 @@ pub(crate) struct UpdateActionRequest {
     params: Option<serde_json::Value>,
     #[serde(default)]
     enabled: Option<bool>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 // ── Helpers ──
@@ -75,7 +79,7 @@ fn actions_path(data_dir: &str) -> String {
     format!("{}/actions.yml", data_dir)
 }
 
-fn load_actions(data_dir: &str) -> ActionsFile {
+pub(crate) fn load_actions(data_dir: &str) -> ActionsFile {
     let path = actions_path(data_dir);
     match std::fs::read_to_string(&path) {
         Ok(content) => serde_yaml::from_str(&content).unwrap_or_else(|e| {
@@ -160,6 +164,13 @@ pub(crate) async fn create_action_handler(
             Json(serde_json::json!({ "error": "Name is required" })),
         );
     }
+    // Validate name is a valid key: alphanumeric, hyphens, underscores only
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Action name must only contain letters, numbers, hyphens, and underscores" })),
+        );
+    }
     if body.tool_name.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -169,27 +180,23 @@ pub(crate) async fn create_action_handler(
 
     let mut file = load_actions(&state.data_dir);
 
-    // Generate a unique ID
-    let id = {
-        let mut counter = 0u64;
-        loop {
-            let candidate = format!("a{}", counter);
-            if !file.actions.contains_key(&candidate) {
-                break candidate;
-            }
-            counter += 1;
-        }
-    };
+    // Check for duplicate name
+    if file.actions.contains_key(&name) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": format!("Action '{}' already exists", name) })),
+        );
+    }
 
     let entry = ActionEntry {
         enabled: true,
         tool_name: body.tool_name,
         params: body.params.unwrap_or(serde_json::json!({})),
-        description: Some(name.clone()),
+        description: body.description,
         is_builtin: None,
     };
 
-    file.actions.insert(id.clone(), entry);
+    file.actions.insert(name.clone(), entry);
 
     match save_actions(&state.data_dir, &file) {
         Ok(()) => {
@@ -238,6 +245,9 @@ pub(crate) async fn update_action_handler(
     }
     if let Some(enabled) = body.enabled {
         entry.enabled = enabled;
+    }
+    if let Some(description) = body.description {
+        entry.description = Some(description);
     }
     if let Some(name) = body.name {
         if name.trim().is_empty() {

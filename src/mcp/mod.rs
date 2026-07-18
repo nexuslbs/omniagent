@@ -380,10 +380,10 @@ impl McpRegistry {
     }
 }
 
-/// Build the `poll_task` tool: check the status of a background task.
+/// Build the `poll-task` tool: check the status of a background task.
 fn poll_task_tool() -> McpTool {
     McpTool {
-        name: "poll_task".to_string(),
+        name: "builtin_poll-task".to_string(),
         full_name: tool_qualify("builtin", "poll_task"),
         description: "Check the status of a previously started background tool task. Returns the task's current status (running/completed/failed/cancelled), elapsed time, and result if done.".to_string(),
         input_schema: serde_json::json!({
@@ -404,10 +404,10 @@ fn poll_task_tool() -> McpTool {
     }
 }
 
-/// Build the `wait_task` tool: wait for a background task to complete.
+/// Build the `wait-task` tool: wait for a background task to complete.
 fn wait_task_tool() -> McpTool {
     McpTool {
-        name: "wait_task".to_string(),
+        name: "builtin_wait-task".to_string(),
         full_name: tool_qualify("builtin", "wait_task"),
         description: "Wait for a background tool task to complete, with a configurable timeout. Polls every 500ms and returns the result when done, or a timeout status if the task doesn't finish in time.".to_string(),
         input_schema: serde_json::json!({
@@ -433,10 +433,10 @@ fn wait_task_tool() -> McpTool {
     }
 }
 
-/// Build the `cancel_task` tool: cancel a running background task.
+/// Build the `cancel-task` tool: cancel a running background task.
 fn cancel_task_tool() -> McpTool {
     McpTool {
-        name: "cancel_task".to_string(),
+        name: "builtin_cancel-task".to_string(),
         full_name: tool_qualify("builtin", "cancel_task"),
         description: "Cancel a running background task. The task's abort signal is sent and it will stop as soon as possible. Use when the task is no longer needed.".to_string(),
         input_schema: serde_json::json!({
@@ -457,10 +457,10 @@ fn cancel_task_tool() -> McpTool {
     }
 }
 
-/// Build the `read_task_logs` tool: stream log output from a background task.
+/// Build the `read-task-logs` tool: stream log output from a background task.
 fn read_task_logs_tool() -> McpTool {
     McpTool {
-        name: "read_task_logs".to_string(),
+        name: "builtin_read-task-logs".to_string(),
         full_name: tool_qualify("builtin", "read_task_logs"),
         description: "Read intermediate log output from a running or completed background task. Supports cursor-based pagination for long logs.".to_string(),
         input_schema: serde_json::json!({
@@ -489,13 +489,13 @@ fn read_task_logs_tool() -> McpTool {
     }
 }
 
-/// Build the `read_attached_file` tool: fetch file content from a platform
+/// Build the `read-attached-file` tool: fetch file content from a platform
 /// on demand, avoiding inlining large files in the prompt or DB.
 fn read_attached_file_tool() -> McpTool {
     use base64::{engine::general_purpose, Engine};
 
     McpTool {
-        name: "read_attached_file".to_string(),
+        name: "builtin_read-attached-file".to_string(),
         full_name: tool_qualify("builtin", "read_attached_file"),
         description: "Read the content of an attached file from a platform channel (e.g. Mattermost). \
                       Use this when a file is mentioned in a message but its content was not inlined \

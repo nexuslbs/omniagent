@@ -430,7 +430,16 @@ async fn list_schedule_handler(
         }
     };
 
-    let jobs: Vec<JobEntry> = rows.into_iter().map(job_row_to_entry).collect();
+    let mut jobs: Vec<JobEntry> = rows.into_iter().map(job_row_to_entry).collect();
+    // Resolve action names from actions.yml (stored in JSON/YAML file, not DB)
+    let actions = super::actions::load_actions(&state.data_dir);
+    for job in &mut jobs {
+        if let Some(action_id) = &job.action_id {
+            if job.action_name.is_none() {
+                job.action_name = actions.actions.get(action_id).map(|a| a.description.clone()).flatten();
+            }
+        }
+    }
     ok_json(jobs)
 }
 
@@ -487,7 +496,19 @@ async fn get_schedule_handler(
         }
     };
 
-    ok_json(job_row_to_entry(row))
+    let mut entry = job_row_to_entry(row);
+    // Resolve action name from actions.yml
+    if let Some(action_id) = &entry.action_id {
+        if entry.action_name.is_none() {
+            let actions = super::actions::load_actions(&state.data_dir);
+            entry.action_name = actions
+                .actions
+                .get(action_id)
+                .map(|a| a.description.clone())
+                .flatten();
+        }
+    }
+    ok_json(entry)
 }
 
 /// POST /schedule: create or upsert a cron job.
