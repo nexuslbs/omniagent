@@ -35,7 +35,6 @@ use axum::{
 use sql_forge::sql_forge;
 use sqlx;
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tracing::{error, info};
 
@@ -45,8 +44,9 @@ use crate::plugin;
 use crate::plugins_yaml;
 use crate::server::AppState;
 
-use super::plugins_types::*;
 use super::plugins_compile::*;
+use super::plugins_reload::*;
+use super::plugins_types::*;
 
 /// Build the plugin management router, reusing the main server's state.
 #[allow(dead_code)]
@@ -3137,154 +3137,4 @@ async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Vec<String>),
     }
 
     Ok((started, stopped, errors))
-}
-
-/// Refresh the process environment by re-reading the .env file.
-/// Returns the number of env vars that were refreshed.
-pub fn refresh_env_from_file(env_path: &str) -> u32 {
-    match std::fs::read_to_string(env_path) {
-        Ok(content) => {
-            let mut refreshed = 0u32;
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if let Some((key, value)) = line.split_once('=') {
-                    let k = key.trim();
-                    let v = value.trim();
-                    if !k.is_empty() {
-                        std::env::set_var(k, v);
-                        refreshed += 1;
-                    }
-                }
-            }
-            refreshed
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Could not read .env at '{}' for env refresh: {:?}",
-                env_path,
-                e
-            );
-            0
-        }
-    }
-}
-
-/// Trigger a hot-reload of a platform plugin after its config has been updated.
-async fn reload_platform_plugin(state: &Arc<AppState>, name: &str) {
-    tracing::info!("Reloading platform plugin '{}' after config update", name);
-
-    let refreshed = refresh_env_from_file(&state.env_path);
-    if refreshed > 0 {
-        tracing::info!(
-            "Refreshed {} env var(s) from .env for platform plugin reload",
-            refreshed
-        );
-    }
-
-    let signal = {
-        let signals = state.platform_restart_signals.lock().await;
-        signals.get(name).cloned()
-    };
-
-    if let Some((restart_count, restart_notify)) = signal {
-        restart_count.fetch_add(1, Ordering::SeqCst);
-        restart_notify.notify_one();
-        tracing::info!(
-            "Set restart counter for platform plugin '{}': subprocess will be respawned (count: {})",
-            name,
-            restart_count.load(Ordering::SeqCst)
-        );
-    } else {
-        tracing::warn!(
-            "Platform plugin '{}' is not currently registered: restart flag not found. \
-             The new config will take effect on next omniagent start.",
-            name
-        );
-    }
-}
-
-/// Trigger a hot-reload of a tool (MCP) plugin after its config has been updated.
-async fn reload_tool_plugin(state: &Arc<AppState>, name: &str) {
-    tracing::info!("Reloading tool plugin '{}' after config update", name);
-
-    let refreshed = refresh_env_from_file(&state.env_path);
-    if refreshed > 0 {
-        tracing::info!(
-            "Refreshed {} env var(s) from .env for tool plugin reload",
-            refreshed
-        );
-    }
-
-    crate::mcp::external::client::clear_server_pools(name);
-    crate::mcp::external::client::remove_server_config(name);
-
-    match crate::mcp::external::client::initialize_single_server_tools(
-        &state.data_dir,
-        name,
-    )
-    .await
-    {
-        Ok(tools) => {
-            let count = tools.len();
-            state.tool_registry.write().await.remove_by_server(name);
-            state.tool_registry.write().await.register_all(tools);
-            tracing::info!(
-                "Hot-reloaded {} tool(s) from MCP server '{}' after config update (no restart needed)",
-                count,
-                name
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Hot-reload of MCP server '{}' after config update failed (config saved, will retry on next restart): {}",
-                name,
-                e
-            );
-        }
-    }
-}
-
-/// Sanitize a plugin name for use as a YAML key and directory path.
-/// - Trims whitespace
-/// - NFD-normalizes to decompose diacritics
-/// - Converts to lowercase
-/// - Replaces runs of whitespace with a single hyphen
-/// - Strips any character that isn't alphanumeric, hyphen, or underscore
-fn sanitize_plugin_name(name: &str) -> String {
-    use unicode_normalization::UnicodeNormalization;
-
-    let trimmed = name.trim();
-    let mut result = String::with_capacity(trimmed.len());
-    let mut in_whitespace = false;
-
-    for ch in trimmed.nfd() {
-        // Skip combining diacritical marks
-        let code = ch as u32;
-        if (0x0300..=0x036F).contains(&code)
-            || (0x1AB0..=0x1AFF).contains(&code)
-            || (0x1DC0..=0x1DFF).contains(&code)
-            || (0x20D0..=0x20FF).contains(&code)
-            || (0xFE20..=0xFE2F).contains(&code)
-        {
-            continue;
-        }
-
-        if ch.is_whitespace() {
-            if !in_whitespace {
-                result.push('-');
-                in_whitespace = true;
-            }
-        } else if ch.is_alphanumeric() || ch == '-' || ch == '_' {
-            for lower in ch.to_lowercase() {
-                result.push(lower);
-            }
-            in_whitespace = false;
-        } else {
-            in_whitespace = false;
-        }
-    }
-    result
 }

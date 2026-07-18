@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 use omniagent::error::{AppResult, Error};
-use omniagent::server::plugins::refresh_env_from_file;
+use omniagent::server::plugins_reload::refresh_env_from_file;
 use omniagent::{agent, db, mcp, platform, profile, scheduler, server};
 
 /// OmniAgent: autonomous agent system with Postgres, pgvector, MCP tools.
