@@ -476,14 +476,17 @@ pub async fn skip_on_startup(pool: &PgPool) -> crate::error::AppResult<u64> {
 
     // Move "running" tasks to "blocked" since the agent restarted mid-execution
     // Record history before the update
-    let _ = sql_forge!(
+    if let Err(e) = sql_forge!(
         r#"
         INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board)
         SELECT id, 'moved', 'running', 'blocked' FROM kanban_tasks WHERE status = 'running'
         "#,
     )
     .execute(pool)
-    .await;
+    .await
+    {
+        tracing::warn!("[agent] Failed to record kanban history: {:?}", e);
+    }
 
     let running_result = sql_forge!(
         r#"UPDATE kanban_tasks SET status = 'blocked', updated_at = NOW() WHERE status = 'running'"#,

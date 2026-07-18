@@ -24,29 +24,18 @@ use crate::error::{AppResult, Error, ErrorContext};
 // EmbeddingProtocol
 // ---------------------------------------------------------------------------
 
-/// Supported external embedding API protocols.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum EmbeddingProtocol {
-    OpenAI,
-    Gemini,
-    Cohere,
-    Jina,
-}
+/// External embedding API protocol.
+/// Identifies the API format to use. Known protocols (openai, gemini, cohere, jina)
+/// have specific request/response handling. Unknown protocols default to
+/// OpenAI-compatible format.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EmbeddingProtocol(pub String);
 
 impl FromStr for EmbeddingProtocol {
-    type Err = Error;
+    type Err = std::convert::Infallible;
 
-    fn from_str(s: &str) -> AppResult<Self> {
-        match s.to_lowercase().as_str() {
-            "openai" => Ok(Self::OpenAI),
-            "gemini" => Ok(Self::Gemini),
-            "cohere" => Ok(Self::Cohere),
-            "jina" => Ok(Self::Jina),
-            _ => Err(err_str!(
-                "Unknown embedding protocol: {}. Expected one of: openai, gemini, cohere, jina",
-                s
-            )),
-        }
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.to_lowercase()))
     }
 }
 
@@ -60,20 +49,8 @@ impl EmbeddingProtocol {
         api_key: &Option<String>,
         model: &str,
     ) -> (String, Vec<(String, String)>, serde_json::Value) {
-        match self {
-            Self::OpenAI => {
-                let url = format!("{}/embeddings", api_url.trim_end_matches('/'));
-                let mut headers = Vec::new();
-                if let Some(key) = api_key {
-                    headers.push(("Authorization".to_string(), format!("Bearer {}", key)));
-                }
-                let body = serde_json::json!({
-                    "input": text,
-                    "model": model,
-                });
-                (url, headers, body)
-            }
-            Self::Gemini => {
+        match self.0.as_str() {
+            "gemini" => {
                 let url = format!("{}:embedContent", api_url.trim_end_matches('/'));
                 let mut headers = Vec::new();
                 if let Some(key) = api_key {
@@ -87,11 +64,11 @@ impl EmbeddingProtocol {
                 });
                 (url, headers, body)
             }
-            Self::Cohere => {
+            "cohere" => {
                 let url = format!("{}/embed", api_url.trim_end_matches('/'));
                 let mut headers = Vec::new();
                 if let Some(key) = api_key {
-                    headers.push(("Authorization".to_string(), format!("Bearer {}", key)));
+                    headers.push(("Authorization".to_string(), format!("Bearer {key}")));
                 }
                 let body = serde_json::json!({
                     "texts": [text],
@@ -100,14 +77,27 @@ impl EmbeddingProtocol {
                 });
                 (url, headers, body)
             }
-            Self::Jina => {
+            "jina" => {
                 let url = format!("{}/embeddings", api_url.trim_end_matches('/'));
                 let mut headers = Vec::new();
                 if let Some(key) = api_key {
-                    headers.push(("Authorization".to_string(), format!("Bearer {}", key)));
+                    headers.push(("Authorization".to_string(), format!("Bearer {key}")));
                 }
                 let body = serde_json::json!({
                     "input": [text],
+                    "model": model,
+                });
+                (url, headers, body)
+            }
+            // Default (openai and unknown): OpenAI-compatible /embeddings endpoint
+            _ => {
+                let url = format!("{}/embeddings", api_url.trim_end_matches('/'));
+                let mut headers = Vec::new();
+                if let Some(key) = api_key {
+                    headers.push(("Authorization".to_string(), format!("Bearer {key}")));
+                }
+                let body = serde_json::json!({
+                    "input": text,
                     "model": model,
                 });
                 (url, headers, body)
@@ -117,25 +107,8 @@ impl EmbeddingProtocol {
 
     /// Extract a single embedding vector from a protocol response.
     pub fn extract_embedding(&self, response: &serde_json::Value) -> AppResult<Vec<f32>> {
-        match self {
-            Self::OpenAI | Self::Jina => {
-                let embedding = response
-                    .get("data")
-                    .and_then(|d| d.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|first| first.get("embedding"))
-                    .and_then(|e| e.as_array())
-                    .ok_or_else(|| err_str!("missing data[0].embedding in response"))?;
-                embedding
-                    .iter()
-                    .map(|v| {
-                        v.as_f64()
-                            .map(|f| f as f32)
-                            .ok_or_else(|| err_str!("non-numeric value in embedding"))
-                    })
-                    .collect()
-            }
-            Self::Gemini => {
+        match self.0.as_str() {
+            "gemini" => {
                 let embedding = response
                     .get("embedding")
                     .and_then(|e| e.get("values"))
@@ -150,13 +123,31 @@ impl EmbeddingProtocol {
                     })
                     .collect()
             }
-            Self::Cohere => {
+            "cohere" => {
                 let embedding = response
                     .get("embeddings")
                     .and_then(|e| e.as_array())
                     .and_then(|arr| arr.first())
                     .and_then(|first| first.as_array())
                     .ok_or_else(|| err_str!("missing embeddings[0] in response"))?;
+                embedding
+                    .iter()
+                    .map(|v| {
+                        v.as_f64()
+                            .map(|f| f as f32)
+                            .ok_or_else(|| err_str!("non-numeric value in embedding"))
+                    })
+                    .collect()
+            }
+            // Default (openai, jina, and unknown): OpenAI-compatible data[0].embedding
+            _ => {
+                let embedding = response
+                    .get("data")
+                    .and_then(|d| d.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|first| first.get("embedding"))
+                    .and_then(|e| e.as_array())
+                    .ok_or_else(|| err_str!("missing data[0].embedding in response"))?;
                 embedding
                     .iter()
                     .map(|v| {
@@ -701,15 +692,8 @@ pub async fn spawn_vectorizers(
         match method {
             "api" => {
                 if let Some(ref url) = config.api_url {
-                    let proto = EmbeddingProtocol::from_str(config.protocol).unwrap_or_else(|e| {
-                        tracing::warn!(
-                            "{}: invalid protocol '{}': {}; falling back to OpenAI",
-                            target,
-                            config.protocol,
-                            e
-                        );
-                        EmbeddingProtocol::OpenAI
-                    });
+                    let proto = EmbeddingProtocol::from_str(config.protocol).unwrap();
+
                     let model = config
                         .api_model
                         .clone()

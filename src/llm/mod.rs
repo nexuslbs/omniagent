@@ -181,36 +181,9 @@ pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::ne
     let installed = format!("{}/plugins/installed", data_dir);
 
     // Bundled first, then installed overrides
-    let mut map = scan_provider_manifests(&[&bundled, &installed]);
-
-    // If no providers found, add minimal builtin defaults as last resort
-    if map.is_empty() {
-        let mut opencode_api_modes = HashMap::new();
-        opencode_api_modes.insert(
-            "anthropic_messages".to_string(),
-            vec!["minimax-*".to_string(), "qwen3.7-max*".to_string()],
-        );
-        map.insert(
-            "opencode-go".to_string(),
-            ProviderMetadata {
-                name: "opencode-go".to_string(),
-                default_base_url: "https://opencode.ai/zen/go/v1".to_string(),
-                api_mode: "chat_completions".to_string(),
-                api_modes: opencode_api_modes,
-                default_model: "deepseek-v4-flash".to_string(),
-            },
-        );
-        map.insert(
-            "deepseek".to_string(),
-            ProviderMetadata {
-                name: "deepseek".to_string(),
-                default_base_url: "https://api.deepseek.com/v1".to_string(),
-                api_mode: "chat_completions".to_string(),
-                api_modes: HashMap::new(),
-                default_model: "deepseek-v4-flash".to_string(),
-            },
-        );
-    }
+    // If no providers are found, the metadata stays empty and callers
+    // handle it gracefully (resolve_default_model returns None).
+    let map = scan_provider_manifests(&[&bundled, &installed]);
 
     map
 });
@@ -402,13 +375,6 @@ impl ProviderThrottle {
         // Pre-populate from known provider metadata
         for name in PROVIDER_METADATA.keys() {
             map.entry(name.clone())
-                .or_insert_with(|| Arc::new(Semaphore::new(max)));
-        }
-
-        // Ensure well-known providers are present even if metadata is missing
-        for name in &["deepseek", "anthropic", "openai", "opencode-go"] {
-            let n = name.to_string();
-            map.entry(n)
                 .or_insert_with(|| Arc::new(Semaphore::new(max)));
         }
 
