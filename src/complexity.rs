@@ -80,8 +80,8 @@ pub fn classify_complexity(
 
     let is_complex_keyword = complex_keywords.iter().any(|kw| lower.contains(kw));
 
-    // Kanban/cron tasks with a body longer than a title
-    let is_structured_task = (msg_type == "kanban" || msg_type == "cron")
+    // Structured tasks (kanban/cron) with a body longer than a title
+    let is_structured_task = crate::agent::helpers::is_structured_msg_type(msg_type)
         && metadata_word_count.map(|c| c > 10).unwrap_or(false);
 
     let has_substantive_length = char_len > standard_max;

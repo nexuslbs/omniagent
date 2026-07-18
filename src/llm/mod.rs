@@ -62,6 +62,8 @@ pub struct ProviderMetadata {
     /// The first matching prefix wins when resolving for a specific model.
     pub api_modes: HashMap<String, Vec<String>>,
     pub default_model: String,
+    /// Whether this provider supports reasoning/thinking tokens in responses.
+    pub supports_reasoning: bool,
 }
 
 /// Extract default_model from a provider plugin manifest's config_schema.
@@ -150,6 +152,10 @@ fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
                 })
                 .unwrap_or_default();
             let default_model = extract_default_model(&manifest);
+            let supports_reasoning = manifest
+                .get("supports_reasoning")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             map.insert(
                 name.clone(),
                 ProviderMetadata {
@@ -158,6 +164,7 @@ fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
                     api_mode,
                     api_modes,
                     default_model,
+                    supports_reasoning,
                 },
             );
         }
@@ -302,6 +309,9 @@ pub struct LLMConfig {
     pub max_tokens: u32,
     #[allow(dead_code)]
     pub temperature: f32,
+    /// Whether the provider supports reasoning/thinking tokens.
+    /// Set from provider metadata at config construction time.
+    pub supports_reasoning: bool,
 }
 
 impl LLMConfig {
@@ -330,6 +340,11 @@ impl LLMConfig {
         // (providers.yml with $env: references), not from hardcoded env var names.
         let api_key = String::new();
 
+        let supports_reasoning = PROVIDER_METADATA
+            .get(&provider_name)
+            .map(|m| m.supports_reasoning)
+            .unwrap_or(false);
+
         Self {
             provider,
             api_mode,
@@ -338,6 +353,7 @@ impl LLMConfig {
             model,
             max_tokens: 8192,
             temperature: 0.7,
+            supports_reasoning,
         }
     }
 }
@@ -761,7 +777,7 @@ impl LLMClient {
             "stream": request.stream,
         });
 
-        if matches!(self.config.provider.0.as_str(), "opencode-go" | "deepseek") {
+        if self.config.supports_reasoning {
             body["include_reasoning"] = serde_json::Value::Bool(true);
         }
 
