@@ -169,6 +169,7 @@ struct MessageEventRow {
     thread_output_tokens: Option<i64>,
     thread_cached_tokens: Option<i64>,
     channel_name: Option<String>,
+    msg_token_usage: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +446,8 @@ async fn events_handler(
                 t.input_tokens::bigint AS thread_input_tokens,
                 t.output_tokens::bigint AS thread_output_tokens,
                 t.cached_tokens::bigint AS thread_cached_tokens,
-                c.name AS channel_name
+                c.name AS channel_name,
+                m.token_usage::text AS msg_token_usage
             FROM messages m
             JOIN threads t ON t.id = m.thread_id
             JOIN channels c ON c.id = t.channel_id
@@ -511,7 +513,8 @@ async fn events_handler(
                 t.input_tokens::bigint AS thread_input_tokens,
                 t.output_tokens::bigint AS thread_output_tokens,
                 t.cached_tokens::bigint AS thread_cached_tokens,
-                c.name AS channel_name
+                c.name AS channel_name,
+                m.token_usage::text AS msg_token_usage
             FROM messages m
             JOIN threads t ON t.id = m.thread_id
             JOIN channels c ON c.id = t.channel_id
@@ -554,45 +557,72 @@ async fn events_handler(
         }
     };
 
-    let messages: Vec<MessageEventEntry> = rows
-        .into_iter()
-        .map(|r| MessageEventEntry {
-            id: r.id,
-            thread_id: r.thread_id.map(|v| v.to_string()),
-            role: r.role,
-            content: r.content,
-            thread_sequence: r.thread_sequence,
-            external_id: r.external_id,
-            metadata: r.metadata,
-            created_at: fmt_ts(&r.created_at),
-            msg_type: r.msg_type,
-            msg_subtype: r.msg_subtype,
-            iteration_number: r.iteration_number,
-            channel_id: r.channel_id,
-            status: r.status,
-            profile: r.profile,
-            provider: r.provider,
-            model: r.model,
-            thread_duration_ms: r.thread_duration_ms,
-            thread_input_tokens: r.thread_input_tokens,
-            thread_output_tokens: r.thread_output_tokens,
-            thread_cached_tokens: r.thread_cached_tokens,
-            channel_name: r.channel_name,
-            processing_time_ms: r.thread_duration_ms,
-            token_usage: if r.thread_input_tokens.is_some()
-                || r.thread_output_tokens.is_some()
-                || r.thread_cached_tokens.is_some()
-            {
-                Some(serde_json::json!({
-                    "prompt_tokens": r.thread_input_tokens,
-                    "completion_tokens": r.thread_output_tokens,
-                    "cached_tokens": r.thread_cached_tokens,
-                }))
-            } else {
-                None
-            },
-        })
+    // Compute per-message processing_time_ms from time gap since previous
+    // message in the same thread (sorted by insertion order).
+    // Previously this was incorrectly set to thread_duration_ms for all messages,
+    // which made every message show the same total thread duration.
+    use std::collections::HashMap;
+    let mut prev_ts_by_thread: HashMap<i64, chrono::DateTime<chrono::Utc>> = HashMap::new();
+    let mut sorted_rows: Vec<_> = rows.into_iter().collect();
+    sorted_rows.sort_by_key(|r| (r.thread_id, r.id));
+
+    let mut msg_map: HashMap<i64, Vec<(i64, Option<i64>)>> = HashMap::new();
+    for r in &sorted_rows {
+        let tid = r.thread_id.unwrap_or(0);
+        let prev_ts = prev_ts_by_thread.get(&tid).copied();
+        let processing = prev_ts.map(|prev| {
+            let gap = (r.created_at - prev).num_milliseconds();
+            gap.max(0)
+        });
+        prev_ts_by_thread.insert(tid, r.created_at);
+        msg_map.entry(tid).or_default().push((r.id, processing));
+    }
+    // Build a lookup: message_id → processing_time_ms
+    let proc_lookup: std::collections::HashMap<i64, Option<i64>> = msg_map
+        .into_values()
+        .flat_map(|list| list.into_iter())
         .collect();
+
+    let messages: Vec<MessageEventEntry> = sorted_rows
+        .into_iter()
+        .map(|r| {
+            let proc_time = proc_lookup.get(&r.id).copied().flatten();
+            MessageEventEntry {
+                id: r.id,
+                thread_id: r.thread_id.map(|v| v.to_string()),
+                role: r.role,
+                content: r.content,
+                thread_sequence: r.thread_sequence,
+                external_id: r.external_id,
+                metadata: r.metadata,
+                created_at: fmt_ts(&r.created_at),
+                msg_type: r.msg_type,
+                msg_subtype: r.msg_subtype,
+                iteration_number: r.iteration_number,
+                channel_id: r.channel_id,
+                status: r.status,
+                profile: r.profile,
+                provider: r.provider,
+                model: r.model,
+                thread_duration_ms: r.thread_duration_ms,
+                thread_input_tokens: r.thread_input_tokens,
+                thread_output_tokens: r.thread_output_tokens,
+                thread_cached_tokens: r.thread_cached_tokens,
+                channel_name: r.channel_name,
+                processing_time_ms: proc_time,
+                token_usage: r.msg_token_usage
+                    .as_ref()
+                    .and_then(|s| {
+                        let v: serde_json::Value = serde_json::from_str(s).ok()?;
+                        if v.is_null() || v == serde_json::json!({}) {
+                            None
+                        } else {
+                            Some(v)
+                        }
+                    }),
+        }
+    })
+    .collect();
 
     ok_json(MessagesEventsResponse {
         messages,

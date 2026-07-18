@@ -18,18 +18,21 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> AppResult<Messag
         INSERT INTO messages (
             thread_id, role, content, thread_sequence, external_id,
             metadata, embedding, summary_text, is_summary,
-            msg_type, msg_subtype, iteration_number
+            msg_type, msg_subtype, iteration_number,
+            duration_ms, token_usage
         )
         VALUES (:thread_id, :role, :content, :thread_sequence, NULLIF(:external_id, '')::text,
             :metadata, NULLIF(:embedding, '')::text, NULLIF(:summary_text, '')::text, :is_summary,
-            :msg_type, NULLIF(:msg_subtype, '')::text, :iteration_number)
+            :msg_type, NULLIF(:msg_subtype, '')::text, :iteration_number,
+            :duration_ms, COALESCE(NULLIF(:token_usage, '')::jsonb, '{}'::jsonb))
         RETURNING
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
             msg_type, msg_subtype, iteration_number,
+            duration_ms, token_usage::text AS "token_usage",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         "#,
-        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :iteration_number = msg.iteration_number )
+        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :iteration_number = msg.iteration_number, :duration_ms = msg.duration_ms, :token_usage = &msg.token_usage.to_string() )
     )
     .fetch_one(pool)
     .await?;
@@ -50,6 +53,7 @@ pub async fn get_recent_thread_messages(
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
             msg_type, msg_subtype, iteration_number,
+            duration_ms, token_usage::text AS "token_usage",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages
         WHERE thread_id = :thread_id
@@ -81,6 +85,7 @@ pub async fn search_messages_text(
             m.id, m.thread_id, m.role, m.content, m.thread_sequence, m.external_id,
             m.metadata::text AS "metadata", m.embedding, m.summary_text, m.is_summary,
             m.msg_type, m.msg_subtype, m.iteration_number,
+            m.duration_ms, m.token_usage::text AS "token_usage",
             COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages m
         JOIN threads t ON t.id = m.thread_id
@@ -135,7 +140,8 @@ pub async fn search_messages_semantic(
         SELECT
             m.id, m.thread_id, m.role, m.content, m.thread_sequence, m.external_id,
             m.metadata::text AS "metadata", m.embedding, m.summary_text, m.is_summary,
-            m.msg_type, m.msg_subtype,
+            m.msg_type, m.msg_subtype, m.iteration_number,
+            m.duration_ms, m.token_usage::text AS "token_usage",
             COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages m
         JOIN vector_candidates vc ON vc.id = m.id
@@ -206,6 +212,8 @@ pub async fn get_latest_seq0_message(pool: &PgPool, channel_id: i64) -> AppResul
             msg_subtype: None,
             created_at: chrono::Utc::now(),
             iteration_number: 0,
+            duration_ms: 0,
+            token_usage: serde_json::Value::Null,
         })),
         None => Ok(None),
     }
@@ -233,6 +241,7 @@ pub async fn get_thread_messages(pool: &PgPool, thread_id: i64) -> AppResult<Vec
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
             msg_type, msg_subtype, iteration_number,
+            duration_ms, token_usage::text AS "token_usage",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages
         WHERE thread_id = :thread_id

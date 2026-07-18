@@ -118,6 +118,8 @@ pub struct MessageDb {
     pub msg_subtype: Option<String>,
     pub created_at: Option<String>,
     pub iteration_number: i32,
+    pub duration_ms: i32,
+    pub token_usage: Option<String>,
 }
 
 impl TryFrom<MessageDb> for Message {
@@ -154,6 +156,12 @@ impl TryFrom<MessageDb> for Message {
                     ))
                 })?,
             iteration_number: db.iteration_number,
+            duration_ms: db.duration_ms,
+            token_usage: db
+                .token_usage
+                .as_deref()
+                .map(|s| serde_json::from_str(s).unwrap_or_default())
+                .unwrap_or_default(),
         })
     }
 }
@@ -422,6 +430,8 @@ pub struct Message {
     pub msg_subtype: Option<String>,
     pub created_at: DateTime<Utc>,
     pub iteration_number: i32,
+    pub duration_ms: i32,
+    pub token_usage: serde_json::Value,
 }
 
 /// Payload for creating a new message (without server-assigned fields).
@@ -439,6 +449,8 @@ pub struct MessageNew {
     pub msg_type: String,
     pub msg_subtype: Option<String>,
     pub iteration_number: i32,
+    pub duration_ms: i32,
+    pub token_usage: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]

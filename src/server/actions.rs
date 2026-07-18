@@ -110,23 +110,9 @@ fn save_actions(data_dir: &str, file: &ActionsFile) -> AppResult<()> {
 }
 
 fn entry_to_response(id: &str, entry: &ActionEntry) -> ActionResponse {
-    let name = entry
-        .description
-        .as_deref()
-        .and_then(|d| {
-            if d.is_empty() {
-                None
-            } else {
-                Some(d.to_string())
-            }
-        })
-        .unwrap_or_else(|| id.replace("builtin_", ""))
-        .trim()
-        .to_string();
-
     ActionResponse {
         id: id.to_string(),
-        name,
+        name: id.replace("builtin_", "").to_string(),
         tool_name: entry.tool_name.clone(),
         params: entry.params.clone(),
         enabled: entry.enabled,
@@ -249,15 +235,8 @@ pub(crate) async fn update_action_handler(
     if let Some(description) = body.description {
         entry.description = Some(description);
     }
-    if let Some(name) = body.name {
-        if name.trim().is_empty() {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": "Name cannot be empty" })),
-            );
-        }
-        entry.description = Some(name.trim().to_string());
-    }
+    // Note: body.name is the YAML key, which cannot be changed via update.
+    // Description is set via body.description above.
 
     // Don't allow changing name for builtins via the YAML
     // (the name field is derived from description or ID)
