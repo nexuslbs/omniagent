@@ -303,8 +303,12 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                                 duration_ms: 0,
                                 token_usage: serde_json::json!({}),
                             };
-                            let _ = queries::create_message(&cfg.pool, &err_msg).await;
-                            let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
+                            if let Err(e) = queries::create_message(&cfg.pool, &err_msg).await {
+                                tracing::warn!("[supervisor] Failed to create error msg for thread {}: {:?}", thread.id, e);
+                            }
+                            if let Err(e) = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
+                                tracing::warn!("[supervisor] Failed to mark thread {} failed (no-cause): {:?}", thread.id, e);
+                            }
                             continue;
                         }
                     };
@@ -319,7 +323,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                                 "Thread {} has reached message limit ({}/{}), skipping",
                                 thread.id, count, max_iter
                             );
-                            let _ = queries::complete_thread(&cfg.pool, thread.id, "skipped", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
+                            if let Err(e) = queries::complete_thread(&cfg.pool, thread.id, "skipped", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
+                                tracing::warn!("[supervisor] Failed to mark thread {} skipped: {:?}", thread.id, e);
+                            }
                             continue;
                         }
                         Ok(_) => {} // under limit, proceed
@@ -341,7 +347,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
 
                     // If this thread is linked to a kanban task, mark it as running
                     if let Some(ref task_id) = thread.task_id {
-                        let _ = queries::update_kanban_task_status(&cfg.pool, task_id, "running").await;
+                        if let Err(e) = queries::update_kanban_task_status(&cfg.pool, task_id, "running").await {
+                            tracing::warn!("[supervisor] Failed to set kanban task {} running: {:?}", task_id, e);
+                        }
                     }
 
                     if let Err(e) = process_thread(&cfg, thread, &cause_msg).await {

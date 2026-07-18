@@ -60,221 +60,50 @@ pub async fn process_thread(
 
     // 3a. Check profile name is present
     if profile_name.is_empty() {
-        let err_msg = MessageNew {
-            thread_id: thread.id,
-            role: "system".to_string(),
-            content: format!(
+        return fail_thread(
+            cfg, thread, cause_msg, &mut next_seq,
+            format!(
                 "Invalid configuration: profile='{}', provider={:?}, model={:?}: profile name is empty. Set a profile on the channel or thread.",
                 profile_name, provider_name, model_name
             ),
-            thread_sequence: {  next_seq },
-            external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
-            metadata: serde_json::json!({
-                "error_type": "configuration",
-            }),
-            embedding: None,
-            summary_text: None,
-            is_summary: false,
-            msg_type: "error".to_string(),
-            msg_subtype: Some("no-profile".to_string()),
-            iteration_number: 0,
-            duration_ms: 0,
-            token_usage: serde_json::json!({}),
-        };
-        let saved = queries::create_message(&cfg.pool, &err_msg).await?;
-        if let Err(e) = queries::complete_thread(
-            &cfg.pool,
-            thread.id,
-            "failed",
-            CompleteThreadStats {
-                input_tokens: 0,
-                cached_tokens: 0,
-                output_tokens: 0,
-                duration_ms: 0,
-            },
-        )
-        .await
-        {
-            tracing::warn!("[executor] Failed to mark thread {} failed (no-profile): {:?}", thread.id, e);
-        }
-        // Deliver the error message back to the user's platform
-        if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
-            helpers::enqueue_delivery(
-                &cfg.ctx,
-                &saved,
-                &channel,
-                thread,
-                cause_msg.external_id.clone(),
-            )
-            .await;
-        }
-        return Ok(saved);
+            "no-profile",
+        ).await;
     }
 
     // 3b. Check profile exists
     if profile_registry.get(&profile_name).is_none() {
-        let err_msg = MessageNew {
-            thread_id: thread.id,
-            role: "system".to_string(),
-            content: format!(
+        return fail_thread(
+            cfg, thread, cause_msg, &mut next_seq,
+            format!(
                 "Invalid configuration: profile='{}' does not exist.",
                 profile_name
             ),
-            thread_sequence: { next_seq },
-            external_id: Some(format!(
-                "validation-error:{}:{}",
-                thread.id,
-                chrono::Utc::now().timestamp()
-            )),
-            metadata: serde_json::json!({
-                "error_type": "configuration",
-                "original_thread_id": thread.id,
-            }),
-            embedding: None,
-            summary_text: None,
-            is_summary: false,
-            msg_type: "error".to_string(),
-            msg_subtype: Some("invalid-profile".to_string()),
-            iteration_number: 0,
-            duration_ms: 0,
-            token_usage: serde_json::json!({}),
-        };
-        let saved = queries::create_message(&cfg.pool, &err_msg).await?;
-        if let Err(e) = queries::complete_thread(
-            &cfg.pool,
-            thread.id,
-            "failed",
-            CompleteThreadStats {
-                input_tokens: 0,
-                cached_tokens: 0,
-                output_tokens: 0,
-                duration_ms: 0,
-            },
-        )
-        .await
-        {
-            tracing::warn!("[executor] Failed to mark thread {} failed (invalid-profile): {:?}", thread.id, e);
-        }
-        // Deliver the error message back to the user's platform
-        if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
-            helpers::enqueue_delivery(
-                &cfg.ctx,
-                &saved,
-                &channel,
-                thread,
-                cause_msg.external_id.clone(),
-            )
-            .await;
-        }
-        return Ok(saved);
+            "invalid-profile",
+        ).await;
     }
 
     // 3c. Check provider is set on the thread
     if provider_name.as_ref().is_none_or(|s| s.is_empty()) {
-        let err_msg = MessageNew {
-            thread_id: thread.id,
-            role: "system".to_string(),
-            content: format!(
+        return fail_thread(
+            cfg, thread, cause_msg, &mut next_seq,
+            format!(
                 "Invalid configuration: provider is not set on thread {}. Ensure the thread has a provider stamped at creation time. Check channel.current_provider, profile provider, or LLM_PROVIDER env var.",
                 thread.id
             ),
-            thread_sequence: {  next_seq },
-            external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
-            metadata: serde_json::json!({
-                "error_type": "configuration",
-                "original_thread_id": thread.id,
-            }),
-            embedding: None,
-            summary_text: None,
-            is_summary: false,
-            msg_type: "error".to_string(),
-            msg_subtype: Some("no-provider".to_string()),
-            iteration_number: 0,
-            duration_ms: 0,
-            token_usage: serde_json::json!({}),
-        };
-        let saved = queries::create_message(&cfg.pool, &err_msg).await?;
-        if let Err(e) = queries::complete_thread(
-            &cfg.pool,
-            thread.id,
-            "failed",
-            CompleteThreadStats {
-                input_tokens: 0,
-                cached_tokens: 0,
-                output_tokens: 0,
-                duration_ms: 0,
-            },
-        )
-        .await
-        {
-            tracing::warn!("[executor] Failed to mark thread {} failed (no-provider): {:?}", thread.id, e);
-        }
-        // Deliver the error message back to the user's platform
-        if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
-            helpers::enqueue_delivery(
-                &cfg.ctx,
-                &saved,
-                &channel,
-                thread,
-                cause_msg.external_id.clone(),
-            )
-            .await;
-        }
-        return Ok(saved);
+            "no-provider",
+        ).await;
     }
 
     // 3d. Check model is set on the thread
     if model_name.as_ref().is_none_or(|s| s.is_empty()) {
-        let err_msg = MessageNew {
-            thread_id: thread.id,
-            role: "system".to_string(),
-            content: format!(
+        return fail_thread(
+            cfg, thread, cause_msg, &mut next_seq,
+            format!(
                 "Invalid configuration: model is not set on thread {}. Ensure the thread has a model stamped at creation time. Check channel.current_model, profile model, or provider plugin default_model.",
                 thread.id
             ),
-            thread_sequence: {  next_seq },
-            external_id: Some(format!("validation-error:{}:{}", thread.id, chrono::Utc::now().timestamp())),
-            metadata: serde_json::json!({
-                "error_type": "configuration",
-                "original_thread_id": thread.id,
-            }),
-            embedding: None,
-            summary_text: None,
-            is_summary: false,
-            msg_type: "error".to_string(),
-            msg_subtype: Some("no-model".to_string()),
-            iteration_number: 0,
-            duration_ms: 0,
-            token_usage: serde_json::json!({}),
-        };
-        let saved = queries::create_message(&cfg.pool, &err_msg).await?;
-        if let Err(e) = queries::complete_thread(
-            &cfg.pool,
-            thread.id,
-            "failed",
-            CompleteThreadStats {
-                input_tokens: 0,
-                cached_tokens: 0,
-                output_tokens: 0,
-                duration_ms: 0,
-            },
-        )
-        .await
-        {
-            tracing::warn!("[executor] Failed to mark thread {} failed (no-model): {:?}", thread.id, e);
-        }
-        // Deliver the error message back to the user's platform
-        if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
-            helpers::enqueue_delivery(
-                &cfg.ctx,
-                &saved,
-                &channel,
-                thread,
-                cause_msg.external_id.clone(),
-            )
-            .await;
-        }
-        return Ok(saved);
+            "no-model",
+        ).await;
     }
 
     // Validation passed: load the profile for its settings (auto_retrieval_enabled, etc.)
@@ -1840,6 +1669,82 @@ Previous plan:\n{}",
                 tracing::info!("Cancelled {} remaining background task(s) for thread {}", count, thread.id);
             }
         }
+    }
+
+    Ok(saved)
+}
+
+/// Create an error message, mark the thread as failed, deliver the error
+/// back to the user's platform, and return the saved message.
+///
+/// Used by all validation-failure paths in process_thread.
+async fn fail_thread(
+    cfg: &AgentContext,
+    thread: &Thread,
+    cause_msg: &Message,
+    next_seq: &mut i32,
+    content: String,
+    subtype: &str,
+) -> AppResult<Message> {
+    let seq = *next_seq;
+    *next_seq += 1;
+
+    let err_msg = MessageNew {
+        thread_id: thread.id,
+        role: "system".to_string(),
+        content,
+        thread_sequence: seq,
+        external_id: Some(format!(
+            "validation-error:{}:{}",
+            thread.id,
+            chrono::Utc::now().timestamp()
+        )),
+        metadata: serde_json::json!({
+            "error_type": "configuration",
+        }),
+        embedding: None,
+        summary_text: None,
+        is_summary: false,
+        msg_type: "error".to_string(),
+        msg_subtype: Some(subtype.to_string()),
+        iteration_number: 0,
+        duration_ms: 0,
+        token_usage: serde_json::json!({}),
+    };
+
+    let saved = queries::create_message(&cfg.pool, &err_msg).await?;
+
+    if let Err(e) = queries::complete_thread(
+        &cfg.pool,
+        thread.id,
+        "failed",
+        CompleteThreadStats {
+            input_tokens: 0,
+            cached_tokens: 0,
+            output_tokens: 0,
+            duration_ms: 0,
+        },
+    )
+    .await
+    {
+        tracing::warn!(
+            "[executor] Failed to mark thread {} failed ({}): {:?}",
+            thread.id,
+            subtype,
+            e
+        );
+    }
+
+    // Deliver the error message back to the user's platform
+    if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
+        helpers::enqueue_delivery(
+            &cfg.ctx,
+            &saved,
+            &channel,
+            thread,
+            cause_msg.external_id.clone(),
+        )
+        .await;
     }
 
     Ok(saved)

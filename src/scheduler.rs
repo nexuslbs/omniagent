@@ -658,7 +658,9 @@ async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
         duration_ms: ctx.is_error as i32,
         token_usage: serde_json::json!({}),
     };
-    let _ = queries::create_message(ctx.pool, &result_msg).await;
+    if let Err(e) = queries::create_message(ctx.pool, &result_msg).await {
+        tracing::warn!("[scheduler] Failed to persist cron result message: {:?}", e);
+    }
 
     // Mark thread as terminal (system for success, failed for error)
     if ctx.is_error {
