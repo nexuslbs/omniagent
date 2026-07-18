@@ -61,7 +61,7 @@ impl ExternalProviderClient {
 
         // Store process, stdin, stdout handles
         {
-            let mut guard = self.process.lock().unwrap();
+            let mut guard = self.process.lock().expect("ExternalProvider lock poisoned");
             *guard = Some(child);
         }
         {
@@ -196,7 +196,7 @@ impl ExternalProviderClient {
 
     /// Get the list of models from initialization.
     pub fn models(&self) -> Vec<String> {
-        self.models.lock().unwrap().clone()
+        self.models.lock().expect("ModelsCache lock poisoned").clone()
     }
 }
 

@@ -174,17 +174,19 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
     // If the thread was skipped because the channel is closed, move the
     // associated kanban task back to 'todo' so it can be retried later.
     if thread_status == "skipped" {
-        let _ = sql_forge!(
+        if let Err(e) = sql_forge!(
             "UPDATE kanban_tasks SET status = 'todo', updated_at = NOW() WHERE id = (
                 SELECT task_id FROM threads WHERE id = :tid AND task_id IS NOT NULL
             )",
             ( :tid = msg.thread_id )
         )
         .execute(&mut *tx)
-        .await;
+        .await {
+            tracing::warn!("[complete_thread] Failed to reset kanban task to todo for skipped thread {}: {:?}", msg.thread_id, e);
+        }
 
         // Record the transition in history
-        let _ = sql_forge!(
+        if let Err(e) = sql_forge!(
             r#"
             INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board)
             SELECT task_id, 'moved', 'running', 'todo'
@@ -193,7 +195,9 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
             ( :tid = msg.thread_id )
         )
         .execute(&mut *tx)
-        .await;
+        .await {
+            tracing::warn!("[complete_thread] Failed to record kanban running→todo history for skipped thread {}: {:?}", msg.thread_id, e);
+        }
     }
 
     tx.commit().await?;
@@ -303,7 +307,7 @@ pub async fn create_thread_with_cause(
         // Global config level: default_provider from settings.yml
         else {
             let prov = crate::agent::config::get_global()
-                .map(|g| g.read().unwrap().default_provider.clone())
+                .map(|g| g.read().expect("GlobalConfig lock poisoned").default_provider.clone())
                 .unwrap_or_default(); // Empty string hits the error path below
             if !prov.is_empty() {
                 let model = crate::llm::resolve_default_model(&prov);
@@ -492,7 +496,7 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
     // - pending (never started) → todo (can be retried)
     // - processing (was started) → blocked (needs investigation)
     // Record transitions in history before updating status
-    let _ = sql_forge!(
+    if let Err(e) = sql_forge!(
         r#"
         INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board)
         SELECT kt.id, 'moved', kt.status, 'todo'
@@ -503,9 +507,11 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
         ( :ch = channel_id )
     )
     .execute(pool)
-    .await;
+    .await {
+        tracing::warn!("[delete_channel] Failed to record kanban ready→todo history: {:?}", e);
+    }
 
-    let _ = sql_forge!(
+    if let Err(e) = sql_forge!(
         r#"
         INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board)
         SELECT kt.id, 'moved', kt.status, 'blocked'
@@ -516,10 +522,12 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
         ( :ch = channel_id )
     )
     .execute(pool)
-    .await;
+    .await {
+        tracing::warn!("[delete_channel] Failed to record kanban running→blocked history: {:?}", e);
+    }
 
     // Now perform the status updates
-    let _ = sql_forge!(
+    if let Err(e) = sql_forge!(
         "UPDATE kanban_tasks SET status = 'todo', updated_at = NOW() WHERE id IN (
             SELECT task_id FROM threads
             WHERE channel_id = :ch AND task_id IS NOT NULL AND status = 'pending'
@@ -527,9 +535,11 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
         ( :ch = channel_id )
     )
     .execute(pool)
-    .await;
+    .await {
+        tracing::warn!("[delete_channel] Failed to reset kanban tasks to todo: {:?}", e);
+    }
 
-    let _ = sql_forge!(
+    if let Err(e) = sql_forge!(
         "UPDATE kanban_tasks SET status = 'blocked', updated_at = NOW() WHERE id IN (
             SELECT task_id FROM threads
             WHERE channel_id = :ch AND task_id IS NOT NULL AND status = 'processing'
@@ -537,7 +547,9 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
         ( :ch = channel_id )
     )
     .execute(pool)
-    .await;
+    .await {
+        tracing::warn!("[delete_channel] Failed to set kanban tasks to blocked: {:?}", e);
+    }
 
     Ok(result.rows_affected())
 }

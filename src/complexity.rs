@@ -35,7 +35,7 @@ pub fn classify_complexity(
     // Read thresholds from global config, used after hot-reload
     let (simple_max, standard_max) = crate::agent::config::get_global()
         .map(|g| {
-            let c = g.read().unwrap();
+            let c = g.read().expect("GlobalConfig lock poisoned");
             (c.planning_complexity_simple_max_chars, c.planning_complexity_standard_max_chars)
         })
         .unwrap_or((60, 200));
@@ -69,7 +69,7 @@ pub fn classify_complexity(
     // Complex: specific action keywords or kanban/cron tasks with content
     let lower = trimmed.to_lowercase();
     let keywords_raw = crate::agent::config::get_global()
-        .map(|g| g.read().unwrap().planning_complexity_keywords.clone())
+        .map(|g| g.read().expect("GlobalConfig lock poisoned").planning_complexity_keywords.clone())
         .unwrap_or_else(|| {
             "implement,refactor,redesign,architecture,create,build,design,develop,\
              migrate,restructure,overhaul,rewrite,configure,set up,deploy,integrate,\

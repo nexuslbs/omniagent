@@ -743,7 +743,7 @@ pub async fn spawn_vectorizers(
         wiki_interval,
         qdrant_url,
     ) = {
-        let cfg = config.read().unwrap();
+        let cfg = config.read().expect("VectorizerConfig lock poisoned");
         (
             cfg.vectorize_messages,
             cfg.messages_vectorization_method.clone(),

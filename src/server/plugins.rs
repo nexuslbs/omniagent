@@ -500,12 +500,14 @@ pub(crate) async fn enable_plugin_handler(
             if source == "remote" {
                 let remote_to_set = req.remote.as_ref().or(existing_remote.as_ref());
                 if let Some(remote) = remote_to_set {
-                    let _ = plugins_yaml::save_remote_plugin(
+                    if let Err(e) = plugins_yaml::save_remote_plugin(
                         &state.data_dir,
                         &yaml_type,
                         &name,
                         remote,
-                    );
+                    ) {
+                        tracing::warn!("[plugins] Failed to save remote info for '{}': {:?}", name, e);
+                    }
                 }
             }
             // Hot-reload: if this is an MCP tool plugin, initialize the server
@@ -533,11 +535,13 @@ pub(crate) async fn enable_plugin_handler(
                             name,
                             e
                         );
-                        let _ = plugins_yaml::remove_entry(
+                        if let Err(e) = plugins_yaml::remove_entry(
                             &state.data_dir,
                             &yaml_type,
                             &name,
-                        );
+                        ) {
+                            tracing::error!("[plugins] Failed to roll back YAML entry for '{}': {:?}", name, e);
+                        }
                         return (
                             StatusCode::BAD_REQUEST,
                             Json(serde_json::json!({
@@ -577,12 +581,12 @@ pub(crate) async fn enable_plugin_handler(
                         );
                         // Register the provider (no async, just inserts into the map)
                         {
-                            let mut registry = crate::provider::registry::PROVIDER_REGISTRY.write().unwrap();
+                            let mut registry = crate::provider::registry::PROVIDER_REGISTRY.write().expect("PROVIDER_REGISTRY lock poisoned");
                             registry.register(&name, &command, &args);
                         }
                         // Start the subprocess (async: drop registry lock first to avoid Send issues)
                         let start_result = {
-                            let registry = crate::provider::registry::PROVIDER_REGISTRY.read().unwrap();
+                            let registry = crate::provider::registry::PROVIDER_REGISTRY.read().expect("PROVIDER_REGISTRY lock poisoned");
                             registry.get_cloned(&name)
                         };
                         // Registry guard dropped: we have an independent Arc
@@ -594,10 +598,12 @@ pub(crate) async fn enable_plugin_handler(
                                         name, e
                                     );
                                     {
-                                        let mut registry = crate::provider::registry::PROVIDER_REGISTRY.write().unwrap();
+                                        let mut registry = crate::provider::registry::PROVIDER_REGISTRY.write().expect("PROVIDER_REGISTRY lock poisoned");
                                         registry.remove(&name);
                                     }
-                                    let _ = plugins_yaml::remove_entry(&state.data_dir, &yaml_type, &name);
+                                    if let Err(e) = plugins_yaml::remove_entry(&state.data_dir, &yaml_type, &name) {
+                                        tracing::error!("[plugins] Failed to roll back YAML for provider '{}': {:?}", name, e);
+                                    }
                                     return (
                                         StatusCode::BAD_REQUEST,
                                         Json(serde_json::json!({
@@ -1266,7 +1272,9 @@ pub(crate) async fn setup_plugin_handler(
     let mut stdin = match child.stdin.take() {
         Some(s) => s,
         None => {
-            let _ = child.kill();
+            if let Err(ke) = child.kill() {
+                tracing::warn!("[plugins] Failed to kill child after stdin failure: {:?}", ke);
+            }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
@@ -1280,7 +1288,9 @@ pub(crate) async fn setup_plugin_handler(
     let mut stdout = match child.stdout.take() {
         Some(s) => s,
         None => {
-            let _ = child.kill();
+            if let Err(ke) = child.kill() {
+                tracing::warn!("[plugins] Failed to kill child after stdout failure: {:?}", ke);
+            }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
@@ -1302,7 +1312,9 @@ pub(crate) async fn setup_plugin_handler(
             "{}",
             serde_json::to_string(&init_req).unwrap_or_default()
         ) {
-            let _ = child.kill();
+            if let Err(ke) = child.kill() {
+                tracing::warn!("[plugins] Failed to kill child after init send failure: {:?}", ke);
+            }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
@@ -1318,7 +1330,9 @@ pub(crate) async fn setup_plugin_handler(
         use std::io::BufRead;
         let mut line = String::new();
         if let Err(e) = reader.read_line(&mut line) {
-            let _ = child.kill();
+            if let Err(ke) = child.kill() {
+                tracing::warn!("[plugins] Failed to kill child after init read failure: {:?}", ke);
+            }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
@@ -1340,7 +1354,9 @@ pub(crate) async fn setup_plugin_handler(
             "{}",
             serde_json::to_string(&configure_req).unwrap_or_default()
         ) {
-            let _ = child.kill();
+            if let Err(ke) = child.kill() {
+                tracing::warn!("[plugins] Failed to kill child after configure send failure: {:?}", ke);
+            }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
@@ -1356,7 +1372,9 @@ pub(crate) async fn setup_plugin_handler(
         use std::io::BufRead;
         let mut line = String::new();
         if let Err(e) = reader.read_line(&mut line) {
-            let _ = child.kill();
+            if let Err(ke) = child.kill() {
+                tracing::warn!("[plugins] Failed to kill child after configure read failure: {:?}", ke);
+            }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
@@ -1373,7 +1391,9 @@ pub(crate) async fn setup_plugin_handler(
     {
         use std::io::Write;
         if let Err(e) = writeln!(stdin, "{}", request_str) {
-            let _ = child.kill();
+            if let Err(ke) = child.kill() {
+                tracing::warn!("[plugins] Failed to kill child after setup send failure: {:?}", ke);
+            }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
@@ -1394,7 +1414,9 @@ pub(crate) async fn setup_plugin_handler(
     let mut stdout_output = String::new();
     loop {
         if start.elapsed() >= max_wait {
-            let _ = child.kill();
+            if let Err(ke) = child.kill() {
+                tracing::warn!("[plugins] Failed to kill child after setup timeout: {:?}", ke);
+            }
             return (
                 StatusCode::REQUEST_TIMEOUT,
                 Json(serde_json::json!({
@@ -1409,7 +1431,9 @@ pub(crate) async fn setup_plugin_handler(
             Ok(Some(status)) => {
                 {
                     use std::io::Read;
-                    let _ = reader.read_to_string(&mut stdout_output);
+                    if let Err(e) = reader.read_to_string(&mut stdout_output) {
+                        tracing::warn!("[plugins] Failed to read stdout: {:?}", e);
+                    }
                 }
                 let stderr_output = child
                     .stderr
@@ -1417,7 +1441,9 @@ pub(crate) async fn setup_plugin_handler(
                     .map(|mut s| {
                         let mut buf = String::new();
                         use std::io::Read;
-                        let _ = s.read_to_string(&mut buf);
+                        if let Err(e) = s.read_to_string(&mut buf) {
+                            tracing::warn!("[plugins] Failed to read stderr: {:?}", e);
+                        }
                         buf
                     })
                     .unwrap_or_default();
@@ -1458,7 +1484,9 @@ pub(crate) async fn setup_plugin_handler(
                 continue;
             }
             Err(e) => {
-                let _ = child.kill();
+                if let Err(ke) = child.kill() {
+                    tracing::warn!("[plugins] Failed to kill child after wait error: {:?}", ke);
+                }
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({
@@ -1575,7 +1603,9 @@ pub(crate) async fn setup_plugin_handler(
                     }
                     result
                 };
-                let _ = std::fs::write(env_path, &updated);
+                if let Err(e) = std::fs::write(env_path, &updated) {
+                    tracing::error!("[plugins] Failed to write bot_token to .env for '{}': {:?}", name, e);
+                }
                 std::env::set_var(&env_var_name, bot_token);
 
                 reload_platform_plugin(&state, &name).await;
@@ -1702,7 +1732,9 @@ pub(crate) async fn delete_plugin_handler(
                 let target_dir = format!("{}/target", base_dir);
                 let target_path = std::path::Path::new(&target_dir);
                 if target_path.exists() && target_path.is_dir() {
-                    let _ = std::fs::remove_dir_all(target_path);
+                    if let Err(e) = std::fs::remove_dir_all(target_path) {
+                        tracing::warn!("[plugins] Failed to remove target dir for '{}': {:?}", name, e);
+                    }
                     tracing::info!(
                         "Uninstall: removed target/ directory for remote plugin '{}'",
                         name
@@ -1716,7 +1748,9 @@ pub(crate) async fn delete_plugin_handler(
                             let sub_target = format!("{}/{}/target", base_dir, subpath);
                             let sub_path = std::path::Path::new(&sub_target);
                             if sub_path.exists() && sub_path.is_dir() {
-                                let _ = std::fs::remove_dir_all(sub_path);
+                                if let Err(e) = std::fs::remove_dir_all(sub_path) {
+                                    tracing::warn!("[plugins] Failed to remove subpath target dir: {:?}", e);
+                                }
                                 tracing::info!(
                                     "Uninstall: removed target/ directory at subpath '{}' for remote plugin '{}'",
                                     subpath, name
@@ -1734,7 +1768,9 @@ pub(crate) async fn delete_plugin_handler(
                 plugins_yaml::PluginYamlType::Provider,
             ] {
                 if let Ok(Some(_)) = plugins_yaml::get_entry(data_dir, yaml_type, &name) {
-                    let _ = plugins_yaml::set_enabled(data_dir, yaml_type, &name, false);
+                    if let Err(e) = plugins_yaml::set_enabled(data_dir, yaml_type, &name, false) {
+                        tracing::error!("[plugins] Failed to set disabled in YAML: {:?}", e);
+                    }
                     break;
                 }
             }
@@ -1770,7 +1806,9 @@ pub(crate) async fn delete_plugin_handler(
                         let target_dir = format!("{}/target", plugin_dir);
                         let target_path = std::path::Path::new(&target_dir);
                         if target_path.exists() && target_path.is_dir() {
-                            let _ = std::fs::remove_dir_all(target_path);
+                            if let Err(e) = std::fs::remove_dir_all(target_path) {
+                                tracing::warn!("[plugins] Failed to remove non-remote target dir: {:?}", e);
+                            }
                             tracing::info!(
                                 "Uninstall: removed target/ directory at {}",
                                 target_dir
@@ -1962,7 +2000,9 @@ pub(crate) async fn delete_plugin_handler(
             plugins_yaml::PluginYamlType::Tool,
             plugins_yaml::PluginYamlType::Provider,
         ] {
-            let _ = plugins_yaml::remove_remote_plugin(data_dir, pt, &name);
+            if let Err(e) = plugins_yaml::remove_remote_plugin(data_dir, pt, &name) {
+                tracing::warn!("[plugins] Failed to remove remote YAML entry: {:?}", e);
+            }
         }
 
         // Remove stale .remote/ directories from other types
@@ -1971,14 +2011,18 @@ pub(crate) async fn delete_plugin_handler(
             let alt = format!("{}/plugins/{}/.remote/{}", data_dir, t, name);
             let alt_path = std::path::Path::new(&alt);
             if alt_path.exists() && alt_path.is_dir() {
-                let _ = std::fs::remove_dir_all(alt_path);
-                tracing::info!("Remove: cleaned up stale .remote/ directory at {}", alt);
+                if let Err(e) = std::fs::remove_dir_all(alt_path) {
+                    tracing::warn!("[plugins] Failed to remove stale remote dir: {:?}", e);
+                }
+                    tracing::info!("Remove: cleaned up stale .remote/ directory at {}", alt);
             }
         }
 
         // Remove YAML entry ONLY if source matches "remote"
         if yaml_source == Some("remote") {
-            let _ = plugins_yaml::remove_entry(data_dir, &actual_type, &name);
+            if let Err(e) = plugins_yaml::remove_entry(data_dir, &actual_type, &name) {
+                tracing::warn!("[plugins] Failed to remove remote YAML entry: {:?}", e);
+            }
             tracing::info!("Remove: removed YAML entry for remote plugin '{}'", name);
             removed = true;
         }
@@ -2043,13 +2087,17 @@ pub(crate) async fn delete_plugin_handler(
         let data_plugin_dir = format!("{}/plugins/{}/{}", data_dir, type_dir, name);
         let data_plugin_path = std::path::Path::new(&data_plugin_dir);
         if data_plugin_path.exists() && data_plugin_path.is_dir() {
-            let _ = std::fs::remove_dir_all(data_plugin_path);
+            if let Err(e) = std::fs::remove_dir_all(data_plugin_path) {
+                tracing::warn!("[plugins] Failed to remove data dir: {:?}", e);
+            }
             tracing::info!("Remove: removed data directory for bundled plugin '{}'", name);
         }
 
         // Remove YAML entry ONLY if source matches "bundled" (or default/omni-stack)
         if yaml_source == Some("bundled") || yaml_source.is_none() {
-            let _ = plugins_yaml::remove_entry(data_dir, &actual_type, &name);
+            if let Err(e) = plugins_yaml::remove_entry(data_dir, &actual_type, &name) {
+                tracing::warn!("[plugins] Failed to remove bundled YAML entry: {:?}", e);
+            }
             tracing::info!("Remove: removed YAML entry for bundled plugin '{}'", name);
             removed = true;
         }
@@ -2134,7 +2182,9 @@ async fn handle_remove_by_source(
             ] {
                 if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, pt, name) {
                     if entry.source == "built-in" {
-                        let _ = plugins_yaml::remove_entry(data_dir, pt, name);
+                        if let Err(e) = plugins_yaml::remove_entry(data_dir, pt, name) {
+                            tracing::warn!("[plugins] Failed to remove built-in phantom YAML: {:?}", e);
+                        }
                         removed = true;
                         break;
                     }
@@ -2153,11 +2203,15 @@ async fn handle_remove_by_source(
                 let remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_str, name);
                 let remote_path = std::path::Path::new(&remote_dir);
                 if remote_path.exists() && remote_path.is_dir() {
-                    let _ = std::fs::remove_dir_all(remote_path);
+                    if let Err(e) = std::fs::remove_dir_all(remote_path) {
+                        tracing::warn!("[plugins] Failed to remove remote dir: {:?}", e);
+                    }
                     tracing::info!("Remove: removed .remote/ directory for '{}' (source=remote)", name);
                     removed = true;
                 }
-                let _ = plugins_yaml::remove_remote_plugin(data_dir, pt, name);
+                if let Err(e) = plugins_yaml::remove_remote_plugin(data_dir, pt, name) {
+                    tracing::warn!("[plugins] Failed to remove remote YAML: {:?}", e);
+                }
             }
             // Remove YAML only if source matches
             for pt in &[
@@ -2167,7 +2221,9 @@ async fn handle_remove_by_source(
             ] {
                 if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, pt, name) {
                     if entry.source == "remote" {
-                        let _ = plugins_yaml::remove_entry(data_dir, pt, name);
+                        if let Err(e) = plugins_yaml::remove_entry(data_dir, pt, name) {
+                            tracing::warn!("[plugins] Failed to remove remote YAML: {:?}", e);
+                        }
                         removed = true;
                         break;
                     }
@@ -2186,14 +2242,18 @@ async fn handle_remove_by_source(
                 let plugin_dir = format!("{}/plugins/{}/{}", data_dir, type_str, name);
                 let plugin_path = std::path::Path::new(&plugin_dir);
                 if plugin_path.exists() && plugin_path.is_dir() {
-                    let _ = std::fs::remove_dir_all(plugin_path);
+                    if let Err(e) = std::fs::remove_dir_all(plugin_path) {
+                        tracing::warn!("[plugins] Failed to remove workspace dir: {:?}", e);
+                    }
                     tracing::info!("Remove: removed workspace directory for '{}' (source=bundled)", name);
                     removed = true;
                 }
                 let data_plugin_dir = format!("{}/plugins/{}/{}", data_dir, type_str, name);
                 let data_plugin_path = std::path::Path::new(&data_plugin_dir);
                 if data_plugin_path.exists() && data_plugin_path.is_dir() {
-                    let _ = std::fs::remove_dir_all(data_plugin_path);
+                    if let Err(e) = std::fs::remove_dir_all(data_plugin_path) {
+                        tracing::warn!("[plugins] Failed to remove data dir: {:?}", e);
+                    }
                     tracing::info!("Remove: removed data directory for '{}' (source=bundled)", name);
                 }
             }
@@ -2587,20 +2647,28 @@ pub(crate) async fn rename_plugin_handler(
     }
 
     // 5. Update remote.yml: remove old key, add new key
-    let _ = plugins_yaml::remove_remote_plugin(data_dir, &yaml_type, &name);
-    let _ = plugins_yaml::save_remote_plugin(data_dir, &yaml_type, &new_name, &remote_info);
+    if let Err(e) = plugins_yaml::remove_remote_plugin(data_dir, &yaml_type, &name) {
+        tracing::warn!("[plugins] Rename: failed to remove old remote YAML: {:?}", e);
+    }
+    if let Err(e) = plugins_yaml::save_remote_plugin(data_dir, &yaml_type, &new_name, &remote_info) {
+        tracing::warn!("[plugins] Rename: failed to save new remote YAML: {:?}", e);
+    }
 
     // 6. Update plugins.yml if entry exists: rename the key
     if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, &yaml_type, &name) {
-        let _ = plugins_yaml::remove_entry(data_dir, &yaml_type, &name);
-        let _ = plugins_yaml::set_entry_with_source(
+        if let Err(e) = plugins_yaml::remove_entry(data_dir, &yaml_type, &name) {
+            tracing::warn!("[plugins] Rename: failed to remove old YAML: {:?}", e);
+        }
+        if let Err(e) = plugins_yaml::set_entry_with_source(
             data_dir,
             &yaml_type,
             &new_name,
             entry.enabled,
             &entry.source,
             entry.config,
-        );
+        ) {
+            tracing::warn!("[plugins] Rename: failed to save new YAML entry: {:?}", e);
+        }
     }
 
     info!("Renamed remote plugin '{}' to '{}'", name, new_name);
@@ -2744,14 +2812,16 @@ pub(crate) async fn download_plugin_handler(
         .flatten()
         .map(|e| e.enabled)
         .unwrap_or(true);
-    let _ = plugins_yaml::set_entry_with_source(
+    if let Err(e) = plugins_yaml::set_entry_with_source(
         data_dir,
         &yaml_type,
         &name,
         current_enabled,
         "remote",
         serde_json::json!({}),
-    );
+    ) {
+        tracing::warn!("[plugins] Download: failed to set YAML entry: {:?}", e);
+    }
 
     match plugins_yaml::get_plugin(data_dir, &name) {
         Ok(Some(detail)) => {
@@ -2924,7 +2994,9 @@ async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Vec<String>),
         let (tx, rx) = tokio::sync::oneshot::channel::<crate::error::AppResult<Vec<crate::plugins_yaml::PluginDetail>>>();
         std::thread::spawn(move || {
             let result = crate::plugins_yaml::list_plugins(&data_dir);
-            let _ = tx.send(result);
+            if let Err(e) = tx.send(result) {
+                tracing::warn!("[plugins] Reload: failed to send plugin list: {:?}", e);
+            }
         });
         tokio::time::timeout(std::time::Duration::from_secs(25), rx)
             .await
@@ -2985,14 +3057,14 @@ async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Vec<String>),
             "provider" => {
                 let running = crate::provider::registry::PROVIDER_REGISTRY
                     .read()
-                    .unwrap()
+                    .expect("PROVIDER_REGISTRY lock poisoned")
                     .has_provider(name);
                 if enabled && !running {
                     let provider = {
                         let guard = crate::provider::registry::PROVIDER_REGISTRY
                             .read()
-                            .unwrap();
-                        if let Some(ep) = plugin.manifest.get("entrypoint") {
+                            .expect("PROVIDER_REGISTRY lock poisoned");
+                                                    if let Some(ep) = plugin.manifest.get("entrypoint") {
                             if let Some(cmd) = ep.get("command").and_then(|c| c.as_str()) {
                                 let args: Vec<String> = ep
                                     .get("args")
@@ -3005,7 +3077,7 @@ async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Vec<String>),
                                     .unwrap_or_default();
                                 crate::provider::registry::PROVIDER_REGISTRY
                                     .write()
-                                    .unwrap()
+                                    .expect("PROVIDER_REGISTRY lock poisoned")
                                     .register(name, cmd, &args);
                                 guard.get_cloned(name)
                             } else {
@@ -3021,7 +3093,7 @@ async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Vec<String>),
                             Err(e) => {
                                 crate::provider::registry::PROVIDER_REGISTRY
                                     .write()
-                                    .unwrap()
+                                    .expect("PROVIDER_REGISTRY lock poisoned")
                                     .remove(name);
                                 errors.push(format!("{} provider: {}", name, e));
                             }
@@ -3030,7 +3102,7 @@ async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Vec<String>),
                 } else if !enabled && running {
                     crate::provider::registry::PROVIDER_REGISTRY
                         .write()
-                        .unwrap()
+                        .expect("PROVIDER_REGISTRY lock poisoned")
                         .remove(name);
                     stopped += 1;
                 }

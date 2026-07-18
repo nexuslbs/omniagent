@@ -153,7 +153,7 @@ impl AgentContext {
     /// This ensures consistent field values throughout one processing cycle
     /// even if the global config is updated concurrently.
     pub fn config_snapshot(&self) -> AgentConfig {
-        self.config.read().unwrap().clone()
+        self.config.read().expect("AgentConfig lock poisoned").clone()
     }
 }
 

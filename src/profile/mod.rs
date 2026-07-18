@@ -44,31 +44,16 @@ pub const CORE_TOOLS: &[&str] = &[
     "cron_list-cron-jobs",
     "cron_delete-cron-job",
     "cron_update-cron-job",
-    "kanban_create-task",
-    "kanban_list-kanban-tasks",
-    "kanban_update-task",
-    "kanban_delete-task",
-    "kanban_add-dependency",
-    "kanban_remove-dependency",
-    "plugin_manager",
     "fetch",
     "filesystem_read",
     "filesystem_write",
     "filesystem_list",
     "filesystem_search",
     "filesystem_info",
-    "git_create-repo",
-    "git_clone-repo",
-    "git_commit-push",
-    "git_status",
-    "query_database",
-    "docker_compose",
-    "metrics_get-metrics",
-    "subtasks_add-subtask",
-    "subtasks_list-subtasks",
-    "subtasks_update-subtask",
-    "subtasks_delete-subtask",
-    "subtasks_get-subtask-counts",
+    "kanban_create-task",
+    "kanban_list-kanban-tasks",
+    "kanban_update-task",
+    "kanban_delete-task",
 ];
 
 /// Schema for profiles/<name>/config.json
@@ -140,7 +125,7 @@ impl Profile {
 /// Read the default profile name from the global config, falling back to "default".
 pub fn default_profile_name() -> String {
     crate::agent::config::get_global()
-        .map(|g| g.read().unwrap().default_profile.clone())
+        .map(|g| g.read().expect("GlobalConfig lock poisoned").default_profile.clone())
         .unwrap_or_else(|| "omni".to_string())
 }
 

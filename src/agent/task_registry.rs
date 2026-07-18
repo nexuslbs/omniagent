@@ -100,7 +100,7 @@ impl TaskRegistry {
         let mut guard = self.tasks.write().await;
         if let Some(entry) = guard.get_mut(id) {
             if let Some(tx) = entry.abort_tx.take() {
-                let _ = tx.send(());
+                let _ = tx.send(()); // oneshot: ok if receiver dropped
             }
             entry.info.status = TaskStatus::Cancelled;
             true

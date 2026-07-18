@@ -1113,7 +1113,7 @@ Previous plan:\n{}",
 
                         tokio::spawn(async move {
                             let bg_tool_future = bg_mcp_snapshot.execute(&bg_mcp_call, tool_ctx);
-                            let bg_result = tokio::select! {
+                            tokio::select! {
                                 _ = abort_rx => {
                                     bg_registry.set_status(&task_id_bg,
                                         crate::agent::task_registry::TaskStatus::Cancelled).await;
@@ -1147,7 +1147,6 @@ Previous plan:\n{}",
                                     }
                                 }
                             };
-                            let _ = bg_result;
                         });
 
                         // Return a McpToolResult containing processing status

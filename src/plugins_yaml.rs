@@ -432,7 +432,9 @@ pub fn save_remote_plugin(
     entries.insert(name.to_string(), remote.clone());
     let path = remote_plugins_path(data_dir);
     if let Some(parent) = std::path::Path::new(&path).parent() {
-        let _ = std::fs::create_dir_all(parent);
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!("[plugins_yaml] Failed to create parent dir for remote.yml: {:?}", e);
+        }
     }
     let content = serde_yaml::to_string(&store)
         .map_err(|e| Error::Message(format!("Failed to serialize remote plugins: {}", e)))?;

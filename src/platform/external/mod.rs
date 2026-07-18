@@ -112,11 +112,21 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
         if manifest.plugin_type != crate::plugin::PluginType::Platform {
             continue;
         }
+        let entrypoint = match &manifest.entrypoint {
+            Some(ep) => ep,
+            None => {
+                tracing::warn!(
+                    "Platform plugin '{}' has no entrypoint, skipping",
+                    manifest.name,
+                );
+                continue;
+            }
+        };
         let config = PlatformPluginConfig {
             name: manifest.name.clone(),
             enabled: true,
-            command: manifest.entrypoint.clone().unwrap().command,
-            args: manifest.entrypoint.unwrap().args,
+            command: entrypoint.command.clone(),
+            args: entrypoint.args.clone(),
             env: manifest.env,
             config: std::collections::HashMap::new(),
             max_retries: 3,

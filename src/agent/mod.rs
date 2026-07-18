@@ -62,7 +62,7 @@ impl Agent {
         // Read config fields inside a scope so the borrow is dropped before
         // moving `config` into the struct.
         let (default_provider, llm_api_key, max_tokens, temperature) = {
-            let cfg_read = config.read().unwrap();
+            let cfg_read = config.read().expect("GlobalConfig lock poisoned");
             (
                 if cfg_read.default_provider.is_empty() {
                     env_cfg.provider.clone()
@@ -279,9 +279,13 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                                 duration_ms: 0,
                                 token_usage: serde_json::json!({}),
                             };
-                            let _ = queries::create_message(&cfg.pool, &err_msg).await;
+                            if let Err(e) = queries::create_message(&cfg.pool, &err_msg).await {
+                                tracing::warn!("[supervisor] Failed to create no-cause error msg for thread {}: {:?}", thread.id, e);
+                            }
                             // Mark thread as failed
-                            let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
+                            if let Err(e) = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
+                                tracing::warn!("[supervisor] Failed to mark thread {} failed (no-cause): {:?}", thread.id, e);
+                            }
                             continue;
                         }
                         Err(e) => {
@@ -372,12 +376,18 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                                                     duration_ms: 0,
                                                     token_usage: serde_json::json!({}),
                                                 };
-                        let _ = queries::create_message(&cfg.pool, &err_msg).await;
+                        if let Err(e) = queries::create_message(&cfg.pool, &err_msg).await {
+                            tracing::warn!("[supervisor] Failed to create error msg for failed thread {}: {:?}", thread.id, e);
+                        }
                         // Mark thread as failed
-                        let _ = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await;
+                        if let Err(e) = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
+                            tracing::warn!("[supervisor] Failed to mark thread {} failed: {:?}", thread.id, e);
+                        }
                         // If this thread is linked to a kanban task, mark it as blocked
                         if let Some(ref task_id) = thread.task_id {
-                            let _ = queries::update_kanban_task_status(&cfg.pool, task_id, "blocked").await;
+                            if let Err(e) = queries::update_kanban_task_status(&cfg.pool, task_id, "blocked").await {
+                                tracing::warn!("[supervisor] Failed to set kanban task {} blocked for failed thread {}: {:?}", task_id, thread.id, e);
+                            }
                         }
                     }
                 }
@@ -464,14 +474,16 @@ pub async fn skip_on_startup(pool: &PgPool) -> crate::error::AppResult<u64> {
     // ── Reset kanban tasks on startup ──
     // Move "ready" tasks back to "todo" so they get re-processed
     // Record history before the update
-    let _ = sql_forge!(
+    if let Err(e) = sql_forge!(
         r#"
         INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board)
         SELECT id, 'moved', 'ready', 'todo' FROM kanban_tasks WHERE status = 'ready'
         "#,
     )
     .execute(pool)
-    .await;
+    .await {
+        tracing::warn!("[startup] Failed to record kanban ready→todo history: {:?}", e);
+    }
 
     let ready_result = sql_forge!(
         r#"UPDATE kanban_tasks SET status = 'todo', updated_at = NOW() WHERE status = 'ready'"#,

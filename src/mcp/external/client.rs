@@ -758,7 +758,7 @@ impl Drop for StdioMcpClient {
         if let Ok(mut guard) = self.process.try_lock() {
             if let Some(mut process) = guard.take() {
                 drop(process.stdin);
-                let _ = process.child.try_wait();
+                let _ = process.child.try_wait(); // sync: non-blocking, best-effort
             }
         }
     }
@@ -985,7 +985,7 @@ impl McpClientPool {
             let req = build_initialize_request((i as u64) * 1000 + 1);
             let resp = proc.send_request(&req, &config.name).await?;
             let _ = parse_response(&resp).ctx(format!(
-                "Failed to parse init response for '{}'",
+                "Failed to parse server list from '{}': {{}}",
                 config.name
             ))?;
 
