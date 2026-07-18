@@ -737,7 +737,7 @@ async fn prompt_preview_handler(
             .or_else(|| prof.provider.clone().filter(|s| !s.is_empty()))
             .or_else(|| {
                 crate::agent::config::get_global()
-                    .map(|g| g.read().unwrap().default_provider.clone())
+                    .map(|g| g.read().expect("GlobalConfig lock poisoned").default_provider.clone())
                     .filter(|s| !s.is_empty())
             })
         {
@@ -1022,7 +1022,7 @@ async fn call_prompt_context(
     channel_id: i64,
 ) -> String {
     let prompt_tool_name = crate::agent::config::get_global()
-        .map(|g| g.read().unwrap().prompt_tool_name.clone())
+        .map(|g| g.read().expect("GlobalConfig lock poisoned").prompt_tool_name.clone())
         .unwrap_or_else(|| "prompt_generate".to_string());
 
     // Collect all available tool names (same as the executor does)

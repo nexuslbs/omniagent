@@ -315,7 +315,7 @@ impl LLMConfig {
     /// Panics if `LLM_PROVIDER` contains an unrecognised value.
     pub fn from_env() -> Self {
         let provider_name = crate::agent::config::get_global()
-            .map(|g| g.read().unwrap().default_provider.clone())
+            .map(|g| g.read().expect("GlobalConfig lock poisoned").default_provider.clone())
             .unwrap_or_default(); // Empty string → provider must be configured
 
         let provider = ProviderId::new(&provider_name);
@@ -672,7 +672,7 @@ impl LLMClient {
         // Try external completion: clone Arc first, drop registry guard, then call complete
         let external_result = {
             let client_opt = {
-                let registry = crate::provider::registry::PROVIDER_REGISTRY.read().unwrap();
+                let registry = crate::provider::registry::PROVIDER_REGISTRY.read().expect("PROVIDER_REGISTRY lock poisoned");
                 registry.get_cloned(provider_name)
             };
             // Registry guard is dropped here: we have an independent Arc<ExternalProviderClient>

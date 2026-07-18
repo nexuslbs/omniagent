@@ -742,7 +742,7 @@ pub(crate) fn resolve_thread_config(
         // Global config level: default_provider from settings.yml
         else {
             let default_provider = crate::agent::config::get_global()
-                .map(|g| g.read().unwrap().default_provider.clone())
+                .map(|g| g.read().expect("GlobalConfig lock poisoned").default_provider.clone())
                 .unwrap_or_default(); // Empty string hits the None path below
             if !default_provider.is_empty() {
                 let m = crate::llm::resolve_default_model(&default_provider);

@@ -56,10 +56,12 @@ pub fn install_from_url(url: &str, data_dir: &str) -> AppResult<PluginManifest> 
 
     let result = install_from_url_inner(url, &bytes, &temp_path, data_dir);
 
-    // Clean up temp directory
+    // Clean up install path
     if let Ok(mut path_opt) = cleanup.lock() {
         if let Some(path) = path_opt.take() {
-            let _ = std::fs::remove_dir_all(&path);
+            if let Err(e) = std::fs::remove_dir_all(&path) {
+                tracing::warn!("[installer] Failed to clean up temp dir {:?}: {:?}", path, e);
+            }
         }
     }
 
@@ -155,7 +157,9 @@ fn install_from_url_inner(
     let copy_result = copy_dir_recursive(extracted_dir, install_path);
     if let Err(e) = copy_result {
         // Clean up on failure
-        let _ = std::fs::remove_dir_all(install_path);
+        if let Err(re) = std::fs::remove_dir_all(install_path) {
+            tracing::warn!("[installer] Failed to clean up install path: {:?}", re);
+        }
         return Err(e).ctx(format!(
             "Failed to copy plugin to install directory: {}",
             install_dir
@@ -312,7 +316,9 @@ pub fn install_from_git(
                 url, cache_dir
             ))?;
         if !clone_status.success() {
-            let _ = std::fs::remove_dir_all(cache_path);
+            if let Err(e) = std::fs::remove_dir_all(cache_path) {
+                tracing::warn!("[installer] Failed to clean up cache dir: {:?}", e);
+            }
             err_msg!(
                 "git mirror clone failed for '{}' with status: {}",
                 url, clone_status
@@ -416,7 +422,9 @@ pub fn install_from_git(
                             ref_str, name
                         ))?;
                     if !checkout_status.success() {
-                        let _ = std::fs::remove_dir_all(&initial_remote_dir);
+                        if let Err(e) = std::fs::remove_dir_all(&initial_remote_dir) {
+                            tracing::warn!("[installer] Failed to clean up remote dir after update checkout failure: {:?}", e);
+                        }
                         err_msg!(
                             "git checkout '{}' failed for '{}' with status: {}",
                             ref_str, name, checkout_status
@@ -470,7 +478,9 @@ pub fn install_from_git(
                 "git clone failed for '{}' from {}. stderr: {}",
                 name, url, stderr
             );
-            let _ = std::fs::remove_dir_all(&initial_remote_dir);
+            if let Err(e) = std::fs::remove_dir_all(&initial_remote_dir) {
+                tracing::warn!("[installer] Failed to clean up remote dir after clone failure: {:?}", e);
+            }
             err_msg!(
                 "git clone failed for '{}' from {} with status: {}. stderr: {}",
                 name, url, output.status, stderr.trim()
@@ -492,7 +502,9 @@ pub fn install_from_git(
                         ref_str, name
                     ))?;
                 if !checkout_status.success() {
-                    let _ = std::fs::remove_dir_all(&initial_remote_dir);
+                    if let Err(e) = std::fs::remove_dir_all(&initial_remote_dir) {
+                        tracing::warn!("[installer] Failed to clean up remote dir after checkout failure: {:?}", e);
+                    }
                     err_msg!(
                         "git checkout '{}' failed for '{}' with status: {}",
                         ref_str, name, checkout_status

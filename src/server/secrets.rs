@@ -337,7 +337,9 @@ async fn update_secret_handler(
         .execute(&mut *tx)
         .await
         {
-            let _ = tx.rollback().await;
+            if let Err(re) = tx.rollback().await {
+                tracing::warn!("[secrets] Rollback failed for version update: {:?}", re);
+            }
             error!("Failed to version old value for '{}': {:?}", name, e);
             return err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -377,7 +379,9 @@ async fn update_secret_handler(
             })
         }
         Err(e) => {
-            let _ = tx.rollback().await;
+            if let Err(re) = tx.rollback().await {
+                tracing::warn!("[secrets] Rollback failed for update: {:?}", re);
+            }
             error!("Failed to update secret '{}': {:?}", name, e);
             err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to update secret")
         }

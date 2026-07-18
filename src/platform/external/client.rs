@@ -295,7 +295,7 @@ impl Platform for ExternalPlatformClient {
 
         // Track consecutive failures with exponential backoff for the spawn loop
         let max_spawn_retries: u32 = crate::agent::config::get_global()
-            .map(|g| g.read().unwrap().platform_max_spawn_retries)
+            .map(|g| g.read().expect("GlobalConfig lock poisoned").platform_max_spawn_retries)
             .unwrap_or(3);
         let mut spawn_failures: u32 = 0;
         let mut last_restart_count = self.restart_count.load(Ordering::SeqCst);
@@ -408,8 +408,12 @@ impl Platform for ExternalPlatformClient {
                     Err(_) => None,
                 };
                 if let Some(mut child) = child_to_kill {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
+                    if let Err(e) = child.kill().await {
+                        tracing::warn!("[platform] Failed to kill stale child during restart: {:?}", e);
+                    }
+                    if let Err(e) = child.wait().await {
+                        tracing::warn!("[platform] Failed to wait on stale child after kill: {:?}", e);
+                    }
                 }
                 let backoff = std::cmp::min(
                     std::time::Duration::from_secs(2u64.saturating_pow(spawn_failures)),
@@ -843,7 +847,7 @@ impl Platform for ExternalPlatformClient {
 
                                                                 // Apply generic file attachment inlining (handles all platforms uniformly)
                                                                 let max_inline_file_kb = crate::agent::config::get_global()
-                                                                    .map(|g| g.read().unwrap().max_inline_file_kb)
+                                                                    .map(|g| g.read().expect("GlobalConfig lock poisoned").max_inline_file_kb)
                                                                     .unwrap_or(100);
                                                                 let max_inline_bytes = max_inline_file_kb as usize * 1024;
 
@@ -1145,7 +1149,9 @@ impl Platform for ExternalPlatformClient {
                     }
                     Ok(None) => {
                         // Process still running, kill it
-                        let _ = child.kill().await;
+                        if let Err(e) = child.kill().await {
+                            tracing::warn!("[platform] Failed to kill plugin '{}': {:?}", plugin_name, e);
+                        }
                         let wait_status = child.wait().await;
                         tracing::info!(
                             "Platform plugin '{}' killed (exit: {:?})",
@@ -1154,13 +1160,17 @@ impl Platform for ExternalPlatformClient {
                         );
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "Failed to check exit status for '{}': {:?}",
-                            plugin_name,
-                            e
-                        );
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
+                    tracing::warn!(
+                        "Failed to check exit status for '{}': {:?}",
+                        plugin_name,
+                        e
+                    );
+                    if let Err(ke) = child.kill().await {
+                        tracing::warn!("[platform] kill() after wait error for '{}': {:?}", plugin_name, ke);
+                    }
+                    if let Err(we) = child.wait().await {
+                        tracing::warn!("[platform] wait() after wait error for '{}': {:?}", plugin_name, we);
+                    }
                     }
                 }
             }
@@ -1511,7 +1521,9 @@ async fn send_react(
         tracing::warn!("Failed to send react newline: {:?}", e);
         return;
     }
-    let _ = stdin.flush().await;
+    if let Err(e) = stdin.flush().await {
+        tracing::warn!("Failed to flush stdin for react: {:?}", e);
+    }
 }
 
 /// Handle a `message_deleted` notification from a platform plugin.
@@ -1697,7 +1709,9 @@ impl Drop for ExternalPlatformClient {
     fn drop(&mut self) {
         if let Ok(mut process_guard) = self.process.lock() {
             if let Some(mut child) = process_guard.take() {
-                let _ = child.start_kill();
+                if let Err(e) = child.start_kill() {
+                    tracing::warn!("[platform] Failed to start_kill child in drop: {:?}", e);
+                }
             }
         }
     }
