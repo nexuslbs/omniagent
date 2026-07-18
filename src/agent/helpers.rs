@@ -61,7 +61,7 @@ pub async fn persist_or_abort(
                 thread_id
             );
             // Mark the thread as failed
-            let _ = queries::complete_thread(
+            if let Err(e) = queries::complete_thread(
                 pool,
                 thread_id,
                 "failed",
@@ -72,7 +72,10 @@ pub async fn persist_or_abort(
                     duration_ms: 0,
                 },
             )
-            .await;
+            .await
+            {
+                tracing::warn!("[helpers] Failed to mark thread {} failed after FK violation: {:?}", thread_id, e);
+            }
             CreateMessageResult::FkViolation
         }
         Err(e) => CreateMessageResult::OtherError(e),

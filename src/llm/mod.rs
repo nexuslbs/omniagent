@@ -316,12 +316,12 @@ impl LLMConfig {
     pub fn from_env() -> Self {
         let provider_name = crate::agent::config::get_global()
             .map(|g| g.read().unwrap().default_provider.clone())
-            .unwrap_or_else(|| "opencode-go".to_string());
+            .unwrap_or_default(); // Empty string → provider must be configured
 
         let provider = ProviderId::new(&provider_name);
         let base_url = resolve_default_base_url(&provider_name);
         let default_model = resolve_default_model(&provider_name)
-            .unwrap_or_else(|| "deepseek-v4-flash".to_string());
+            .unwrap_or_default(); // Empty string → model must be configured
         let model = default_model;
 
         let api_mode = ApiMode::resolve(&provider_name, &model);
