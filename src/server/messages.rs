@@ -146,7 +146,7 @@ struct CountRow {
     total: Option<i64>,
 }
 
-#[derive(FromRow)]
+#[derive(FromRow, Clone)]
 struct MessageEventRow {
     id: i64,
     thread_id: Option<i64>,
@@ -562,12 +562,15 @@ async fn events_handler(
     // Previously this was incorrectly set to thread_duration_ms for all messages,
     // which made every message show the same total thread duration.
     use std::collections::HashMap;
-    let mut prev_ts_by_thread: HashMap<i64, chrono::DateTime<chrono::Utc>> = HashMap::new();
-    let mut sorted_rows: Vec<_> = rows.into_iter().collect();
-    sorted_rows.sort_by_key(|r| (r.thread_id, r.id));
+    // Save SQL-ordered rows for output (preserves ORDER BY desc/asc)
+    let sql_rows = rows;
+    // Create a thread-sorted copy for processing_time_ms computation
+    let mut sorted_for_proc = sql_rows.clone();
+    sorted_for_proc.sort_by_key(|r| (r.thread_id, r.id));
 
+    let mut prev_ts_by_thread: HashMap<i64, chrono::DateTime<chrono::Utc>> = HashMap::new();
     let mut msg_map: HashMap<i64, Vec<(i64, Option<i64>)>> = HashMap::new();
-    for r in &sorted_rows {
+    for r in &sorted_for_proc {
         let tid = r.thread_id.unwrap_or(0);
         let prev_ts = prev_ts_by_thread.get(&tid).copied();
         let processing = prev_ts.map(|prev| {
@@ -583,7 +586,7 @@ async fn events_handler(
         .flat_map(|list| list.into_iter())
         .collect();
 
-    let messages: Vec<MessageEventEntry> = sorted_rows
+    let messages: Vec<MessageEventEntry> = sql_rows
         .into_iter()
         .map(|r| {
             let proc_time = proc_lookup.get(&r.id).copied().flatten();
