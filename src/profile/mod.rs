@@ -57,40 +57,18 @@ pub const CORE_TOOLS: &[&str] = &[
     "filesystem_list",
     "filesystem_search",
     "filesystem_info",
-    "search_messages",
-    "search_wiki",
     "git_create-repo",
     "git_clone-repo",
     "git_commit-push",
     "git_status",
     "query_database",
     "docker_compose",
-    "skills_create-skill",
     "metrics_get-metrics",
     "subtasks_add-subtask",
     "subtasks_list-subtasks",
     "subtasks_update-subtask",
     "subtasks_delete-subtask",
     "subtasks_get-subtask-counts",
-    "hindsight_recall",
-    "hindsight_retain",
-    "hindsight_reflect",
-    "actions_kanban-dispatcher",
-    "actions_relevance-indexer",
-    "actions_hindsight-populator",
-    "actions_setup-knowledge-pipeline",
-    "test-python-tool_wait",
-    "test-python-tool_echo",
-    "test-python-tool_test-error",
-    "test-python-tool_save-datetime",
-    "test-rust-tool_wait",
-    "test-rust-tool_echo",
-    "test-rust-tool_test-error",
-    "test-rust-tool_save-datetime",
-    "test-js-tool_wait",
-    "test-js-tool_echo",
-    "test-js-tool_test-error",
-    "test-js-tool_save-datetime",
 ];
 
 /// Schema for profiles/<name>/config.json
@@ -112,7 +90,7 @@ impl Profile {
             api_key: None,
             max_tokens: None,
             temperature: None,
-            allowed_tools: CORE_TOOLS.iter().map(|s| s.to_string()).collect(),
+            allowed_tools: Vec::new(), // Tools come from profile config.json or dashboard UI
             auto_retrieval_enabled: true,
             retrieval_aggressiveness: 2,
             grounding_required: false,
@@ -256,11 +234,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_profile_has_core_tools() {
+    fn test_default_profile_starts_empty() {
         let p = Profile::default("test");
-        assert!(p.allowed_tools.contains(&"cron_create-job".to_string()));
-        assert!(p.allowed_tools.contains(&"plugin_manager".to_string()));
-        assert_eq!(p.allowed_tools.len(), CORE_TOOLS.len());
+        assert!(
+            p.allowed_tools.is_empty(),
+            "Default profile should have no tools — they come from profile config.json"
+        );
     }
 
     #[test]
