@@ -741,7 +741,7 @@ pub(crate) fn resolve_thread_config(
         else {
             let default_provider = crate::agent::config::get_global()
                 .map(|g| g.read().unwrap().default_provider.clone())
-                .unwrap_or_else(|| "openai".to_string());
+                .unwrap_or_default(); // Empty string hits the None path below
             if !default_provider.is_empty() {
                 let m = crate::llm::resolve_default_model(&default_provider);
                 (default_provider, m)
