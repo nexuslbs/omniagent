@@ -1664,7 +1664,7 @@ pub(crate) async fn setup_plugin_handler(
 
     // Inject ALL config values into setup_env so they're forwarded to the
     // plugin binary via the configure message. This avoids maintaining a
-    // hardcoded list of what each plugin needs — the plugin knows its own
+    // hardcoded list of what each plugin needs : the plugin knows its own
     // config schema. $secret: and $env: references are resolved below.
     let config = &detail.config;
     if let Some(config_map) = config.as_object() {
@@ -1696,7 +1696,7 @@ pub(crate) async fn setup_plugin_handler(
                 std::env::var(raw.strip_prefix("$env:").unwrap()).unwrap_or_default()
             } else if raw.starts_with("$secret:") {
                 // Already resolved above via setup_env + resolve_config_refs.
-                // This branch is a fallback — see the injection block above.
+                // This branch is a fallback : see the injection block above.
                 String::new()
             } else {
                 raw.to_string()
@@ -3310,7 +3310,7 @@ pub(crate) async fn restart_plugin_handler(
     .await
     .into_response();
 
-    // Check if disable succeeded — if it returned non-OK, propagate the error
+    // Check if disable succeeded : if it returned non-OK, propagate the error
     if disable_resp.status() != StatusCode::OK {
         return disable_resp;
     }

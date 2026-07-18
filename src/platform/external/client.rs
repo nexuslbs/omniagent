@@ -164,7 +164,7 @@ impl ExternalPlatformClient {
     }
 
     /// Request a restart: increments the restart counter and notifies the main loop.
-    /// Each call creates one "restart debt" — the outer loop respawns until the
+    /// Each call creates one "restart debt" : the outer loop respawns until the
     /// counter matches, even if multiple restarts were requested in quick succession.
     pub fn request_restart(&self) {
         self.restart_count.fetch_add(1, Ordering::SeqCst);
@@ -1057,7 +1057,7 @@ impl Platform for ExternalPlatformClient {
                         // Check for stale notification bit from before the last
                         // spawn. If the restart was already caught by the stale
                         // check at line 473 (counters were already updated), the
-                        // inner loop should NOT break — the subprocess is healthy.
+                        // inner loop should NOT break : the subprocess is healthy.
                         let current_restart = self.restart_count.load(Ordering::SeqCst);
                         if current_restart == last_restart_count {
                             tracing::debug!(
@@ -1127,7 +1127,7 @@ impl Platform for ExternalPlatformClient {
 
             // Check if we should restart (reload config from disk and respawn)
             // Compare current restart counter with the value recorded at spawn time.
-            // If they differ, one or more restarts were requested — keep respawning
+            // If they differ, one or more restarts were requested : keep respawning
             // until the counter stabilizes.
             let current_cnt = self.restart_count.load(Ordering::SeqCst);
             if current_cnt != last_restart_count {
