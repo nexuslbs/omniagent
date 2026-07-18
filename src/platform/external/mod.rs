@@ -478,6 +478,25 @@ pub fn build_delete_request(id: u64, params: &DeleteParams) -> String {
 // React
 // ---------------------------------------------------------------------------
 
+/// Parameters for the typing indicator method.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypingParams {
+    pub resource_identifier: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+}
+
+/// Build a typing request JSON string.
+#[allow(dead_code)]
+pub fn build_typing_request(id: u64, params: &TypingParams) -> String {
+    let req = PluginRequest {
+        id: Some(id),
+        method: "typing".to_string(),
+        params: Some(serde_json::to_value(params).unwrap_or_default()),
+    };
+    serde_json::to_string(&req).unwrap_or_default()
+}
+
 /// Parameters for the react method.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReactParams {
