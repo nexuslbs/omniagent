@@ -3363,8 +3363,8 @@ pub(crate) fn reload_env_handler(
                     Err(e) => Err(format!("Reload task panicked: {}", e)),
                 }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
-                Err("Reload timed out after 30s".to_string())
+            _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                Err("Reload timed out after 60s".to_string())
             }
         };
 
@@ -3407,11 +3407,22 @@ fn format_reload_response(
 /// Helper: reload plugin runtime state from YAML on disk.
 async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Vec<String>), String> {
     let data_dir = state.data_dir.clone();
-    let all_plugins =
-        tokio::task::spawn_blocking(move || crate::plugins_yaml::list_plugins(&data_dir))
+    let all_plugins = {
+        // Use a dedicated OS thread (not tokio's shared blocking pool) so that
+        // a timed-out reload can't saturate the blocking thread pool and hang
+        // future reload requests. The oneshot channel lets this future complete
+        // independently of the spawn_blocking thread-pool queue.
+        let (tx, rx) = tokio::sync::oneshot::channel::<crate::error::AppResult<Vec<crate::plugins_yaml::PluginDetail>>>();
+        std::thread::spawn(move || {
+            let result = crate::plugins_yaml::list_plugins(&data_dir);
+            let _ = tx.send(result);
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(25), rx)
             .await
-            .map_err(|e| format!("Task join: {}", e))?
-            .map_err(|e| format!("list_plugins: {}", e))?;
+            .map_err(|_| "list_plugins timed out after 25s")?
+            .map_err(|_| "list_plugins thread dropped")?
+            .map_err(|e| format!("list_plugins: {}", e))?
+    };
     tracing::info!("Reload: listed {} plugins", all_plugins.len());
 
     // 2. Snapshot current runtime state (tokio locks, Send-safe)
