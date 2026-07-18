@@ -92,6 +92,8 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
         )
         // 12. History
         .route("/kanban/tasks/{id}/history", get(list_history_handler))
+        // 12b. History (by query param task_id, for frontend kanban-history page)
+        .route("/kanban/history", get(list_all_history_handler))
         // 13. Subtasks
         .route("/kanban/tasks/{id}/subtasks", get(list_subtasks_handler))
 }
@@ -117,6 +119,7 @@ struct HistoryQuery {
     action: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+    task_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1557,6 +1560,47 @@ async fn list_history_handler(
         Ok(rows) => rows,
         Err(e) => {
             error!("[kanban/tasks/{}/history] query failed: {:?}", id, e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch history");
+        }
+    };
+
+    let entries: Vec<HistoryEntry> = rows.into_iter().map(history_row_to_entry).collect();
+    ok_json(entries)
+}
+
+/// GET /kanban/history: History log filtered by query params (task_id optional).
+/// The frontend kanban-history page calls this with `?task_id=...&action=...&limit=200&offset=0`.
+async fn list_all_history_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HistoryQuery>,
+) -> impl IntoResponse {
+    let action_filter = params.action.as_deref().unwrap_or("");
+    let task_filter = params.task_id.as_deref().unwrap_or("");
+    let limit = params.limit.unwrap_or(200).clamp(1, 500);
+    let offset = params.offset.unwrap_or(0).max(0);
+
+    let rows = match sql_forge!(
+        HistoryRow,
+        r#"
+        SELECT id, kanban_task_id, action, initial_board, final_board,
+               previous_values, created_at::text AS created_at
+        FROM kanban_history
+        WHERE (:task_id = '' OR kanban_task_id = :task_id)
+          AND (:action = '' OR action = :action)
+        ORDER BY id DESC
+        LIMIT :limit_val OFFSET :offset_val
+        "#,
+        ( :task_id = task_filter,
+          :action = action_filter,
+          :limit_val = limit,
+          :offset_val = offset )
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("[kanban/history] query failed: {:?}", e);
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch history");
         }
     };
