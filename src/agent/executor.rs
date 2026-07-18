@@ -150,6 +150,10 @@ pub async fn process_thread(
             api_mode,
             max_tokens: cfg.config_snapshot().max_tokens,
             temperature: cfg.config_snapshot().temperature,
+            supports_reasoning: crate::llm::PROVIDER_METADATA
+                .get(&provider_name_val)
+                .map(|m| m.supports_reasoning)
+                .unwrap_or(false),
         };
         LLMClient::new(llm_cfg)
     };

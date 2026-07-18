@@ -77,6 +77,7 @@ pub(crate) async fn llm_chat_handler(
         api_mode,
         max_tokens: body.max_tokens,
         temperature: body.temperature,
+        supports_reasoning: false,
     };
 
     let llm = LLMClient::new(llm_config);

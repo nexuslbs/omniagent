@@ -78,6 +78,7 @@ impl Agent {
                 cfg_read.temperature,
             )
         };
+        let provider_name = default_provider.0.clone();
         let llm_config = crate::llm::LLMConfig {
             provider: default_provider,
             api_key: llm_api_key,
@@ -86,6 +87,10 @@ impl Agent {
             api_mode: env_cfg.api_mode,
             max_tokens,
             temperature,
+            supports_reasoning: crate::llm::PROVIDER_METADATA
+                .get(&provider_name)
+                .map(|m| m.supports_reasoning)
+                .unwrap_or(false),
         };
         let llm = Arc::new(LLMClient::new(llm_config));
         Self {

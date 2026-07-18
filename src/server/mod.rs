@@ -807,6 +807,10 @@ evaluate: if the task was completed, call the completion tool.",
             api_mode,
             max_tokens: 1024,
             temperature: 0.3,
+            supports_reasoning: crate::llm::PROVIDER_METADATA
+                .get(&provider_name)
+                .map(|m| m.supports_reasoning)
+                .unwrap_or(false),
         };
         let llm = LLMClient::new(llm_config);
 
