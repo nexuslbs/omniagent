@@ -14,21 +14,21 @@
       "key": "summarize_after_days",
       "label": "Summarize After Days",
       "type": "integer",
-      "default": "$env:SUMMARIZE_AFTER_DAYS",
+      "default": "7",
       "description": "Days of inactivity before auto-summarizing threads"
     },
     {
       "key": "summary_window",
       "label": "Summary Window",
       "type": "integer",
-      "default": "$env:SUMMARY_WINDOW",
+      "default": "10",
       "description": "Number of threads in a summary generation window"
     },
     {
       "key": "channel_summary_tokens",
       "label": "Channel Summary Tokens",
       "type": "integer",
-      "default": "$env:CHANNEL_SUMMARY_TOKENS",
+      "default": "4096",
       "description": "Maximum tokens for channel-level summary generation"
     },
     {

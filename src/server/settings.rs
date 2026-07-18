@@ -327,10 +327,10 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 field_type: "select".into(),
                 description: "Default LLM provider backend for channels without an explicit provider".into(),
                 options: Some(vec![
-                    SettingOption { id: "opencode-go".into(), name: "OpenCode Go".into() },
-                    SettingOption { id: "openai".into(), name: "OpenAI".into() },
-                    SettingOption { id: "anthropic".into(), name: "Anthropic".into() },
-                    SettingOption { id: "deepseek".into(), name: "DeepSeek".into() },
+                    SettingOption { id: "opencode-go".into(), name: "opencode-go".into() },
+                    SettingOption { id: "openai".into(), name: "openai".into() },
+                    SettingOption { id: "anthropic".into(), name: "anthropic".into() },
+                    SettingOption { id: "deepseek".into(), name: "deepseek".into() },
                 ]),
                 readonly: false,
                 default: Some("opencode-go".into()),
@@ -527,7 +527,7 @@ fn enrich_provider_options(meta: &mut SettingMeta, data_dir: &str) {
     meta.options = Some(
         providers
             .into_iter()
-            .map(|(id, name)| SettingOption { id, name })
+            .map(|(id, _)| SettingOption { id: id.clone(), name: id })
             .collect(),
     );
 }
