@@ -977,7 +977,7 @@ mod tests {
     #[test]
     fn test_discover_installed_plugin() {
         let data_dir = tempfile::tempdir().unwrap();
-        let workspace_dir = tempfile::tempdir().unwrap();
+        let _workspace_dir = tempfile::tempdir().unwrap();
 
         // Create a data directory plugin
         let plugin_dir = data_dir
@@ -1010,7 +1010,7 @@ mod tests {
     #[test]
     fn test_discover_remote_plugin() {
         let data_dir = tempfile::tempdir().unwrap();
-        let workspace_dir = tempfile::tempdir().unwrap();
+        let _workspace_dir = tempfile::tempdir().unwrap();
 
         // Create a remote plugin under .remote/
         let plugin_dir = data_dir
