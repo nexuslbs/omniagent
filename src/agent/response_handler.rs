@@ -263,9 +263,6 @@ pub(crate) async fn handle_response(
     )
     .await?;
 
-    // ── Send completion reaction to platform ──
-    crate::agent::reaction_handler::send_completion_reaction(cfg, channel, cause_msg, final_status).await;
-
     // If this thread is linked to a kanban task, update its status
     crate::agent::kanban_updater::update_kanban_status(cfg, thread, final_status).await;
 
