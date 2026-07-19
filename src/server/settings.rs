@@ -98,8 +98,9 @@ fn settings_path(data_dir: &str) -> String {
     format!("{}/settings.yml", data_dir)
 }
 
-/// Load settings.yml as a flat key-value map, supporting both flat format
-/// (`KEY: value`) and nested section format (`section:\n  key: value`).
+/// Load settings.yml as a flat key-value map from nested sections only.
+/// Expects the format: `section:\n  key: value` — flat `KEY: value` at the
+/// top level is silently ignored.
 /// Returns an empty map if the file doesn't exist or can't be parsed.
 pub(crate) fn load_settings_file(data_dir: &str) -> HashMap<String, String> {
     let path = settings_path(data_dir);
@@ -114,16 +115,22 @@ pub(crate) fn load_settings_file(data_dir: &str) -> HashMap<String, String> {
     };
 
     let mut map = HashMap::new();
-    flatten_yaml_mapping(&raw, &mut map, "");
+    if let serde_yaml::Value::Mapping(mapping) = raw {
+        for (_section_key, section_val) in mapping {
+            // Only recurse into nested mappings (sections); skip flat keys
+            if let serde_yaml::Value::Mapping(_) = section_val {
+                flatten_section(&section_val, &mut map);
+            }
+        }
+    }
     map
 }
 
-/// Recursively flatten nested YAML mappings into a flat key-value map.
-/// Handles both flat (`KEY: value`) and nested (`section:\n  key: value`) formats.
-fn flatten_yaml_mapping(
+/// Extract key-value pairs from a single section mapping (no recursion —
+/// only one level deep). Keys are lowercased; values are stringified.
+fn flatten_section(
     value: &serde_yaml::Value,
     map: &mut HashMap<String, String>,
-    _prefix: &str,
 ) {
     if let serde_yaml::Value::Mapping(mapping) = value {
         for (key, val) in mapping {
@@ -140,10 +147,6 @@ fn flatten_yaml_mapping(
                 }
                 serde_yaml::Value::Number(n) => {
                     map.insert(k, n.to_string());
-                }
-                serde_yaml::Value::Mapping(_) => {
-                    // Nested section: recurse into it
-                    flatten_yaml_mapping(val, map, "");
                 }
                 serde_yaml::Value::Null => {
                     map.insert(k, String::new());
