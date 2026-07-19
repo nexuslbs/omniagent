@@ -829,6 +829,14 @@ fn build_plugin_detail(
                 }
             }
 
+            // Also check the plugin directory itself: built-in plugins ship their
+            // binary alongside plugin.json (e.g., plugins/tools/prompt/mcp-server-prompt)
+            if let Some(ref ep) = manifest.entrypoint {
+                if ep.transport == "stdio" && !ep.command.contains('/') {
+                    candidates.push(format!("{}/{}", dir, ep.command));
+                }
+            }
+
             !candidates.iter().any(|p| std::path::Path::new(p).exists())
         })
         .unwrap_or(false);
