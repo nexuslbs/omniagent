@@ -73,12 +73,23 @@ pub(crate) fn get_plugin_dir_for_category(
             )
         }
         PluginCategory::Remote => {
-            format!(
+            let base = format!(
                 "{}/plugins/{}/.remote/{}",
                 data_dir,
                 yaml_type.type_dir_name(),
                 name
-            )
+            );
+            // Remote plugins may have a sub-path inside the cloned repo
+            // (e.g. path: "tools/test-rust-tool" in remote.yml). Append it
+            // so compile_rust_crate finds the actual Cargo.toml.
+            if let Some(remote) = crate::plugins_yaml::get_remote_plugin(data_dir, yaml_type, name) {
+                if let Some(ref sub_path) = remote.path {
+                    if !sub_path.is_empty() {
+                        return format!("{}/{}", base, sub_path);
+                    }
+                }
+            }
+            base
         }
     }
 }
