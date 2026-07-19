@@ -15,6 +15,9 @@
 pub mod config;
 pub mod executor;
 pub mod helpers;
+pub mod kanban_updater;
+pub mod reaction_handler;
+pub mod summary_trigger;
 pub mod task_registry;
 
 use sql_forge::sql_forge;

@@ -73,6 +73,12 @@ pub mod plugins;
 pub mod plugins_compile;
 pub mod plugins_types;
 pub mod plugins_reload;
+pub mod plugins_listing;
+pub mod plugins_setup;
+pub mod plugins_delete;
+pub mod plugins_install;
+pub mod plugins_enable;
+pub mod plugins_env;
 
 /// Type alias for the platform restart signals map.
 type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicU64>, Arc<Notify>)>>>;
