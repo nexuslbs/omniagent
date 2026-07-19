@@ -119,22 +119,6 @@ pub struct AgentConfig {
     pub max_inline_file_kb: u32,
     /// Default profile name (used at login / session start).
     pub default_profile: String,
-
-    // ── Reaction emoji configuration ──
-    /// Emoji for completed threads. Default: ":white_check_mark:"
-    pub completed_emoji: String,
-    /// Emoji for failed threads. Default: ":x:"
-    pub failed_emoji: String,
-    /// Emoji for interrupted threads. Default: ":broken_heart:"
-    pub interrupted_emoji: String,
-    /// Fallback emoji for unknown final statuses. Default: ":o:"
-    pub default_emoji: String,
-
-    // ── Kanban status transitions ──
-    /// Kanban status assigned when a thread completes successfully. Default: "review"
-    pub kanban_completed_status: String,
-    /// Kanban status assigned when a thread fails or is interrupted. Default: "blocked"
-    pub kanban_failed_status: String,
 }
 
 /// Shared context bundle used by channel_handler and process_thread.
@@ -205,16 +189,6 @@ impl AgentConfig {
             platform_max_spawn_retries: get("platform_max_spawn_retries", "3").parse().unwrap_or(3),
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
             default_profile: get("default_profile", "omni"),
-
-            // Reaction emoji (with defaults matching the original hardcoded values)
-            completed_emoji: get("completed_emoji", ":white_check_mark:"),
-            failed_emoji: get("failed_emoji", ":x:"),
-            interrupted_emoji: get("interrupted_emoji", ":broken_heart:"),
-            default_emoji: get("default_emoji", ":o:"),
-
-            // Kanban status transitions
-            kanban_completed_status: get("kanban_completed_status", "review"),
-            kanban_failed_status: get("kanban_failed_status", "blocked"),
         })
     }
 
@@ -269,16 +243,6 @@ impl AgentConfig {
                 .parse()
                 .unwrap_or(100),
             default_profile: get("default_profile", "omni"),
-
-            // Reaction emoji (with defaults matching the original hardcoded values)
-            completed_emoji: get("completed_emoji", ":white_check_mark:"),
-            failed_emoji: get("failed_emoji", ":x:"),
-            interrupted_emoji: get("interrupted_emoji", ":broken_heart:"),
-            default_emoji: get("default_emoji", ":o:"),
-
-            // Kanban status transitions
-            kanban_completed_status: get("kanban_completed_status", "review"),
-            kanban_failed_status: get("kanban_failed_status", "blocked"),
         })
     }
 }
