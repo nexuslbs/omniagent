@@ -22,12 +22,11 @@ pub async fn send_completion_reaction(
     if let Some(ref ext_id) = reaction_ext_id {
         if let Some(ref platform) = channel.platform {
             if let Some(ref resource) = channel.resource_identifier {
-                let cfg_snap = cfg.config_snapshot();
                 let emoji = match final_status {
-                    "completed" => &cfg_snap.completed_emoji,
-                    "failed" => &cfg_snap.failed_emoji,
-                    "interrupted" => &cfg_snap.interrupted_emoji,
-                    _ => &cfg_snap.default_emoji,
+                    "completed" => ":white_check_mark:",
+                    "failed" => ":x:",
+                    "interrupted" => ":broken_heart:",
+                    _ => ":o:",
                 };
                 helpers::enqueue_reaction(&cfg.ctx, platform, resource, ext_id, emoji).await;
             }
