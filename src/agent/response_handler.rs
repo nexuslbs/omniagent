@@ -263,6 +263,25 @@ pub(crate) async fn handle_response(
     )
     .await?;
 
+    // ── Send completion reaction to platform ──
+    // Find the cause message's external_id for the reaction target
+    let reaction_ext_id = if cause_msg.external_id.is_some() {
+        cause_msg.external_id.clone()
+    } else {
+        crate::db::threads::get_cause_message(&cfg.pool, cause_msg.thread_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|m| m.external_id)
+    };
+    if let Some(ref ext_id) = reaction_ext_id {
+        if let Some(ref platform) = channel.platform {
+            if let Some(ref resource) = channel.resource_identifier {
+                helpers::enqueue_reaction(&cfg.ctx, platform, resource, ext_id, final_status).await;
+            }
+        }
+    }
+
     // If this thread is linked to a kanban task, update its status
     crate::agent::kanban_updater::update_kanban_status(cfg, thread, final_status).await;
 

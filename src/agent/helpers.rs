@@ -650,6 +650,42 @@ pub async fn enqueue_delivery(
     }
 }
 
+/// Enqueue a reaction to a platform message.
+///
+/// Sends the thread's final status (e.g. "completed", "failed", "interrupted")
+/// to the platform — no emoji is hardcoded here. The platform plugin maps
+/// the status string to the appropriate emoji/reaction.
+pub async fn enqueue_reaction(
+    ctx: &AppContext,
+    platform: &str,
+    resource_identifier: &str,
+    external_id: &str,
+    final_status: &str,
+) {
+    let sender = match ctx.platform_senders.get(platform) {
+        Some(s) => s.clone(),
+        None => return,
+    };
+
+    let envelope = OutboundEnvelope {
+        message_id: 0,
+        resource_identifier: resource_identifier.to_string(),
+        content: final_status.to_string(),
+        msg_type: "reaction".to_string(),
+        msg_subtype: None,
+        thread_id: 0,
+        thread_sequence: 0,
+        cause_external_id: Some(external_id.to_string()),
+        cause_root_id: None,
+        is_summary: false,
+        is_user_thread: false,
+    };
+
+    if let Err(e) = sender.try_send(envelope) {
+        tracing::warn!("Failed to enqueue reaction: {:?}", e);
+    }
+}
+
 /// Enqueue a typing indicator to a platform channel/thread.
 /// Broadcasts "bot is typing..." while the agent is processing.
 pub async fn enqueue_typing(
