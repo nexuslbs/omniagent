@@ -1208,7 +1208,7 @@ pub(crate) async fn setup_plugin_handler(
             .filter(|s| !s.is_empty())
         {
             if raw.starts_with("$env:") {
-                std::env::var(raw.strip_prefix("$env:").unwrap()).unwrap_or_default()
+                std::env::var(raw.strip_prefix("$env:").unwrap_or(raw)).unwrap_or_default()
             } else if raw.starts_with("$secret:") {
                 // Already resolved above via setup_env + resolve_config_refs.
                 // This branch is a fallback : see the injection block above.
@@ -1946,9 +1946,10 @@ pub(crate) async fn delete_plugin_handler(
     // ── Rule 2: YAML says built-in but not on disk → just remove YAML entry ──
     // This handles: plugin was registered as built-in but the source was removed.
     if yaml_source == Some("built-in") {
-        let (yaml_type, _) = yaml_info.as_ref().unwrap();
-        if let Ok(true) = plugins_yaml::remove_entry(data_dir, yaml_type, &name) {
-            tracing::info!("Remove: removed YAML entry for built-in plugin '{}' (source not on disk)", name);
+        if let Some((yaml_type, _)) = yaml_info.as_ref() {
+            if let Ok(true) = plugins_yaml::remove_entry(data_dir, yaml_type, &name) {
+                tracing::info!("Remove: removed YAML entry for built-in plugin '{}' (source not on disk)", name);
+            }
         }
         removed = true;
     }
