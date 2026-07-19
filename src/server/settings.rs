@@ -98,7 +98,8 @@ fn settings_path(data_dir: &str) -> String {
     format!("{}/settings.yml", data_dir)
 }
 
-/// Load settings.yml as a flat key-value map.
+/// Load settings.yml as a flat key-value map, supporting both flat format
+/// (`KEY: value`) and nested section format (`section:\n  key: value`).
 /// Returns an empty map if the file doesn't exist or can't be parsed.
 pub(crate) fn load_settings_file(data_dir: &str) -> HashMap<String, String> {
     let path = settings_path(data_dir);
@@ -107,62 +108,147 @@ pub(crate) fn load_settings_file(data_dir: &str) -> HashMap<String, String> {
         Err(_) => return HashMap::new(),
     };
 
-    // Parse YAML as a mapping of string → string
     let raw: serde_yaml::Value = match serde_yaml::from_str(&content) {
         Ok(v) => v,
         Err(_) => return HashMap::new(),
     };
 
     let mut map = HashMap::new();
-    if let serde_yaml::Value::Mapping(mapping) = raw {
-        for (key, value) in mapping {
+    flatten_yaml_mapping(&raw, &mut map, "");
+    map
+}
+
+/// Recursively flatten nested YAML mappings into a flat key-value map.
+/// Handles both flat (`KEY: value`) and nested (`section:\n  key: value`) formats.
+fn flatten_yaml_mapping(
+    value: &serde_yaml::Value,
+    map: &mut HashMap<String, String>,
+    _prefix: &str,
+) {
+    if let serde_yaml::Value::Mapping(mapping) = value {
+        for (key, val) in mapping {
             let k = match key.as_str() {
                 Some(s) => s.to_lowercase(),
                 None => continue,
             };
-            let v = match value.as_str() {
-                Some(s) => s.to_string(),
-                None => {
-                    // Non-string values: serialize back to YAML string
-                    serde_yaml::to_string(&value)
-                        .unwrap_or_default()
-                        .trim()
-                        .to_string()
+            match val {
+                serde_yaml::Value::String(s) => {
+                    map.insert(k, s.clone());
                 }
-            };
-            map.insert(k, v);
+                serde_yaml::Value::Bool(b) => {
+                    map.insert(k, b.to_string());
+                }
+                serde_yaml::Value::Number(n) => {
+                    map.insert(k, n.to_string());
+                }
+                serde_yaml::Value::Mapping(_) => {
+                    // Nested section: recurse into it
+                    flatten_yaml_mapping(val, map, "");
+                }
+                serde_yaml::Value::Null => {
+                    map.insert(k, String::new());
+                }
+                _ => {
+                    // Fallback: serialize to string
+                    if let Ok(s) = serde_yaml::to_string(val) {
+                        map.insert(k, s.trim().to_string());
+                    }
+                }
+            }
         }
     }
-    map
 }
 
-/// Write a key-value map to settings.yml.
+/// Write a key-value map to settings.yml using the nested section format.
 fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result<(), String> {
     let path = settings_path(data_dir);
 
-    // Build a YAML mapping preserving insertion order (sorted by key)
-    let mut sorted_keys: Vec<&String> = vars.keys().collect();
-    sorted_keys.sort();
+    // ── Section groupings for the nested YAML output ──
+    let section_order = ["general", "execution", "prompt", "memory"];
+    let sections: std::collections::HashMap<&str, Vec<&str>> = [
+        ("general", vec![
+            "condense_keep_turns", "delete_after_days", "default_provider",
+            "llm_provider", "max_inline_file_kb", "max_pool_connections",
+            "max_tokens", "max_unfinished_subtask_retries",
+            "old_message_char_budget", "soul_max_chars",
+            "state_block_update_interval", "temperature",
+            "thread_summary_tokens", "tokenizer_encoding", "watchdog_default",
+        ]),
+        ("execution", vec![
+            "max_iterations_no_plan", "max_iterations_plan",
+            "tool_bg_secs", "tool_long_timeout_secs", "tool_short_timeout_secs",
+        ]),
+        ("prompt", vec![
+            "prompt_char_budget_hard", "prompt_char_budget_soft",
+            "prompt_compact_messages_tool", "prompt_generate_tool",
+            "prompt_log_level", "prompt_token_budget_hard",
+            "prompt_token_budget_soft", "prompt_token_safety_factor",
+        ]),
+        ("memory", vec![
+            "memory_max_chars",
+            "messages_vectorization_api_key", "messages_vectorization_api_model",
+            "messages_vectorization_api_url", "messages_vectorization_interval",
+            "messages_vectorization_method", "messages_vectorization_protocol",
+            "vectorize_messages", "vectorize_wiki",
+            "wiki_vectorization_api_key", "wiki_vectorization_api_model",
+            "wiki_vectorization_api_url", "wiki_vectorization_interval",
+            "wiki_vectorization_method", "wiki_vectorization_protocol",
+        ]),
+    ].into_iter().collect();
+
+    /// Format a single YAML value with proper quoting.
+    fn format_value(value: &str) -> String {
+        if value.starts_with('$')
+            || value.contains(':')
+            || value.contains('#')
+            || value.is_empty()
+            || value.contains(' ')
+            || value.contains('\n')
+        {
+            format!("'{}'", value.replace('\'', "''"))
+        } else {
+            value.to_string()
+        }
+    }
 
     let mut content = String::from("# Settings for OmniAgent\n");
     content.push_str("# Values support $env:VAR and $secret:NAME refs.\n\n");
 
-    for key in sorted_keys {
-        if let Some(value) = vars.get(key) {
-            // If value contains special chars or starts with $, quote it
-            let formatted = if value.starts_with('$')
-                || value.contains(':')
-                || value.contains('#')
-                || value.is_empty()
-            {
-                format!("'{}'\n", value.replace('\'', "''"))
-            } else if value.contains(' ') || value.contains('\n') {
-                format!("'{}'\n", value.replace('\'', "''"))
-            } else {
-                format!("{}\n", value)
-            };
-            content.push_str(&format!("{}: {}\n", key, formatted.trim_end()));
+    let mut written = std::collections::HashSet::new();
+
+    for section_name in &section_order {
+        let mut sec_values: Vec<(String, String)> = Vec::new();
+        if let Some(keys) = sections.get(section_name) {
+            for key in keys {
+                if let Some(value) = vars.get(*key) {
+                    sec_values.push((key.to_string(), format_value(value)));
+                    written.insert(key.to_string());
+                }
+            }
         }
+        if sec_values.is_empty() {
+            continue;
+        }
+        content.push_str(&format!("{}:\n", section_name));
+        for (key, value) in &sec_values {
+            content.push_str(&format!("  {}: {}\n", key, value));
+        }
+        content.push('\n');
+    }
+
+    // Any remaining keys not assigned to a section go under a general catch-all
+    let mut remaining: Vec<&String> = vars.keys()
+        .filter(|k| !written.contains(k.as_str()))
+        .collect();
+    if !remaining.is_empty() {
+        remaining.sort();
+        content.push_str("unsorted:\n");
+        for key in remaining {
+            if let Some(value) = vars.get(key) {
+                content.push_str(&format!("  {}: {}\n", key, format_value(value)));
+            }
+        }
+        content.push('\n');
     }
 
     std::fs::write(&path, content).map_err(|e| format!("Failed to write settings.yml: {}", e))
