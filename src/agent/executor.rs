@@ -5,7 +5,7 @@ use tracing::{error, info, warn};
 use crate::agent::config::AgentContext;
 use crate::agent::helpers;
 use crate::db::types as queries;
-use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
+use crate::db::types::{Channel, CompleteThreadStats, Message, MessageNew, Thread};
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, LLMConfig, ProviderId, Usage};
 use crate::mcp::{truncate_content, McpToolCall, McpToolResult, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
 use tokio::task::JoinSet;
@@ -29,6 +29,15 @@ use sql_forge::sql_forge;
 /// 8. Generate a per-turn summary (outside iteration limit)
 /// 9. Update thread status → completed/failed, record token_usage + duration
 /// 10. Trigger cross-thread summary if enough threads have accumulated
+
+struct PromptParts {
+    system: String,
+    memory: String,
+    soul: String,
+    context: String,
+    user: String,
+    plan: bool,
+}
 pub async fn process_thread(
     cfg: &AgentContext,
     thread: &Thread,
@@ -183,17 +192,32 @@ pub async fn process_thread(
         .map(|t| t.name.clone())
         .collect();
 
-    struct PromptParts {
-        system: String,
-        memory: String,
-        soul: String,
-        context: String,
-        user: String,
-        plan: bool,
-    }
+    let (prompt_parts, template_section) = build_prompt_context(
+        cfg, thread, cause_msg, &channel, &profile_name, &tool_names,
+    ).await?;
+    let saved = run_main_loop(
+        cfg, thread, cause_msg, &channel, &profile_name, &tool_names,
+        prompt_parts, template_section,
+        &mut next_seq, &per_thread_llm, &prof, start_time,
+    ).await?;
+    Ok(saved)
+}
 
+/// Create an error message, mark the thread as failed, deliver the error
+/// back to the user's platform, and return the saved message.
+///
+/// Used by all validation-failure paths in process_thread.
 
-
+/// Build the prompt context by calling the prompt MCP tool and loading any
+/// structured-message template. Returns the prompt parts and optional template section.
+async fn build_prompt_context(
+    cfg: &AgentContext,
+    thread: &Thread,
+    cause_msg: &Message,
+    channel: &Channel,
+    profile_name: &str,
+    tool_names: &[String],
+) -> AppResult<(PromptParts, Option<String>)> {
     let prompt_parts = {
         let prompt_tool_name = cfg.config_snapshot().prompt_tool_name;
         let mcp_call = McpToolCall {
@@ -237,7 +261,8 @@ pub async fn process_thread(
             user: parsed["user"].as_str().unwrap_or("").to_string(),
             plan: parsed.get("plan").and_then(|v| v.as_bool()).unwrap_or(false),
         }
-    };    // 4a. Load template from cause message metadata (for kanban/cron/user tasks)
+    };
+
     let template_section: Option<String> = {
         let msg_type = cause_msg.msg_type.as_str();
         if helpers::is_structured_msg_type(msg_type) {
@@ -250,13 +275,13 @@ pub async fn process_thread(
                 let template_path = if template.ends_with(".md") || template.contains('.') {
                     std::path::PathBuf::from(&cfg.ctx.data_dir)
                         .join("profiles")
-                        .join(&profile_name)
+                        .join(profile_name)
                         .join("templates")
                         .join(template)
                 } else {
                     std::path::PathBuf::from(&cfg.ctx.data_dir)
                         .join("profiles")
-                        .join(&profile_name)
+                        .join(profile_name)
                         .join("templates")
                         .join(format!("{}.md", template))
                 };
@@ -289,6 +314,26 @@ pub async fn process_thread(
         }
     };
 
+    Ok((prompt_parts, template_section))
+}
+
+/// Run the main agent loop: planning phase (if enabled) + tool-calling iterations.
+/// Returns the saved final message.
+#[allow(clippy::too_many_arguments)]
+async fn run_main_loop(
+    cfg: &AgentContext,
+    thread: &Thread,
+    cause_msg: &Message,
+    channel: &Channel,
+    profile_name: &str,
+    tool_names: &[String],
+    prompt_parts: PromptParts,
+    template_section: Option<String>,
+    next_seq: &mut i32,
+    per_thread_llm: &LLMClient,
+    prof: &crate::profile::Profile,
+    start_time: std::time::Instant,
+) -> AppResult<Message> {
 
     // Track cumulative token usage across all LLM calls
     let mut cumulative_usage: Option<crate::llm::Usage> = None;
@@ -376,8 +421,8 @@ Previous plan:\n{}",
             // Subtype "plan" indicates this is the first prompt to create a plan.
             if prompt_log_level != "off" {
                 let prompt_seq = {
-                    let v = next_seq;
-                    next_seq += 1;
+                    let v = *next_seq;
+                    *next_seq += 1;
                     v
                 };
                 let prompt_content =
@@ -458,8 +503,8 @@ Previous plan:\n{}",
                             role: "agent".to_string(),
                             content: plan_content.clone(),
                             thread_sequence: {
-                                let v = next_seq;
-                                next_seq += 1;
+                                let v = *next_seq;
+                                *next_seq += 1;
                                 v
                             },
                             external_id: None,
@@ -725,8 +770,8 @@ Previous plan:\n{}",
         };
         if should_log_prompt {
             let prompt_seq = {
-                let v = next_seq;
-                next_seq += 1;
+                let v = *next_seq;
+                *next_seq += 1;
                 v
             };
             let prompt_content = serde_json::to_string(&messages).unwrap_or_else(|_| String::new());
@@ -992,8 +1037,8 @@ Previous plan:\n{}",
             role: "agent".to_string(),
             content: tool_content,
             thread_sequence: {
-                let v = next_seq;
-                next_seq += 1;
+                let v = *next_seq;
+                *next_seq += 1;
                 v
             },
             external_id: None,
@@ -1041,8 +1086,8 @@ Previous plan:\n{}",
         // Pre-allocate sequence numbers for each result message
         let result_seqs: Vec<i32> = (0..tool_count)
             .map(|_| {
-                let v = next_seq;
-                next_seq += 1;
+                let v = *next_seq;
+                *next_seq += 1;
                 v
             })
             .collect();
@@ -1067,7 +1112,7 @@ Previous plan:\n{}",
             let mut tool_ctx = cfg.ctx.clone();
             tool_ctx.current_thread_id = Some(thread.id);
             tool_ctx.current_channel_id = Some(thread.channel_id);
-            tool_ctx.current_profile_name = Some(profile_name.clone());
+            tool_ctx.current_profile_name = Some(profile_name.to_string());
             tool_ctx.current_channel_name = Some(channel.name.clone());
             tool_ctx.current_platform = channel.platform.clone();
             tool_ctx.current_allowed_tools = prof.allowed_tools.clone();
@@ -1332,8 +1377,8 @@ Previous plan:\n{}",
                 role: "agent".to_string(),
                 content: reasoning_text.clone(),
                 thread_sequence: {
-                    let v = next_seq;
-                    next_seq += 1;
+                    let v = *next_seq;
+                    *next_seq += 1;
                     v
                 },
                 external_id: None,
@@ -1363,21 +1408,15 @@ Previous plan:\n{}",
     }
 
     // 9. Save the main agent response (when limit_reached, generate LLM summary instead)
-    let agent_elapsed_ms = start_time.elapsed().as_millis() as i32;
     // 9. Save the main agent response + cleanup
     let saved = handle_response(
-        cfg, thread, cause_msg, &channel, next_seq, start_time, &messages,
+        cfg, thread, cause_msg, &channel, *next_seq, start_time, &messages,
         &mut cumulative_usage, &mut force_failed, limit_reached, current_iter,
         iter_limit, &per_thread_llm, final_content, token_usage_json,
         evidence_metadata, enable_subtasks,
     ).await?;
     return Ok(saved)
 }
-
-/// Create an error message, mark the thread as failed, deliver the error
-/// back to the user's platform, and return the saved message.
-///
-/// Used by all validation-failure paths in process_thread.
 async fn fail_thread(
     cfg: &AgentContext,
     thread: &Thread,
