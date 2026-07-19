@@ -19,6 +19,10 @@ pub mod kanban_updater;
 pub mod reaction_handler;
 pub mod summary_trigger;
 pub mod task_registry;
+pub(crate) mod context_builder;
+pub(crate) mod fail_thread;
+pub(crate) mod main_loop;
+pub(crate) mod response_handler;
 
 use sql_forge::sql_forge;
 use sqlx::FromRow;

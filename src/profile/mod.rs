@@ -36,26 +36,6 @@ pub struct Profile {
 /// Default context budget for profiles that don't specify one.
 pub const PROMPT_BUDGET_DEFAULT: usize = 15_000;
 
-/// The list of core native tools: used for multi-select in the dashboard.
-/// External tools (MCP plugins installed via plugin_registry) are loaded
-/// dynamically at runtime and are not listed here.
-pub const CORE_TOOLS: &[&str] = &[
-    "cron_create-job",
-    "cron_list-cron-jobs",
-    "cron_delete-cron-job",
-    "cron_update-cron-job",
-    "fetch",
-    "filesystem_read",
-    "filesystem_write",
-    "filesystem_list",
-    "filesystem_search",
-    "filesystem_info",
-    "kanban_create-task",
-    "kanban_list-kanban-tasks",
-    "kanban_update-task",
-    "kanban_delete-task",
-];
-
 /// Schema for profiles/<name>/config.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileConfig {
