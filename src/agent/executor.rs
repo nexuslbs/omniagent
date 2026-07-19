@@ -1602,77 +1602,13 @@ Previous plan:\n{}",
     .await?;
 
     // ── Send completion reaction to platform ──
-    // Use the cause message's external_id if available; otherwise look it up
-    // from the database (the async post-back from delivery may have set it).
-    let reaction_ext_id = if cause_msg.external_id.is_some() {
-        cause_msg.external_id.clone()
-    } else {
-        crate::db::threads::get_cause_message(&cfg.pool, thread.id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|m| m.external_id)
-    };
-    if let Some(ref ext_id) = reaction_ext_id {
-        if let Some(ref platform) = channel.platform {
-            if let Some(ref resource) = channel.resource_identifier {
-                let cfg_snap = cfg.config_snapshot();
-                let emoji = match final_status {
-                    "completed" => &cfg_snap.completed_emoji,
-                    "failed" => &cfg_snap.failed_emoji,
-                    "interrupted" => &cfg_snap.interrupted_emoji,
-                    _ => &cfg_snap.default_emoji,
-                };
-                helpers::enqueue_reaction(&cfg.ctx, platform, resource, ext_id, emoji).await;
-            }
-        }
-    }
+    crate::agent::reaction_handler::send_completion_reaction(cfg, &channel, cause_msg, final_status).await;
 
     // If this thread is linked to a kanban task, update its status
-    if let Some(ref task_id) = thread.task_id {
-        let cfg_snap = cfg.config_snapshot();
-        let kanban_status = if final_status == "completed" {
-            &cfg_snap.kanban_completed_status
-        } else {
-            &cfg_snap.kanban_failed_status
-        };
-        if let Err(e) = queries::update_kanban_task_status(&cfg.pool, task_id, kanban_status).await {
-            tracing::warn!("[executor] Failed to update kanban task {} status: {:?}", task_id, e);
-        }
-    }
+    crate::agent::kanban_updater::update_kanban_status(cfg, thread, final_status).await;
 
-    // 11. Trigger cross-thread summary check via memory plugin
-    {
-        let mcp_call = McpToolCall {
-            id: "post-thread-summary".to_string(),
-            name: "memory_generate_summary".to_string(),
-            arguments: serde_json::json!({
-                "channel_id": thread.channel_id,
-            }),
-        };
-        if let Err(e) = cfg
-            .mcp
-            .read()
-            .await
-            .execute(&mcp_call, cfg.ctx.clone())
-            .await
-        {
-            tracing::debug!("[executor] Post-thread summary failed (non-critical): {:?}", e);
-        }
-    }
-
-    // 12. Cancel any remaining background tasks for this thread
-    {
-        let registry = crate::agent::task_registry::TASK_REGISTRY
-            .get()
-            .cloned();
-        if let Some(reg) = registry {
-            let count = reg.cancel_all_for_thread(thread.id).await;
-            if count > 0 {
-                tracing::info!("Cancelled {} remaining background task(s) for thread {}", count, thread.id);
-            }
-        }
-    }
+    // 11. Trigger cross-thread summary check via memory plugin + cancel bg tasks
+    crate::agent::summary_trigger::trigger_summary_and_cleanup(cfg, thread).await;
 
     Ok(saved)
 }
@@ -1752,3 +1688,8 @@ async fn fail_thread(
 
     Ok(saved)
 }
+
+// ── Helper functions moved to submodules ──
+//   send_completion_reaction  →  reaction_handler.rs
+//   update_kanban_status      →  kanban_updater.rs
+//   trigger_summary_and_cleanup → summary_trigger.rs
