@@ -692,7 +692,8 @@ pub async fn spawn_vectorizers(
         match method {
             "api" => {
                 if let Some(ref url) = config.api_url {
-                    let proto = EmbeddingProtocol::from_str(config.protocol).unwrap();
+                    let proto = EmbeddingProtocol::from_str(config.protocol)
+                        .expect("EmbeddingProtocol::from_str is infallible");
 
                     let model = config
                         .api_model
