@@ -114,10 +114,10 @@ impl PluginYamlType {
     /// Map from a string representation (used by installer/manifest JSON).
     pub fn from_type_str(s: &str) -> Self {
         match s {
-            "platform" => PluginYamlType::Platform,
+            "platform" | "platforms" => PluginYamlType::Platform,
             "mcp" => PluginYamlType::Tool, // Map legacy "mcp" to "tool"
-            "tool" => PluginYamlType::Tool,
-            "provider" => PluginYamlType::Provider,
+            "tool" | "tools" => PluginYamlType::Tool,
+            "provider" | "providers" => PluginYamlType::Provider,
             _ => PluginYamlType::Tool, // fallback
         }
     }
