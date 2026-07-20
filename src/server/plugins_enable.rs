@@ -1,6 +1,6 @@
 use axum::{extract::{Path, State}, http::StatusCode, response::IntoResponse, Json};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::error;
 use crate::plugins_yaml;
 use crate::server::AppState;
 use super::plugins_reload::*;
