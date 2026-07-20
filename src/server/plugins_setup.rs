@@ -19,7 +19,7 @@ use crate::server::AppState;
 use super::plugins_reload::*;
 
 pub(crate) async fn setup_plugin_handler(
-    Path(name): Path<String>,
+    Path((_p_type, _source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // 1. Get plugin detail from disk

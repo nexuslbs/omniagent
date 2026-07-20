@@ -19,31 +19,47 @@ pub(crate) struct UpdateConfigRequest {
     pub config: serde_json::Value,
 }
 
-#[derive(Deserialize)]
-pub(crate) struct PluginSourceRequest {
-    /// Source identifier: "built-in", "bundled", or "remote".
-    /// Required. The handler acts on this exact source.
-    pub source: Option<String>,
-    /// Optional remote config to set when enabling a remote source.
-    /// When source is "remote" and this is provided, the remote URL/path
-    /// is written to the YAML entry. Required when re-enabling a remote
-    /// source after it was previously cleared (by switching to built-in
-    /// or bundled).
-    #[serde(default)]
-    pub remote: Option<plugins_yaml::PluginRemote>,
-}
-
-/// Validate that a source was provided. Returns an error response if missing.
-pub(crate) fn require_source(source: &Option<String>) -> Result<&str, (StatusCode, Json<serde_json::Value>)> {
-    match source.as_deref() {
-        Some(s) => Ok(s),
-        None => Err((
+/// Validate a source string from the URL path.
+/// Returns an error response if invalid.
+pub(crate) fn validate_source(source: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    match source {
+        "built-in" | "bundled" | "remote" => Ok(()),
+        _ => Err((
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "success": false,
-                "error": "Source is required. Provide a `source` parameter: 'built-in', 'bundled', or 'remote'."
+                "error": format!("Invalid source '{}': must be 'built-in', 'bundled', or 'remote'", source)
             })),
         )),
+    }
+}
+
+/// Validate a plugin type string from the URL path.
+pub(crate) fn validate_plugin_type(p_type: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    match p_type {
+        "tools" | "platforms" | "providers" => Ok(()),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Invalid plugin type '{}': must be 'tools', 'platforms', or 'providers'", p_type)
+            })),
+        )),
+    }
+}
+
+/// Return a 400 error for operations not allowed on built-in plugins.
+pub(crate) fn reject_builtin_operation(source: &str, action: &str, name: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if source == "built-in" {
+        Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": format!("Cannot {} built-in plugin '{}': only enable and disable are allowed", action, name)
+            })),
+        ))
+    } else {
+        Ok(())
     }
 }
 

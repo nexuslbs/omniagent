@@ -20,27 +20,23 @@ use super::plugins_reload::*;
 use super::plugins_types::*;
 
 pub(crate) async fn install_plugin_handler(
-    Path(name): Path<String>,
+    Path((p_type, source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
-    body: Option<Json<PluginSourceRequest>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
-    let explicit_source = body.as_ref().and_then(|b| b.source.as_deref());
 
-    // Require source parameter
-    let source = match explicit_source {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": "Source is required. Provide a `source` parameter: 'built-in', 'bundled', or 'remote'."
-                })),
-            )
-                .into_response();
-        }
-    };
+    // Validate type and source from path
+    if let Err(e) = validate_plugin_type(&p_type) {
+        return e.into_response();
+    }
+    if let Err(e) = validate_source(&source) {
+        return e.into_response();
+    }
+
+    // Reject install for built-in plugins
+    if let Err(e) = reject_builtin_operation(&source, "install", &name) {
+        return e.into_response();
+    }
 
     // 1. Resolve plugin source via shared preamble (detect type, resolve dir, verify source)
     let resolved = match resolve_plugin_for_compile(
@@ -48,7 +44,7 @@ pub(crate) async fn install_plugin_handler(
         &state.data_dir,
         &name,
         "Install",
-        Some(source),
+        Some(&source),
     )
     .await
     {
@@ -149,27 +145,23 @@ pub(crate) async fn install_plugin_handler(
 /// 2. Omni-stack: recompile in place
 /// 3. Remote: re-clone to .remote/, recompile
 pub(crate) async fn reinstall_plugin_handler(
-    Path(name): Path<String>,
+    Path((p_type, source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
-    body: Option<Json<PluginSourceRequest>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
-    let explicit_source = body.as_ref().and_then(|b| b.source.as_deref());
 
-    // Require source parameter
-    let source = match explicit_source {
-        Some(s) => s,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": "Source is required. Provide a `source` parameter: 'built-in', 'bundled', or 'remote'."
-                })),
-            )
-                .into_response();
-        }
-    };
+    // Validate type and source from path
+    if let Err(e) = validate_plugin_type(&p_type) {
+        return e.into_response();
+    }
+    if let Err(e) = validate_source(&source) {
+        return e.into_response();
+    }
+
+    // Reject reinstall for built-in plugins
+    if let Err(e) = reject_builtin_operation(&source, "reinstall", &name) {
+        return e.into_response();
+    }
 
     // 1. Resolve plugin source via shared preamble (detect type, resolve dir, verify source)
     let resolved = match resolve_plugin_for_compile(
@@ -177,7 +169,7 @@ pub(crate) async fn reinstall_plugin_handler(
         &state.data_dir,
         &name,
         "Reinstall",
-        Some(source),
+        Some(&source),
     )
     .await
     {
@@ -445,31 +437,26 @@ pub(crate) async fn install_git_handler(
 }
 
 
-/// POST /api/plugins/{name}/download: clone a remote plugin that has a remote.yml entry but no disk directory.
+/// POST /api/plugins/{type}/{source}/{name}/download: clone a remote plugin that has a remote.yml entry but no disk directory.
 /// For `source=remote`: clones from git via remote.yml.
 pub(crate) async fn download_plugin_handler(
-    Path(name): Path<String>,
+    Path((p_type, source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
-    body: Option<Json<PluginSourceRequest>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
 
-    // Validate source: download only supports 'remote'
-    let source = match &body {
-        Some(req) => match require_source(&req.source) {
-            Ok(s) => s,
-            Err(e) => return e.into_response(),
-        },
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": "Source is required. Provide a `source` parameter: 'built-in', 'bundled', or 'remote'."
-                })),
-            ).into_response();
-        }
-    };
+    // Validate type and source from path
+    if let Err(e) = validate_plugin_type(&p_type) {
+        return e.into_response();
+    }
+    if let Err(e) = validate_source(&source) {
+        return e.into_response();
+    }
+    if let Err(e) = reject_builtin_operation(&source, "download", &name) {
+        return e.into_response();
+    }
+
+    // Validate that download only supports 'remote'
     if source != "remote" {
         return (
             StatusCode::BAD_REQUEST,
@@ -607,10 +594,19 @@ pub(crate) async fn download_plugin_handler(
 /// Updates remote.yml key, plugins.yml key (if an entry exists), and renames
 /// the .remote/ directory from the old name to the new name.
 pub(crate) async fn rename_plugin_handler(
-    Path(name): Path<String>,
+    Path((p_type, source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
     Json(body): Json<RenameRequest>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_plugin_type(&p_type) {
+        return e.into_response();
+    }
+    if let Err(e) = validate_source(&source) {
+        return e.into_response();
+    }
+    if let Err(e) = reject_builtin_operation(&source, "rename", &name) {
+        return e.into_response();
+    }
     let new_name = sanitize_plugin_name(&body.new_name);
     if new_name.is_empty() {
         return (
