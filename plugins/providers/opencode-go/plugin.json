@@ -1,0 +1,13 @@
+{
+  "name": "opencode-go",
+  "version": "1.0.0",
+  "type": "provider",
+  "description": "OpenCode Go: gateway provider with multi-model support",
+  "default_base_url": "https://opencode.ai/zen/go/v1",
+  "api_mode": "dynamic",
+  "config_schema": [
+    { "key": "api_key", "label": "API Key", "type": "secret", "required": false, "description": "Set in providers.yml or directly" },
+    { "key": "default_model", "label": "Default Model", "type": "enum", "default": "deepseek-v4-flash", "refresh_url": "https://opencode.ai/zen/go/v1/models" }
+  ],
+  "env": {}
+}

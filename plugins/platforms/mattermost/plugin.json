@@ -1,0 +1,141 @@
+{
+  "name": "mattermost",
+  "version": "2.0.0",
+  "type": "platform",
+  "description": "Mattermost platform: send and receive messages via Mattermost REST API",
+  "entrypoint": {
+    "command": "mattermost-platform",
+    "args": [],
+    "transport": "stdio"
+  },
+  "capabilities": {
+    "inbound": true,
+    "outbound": true,
+    "setup": true
+  },
+  "config_schema": [
+    {
+      "key": "server_url",
+      "label": "Mattermost Server URL",
+      "type": "string",
+      "required": false,
+      "default": "http://mattermost:8065",
+      "description": "Base URL of the Mattermost server."
+    },
+    {
+      "key": "access_token_name",
+      "label": "Access Token Name",
+      "type": "string",
+      "required": false,
+      "description": "Name of the Mattermost personal access token to use (generated during setup).",
+      "default": ""
+    },
+    {
+      "key": "polling_enabled",
+      "label": "Enable inbound polling",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "Enable polling for incoming messages (only relevant in polling mode)."
+    },
+    {
+      "key": "polling_interval",
+      "label": "Polling interval (seconds)",
+      "type": "integer",
+      "required": false,
+      "default": 15,
+      "min": 5,
+      "max": 300,
+      "description": "How often to poll for new messages (only used in polling mode)"
+    },
+    {
+      "key": "connection_mode",
+      "label": "Connection Mode",
+      "type": "enum",
+      "required": false,
+      "default": "websocket",
+      "allowed_values": [
+        "polling",
+        "websocket"
+      ],
+      "description": "How to detect new messages: 'polling' or 'websocket' (real-time)"
+    },
+    {
+      "key": "setup_team",
+      "label": "Setup Team Name",
+      "type": "string",
+      "required": false,
+      "default": "",
+      "description": "Team to create during setup. Required for setup (not for platform operation)."
+    },
+    {
+      "key": "setup_channel",
+      "label": "Setup Channel Name",
+      "type": "string",
+      "required": false,
+      "default": "setup",
+      "description": "Channel to create during setup. Required for setup (not for platform operation)."
+    },
+    {
+      "key": "bot_user",
+      "label": "Bot Username",
+      "type": "string",
+      "required": false,
+      "default": "omniagent",
+      "description": "Username of the bot account used during setup. Required for setup."
+    },
+    {
+      "key": "bot_password",
+      "label": "Bot Password",
+      "type": "secret",
+      "required": false,
+      "secret": true,
+      "description": "Password for the bot account. Required for first-time setup when the bot user does not yet exist."
+    },
+    {
+      "key": "admin_user",
+      "label": "Admin Username",
+      "type": "string",
+      "required": false,
+      "default": "",
+      "description": "Admin account to create during setup (optional). Uses the first system admin if not provided."
+    },
+    {
+      "key": "admin_password",
+      "label": "Admin Password",
+      "type": "secret",
+      "required": false,
+      "secret": true,
+      "description": "Password for the admin account (optional, only used if admin_user is set)."
+    },
+    {
+      "key": "test_user",
+      "label": "Test Username",
+      "type": "string",
+      "required": false,
+      "default": "",
+      "description": "Test user to create during setup (optional)."
+    },
+    {
+      "key": "test_password",
+      "label": "Test Password",
+      "type": "secret",
+      "required": false,
+      "secret": true,
+      "description": "Password for the test user (optional, only used if test_user is set)."
+    },
+    {
+      "key": "max_download_bytes",
+      "label": "Max File Download Size (bytes)",
+      "type": "integer",
+      "required": false,
+      "default": 10485760,
+      "min": 1024,
+      "max": 1073741824,
+      "description": "Maximum file size in bytes to download from the platform API. Files larger than this are not downloaded; only metadata and a file URL reference are included. Default: 10 MB (10485760)."
+    }
+  ],
+  "env": {
+    "RUST_LOG": "mattermost_platform=debug"
+  }
+}

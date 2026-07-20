@@ -1,0 +1,15 @@
+[package]
+name = "mcp-server-filesystem"
+version = "0.1.0"
+edition = "2021"
+description = "Filesystem MCP server: read, write, list, search, info tools"
+
+[dependencies]
+mcp-server-util = { path = "../util" }
+anyhow = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = "0.4"
+glob = "0.3"
