@@ -27,7 +27,7 @@ pub(crate) fn reload_env_handler(
         let env_refreshed = refresh_env_from_file(&env_path);
         tracing::info!("Reload: .env read ({} vars), now reloading plugins", env_refreshed);
 
-        // Run reload in a spawned task with a 30s timeout so a stuck
+        // Run reload in a spawned task with a 10s timeout so a stuck
         // spawn_blocking or MCP init can't hang the endpoint forever.
         let state_clone = state.clone();
         let result = tokio::select! {
