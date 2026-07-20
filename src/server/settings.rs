@@ -175,7 +175,7 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
             "max_tokens", "max_unfinished_subtask_retries",
             "old_message_char_budget", "soul_max_chars",
             "state_block_update_interval", "temperature",
-            "thread_summary_tokens", "tokenizer_encoding", "watchdog_default",
+            "thread_summary_tokens", "tokenizer_encoding",
         ]),
         ("execution", vec![
             "max_iterations_no_plan", "max_iterations_plan",
