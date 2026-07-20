@@ -652,9 +652,8 @@ pub async fn enqueue_delivery(
 
 /// Enqueue a reaction to a platform message.
 ///
-/// Sends the thread's final status (e.g. "completed", "failed", "interrupted")
-/// to the platform — no emoji is hardcoded here. The platform plugin maps
-/// the status string to the appropriate emoji/reaction.
+/// Sends an emoji for the thread's final status (e.g. ":white_check_mark:")
+/// to the platform. The caller is responsible for mapping status → emoji.
 pub async fn enqueue_reaction(
     ctx: &AppContext,
     platform: &str,
