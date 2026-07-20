@@ -63,11 +63,9 @@ pub(crate) fn get_plugin_dir_for_category(
             format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name)
         }
         PluginCategory::OmniStack => {
-            let workspace_dir = std::env::var("WORKSPACE_DIR")
-                .unwrap_or_else(|_| "/opt/workspace/omni-stack".to_string());
             format!(
                 "{}/plugins/{}/{}",
-                workspace_dir,
+                data_dir,
                 yaml_type.type_dir_name(),
                 name
             )
