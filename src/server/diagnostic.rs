@@ -79,7 +79,7 @@ pub async fn check_enrich_json(State(state): State<Arc<AppState>>) -> String {
 
 /// Check environment variables (for debugging env resolution).
 pub async fn check_env_read(State(state): State<Arc<AppState>>) -> String {
-    let vars = ["OMNI_DIR", "WORKSPACE_DIR", "LLM_PROVIDER", "HOST", "PORT"];
+    let vars = ["OMNI_DIR", "LLM_PROVIDER", "HOST", "PORT"];
     let mut result = String::new();
     for var in &vars {
         let val = std::env::var(var).unwrap_or_else(|_| "(not set)".to_string());

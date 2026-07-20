@@ -2,7 +2,7 @@
 //!
 //! Providers are configured via plugin config (providers.yml with $env: references).
 //! The only hardcoded env var names are the infrastructure defaults set by the
-//! deployment repo: `OMNI_DIR`, `WORKSPACE_DIR`, and `LLM_PROVIDER`.
+//! deployment repo: `OMNI_DIR` and `LLM_PROVIDER`.
 //!
 //! The API key comes from the provider's plugin config (providers.yml with $env:
 //! references). The startup fallback is empty: no hardcoded env var names.
