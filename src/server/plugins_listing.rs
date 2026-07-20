@@ -123,9 +123,9 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
 }
 
 
-/// GET /api/plugins/:name: get single plugin detail.
+/// GET /api/plugins/{type}/{source}/{name}: get single plugin detail.
 pub(crate) async fn get_plugin_handler(
-    Path(name): Path<String>,
+    Path((_p_type, _source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let data_dir = state.data_dir.clone();

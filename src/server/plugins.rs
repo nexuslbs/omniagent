@@ -57,51 +57,37 @@ pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
         .route("/api/plugins/install-git", post(install_git_handler))
         .route("/api/plugins/install-url", post(install_url_handler))
         .route("/api/plugins", get(list_plugins_handler))
-        .route("/api/plugins/{name}", get(get_plugin_handler))
-        .route("/api/plugins/{name}/config", post(update_config_handler))
-        .route("/api/plugins/{name}/enable", post(enable_plugin_handler))
-        .route("/api/plugins/{name}/disable", post(disable_plugin_handler))
-        .route("/api/plugins/{name}/install", post(install_plugin_handler))
-        .route("/api/plugins/{name}/reinstall", post(reinstall_plugin_handler))
-        .route("/api/plugins/{name}/refresh-models", post(refresh_models_handler))
-        .route("/api/plugins/{name}/setup", post(setup_plugin_handler))
-        .route("/api/plugins/{name}/download", post(download_plugin_handler))
-        .route("/api/plugins/{name}/rename", post(rename_plugin_handler))
-        .route("/api/plugins/{name}", delete(delete_plugin_handler))
+        .route("/api/plugins/{type}/{source}/{name}", get(get_plugin_handler))
+        .route("/api/plugins/{type}/{source}/{name}/config", post(update_config_handler))
+        .route("/api/plugins/{type}/{source}/{name}/enable", post(enable_plugin_handler))
+        .route("/api/plugins/{type}/{source}/{name}/disable", post(disable_plugin_handler))
+        .route("/api/plugins/{type}/{source}/{name}/install", post(install_plugin_handler))
+        .route("/api/plugins/{type}/{source}/{name}/reinstall", post(reinstall_plugin_handler))
+        .route("/api/plugins/{type}/{source}/{name}/refresh-models", post(refresh_models_handler))
+        .route("/api/plugins/{type}/{source}/{name}/setup", post(setup_plugin_handler))
+        .route("/api/plugins/{type}/{source}/{name}/download", post(download_plugin_handler))
+        .route("/api/plugins/{type}/{source}/{name}/rename", post(rename_plugin_handler))
+        .route("/api/plugins/{type}/{source}/{name}", delete(delete_plugin_handler))
 }
 
 // ── Handlers remaining in this file ──
 
-/// POST /api/plugins/:name/config: update a plugin's YAML config.
+/// POST /api/plugins/{type}/{source}/{name}/config: update a plugin's YAML config.
 pub(crate) async fn update_config_handler(
-    Path(name): Path<String>,
+    Path((p_type, source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateConfigRequest>,
 ) -> impl IntoResponse {
-    // Determine the YAML type from disk manifest
-    let yaml_type = match plugins_yaml::get_disk_plugin_type(&state.data_dir, &name) {
-        Ok(Some(t)) => plugins_yaml::PluginYamlType::from_type_str(&t),
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": "Plugin not found"
-                })),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": format!("Failed to determine plugin type: {}", e)
-                })),
-            )
-                .into_response();
-        }
-    };
+    // Validate type and source from path
+    if let Err(e) = validate_plugin_type(&p_type) {
+        return e.into_response();
+    }
+    if let Err(e) = validate_source(&source) {
+        return e.into_response();
+    }
+
+    // Determine the YAML type from the path type
+    let yaml_type = plugins_yaml::PluginYamlType::from_type_str(&p_type);
 
     // Update config in YAML
     match plugins_yaml::update_config(&state.data_dir, &yaml_type, &name, body.config.clone()) {
@@ -177,9 +163,9 @@ pub(crate) async fn update_config_handler(
     }
 }
 
-/// POST /api/plugins/:name/refresh-models: refresh dynamic model list from external API.
+/// POST /api/plugins/{type}/{source}/{name}/refresh-models: refresh dynamic model list from external API.
 pub(crate) async fn refresh_models_handler(
-    Path(name): Path<String>,
+    Path((_p_type, _source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     match plugins_yaml::refresh_plugin_models(&state.data_dir, &name).await {

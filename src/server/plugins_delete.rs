@@ -17,18 +17,30 @@ use crate::plugins_yaml;
 use crate::server::AppState;
 
 use super::plugins_compile::*;
+use super::plugins_types::*;
 
 pub(crate) async fn delete_plugin_handler(
-    Path(name): Path<String>,
+    Path((p_type, source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let data_dir = &state.data_dir;
+
+    if let Err(e) = validate_plugin_type(&p_type) {
+        return e.into_response();
+    }
+    if let Err(e) = validate_source(&source) {
+        return e.into_response();
+    }
+    if let Err(e) = reject_builtin_operation(&source, "delete", &name) {
+        return e.into_response();
+    }
+
     let is_uninstall_mode = params
         .get("mode")
         .map(|s| s == "uninstall")
         .unwrap_or(false);
-    let explicit_source = params.get("source").map(|s| s.as_str());
+    let explicit_source = Some(&source[..]);
 
     if is_uninstall_mode {
         // ── Uninstall mode ──
