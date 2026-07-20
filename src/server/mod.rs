@@ -163,61 +163,13 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
             "/api/plugins/check-enrich",
             get(diagnostic::check_enrich_json),
         )
-        .route(
-            "/api/plugins/install-git",
-            post(plugins::install_git_handler),
-        )
-        .route(
-            "/api/plugins/install-url",
-            post(plugins::install_url_handler),
-        )
-        .route("/api/plugins", get(plugins::list_plugins_handler))
-        .route("/api/plugins/{name}", get(plugins::get_plugin_handler))
-        .route(
-            "/api/plugins/{name}/config",
-            post(plugins::update_config_handler),
-        )
-        .route(
-            "/api/plugins/{name}/enable",
-            post(plugins::enable_plugin_handler),
-        )
-        .route(
-            "/api/plugins/{name}/disable",
-            post(plugins::disable_plugin_handler),
-        )
-        .route(
-            "/api/plugins/{name}/reinstall",
-            post(plugins::reinstall_plugin_handler),
-        )
-        .route(
-            "/api/plugins/{name}/install",
-            post(plugins::install_plugin_handler),
-        )
-        .route(
-            "/api/plugins/{name}/refresh-models",
-            post(plugins::refresh_models_handler),
-        )
-        .route(
-            "/api/plugins/{name}/setup",
-            post(plugins::setup_plugin_handler),
-        )
-        .route(
-            "/api/plugins/{name}/download",
-            post(plugins::download_plugin_handler),
-        )
-        .route(
-            "/api/plugins/{name}/rename",
-            post(plugins::rename_plugin_handler),
-        )
-        .route(
-            "/api/plugins/{name}",
-            delete(plugins::delete_plugin_handler),
-        )
+        // ── Plugin CRUD routes (from plugin_router) ──
+        .merge(plugins::plugin_router())
         // ── Env reload (hot-reload .env without restart) ──
         .route("/api/reload", post(plugins::reload_env_handler))
         // ── Plugin restart (disable + enable cycle) ──
         .route(
-            "/api/plugins/{name}/restart",
+            "/api/plugins/{type}/{source}/{name}/restart",
             post(plugins::restart_plugin_handler),
         )
         // ── LLM Proxy (allows MCP plugins to use provider infrastructure) ──

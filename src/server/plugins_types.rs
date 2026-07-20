@@ -2,13 +2,8 @@
 //!
 //! Extracted from `plugins.rs` for separation of concerns.
 
-use axum::{
-    http::StatusCode,
-    Json,
-};
+use axum::{http::StatusCode, Json};
 use serde::Deserialize;
-
-use crate::plugins_yaml;
 
 // ---------------------------------------------------------------------------
 // Request/Response types
