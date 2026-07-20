@@ -277,7 +277,16 @@ pub(crate) async fn handle_response(
     if let Some(ref ext_id) = reaction_ext_id {
         if let Some(ref platform) = channel.platform {
             if let Some(ref resource) = channel.resource_identifier {
-                helpers::enqueue_reaction(&cfg.ctx, platform, resource, ext_id, final_status).await;
+                // Map status to platform emoji before enqueueing —
+                // the platform plugin expects an actual emoji name, not a status string.
+                let react_emoji = match final_status {
+                    "completed" => ":white_check_mark:",
+                    "failed" => ":x:",
+                    "interrupted" => ":broken_heart:",
+                    "skipped" => ":o:",
+                    other => other,
+                };
+                helpers::enqueue_reaction(&cfg.ctx, platform, resource, ext_id, react_emoji).await;
             }
         }
     }
