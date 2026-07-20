@@ -716,14 +716,68 @@ pub fn discover_plugins(
         }
     }
 
-
-
+    // B. Scan /app/plugins/ for built-in plugin config files (plugin.json, mcp-config.json).
+    // This is the omniagent repo's plugins directory, mounted at /app in the container.
+    // Built-in plugins keep their config with their source code, not in the OMNI_DIR.
+    let app_plugins_base = "/app/plugins";
+    if let Ok(app_plugin_entries) = std::fs::read_dir(app_plugins_base) {
+        for entry in app_plugin_entries.flatten() {
+            let type_path = entry.path();
+            if !type_path.is_dir() {
+                continue;
+            }
+            if type_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.starts_with('.'))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if let Ok(plugin_entries) = std::fs::read_dir(&type_path) {
+                for plugin_entry in plugin_entries.flatten() {
+                    let plugin_path = plugin_entry.path();
+                    if !plugin_path.is_dir() {
+                        continue;
+                    }
+                    if plugin_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.starts_with('.'))
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    let manifest_path = plugin_path.join("plugin.json");
+                    if manifest_path.exists() {
+                        let path_str = manifest_path.to_string_lossy().to_string();
+                        let manifest = match load_manifest(&path_str) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to load /app/plugins plugin manifest at {}: {:?}",
+                                    path_str,
+                                    e
+                                );
+                                continue;
+                            }
+                        };
+                        results.push((manifest, "bundled".to_string(), path_str));
+                    }
+                }
+            }
+        }
+    }
 
     // C. Scan remote plugins using remote.yml for exact path resolution.
     // C1: remote.yml-driven using exact manifest paths
     // C2: fallback directory scan for orphan .remote/ dirs
     let remote_plugins = crate::plugins_yaml::load_remote_plugins(data_dir);
-    let mut remote_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    // C. Scan remote plugins using remote.yml for exact path resolution.
+                    // C1: remote.yml-driven using exact manifest paths
+                    // C2: fallback directory scan for orphan .remote/ dirs
+                    let remote_plugins = crate::plugins_yaml::load_remote_plugins(data_dir);
+                    let mut remote_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Helper to process entries for a given type
     macro_rules! process_remote_entries {
