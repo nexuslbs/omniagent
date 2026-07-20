@@ -1,0 +1,15 @@
+{
+  "name": "noop-full",
+  "version": "1.0.0",
+  "type": "provider",
+  "description": "Full standalone provider — handles chat completions entirely in-client via stdio protocol, no api_mode dependency on omniagent",
+  "entrypoint": {
+    "command": "python3",
+    "args": ["/opt/omni/plugins/providers/noop-full/client.py"],
+    "transport": "stdio"
+  },
+  "config_schema": [
+    { "key": "default_model", "label": "Default Model", "type": "string", "default": "test-model-1" }
+  ],
+  "env": {}
+}

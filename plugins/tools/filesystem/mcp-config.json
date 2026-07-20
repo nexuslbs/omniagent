@@ -1,0 +1,19 @@
+{
+    "servers": [
+        {
+            "name": "filesystem",
+            "transport": "stdio",
+            "args": [],
+            "timeout_secs": 60,
+            "max_retries": 2,
+            "allowed_tools": [
+                "*"
+            ],
+            "env": {
+                "OMNI_DIR": "${OMNI_DIR:-/opt/data}",
+                "WORKSPACE_DIR": "${WORKSPACE_DIR:-/opt/workspace}",
+                "RUST_LOG": "info"
+            }
+        }
+    ]
+}

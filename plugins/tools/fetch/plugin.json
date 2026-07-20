@@ -1,0 +1,13 @@
+{
+  "id": "mcp-server-fetch",
+  "name": "Fetch MCP Server",
+  "version": "0.1.0",
+  "description": "HTTP GET tool \u2014 fetch web pages and API responses",
+  "type": "mcp",
+  "entrypoint": {
+    "command": "mcp-server-fetch",
+    "args": [],
+    "transport": "stdio"
+  },
+  "config_schema": []
+}

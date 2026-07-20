@@ -1,0 +1,16 @@
+[package]
+name = "mcp-server-actions"
+version = "0.1.0"
+edition = "2021"
+description = "MCP server for built-in action tools — kanban_dispatcher, hindsight_populator, relevance_indexer, setup_knowledge_pipeline"
+
+[dependencies]
+mcp-server-util = { path = "../util" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sqlx = { version = "0.9", features = ["postgres", "runtime-tokio", "chrono"] }
+chrono = { version = "0.4", features = ["serde"] }

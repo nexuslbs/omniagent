@@ -1,0 +1,19 @@
+{
+    "servers": [
+        {
+            "name": "actions",
+            "transport": "stdio",
+            "args": [],
+            "timeout_secs": 120,
+            "max_retries": 2,
+            "allowed_tools": [
+                "*"
+            ],
+            "env": {
+                "DATABASE_URL": "${DATABASE_URL}",
+                "HINDSIGHT_URL": "${HINDSIGHT_URL}",
+                "RUST_LOG": "info"
+            }
+        }
+    ]
+}

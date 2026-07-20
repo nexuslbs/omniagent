@@ -1,0 +1,12 @@
+{
+  "name": "git",
+  "version": "0.1.0",
+  "type": "mcp",
+  "description": "Git/GitHub operations \u2014 create repos, clone, commit, push, status",
+  "config_schema": [],
+  "entrypoint": {
+    "command": "mcp-server-git",
+    "args": [],
+    "transport": "stdio"
+  }
+}

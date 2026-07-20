@@ -1,0 +1,14 @@
+{
+  "servers": [
+    {
+      "name": "git",
+      "transport": "stdio",
+      "args": [],
+      "timeout_secs": 60,
+      "max_retries": 2,
+      "allowed_tools": [
+        "*"
+      ]
+    }
+  ]
+}
