@@ -75,6 +75,15 @@ pub(crate) async fn fail_thread(
             cause_msg.external_id.clone(),
         )
         .await;
+
+        // Send failure reaction (:x:) on the cause message
+        if let Some(ref platform) = channel.platform {
+            if let Some(ref resource) = channel.resource_identifier {
+                if let Some(ref ext_id) = cause_msg.external_id {
+                    helpers::enqueue_reaction(&cfg.ctx, platform, resource, ext_id, ":x:").await;
+                }
+            }
+        }
     }
 
     Ok(saved)
