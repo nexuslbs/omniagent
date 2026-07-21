@@ -51,7 +51,7 @@ fn handle_fetch(args: Value) -> Result<(String, bool)> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let fetch_handler: AsyncToolHandler = Box::new(|args: Value| {
+    let fetch_handler: ToolHandler = Box::new(|args: Value, _meta: Option<McpMeta>| {
         Box::pin(async move { handle_fetch(args) })
     });
 

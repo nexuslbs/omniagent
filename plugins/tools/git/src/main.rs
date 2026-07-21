@@ -593,7 +593,7 @@ async fn main() -> Result<()> {
                     "required": ["name"]
                 }),
             },
-            handler: Box::new(|args: Value| Box::pin(async move { handle_create_github_repo(args) })),
+            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_create_github_repo(args) })),
         },
         McpToolEntry {
             def: McpToolDef {
@@ -618,7 +618,7 @@ async fn main() -> Result<()> {
                     "required": ["url"]
                 }),
             },
-            handler: Box::new(|args: Value| Box::pin(async move { handle_clone_repo(args) })),
+            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_clone_repo(args) })),
         },
         McpToolEntry {
             def: McpToolDef {
@@ -649,7 +649,7 @@ async fn main() -> Result<()> {
                     "required": ["repo_dir", "message"]
                 }),
             },
-            handler: Box::new(|args: Value| Box::pin(async move { handle_commit_and_push(args) })),
+            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_commit_and_push(args) })),
         },
         McpToolEntry {
             def: McpToolDef {
@@ -667,7 +667,7 @@ async fn main() -> Result<()> {
                     "required": ["repo_dir"]
                 }),
             },
-            handler: Box::new(|args: Value| Box::pin(async move { handle_status(args) })),
+            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_status(args) })),
         },
     ];
 

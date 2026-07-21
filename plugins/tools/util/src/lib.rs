@@ -488,3 +488,53 @@ async fn send_error<W: AsyncWriteExt + Unpin>(
     writer.flush().await?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// HashVectorizer — deterministic local text embedding for semantic search
+// ---------------------------------------------------------------------------
+
+use std::hash::{DefaultHasher, Hash, Hasher};
+
+/// Lightweight local vectorizer using character trigram feature hashing.
+/// Algorithm: split text into overlapping 3-character windows, hash each
+/// trigram to a bucket (0..1535) using DefaultHasher, increment the bucket
+/// value, then normalize to unit length. Deterministic, zero dependencies.
+pub struct HashVectorizer;
+
+impl HashVectorizer {
+    pub async fn generate_embedding(&self, text: &str) -> Vec<f32> {
+        let dim = 1536;
+        let mut vec = vec![0.0f32; dim];
+
+        let chars: Vec<char> = text.chars().collect();
+        if chars.len() < 3 {
+            return vec;
+        }
+
+        for window in chars.windows(3) {
+            let trigram: String = window.iter().collect();
+            let mut hasher = DefaultHasher::new();
+            trigram.hash(&mut hasher);
+            let hash = hasher.finish();
+            let bucket = (hash as usize) % dim;
+            vec[bucket] += 1.0;
+        }
+
+        // Normalize to unit length
+        let magnitude: f32 = vec.iter().map(|v| v * v).sum::<f32>().sqrt();
+        if magnitude > 0.0 {
+            for val in vec.iter_mut() {
+                *val /= magnitude;
+            }
+        }
+
+        vec
+    }
+}
+
+/// Convert a Vec<f32> to Postgres-compatible text representation.
+/// Used for building embedding query vectors in SQL.
+pub fn vector_to_string(vec: &[f32]) -> String {
+    let parts: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
+    format!("[{}]", parts.join(","))
+}

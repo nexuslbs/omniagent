@@ -246,60 +246,22 @@ fn discover_plugin_servers_fallback(data_dir: &str) -> Vec<McpServerConfig> {
     servers
 }
 
-/// Resolve a plugin binary path relative to the omniagent binary's directory.
+/// Resolve a workspace-member binary path deterministically.
 ///
-/// Workspace member MCP servers (mcp-server-*) live next to the omniagent
-/// binary in both dev (`/app/target/release/`) and production (Docker image),
-/// so we resolve by convention without hardcoded paths or env vars.
-pub(crate) fn get_bin_path(name: &str) -> Option<String> {
-    // Look for the binary in multiple locations:
-    // 1. Next to the current executable (the canonical location)
-    // 2. /app/target/release/<name> (development workspace)
-    // 3. Same with mcp-server-{name} convention (package name may differ from plugin name)
-
-    // Primary: next to executable
-    if let Some(path) = std::env::current_exe()
+/// Built-in MCP server binaries are workspace members compiled by
+/// `cargo build --release --workspace` and live next to the omniagent
+/// executable. The path is computed by convention — no existence checks,
+/// no fallback chain. Each plugin has exactly one deterministic path.
+pub(crate) fn get_bin_path(name: &str) -> String {
+    // Binary lives next to the omniagent executable (workspace target/release).
+    // Fallback to /app/target/release/ if current_exe() is unavailable.
+    std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| format!("{}/{}", d.display(), name)))
-    {
-        return Some(path);
-    }
-
-    // Fallback: check /app/target/release/<name>
-    let dev_path = format!("/app/target/release/{}", name);
-    if std::path::Path::new(&dev_path).exists() {
-        return Some(dev_path);
-    }
-
-    // Fallback: check mcp-server-{name} convention next to executable
-    let mcp_server_name = format!("mcp-server-{}", name);
-    if let Some(path) = std::env::current_exe().ok().and_then(|p| {
-        p.parent()
-            .map(|d| format!("{}/{}", d.display(), &mcp_server_name))
-    }) {
-        if std::path::Path::new(&path).exists() {
-            return Some(path);
-        }
-    }
-
-    // Fallback: check /app/target/release/mcp-server-{name}
-    let mcp_dev_path = format!("/app/target/release/mcp-server-{}", name);
-    if std::path::Path::new(&mcp_dev_path).exists() {
-        return Some(mcp_dev_path);
-    }
-
-    // Check for directory-name binary (plugin dir name may be the binary name)
-    // e.g. test-rust-tool directory produces test-rust-tool binary
-    if let Some(path) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| format!("{}/{}", d.display(), name)))
-    {
-        if std::path::Path::new(&path).exists() {
-            return Some(path);
-        }
-    }
-
-    None
+        .and_then(|p| {
+            p.parent()
+                .map(|d| format!("{}/{}", d.display(), name))
+        })
+        .unwrap_or_else(|| format!("/app/target/release/{}", name))
 }
 
 /// Process a single plugin directory: handles mcp-config.json or Cargo.toml + plugin.json.
@@ -344,36 +306,35 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
             })
             .unwrap_or_else(|| format!("mcp-server-{}", dir_name));
 
-        if let Some(cmd) = get_bin_path(&pkg) {
-            tracing::info!(
-                "Builtin crate '{}' at {}: resolved binary via get_bin_path: {}",
-                dir_name,
-                path.display(),
-                cmd
-            );
-            let mut srv = McpServerConfig {
-                name: dir_name.clone(),
-                transport: McpTransport::Stdio,
-                command: Some(cmd),
-                args: vec![],
-                url: None,
-                env: HashMap::new(),
-                current_dir: None,
-                timeout_secs: default_timeout(),
-                max_retries: default_max_retries(),
-                allowed_tools: default_allowed_tools(),
-                pool_size: default_pool_size(),
-            };
-            crate::plugins_yaml::merge_yaml_config_into_env(
-                &mut srv.env,
-                &dir_name,
-                data_dir,
-                &crate::plugins_yaml::PluginYamlType::Tool,
-            );
-            servers.push(srv);
-        }
-        return Some(servers);
+        let cmd = get_bin_path(&pkg);
+        tracing::info!(
+            "Builtin crate '{}' at {}: resolved binary: {}",
+            dir_name,
+            path.display(),
+            cmd
+        );
+        let mut srv = McpServerConfig {
+            name: dir_name.clone(),
+            transport: McpTransport::Stdio,
+            command: Some(cmd),
+            args: vec![],
+            url: None,
+            env: HashMap::new(),
+            current_dir: None,
+            timeout_secs: default_timeout(),
+            max_retries: default_max_retries(),
+            allowed_tools: default_allowed_tools(),
+            pool_size: default_pool_size(),
+        };
+        crate::plugins_yaml::merge_yaml_config_into_env(
+            &mut srv.env,
+            &dir_name,
+            data_dir,
+            &crate::plugins_yaml::PluginYamlType::Tool,
+        );
+        servers.push(srv);
     }
+    return Some(servers);
 
     // Has mcp-config.json
     if !config_file.exists() {
@@ -414,77 +375,54 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
                 .map(|mut srv| {
                     if srv.transport == McpTransport::Stdio && srv.command.is_none() {
                         if has_cargo_toml {
-                            // Resolve binary path by convention:
-                            // 1. {plugin_dir}/target/release/{package_name}: standalone plugin
-                            // 2. {get_bin_path(package_name)}: workspace member (next to omniagent binary)
-                            // 3. {plugin_dir}/target/release/{name}: fallback using server name
+                            // Deterministic binary path by plugin location:
+                            // - Under /app/plugins/ → workspace member (next to omniagent)
+                            // - Elsewhere (bundled/remote) → own target/release/
                             let pkg = cargo_package_name
                                 .as_deref()
                                 .unwrap_or(&srv.name);
 
-                            let mut candidates = vec![
-                                format!("{}/target/release/{}", plugin_dir_str, pkg),
-                            ];
-                            if let Some(w) = get_bin_path(pkg) {
-                                candidates.push(w);
-                            }
-                            candidates.push(format!(
-                                "{}/target/release/{}",
-                                plugin_dir_str, srv.name
-                            ));
-                            let found = candidates
-                                .into_iter()
-                                .find(|p| std::path::Path::new(p).exists());
+                            let bin_path = if plugin_dir_str.starts_with("/app/plugins/") {
+                                get_bin_path(pkg)
+                            } else {
+                                format!("{}/target/release/{}", plugin_dir_str, pkg)
+                            };
 
-                            match found {
-                                Some(ref bin_path) => {
-                                    tracing::info!(
-                                        "Resolved command for '{}' by convention: {}",
-                                        srv.name, bin_path
-                                    );
-                                    srv.command = Some(bin_path.clone());
-                                }
-                                None => {
-                                    tracing::warn!(
-                                        "MCP server '{}' has no binary found at any convention path",
-                                        srv.name,
-                                    );
-                                }
+                            if std::path::Path::new(&bin_path).exists() {
+                                tracing::info!(
+                                    "Resolved command for '{}': {}",
+                                    srv.name, bin_path
+                                );
+                                srv.command = Some(bin_path);
+                            } else {
+                                tracing::warn!(
+                                    "MCP server '{}' binary not found at expected path: {}",
+                                    srv.name, bin_path,
+                                );
                             }
                         } else {
-                            // No Cargo.toml: try workspace member convention, then
-                            // plugin-local target/release.
-                            let mut candidates = Vec::new();
+                            // No Cargo.toml: binary must be pre-built (no source to compile).
+                            // Deterministic path by plugin location:
+                            // - Under /app/plugins/ → workspace member (next to omniagent)
+                            // - Elsewhere (bundled/remote) → own target/release/
+                            let bin_name = format!("mcp-server-{}", srv.name);
+                            let bin_path = if plugin_dir_str.starts_with("/app/plugins/") {
+                                get_bin_path(&bin_name)
+                            } else {
+                                format!("{}/target/release/{}", plugin_dir_str, bin_name)
+                            };
 
-                            // 1. Workspace: binary next to omniagent binary
-                            if let Some(w) = get_bin_path(&format!("mcp-server-{}", srv.name)) {
-                                candidates.push(w);
-                            }
-
-                            // 2. Plugin-local target/release
-                            let ws_name = format!("mcp-server-{}", srv.name);
-                            candidates.push(format!(
-                                "{}/target/release/{}",
-                                plugin_dir_str, ws_name
-                            ));
-                            let found = candidates
-                                .into_iter()
-                                .find(|p| std::path::Path::new(p).exists());
-
-                            match found {
-                                Some(ref bin_path) => {
-                                    tracing::info!(
-                                        "Resolved command for '{}' by convention: {}",
-                                        srv.name, bin_path
-                                    );
-                                    srv.command = Some(bin_path.clone());
-                                }
-                                None => {
-                                    tracing::warn!(
-                                        "MCP server '{}' has no command configured, no Cargo.toml, and no binary found in workspace or plugin target/release",
-                                        srv.name
-                                    );
-                                }
+                            if std::path::Path::new(&bin_path).exists() {
+                                tracing::info!(
+                                    "Resolved command for '{}': {}",
+                                    srv.name, bin_path
+                                );
+                                srv.command = Some(bin_path);
+                            } else {
+                                tracing::warn!(
+                                    "MCP server '{}' has no command configured and no binary at expected path: {}",
+                                    srv.name, bin_path,
+                                );
                             }
                         }
                     }

@@ -99,7 +99,7 @@ async fn handle_uninstall(data_dir: &str, args: &Value) -> Result<(String, bool)
             plugins_yaml::get_entry(data_dir, &yaml_type, name)
                 .ok()
                 .flatten()
-                .and_then(|e| e.remote)
+                .and_then(|e| if e.source == "remote" { Some(()) } else { None })
                 .is_some()
         })
         .unwrap_or(false);

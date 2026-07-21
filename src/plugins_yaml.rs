@@ -803,41 +803,17 @@ fn build_plugin_detail(
                         })
                     });
 
-            // All possible binary paths to check:
-            // - Directory name convention (standalone plugin)
-            // - Package name from Cargo.toml (workspace members with mcp-server- prefix)
-            // - get_bin_path() for builtins (binary next to omniagent or in workspace target/release)
-            let mut candidates = vec![format!("{}/target/release/{}", dir, dir_name)];
-            if let Some(ref pkg) = cargo_package_name {
-                candidates.push(format!("{}/target/release/{}", dir, pkg));
+            // Deterministic binary path by plugin location:
+            // - Under /app/plugins/ → workspace member (next to omniagent)
+            // - Elsewhere (bundled/remote) → own target/release/
+            let pkg = cargo_package_name.as_deref().unwrap_or(&dir_name);
+            let expected_binary = if dir.starts_with("/app/plugins/") {
+                crate::mcp::external::config::get_bin_path(pkg)
+            } else {
+                format!("{}/target/release/{}", dir, pkg)
+            };
 
-                // Also check workspace root target (for builtin:true plugins whose
-                // binaries live at /app/target/release/<package> from workspace builds)
-                let workspace_root = std::path::Path::new("/app");
-                if workspace_root.join("Cargo.toml").exists() {
-                    candidates.push(format!(
-                        "{}/target/release/{}",
-                        workspace_root.to_string_lossy(),
-                        pkg
-                    ));
-                }
-
-                // Check get_bin_path(): resolves binary next to the omniagent executable
-                // or at /app/target/release/<name>
-                if let Some(bin_path) = crate::mcp::external::config::get_bin_path(pkg) {
-                    candidates.push(bin_path);
-                }
-            }
-
-            // Also check the plugin directory itself: built-in plugins ship their
-            // binary alongside plugin.json (e.g., plugins/tools/prompt/mcp-server-prompt)
-            if let Some(ref ep) = manifest.entrypoint {
-                if ep.transport == "stdio" && !ep.command.contains('/') {
-                    candidates.push(format!("{}/{}", dir, ep.command));
-                }
-            }
-
-            !candidates.iter().any(|p| std::path::Path::new(p).exists())
+            !std::path::Path::new(&expected_binary).exists()
         })
         .unwrap_or(false);
 

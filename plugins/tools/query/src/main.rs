@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use mcp_server_util::*;
 use omniagent::db;
-use omniagent::vectorizer::{vector_to_string, HashVectorizer, Vectorizer};
+use mcp_server_util::{vector_to_string, HashVectorizer};
 use serde_json::Value;
 use sql_forge::sql_forge;
 use sqlx::{Column, FromRow, PgPool, Row};
