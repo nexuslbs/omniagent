@@ -443,6 +443,14 @@ impl AsyncChildProcess {
             command.env(key, resolved);
         }
 
+        // Debug: log first few env vars for this server to diagnose password auth failures
+        tracing::info!(
+            "Env vars for '{}' ({} total): {:?}",
+            config.name,
+            config.env.len(),
+            config.env.keys().take(5).collect::<Vec<_>>()
+        );
+
         let mut child = command
             .spawn()
             .ctx(format!("Failed to spawn MCP server '{}'", config.name))?;
