@@ -71,14 +71,18 @@ pub struct PlatformPluginsConfig {
 /// is loaded as a platform plugin. Platforms are enabled by default.
 pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
     let mut results: Vec<PlatformPluginConfig> = Vec::new();
-    let platforms_dir = format!("{}/plugins/platforms", data_dir);
+    let platforms_dirs = [
+        format!("{}/plugins/platforms", data_dir),
+        "/app/plugins/platforms".to_string(),
+    ];
 
-    let entries = match std::fs::read_dir(&platforms_dir) {
-        Ok(e) => e,
-        Err(_) => return results,
-    };
+    for platforms_dir in &platforms_dirs {
+        let entries = match std::fs::read_dir(platforms_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
 
-    for entry in entries.flatten() {
+        for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
             continue;
@@ -122,10 +126,28 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
                 continue;
             }
         };
+
+        // Resolve the command path: for bare-name commands, try get_bin_path first
+        let resolved_command = if entrypoint.command.contains('/') {
+            entrypoint.command.clone()
+        } else if let Some(bin_path) =
+            crate::mcp::external::config::get_bin_path(&entrypoint.command)
+        {
+            tracing::info!(
+                "Resolved command for platform '{}' from '{}' to '{}'",
+                manifest.name,
+                entrypoint.command,
+                bin_path
+            );
+            bin_path
+        } else {
+            entrypoint.command.clone()
+        };
+
         let config = PlatformPluginConfig {
             name: manifest.name.clone(),
             enabled: true,
-            command: entrypoint.command.clone(),
+            command: resolved_command,
             args: entrypoint.args.clone(),
             env: manifest.env,
             config: std::collections::HashMap::new(),
@@ -170,6 +192,7 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
             manifest.name
         );
         results.push(merged);
+    }
     }
 
     results

@@ -762,7 +762,7 @@ pub fn discover_plugins(
                                 continue;
                             }
                         };
-                        results.push((manifest, "bundled".to_string(), path_str));
+                        results.push((manifest, "built-in".to_string(), path_str));
                     }
                 }
             }
@@ -894,22 +894,9 @@ pub fn discover_plugins(
                     .to_string();
 
                 if has_plugin_json {
-                    let path_str = plugin_path
-                        .join("plugin.json")
-                        .to_string_lossy()
-                        .to_string();
-                    match load_manifest(&path_str) {
-                        Ok(manifest) => {
-                            results.push((manifest, "built-in".to_string(), path_str));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to load builtin plugin manifest at {}: {:?}",
-                                path_str,
-                                e
-                            );
-                        }
-                    }
+                    // Already discovered in Section B above.
+                    // Skip — plugin.json entries are pushed there with the same
+                    // source type. Only Cargo.toml-only plugins need this section.
                 } else if has_cargo_toml {
                     // Synthetic manifest for Rust workspace member crates
                     let _pkg_name = std::fs::read_to_string(plugin_path.join("Cargo.toml"))
