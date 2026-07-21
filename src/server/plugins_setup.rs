@@ -131,24 +131,22 @@ pub(crate) async fn setup_plugin_handler(
                     crate::mcp::external::config::get_bin_path(&entrypoint.command)
                 {
                     if std::path::Path::new(&bin_path).exists() {
+                        found = Some(std::path::PathBuf::from(bin_path));
+                    }
+                }
+                match found {
+                    Some(inner_p) => inner_p,
+                    None => {
                         return (
-                            StatusCode::OK,
+                            StatusCode::INTERNAL_SERVER_ERROR,
                             Json(serde_json::json!({
-                                "success": true,
-                                "data": { "binary": bin_path }
+                                "success": false,
+                                "error": format!("Plugin binary not found for '{}': {}", name, entrypoint.command)
                             })),
                         )
                             .into_response();
                     }
                 }
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": format!("Plugin binary not found for '{}': {}", name, entrypoint.command)
-                    })),
-                )
-                    .into_response();
             }
         }
     };
@@ -380,7 +378,7 @@ pub(crate) async fn setup_plugin_handler(
     let start = std::time::Instant::now();
     let max_wait = std::time::Duration::from_secs(120);
 
-    let mut stdout_output = String::new();
+        let mut stdout_output = String::new();
     loop {
         if start.elapsed() >= max_wait {
             if let Err(ke) = child.kill() {
@@ -469,7 +467,7 @@ pub(crate) async fn setup_plugin_handler(
     }
 
     // Parse response
-    let first_line = stdout_output.lines().next().unwrap_or("");
+        let first_line = stdout_output.lines().next().unwrap_or("");
 
     match serde_json::from_str::<serde_json::Value>(first_line) {
         Ok(val) => {
