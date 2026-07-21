@@ -335,10 +335,10 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
             &crate::plugins_yaml::PluginYamlType::Tool,
         );
         servers.push(srv);
+        return Some(servers);
     }
-    return Some(servers);
 
-    // Has mcp-config.json
+    // Has mcp-config.json — parse it, or return None if no config file
     if !config_file.exists() {
         return None;
     }
