@@ -1868,22 +1868,12 @@ pub fn merge_yaml_config_into_env(
         }
     }
 
-    // Code-level defaults: inject DATABASE_URL → {PLUGIN}_DATABASE_URL and
-    // OMNI_DIR → {PLUGIN}_OMNI_DIR when the env vars are set and the plugin
-    // hasn't explicitly configured them. This ensures MCP tool servers can
-    // always find the database and data directory without needing YAML entries.
-    let db_url_key = format!("{}_DATABASE_URL", prefix);
-    if !env.contains_key(&db_url_key) {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            env.insert(db_url_key, url);
-        }
-    }
-    let omni_dir_key = format!("{}_OMNI_DIR", prefix);
-    if !env.contains_key(&omni_dir_key) {
-        if let Ok(dir) = std::env::var("OMNI_DIR") {
-            env.insert(omni_dir_key, dir);
-        }
-    }
+    // NOTE: {PLUGIN}_DATABASE_URL and {PLUGIN}_OMNI_DIR are NOT injected here.
+    // Plugins that need them must declare `database_url: "$env:DATABASE_URL"`
+    // and/or `omni_dir: "$env:OMNI_DIR"` in their plugins.yml config block,
+    // which goes through the $env: resolution path above. All plugins already
+    // fall back to DATABASE_URL / OMNI_DIR (inherited from the parent process)
+    // when the prefixed env var is absent, so they work without explicit config.
 }
 
 // ---------------------------------------------------------------------------

@@ -442,34 +442,6 @@ impl AsyncChildProcess {
             command.env(key, value);
         }
 
-        // HACK: force-set DATABASE_URL-based env vars for spawned MCP servers
-        if let Ok(db_url) = std::env::var("DATABASE_URL") {
-            let prefix = config.name.to_uppercase().replace('-', "_");
-            command.env(format!("{}_DATABASE_URL", prefix), &db_url);
-            // Log password length to detect env mismatch
-            let pw_len = db_url.split('@').next()
-                .and_then(|part| part.split(':').nth(1))
-                .map(|pw| pw.len())
-                .unwrap_or(0);
-            tracing::info!(
-                "  {} DIRECT: prefix={}, url_len={}, pw_len={}",
-                config.name, prefix, db_url.len(), pw_len
-            );
-        }
-        if let Ok(omni_dir) = std::env::var("OMNI_DIR") {
-            let prefix = config.name.to_uppercase().replace('-', "_");
-            command.env(format!("{}_OMNI_DIR", prefix), &omni_dir);
-        }
-
-        // Debug: check DB plugin env keys are present
-        if config.name == "kanban" || config.name == "query" {
-            tracing::info!(
-                "spawn {} env keys: {:?}",
-                config.name,
-                config.env.keys().collect::<Vec<_>>()
-            );
-        }
-
         let mut child = command
             .spawn()
             .ctx(format!("Failed to spawn MCP server '{}'", config.name))?;
