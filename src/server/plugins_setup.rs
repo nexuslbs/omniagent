@@ -19,7 +19,7 @@ use crate::server::AppState;
 use super::plugins_reload::*;
 
 pub(crate) async fn setup_plugin_handler(
-    Path((_p_type, _source, name)): Path<(String, String, String)>,
+    Path((p_type, source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     // 1. Get plugin detail from disk
@@ -106,48 +106,94 @@ pub(crate) async fn setup_plugin_handler(
     let binary_path = if cmd.is_absolute() {
         cmd.to_path_buf()
     } else {
-        // Try relative to plugin directory: scan possible locations
-        let plugin_dirs = [
-            format!("{}/plugins/platforms/{}", data_dir, name),
-            format!("{}/plugins/tools/{}", data_dir, name),
-            format!("{}/plugins/providers/{}", data_dir, name),
-            format!("/app/plugins/platforms/{}", name),
-            format!("/app/plugins/tools/{}", name),
-            format!("/app/plugins/providers/{}", name),
-        ];
-        let mut found = None;
-        for dir in &plugin_dirs {
-            let candidate = std::path::Path::new(dir).join(&entrypoint.command);
-            if candidate.exists() {
-                found = Some(candidate);
-                break;
+        // Resolve binary path deterministically based on plugin source metadata.
+        // The paths are defined by convention, not by scanning directories:
+        //
+        //   built-in → /app/target/release/<command>    (workspace member target)
+        //   bundled  → {data_dir}/plugins/{type}/{name}/<command>
+        //   remote   → {data_dir}/plugins/{type}/.remote/{name}/{path}/<command>
+        //
+        // This ensures anything outside omniagent (tests, scripts) never needs
+        // to know these paths — omniagent resolves them from plugin metadata.
+        let type_dir = &p_type;
+        let source_name: &str = detail.source.as_deref().unwrap_or(&source);
+        let named_path = match source_name {
+            "built-in" => {
+                // Workspace member binaries live next to the omniagent executable
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join(&entrypoint.command)))
+                    .unwrap_or_else(|| {
+                        std::path::PathBuf::from("/app/target/release").join(&entrypoint.command)
+                    })
             }
-        }
-        match found {
-            Some(p) => p,
-            None => {
-                // Try get_bin_path() for builtin plugins
-                if let Some(bin_path) =
-                    crate::mcp::external::config::get_bin_path(&entrypoint.command)
-                {
-                    if std::path::Path::new(&bin_path).exists() {
-                        found = Some(std::path::PathBuf::from(bin_path));
-                    }
+            "bundled" => {
+                std::path::Path::new(&data_dir)
+                    .join("plugins")
+                    .join(type_dir)
+                    .join(&name)
+                    .join(&entrypoint.command)
+            }
+            "remote" => {
+                // Remote plugins: resolve from remote.yml for the subpath
+                let remote_type = crate::plugins_yaml::PluginYamlType::from_type_str(type_dir);
+                if let Some(remote) = crate::plugins_yaml::get_remote_plugin(
+                    &data_dir,
+                    &remote_type,
+                    &name,
+                ) {
+                    let subpath = remote.path.as_deref().unwrap_or("");
+                    std::path::Path::new(&data_dir)
+                        .join("plugins")
+                        .join(type_dir)
+                        .join(".remote")
+                        .join(&name)
+                        .join(subpath)
+                        .join(&entrypoint.command)
+                } else {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": format!(
+                                "Remote plugin '{}' not found in remote.yml for setup",
+                                name
+                            )
+                        })),
+                    )
+                        .into_response();
                 }
-                match found {
-                    Some(inner_p) => inner_p,
-                    None => {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({
-                                "success": false,
-                                "error": format!("Plugin binary not found for '{}': {}", name, entrypoint.command)
-                            })),
+            }
+            _ => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": format!(
+                            "Unknown plugin source '{}' for '{}'",
+                            source_name, name
                         )
-                            .into_response();
-                    }
-                }
+                    })),
+                )
+                    .into_response();
             }
+        };
+        if named_path.exists() {
+            named_path
+        } else {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!(
+                        "Plugin binary not found for '{}' ({}) at expected path: {}",
+                        name,
+                        source_name,
+                        named_path.display()
+                    )
+                })),
+            )
+                .into_response();
         }
     };
 
