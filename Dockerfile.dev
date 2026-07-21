@@ -22,7 +22,8 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
     && cargo binstall cargo-watch -y --locked 2>&1
 
 # Auto-rebuild and restart on source changes via cargo watch
+# Builds all workspace member binaries first so MCP servers are available
 # Only watches src/ — excludes Cargo.toml, migrations, config files, etc.
 # Logs are JSON (set by the app's tracing subscriber) — watch the container logs
 # to see build output and agent startup.
-CMD ["cargo", "watch", "-w", "src", "-x", "run --release"]
+CMD bash -c 'cargo build --release --workspace --locked && exec cargo watch -w src -x "run --release"'

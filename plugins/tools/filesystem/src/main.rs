@@ -40,11 +40,11 @@ fn truncate_content(content: &str, max_chars: usize) -> String {
 /// Wrap a handler so any Err(e) becomes Ok((error_msg, true)).
 /// This prevents access-denied and file-not-found errors from
 /// triggering the circuit breaker on the MCP client side.
-fn soft_error<F>(handler: F) -> AsyncToolHandler
+fn soft_error<F>(handler: F) -> ToolHandler
 where
     F: Fn(Value) -> Result<(String, bool)> + Clone + Send + Sync + 'static,
 {
-    Box::new(move |args: Value| {
+    Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let h = handler.clone();
         Box::pin(async move {
             match h(args) {

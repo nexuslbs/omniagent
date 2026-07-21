@@ -496,29 +496,29 @@ async fn main() -> Result<()> {
     let pool = Arc::new(pool);
 
     let p_kanban = pool.clone();
-    let kanban_handler: AsyncToolHandler =
-        Box::new(move |args: Value| {
+    let kanban_handler: ToolHandler =
+        Box::new(move |args: Value, _meta: Option<McpMeta>| {
             let pool = p_kanban.clone();
             Box::pin(async move { handle_kanban_dispatcher(&pool, &args).await })
         });
 
     let p_hindsight = pool.clone();
-    let hindsight_handler: AsyncToolHandler =
-        Box::new(move |args: Value| {
+    let hindsight_handler: ToolHandler =
+        Box::new(move |args: Value, _meta: Option<McpMeta>| {
             let pool = p_hindsight.clone();
             Box::pin(async move { handle_hindsight_populator(&pool, &args).await })
         });
 
     let p_relevance = pool.clone();
-    let relevance_handler: AsyncToolHandler =
-        Box::new(move |args: Value| {
+    let relevance_handler: ToolHandler =
+        Box::new(move |args: Value, _meta: Option<McpMeta>| {
             let pool = p_relevance.clone();
             Box::pin(async move { handle_relevance_indexer(&pool, &args).await })
         });
 
     let p_pipeline = pool.clone();
-    let pipeline_handler: AsyncToolHandler =
-        Box::new(move |args: Value| {
+    let pipeline_handler: ToolHandler =
+        Box::new(move |args: Value, _meta: Option<McpMeta>| {
             let pool = p_pipeline.clone();
             Box::pin(async move { handle_setup_knowledge_pipeline(&pool, &args).await })
         });

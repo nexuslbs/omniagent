@@ -84,7 +84,7 @@ fn handle_create_skill(args: Value) -> Result<(String, bool)> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let create_skill_handler: AsyncToolHandler = Box::new(|args: Value| {
+    let create_skill_handler: ToolHandler = Box::new(|args: Value, _meta: Option<McpMeta>| {
         Box::pin(async move { handle_create_skill(args) })
     });
 

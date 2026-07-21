@@ -127,21 +127,24 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
             }
         };
 
-        // Resolve the command path: for bare-name commands, try get_bin_path first
+        // Resolve the command path: for bare-name commands, check if it's a
+        // workspace member binary (next to omniagent), otherwise use as-is.
         let resolved_command = if entrypoint.command.contains('/') {
             entrypoint.command.clone()
-        } else if let Some(bin_path) =
-            crate::mcp::external::config::get_bin_path(&entrypoint.command)
-        {
-            tracing::info!(
-                "Resolved command for platform '{}' from '{}' to '{}'",
-                manifest.name,
-                entrypoint.command,
-                bin_path
-            );
-            bin_path
         } else {
-            entrypoint.command.clone()
+            let bin_path =
+                crate::mcp::external::config::get_bin_path(&entrypoint.command);
+            if std::path::Path::new(&bin_path).exists() {
+                tracing::info!(
+                    "Resolved command for platform '{}' from '{}' to '{}'",
+                    manifest.name,
+                    entrypoint.command,
+                    bin_path
+                );
+                bin_path
+            } else {
+                entrypoint.command.clone()
+            }
         };
 
         let config = PlatformPluginConfig {
