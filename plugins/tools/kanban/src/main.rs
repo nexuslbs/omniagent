@@ -573,7 +573,9 @@ async fn handle_remove_dependency(pool: &PgPool, args: &Value) -> Result<(String
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
+    let database_url = std::env::var("KANBAN_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .context("KANBAN_DATABASE_URL or DATABASE_URL must be set")?;
     let pool = db::connect(&database_url)
         .await
         .context("Failed to connect to database")?;

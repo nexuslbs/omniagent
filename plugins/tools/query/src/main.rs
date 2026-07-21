@@ -315,7 +315,9 @@ fn format_results(operation: &str, results: &[MessageResult], total_count: i64) 
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
+    let database_url = std::env::var("QUERY_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .context("QUERY_DATABASE_URL or DATABASE_URL must be set")?;
     let pool = db::connect(&database_url)
         .await
         .context("Failed to connect to database")?;

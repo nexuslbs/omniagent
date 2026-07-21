@@ -151,9 +151,9 @@ pub fn discover_plugin_servers(data_dir: &str) -> Vec<McpServerConfig> {
     // Read tools from plugins.yml: only scan enabled plugins at their correct source location
     let tools =
         match crate::plugins_yaml::load_raw(data_dir, &crate::plugins_yaml::PluginYamlType::Tool) {
-            Ok(tools) => tools,
-            Err(_) => {
-                // Fallback: if plugins.yml can't be read, scan all directories as before
+            Ok(tools) => { tracing::info!("discover_plugin_servers: load_raw OK, {} entries", tools.len()); tools },
+            Err(e) => {
+                tracing::info!("discover_plugin_servers: load_raw failed: {:?}, falling back", e);
                 return discover_plugin_servers_fallback(data_dir);
             }
         };
@@ -162,6 +162,8 @@ pub fn discover_plugin_servers(data_dir: &str) -> Vec<McpServerConfig> {
         if !entry.enabled {
             continue;
         }
+
+        tracing::info!("discover: tool '{}' source='{}' enabled={}", name, entry.source, entry.enabled);
 
         match entry.source.as_str() {
             "built-in" => {

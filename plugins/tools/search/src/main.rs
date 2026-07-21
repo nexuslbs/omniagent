@@ -198,7 +198,9 @@ fn handle_search_wiki(args: &Value) -> Result<(String, bool)> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
+    let database_url = std::env::var("SEARCH_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .context("SEARCH_DATABASE_URL or DATABASE_URL must be set")?;
     let pool = omniagent::db::connect(&database_url)
         .await
         .context("Failed to connect to database")?;
