@@ -787,7 +787,9 @@ async fn handle_generate_summary(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
+    let database_url = std::env::var("MEMORY_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .context("MEMORY_DATABASE_URL or DATABASE_URL must be set")?;
     let data_dir = std::env::var("OMNI_DIR").context("OMNI_DIR must be set")?;
 
     let pool = db::connect(&database_url)
