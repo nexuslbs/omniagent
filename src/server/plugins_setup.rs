@@ -196,41 +196,9 @@ pub(crate) async fn setup_plugin_handler(
     // Resolve $secret: references in setup_env
     crate::plugins_yaml::resolve_config_refs(&mut setup_env, &state.pool).await;
 
-    // Build the setup params
-    let setup_val = |key: &str| -> String {
-        if let Some(v) = setup_env.get(key) {
-            if !v.is_empty() {
-                return v.clone();
-            }
-        }
-        if let Some(raw) = config
-            .get(key)
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        {
-            if raw.starts_with("$env:") {
-                std::env::var(raw.strip_prefix("$env:").unwrap_or(raw)).unwrap_or_default()
-            } else if raw.starts_with("$secret:") {
-                // Already resolved above via setup_env + resolve_config_refs.
-                // This branch is a fallback : see the injection block above.
-                String::new()
-            } else {
-                raw.to_string()
-            }
-        } else {
-            String::new()
-        }
-    };
-    let setup_params = serde_json::json!({
-        "setup_team": setup_val("setup_team"),
-        "setup_channel": setup_val("setup_channel"),
-        "bot_user": setup_val("bot_user"),
-        "admin_user": setup_val("admin_user"),
-        "admin_password": setup_val("admin_password"),
-        "test_user": setup_val("test_user"),
-        "test_password": setup_val("test_password"),
-        "bot_password": setup_val("bot_password"),
-    });
+    // Pass the full resolved config as setup params -- the plugin knows its
+    // own schema. No hardcoded field names in omniagent core.
+    let setup_params = serde_json::to_value(&setup_env).unwrap_or_else(|_| serde_json::json!({}));
 
     let request_body = serde_json::json!({
         "method": "setup",
