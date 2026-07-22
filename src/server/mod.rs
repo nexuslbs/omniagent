@@ -88,7 +88,7 @@ pub(crate) struct AppState {
     pool: PgPool,
     cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
     data_dir: String,
-    /// Default profile name (from DEFAULT_PROFILE env var)
+    /// Default profile name (from global config default_profile setting)
     default_profile: String,
     /// Path to the .env file for settings API
     env_path: String,

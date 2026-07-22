@@ -64,7 +64,6 @@ async fn run_server() -> AppResult<()> {
 
     let default_profile = profile::default_profile_name();
     tracing::info!("Default profile: {}", default_profile);
-    std::env::set_var("DEFAULT_PROFILE", &default_profile);
 
     // Refresh process environment from .env file: this overrides any stale
     // Docker-loaded env vars with the current .env contents, so that $env:
