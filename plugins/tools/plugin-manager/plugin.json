@@ -1,0 +1,21 @@
+{
+  "name": "Plugin Manager MCP Server",
+  "id": "mcp-server-plugin-manager",
+  "version": "0.1.0",
+  "description": "Plugin management: list, install, uninstall, enable, disable, configure plugins",
+  "type": "mcp",
+  "entrypoint": {
+    "command": "mcp-server-plugin-manager",
+    "args": [],
+    "transport": "stdio"
+  },
+  "config_schema": [
+    {
+      "key": "omni_dir",
+      "label": "OMNI_DIR",
+      "type": "string",
+      "default": "$env:OMNI_DIR",
+      "description": "Data directory for plugin file operations"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "name": "Search MCP Server",
+  "id": "mcp-server-search",
+  "version": "0.1.0",
+  "description": "Message and wiki search: search message history and wiki pages by keyword",
+  "type": "mcp",
+  "entrypoint": {
+    "command": "mcp-server-search",
+    "args": [],
+    "transport": "stdio"
+  },
+  "config_schema": [
+    {
+      "key": "database_url",
+      "label": "Database URL",
+      "type": "string",
+      "default": "$env:DATABASE_URL",
+      "description": "PostgreSQL connection URL for message search"
+    },
+    {
+      "key": "omni_dir",
+      "label": "OMNI_DIR",
+      "type": "string",
+      "default": "$env:OMNI_DIR",
+      "description": "Data directory for wiki file search"
+    }
+  ]
+}

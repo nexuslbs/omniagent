@@ -1,0 +1,21 @@
+{
+  "name": "Cron MCP Server",
+  "id": "mcp-server-cron",
+  "version": "0.1.0",
+  "description": "Cron job management: create, list, delete, update scheduled tasks",
+  "type": "mcp",
+  "entrypoint": {
+    "command": "mcp-server-cron",
+    "args": [],
+    "transport": "stdio"
+  },
+  "config_schema": [
+    {
+      "key": "database_url",
+      "label": "Database URL",
+      "type": "string",
+      "default": "$env:DATABASE_URL",
+      "description": "PostgreSQL connection URL for cron job storage"
+    }
+  ]
+}

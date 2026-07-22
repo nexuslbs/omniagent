@@ -559,12 +559,35 @@ impl StdioMcpClient {
         Ok(guard)
     }
 
-    /// Run a full MCP handshake: initialize → initialized notification → tools/list.
+    /// Run a full MCP handshake: configure → initialize → initialized notification → tools/list.
     async fn initialize_handshake(
         process: &mut AsyncChildProcess,
         server_name: &str,
         next_id: &AtomicU64,
+        config_env: &HashMap<String, String>,
     ) -> AppResult<ListToolsResult> {
+        // Step 0: Send plugin configuration before initialize
+        // The plugin's on_configure callback receives these values.
+        if !config_env.is_empty() {
+            let cfg_req = build_configure_request(config_env);
+            process
+                .stdin
+                .write_all(cfg_req.as_bytes())
+                .await
+                .ctx(format!(
+                    "Failed to write configure message to MCP server '{}' stdin",
+                    server_name
+                ))?;
+            process.stdin.write_all(b"\n").await.ctx(
+                "Failed to write newline to MCP server stdin after configure",
+            )?;
+            process.stdin.flush().await.ctx("Failed to flush MCP server stdin after configure")?;
+            // Read the acknowledgment
+            let mut ack = String::new();
+            let _ = process.reader.read_line(&mut ack).await;
+            tracing::debug!("MCP server '{}' configure response: {}", server_name, ack.trim());
+        }
+
         // Step 1: Initialize
         let id = next_id.fetch_add(1, Ordering::SeqCst);
         let req = build_initialize_request(id);
@@ -662,7 +685,7 @@ impl McpServerClient for StdioMcpClient {
         })?;
         let server_name = &self.config.name;
 
-        let result = Self::initialize_handshake(process, server_name, &self.next_id).await?;
+        let result = Self::initialize_handshake(process, server_name, &self.next_id, &self.config.env).await?;
 
         *self.tools.lock().await = result.tools.clone();
         Ok(result.tools)

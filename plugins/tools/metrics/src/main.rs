@@ -306,6 +306,15 @@ async fn handle_get_metrics(pool: &PgPool, args: &Value) -> Result<(String, bool
 }
 
 // ---------------------------------------------------------------------------
+// Plugin config hook
+// ---------------------------------------------------------------------------
+
+/// Callback invoked when the host sends configuration via configure message.
+fn on_configure(params: serde_json::Value) {
+    tracing::info!("Metrics plugin configured");
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -356,5 +365,5 @@ async fn main() -> Result<()> {
         version: "0.1.0".to_string(),
     };
 
-    run_server(server_info, tools).await
+    run_server_with_config(server_info, tools, Some(on_configure)).await
 }

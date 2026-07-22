@@ -1,0 +1,21 @@
+{
+  "name": "Metrics MCP Server",
+  "id": "mcp-server-metrics",
+  "version": "0.1.0",
+  "description": "Agent metrics queries: token usage, latency, message counts, groundedness rate, retrieval hit rate",
+  "type": "mcp",
+  "entrypoint": {
+    "command": "mcp-server-metrics",
+    "args": [],
+    "transport": "stdio"
+  },
+  "config_schema": [
+    {
+      "key": "database_url",
+      "label": "Database URL",
+      "type": "string",
+      "default": "$env:DATABASE_URL",
+      "description": "PostgreSQL connection URL for metrics queries"
+    }
+  ]
+}
