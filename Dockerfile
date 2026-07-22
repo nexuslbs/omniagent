@@ -17,7 +17,8 @@ RUN mkdir -p src plugins .sqlx && \
 # Copy the rest of the source and build
 COPY . .
 ENV SQLX_OFFLINE=true
-RUN cargo build --release
+RUN cargo build --release && \
+    cargo build --release -p db-migrations
 
 # Stage 2: Docker CLI binary
 FROM docker:cli AS docker-cli
