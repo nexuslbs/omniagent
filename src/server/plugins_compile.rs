@@ -2,7 +2,7 @@
 //!
 //! Extracted from `plugins.rs` for separation of concerns.
 
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::plugins_yaml;
 
@@ -167,6 +167,10 @@ pub(crate) fn read_cargo_package_name(cargo_toml_path: &str) -> Option<String> {
 }
 
 /// Compile a Rust crate at the given path. Returns true if compilation succeeded.
+///
+/// Retries once on failure for remote plugins, since transient network timeouts
+/// (crates.io index update, dependency download) are the most common cause of
+/// first-attempt failures.
 pub(crate) async fn compile_rust_crate(
     plugin_dir: &str,
     name: &str,
@@ -187,31 +191,47 @@ pub(crate) async fn compile_rust_crate(
     let pkg_name = read_cargo_package_name(&cargo_path)
         .ok_or_else(|| format!("Failed to read package name from {}", cargo_path))?;
 
-    // Run cargo build
-    let output = tokio::process::Command::new("cargo")
-        .args(["build", "--release", "--manifest-path", &cargo_path])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run cargo build for '{}': {}", name, e))?;
+    // Remote plugins get one retry for transient network failures (e.g. crates.io timeout)
+    let max_attempts = if source == "remote" { 2 } else { 1 };
 
-    if output.status.success() {
-        info!(
-            "[plugin/compile] Successfully compiled '{}' (pkg: {})",
-            name, pkg_name
-        );
-        Ok(true)
-    } else {
+    let label = format!("{} (pkg: {})", name, pkg_name);
+    for attempt in 1..=max_attempts {
+        let output = tokio::process::Command::new("cargo")
+            .args(["build", "--release", "--manifest-path", &cargo_path])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run cargo build for '{}': {}", name, e))?;
+
+        if output.status.success() {
+            info!(
+                "[plugin/compile] Successfully compiled '{}'",
+                label,
+            );
+            return Ok(true);
+        }
+
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        error!(
-            "[plugin/compile] Failed to compile '{}':\nstdout: {}\nstderr: {}",
-            name, stdout, stderr
-        );
-        Err(format!(
-            "Compilation failed for '{}'. Check logs for details.",
-            name
-        ))
+
+        if attempt < max_attempts {
+            warn!(
+                "[plugin/compile] Attempt {}/{} failed for '{}' (will retry):\nstdout: {}\nstderr: {}",
+                attempt, max_attempts, label, stdout, stderr
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        } else {
+            error!(
+                "[plugin/compile] All {}/{} attempts failed for '{}':\nstdout: {}\nstderr: {}",
+                attempt, max_attempts, label, stdout, stderr
+            );
+            return Err(format!(
+                "Compilation failed for '{}'. Check logs for details.",
+                name
+            ));
+        }
     }
+
+    unreachable!()
 }
 
 /// Map a category string back to its source keyword for YAML.
