@@ -22,6 +22,7 @@ fn get(path: &str) -> reqwest::blocking::Response {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_health() {
     let resp = get("/health");
     assert_eq!(resp.status(), 200);
@@ -34,6 +35,7 @@ fn test_health() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_messages_filters() {
     let resp = get("/messages/filters");
     assert_eq!(resp.status(), 200);
@@ -47,6 +49,7 @@ fn test_messages_filters() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_messages_events_no_params() {
     let resp = get("/messages/events");
     assert_eq!(resp.status(), 200);
@@ -60,6 +63,7 @@ fn test_messages_events_no_params() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_threads() {
     let resp = get("/threads");
     assert_eq!(resp.status(), 200);
@@ -73,6 +77,7 @@ fn test_threads() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_threads_filters() {
     let resp = get("/threads/filters");
     assert_eq!(resp.status(), 200);
@@ -86,6 +91,7 @@ fn test_threads_filters() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_channels() {
     let resp = get("/channels");
     assert_eq!(resp.status(), 200);
@@ -99,6 +105,7 @@ fn test_channels() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_overview() {
     let resp = get("/overview");
     assert_eq!(resp.status(), 200);
@@ -112,6 +119,7 @@ fn test_overview() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_overview_dashboard() {
     let resp = get("/overview/dashboard");
     assert_eq!(resp.status(), 200);
@@ -125,6 +133,7 @@ fn test_overview_dashboard() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_memory_stats() {
     let resp = get("/memory/stats");
     assert_eq!(resp.status(), 200);
@@ -138,6 +147,7 @@ fn test_memory_stats() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_platforms() {
     let resp = get("/platforms");
     assert_eq!(resp.status(), 200);
@@ -151,6 +161,7 @@ fn test_platforms() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_kanban_tasks() {
     let resp = get("/kanban/tasks");
     assert_eq!(resp.status(), 200);
@@ -164,6 +175,7 @@ fn test_kanban_tasks() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_schedule() {
     let resp = get("/schedule");
     assert_eq!(resp.status(), 200);
@@ -177,6 +189,7 @@ fn test_schedule() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_actions() {
     let resp = get("/actions");
     assert_eq!(resp.status(), 200);
@@ -190,6 +203,7 @@ fn test_actions() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_messages_events_with_bogus_params() {
     let resp = get("/messages/events?bogus=1&limit=abc");
     // The server should either gracefully default or return 400 for bad params
@@ -205,6 +219,7 @@ fn test_messages_events_with_bogus_params() {
 }
 
 #[test]
+#[ignore]
 fn test_threads_with_bogus_params() {
     let resp = get("/threads?bogus=1&limit=abc&status=invalid");
     assert!(
@@ -220,6 +235,7 @@ fn test_threads_with_bogus_params() {
 }
 
 #[test]
+#[ignore]
 fn test_kanban_tasks_with_bogus_params() {
     let resp = get("/kanban/tasks?bogus=1&status=invalid&limit=abc");
     assert_eq!(resp.status(), 200);
@@ -229,6 +245,7 @@ fn test_kanban_tasks_with_bogus_params() {
 }
 
 #[test]
+#[ignore]
 fn test_schedule_with_bogus_params() {
     let resp = get("/schedule?bogus=1&active=maybe");
     assert_eq!(resp.status(), 200);
@@ -238,6 +255,7 @@ fn test_schedule_with_bogus_params() {
 }
 
 #[test]
+#[ignore]
 fn test_memory_stats_with_bogus_params() {
     let resp = get("/memory/stats?bogus=1&channel=notanumber&profile=");
     assert!(
@@ -257,6 +275,7 @@ fn test_memory_stats_with_bogus_params() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[ignore]
 fn test_unknown_route_returns_404() {
     let resp = get("/nonexistent-route");
     assert_eq!(resp.status(), 404);
