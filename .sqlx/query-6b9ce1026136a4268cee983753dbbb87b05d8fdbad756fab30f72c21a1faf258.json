@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO cron_jobs (\n            id, name, display_name, schedule, prompt, active,\n            channel_id, profile, mode, action_id, enabled,\n            silent, template, plan\n        )\n        VALUES (\n            $1, $2, $3, $4, $5, $6,\n            $7, NULLIF($8, '')::text, $9, $10, $11,\n            $12, $13, $14::boolean\n        )\n        ON CONFLICT (id) DO UPDATE SET\n            name = EXCLUDED.name,\n            display_name = EXCLUDED.display_name,\n            schedule = EXCLUDED.schedule,\n            prompt = EXCLUDED.prompt,\n            active = EXCLUDED.active,\n            channel_id = EXCLUDED.channel_id,\n            profile = EXCLUDED.profile,\n            mode = EXCLUDED.mode,\n            action_id = EXCLUDED.action_id,\n            enabled = EXCLUDED.enabled,\n            silent = EXCLUDED.silent,\n            template = EXCLUDED.template,\n            plan = EXCLUDED.plan,\n            updated_at = NOW()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Bool",
+        "Bool",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6b9ce1026136a4268cee983753dbbb87b05d8fdbad756fab30f72c21a1faf258"
+}

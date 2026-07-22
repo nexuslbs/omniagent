@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT msg_type FROM messages WHERE msg_type IS NOT NULL ORDER BY msg_type",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "msg_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "msg_type"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e5b1af0834e7372042dd895eb8c1deb5d41e4fabfdbb82d8d36a7122f021011a"
+}

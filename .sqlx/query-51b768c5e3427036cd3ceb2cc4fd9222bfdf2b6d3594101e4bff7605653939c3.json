@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE cron_jobs SET running = false, updated_at = NOW() WHERE running = true",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "51b768c5e3427036cd3ceb2cc4fd9222bfdf2b6d3594101e4bff7605653939c3"
+}

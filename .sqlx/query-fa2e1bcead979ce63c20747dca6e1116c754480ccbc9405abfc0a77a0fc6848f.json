@@ -1,0 +1,63 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            COALESCE((SELECT COUNT(*) FROM threads\n                WHERE created_at >= date_trunc('day', NOW())), 0)::bigint AS threads_today,\n            COALESCE((SELECT AVG(duration_ms)::bigint FROM threads\n                WHERE status = 'completed' AND ended_at >= date_trunc('day', NOW())), 0) AS avg_response_time,\n            COALESCE((SELECT SUM(input_tokens + output_tokens) FROM threads\n                WHERE created_at >= date_trunc('day', NOW())), 0)::bigint AS tokens_today,\n            COALESCE((SELECT COUNT(DISTINCT channel_id) FROM threads\n                WHERE created_at >= date_trunc('day', NOW() - INTERVAL '1 day')), 0)::bigint AS active_channels,\n            COALESCE((SELECT COUNT(*) FROM threads\n                WHERE created_at >= date_trunc('day', NOW() - INTERVAL '1 day')\n                  AND created_at < date_trunc('day', NOW())), 0)::bigint AS threads_yesterday,\n            COALESCE((SELECT AVG(duration_ms)::bigint FROM threads\n                WHERE status = 'completed'\n                  AND ended_at >= date_trunc('day', NOW() - INTERVAL '1 day')\n                  AND ended_at < date_trunc('day', NOW())), 0) AS avg_response_yesterday,\n            COALESCE((SELECT SUM(input_tokens + output_tokens) FROM threads\n                WHERE created_at >= date_trunc('day', NOW() - INTERVAL '1 day')\n                  AND created_at < date_trunc('day', NOW())), 0)::bigint AS tokens_yesterday\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "threads_today",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "avg_response_time",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "tokens_today",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "active_channels",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "threads_yesterday",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "avg_response_yesterday",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "tokens_yesterday",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "fa2e1bcead979ce63c20747dca6e1116c754480ccbc9405abfc0a77a0fc6848f"
+}

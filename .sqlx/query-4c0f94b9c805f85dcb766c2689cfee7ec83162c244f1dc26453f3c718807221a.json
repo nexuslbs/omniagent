@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM kanban_task_dependencies WHERE task_id = $1 OR depends_on_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4c0f94b9c805f85dcb766c2689cfee7ec83162c244f1dc26453f3c718807221a"
+}

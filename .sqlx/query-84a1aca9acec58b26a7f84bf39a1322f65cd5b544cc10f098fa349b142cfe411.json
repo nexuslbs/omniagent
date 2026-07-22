@@ -1,0 +1,251 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT DISTINCT ON (cj.name)\n            cj.id,\n            cj.name,\n            cj.display_name,\n            cj.schedule,\n            cj.prompt,\n            cj.skills,\n            cj.enabled,\n            cj.active,\n            cj.mode,\n            cj.action_id,\n            NULL::TEXT AS action_name,\n            cj.channel_id,\n            ch.name AS channel_name,\n            cj.profile,\n            cj.last_run_at,\n            cj.next_run_at,\n            cj.created_at,\n            cj.silent,\n            cj.template,\n            cj.plan\n        FROM cron_jobs cj\n        LEFT JOIN channels ch ON ch.id = cj.channel_id\n        WHERE ($1 = false OR cj.active = true)\n        ORDER BY cj.name, cj.created_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "display_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "display_name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "schedule",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "schedule"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "prompt",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "prompt"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "skills",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "skills"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "enabled",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "enabled"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "active",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "active"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "mode",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "mode"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "action_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "action_id"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "action_name",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 11,
+        "name": "channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "channel_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "profile",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "profile"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "last_run_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "last_run_at"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "next_run_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "next_run_at"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "silent",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "silent"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "template",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "template"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "plan",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "cron_jobs",
+            "name": "plan"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      null,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "84a1aca9acec58b26a7f84bf39a1322f65cd5b544cc10f098fa349b142cfe411"
+}

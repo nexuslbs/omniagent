@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT readonly, closed, plan\n        FROM channels\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "readonly",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "readonly"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "closed",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "closed"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "plan",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "plan"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a46ae8ad24f76c2be080966665ebfada4dae13cae70f693c90a6e879ed6353ec"
+}

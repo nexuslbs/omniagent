@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*) as cnt\n        FROM messages\n        WHERE thread_id IN (\n            SELECT id FROM threads\n            WHERE 1=1\n              AND ($1 = '' OR profile = $2)\n              AND ($3 = 0::bigint OR channel_id = $4)\n        )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "cnt",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a8f996356a8d2f824c9941d0460897eb77362b16bd9b62a16e4c9c8fbafce50c"
+}

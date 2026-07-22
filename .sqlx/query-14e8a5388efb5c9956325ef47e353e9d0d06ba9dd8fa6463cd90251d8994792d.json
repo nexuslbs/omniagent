@@ -1,0 +1,146 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            id,\n            name,\n            platform,\n            resource_identifier,\n            closed,\n            current_profile,\n            current_provider,\n            current_model,\n            readonly,\n            plan,\n            template\n        FROM channels\n        ORDER BY name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "platform",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "platform"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "resource_identifier",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "resource_identifier"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "closed",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "closed"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "current_profile",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "current_profile"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "current_provider",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "current_provider"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "current_model",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "current_model"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "readonly",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "readonly"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "plan",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "plan"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "template",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "template"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "14e8a5388efb5c9956325ef47e353e9d0d06ba9dd8fa6463cd90251d8994792d"
+}

@@ -1,0 +1,245 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT\n                    id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,\n                    input_tokens, cached_tokens, output_tokens, duration_ms,\n                    COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\",\n                    COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"started_at\",\n                    COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"ended_at\",\n                    terminal,\n                    plan,\n                    parent_id,\n                    iterations\n                FROM threads\n                WHERE channel_id = $1\n                  AND status = 'completed'\n                  AND id > $2\n                  AND (parent_id = $3 OR id = $4)\n                ORDER BY id ASC\n                LIMIT $5\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "cause",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "cause"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "profile",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "profile"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "provider",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "model",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "model"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "task_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "task_id"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "schedule_task_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "schedule_task_id"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "input_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "input_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "cached_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "cached_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "output_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "output_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "duration_ms",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "duration_ms"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 14,
+        "name": "started_at",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 15,
+        "name": "ended_at",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 16,
+        "name": "terminal",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "terminal"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "plan",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "plan"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "parent_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "parent_id"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "iterations",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "iterations"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      null,
+      null,
+      null,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "635784cc784b876d2dd34f8b50386f74765c5d3eaf57ec4ce1892364fee7ae74"
+}
