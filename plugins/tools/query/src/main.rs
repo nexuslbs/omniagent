@@ -311,6 +311,13 @@ fn format_results(operation: &str, results: &[MessageResult], total_count: i64) 
     (output, false)
 }
 
+// ── Plugin config hook ─────────────────────────────────────────────────────
+
+/// Callback invoked when the host sends configuration via configure message.
+fn on_configure(params: serde_json::Value) {
+    tracing::info!("Query plugin configured");
+}
+
 // ── Main ───────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -397,5 +404,5 @@ Database schema is documented in the tool description for reference.".to_string(
         version: "0.1.0".to_string(),
     };
 
-    run_server(server_info, tools).await
+    run_server_with_config(server_info, tools, Some(on_configure)).await
 }

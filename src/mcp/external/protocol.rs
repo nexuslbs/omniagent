@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// Supported MCP protocol version.
 pub const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
@@ -223,6 +224,22 @@ pub fn build_list_tools_request(id: u64) -> String {
         id: Some(id),
         method: "tools/list".to_string(),
         params: None,
+    };
+    serde_json::to_string(&req).unwrap_or_default()
+}
+
+/// Build a configure request with plugin config values.
+/// Always uses id=0 (notification-style) — no response expected.
+pub fn build_configure_request(config: &HashMap<String, String>) -> String {
+    let config_obj: serde_json::Map<String, serde_json::Value> = config
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+        .collect();
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(0),
+        method: "configure".to_string(),
+        params: Some(serde_json::Value::Object(config_obj)),
     };
     serde_json::to_string(&req).unwrap_or_default()
 }

@@ -1,0 +1,21 @@
+{
+  "name": "Kanban MCP Server",
+  "id": "mcp-server-kanban",
+  "version": "0.1.0",
+  "description": "Kanban task management MCP server: create, list, update, delete kanban tasks and dependencies",
+  "type": "mcp",
+  "entrypoint": {
+    "command": "mcp-server-kanban",
+    "args": [],
+    "transport": "stdio"
+  },
+  "config_schema": [
+    {
+      "key": "database_url",
+      "label": "Database URL",
+      "type": "string",
+      "default": "$env:DATABASE_URL",
+      "description": "PostgreSQL connection URL for kanban task storage"
+    }
+  ]
+}

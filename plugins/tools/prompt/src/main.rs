@@ -746,11 +746,15 @@ async fn main() -> Result<()> {
         let cfg = plugin_config.clone();
         Some(move |params: Value| {
             let new_config = PluginConfig::from_json(&params);
-            let mut locked = cfg.blocking_write();
-            *locked = new_config;
+            // block_in_place is required because blocking_write() panics
+            // when called from an async context without this wrapper.
+            tokio::task::block_in_place(|| {
+                let mut locked = cfg.blocking_write();
+                *locked = new_config.clone();
+            });
             tracing::info!(
                 "Prompt plugin config updated via configure message: tokenizer_encoding={:?}, char_budget_soft={}, char_budget_hard={}",
-                locked.tokenizer_encoding, locked.char_budget_soft, locked.char_budget_hard
+                new_config.tokenizer_encoding, new_config.char_budget_soft, new_config.char_budget_hard
             );
         })
     };

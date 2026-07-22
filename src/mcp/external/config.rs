@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::error::{AppResult, ErrorContext};
+use crate::plugins_yaml;
 
 /// Supported MCP transport types.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -328,12 +329,27 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
             allowed_tools: default_allowed_tools(),
             pool_size: default_pool_size(),
         };
-        crate::plugins_yaml::merge_yaml_config_into_env(
-            &mut srv.env,
+        // Load YAML config values with original (non-prefixed) keys
+        if let Some(yaml_config) = crate::plugins_yaml::load_plugin_yaml_config(
             &dir_name,
             data_dir,
             &crate::plugins_yaml::PluginYamlType::Tool,
-        );
+        ) {
+            if let Some(obj) = yaml_config.as_object() {
+                for (key, val) in obj {
+                    let raw = val.as_str().map(|s| s.to_string()).unwrap_or_default();
+                    if !raw.is_empty() {
+                        let resolved = crate::plugins_yaml::resolve_config_value(&raw);
+                        if !resolved.is_empty() {
+                            srv.env.insert(key.clone(), resolved);
+                        }
+                    }
+                }
+            }
+        }
+        // Apply config_schema defaults from plugin.json (fills missing fields)
+        apply_config_schema_defaults(&mut srv.env, &path.to_string_lossy());
+
         servers.push(srv);
         return Some(servers);
     }
@@ -429,10 +445,25 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
                         }
                     }
 
-                    crate::plugins_yaml::merge_yaml_config_into_env(
-                        &mut srv.env, &dir_name, data_dir,
+                    // Load YAML config values with original (non-prefixed) keys
+                    if let Some(yaml_config) = crate::plugins_yaml::load_plugin_yaml_config(
+                        &dir_name, data_dir,
                         &crate::plugins_yaml::PluginYamlType::Tool,
-                    );
+                    ) {
+                        if let Some(obj) = yaml_config.as_object() {
+                            for (key, val) in obj {
+                                let raw = val.as_str().map(|s| s.to_string()).unwrap_or_default();
+                                if !raw.is_empty() {
+                                    let resolved = crate::plugins_yaml::resolve_config_value(&raw);
+                                    if !resolved.is_empty() {
+                                        srv.env.insert(key.clone(), resolved);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Apply config_schema defaults from plugin.json (fills missing fields)
+                    apply_config_schema_defaults(&mut srv.env, &path.to_string_lossy());
 
                     // Set working directory to the plugin directory so relative
                     // args (e.g. ["server.py"]) resolve correctly.
@@ -510,6 +541,77 @@ fn read_config_file(path: &str) -> AppResult<McpServersConfig> {
         path
     ))?;
     Ok(config)
+}
+
+/// Apply config_schema defaults from plugin.json into the env map.
+///
+/// For each field in config_schema that has a `default` value and whose key
+/// is not already present in `env`, resolves `$env:` references and adds it
+/// with the original (non-prefixed) key. This allows the configure message
+/// sent to the plugin to include these values.
+fn apply_config_schema_defaults(env: &mut HashMap<String, String>, plugin_dir: &str) {
+    let plugin_json_path = std::path::Path::new(plugin_dir).join("plugin.json");
+    if !plugin_json_path.exists() {
+        return;
+    }
+
+    // Read plugin.json and extract config_schema programmatically
+    let content = match std::fs::read_to_string(&plugin_json_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to read plugin.json from {}: {:?}",
+                plugin_dir,
+                e
+            );
+            return;
+        }
+    };
+
+    // Parse as a generic JSON object so we don't need a full manifest struct here
+    let parsed: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to parse plugin.json from {}: {:?}",
+                plugin_dir,
+                e
+            );
+            return;
+        }
+    };
+
+    let schema_fields = match parsed.get("config_schema") {
+        Some(arr) if arr.is_array() => arr.as_array().unwrap(),
+        _ => return, // no config_schema
+    };
+
+    for field in schema_fields {
+        let key = match field.get("key").and_then(|v| v.as_str()) {
+            Some(k) => k,
+            None => continue,
+        };
+
+        let default_val = match field.get("default") {
+            Some(d) => d.as_str().unwrap_or(""),
+            None => continue,
+        };
+
+        if default_val.is_empty() {
+            continue;
+        }
+
+        // Skip if key is already in env (YAML config overrides schema defaults)
+        if env.contains_key(key) {
+            continue;
+        }
+
+        // Resolve $env: references
+        let resolved = plugins_yaml::resolve_config_value(default_val);
+        if !resolved.is_empty() {
+            env.insert(key.to_string(), resolved);
+        }
+    }
 }
 
 /// Resolve environment variable references in a config value.

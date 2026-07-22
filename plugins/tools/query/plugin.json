@@ -1,0 +1,21 @@
+{
+  "name": "Query MCP Server",
+  "id": "mcp-server-query",
+  "version": "0.1.0",
+  "description": "Read-only database query server: semantic search, message retrieval, custom SELECT queries",
+  "type": "mcp",
+  "entrypoint": {
+    "command": "mcp-server-query",
+    "args": [],
+    "transport": "stdio"
+  },
+  "config_schema": [
+    {
+      "key": "database_url",
+      "label": "Database URL",
+      "type": "string",
+      "default": "$env:DATABASE_URL",
+      "description": "PostgreSQL connection URL for query operations"
+    }
+  ]
+}
