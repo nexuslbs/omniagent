@@ -435,7 +435,7 @@ impl Platform for ExternalPlatformClient {
                 };
                 // Resolve all config refs ($env:, $secret:, ${VAR}) so the plugin
                 // receives actual values (e.g. access_token), not literal
-                // references like "$env:MATTERMOST_ACCESS_TOKEN" or "$secret:my_key".
+                // references like "$env:ACCESS_TOKEN" or "$secret:my_key".
                 let mut resolved_config = config_map;
                 crate::plugins_yaml::resolve_config_refs(&mut resolved_config, &pool).await;
                 let req =
