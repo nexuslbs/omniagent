@@ -7,8 +7,8 @@
 //! Safe to run on every startup (all statements use IF NOT EXISTS).
 //!
 //! Profile columns (channels.current_profile, threads.profile) have NO
-//! DEFAULT: the application supplies the profile name from DEFAULT_PROFILE
-//! env var at insert time.
+//! DEFAULT: the application supplies the profile name (default: "omni")
+//! at insert time.
 
 use anyhow::Result;
 use sqlx::PgPool;

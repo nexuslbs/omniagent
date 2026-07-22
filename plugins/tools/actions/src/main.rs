@@ -19,7 +19,7 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------
 
 fn default_profile_name() -> String {
-    std::env::var("DEFAULT_PROFILE").unwrap_or_else(|_| "omni".to_string())
+    "omni".to_string()
 }
 
 fn data_dir() -> String {

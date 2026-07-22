@@ -481,7 +481,7 @@ The Knowledge Pipeline is a periodic maintenance cron that runs 6 steps:
 - Planning mode: `max_plan` (enables subtask decomposition)
 - Instruction file: `knowledge-pipeline.md` (templates in `profiles/<name>/templates/`)
 
-The template is loaded from `<data_dir>/profiles/<profile>/templates/knowledge-pipeline.md` (where `<profile>` is the value of `DEFAULT_PROFILE` env var, defaulting to `"default"`) and injected as a task template into the agent's prompt. Sub-task mode (`auto_subtasks`) ensures each step is tracked; errors on individual steps don't abort the entire pipeline (use the `error` subtask status).
+The template is loaded from `<data_dir>/profiles/<profile>/templates/knowledge-pipeline.md` (where `<profile>` is the configured default profile name (default: `"omni"`)) and injected as a task template into the agent's prompt. Sub-task mode (`auto_subtasks`) ensures each step is tracked; errors on individual steps don't abort the entire pipeline (use the `error` subtask status).
 
 ### Scheduler
 
