@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            COALESCE(c.name, 'unknown') AS name,\n            COUNT(*) FILTER (\n                WHERE t.created_at >= date_trunc('day', NOW()) AND t.status != 'system'\n            )::bigint AS threads_today,\n            COALESCE(AVG(t.duration_ms) FILTER (WHERE t.status = 'completed')::bigint, 0) AS avg_duration,\n            CASE\n                WHEN COUNT(*) FILTER (WHERE t.status != 'system') > 0\n                THEN ROUND(\n                    COUNT(*) FILTER (WHERE t.status = 'completed')::numeric\n                    / GREATEST(COUNT(*) FILTER (WHERE t.status != 'system'), 1), 2\n                )::float8\n                ELSE 0\n            END AS success_rate,\n            COALESCE(MAX(t.created_at)::text, '') AS last_activity\n        FROM threads t\n        LEFT JOIN channels c ON c.id = t.channel_id\n        GROUP BY c.name\n        ORDER BY threads_today DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "threads_today",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "avg_duration",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "success_rate",
+        "type_info": "Float8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "last_activity",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "633e75651119efed68ebf28ad174eb8ab84c0f1e8a459b7df799c5ef6b6cfaf0"
+}

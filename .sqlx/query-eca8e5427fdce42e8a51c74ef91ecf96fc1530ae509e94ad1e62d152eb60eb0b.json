@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*) as cnt\n        FROM threads\n        WHERE 1=1\n          AND ($1 = '' OR profile = $2)\n          AND ($3 = 0::bigint OR channel_id = $4)\n          AND status = 'failed'\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "cnt",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "eca8e5427fdce42e8a51c74ef91ecf96fc1530ae509e94ad1e62d152eb60eb0b"
+}

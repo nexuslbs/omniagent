@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE channels\n        SET resource_identifier = $1,\n            external_id = $2,\n            updated_at = NOW()\n        WHERE id = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ddc5612c686841fdaa68276bfa8869e7297b7207b64281178c0298320d94bb79"
+}
