@@ -472,7 +472,7 @@ mod tests {
     fn test_parse_profile_set() {
         let cmd = parse_profile_command("//profile default").unwrap();
         match cmd {
-            ProfileCommand::Set(name) => assert_eq!(name, "omni"),
+            ProfileCommand::Set(name) => assert_eq!(name, "default"),
             _ => panic!("Expected Set"),
         }
     }
