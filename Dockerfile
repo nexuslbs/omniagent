@@ -37,6 +37,7 @@ COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 # Copy the omniagent binary and all workspace member MCP server binaries
 COPY --from=builder /build/target/release/omniagent /usr/local/bin/omniagent
 COPY --from=builder /build/target/release/mcp-server-* /usr/local/bin/
+COPY --from=builder /build/target/release/db-migrations /usr/local/bin/db-migrations
 
 EXPOSE 8080
 CMD ["omniagent"]
