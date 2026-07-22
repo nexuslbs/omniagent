@@ -144,30 +144,17 @@ Thread subtasks enable the LLM to decompose a complex request into trackable sub
 
 ### Setup
 
-1. Clone the repo:
-   ```bash
-   git clone https://github.com/nexuslbs/omniagent.git
-   cd omniagent
-   ```
+The omniagent binary runs as part of the **omni-stack** Docker Compose stack.
+See [nexuslbs/omni-stack](https://github.com/nexuslbs/omni-stack) for deployment instructions.
 
-2. Copy the environment template and configure:
-   ```bash
-   cp .env.example .env
-   ```
-   Edit `.env` and set at minimum:
-   - `LLM_PROVIDER`: your LLM provider (e.g. `opencode-go`, `deepseek`)
-   - `{PROVIDER}_API_KEY`: API key for your chosen provider (e.g. `DEEPSEEK_API_KEY` for deepseek, `OPENCODE_GO_API_KEY` for opencode-go)
-   - `DATABASE_URL`: PostgreSQL connection string (default: `postgres://omniagent:***@postgres:5432/omniagent`)
+For local development outside Docker:
+```bash
+cp .env.example .env
+# Edit .env with at minimum DATABASE_URL and LLM_PROVIDER
+cargo run
+```
 
-3. Start the stack:
-   ```bash
-   docker compose up -d
-   ```
-
-This starts:
-- **PostgreSQL 16 + pgvector**: message storage with vector embeddings
-- **Qdrant**: vector similarity search (optional, for semantic search)
-- **OmniAgent**: the agent itself, on port 8080
+The binary reads `.env` automatically via `dotenvy`.
 
 ### Verify
 
@@ -175,6 +162,8 @@ This starts:
 curl http://localhost:8080/health
 # → ok
 ```
+
+> **Note:** omniagent has no docker-compose.yml of its own. All Docker Compose configuration lives in [nexuslbs/omni-stack](https://github.com/nexuslbs/omni-stack).
 
 ## Channels
 
@@ -566,16 +555,18 @@ $OMNI_DIR/profiles/<name>/memories/
   SOUL.md        # Identity/persona file
 ```
 
-### Environment Variables
+### Memory Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MEMORY_MAX_CHARS` | `5000` | Maximum characters in MEMORY.md |
-| `USER_MAX_CHARS` | `1000` | Maximum characters for user-specific memory |
-| `PLANNING_MODE` | `auto_plan` | Global planning mode: `prompt_only`, `auto_plan`, `auto_subtasks`, or `always` |
-| `PLANNING_COMPLEXITY_SIMPLE_MAX_CHARS` | `60` | Max chars for "simple" (greeting) classification |
-| `PLANNING_COMPLEXITY_STANDARD_MAX_CHARS` | `200` | Max chars for "standard" classification: above this triggers complex planning |
-| `PLANNING_COMPLEXITY_KEYWORDS` | (built-in list) | Comma-separated keywords that trigger complex planning |
+These values are configured through the prompt plugin's YAML config (in `tools.yml`), not environment variables. They are documented here for reference:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `memory_max_chars` | `5000` | Maximum characters in MEMORY.md |
+| `user_max_chars` | `1000` | Maximum characters for user-specific memory |
+| `planning_mode` | `auto_plan` | Global planning mode: `prompt_only`, `auto_plan`, `auto_subtasks` |
+| `planning_complexity_simple_max_chars` | `60` | Max chars for "simple" (greeting) classification |
+| `planning_complexity_standard_max_chars` | `200` | Max chars for "standard" classification: above this triggers complex planning |
+| `planning_complexity_keywords` | (built-in list) | Comma-separated keywords that trigger complex planning |
 
 ## Planning Mode
 
@@ -824,47 +815,6 @@ Output shows:
 - Total token usage across all channels
 - Helps with cost tracking and monitoring
 
-## Backup Container
-
-The stack includes a standalone **backup** container for S3 data durability. It is agent-agnostic: does not require the agent to be running, making it suitable for setup on a new machine before the agent starts.
-
-### Architecture
-
-```yaml
-services:
-  backup:
-    build: ./backup
-    env_file: backup.env          # NOT git-versioned
-    volumes:
-      - ./data:/opt/omni:rw
-```
-
-### Commands
-
-Run inside the container (`docker compose exec backup <command>`):
-
-| Command | Description |
-|---------|-------------|
-| `backup` | Syncs `/opt/omni/` to `S3_BUCKET/S3_PATH/data/` |
-| `checkpoint` | Syncs `/opt/omni/` to `S3_BUCKET/S3_PATH/checkpoint/YYYYMMDD/` |
-| `restore_backup` | Syncs from `S3_BUCKET/S3_PATH/data/` to `/opt/omni/` |
-| `restore_checkpoint YYYYMMDD` | Syncs from `S3_BUCKET/S3_PATH/checkpoint/YYYYMMDD/` to `/opt/omni/` |
-
-### Configuration (`backup.env`)
-
-| Variable | Example | Description |
-|----------|---------|-------------|
-| `S3_ENDPOINT` | `https://s3.us-east-005.backblazeb2.com` | S3-compatible endpoint |
-| `S3_REGION` | `us-east-005` | S3 region |
-| `S3_BUCKET` | `my-bucket` | S3 bucket name |
-| `S3_PATH` | `omni` | Path prefix within the bucket |
-| `S3_ACCESS_KEY` | N/A | S3 access key ID |
-| `S3_SECRET_KEY` | N/A | S3 secret access key |
-| `CRON_BACKUP` | `"0 5 * * *"` | Backup schedule (empty = disabled) |
-| `CRON_CHECKPOINT` | `"0 3 * * 0"` | Checkpoint schedule (empty = disabled) |
-
-Both backup and checkpoint use `rclone sync` with rclone v1.74+.
-
 ## Data Directory Structure
 
 Persistent data lives under `OMNI_DIR` (default `/opt/omni`):
@@ -872,10 +822,10 @@ Persistent data lives under `OMNI_DIR` (default `/opt/omni`):
 ```
 $OMNI_DIR/
   profiles/
-    default/
+    omni/                     # Default profile (name configured in settings)
       memories/         # Memory files (MEMORY.md, SOUL.md)
-      skills/           # Reusable skills
-      wiki/             # Wiki reference content
+      skills/           # Practical wiki (reusable knowledge)
+      wiki/             # Wiki content (long-term memory in human-readable format)
         Memory/
           Promoted/     # Promoted long-term memories
   config/
@@ -901,32 +851,10 @@ Messages flow: **PG → Agent → LLM → (tool calls loop) → PG**
 
 ## Docker Compose
 
-### Production
-
-```yaml
-services:
-  postgres:
-    image: pgvector/pgvector:pg16
-    expose: ["5432"]
-
-  qdrant:
-    image: qdrant/qdrant:v1.18.2
-    expose: ["6333"]
-
-  omniagent:
-    build: .
-    depends_on: [postgres, qdrant]
-    env_file: .env
-    expose: ["8080"]
-    volumes:
-      - ./.env:/app/.env:ro
-```
-
-### Development
+The Docker Compose configuration for running omniagent in production or development lives in [nexuslbs/omni-stack](https://github.com/nexuslbs/omni-stack).
 
 For local development outside Docker:
 ```bash
-# Run postgres + qdrant, then:
 cargo run
 ```
 
