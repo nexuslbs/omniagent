@@ -213,15 +213,8 @@ fn merge_platform_config_env(
     data_dir: &str,
 ) -> PlatformPluginConfig {
     let mut merged_env = config.env.clone();
-    // Only runtime env vars from plugin.json: do NOT merge YAML config into env.
-    // YAML config values go to the `config` field with original field names.
-    crate::plugins_yaml::merge_yaml_config_into_env(
-        &mut merged_env,
-        &config.name,
-        data_dir,
-        &crate::plugins_yaml::PluginYamlType::Platform,
-    );
-
+    // Only runtime env vars from plugin.json: YAML config values go to the
+    // `config` field with original field names via load_plugin_yaml_config.
     // Load YAML config with original field names (unprefixed) for configure params.
     let mut config_map = std::collections::HashMap::new();
     let yaml_config = crate::plugins_yaml::load_plugin_yaml_config(

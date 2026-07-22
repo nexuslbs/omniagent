@@ -753,11 +753,7 @@ fn build_plugin_detail(
         }
     }
 
-    // Merge YAML config values into env with derived env keys
-    // (e.g. connection_mode: websocket → PLUGINNAME_CONNECTION_MODE)
-    // so the API response reflects what the subprocess will actually receive.
-    let yaml_type = PluginYamlType::from_plugin_type(&manifest.plugin_type);
-    merge_yaml_config_into_env(&mut resolved, &manifest.name, data_dir, &yaml_type);
+    // Config values use original keys (not prefixed) — delivered via configure message.
 
     let plugin_type_str = match manifest.plugin_type {
         PluginType::Platform => "platform",
@@ -1838,42 +1834,6 @@ pub fn load_plugin_yaml_config(
         };
         section?.get(plugin_name)?.config.clone()
     })()
-}
-
-/// Merge YAML plugin config values into the env map with PREFIXED keys
-/// (e.g. "access_token" from YAML becomes "MYTOOL_ACCESS_TOKEN" in env).
-///
-/// This is used by MCP tool servers and provider plugins that need env vars
-/// with prefixed names. For platform plugins, use `load_plugin_yaml_config`
-/// directly: the `config` field (original keys) is sent as configure params.
-pub fn merge_yaml_config_into_env(
-    env: &mut HashMap<String, String>,
-    plugin_name: &str,
-    data_dir: &str,
-    yaml_type: &PluginYamlType,
-) {
-    let prefix = plugin_name.to_uppercase().replace('-', "_");
-
-    let config = load_plugin_yaml_config(plugin_name, data_dir, yaml_type);
-    if let Some(ref entry_config) = config {
-        if let Some(obj) = entry_config.as_object() {
-            for (key, val) in obj {
-                let env_key = format!("{}_{}", prefix, key.to_uppercase().replace('-', "_"));
-                let raw = val.as_str().map(|s| s.to_string()).unwrap_or_default();
-                let str_val = resolve_config_value(&raw);
-                if !str_val.is_empty() {
-                    env.insert(env_key, str_val);
-                }
-            }
-        }
-    }
-
-    // NOTE: {PLUGIN}_DATABASE_URL and {PLUGIN}_OMNI_DIR are NOT injected here.
-    // Plugins that need them must declare `database_url: "$env:DATABASE_URL"`
-    // and/or `omni_dir: "$env:OMNI_DIR"` in their plugins.yml config block,
-    // which goes through the $env: resolution path above. All plugins already
-    // fall back to DATABASE_URL / OMNI_DIR (inherited from the parent process)
-    // when the prefixed env var is absent, so they work without explicit config.
 }
 
 // ---------------------------------------------------------------------------

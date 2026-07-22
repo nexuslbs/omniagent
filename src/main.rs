@@ -67,8 +67,8 @@ async fn run_server() -> AppResult<()> {
 
     // Refresh process environment from .env file: this overrides any stale
     // Docker-loaded env vars with the current .env contents, so that $env:
-    // references in plugin manifests resolve to current values (e.g.
-    // MATTERMOST_ACCESS_TOKEN) even after the .env was modified at runtime.
+    // references in plugin manifests resolve to current values even after
+    // the .env was modified at runtime.
     let env_path = format!("{}/.env", data_dir);
     let refreshed = refresh_env_from_file(&env_path);
     if refreshed > 0 {
