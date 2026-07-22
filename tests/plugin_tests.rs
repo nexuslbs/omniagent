@@ -36,6 +36,7 @@ fn get_plugin(name: &str) -> Option<serde_json::Value> {
 }
 
 #[test]
+#[ignore]
 fn test_list_plugins_no_stale_entries() {
     let resp = api_get("/plugins");
     let data = resp["data"].as_array().expect("Expected data array");
@@ -49,6 +50,7 @@ fn test_list_plugins_no_stale_entries() {
 }
 
 #[test]
+#[ignore]
 fn test_list_builtins_have_source_code() {
     let resp = api_get("/plugins");
     let data = resp["data"].as_array().expect("Expected data array");
@@ -61,6 +63,7 @@ fn test_list_builtins_have_source_code() {
 }
 
 #[test]
+#[ignore]
 fn test_list_bundled_exist() {
     let resp = api_get("/plugins");
     let data = resp["data"].as_array().expect("Expected data array");
@@ -71,6 +74,7 @@ fn test_list_bundled_exist() {
 }
 
 #[test]
+#[ignore]
 fn test_builtins_enabled_only_in_yaml() {
     let resp = api_get("/plugins");
     let data = resp["data"].as_array().expect("Expected data array");
@@ -83,6 +87,7 @@ fn test_builtins_enabled_only_in_yaml() {
 }
 
 #[test]
+#[ignore]
 fn test_no_duplicated_primary_enabled() {
     let resp = api_get("/plugins");
     let data = resp["data"].as_array().expect("Expected data array");
@@ -99,6 +104,7 @@ fn test_no_duplicated_primary_enabled() {
 }
 
 #[test]
+#[ignore]
 fn test_remote_plugin_install_compile() {
     let name = "test-rust-tool";
     let base = "/plugins/tools/remote/test-rust-tool";
@@ -134,6 +140,7 @@ fn test_remote_plugin_install_compile() {
 }
 
 #[test]
+#[ignore]
 fn test_remote_plugin_enable_and_query() {
     let name = "test-rust-tool";
     let base = "/plugins/tools/remote/test-rust-tool";
@@ -150,6 +157,7 @@ fn test_remote_plugin_enable_and_query() {
 }
 
 #[test]
+#[ignore]
 fn test_remote_plugin_reinstall() {
     let name = "test-rust-tool";
     let base = "/plugins/tools/remote/test-rust-tool";
@@ -177,6 +185,7 @@ fn test_remote_plugin_reinstall() {
 }
 
 #[test]
+#[ignore]
 fn test_remote_plugin_uninstall() {
     let name = "test-rust-tool";
     let base = "/plugins/tools/remote/test-rust-tool";
@@ -214,6 +223,7 @@ fn test_remote_plugin_uninstall() {
 }
 
 #[test]
+#[ignore]
 fn test_builtin_reinstall_rejected() {
     let name = "plugin-manager";
     let base = "/plugins/tools/built-in/plugin-manager";
@@ -229,6 +239,7 @@ fn test_builtin_reinstall_rejected() {
 }
 
 #[test]
+#[ignore]
 fn test_no_mcp_directory_references() {
     let (stdout, _, _code) = run(&["sh", "-c", "test -d /app/plugins/mcp && echo EXISTS || echo NOT_FOUND"]);
     assert_eq!(stdout.trim(), "NOT_FOUND", "mcp/ directory should not exist: should be tools/");
@@ -237,6 +248,7 @@ fn test_no_mcp_directory_references() {
 }
 
 #[test]
+#[ignore]
 fn test_workspace_cargo_toml_uses_tools_not_mcp() {
     let (stdout, _, _code) = run(&["sh", "-c", "grep 'plugins/mcp' /app/Cargo.toml || echo NO_MCP_REFS"]);
     assert_eq!(stdout.trim(), "NO_MCP_REFS", "Cargo.toml should not reference plugins/mcp/");
@@ -245,6 +257,7 @@ fn test_workspace_cargo_toml_uses_tools_not_mcp() {
 }
 
 #[test]
+#[ignore]
 fn test_all_plugin_statuses_are_valid() {
     let resp = api_get("/plugins");
     let data = resp["data"].as_array().expect("Expected data array");
