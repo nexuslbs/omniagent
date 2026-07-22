@@ -321,7 +321,7 @@ async fn handle_generate_full(
     meta: Option<McpMeta>,
     cfg: &PluginConfig,
 ) -> Result<(String, bool)> {
-    let profile_name = extract_str(args, &meta, "profile_name").unwrap_or("default");
+    let profile_name = extract_str(args, &meta, "profile_name").unwrap_or_else(|| std::env::var("DEFAULT_PROFILE").unwrap_or_else(|_| "omni".to_string()));
     let platform = extract_str(args, &meta, "platform").unwrap_or("");
     let system_message = args["system_message"].as_str();
     let user_message = args["user_message"].as_str().unwrap_or("");
@@ -670,7 +670,7 @@ async fn main() -> Result<()> {
                     "properties": {
                         "profile_name": {
                             "type": "string",
-                            "description": "Profile name (default: default)"
+                            "description": "Profile name (default: omni)"
                         },
                         "platform": {
                             "type": "string",
