@@ -772,7 +772,7 @@ pub fn discover_plugins(
     // C. Scan remote plugins using remote.yml for exact path resolution.
     // C1: remote.yml-driven using exact manifest paths
     // C2: fallback directory scan for orphan .remote/ dirs
-    let remote_plugins = crate::plugins_yaml::load_remote_plugins(data_dir);
+    let _remote_plugins = crate::plugins_yaml::load_remote_plugins(data_dir);
                     // C. Scan remote plugins using remote.yml for exact path resolution.
                     // C1: remote.yml-driven using exact manifest paths
                     // C2: fallback directory scan for orphan .remote/ dirs
@@ -1008,7 +1008,7 @@ mod tests {
     #[test]
     fn test_discover_plugins_empty_dirs() {
         let data_dir = tempfile::tempdir().unwrap();
-        let workspace_dir = tempfile::tempdir().unwrap();
+        let _workspace_dir = tempfile::tempdir().unwrap();
 
         // No plugin dirs exist yet
         let plugins = discover_plugins(

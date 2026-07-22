@@ -212,7 +212,7 @@ fn merge_platform_config_env(
     _config_schema: &serde_json::Value,
     data_dir: &str,
 ) -> PlatformPluginConfig {
-    let mut merged_env = config.env.clone();
+    let merged_env = config.env.clone();
     // Only runtime env vars from plugin.json: YAML config values go to the
     // `config` field with original field names via load_plugin_yaml_config.
     // Load YAML config with original field names (unprefixed) for configure params.
