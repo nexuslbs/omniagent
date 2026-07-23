@@ -18,7 +18,15 @@ RUN mkdir -p src plugins .sqlx && \
 COPY . .
 ENV SQLX_OFFLINE=true
 RUN cargo build --release && \
-    cargo build --release -p db-migrations
+    cargo build --release -p db-migrations && \
+    cargo build --release -p mcp-server-cron \
+        -p mcp-server-kanban -p mcp-server-search \
+        -p mcp-server-memory -p mcp-server-metrics \
+        -p mcp-server-query -p mcp-server-plugin-manager \
+        -p mcp-server-subtasks -p mcp-server-hindsight \
+        -p mcp-server-prompt -p mcp-server-actions \
+        -p mcp-server-fetch -p mcp-server-filesystem \
+        -p mcp-server-git -p mcp-server-skills
 
 # Stage 2: Docker CLI binary
 FROM docker:cli AS docker-cli
