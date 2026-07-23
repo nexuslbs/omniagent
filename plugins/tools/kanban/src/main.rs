@@ -12,6 +12,7 @@ use sql_forge::sql_forge;
 use sqlx::PgPool;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use unicode_normalization::UnicodeNormalization;
 
 use chrono::{DateTime, Utc};
@@ -572,8 +573,24 @@ async fn handle_remove_dependency(pool: &PgPool, args: &Value) -> Result<(String
 // ---------------------------------------------------------------------------
 
 /// Callback invoked when the host sends configuration via configure message.
-fn on_configure(params: serde_json::Value) {
-    tracing::info!("Kanban plugin configured");
+/// Plugin config — received via configure message.
+#[derive(Debug, Clone)]
+struct PluginConfig {
+    pub database_url: String,
+}
+
+impl PluginConfig {
+    fn from_json(v: &serde_json::Value) -> Self {
+        Self {
+            database_url: v.get("database_url")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| {
+                    eprintln!("FATAL: database_url not in configure message");
+                    std::process::exit(1);
+                }),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -582,49 +599,91 @@ fn on_configure(params: serde_json::Value) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url = std::env::var("KANBAN_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .context("KANBAN_DATABASE_URL or DATABASE_URL must be set")?;
-    let pool = db::connect(&database_url)
-        .await
-        .context("Failed to connect to database")?;
-    let pool = Arc::new(pool);
+    // Shared pool — populated by configure callback before any tool call
+    let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
 
-    // Wrap each handler to capture a clone of the pool
     let p_create = pool.clone();
     let create_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_create.clone();
-        Box::pin(async move { handle_create(&p, &args).await })
+        Box::pin(async move {
+
+            let guard = p.read().await;
+
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+
+            handle_create(&pool, &args).await
+
+        })
     });
 
     let p_list = pool.clone();
     let list_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_list.clone();
-        Box::pin(async move { handle_list(&p, &args).await })
+        Box::pin(async move {
+
+            let guard = p.read().await;
+
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+
+            handle_list(&pool, &args).await
+
+        })
     });
 
     let p_update = pool.clone();
     let update_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_update.clone();
-        Box::pin(async move { handle_update(&p, &args).await })
+        Box::pin(async move {
+
+            let guard = p.read().await;
+
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+
+            handle_update(&pool, &args).await
+
+        })
     });
 
     let p_delete = pool.clone();
     let delete_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_delete.clone();
-        Box::pin(async move { handle_delete(&p, &args).await })
+        Box::pin(async move {
+
+            let guard = p.read().await;
+
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+
+            handle_delete(&pool, &args).await
+
+        })
     });
 
     let p_add_dep = pool.clone();
     let add_dep_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_add_dep.clone();
-        Box::pin(async move { handle_add_dependency(&p, &args).await })
+        Box::pin(async move {
+
+            let guard = p.read().await;
+
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+
+            handle_add_dependency(&pool, &args).await
+
+        })
     });
 
     let p_rm_dep = pool.clone();
     let rm_dep_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_rm_dep.clone();
-        Box::pin(async move { handle_remove_dependency(&p, &args).await })
+        Box::pin(async move {
+
+            let guard = p.read().await;
+
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+
+            handle_remove_dependency(&pool, &args).await
+
+        })
     });
 
     let tools = vec![
@@ -809,5 +868,17 @@ async fn main() -> Result<()> {
         version: "0.1.0".to_string(),
     };
 
-    run_server_with_config(server_info, tools, Some(on_configure)).await
+    run_server_with_config(server_info, tools, {
+        let p = pool.clone();
+        Some(move |params: serde_json::Value| {
+            let config = PluginConfig::from_json(&params);
+            tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                let new_pool = rt.block_on(db::connect(&config.database_url))
+                    .expect("Failed to connect to database");
+                *p.blocking_write() = Some(new_pool);
+            });
+            tracing::info!("Kanban plugin configured with database_url");
+        })
+    }).await
 }

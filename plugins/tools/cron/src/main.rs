@@ -11,6 +11,7 @@ use sql_forge::sql_forge;
 use sqlx::PgPool;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------
 // Tool: create_cron_job
@@ -258,9 +259,24 @@ async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Plugin config hook
 // ---------------------------------------------------------------------------
 
-/// Callback invoked when the host sends configuration via configure message.
-fn on_configure(params: serde_json::Value) {
-    tracing::info!("Cron plugin configured");
+/// Plugin config — received via configure message.
+#[derive(Debug, Clone)]
+struct PluginConfig {
+    pub database_url: String,
+}
+
+impl PluginConfig {
+    fn from_json(v: &serde_json::Value) -> Self {
+        Self {
+            database_url: v.get("database_url")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| {
+                    eprintln!("FATAL: database_url not in configure message");
+                    std::process::exit(1);
+                }),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -269,32 +285,45 @@ fn on_configure(params: serde_json::Value) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
-    let pool = db::connect(&database_url)
-        .await
-        .context("Failed to connect to database")?;
-    let pool = Arc::new(pool);
+    // Shared pool — populated by configure callback before any tool call
+    let pool = Arc::new(RwLock::new(None::<PgPool>));
 
-    // Wrap each handler to capture a clone of the pool
+    // Wrap each handler to capture a clone of the shared pool
     let p_cron = pool.clone();
     let create_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_cron.clone();
-        Box::pin(async move { handle_create(&p, &args).await })
+        Box::pin(async move {
+            let guard = p.read().await;
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+            handle_create(&pool, &args).await
+        })
     });
     let p_list = pool.clone();
     let list_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_list.clone();
-        Box::pin(async move { handle_list(&p, &args).await })
+        Box::pin(async move {
+            let guard = p.read().await;
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+            handle_list(&pool, &args).await
+        })
     });
     let p_del = pool.clone();
     let delete_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_del.clone();
-        Box::pin(async move { handle_delete(&p, &args).await })
+        Box::pin(async move {
+            let guard = p.read().await;
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+            handle_delete(&pool, &args).await
+        })
     });
     let p_upd = pool.clone();
     let update_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_upd.clone();
-        Box::pin(async move { handle_update(&p, &args).await })
+        Box::pin(async move {
+            let guard = p.read().await;
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+            handle_update(&pool, &args).await
+        })
     });
 
     let tools = vec![
@@ -372,5 +401,17 @@ async fn main() -> Result<()> {
         version: "0.1.0".to_string(),
     };
 
-    run_server_with_config(server_info, tools, Some(on_configure)).await
+    run_server_with_config(server_info, tools, {
+        let p = pool.clone();
+        Some(move |params: serde_json::Value| {
+            let config = PluginConfig::from_json(&params);
+            tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                let new_pool = rt.block_on(db::connect(&config.database_url))
+                    .expect("Failed to connect to database");
+                *p.blocking_write() = Some(new_pool);
+            });
+            tracing::info!("Cron plugin configured with database_url");
+        })
+    }).await
 }

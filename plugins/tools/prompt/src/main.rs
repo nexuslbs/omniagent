@@ -21,7 +21,7 @@ use mcp_server_util::*;
 use serde_json::Value;
 use sqlx::{FromRow, PgPool};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Notify};
 
 // ---------------------------------------------------------------------------
 // Plugin config — received via configure message, never from env vars
@@ -30,6 +30,9 @@ use tokio::sync::RwLock;
 /// Plugin-level config with defaults matching the original settings values.
 #[derive(Debug, Clone)]
 pub struct PluginConfig {
+    // Database
+    pub database_url: String,
+    pub omni_dir: String,
     // Planning
     pub planning_complexity_max_chars: usize,
     pub planning_complexity_keywords: String,
@@ -50,6 +53,8 @@ pub struct PluginConfig {
 impl PluginConfig {
     fn default() -> Self {
         Self {
+            database_url: String::new(),
+            omni_dir: String::new(),
             planning_complexity_max_chars: 60,
             planning_complexity_keywords:
                 "implement,refactor,redesign,architecture,create,build,design,develop,\
@@ -74,6 +79,12 @@ impl PluginConfig {
     fn from_json(json: &Value) -> Self {
         let mut cfg = Self::default();
         if let Some(obj) = json.as_object() {
+            if let Some(v) = obj.get("database_url").and_then(|v| v.as_str()) {
+                cfg.database_url = v.to_string();
+            }
+            if let Some(v) = obj.get("omni_dir").and_then(|v| v.as_str()) {
+                cfg.omni_dir = v.to_string();
+            }
             if let Some(v) = obj.get("planning_complexity_max_chars").and_then(|v| v.as_i64()) {
                 cfg.planning_complexity_max_chars = v as usize;
             }
@@ -192,9 +203,8 @@ struct SubtaskRow {
 // DB helpers
 // ---------------------------------------------------------------------------
 
-async fn connect_db() -> Result<PgPool> {
-    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
-    let pool = PgPool::connect(&database_url)
+async fn connect_db(database_url: &str) -> Result<PgPool> {
+    let pool = PgPool::connect(database_url)
         .await
         .context("Failed to connect to database")?;
     Ok(pool)
@@ -630,8 +640,9 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let pool = connect_db().await?;
-    let pool = Arc::new(pool);
+    // Shared pool — populated by configure callback before any tool call
+    let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
+    let pool_ready: Arc<Notify> = Arc::new(Notify::new());
 
     // Shared config — updated by configure message at startup
     let plugin_config = Arc::new(RwLock::new(PluginConfig::default()));
@@ -639,12 +650,17 @@ async fn main() -> Result<()> {
     // Generate full prompt handler
     let p_gen = pool.clone();
     let cfg_gen = plugin_config.clone();
+    let pool_ready_gen = pool_ready.clone();
     let gen_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let p = p_gen.clone();
         let cfg = cfg_gen.clone();
+        let ready = pool_ready_gen.clone();
         Box::pin(async move {
-            let config = cfg.read().await;
-            handle_generate_full(&p, &args, meta, &config).await
+            ready.notified().await;
+            let guard = p.read().await;
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+            let config = cfg.read().await.clone();
+            handle_generate_full(&pool, &args, meta, &config).await
         })
     });
 
@@ -744,18 +760,40 @@ async fn main() -> Result<()> {
     // via the configure message instead of env vars.
     let on_configure = {
         let cfg = plugin_config.clone();
+        let p = pool.clone();
+        let ready = pool_ready.clone();
         Some(move |params: Value| {
             let new_config = PluginConfig::from_json(&params);
-            // block_in_place is required because blocking_write() panics
-            // when called from an async context without this wrapper.
-            tokio::task::block_in_place(|| {
-                let mut locked = cfg.blocking_write();
-                *locked = new_config.clone();
+            let db_url = new_config.database_url.clone();
+            let pc = p.clone();
+            let rc = ready.clone();
+            let cfg_c = cfg.clone();
+            tracing::info!("Prompt configure received: database_url present={}, omni_dir present={}",
+                !new_config.database_url.is_empty(),
+                !new_config.omni_dir.is_empty());
+            // Spawn async DB connection — runs in background while
+            // the MCP loop continues. Handlers wait on pool_ready Notify.
+            tokio::spawn(async move {
+                match connect_db(&db_url).await {
+                    Ok(new_pool) => {
+                        *pc.write().await = Some(new_pool);
+                        tracing::info!("Prompt plugin DB connected");
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to connect to database: {:?}", e);
+                    }
+                }
+                rc.notify_waiters();
             });
-            tracing::info!(
-                "Prompt plugin config updated via configure message: tokenizer_encoding={:?}, char_budget_soft={}, char_budget_hard={}",
-                new_config.tokenizer_encoding, new_config.char_budget_soft, new_config.char_budget_hard
-            );
+            // Store config immediately (no DB needed for config values)
+            tokio::spawn(async move {
+                let mut locked = cfg_c.write().await;
+                *locked = new_config.clone();
+                tracing::info!(
+                    "Prompt plugin configured: database_url set, tokenizer_encoding={:?}, char_budget_soft={}, char_budget_hard={}",
+                    locked.tokenizer_encoding, locked.char_budget_soft, locked.char_budget_hard
+                );
+            });
         })
     };
 

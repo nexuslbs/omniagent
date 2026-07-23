@@ -9,5 +9,10 @@
     "args": [],
     "transport": "stdio"
   },
-  "config_schema": []
+  "config_schema": [
+    {
+      "key": "omni_dir",
+      "default": "$env:OMNI_DIR"
+    }
+  ]
 }

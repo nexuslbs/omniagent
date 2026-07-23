@@ -2689,17 +2689,20 @@ async fn ws_event_loop(
                 // Initialize cursors for channels that don't have one yet
                 // (first connect) or need catch-up (reconnect)
                 let channels: Vec<String> = if watch_all {
-                    // In watch_all mode with WS, we don't know what channels exist
-                    // until we receive events. Cursors are initialized lazily.
-                    vec![]
+                    // In watch_all mode, discover all channels the bot is a member of
+                    // and poll each one to catch up on missed messages during reconnect.
+                    let discovered = discover_channels(&client, &bot_id).await;
+                    let known: std::collections::HashSet<String> =
+                        channel_set.union(&discovered.into_iter().collect()).cloned().collect();
+                    for ch_id in &known {
+                        if !last_create_at.contains_key(ch_id.as_str()) {
+                            init_channel_cursor(&client, ch_id, &bot_id, &mut last_create_at).await;
+                        }
+                    }
+                    known.into_iter().collect()
                 } else {
                     channel_set.iter().cloned().collect()
                 };
-                for ch_id in &channels {
-                    if !last_create_at.contains_key(ch_id.as_str()) {
-                        init_channel_cursor(&client, ch_id, &bot_id, &mut last_create_at).await;
-                    }
-                }
                 // Do a full poll for all known channels (catches missed messages)
                 for ch_id in &channels {
                     let count = poll_channel(

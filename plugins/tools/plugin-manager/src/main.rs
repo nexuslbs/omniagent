@@ -9,6 +9,8 @@
 //!   config: object (required for config action)
 
 use anyhow::Result;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use mcp_server_util::*;
 use omniagent::plugin;
 use omniagent::plugins_yaml;
@@ -225,8 +227,21 @@ async fn handle_plugin_manager(data_dir: &str, args: &Value) -> Result<(String, 
 // ---------------------------------------------------------------------------
 
 /// Callback invoked when the host sends configuration via configure message.
-fn on_configure(params: serde_json::Value) {
-    tracing::info!("Plugin-manager configured");
+/// Plugin config — received via configure message.
+#[derive(Debug, Clone)]
+struct PluginConfig {
+    pub omni_dir: String,
+}
+
+impl PluginConfig {
+    fn from_json(v: &serde_json::Value) -> Self {
+        Self {
+            omni_dir: v.get("omni_dir")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)).unwrap_or_default()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -235,12 +250,17 @@ fn on_configure(params: serde_json::Value) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let data_dir = data_dir();
+    // Shared data_dir — populated by configure callback before any tool call
+    let data_dir: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
 
     let dd = data_dir.clone();
     let handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let dd_inner = dd.clone();
-        Box::pin(async move { handle_plugin_manager(&dd_inner, &args).await })
+        Box::pin(async move {
+            let guard = dd_inner.read().await;
+            let data_dir = guard.as_ref().expect("data_dir not initialized").clone();
+            handle_plugin_manager(&data_dir, &args).await
+        })
     });
 
     let tools = vec![McpToolEntry {
@@ -280,5 +300,14 @@ async fn main() -> Result<()> {
         version: env!("CARGO_PKG_VERSION").to_string(),
     };
 
-    run_server_with_config(server_info, tools, Some(on_configure)).await
+    run_server_with_config(server_info, tools, {
+        let dd = data_dir.clone();
+        Some(move |params: serde_json::Value| {
+            let config = PluginConfig::from_json(&params);
+            tokio::task::block_in_place(|| {
+                *dd.blocking_write() = Some(config.omni_dir.clone());
+            });
+            tracing::info!("Plugin-manager configured with omni_dir");
+        })
+    }).await
 }
