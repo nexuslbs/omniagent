@@ -137,7 +137,6 @@ pub(crate) async fn install_plugin_handler(
     }
 }
 
-
 /// POST /api/plugins/:name/reinstall: recompile and reload a plugin.
 ///
 /// Handles all three plugin categories:
@@ -249,7 +248,6 @@ pub(crate) async fn reinstall_plugin_handler(
     }
 }
 
-
 /// POST /api/plugins/install-url: install a plugin from a URL and register in YAML.
 pub(crate) async fn install_url_handler(
     State(state): State<Arc<AppState>>,
@@ -327,7 +325,6 @@ pub(crate) async fn install_url_handler(
         }
     }
 }
-
 
 /// POST /api/plugins/install-git: clone a plugin repository.
 ///
@@ -436,7 +433,6 @@ pub(crate) async fn install_git_handler(
         .into_response()
 }
 
-
 /// POST /api/plugins/{type}/{source}/{name}/download: clone a remote plugin that has a remote.yml entry but no disk directory.
 /// For `source=remote`: clones from git via remote.yml.
 pub(crate) async fn download_plugin_handler(
@@ -541,10 +537,7 @@ pub(crate) async fn download_plugin_handler(
         _ => plugin_dir.clone(),
     };
     if !content_changed {
-        info!(
-            "Download: no new commits fetched for '{}'",
-            name
-        );
+        info!("Download: no new commits fetched for '{}'", name);
     } else {
         info!(
             "Download: cloned source for '{}' (compile separately via Install)",
@@ -587,7 +580,6 @@ pub(crate) async fn download_plugin_handler(
     }
     .into_response()
 }
-
 
 /// POST /api/plugins/{name}/rename: rename a remote plugin.
 ///
@@ -744,9 +736,13 @@ pub(crate) async fn rename_plugin_handler(
 
     // 5. Update remote.yml: remove old key, add new key
     if let Err(e) = plugins_yaml::remove_remote_plugin(data_dir, &yaml_type, &name) {
-        tracing::warn!("[plugins] Rename: failed to remove old remote YAML: {:?}", e);
+        tracing::warn!(
+            "[plugins] Rename: failed to remove old remote YAML: {:?}",
+            e
+        );
     }
-    if let Err(e) = plugins_yaml::save_remote_plugin(data_dir, &yaml_type, &new_name, &remote_info) {
+    if let Err(e) = plugins_yaml::save_remote_plugin(data_dir, &yaml_type, &new_name, &remote_info)
+    {
         tracing::warn!("[plugins] Rename: failed to save new remote YAML: {:?}", e);
     }
 
@@ -781,4 +777,3 @@ pub(crate) async fn rename_plugin_handler(
     )
         .into_response()
 }
-

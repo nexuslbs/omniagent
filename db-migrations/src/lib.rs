@@ -65,10 +65,12 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .ok();
 
     // Add plan column to kanban_tasks
-    sqlx::query("ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS plan BOOLEAN NOT NULL DEFAULT false")
-        .execute(pool)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS plan BOOLEAN NOT NULL DEFAULT false",
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query(
         "UPDATE kanban_tasks SET plan = true WHERE planning_mode IN ('auto_plan', 'auto_subtasks', 'always')"
     )
@@ -77,10 +79,12 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .ok();
 
     // Add plan column to cron_jobs
-    sqlx::query("ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS plan BOOLEAN NOT NULL DEFAULT false")
-        .execute(pool)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS plan BOOLEAN NOT NULL DEFAULT false",
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query(
         "UPDATE cron_jobs SET plan = true WHERE planning_mode IN ('auto_plan', 'auto_subtasks', 'always')"
     )
@@ -89,10 +93,12 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .ok();
 
     // Add plan column to channels
-    sqlx::query("ALTER TABLE channels ADD COLUMN IF NOT EXISTS plan BOOLEAN NOT NULL DEFAULT false")
-        .execute(pool)
-        .await
-        .ok();
+    sqlx::query(
+        "ALTER TABLE channels ADD COLUMN IF NOT EXISTS plan BOOLEAN NOT NULL DEFAULT false",
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query(
         "UPDATE channels SET plan = true WHERE planning_mode IN ('auto_plan', 'auto_subtasks', 'always')"
     )
@@ -104,15 +110,11 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     // Each message stores the time it took to produce (LLM call time for
     // assistant messages, tool execution time for tool results) and the
     // token usage from the LLM response that produced it.
-    sqlx::query(
-        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS duration_ms INT NOT NULL DEFAULT 0"
-    )
+    sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS duration_ms INT NOT NULL DEFAULT 0")
         .execute(pool)
         .await
         .ok();
-    sqlx::query(
-        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS token_usage JSONB DEFAULT '{}'"
-    )
+    sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS token_usage JSONB DEFAULT '{}'")
         .execute(pool)
         .await
         .ok();

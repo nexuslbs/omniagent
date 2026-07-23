@@ -320,7 +320,8 @@ struct PluginConfig {
 impl PluginConfig {
     fn from_json(v: &serde_json::Value) -> Self {
         Self {
-            database_url: v.get("database_url")
+            database_url: v
+                .get("database_url")
                 .and_then(|v| v.as_str())
                 .map(String::from)
                 .unwrap_or_else(|| {
@@ -344,13 +345,11 @@ async fn main() -> Result<()> {
     let metrics_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_metrics.clone();
         Box::pin(async move {
-
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
             handle_get_metrics(&pool, &args).await
-
         })
     });
 
@@ -390,11 +389,13 @@ async fn main() -> Result<()> {
             let config = PluginConfig::from_json(&params);
             tokio::task::block_in_place(|| {
                 let rt = tokio::runtime::Handle::current();
-                let new_pool = rt.block_on(db::connect(&config.database_url))
+                let new_pool = rt
+                    .block_on(db::connect(&config.database_url))
                     .expect("Failed to connect to database");
                 *p.blocking_write() = Some(new_pool);
             });
             tracing::info!("Metrics plugin configured with database_url");
         })
-    }).await
+    })
+    .await
 }

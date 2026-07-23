@@ -122,7 +122,6 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
     }
 }
 
-
 /// GET /api/plugins/{type}/{source}/{name}: get single plugin detail.
 pub(crate) async fn get_plugin_handler(
     Path((_p_type, _source, name)): Path<(String, String, String)>,
@@ -218,4 +217,3 @@ pub(crate) async fn get_plugin_handler(
         }
     }
 }
-

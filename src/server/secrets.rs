@@ -192,11 +192,17 @@ async fn get_secret_handler(
     {
         Ok(Some(row)) => row,
         Ok(None) => {
-            return err_json(StatusCode::NOT_FOUND, &format!("Secret '{}' not found", name));
+            return err_json(
+                StatusCode::NOT_FOUND,
+                &format!("Secret '{}' not found", name),
+            );
         }
         Err(e) => {
             error!("Failed to fetch secret '{}': {:?}", name, e);
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("Failed to fetch secret '{}'", name));
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to fetch secret '{}'", name),
+            );
         }
     };
 

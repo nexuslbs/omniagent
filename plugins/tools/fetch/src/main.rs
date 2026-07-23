@@ -41,7 +41,12 @@ fn handle_fetch(args: Value) -> Result<(String, bool)> {
         body
     };
 
-    let text = format!("HTTP {} {}\n\n{}", status.as_u16(), status.canonical_reason().unwrap_or(""), truncated);
+    let text = format!(
+        "HTTP {} {}\n\n{}",
+        status.as_u16(),
+        status.canonical_reason().unwrap_or(""),
+        truncated
+    );
     Ok((text, !status.is_success()))
 }
 
@@ -51,9 +56,8 @@ fn handle_fetch(args: Value) -> Result<(String, bool)> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let fetch_handler: ToolHandler = Box::new(|args: Value, _meta: Option<McpMeta>| {
-        Box::pin(async move { handle_fetch(args) })
-    });
+    let fetch_handler: ToolHandler =
+        Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_fetch(args) }));
 
     let tools = vec![McpToolEntry {
         def: McpToolDef {

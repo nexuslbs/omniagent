@@ -152,9 +152,18 @@ pub fn discover_plugin_servers(data_dir: &str) -> Vec<McpServerConfig> {
     // Read tools from plugins.yml: only scan enabled plugins at their correct source location
     let tools =
         match crate::plugins_yaml::load_raw(data_dir, &crate::plugins_yaml::PluginYamlType::Tool) {
-            Ok(tools) => { tracing::info!("discover_plugin_servers: load_raw OK, {} entries", tools.len()); tools },
+            Ok(tools) => {
+                tracing::info!(
+                    "discover_plugin_servers: load_raw OK, {} entries",
+                    tools.len()
+                );
+                tools
+            }
             Err(e) => {
-                tracing::info!("discover_plugin_servers: load_raw failed: {:?}, falling back", e);
+                tracing::info!(
+                    "discover_plugin_servers: load_raw failed: {:?}, falling back",
+                    e
+                );
                 return discover_plugin_servers_fallback(data_dir);
             }
         };
@@ -164,7 +173,12 @@ pub fn discover_plugin_servers(data_dir: &str) -> Vec<McpServerConfig> {
             continue;
         }
 
-        tracing::info!("discover: tool '{}' source='{}' enabled={}", name, entry.source, entry.enabled);
+        tracing::info!(
+            "discover: tool '{}' source='{}' enabled={}",
+            name,
+            entry.source,
+            entry.enabled
+        );
 
         match entry.source.as_str() {
             "built-in" => {
@@ -220,10 +234,7 @@ fn discover_plugin_servers_fallback(data_dir: &str) -> Vec<McpServerConfig> {
 
     let app_plugins_dir = "/app/plugins/tools";
     let app_plugins_path = std::path::Path::new(app_plugins_dir);
-    if app_plugins_path.exists()
-        && app_plugins_path.is_dir()
-        && app_plugins_dir != plugins_dir
-    {
+    if app_plugins_path.exists() && app_plugins_path.is_dir() && app_plugins_dir != plugins_dir {
         let existing_names: std::collections::HashSet<String> =
             servers.iter().map(|s| s.name.clone()).collect();
         let app_servers = scan_plugin_servers(app_plugins_dir, data_dir);
@@ -260,10 +271,7 @@ pub(crate) fn get_bin_path(name: &str) -> String {
     // Fallback to /app/target/release/ if current_exe() is unavailable.
     std::env::current_exe()
         .ok()
-        .and_then(|p| {
-            p.parent()
-                .map(|d| format!("{}/{}", d.display(), name))
-        })
+        .and_then(|p| p.parent().map(|d| format!("{}/{}", d.display(), name)))
         .unwrap_or_else(|| format!("/app/target/release/{}", name))
 }
 
@@ -559,11 +567,7 @@ fn apply_config_schema_defaults(env: &mut HashMap<String, String>, plugin_dir: &
     let content = match std::fs::read_to_string(&plugin_json_path) {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!(
-                "Failed to read plugin.json from {}: {:?}",
-                plugin_dir,
-                e
-            );
+            tracing::warn!("Failed to read plugin.json from {}: {:?}", plugin_dir, e);
             return;
         }
     };
@@ -572,11 +576,7 @@ fn apply_config_schema_defaults(env: &mut HashMap<String, String>, plugin_dir: &
     let parsed: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(
-                "Failed to parse plugin.json from {}: {:?}",
-                plugin_dir,
-                e
-            );
+            tracing::warn!("Failed to parse plugin.json from {}: {:?}", plugin_dir, e);
             return;
         }
     };

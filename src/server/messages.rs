@@ -613,19 +613,17 @@ async fn events_handler(
                 thread_cached_tokens: r.thread_cached_tokens,
                 channel_name: r.channel_name,
                 processing_time_ms: proc_time,
-                token_usage: r.msg_token_usage
-                    .as_ref()
-                    .and_then(|s| {
-                        let v: serde_json::Value = serde_json::from_str(s).ok()?;
-                        if v.is_null() || v == serde_json::json!({}) {
-                            None
-                        } else {
-                            Some(v)
-                        }
-                    }),
-        }
-    })
-    .collect();
+                token_usage: r.msg_token_usage.as_ref().and_then(|s| {
+                    let v: serde_json::Value = serde_json::from_str(s).ok()?;
+                    if v.is_null() || v == serde_json::json!({}) {
+                        None
+                    } else {
+                        Some(v)
+                    }
+                }),
+            }
+        })
+        .collect();
 
     ok_json(MessagesEventsResponse {
         messages,

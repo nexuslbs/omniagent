@@ -28,7 +28,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, delete},
+    routing::{delete, get, post},
     Json, Router,
 };
 use std::sync::Arc;
@@ -37,16 +37,21 @@ use tracing::{error, info};
 use crate::plugins_yaml;
 use crate::server::AppState;
 
-use super::plugins_types::*;
 use super::plugins_reload::*;
+use super::plugins_types::*;
 
 // ── Re-exports from submodules ──
-pub(crate) use super::plugins_listing::{list_plugins_handler, get_plugin_handler};
-pub(crate) use super::plugins_enable::{enable_plugin_handler, disable_plugin_handler, restart_plugin_handler};
-pub(crate) use super::plugins_install::{install_plugin_handler, reinstall_plugin_handler, install_url_handler, install_git_handler, download_plugin_handler, rename_plugin_handler};
-pub(crate) use super::plugins_setup::{setup_plugin_handler};
-pub(crate) use super::plugins_delete::{delete_plugin_handler};
-pub(crate) use super::plugins_env::{reload_env_handler};
+pub(crate) use super::plugins_delete::delete_plugin_handler;
+pub(crate) use super::plugins_enable::{
+    disable_plugin_handler, enable_plugin_handler, restart_plugin_handler,
+};
+pub(crate) use super::plugins_env::reload_env_handler;
+pub(crate) use super::plugins_install::{
+    download_plugin_handler, install_git_handler, install_plugin_handler, install_url_handler,
+    reinstall_plugin_handler, rename_plugin_handler,
+};
+pub(crate) use super::plugins_listing::{get_plugin_handler, list_plugins_handler};
+pub(crate) use super::plugins_setup::setup_plugin_handler;
 
 // ── Router (references handlers from all submodules) ──
 
@@ -57,17 +62,50 @@ pub(crate) fn plugin_router() -> Router<Arc<AppState>> {
         .route("/api/plugins/install-git", post(install_git_handler))
         .route("/api/plugins/install-url", post(install_url_handler))
         .route("/api/plugins", get(list_plugins_handler))
-        .route("/api/plugins/{type}/{source}/{name}", get(get_plugin_handler))
-        .route("/api/plugins/{type}/{source}/{name}/config", post(update_config_handler))
-        .route("/api/plugins/{type}/{source}/{name}/enable", post(enable_plugin_handler))
-        .route("/api/plugins/{type}/{source}/{name}/disable", post(disable_plugin_handler))
-        .route("/api/plugins/{type}/{source}/{name}/install", post(install_plugin_handler))
-        .route("/api/plugins/{type}/{source}/{name}/reinstall", post(reinstall_plugin_handler))
-        .route("/api/plugins/{type}/{source}/{name}/refresh-models", post(refresh_models_handler))
-        .route("/api/plugins/{type}/{source}/{name}/setup", post(setup_plugin_handler))
-        .route("/api/plugins/{type}/{source}/{name}/download", post(download_plugin_handler))
-        .route("/api/plugins/{type}/{source}/{name}/rename", post(rename_plugin_handler))
-        .route("/api/plugins/{type}/{source}/{name}", delete(delete_plugin_handler))
+        .route(
+            "/api/plugins/{type}/{source}/{name}",
+            get(get_plugin_handler),
+        )
+        .route(
+            "/api/plugins/{type}/{source}/{name}/config",
+            post(update_config_handler),
+        )
+        .route(
+            "/api/plugins/{type}/{source}/{name}/enable",
+            post(enable_plugin_handler),
+        )
+        .route(
+            "/api/plugins/{type}/{source}/{name}/disable",
+            post(disable_plugin_handler),
+        )
+        .route(
+            "/api/plugins/{type}/{source}/{name}/install",
+            post(install_plugin_handler),
+        )
+        .route(
+            "/api/plugins/{type}/{source}/{name}/reinstall",
+            post(reinstall_plugin_handler),
+        )
+        .route(
+            "/api/plugins/{type}/{source}/{name}/refresh-models",
+            post(refresh_models_handler),
+        )
+        .route(
+            "/api/plugins/{type}/{source}/{name}/setup",
+            post(setup_plugin_handler),
+        )
+        .route(
+            "/api/plugins/{type}/{source}/{name}/download",
+            post(download_plugin_handler),
+        )
+        .route(
+            "/api/plugins/{type}/{source}/{name}/rename",
+            post(rename_plugin_handler),
+        )
+        .route(
+            "/api/plugins/{type}/{source}/{name}",
+            delete(delete_plugin_handler),
+        )
 }
 
 // ── Handlers remaining in this file ──

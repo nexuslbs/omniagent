@@ -14,8 +14,10 @@ use std::path::Path;
 // ---------------------------------------------------------------------------
 
 fn handle_create_skill(args: Value) -> Result<(String, bool)> {
-    let data_dir = std::env::var("OMNI_DIR")
-        .unwrap_or_else(|_| { eprintln!("FATAL: OMNI_DIR must be set"); std::process::exit(1); });
+    let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| {
+        eprintln!("FATAL: OMNI_DIR must be set");
+        std::process::exit(1);
+    });
 
     let name = args["name"]
         .as_str()
@@ -33,10 +35,18 @@ fn handle_create_skill(args: Value) -> Result<(String, bool)> {
         anyhow::bail!("Skill name must not be empty");
     }
     if name.len() > 64 {
-        anyhow::bail!("Skill name must be 64 characters or less (got {})", name.len());
+        anyhow::bail!(
+            "Skill name must be 64 characters or less (got {})",
+            name.len()
+        );
     }
-    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
-        anyhow::bail!("Skill name must match pattern: lowercase alphanumeric, hyphens, underscores only");
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        anyhow::bail!(
+            "Skill name must match pattern: lowercase alphanumeric, hyphens, underscores only"
+        );
     }
     if description.is_empty() {
         anyhow::bail!("Skill description must not be empty");
@@ -62,8 +72,13 @@ fn handle_create_skill(args: Value) -> Result<(String, bool)> {
     }
 
     // Create dirs
-    fs::create_dir_all(&skill_dir)
-        .map_err(|e| anyhow::anyhow!("Failed to create skill directory '{}': {}", skill_dir.display(), e))?;
+    fs::create_dir_all(&skill_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create skill directory '{}': {}",
+            skill_dir.display(),
+            e
+        )
+    })?;
 
     // Write the file
     let file_content = format!(
@@ -75,7 +90,13 @@ fn handle_create_skill(args: Value) -> Result<(String, bool)> {
     fs::write(&skill_path, &file_content)
         .map_err(|e| anyhow::anyhow!("Failed to write skill file '{}': {}", safe_path, e))?;
 
-    Ok((format!("Skill '{}' created successfully at {}", normalized, safe_path), false))
+    Ok((
+        format!(
+            "Skill '{}' created successfully at {}",
+            normalized, safe_path
+        ),
+        false,
+    ))
 }
 
 // ---------------------------------------------------------------------------

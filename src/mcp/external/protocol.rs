@@ -245,7 +245,12 @@ pub fn build_configure_request(config: &HashMap<String, String>) -> String {
 }
 
 /// Build a tools/call request. Accepts optional _meta context injected by the framework.
-pub fn build_call_tool_request(id: u64, name: &str, arguments: &Value, meta: Option<Value>) -> String {
+pub fn build_call_tool_request(
+    id: u64,
+    name: &str,
+    arguments: &Value,
+    meta: Option<Value>,
+) -> String {
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(id),

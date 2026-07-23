@@ -26,4 +26,8 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # Only watches src/ — excludes Cargo.toml, migrations, config files, etc.
 # Logs are JSON (set by the app's tracing subscriber) — watch the container logs
 # to see build output and agent startup.
-CMD bash -c 'cargo build --release --workspace --locked && exec cargo watch -w src -x "run --release"'
+# Use SQLX_OFFLINE=true to skip compile-time DB verification — postgres
+# may not be migrated yet at build time (chicken-and-egg). The .sqlx/
+# offline query data exists in the repo and powers sqlx checks without
+# a live connection. Matches the production Dockerfile pattern.
+CMD bash -c 'SQLX_OFFLINE=true cargo build --release -p omniagent && exec cargo watch -w src -x "run --release"'

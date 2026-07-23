@@ -21,7 +21,7 @@ use mcp_server_util::*;
 use serde_json::Value;
 use sqlx::{FromRow, PgPool};
 use std::sync::Arc;
-use tokio::sync::{RwLock, watch};
+use tokio::sync::{watch, RwLock};
 // ---------------------------------------------------------------------------
 // Plugin config — received via configure message, never from env vars
 // ---------------------------------------------------------------------------
@@ -84,10 +84,16 @@ impl PluginConfig {
             if let Some(v) = obj.get("omni_dir").and_then(|v| v.as_str()) {
                 cfg.omni_dir = v.to_string();
             }
-            if let Some(v) = obj.get("planning_complexity_max_chars").and_then(|v| v.as_i64()) {
+            if let Some(v) = obj
+                .get("planning_complexity_max_chars")
+                .and_then(|v| v.as_i64())
+            {
                 cfg.planning_complexity_max_chars = v as usize;
             }
-            if let Some(v) = obj.get("planning_complexity_keywords").and_then(|v| v.as_str()) {
+            if let Some(v) = obj
+                .get("planning_complexity_keywords")
+                .and_then(|v| v.as_str())
+            {
                 cfg.planning_complexity_keywords = v.to_string();
             }
             if let Some(v) = obj.get("prompt_plan_max_tokens").and_then(|v| v.as_i64()) {
@@ -336,7 +342,11 @@ async fn handle_generate_full(
     let user_message = args["user_message"].as_str().unwrap_or("");
     let tool_names: Vec<String> = args["tool_names"]
         .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let thread_id = extract_i64(args, &meta, "thread_id");
     let channel_id = extract_i64(args, &meta, "channel_id");
@@ -374,7 +384,10 @@ async fn handle_generate_full(
                 memory_text.push_str(part);
                 memory_text.push('\n');
             }
-        } else if system_message.is_some() && !system_message.unwrap().is_empty() && part == system_message.unwrap() {
+        } else if system_message.is_some()
+            && !system_message.unwrap().is_empty()
+            && part == system_message.unwrap()
+        {
             soul_text = part.clone();
         } else {
             system_parts.push(part.clone());
@@ -396,9 +409,11 @@ async fn handle_generate_full(
     if let Some(tid) = thread_id {
         match get_thread_messages(pool, tid, 10).await {
             Ok(msgs) if !msgs.is_empty() => {
-                let formatted: Vec<String> = msgs.iter().rev().map(|m| {
-                    format!("[{}]: {}", m.role, truncate_str(&m.content, 500))
-                }).collect();
+                let formatted: Vec<String> = msgs
+                    .iter()
+                    .rev()
+                    .map(|m| format!("[{}]: {}", m.role, truncate_str(&m.content, 500)))
+                    .collect();
                 context_blocks.push(format!(
                     "Recent conversation history (current thread):\n{}",
                     formatted.join("\n")
@@ -415,14 +430,16 @@ async fn handle_generate_full(
             Ok(Some(summary)) => {
                 context_blocks.push(format!(
                     "Previous channel summary (covers threads up to id={}):\n{}",
-                    summary.next_thread_id, truncate_str(&summary.content, 4000)
+                    summary.next_thread_id,
+                    truncate_str(&summary.content, 4000)
                 ));
 
                 match get_threads_since(pool, cid, summary.next_thread_id, 5).await {
                     Ok(threads) if !threads.is_empty() => {
-                        let thread_info: Vec<String> = threads.iter().map(|t| {
-                            format!("[Thread #{} by {}]: completed", t.id, t.cause)
-                        }).collect();
+                        let thread_info: Vec<String> = threads
+                            .iter()
+                            .map(|t| format!("[Thread #{} by {}]: completed", t.id, t.cause))
+                            .collect();
                         context_blocks.push(format!(
                             "Recent threads (after last summary):\n{}",
                             thread_info.join("\n---\n")
@@ -439,10 +456,7 @@ async fn handle_generate_full(
     // 2c. Skills
     let skills = get_skills(&data_dir, profile_name);
     if !skills.is_empty() {
-        context_blocks.push(format!(
-            "Available skills:\n{}",
-            skills.join("\n")
-        ));
+        context_blocks.push(format!("Available skills:\n{}", skills.join("\n")));
     }
 
     // 2d. Subtasks
@@ -470,9 +484,9 @@ async fn handle_generate_full(
 
     // ── Plan resolution ──
     // Plan input: true=plan, false=no plan, null/absent=let plugin config decide
-    let plan_input: Option<bool> = args.get("plan").and_then(|v| {
-        if v.is_null() { None } else { v.as_bool() }
-    });
+    let plan_input: Option<bool> =
+        args.get("plan")
+            .and_then(|v| if v.is_null() { None } else { v.as_bool() });
 
     // When plan is null/absent, use plugin-level config to decide
     let plan = match plan_input {
@@ -504,7 +518,10 @@ async fn handle_generate_full(
         "plan": plan,
     });
 
-    Ok((serde_json::to_string_pretty(&result).unwrap_or_else(|_| "Serialization error".to_string()), false))
+    Ok((
+        serde_json::to_string_pretty(&result).unwrap_or_else(|_| "Serialization error".to_string()),
+        false,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -514,7 +531,12 @@ async fn handle_generate_full(
 async fn handle_compact_messages(args: &Value) -> Result<(String, bool)> {
     let messages_arr = match args["messages"].as_array() {
         Some(arr) => arr,
-        None => return Ok(("Missing required argument: 'messages' (array of ChatMessage)".to_string(), true)),
+        None => {
+            return Ok((
+                "Missing required argument: 'messages' (array of ChatMessage)".to_string(),
+                true,
+            ))
+        }
     };
 
     let keep_recent = args["keep_recent"].as_u64().unwrap_or(3) as usize;
@@ -536,7 +558,10 @@ async fn handle_compact_messages(args: &Value) -> Result<(String, bool)> {
         "after_count": after,
     });
 
-    Ok((serde_json::to_string_pretty(&result).unwrap_or_else(|_| "Serialization error".to_string()), false))
+    Ok((
+        serde_json::to_string_pretty(&result).unwrap_or_else(|_| "Serialization error".to_string()),
+        false,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -546,7 +571,12 @@ async fn handle_compact_messages(args: &Value) -> Result<(String, bool)> {
 async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bool)> {
     let messages_arr = match args["messages"].as_array() {
         Some(arr) => arr,
-        None => return Ok(("Missing required argument: 'messages' (array of ChatMessage)".to_string(), true)),
+        None => {
+            return Ok((
+                "Missing required argument: 'messages' (array of ChatMessage)".to_string(),
+                true,
+            ))
+        }
     };
 
     let mut messages: Vec<crate::chat_message::ChatMessage> =
@@ -598,7 +628,11 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
         };
 
         if after_size > target_budget {
-            let aggressive_keep = if condense_keep_turns > 1 { condense_keep_turns - 1 } else { 0 };
+            let aggressive_keep = if condense_keep_turns > 1 {
+                condense_keep_turns - 1
+            } else {
+                0
+            };
             crate::compact::compact_old_assistant_messages(&mut messages, aggressive_keep);
         }
         true
@@ -614,7 +648,10 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
         "after_count": after,
     });
 
-    Ok((serde_json::to_string_pretty(&result).unwrap_or_else(|_| "Serialization error".to_string()), false))
+    Ok((
+        serde_json::to_string_pretty(&result).unwrap_or_else(|_| "Serialization error".to_string()),
+        false,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -668,10 +705,9 @@ async fn main() -> Result<()> {
     });
 
     // Compact messages handler
-    let compact_handler: ToolHandler =
-        Box::new(move |args: Value, _meta: Option<McpMeta>| {
-            Box::pin(async move { handle_compact_messages(&args).await })
-        });
+    let compact_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        Box::pin(async move { handle_compact_messages(&args).await })
+    });
 
     let tools = vec![
         McpToolEntry {
@@ -771,9 +807,11 @@ async fn main() -> Result<()> {
             let pc = p.clone();
             let tx = ready_tx.clone();
             let cfg_c = cfg.clone();
-            tracing::info!("Prompt configure received: database_url present={}, omni_dir present={}",
+            tracing::info!(
+                "Prompt configure received: database_url present={}, omni_dir present={}",
                 !new_config.database_url.is_empty(),
-                !new_config.omni_dir.is_empty());
+                !new_config.omni_dir.is_empty()
+            );
             // Spawn async DB connection — runs in background while
             // the MCP loop continues. Handlers wait on pool_ready.
             tokio::spawn(async move {

@@ -1,8 +1,8 @@
+use crate::agent::config::AgentContext;
 use crate::agent::helpers;
 use crate::db::types as queries;
 use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
 use crate::error::AppResult;
-use crate::agent::config::AgentContext;
 
 /// Create an error message, mark the thread as failed, deliver the error
 /// back to the user's platform, and return the saved message.

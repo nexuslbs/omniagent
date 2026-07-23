@@ -172,7 +172,9 @@ pub struct ServerInfo {
 
 /// Handler function type: receives tool arguments (+ meta context), returns result text + error flag.
 pub type ToolHandler = Box<
-    dyn Fn(Value, Option<McpMeta>) -> Pin<Box<dyn Future<Output = Result<(String, bool)>> + Send>> + Send + Sync,
+    dyn Fn(Value, Option<McpMeta>) -> Pin<Box<dyn Future<Output = Result<(String, bool)>> + Send>>
+        + Send
+        + Sync,
 >;
 
 /// A registered tool definition + handler.
@@ -189,10 +191,7 @@ pub struct McpToolEntry {
 ///
 /// `server_info`: identity reported in initialize response.
 /// `tools`: list of (tool_def, handler) pairs.
-pub async fn run_server(
-    server_info: ServerInfo,
-    tools: Vec<McpToolEntry>,
-) -> Result<()> {
+pub async fn run_server(server_info: ServerInfo, tools: Vec<McpToolEntry>) -> Result<()> {
     run_server_inner(server_info, tools, None::<fn(Value)>).await
 }
 

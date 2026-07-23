@@ -138,7 +138,10 @@ impl AgentContext {
     /// This ensures consistent field values throughout one processing cycle
     /// even if the global config is updated concurrently.
     pub fn config_snapshot(&self) -> AgentConfig {
-        self.config.read().expect("AgentConfig lock poisoned").clone()
+        self.config
+            .read()
+            .expect("AgentConfig lock poisoned")
+            .clone()
     }
 }
 
@@ -156,7 +159,10 @@ impl AgentConfig {
 
         // Helper: get a resolved value or default (sync : no $secret: resolution at startup)
         let get = |key: &str, default: &str| -> String {
-            settings.get(key).cloned().unwrap_or_else(|| default.to_string())
+            settings
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| default.to_string())
         };
 
         Ok(Self {
@@ -167,10 +173,15 @@ impl AgentConfig {
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
             max_iterations_plan: get("max_iterations_plan", "120").parse().unwrap_or(120),
             thread_summary_tokens: get("thread_summary_tokens", "2048").parse().unwrap_or(2048),
-            max_unfinished_subtask_retries: get("max_unfinished_subtask_retries", "3").parse().unwrap_or(3),
+            max_unfinished_subtask_retries: get("max_unfinished_subtask_retries", "3")
+                .parse()
+                .unwrap_or(3),
             delete_after_days: get("delete_after_days", "30").parse().unwrap_or(30),
             prompt_tool_name: get("prompt_generate_tool", "prompt_generate"),
-            compact_messages_tool_name: get("prompt_compact_messages_tool", "prompt_compact-messages"),
+            compact_messages_tool_name: get(
+                "prompt_compact_messages_tool",
+                "prompt_compact-messages",
+            ),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
@@ -222,7 +233,10 @@ impl AgentConfig {
                 .unwrap_or(3),
             delete_after_days: get("delete_after_days", "30").parse().unwrap_or(30),
             prompt_tool_name: get("prompt_generate_tool", "prompt_generate"),
-            compact_messages_tool_name: get("prompt_compact_messages_tool", "prompt_compact-messages"),
+            compact_messages_tool_name: get(
+                "prompt_compact_messages_tool",
+                "prompt_compact-messages",
+            ),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
@@ -240,9 +254,7 @@ impl AgentConfig {
                 .parse()
                 .ctx("PORT must be a valid number")?,
             platform_max_spawn_retries: get("platform_max_spawn_retries", "3").parse().unwrap_or(3),
-            max_inline_file_kb: get("max_inline_file_kb", "100")
-                .parse()
-                .unwrap_or(100),
+            max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
             default_profile: get("default_profile", "omni"),
         })
     }

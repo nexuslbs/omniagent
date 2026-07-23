@@ -38,8 +38,11 @@ pub trait PluginManager: Send + Sync + 'static {
 
     /// Initialize a single external MCP server by name and return its tools.
     /// Registers the client in the external clients registry.
-    async fn initialize_single_server(&self, data_dir: &str, server_name: &str)
-        -> Result<Vec<McpTool>, String>;
+    async fn initialize_single_server(
+        &self,
+        data_dir: &str,
+        server_name: &str,
+    ) -> Result<Vec<McpTool>, String>;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -57,7 +60,10 @@ pub struct LegacyPluginManager {
 }
 
 impl LegacyPluginManager {
-    pub fn new(registry: Arc<tokio::sync::RwLock<McpRegistry>>, clients: Arc<crate::mcp::external::client::ExternalMcpClients>) -> Self {
+    pub fn new(
+        registry: Arc<tokio::sync::RwLock<McpRegistry>>,
+        clients: Arc<crate::mcp::external::client::ExternalMcpClients>,
+    ) -> Self {
         Self { registry, clients }
     }
 
@@ -82,17 +88,30 @@ impl PluginManager for LegacyPluginManager {
     }
 
     async fn all_tool_names(&self) -> Vec<String> {
-        self.registry.read().await.all().iter().map(|t| t.name.clone()).collect()
+        self.registry
+            .read()
+            .await
+            .all()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect()
     }
 
     fn remove_client(&self, name: &str) {
         self.clients.remove(name);
     }
 
-    async fn initialize_single_server(&self, data_dir: &str, server_name: &str)
-        -> Result<Vec<McpTool>, String>
-    {
-        crate::mcp::external::client::initialize_single_server_tools(data_dir, server_name, &self.clients).await
+    async fn initialize_single_server(
+        &self,
+        data_dir: &str,
+        server_name: &str,
+    ) -> Result<Vec<McpTool>, String> {
+        crate::mcp::external::client::initialize_single_server_tools(
+            data_dir,
+            server_name,
+            &self.clients,
+        )
+        .await
     }
 }
 
@@ -142,7 +161,10 @@ impl ActorPluginManager {
     ///
     /// The actor owns an `McpRegistry` initialized with `initial_registry`.
     /// The returned handle can be cloned (each clone shares the same sender).
-    pub fn new(initial_registry: McpRegistry, clients: Arc<crate::mcp::external::client::ExternalMcpClients>) -> Self {
+    pub fn new(
+        initial_registry: McpRegistry,
+        clients: Arc<crate::mcp::external::client::ExternalMcpClients>,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel::<PluginCommand>();
         tokio::spawn(actor_loop(initial_registry, rx));
         Self { tx, clients }
@@ -170,11 +192,18 @@ async fn actor_loop(mut registry: McpRegistry, mut rx: mpsc::UnboundedReceiver<P
                 let names = registry.all().iter().map(|t| t.name.clone()).collect();
                 let _ = resp.send(names);
             }
-            PluginCommand::InitializeSingleServer { data_dir, server_name, clients, resp } => {
+            PluginCommand::InitializeSingleServer {
+                data_dir,
+                server_name,
+                clients,
+                resp,
+            } => {
                 // Spawn a subtask so the actor isn't blocked on MCP I/O
                 let result = tokio::spawn(async move {
                     crate::mcp::external::client::initialize_single_server_tools(
-                        &data_dir, &server_name, &clients,
+                        &data_dir,
+                        &server_name,
+                        &clients,
                     )
                     .await
                 })
@@ -206,7 +235,9 @@ impl PluginManager for ActorPluginManager {
 
     async fn register_tools(&self, tools: Vec<McpTool>) {
         let (tx, rx) = oneshot::channel();
-        let _ = self.tx.send(PluginCommand::RegisterTools { tools, resp: tx });
+        let _ = self
+            .tx
+            .send(PluginCommand::RegisterTools { tools, resp: tx });
         let _ = rx.await;
     }
 
@@ -229,9 +260,11 @@ impl PluginManager for ActorPluginManager {
         self.clients.remove(name);
     }
 
-    async fn initialize_single_server(&self, data_dir: &str, server_name: &str)
-        -> Result<Vec<McpTool>, String>
-    {
+    async fn initialize_single_server(
+        &self,
+        data_dir: &str,
+        server_name: &str,
+    ) -> Result<Vec<McpTool>, String> {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(PluginCommand::InitializeSingleServer {
             data_dir: data_dir.to_string(),

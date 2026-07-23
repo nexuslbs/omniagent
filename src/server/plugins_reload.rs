@@ -4,8 +4,8 @@
 //! Contains functions for refreshing .env files, reloading platform/tool
 //! plugins after config changes, and name sanitization.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::server::AppState;
 
@@ -90,7 +90,11 @@ pub(crate) async fn reload_tool_plugin(state: &Arc<AppState>, name: &str) {
 
     state.plugin_manager.remove_client(name);
 
-    match state.plugin_manager.initialize_single_server(&state.data_dir, name).await {
+    match state
+        .plugin_manager
+        .initialize_single_server(&state.data_dir, name)
+        .await
+    {
         Ok(tools) => {
             let count = tools.len();
             state.plugin_manager.remove_server_tools(name).await;

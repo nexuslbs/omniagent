@@ -151,10 +151,15 @@ pub(crate) async fn create_action_handler(
         );
     }
     // Validate name is a valid key: alphanumeric, hyphens, underscores only
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "Action name must only contain letters, numbers, hyphens, and underscores" })),
+            Json(
+                serde_json::json!({ "error": "Action name must only contain letters, numbers, hyphens, and underscores" }),
+            ),
         );
     }
     if body.tool_name.is_empty() {

@@ -13,16 +13,16 @@
 //! requests from the `/stop` HTTP endpoint.
 
 pub mod config;
+pub(crate) mod context_builder;
 pub mod executor;
+pub(crate) mod fail_thread;
 pub mod helpers;
 pub mod kanban_updater;
-pub mod summary_trigger;
-pub mod task_registry;
-pub(crate) mod context_builder;
-pub(crate) mod fail_thread;
 pub(crate) mod main_loop;
 pub mod plugin_manager;
 pub(crate) mod response_handler;
+pub mod summary_trigger;
+pub mod task_registry;
 
 use sql_forge::sql_forge;
 use sqlx::FromRow;
@@ -494,8 +494,12 @@ pub async fn skip_on_startup(pool: &PgPool) -> crate::error::AppResult<u64> {
         "#,
     )
     .execute(pool)
-    .await {
-        tracing::warn!("[startup] Failed to record kanban ready→todo history: {:?}", e);
+    .await
+    {
+        tracing::warn!(
+            "[startup] Failed to record kanban ready→todo history: {:?}",
+            e
+        );
     }
 
     let ready_result = sql_forge!(

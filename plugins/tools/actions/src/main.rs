@@ -10,8 +10,8 @@
 use anyhow::{Context, Result};
 use mcp_server_util::*;
 use serde_json::Value;
-use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -50,13 +50,12 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
     // Iterate in priority/position order, find first task with all deps satisfied
     for (id, title) in &tasks {
         // Query dependencies for this task
-        let deps: Vec<(String,)> = sqlx::query_as(
-            "SELECT depends_on_id FROM kanban_task_dependencies WHERE task_id = $1"
-        )
-        .bind(id)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to query task dependencies: {}", e))?;
+        let deps: Vec<(String,)> =
+            sqlx::query_as("SELECT depends_on_id FROM kanban_task_dependencies WHERE task_id = $1")
+                .bind(id)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to query task dependencies: {}", e))?;
 
         // Check each dependency's status
         let all_satisfied = {
@@ -65,13 +64,14 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
             } else {
                 let mut ok = true;
                 for (dep_id,) in &deps {
-                    let dep_status: Option<(String,)> = sqlx::query_as(
-                        "SELECT status FROM kanban_tasks WHERE id = $1"
-                    )
-                    .bind(dep_id)
-                    .fetch_optional(pool)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to query dependency status: {}", e))?;
+                    let dep_status: Option<(String,)> =
+                        sqlx::query_as("SELECT status FROM kanban_tasks WHERE id = $1")
+                            .bind(dep_id)
+                            .fetch_optional(pool)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!("Failed to query dependency status: {}", e)
+                            })?;
 
                     match dep_status {
                         Some((status,)) => {
@@ -104,7 +104,14 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
         .await
         .map_err(|e| anyhow::anyhow!("Failed to query kanban task '{}': {}", id, e))?;
 
-        let (_task_id, task_title, maybe_channel_id, task_profile, _task_template, task_planning_mode) = match task_data {
+        let (
+            _task_id,
+            task_title,
+            maybe_channel_id,
+            task_profile,
+            _task_template,
+            task_planning_mode,
+        ) = match task_data {
             Some(r) => r,
             None => continue,
         };
@@ -112,18 +119,23 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
         let channel_id = match maybe_channel_id {
             Some(cid) => cid,
             None => {
-                return Ok((format!("Kanban task '{}' ({}) has no channel — cannot create thread", title, id), false));
+                return Ok((
+                    format!(
+                        "Kanban task '{}' ({}) has no channel — cannot create thread",
+                        title, id
+                    ),
+                    false,
+                ));
             }
         };
 
         // 2. Get channel's current_profile (fallback to default)
-        let chan_profile: Option<(Option<String>,)> = sqlx::query_as(
-            "SELECT current_profile FROM channels WHERE id = $1"
-        )
-        .bind(channel_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to query channel {}: {}", channel_id, e))?;
+        let chan_profile: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT current_profile FROM channels WHERE id = $1")
+                .bind(channel_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to query channel {}: {}", channel_id, e))?;
 
         let effective_profile = task_profile
             .as_deref()
@@ -133,13 +145,12 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
             .to_string();
 
         // 3. Build content: use body if present, otherwise title
-        let body_row: Option<(Option<String>,)> = sqlx::query_as(
-            "SELECT body FROM kanban_tasks WHERE id = $1"
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to query kanban task body: {}", e))?;
+        let body_row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT body FROM kanban_tasks WHERE id = $1")
+                .bind(id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to query kanban task body: {}", e))?;
 
         let body_text = body_row
             .as_ref()
@@ -161,7 +172,7 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
         // Chain: channel.current_provider → LLM_PROVIDER env
         let (resolved_provider, resolved_model): (String, Option<String>) = {
             let chan_prov: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-                "SELECT current_provider, current_model FROM channels WHERE id = $1"
+                "SELECT current_provider, current_model FROM channels WHERE id = $1",
             )
             .bind(channel_id)
             .fetch_optional(pool)
@@ -179,9 +190,7 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
                         let model = resolve_default_model(&prov);
                         (prov, model)
                     }
-                    _ => {
-                        ("openai".to_string(), None)
-                    }
+                    _ => ("openai".to_string(), None),
                 }
             }
         };
@@ -208,7 +217,13 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
         let thread_id = match result {
             Some((tid,)) => tid,
             None => {
-                return Ok((format!("Failed to create thread for kanban task '{}' ({})", title, id), false));
+                return Ok((
+                    format!(
+                        "Failed to create thread for kanban task '{}' ({})",
+                        title, id
+                    ),
+                    false,
+                ));
             }
         };
 
@@ -233,13 +248,12 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
         .map_err(|e| anyhow::anyhow!("Failed to create cause message: {}", e))?;
 
         // Check if channel is closed — if so, skip
-        let is_closed: Option<(bool,)> = sqlx::query_as(
-            "SELECT closed FROM channels WHERE id = $1"
-        )
-        .bind(channel_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to check channel closed: {}", e))?;
+        let is_closed: Option<(bool,)> =
+            sqlx::query_as("SELECT closed FROM channels WHERE id = $1")
+                .bind(channel_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to check channel closed: {}", e))?;
 
         let channel_closed = is_closed.map(|c| c.0).unwrap_or(false);
 
@@ -250,14 +264,19 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to set thread skipped: {}", e))?;
 
-            sqlx::query("UPDATE kanban_tasks SET status = 'todo', updated_at = NOW() WHERE id = $1")
-                .bind(id)
-                .execute(pool)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to reset kanban task: {}", e))?;
+            sqlx::query(
+                "UPDATE kanban_tasks SET status = 'todo', updated_at = NOW() WHERE id = $1",
+            )
+            .bind(id)
+            .execute(pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to reset kanban task: {}", e))?;
 
             return Ok((
-                format!("Channel {} is closed — skipped thread for task '{}' ({})", channel_id, title, id),
+                format!(
+                    "Channel {} is closed — skipped thread for task '{}' ({})",
+                    channel_id, title, id
+                ),
                 false,
             ));
         }
@@ -280,7 +299,10 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
         insert_kanban_history(pool, id, "moved", Some("todo"), Some("ready"), None).await?;
 
         return Ok((
-            format!("Dispatched kanban task '{}' ({}) → thread {} (ready)", title, id, thread_id),
+            format!(
+                "Dispatched kanban task '{}' ({}) → thread {} (ready)",
+                title, id, thread_id
+            ),
             false,
         ));
     }
@@ -361,7 +383,13 @@ async fn handle_hindsight_populator(pool: &PgPool, _args: &Value) -> Result<(Str
     std::fs::write(&watermark_path, serde_json::to_string_pretty(&watermark)?)
         .map_err(|e| anyhow::anyhow!("Failed to write watermark: {}", e))?;
 
-    Ok((format!("Hindsight populator: retained {} messages (watermark: {} -> {})", count, last_id, max_id), false))
+    Ok((
+        format!(
+            "Hindsight populator: retained {} messages (watermark: {} -> {})",
+            count, last_id, max_id
+        ),
+        false,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -385,18 +413,31 @@ async fn handle_relevance_indexer(_pool: &PgPool, _args: &Value) -> Result<(Stri
         .unwrap_or_default()
         .as_secs();
 
-    let mut scored: Vec<(String, f64)> = entries.iter().map(|(path, mtime)| {
-        let age = now.saturating_sub(*mtime);
-        let recency_score = if age < 3600 { 50.0 } else if age < 86400 { 40.0 } else if age < 604800 { 30.0 } else { 10.0 };
-        (path.clone(), recency_score)
-    }).collect();
+    let mut scored: Vec<(String, f64)> = entries
+        .iter()
+        .map(|(path, mtime)| {
+            let age = now.saturating_sub(*mtime);
+            let recency_score = if age < 3600 {
+                50.0
+            } else if age < 86400 {
+                40.0
+            } else if age < 604800 {
+                30.0
+            } else {
+                10.0
+            };
+            (path.clone(), recency_score)
+        })
+        .collect();
 
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut output = String::from("# Relevant Wiki Pages\n\n");
     for (path, score) in scored.iter().take(30) {
         let line = format!("- [{}]({}) --- score: {:.0}\n", path, path, score);
-        if output.len() + line.len() > 1000 { break; }
+        if output.len() + line.len() > 1000 {
+            break;
+        }
         output.push_str(&line);
     }
 
@@ -404,7 +445,10 @@ async fn handle_relevance_indexer(_pool: &PgPool, _args: &Value) -> Result<(Stri
     std::fs::write(&output_path, &output)
         .map_err(|e| anyhow::anyhow!("Failed to write relevant-index.md: {}", e))?;
 
-    Ok((format!("Relevance indexer complete: {} files indexed", scored.len()), false))
+    Ok((
+        format!("Relevance indexer complete: {} files indexed", scored.len()),
+        false,
+    ))
 }
 
 fn collect_md_files(dir: &std::path::Path, entries: &mut Vec<(String, u64)>, prefix: &str) {
@@ -418,7 +462,9 @@ fn collect_md_files(dir: &std::path::Path, entries: &mut Vec<(String, u64)>, pre
             } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name != "relevant-index.md" {
-                        let mtime = entry.metadata().ok()
+                        let mtime = entry
+                            .metadata()
+                            .ok()
                             .and_then(|m| m.modified().ok())
                             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                             .map(|d| d.as_secs())
@@ -436,28 +482,33 @@ fn collect_md_files(dir: &std::path::Path, entries: &mut Vec<(String, u64)>, pre
 // ---------------------------------------------------------------------------
 
 async fn handle_setup_knowledge_pipeline(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
-    let schedule = args.get("schedule").and_then(|v| v.as_str()).unwrap_or("0 */6 * * *");
-    let id = format!("knowledge-pipeline-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos());
+    let schedule = args
+        .get("schedule")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0 */6 * * *");
+    let id = format!(
+        "knowledge-pipeline-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
 
     let skills_json = serde_json::json!(["knowledge-pipeline"]).to_string();
     let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("Run the knowledge pipeline maintenance (summarize channels, update wiki, run relevance indexer, populate hindsight).");
 
-    let existing: Option<(String,)> = sqlx::query_as(
-        "SELECT id FROM cron_jobs WHERE name = 'knowledge-pipeline' LIMIT 1"
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to check existing cron: {}", e))?;
+    let existing: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM cron_jobs WHERE name = 'knowledge-pipeline' LIMIT 1")
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to check existing cron: {}", e))?;
 
     if existing.is_some() {
         return Ok(("Knowledge Pipeline cron already exists".to_string(), false));
     }
 
     let channel: Option<(i64,)> = sqlx::query_as(
-        "SELECT id FROM channels WHERE platform = 'cron' AND name = 'cron-default' LIMIT 1"
+        "SELECT id FROM channels WHERE platform = 'cron' AND name = 'cron-default' LIMIT 1",
     )
     .fetch_optional(pool)
     .await
@@ -478,7 +529,13 @@ async fn handle_setup_knowledge_pipeline(pool: &PgPool, args: &Value) -> Result<
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create knowledge pipeline cron: {}", e))?;
 
-    Ok((format!("Knowledge Pipeline cron job created with schedule '{}'", schedule), false))
+    Ok((
+        format!(
+            "Knowledge Pipeline cron job created with schedule '{}'",
+            schedule
+        ),
+        false,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -491,48 +548,44 @@ async fn main() -> Result<()> {
     let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
 
     let p_kanban = pool.clone();
-    let kanban_handler: ToolHandler =
-        Box::new(move |args: Value, _meta: Option<McpMeta>| {
-            let p = p_kanban.clone();
-            Box::pin(async move {
-                let guard = p.read().await;
-                let pool = guard.as_ref().expect("Pool not initialized").clone();
-                handle_kanban_dispatcher(&pool, &args).await
-            })
-        });
+    let kanban_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let p = p_kanban.clone();
+        Box::pin(async move {
+            let guard = p.read().await;
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+            handle_kanban_dispatcher(&pool, &args).await
+        })
+    });
 
     let p_hindsight = pool.clone();
-    let hindsight_handler: ToolHandler =
-        Box::new(move |args: Value, _meta: Option<McpMeta>| {
-            let p = p_hindsight.clone();
-            Box::pin(async move {
-                let guard = p.read().await;
-                let pool = guard.as_ref().expect("Pool not initialized").clone();
-                handle_hindsight_populator(&pool, &args).await
-            })
-        });
+    let hindsight_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let p = p_hindsight.clone();
+        Box::pin(async move {
+            let guard = p.read().await;
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+            handle_hindsight_populator(&pool, &args).await
+        })
+    });
 
     let p_relevance = pool.clone();
-    let relevance_handler: ToolHandler =
-        Box::new(move |args: Value, _meta: Option<McpMeta>| {
-            let p = p_relevance.clone();
-            Box::pin(async move {
-                let guard = p.read().await;
-                let pool = guard.as_ref().expect("Pool not initialized").clone();
-                handle_relevance_indexer(&pool, &args).await
-            })
-        });
+    let relevance_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let p = p_relevance.clone();
+        Box::pin(async move {
+            let guard = p.read().await;
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+            handle_relevance_indexer(&pool, &args).await
+        })
+    });
 
     let p_pipeline = pool.clone();
-    let pipeline_handler: ToolHandler =
-        Box::new(move |args: Value, _meta: Option<McpMeta>| {
-            let p = p_pipeline.clone();
-            Box::pin(async move {
-                let guard = p.read().await;
-                let pool = guard.as_ref().expect("Pool not initialized").clone();
-                handle_setup_knowledge_pipeline(&pool, &args).await
-            })
-        });
+    let pipeline_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let p = p_pipeline.clone();
+        Box::pin(async move {
+            let guard = p.read().await;
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+            handle_setup_knowledge_pipeline(&pool, &args).await
+        })
+    });
 
     let tools = vec![
         McpToolEntry {
@@ -603,7 +656,8 @@ async fn main() -> Result<()> {
         {
             let p = pool.clone();
             Some(move |params: serde_json::Value| {
-                let database_url = params.get("database_url")
+                let database_url = params
+                    .get("database_url")
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| {
@@ -612,14 +666,16 @@ async fn main() -> Result<()> {
                     });
                 tokio::task::block_in_place(|| {
                     let rt = tokio::runtime::Handle::current();
-                    let new_pool = rt.block_on(async {
-                        PgPoolOptions::new()
-                            .max_connections(5)
-                            .acquire_timeout(std::time::Duration::from_secs(30))
-                            .connect(&database_url)
-                            .await
-                            .context("Failed to connect to database")
-                    }).expect("Failed to connect to database");
+                    let new_pool = rt
+                        .block_on(async {
+                            PgPoolOptions::new()
+                                .max_connections(5)
+                                .acquire_timeout(std::time::Duration::from_secs(30))
+                                .connect(&database_url)
+                                .await
+                                .context("Failed to connect to database")
+                        })
+                        .expect("Failed to connect to database");
                     *p.blocking_write() = Some(new_pool);
                 });
                 tracing::info!("Actions plugin configured with database_url");

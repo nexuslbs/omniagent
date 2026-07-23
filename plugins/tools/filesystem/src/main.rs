@@ -96,9 +96,15 @@ fn handle_write(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(Str
     // Validate path is within allowed dirs
     let safe_path = Path::new(path);
     let safe_path_str = safe_path.to_string_lossy();
-    let canonical = safe_path.canonicalize().unwrap_or_else(|_| safe_path.to_path_buf());
-    let data_real = Path::new(data_dir).canonicalize().unwrap_or_else(|_| Path::new(data_dir).to_path_buf());
-    let ws_real = Path::new(workspace_dir).canonicalize().unwrap_or_else(|_| Path::new(workspace_dir).to_path_buf());
+    let canonical = safe_path
+        .canonicalize()
+        .unwrap_or_else(|_| safe_path.to_path_buf());
+    let data_real = Path::new(data_dir)
+        .canonicalize()
+        .unwrap_or_else(|_| Path::new(data_dir).to_path_buf());
+    let ws_real = Path::new(workspace_dir)
+        .canonicalize()
+        .unwrap_or_else(|_| Path::new(workspace_dir).to_path_buf());
     if !canonical.starts_with(&data_real) && !canonical.starts_with(&ws_real) {
         // For new files that don't exist yet, check prefix of the path string
         if !safe_path_str.starts_with(data_dir) && !safe_path_str.starts_with(workspace_dir) {
@@ -112,7 +118,14 @@ fn handle_write(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(Str
     }
     fs::write(safe_path, content)
         .map_err(|e| anyhow::anyhow!("Failed to write file '{}': {}", safe_path_str, e))?;
-    Ok((format!("Successfully wrote {} bytes to {}", content.len(), safe_path_str), false))
+    Ok((
+        format!(
+            "Successfully wrote {} bytes to {}",
+            content.len(),
+            safe_path_str
+        ),
+        false,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +157,12 @@ fn handle_list(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(Stri
     let max_entries = 2000;
     let output = if results.len() > max_entries {
         let joined = results[..max_entries].join("\n");
-        format!("{}\n[... truncated from {} to ~{} entries]", joined, results.len(), max_entries)
+        format!(
+            "{}\n[... truncated from {} to ~{} entries]",
+            joined,
+            results.len(),
+            max_entries
+        )
     } else if results.is_empty() {
         "(empty directory)".to_string()
     } else {
@@ -166,8 +184,8 @@ fn handle_search(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(St
     let safe_base = restrict_path(base_path, data_dir, workspace_dir)?;
 
     let glob_pattern = format!("{}/{}", safe_base.trim_end_matches('/'), pattern);
-    let entries = glob::glob(&glob_pattern)
-        .map_err(|e| anyhow::anyhow!("Invalid glob pattern: {}", e))?;
+    let entries =
+        glob::glob(&glob_pattern).map_err(|e| anyhow::anyhow!("Invalid glob pattern: {}", e))?;
 
     let mut results: Vec<String> = entries
         .filter_map(|e| e.ok())
@@ -180,7 +198,12 @@ fn handle_search(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(St
         format!("No files matching '{}' in {}", pattern, safe_base)
     } else if results.len() > max_results {
         let joined = results[..max_results].join("\n");
-        format!("{}\n[... truncated from {} to ~{} results]", joined, results.len(), max_results)
+        format!(
+            "{}\n[... truncated from {} to ~{} results]",
+            joined,
+            results.len(),
+            max_results
+        )
     } else {
         results.join("\n")
     };
@@ -217,7 +240,11 @@ fn handle_info(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(Stri
         })
         .unwrap_or_default();
 
-    let typ = if metadata.is_dir() { "directory" } else { "file" };
+    let typ = if metadata.is_dir() {
+        "directory"
+    } else {
+        "file"
+    };
 
     let output = format!(
         "Path: {}\nType: {}\nSize: {}\nPermissions: {:o}\nCreated: {}\nModified: {}",
@@ -238,9 +265,12 @@ fn handle_info(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(Stri
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let data_dir = std::env::var("OMNI_DIR")
-        .unwrap_or_else(|_| { eprintln!("FATAL: OMNI_DIR must be set"); std::process::exit(1); });
-    let workspace_dir = std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
+    let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| {
+        eprintln!("FATAL: OMNI_DIR must be set");
+        std::process::exit(1);
+    });
+    let workspace_dir =
+        std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
 
     let d1 = data_dir.clone();
     let w1 = workspace_dir.clone();

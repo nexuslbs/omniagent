@@ -9,12 +9,12 @@
 //!   config: object (required for config action)
 
 use anyhow::Result;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use mcp_server_util::*;
 use omniagent::plugin;
 use omniagent::plugins_yaml;
 use serde_json::Value;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------
 // Environment helpers
@@ -236,10 +236,15 @@ struct PluginConfig {
 impl PluginConfig {
     fn from_json(v: &serde_json::Value) -> Self {
         Self {
-            omni_dir: v.get("omni_dir")
+            omni_dir: v
+                .get("omni_dir")
                 .and_then(|v| v.as_str())
                 .map(String::from)
-                .unwrap_or_else(|| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)).unwrap_or_default()),
+                .unwrap_or_else(|| {
+                    std::env::var("HOME")
+                        .map(|h| format!("{}/.omniagent", h))
+                        .unwrap_or_default()
+                }),
         }
     }
 }
@@ -309,5 +314,6 @@ async fn main() -> Result<()> {
             });
             tracing::info!("Plugin-manager configured with omni_dir");
         })
-    }).await
+    })
+    .await
 }

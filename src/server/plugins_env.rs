@@ -3,14 +3,14 @@
 //! Extracted from `plugins.rs` for separation of concerns.
 
 use axum::{
-    extract::State,
-    http::{StatusCode, Response},
-    response::IntoResponse,
     body::Body,
+    extract::State,
+    http::{Response, StatusCode},
+    response::IntoResponse,
     Json,
 };
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::server::AppState;
@@ -25,7 +25,10 @@ pub(crate) fn reload_env_handler(
         let env_path = state.env_path.clone();
         tracing::info!("Reload: reading .env from {}", env_path);
         let env_refreshed = refresh_env_from_file(&env_path);
-        tracing::info!("Reload: .env read ({} vars), now reloading plugins", env_refreshed);
+        tracing::info!(
+            "Reload: .env read ({} vars), now reloading plugins",
+            env_refreshed
+        );
 
         // Run reload in a spawned task with a 10s timeout so a stuck
         // spawn_blocking or MCP init can't hang the endpoint forever.
@@ -46,7 +49,6 @@ pub(crate) fn reload_env_handler(
         format_reload_response(env_refreshed, result)
     })
 }
-
 
 /// Format the reload response (extracted to reduce handler complexity for axum's trait solver).
 pub(crate) fn format_reload_response(
@@ -79,7 +81,6 @@ pub(crate) fn format_reload_response(
     (status, Json(body)).into_response()
 }
 
-
 /// Minimal plugin info needed for reload (name + type + status + optional entrypoint).
 struct ReloadPluginInfo {
     name: String,
@@ -98,7 +99,11 @@ fn read_plugins_from_yaml(data_dir: &str) -> Result<Vec<ReloadPluginInfo>, Strin
         .map_err(|e| format!("Failed to read plugins.yml: {}", e))?;
 
     let mut plugins = Vec::new();
-    let sections: Vec<(&str, &str, Option<&std::collections::BTreeMap<String, PluginYamlEntry>>)> = vec![
+    let sections: Vec<(
+        &str,
+        &str,
+        Option<&std::collections::BTreeMap<String, PluginYamlEntry>>,
+    )> = vec![
         ("platform", "platforms", file.platforms.as_ref()),
         ("tool", "tools", file.tools.as_ref()),
         ("provider", "providers", file.providers.as_ref()),
@@ -110,10 +115,8 @@ fn read_plugins_from_yaml(data_dir: &str) -> Result<Vec<ReloadPluginInfo>, Strin
                 let status = if entry.enabled { "enabled" } else { "disabled" };
                 // Load entrypoint lazily only for providers (needed to start them)
                 let entrypoint = if *type_name == "provider" {
-                    let manifest_path = format!(
-                        "{}/plugins/{}/{}/plugin.json",
-                        data_dir, type_dir, name
-                    );
+                    let manifest_path =
+                        format!("{}/plugins/{}/{}/plugin.json", data_dir, type_dir, name);
                     if let Ok(manifest) = crate::plugin::load_manifest(&manifest_path) {
                         manifest.entrypoint.map(|ep| (ep.command, ep.args))
                     } else {
@@ -136,14 +139,23 @@ fn read_plugins_from_yaml(data_dir: &str) -> Result<Vec<ReloadPluginInfo>, Strin
 }
 
 /// Helper: reload plugin runtime state from YAML on disk.
-pub(crate) async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Vec<String>), String> {
+pub(crate) async fn reload_plugins(
+    state: Arc<AppState>,
+) -> Result<(u32, u32, Vec<String>), String> {
     let data_dir = state.data_dir.clone();
     let all_plugins = read_plugins_from_yaml(&data_dir)?;
     tracing::info!("Reload: listed {} plugins", all_plugins.len());
 
     // 2. Snapshot current runtime state (tokio locks, Send-safe)
     let active_mcp: std::collections::HashSet<String> = {
-        state.plugin_manager.snapshot_registry().await.all().iter().filter_map(|t| t.server_name.clone()).collect()
+        state
+            .plugin_manager
+            .snapshot_registry()
+            .await
+            .all()
+            .iter()
+            .filter_map(|t| t.server_name.clone())
+            .collect()
     };
     let active_platforms: std::collections::HashSet<String> = {
         let sigs = state.platform_restart_signals.lock().await;
@@ -166,10 +178,9 @@ pub(crate) async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Ve
                     // from blocking the entire reload endpoint indefinitely.
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(15),
-                        state.plugin_manager.initialize_single_server(
-                            &state.data_dir,
-                            name,
-                        ),
+                        state
+                            .plugin_manager
+                            .initialize_single_server(&state.data_dir, name),
                     )
                     .await
                     {
@@ -178,10 +189,9 @@ pub(crate) async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Ve
                             started += 1;
                         }
                         Ok(Err(e)) => errors.push(format!("{} MCP: {}", name, e)),
-                        Err(_) => errors.push(format!(
-                            "{} MCP: initialization timed out (15s)",
-                            name
-                        )),
+                        Err(_) => {
+                            errors.push(format!("{} MCP: initialization timed out (15s)", name))
+                        }
                     }
                 } else if !enabled && running {
                     state.plugin_manager.remove_server_tools(name).await;
@@ -257,4 +267,3 @@ pub(crate) async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Ve
 
     Ok((started, stopped, errors))
 }
-

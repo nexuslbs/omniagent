@@ -9,9 +9,9 @@
 use crate::err_str;
 use crate::error::{AppResult, Error, ErrorContext};
 use crate::platform::external::{
-    build_deliver_request, build_initialize_request, build_react_request, build_typing_request, parse_response,
-    DeliverParams, DeliverResult, InitializeResult, PlatformPluginConfig, PluginResponse,
-    ReactParams, TypingParams,
+    build_deliver_request, build_initialize_request, build_react_request, build_typing_request,
+    parse_response, DeliverParams, DeliverResult, InitializeResult, PlatformPluginConfig,
+    PluginResponse, ReactParams, TypingParams,
 };
 use crate::platform::{OutboundReceiver, Platform};
 use async_trait::async_trait;
@@ -295,7 +295,11 @@ impl Platform for ExternalPlatformClient {
 
         // Track consecutive failures with exponential backoff for the spawn loop
         let max_spawn_retries: u32 = crate::agent::config::get_global()
-            .map(|g| g.read().expect("GlobalConfig lock poisoned").platform_max_spawn_retries)
+            .map(|g| {
+                g.read()
+                    .expect("GlobalConfig lock poisoned")
+                    .platform_max_spawn_retries
+            })
             .unwrap_or(3);
         let mut spawn_failures: u32 = 0;
         let mut last_restart_count = self.restart_count.load(Ordering::SeqCst);
@@ -409,10 +413,16 @@ impl Platform for ExternalPlatformClient {
                 };
                 if let Some(mut child) = child_to_kill {
                     if let Err(e) = child.kill().await {
-                        tracing::warn!("[platform] Failed to kill stale child during restart: {:?}", e);
+                        tracing::warn!(
+                            "[platform] Failed to kill stale child during restart: {:?}",
+                            e
+                        );
                     }
                     if let Err(e) = child.wait().await {
-                        tracing::warn!("[platform] Failed to wait on stale child after kill: {:?}", e);
+                        tracing::warn!(
+                            "[platform] Failed to wait on stale child after kill: {:?}",
+                            e
+                        );
                     }
                 }
                 let backoff = std::cmp::min(
@@ -1150,7 +1160,11 @@ impl Platform for ExternalPlatformClient {
                     Ok(None) => {
                         // Process still running, kill it
                         if let Err(e) = child.kill().await {
-                            tracing::warn!("[platform] Failed to kill plugin '{}': {:?}", plugin_name, e);
+                            tracing::warn!(
+                                "[platform] Failed to kill plugin '{}': {:?}",
+                                plugin_name,
+                                e
+                            );
                         }
                         let wait_status = child.wait().await;
                         tracing::info!(
@@ -1160,17 +1174,25 @@ impl Platform for ExternalPlatformClient {
                         );
                     }
                     Err(e) => {
-                    tracing::warn!(
-                        "Failed to check exit status for '{}': {:?}",
-                        plugin_name,
-                        e
-                    );
-                    if let Err(ke) = child.kill().await {
-                        tracing::warn!("[platform] kill() after wait error for '{}': {:?}", plugin_name, ke);
-                    }
-                    if let Err(we) = child.wait().await {
-                        tracing::warn!("[platform] wait() after wait error for '{}': {:?}", plugin_name, we);
-                    }
+                        tracing::warn!(
+                            "Failed to check exit status for '{}': {:?}",
+                            plugin_name,
+                            e
+                        );
+                        if let Err(ke) = child.kill().await {
+                            tracing::warn!(
+                                "[platform] kill() after wait error for '{}': {:?}",
+                                plugin_name,
+                                ke
+                            );
+                        }
+                        if let Err(we) = child.wait().await {
+                            tracing::warn!(
+                                "[platform] wait() after wait error for '{}': {:?}",
+                                plugin_name,
+                                we
+                            );
+                        }
                     }
                 }
             }

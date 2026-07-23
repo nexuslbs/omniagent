@@ -582,7 +582,8 @@ struct PluginConfig {
 impl PluginConfig {
     fn from_json(v: &serde_json::Value) -> Self {
         Self {
-            database_url: v.get("database_url")
+            database_url: v
+                .get("database_url")
                 .and_then(|v| v.as_str())
                 .map(String::from)
                 .unwrap_or_else(|| {
@@ -606,13 +607,11 @@ async fn main() -> Result<()> {
     let create_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_create.clone();
         Box::pin(async move {
-
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
             handle_create(&pool, &args).await
-
         })
     });
 
@@ -620,13 +619,11 @@ async fn main() -> Result<()> {
     let list_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_list.clone();
         Box::pin(async move {
-
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
             handle_list(&pool, &args).await
-
         })
     });
 
@@ -634,13 +631,11 @@ async fn main() -> Result<()> {
     let update_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_update.clone();
         Box::pin(async move {
-
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
             handle_update(&pool, &args).await
-
         })
     });
 
@@ -648,13 +643,11 @@ async fn main() -> Result<()> {
     let delete_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_delete.clone();
         Box::pin(async move {
-
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
             handle_delete(&pool, &args).await
-
         })
     });
 
@@ -662,13 +655,11 @@ async fn main() -> Result<()> {
     let add_dep_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_add_dep.clone();
         Box::pin(async move {
-
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
             handle_add_dependency(&pool, &args).await
-
         })
     });
 
@@ -676,13 +667,11 @@ async fn main() -> Result<()> {
     let rm_dep_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_rm_dep.clone();
         Box::pin(async move {
-
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
             handle_remove_dependency(&pool, &args).await
-
         })
     });
 
@@ -874,11 +863,13 @@ async fn main() -> Result<()> {
             let config = PluginConfig::from_json(&params);
             tokio::task::block_in_place(|| {
                 let rt = tokio::runtime::Handle::current();
-                let new_pool = rt.block_on(db::connect(&config.database_url))
+                let new_pool = rt
+                    .block_on(db::connect(&config.database_url))
                     .expect("Failed to connect to database");
                 *p.blocking_write() = Some(new_pool);
             });
             tracing::info!("Kanban plugin configured with database_url");
         })
-    }).await
+    })
+    .await
 }

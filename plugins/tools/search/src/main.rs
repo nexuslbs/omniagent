@@ -208,17 +208,23 @@ struct PluginConfig {
 impl PluginConfig {
     fn from_json(v: &serde_json::Value) -> Self {
         Self {
-            database_url: v.get("database_url")
+            database_url: v
+                .get("database_url")
                 .and_then(|v| v.as_str())
                 .map(String::from)
                 .unwrap_or_else(|| {
                     eprintln!("FATAL: database_url not in configure message");
                     std::process::exit(1);
                 }),
-            omni_dir: v.get("omni_dir")
+            omni_dir: v
+                .get("omni_dir")
                 .and_then(|v| v.as_str())
                 .map(String::from)
-                .unwrap_or_else(|| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)).unwrap_or_default()),
+                .unwrap_or_else(|| {
+                    std::env::var("HOME")
+                        .map(|h| format!("{}/.omniagent", h))
+                        .unwrap_or_default()
+                }),
         }
     }
 }
@@ -229,7 +235,7 @@ impl PluginConfig {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-        // Shared pool — populated by configure callback before any tool call
+    // Shared pool — populated by configure callback before any tool call
     let pool = Arc::new(RwLock::new(None::<PgPool>));
 
     let p_search = pool.clone();
@@ -237,18 +243,17 @@ async fn main() -> Result<()> {
     let search_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_search.clone();
         Box::pin(async move {
-
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
             handle_search_messages(&pool, &args).await
-
         })
     });
 
-    let wiki_handler: ToolHandler =
-        Box::new(move |args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_search_wiki(&args) }));
+    let wiki_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        Box::pin(async move { handle_search_wiki(&args) })
+    });
 
     let tools = vec![
         McpToolEntry {
@@ -316,11 +321,13 @@ async fn main() -> Result<()> {
             let config = PluginConfig::from_json(&params);
             tokio::task::block_in_place(|| {
                 let rt = tokio::runtime::Handle::current();
-                let new_pool = rt.block_on(omniagent::db::connect(&config.database_url))
+                let new_pool = rt
+                    .block_on(omniagent::db::connect(&config.database_url))
                     .expect("Failed to connect to database");
                 *p.blocking_write() = Some(new_pool);
             });
             tracing::info!("Search plugin configured with database_url");
         })
-    }).await
+    })
+    .await
 }
