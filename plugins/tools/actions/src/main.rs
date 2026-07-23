@@ -13,6 +13,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -486,41 +487,51 @@ async fn handle_setup_knowledge_pipeline(pool: &PgPool, args: &Value) -> Result<
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url = std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?;
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .acquire_timeout(std::time::Duration::from_secs(30))
-        .connect(&database_url)
-        .await
-        .context("Failed to connect to database")?;
-    let pool = Arc::new(pool);
+    // Shared pool — populated by configure callback before any tool call
+    let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
 
     let p_kanban = pool.clone();
     let kanban_handler: ToolHandler =
         Box::new(move |args: Value, _meta: Option<McpMeta>| {
-            let pool = p_kanban.clone();
-            Box::pin(async move { handle_kanban_dispatcher(&pool, &args).await })
+            let p = p_kanban.clone();
+            Box::pin(async move {
+                let guard = p.read().await;
+                let pool = guard.as_ref().expect("Pool not initialized").clone();
+                handle_kanban_dispatcher(&pool, &args).await
+            })
         });
 
     let p_hindsight = pool.clone();
     let hindsight_handler: ToolHandler =
         Box::new(move |args: Value, _meta: Option<McpMeta>| {
-            let pool = p_hindsight.clone();
-            Box::pin(async move { handle_hindsight_populator(&pool, &args).await })
+            let p = p_hindsight.clone();
+            Box::pin(async move {
+                let guard = p.read().await;
+                let pool = guard.as_ref().expect("Pool not initialized").clone();
+                handle_hindsight_populator(&pool, &args).await
+            })
         });
 
     let p_relevance = pool.clone();
     let relevance_handler: ToolHandler =
         Box::new(move |args: Value, _meta: Option<McpMeta>| {
-            let pool = p_relevance.clone();
-            Box::pin(async move { handle_relevance_indexer(&pool, &args).await })
+            let p = p_relevance.clone();
+            Box::pin(async move {
+                let guard = p.read().await;
+                let pool = guard.as_ref().expect("Pool not initialized").clone();
+                handle_relevance_indexer(&pool, &args).await
+            })
         });
 
     let p_pipeline = pool.clone();
     let pipeline_handler: ToolHandler =
         Box::new(move |args: Value, _meta: Option<McpMeta>| {
-            let pool = p_pipeline.clone();
-            Box::pin(async move { handle_setup_knowledge_pipeline(&pool, &args).await })
+            let p = p_pipeline.clone();
+            Box::pin(async move {
+                let guard = p.read().await;
+                let pool = guard.as_ref().expect("Pool not initialized").clone();
+                handle_setup_knowledge_pipeline(&pool, &args).await
+            })
         });
 
     let tools = vec![
@@ -583,14 +594,37 @@ async fn main() -> Result<()> {
         },
     ];
 
-    run_server(
+    run_server_with_config(
         ServerInfo {
             name: "mcp-server-actions".to_string(),
             version: "0.1.0".to_string(),
         },
         tools,
+        {
+            let p = pool.clone();
+            Some(move |params: serde_json::Value| {
+                let database_url = params.get("database_url")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| {
+                        eprintln!("FATAL: database_url not in configure message");
+                        std::process::exit(1);
+                    });
+                tokio::task::block_in_place(|| {
+                    let rt = tokio::runtime::Handle::current();
+                    let new_pool = rt.block_on(async {
+                        PgPoolOptions::new()
+                            .max_connections(5)
+                            .acquire_timeout(std::time::Duration::from_secs(30))
+                            .connect(&database_url)
+                            .await
+                            .context("Failed to connect to database")
+                    }).expect("Failed to connect to database");
+                    *p.blocking_write() = Some(new_pool);
+                });
+                tracing::info!("Actions plugin configured with database_url");
+            })
+        },
     )
-    .await?;
-
-    Ok(())
+    .await
 }

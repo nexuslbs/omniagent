@@ -9,6 +9,7 @@ use serde_json::Value;
 use sql_forge::sql_forge;
 use sqlx::{FromRow, PgPool};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------
 // Shared row type
@@ -197,8 +198,29 @@ fn handle_search_wiki(args: &Value) -> Result<(String, bool)> {
 // ---------------------------------------------------------------------------
 
 /// Callback invoked when the host sends configuration via configure message.
-fn on_configure(params: serde_json::Value) {
-    tracing::info!("Search plugin configured");
+/// Plugin config — received via configure message.
+#[derive(Debug, Clone)]
+struct PluginConfig {
+    pub database_url: String,
+    pub omni_dir: String,
+}
+
+impl PluginConfig {
+    fn from_json(v: &serde_json::Value) -> Self {
+        Self {
+            database_url: v.get("database_url")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| {
+                    eprintln!("FATAL: database_url not in configure message");
+                    std::process::exit(1);
+                }),
+            omni_dir: v.get("omni_dir")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)).unwrap_or_default()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -207,19 +229,22 @@ fn on_configure(params: serde_json::Value) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url = std::env::var("SEARCH_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .context("SEARCH_DATABASE_URL or DATABASE_URL must be set")?;
-    let pool = omniagent::db::connect(&database_url)
-        .await
-        .context("Failed to connect to database")?;
-    let pool = Arc::new(pool);
+        // Shared pool — populated by configure callback before any tool call
+    let pool = Arc::new(RwLock::new(None::<PgPool>));
 
     let p_search = pool.clone();
 
     let search_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_search.clone();
-        Box::pin(async move { handle_search_messages(&p, &args).await })
+        Box::pin(async move {
+
+            let guard = p.read().await;
+
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+
+            handle_search_messages(&pool, &args).await
+
+        })
     });
 
     let wiki_handler: ToolHandler =
@@ -285,5 +310,17 @@ async fn main() -> Result<()> {
         version: env!("CARGO_PKG_VERSION").to_string(),
     };
 
-    run_server_with_config(server_info, tools, Some(on_configure)).await
+    run_server_with_config(server_info, tools, {
+        let p = pool.clone();
+        Some(move |params: serde_json::Value| {
+            let config = PluginConfig::from_json(&params);
+            tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                let new_pool = rt.block_on(omniagent::db::connect(&config.database_url))
+                    .expect("Failed to connect to database");
+                *p.blocking_write() = Some(new_pool);
+            });
+            tracing::info!("Search plugin configured with database_url");
+        })
+    }).await
 }

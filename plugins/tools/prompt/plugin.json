@@ -93,6 +93,14 @@
       "type": "integer",
       "default": 4,
       "description": "Number of most recent assistant turns to preserve when condensing"
+    },
+    {
+      "key": "database_url",
+      "default": "$env:DATABASE_URL"
+    },
+    {
+      "key": "omni_dir",
+      "default": "$env:OMNI_DIR"
     }
   ]
 }

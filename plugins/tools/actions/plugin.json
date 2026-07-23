@@ -2,7 +2,7 @@
   "id": "mcp-server-actions",
   "name": "Actions MCP Server",
   "version": "0.1.0",
-  "description": "Built-in action tools — kanban_dispatcher, hindsight_populator, relevance_indexer, setup_knowledge_pipeline",
+  "description": "Built-in action tools \u2014 kanban_dispatcher, hindsight_populator, relevance_indexer, setup_knowledge_pipeline",
   "type": "mcp",
   "entrypoint": {
     "command": "mcp-server-actions",
@@ -15,6 +15,14 @@
       "label": "Hindsight Service URL",
       "type": "string",
       "required": false
+    },
+    {
+      "key": "database_url",
+      "default": "$env:DATABASE_URL"
+    },
+    {
+      "key": "omni_dir",
+      "default": "$env:OMNI_DIR"
     }
   ]
 }

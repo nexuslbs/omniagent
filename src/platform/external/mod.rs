@@ -671,8 +671,48 @@ pub fn build_platform_file_readers(
 ) -> HashMap<String, Arc<dyn FileReader + Send + Sync>> {
     let mut readers: HashMap<String, Arc<dyn FileReader + Send + Sync>> = HashMap::new();
     for plugin in plugins {
-        let raw_token = plugin.config.get("access_token").map(|s| s.as_str()).unwrap_or("");
-        if raw_token.is_empty() {
+        // Try `access_token` first, then fall back to `access_token_name`.
+        let raw_token = plugin
+            .config
+            .get("access_token")
+            .map(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        let raw_token = if raw_token.is_empty() {
+            plugin
+                .config
+                .get("access_token_name")
+                .map(|s| s.as_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            raw_token
+        };
+        if raw_token.is_empty() || raw_token.starts_with("$secret:") {
+            // access_token_name is a secret name — try the env var of the same name,
+            // which is how the Mattermost plugin setup stores the resolved token
+            // (via set_var in the env).
+            let from_env = if let Some(env_name) = raw_token.strip_prefix("$secret:") {
+                std::env::var(env_name).ok()
+            } else {
+                std::env::var(&raw_token).ok()
+            };
+            if let Some(tok) = from_env {
+                if !tok.is_empty() {
+                    let reader = HttpBearerFileReader::new(tok);
+                    readers.insert(plugin.name.clone(), Arc::new(reader));
+                    tracing::info!(
+                        "Registered file reader for platform '{}' (resolved from env '{}')",
+                        plugin.name,
+                        raw_token
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    "Skipped file reader for platform '{}': access_token_name '{}' not resolvable as env var",
+                    plugin.name, raw_token
+                );
+            }
             continue;
         }
         // Resolve $env:VAR references from the environment
@@ -684,14 +724,8 @@ pub fn build_platform_file_readers(
                 );
                 String::new()
             })
-        } else if raw_token.starts_with("$secret:") {
-            tracing::warn!(
-                "Cannot resolve $secret: reference for platform '{}' access_token",
-                plugin.name
-            );
-            String::new()
         } else {
-            raw_token.to_string()
+            raw_token
         };
 
         if !token.is_empty() {

@@ -26,6 +26,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -508,6 +509,8 @@ async fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 
 #[derive(Debug, Clone, Default)]
 struct PluginConfig {
+    pub database_url: String,
+    pub omni_dir: String,
     summarize_after_days: i64,
     channel_summary_tokens: u32,
     summary_provider: Option<String>,
@@ -517,6 +520,17 @@ struct PluginConfig {
 impl PluginConfig {
     fn from_value(v: &serde_json::Value) -> Self {
         Self {
+            database_url: v.get("database_url")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| {
+                    eprintln!("FATAL: database_url not in configure message");
+                    std::process::exit(1);
+                }),
+            omni_dir: v.get("omni_dir")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)).unwrap_or_default()),
             summarize_after_days: v.get("summarize_after_days").and_then(|v| v.as_i64()).unwrap_or(7),
             channel_summary_tokens: v.get("channel_summary_tokens").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(500),
             summary_provider: v.get("summary_provider").and_then(|v| v.as_str()).map(String::from),
@@ -787,46 +801,56 @@ async fn handle_generate_summary(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url = std::env::var("MEMORY_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .context("MEMORY_DATABASE_URL or DATABASE_URL must be set")?;
-    let data_dir = std::env::var("OMNI_DIR").context("OMNI_DIR must be set")?;
+    // Shared state — populated by configure callback before any tool call
+    let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
+    let data_dir: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
 
-    let pool = db::connect(&database_url)
-        .await
-        .context("Failed to connect to database")?;
-    let pool = Arc::new(pool);
-
-    // Wrap each handler to capture clones of data_dir
+    // Wrap each handler to capture shared data_dir
     let dd_promote = data_dir.clone();
     let promote_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         Box::pin({
-            let value = dd_promote.clone();
-            async move { handle_promote(&value, &args).await }
+            let dd = dd_promote.clone();
+            async move {
+                let guard = dd.read().await;
+                let value = guard.as_ref().expect("data_dir not initialized").clone();
+                handle_promote(&value, &args).await
+            }
         })
     });
 
     let dd_list = data_dir.clone();
     let list_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         Box::pin({
-            let value = dd_list.clone();
-            async move { handle_list(&value, &args).await }
+            let dd = dd_list.clone();
+            async move {
+                let guard = dd.read().await;
+                let value = guard.as_ref().expect("data_dir not initialized").clone();
+                handle_list(&value, &args).await
+            }
         })
     });
 
     let dd_review = data_dir.clone();
     let review_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         Box::pin({
-            let value = dd_review.clone();
-            async move { handle_review(&value, &args).await }
+            let dd = dd_review.clone();
+            async move {
+                let guard = dd.read().await;
+                let value = guard.as_ref().expect("data_dir not initialized").clone();
+                handle_review(&value, &args).await
+            }
         })
     });
 
     let dd_manage = data_dir.clone();
     let manage_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         Box::pin({
-            let value = dd_manage.clone();
-            async move { handle_manage(&value, &args).await }
+            let dd = dd_manage.clone();
+            async move {
+                let guard = dd.read().await;
+                let value = guard.as_ref().expect("data_dir not initialized").clone();
+                handle_manage(&value, &args).await
+            }
         })
     });
 
@@ -838,9 +862,11 @@ async fn main() -> Result<()> {
     let p_summary = pool.clone();
     let cfg_gen = plugin_config.clone();
     let generate_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
-        let pool = p_summary.clone();
+        let p = p_summary.clone();
         let cfg = cfg_gen.clone();
         Box::pin(async move {
+            let guard = p.read().await;
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
             let config = cfg.lock().unwrap().clone();
             handle_generate_summary(&pool, &config, &args).await
         })
@@ -1009,11 +1035,23 @@ async fn main() -> Result<()> {
         version: "0.1.0".to_string(),
     };
 
-    // Set up configure callback that populates plugin config
+    // Set up configure callback that populates plugin config + connects DB
     let cfg_callback = plugin_config.clone();
+    let p_pool = pool.clone();
+    let dd_dir = data_dir.clone();
     let on_configure = Some(move |params: serde_json::Value| {
-        let mut config = cfg_callback.lock().unwrap();
-        *config = PluginConfig::from_value(&params);
+        let config = PluginConfig::from_value(&params);
+        // Connect to database using config's database_url
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            let new_pool = rt.block_on(db::connect(&config.database_url))
+                .expect("Failed to connect to database");
+            *p_pool.blocking_write() = Some(new_pool);
+            *dd_dir.blocking_write() = Some(config.omni_dir.clone());
+        });
+        // Store plugin config
+        let mut locked = cfg_callback.lock().unwrap();
+        *locked = config;
         tracing::info!("Memory plugin configured");
     });
 

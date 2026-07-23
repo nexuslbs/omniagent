@@ -17,6 +17,7 @@ use serde_json::Value;
 use sql_forge::sql_forge;
 use sqlx::{Column, FromRow, PgPool, Row};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 // ── Result structs ─────────────────────────────────────────────────────────
 
@@ -313,27 +314,45 @@ fn format_results(operation: &str, results: &[MessageResult], total_count: i64) 
 
 // ── Plugin config hook ─────────────────────────────────────────────────────
 
-/// Callback invoked when the host sends configuration via configure message.
-fn on_configure(params: serde_json::Value) {
-    tracing::info!("Query plugin configured");
+/// Plugin config — received via configure message.
+#[derive(Debug, Clone)]
+struct PluginConfig {
+    pub database_url: String,
+}
+
+impl PluginConfig {
+    fn from_json(v: &serde_json::Value) -> Self {
+        Self {
+            database_url: v.get("database_url")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| {
+                    eprintln!("FATAL: database_url not in configure message");
+                    std::process::exit(1);
+                }),
+        }
+    }
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let database_url = std::env::var("QUERY_DATABASE_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .context("QUERY_DATABASE_URL or DATABASE_URL must be set")?;
-    let pool = db::connect(&database_url)
-        .await
-        .context("Failed to connect to database")?;
-    let pool = Arc::new(pool);
+    // Shared pool — populated by configure callback before any tool call
+    let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
 
     let p_query = pool.clone();
     let query_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_query.clone();
-        Box::pin(async move { handle_query_database(&p, &args).await })
+        Box::pin(async move {
+
+            let guard = p.read().await;
+
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+
+            handle_query_database(&pool, &args).await
+
+        })
     });
 
     let tools = vec![
@@ -404,5 +423,17 @@ Database schema is documented in the tool description for reference.".to_string(
         version: "0.1.0".to_string(),
     };
 
-    run_server_with_config(server_info, tools, Some(on_configure)).await
+    run_server_with_config(server_info, tools, {
+        let p = pool.clone();
+        Some(move |params: serde_json::Value| {
+            let config = PluginConfig::from_json(&params);
+            tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                let new_pool = rt.block_on(db::connect(&config.database_url))
+                    .expect("Failed to connect to database");
+                *p.blocking_write() = Some(new_pool);
+            });
+            tracing::info!("Query plugin configured with database_url");
+        })
+    }).await
 }
