@@ -40,12 +40,7 @@ pub(crate) async fn build_prompt_context(
                 "plan": thread.plan,
             }),
         };
-        let result = cfg
-            .mcp
-            .read()
-            .await
-            .execute(&mcp_call, cfg.ctx.clone())
-            .await?;
+        let result = cfg.plugin_manager.snapshot_registry().await.execute(&mcp_call, cfg.ctx.clone()).await?;
         let parsed: serde_json::Value = serde_json::from_str(&result.content)
             .unwrap_or(serde_json::json!({}));
 

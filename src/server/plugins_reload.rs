@@ -88,19 +88,13 @@ pub(crate) async fn reload_tool_plugin(state: &Arc<AppState>, name: &str) {
         );
     }
 
-    crate::mcp::external::client::clear_server_pools(name);
-    crate::mcp::external::client::remove_server_config(name);
+    state.plugin_manager.remove_client(name);
 
-    match crate::mcp::external::client::initialize_single_server_tools(
-        &state.data_dir,
-        name,
-    )
-    .await
-    {
+    match state.plugin_manager.initialize_single_server(&state.data_dir, name).await {
         Ok(tools) => {
             let count = tools.len();
-            state.tool_registry.write().await.remove_by_server(name);
-            state.tool_registry.write().await.register_all(tools);
+            state.plugin_manager.remove_server_tools(name).await;
+            state.plugin_manager.register_tools(tools).await;
             tracing::info!(
                 "Hot-reloaded {} tool(s) from MCP server '{}' after config update (no restart needed)",
                 count,

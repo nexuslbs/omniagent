@@ -113,9 +113,8 @@ pub(crate) async fn delete_plugin_handler(
                 "Uninstall: stopping MCP server for remote plugin '{}'",
                 name
             );
-            crate::mcp::external::client::clear_server_pools(&name);
-            crate::mcp::external::client::remove_server_config(&name);
-            state.tool_registry.write().await.remove_by_server(&name);
+            state.plugin_manager.remove_client(&name);
+            state.plugin_manager.remove_server_tools(&name).await;
 
             return (
                 StatusCode::OK,
@@ -156,9 +155,8 @@ pub(crate) async fn delete_plugin_handler(
                 "Uninstall: stopping MCP server for non-remote plugin '{}'",
                 name
             );
-            crate::mcp::external::client::clear_server_pools(&name);
-            crate::mcp::external::client::remove_server_config(&name);
-            state.tool_registry.write().await.remove_by_server(&name);
+            state.plugin_manager.remove_client(&name);
+            state.plugin_manager.remove_server_tools(&name).await;
             let mut removed = false;
             for yaml_type in &[
                 plugins_yaml::PluginYamlType::Platform,
@@ -363,9 +361,8 @@ pub(crate) async fn delete_plugin_handler(
 
         // Stop MCP server
         tracing::info!("Remove: stopping MCP server for plugin '{}'", name);
-        crate::mcp::external::client::clear_server_pools(&name);
-        crate::mcp::external::client::remove_server_config(&name);
-        state.tool_registry.write().await.remove_by_server(&name);
+        state.plugin_manager.remove_client(&name);
+        state.plugin_manager.remove_server_tools(&name).await;
 
         if removed {
             info!("Deleted remote plugin '{}'", name);
@@ -438,9 +435,8 @@ pub(crate) async fn delete_plugin_handler(
 
         // Stop MCP server
         tracing::info!("Remove: stopping MCP server for plugin '{}'", name);
-        crate::mcp::external::client::clear_server_pools(&name);
-        crate::mcp::external::client::remove_server_config(&name);
-        state.tool_registry.write().await.remove_by_server(&name);
+        state.plugin_manager.remove_client(&name);
+        state.plugin_manager.remove_server_tools(&name).await;
 
         if removed {
             info!("Deleted bundled plugin '{}'", name);
@@ -564,10 +560,11 @@ pub(crate) async fn handle_remove_by_source(
                     }
                 }
             }
-            // Stop MCP server
-            crate::mcp::external::client::clear_server_pools(name);
-            crate::mcp::external::client::remove_server_config(name);
-            state.tool_registry.write().await.remove_by_server(name);
+            // Stop MCP server (only if we found and removed the plugin)
+            if removed {
+                state.plugin_manager.remove_client(name);
+                state.plugin_manager.remove_server_tools(name).await;
+            }
             return respond_removed(name, removed);
         }
         "bundled" => {
@@ -608,10 +605,11 @@ pub(crate) async fn handle_remove_by_source(
                     }
                 }
             }
-            // Stop MCP server
-            crate::mcp::external::client::clear_server_pools(name);
-            crate::mcp::external::client::remove_server_config(name);
-            state.tool_registry.write().await.remove_by_server(name);
+            // Stop MCP server (only if we found and removed the plugin)
+            if removed {
+                state.plugin_manager.remove_client(name);
+                state.plugin_manager.remove_server_tools(name).await;
+            }
             return respond_removed(name, removed);
         }
         _ => {

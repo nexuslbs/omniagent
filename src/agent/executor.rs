@@ -1,11 +1,11 @@
-use crate::error::AppResult;
-use crate::db::types as queries;
-use crate::db::types::{Message, Thread};
 use crate::agent::config::AgentContext;
 use crate::agent::context_builder::build_prompt_context;
 use crate::agent::fail_thread::fail_thread;
 use crate::agent::helpers;
 use crate::agent::main_loop::run_main_loop;
+use crate::db::types as queries;
+use crate::db::types::{Message, Thread};
+use crate::error::AppResult;
 use crate::llm::{LLMClient, LLMConfig, ProviderId};
 
 struct PromptParts {
@@ -131,14 +131,7 @@ pub async fn process_thread(
         }
     }
 
-    let tool_names: Vec<String> = cfg
-        .mcp
-        .read()
-        .await
-        .all()
-        .iter()
-        .map(|t| t.name.clone())
-        .collect();
+    let tool_names: Vec<String> = cfg.plugin_manager.all_tool_names().await;
 
     let (prompt_parts, template_section) = build_prompt_context(
         cfg, thread, cause_msg, &channel, &profile_name, &tool_names,

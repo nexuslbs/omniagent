@@ -21,7 +21,7 @@ use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
 use crate::db::types as queries;
-use crate::mcp::{AppContext, McpRegistry, McpToolCall};
+use crate::mcp::{AppContext, McpToolCall};
 
 #[derive(Debug, FromRow)]
 struct CronJobDueRow {
@@ -43,7 +43,7 @@ struct CronJobDueRow {
 pub fn spawn(
     pool: PgPool,
     data_dir: String,
-    mcp_registry: Arc<tokio::sync::RwLock<McpRegistry>>,
+    plugin_manager: Arc<dyn crate::agent::plugin_manager::PluginManager>,
     app_context: AppContext,
 ) -> tokio::task::JoinHandle<()> {
     // Clear stale running flags from previous process life (crash/restart)
@@ -74,7 +74,7 @@ pub fn spawn(
         info!("[cron-scheduler] Starting cron scheduler loop");
 
         loop {
-            if let Err(e) = tick(&pool, &data_dir, &mcp_registry, &app_context).await {
+            if let Err(e) = tick(&pool, &data_dir, &plugin_manager, &app_context).await {
                 error!("[cron-scheduler] Tick failed: {:?}", e);
             }
             sleep(Duration::from_secs(30)).await;
@@ -86,7 +86,7 @@ pub fn spawn(
 async fn tick(
     pool: &PgPool,
     data_dir: &str,
-    mcp_registry: &Arc<tokio::sync::RwLock<McpRegistry>>,
+    plugin_manager: &Arc<dyn crate::agent::plugin_manager::PluginManager>,
     app_context: &AppContext,
 ) -> AppResult<()> {
     let jobs = fetch_due_jobs(pool).await?;
@@ -151,7 +151,7 @@ async fn tick(
             handle_action_mode(ActionModeCtx {
                 pool,
                 data_dir,
-                mcp_registry,
+                plugin_manager,
                 app_context,
                 job: &job,
                 display_name,
@@ -436,7 +436,7 @@ fn resolve_action(data_dir: &str, action_id: &str) -> AppResult<McpToolCall> {
 struct ActionModeCtx<'a> {
     pool: &'a PgPool,
     data_dir: &'a str,
-    mcp_registry: &'a Arc<tokio::sync::RwLock<McpRegistry>>,
+    plugin_manager: &'a Arc<dyn crate::agent::plugin_manager::PluginManager>,
     app_context: &'a AppContext,
     job: &'a CronJobDueRow,
     display_name: &'a str,
@@ -483,7 +483,7 @@ async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
     // Execute the tool first, THEN create the thread with the result.
     // This avoids the executor picking up a pending thread before it's terminal.
     // Snapshot the registry under the lock; tokio::sync::RwLockReadGuard is Send.
-    let mcp_snapshot = ctx.mcp_registry.read().await.clone();
+    let mcp_snapshot = ctx.plugin_manager.snapshot_registry().await;
     match mcp_snapshot
         .execute(&tool_call, ctx.app_context.clone())
         .await
@@ -790,7 +790,7 @@ fn extract_error_code(err_msg: &str) -> Option<String> {
 pub async fn fire_cron_job_by_id(
     pool: &PgPool,
     data_dir: &str,
-    mcp_registry: &Arc<tokio::sync::RwLock<McpRegistry>>,
+    plugin_manager: &Arc<dyn crate::agent::plugin_manager::PluginManager>,
     app_context: &AppContext,
     schedule_id: &str,
     force: bool,
@@ -850,7 +850,7 @@ pub async fn fire_cron_job_by_id(
         let tid = handle_action_mode(ActionModeCtx {
             pool,
             data_dir,
-            mcp_registry,
+            plugin_manager,
             app_context,
             job: &job,
             display_name,

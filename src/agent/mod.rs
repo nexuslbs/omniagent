@@ -21,6 +21,7 @@ pub mod task_registry;
 pub(crate) mod context_builder;
 pub(crate) mod fail_thread;
 pub(crate) mod main_loop;
+pub mod plugin_manager;
 pub(crate) mod response_handler;
 
 use sql_forge::sql_forge;
@@ -35,10 +36,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 use crate::agent::executor::process_thread;
+use crate::agent::plugin_manager::PluginManager;
 use crate::db::types as queries;
 use crate::db::types::CompleteThreadStats;
 use crate::llm::LLMClient;
-use crate::mcp::{AppContext, McpRegistry};
+use crate::mcp::AppContext;
 
 // Re-export commonly used types (from config submodule).
 pub use config::AgentConfig;
@@ -49,8 +51,8 @@ pub struct Agent {
     pub pool: PgPool,
     pub config: Arc<RwLock<AgentConfig>>,
     pub llm: Arc<LLMClient>,
-    pub mcp: Arc<tokio::sync::RwLock<McpRegistry>>,
     pub ctx: AppContext,
+    pub plugin_manager: Arc<dyn PluginManager>,
 }
 
 impl Agent {
@@ -61,8 +63,8 @@ impl Agent {
     pub fn new(
         pool: PgPool,
         config: Arc<RwLock<AgentConfig>>,
-        mcp: Arc<tokio::sync::RwLock<McpRegistry>>,
         ctx: AppContext,
+        plugin_manager: Arc<dyn PluginManager>,
     ) -> Self {
         let env_cfg = crate::llm::LLMConfig::from_env();
         // Read config fields inside a scope so the borrow is dropped before
@@ -103,8 +105,8 @@ impl Agent {
             pool,
             config,
             llm,
-            mcp,
             ctx,
+            plugin_manager,
         }
     }
 
@@ -124,8 +126,8 @@ impl Agent {
             pool: self.pool,
             llm: self.llm,
             config: self.config,
-            mcp: self.mcp,
             ctx: self.ctx,
+            plugin_manager: self.plugin_manager,
         };
 
         loop {

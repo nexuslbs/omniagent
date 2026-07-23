@@ -670,7 +670,7 @@ pub async fn get_settings_handler(
     }
 
     // Enrich prompt_generate_tool and prompt_compact_messages_tool with available MCP tools
-    let registry = state.tool_registry.read().await;
+    let registry = state.plugin_manager.snapshot_registry().await;
     let mcp_tools: Vec<&crate::mcp::McpTool> = registry.all();
     for tool_key in ["prompt_generate_tool", "prompt_compact_messages_tool"] {
         if let Some((_, _, ref mut meta)) = defs.iter_mut().find(|(name, _, _)| name.as_str() == tool_key)

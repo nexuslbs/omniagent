@@ -181,10 +181,15 @@ pub(crate) async fn compile_rust_crate(
         name, plugin_dir, source
     );
 
-    // Locate the Cargo.toml
+    // Locate the Cargo.toml — if none exists, skip compilation
+    // (non-Rust plugins like Python don't have Cargo.toml)
     let cargo_path = format!("{}/Cargo.toml", plugin_dir);
     if !std::path::Path::new(&cargo_path).exists() {
-        return Err(format!("No Cargo.toml found at {}", cargo_path));
+        info!(
+            "[plugin/compile] No Cargo.toml at {}, skipping compilation for '{}'",
+            cargo_path, name
+        );
+        return Ok(false);
     }
 
     // Determine the package name from Cargo.toml
