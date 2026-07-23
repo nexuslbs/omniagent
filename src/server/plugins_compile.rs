@@ -79,15 +79,19 @@ pub(crate) fn get_plugin_dir_for_category(
             );
             tracing::debug!(
                 "[compile] Remote plugin_dir base: {}, yaml_type: {:?}, name: {}",
-                base, yaml_type, name
+                base,
+                yaml_type,
+                name
             );
             // Remote plugins may have a sub-path inside the cloned repo
             // (e.g. path: "tools/test-rust-tool" in remote.yml). Append it
             // so compile_rust_crate finds the actual Cargo.toml.
-            if let Some(remote) = crate::plugins_yaml::get_remote_plugin(data_dir, yaml_type, name) {
+            if let Some(remote) = crate::plugins_yaml::get_remote_plugin(data_dir, yaml_type, name)
+            {
                 tracing::debug!(
                     "[compile] Found remote plugin: path={:?}, url={}",
-                    remote.path, remote.url
+                    remote.path,
+                    remote.url
                 );
                 if let Some(ref sub_path) = remote.path {
                     if !sub_path.is_empty() {
@@ -117,7 +121,10 @@ pub(crate) fn detect_plugin_category_cross_type(
         .flatten()
         .is_some()
     {
-        return Some((tool_type.clone(), detect_plugin_category(data_dir, &tool_type, name)));
+        return Some((
+            tool_type.clone(),
+            detect_plugin_category(data_dir, &tool_type, name),
+        ));
     }
 
     // Try provider type
@@ -208,10 +215,7 @@ pub(crate) async fn compile_rust_crate(
             .map_err(|e| format!("Failed to run cargo build for '{}': {}", name, e))?;
 
         if output.status.success() {
-            info!(
-                "[plugin/compile] Successfully compiled '{}'",
-                label,
-            );
+            info!("[plugin/compile] Successfully compiled '{}'", label,);
             return Ok(true);
         }
 
@@ -271,11 +275,9 @@ pub(crate) async fn resolve_plugin_for_compile(
     use axum::Json;
 
     // 1. Detect the plugin type by checking each YAML type
-    let yaml_type = if let Ok(Some(entry)) = plugins_yaml::get_entry(
-        data_dir,
-        &plugins_yaml::PluginYamlType::Tool,
-        name,
-    ) {
+    let yaml_type = if let Ok(Some(entry)) =
+        plugins_yaml::get_entry(data_dir, &plugins_yaml::PluginYamlType::Tool, name)
+    {
         if source.map_or(true, |s| entry.source == s) {
             plugins_yaml::PluginYamlType::Tool
         } else {

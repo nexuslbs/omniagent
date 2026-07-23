@@ -14,9 +14,15 @@ pub fn load_template(data_dir: &str, profile_name: &str, template_name: &str) ->
     if template_name.is_empty() {
         return None;
     }
-    let path: PathBuf = [data_dir, "profiles", profile_name, "templates", template_name]
-        .iter()
-        .collect();
+    let path: PathBuf = [
+        data_dir,
+        "profiles",
+        profile_name,
+        "templates",
+        template_name,
+    ]
+    .iter()
+    .collect();
     let path = if path.extension().is_some() {
         path
     } else {
@@ -30,7 +36,11 @@ pub fn load_template(data_dir: &str, profile_name: &str, template_name: &str) ->
     match fs::read_to_string(&path) {
         Ok(content) => {
             let trimmed = content.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         }
         Err(_) => None,
     }
@@ -79,7 +89,8 @@ impl MemoryStore {
             match fs::read_to_string(&memory_path) {
                 Ok(raw) => {
                     let hash = format!("{:x}", Sha256::digest(raw.as_bytes()));
-                    let expected = Self::read_expected_hash(&self.memories_dir.join("MEMORY.md.sha256"));
+                    let expected =
+                        Self::read_expected_hash(&self.memories_dir.join("MEMORY.md.sha256"));
                     let valid = expected.as_ref().map_or(true, |e| e == &hash);
                     (Some(hash), valid)
                 }
@@ -94,9 +105,16 @@ impl MemoryStore {
             if memory_entries.is_empty() {
                 "(no long-term memory records)".to_string()
             } else {
-                let count = memory_entries.lines().filter(|l| l.starts_with("- ")).count();
+                let count = memory_entries
+                    .lines()
+                    .filter(|l| l.starts_with("- "))
+                    .count();
                 let chars = memory_entries.len();
-                format!("{} records, {} chars", format_thousands(count), format_thousands(chars))
+                format!(
+                    "{} records, {} chars",
+                    format_thousands(count),
+                    format_thousands(chars)
+                )
             },
         );
 
@@ -111,11 +129,14 @@ impl MemoryStore {
         );
 
         if let Some(hash) = &memory_hash {
-            self.snapshot.insert("memory_hash".to_string(), hash.clone());
+            self.snapshot
+                .insert("memory_hash".to_string(), hash.clone());
         }
-        self.snapshot.insert("hash_valid".to_string(), hash_valid.to_string());
+        self.snapshot
+            .insert("hash_valid".to_string(), hash_valid.to_string());
 
-        self.snapshot.insert("memory_raw".to_string(), memory_entries);
+        self.snapshot
+            .insert("memory_raw".to_string(), memory_entries);
         self.snapshot.insert("user_raw".to_string(), user_entries);
     }
 
@@ -124,11 +145,17 @@ impl MemoryStore {
     }
 
     pub fn get_memory_raw(&self) -> &str {
-        self.snapshot.get("memory_raw").map(|s| s.as_str()).unwrap_or("")
+        self.snapshot
+            .get("memory_raw")
+            .map(|s| s.as_str())
+            .unwrap_or("")
     }
 
     pub fn get_user_raw(&self) -> &str {
-        self.snapshot.get("user_raw").map(|s| s.as_str()).unwrap_or("")
+        self.snapshot
+            .get("user_raw")
+            .map(|s| s.as_str())
+            .unwrap_or("")
     }
 
     pub fn memories_dir(&self) -> &Path {

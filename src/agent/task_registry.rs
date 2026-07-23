@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use tokio::sync::{RwLock, oneshot};
+use tokio::sync::{oneshot, RwLock};
 
 pub type TaskId = String;
 
@@ -114,7 +114,9 @@ impl TaskRegistry {
             let guard = self.tasks.read().await;
             guard
                 .iter()
-                .filter(|(_, e)| e.info.thread_id == thread_id && matches!(e.info.status, TaskStatus::Running))
+                .filter(|(_, e)| {
+                    e.info.thread_id == thread_id && matches!(e.info.status, TaskStatus::Running)
+                })
                 .map(|(id, _)| id.clone())
                 .collect()
         };
@@ -154,7 +156,12 @@ impl TaskRegistry {
         }
     }
 
-    pub async fn read_logs(&self, id: &str, cursor: Option<usize>, limit: Option<usize>) -> (Vec<String>, Option<usize>) {
+    pub async fn read_logs(
+        &self,
+        id: &str,
+        cursor: Option<usize>,
+        limit: Option<usize>,
+    ) -> (Vec<String>, Option<usize>) {
         let guard = self.tasks.read().await;
         if let Some(entry) = guard.get(id) {
             let buf = entry.log_buffer.read().await;

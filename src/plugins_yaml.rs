@@ -433,7 +433,10 @@ pub fn save_remote_plugin(
     let path = remote_plugins_path(data_dir);
     if let Some(parent) = std::path::Path::new(&path).parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::warn!("[plugins_yaml] Failed to create parent dir for remote.yml: {:?}", e);
+            tracing::warn!(
+                "[plugins_yaml] Failed to create parent dir for remote.yml: {:?}",
+                e
+            );
         }
     }
     let content = serde_yaml::to_string(&store)
@@ -821,44 +824,44 @@ fn build_plugin_detail(
         false
     } else {
         plugin_dir
-        .map(|dir| {
-            let dir_path = std::path::Path::new(dir);
-            if dir_path.join("Cargo.toml").exists() {
-                return true;
-            }
-            if dir_path.join("package.json").exists() {
-                return true;
-            }
-            if dir_path.join("pyproject.toml").exists() {
-                return true;
-            }
-            // Check if manifest has a script entrypoint (not a bare binary name)
-            if let Some(ep) = manifest.entrypoint.as_ref() {
-                if !ep.command.is_empty() {
-                    // Check if entrypoint references a file/script in the plugin directory
-                    // (e.g., "./target/release/mcp-server-foo" or "./plugin.py").
-                    // If the first token contains a path separator, it's a script/path.
-                    let first_word = ep.command.split_whitespace().next().unwrap_or("");
-                    if first_word.contains('/') || first_word.contains('\\') {
-                        return true;
-                    }
-                    // Bare binary names like "mcp-server-actions" or "python3" are NOT
-                    // source code: they're either pre-compiled binaries or script runners.
-                    // Known runners are checked by looking at the first word's characteristics:
-                    // - Known script runners always have extensions or are well-known names
-                    // - Plugin binaries follow the "mcp-server-*" or similar conventions
-                    // We return false here: bare binary name = no source code.
-                    return false;
+            .map(|dir| {
+                let dir_path = std::path::Path::new(dir);
+                if dir_path.join("Cargo.toml").exists() {
+                    return true;
                 }
-            }
-            // Check for source files by extension (covers remote plugins without
-            // explicit entrypoint in plugin.json: e.g. test-js-tool, test-python-tool)
-            if has_source_file_by_extension(dir_path) {
-                return true;
-            }
-            false
-        })
-        .unwrap_or(false)
+                if dir_path.join("package.json").exists() {
+                    return true;
+                }
+                if dir_path.join("pyproject.toml").exists() {
+                    return true;
+                }
+                // Check if manifest has a script entrypoint (not a bare binary name)
+                if let Some(ep) = manifest.entrypoint.as_ref() {
+                    if !ep.command.is_empty() {
+                        // Check if entrypoint references a file/script in the plugin directory
+                        // (e.g., "./target/release/mcp-server-foo" or "./plugin.py").
+                        // If the first token contains a path separator, it's a script/path.
+                        let first_word = ep.command.split_whitespace().next().unwrap_or("");
+                        if first_word.contains('/') || first_word.contains('\\') {
+                            return true;
+                        }
+                        // Bare binary names like "mcp-server-actions" or "python3" are NOT
+                        // source code: they're either pre-compiled binaries or script runners.
+                        // Known runners are checked by looking at the first word's characteristics:
+                        // - Known script runners always have extensions or are well-known names
+                        // - Plugin binaries follow the "mcp-server-*" or similar conventions
+                        // We return false here: bare binary name = no source code.
+                        return false;
+                    }
+                }
+                // Check for source files by extension (covers remote plugins without
+                // explicit entrypoint in plugin.json: e.g. test-js-tool, test-python-tool)
+                if has_source_file_by_extension(dir_path) {
+                    return true;
+                }
+                false
+            })
+            .unwrap_or(false)
     };
 
     // Compute is_script: plugins with script-based source code that
@@ -869,30 +872,36 @@ fn build_plugin_detail(
     let is_script = if manifest.api_mode.is_some() {
         false
     } else if has_source_code {
-        plugin_dir.as_ref().map(|dir| {
-            let dir_path = std::path::Path::new(dir);
-            // Compiled languages have build config files
-            if dir_path.join("Cargo.toml").exists() { false }
-            else if dir_path.join("package.json").exists() { false }
-            else if dir_path.join("pyproject.toml").exists() { false }
-            else {
-                // No build config found : check if source files are script-like
-                // Path-based entrypoints (e.g., "./plugin.py", "python3 client.py") indicate a script.
-                if let Some(ep) = manifest.entrypoint.as_ref() {
-                    if !ep.command.is_empty() {
-                        let first_word = ep.command.split_whitespace().next().unwrap_or("");
-                        if first_word.contains('/') || first_word.contains('\\') {
-                            return true; // path-based command = script file
+        plugin_dir
+            .as_ref()
+            .map(|dir| {
+                let dir_path = std::path::Path::new(dir);
+                // Compiled languages have build config files
+                if dir_path.join("Cargo.toml").exists() {
+                    false
+                } else if dir_path.join("package.json").exists() {
+                    false
+                } else if dir_path.join("pyproject.toml").exists() {
+                    false
+                } else {
+                    // No build config found : check if source files are script-like
+                    // Path-based entrypoints (e.g., "./plugin.py", "python3 client.py") indicate a script.
+                    if let Some(ep) = manifest.entrypoint.as_ref() {
+                        if !ep.command.is_empty() {
+                            let first_word = ep.command.split_whitespace().next().unwrap_or("");
+                            if first_word.contains('/') || first_word.contains('\\') {
+                                return true; // path-based command = script file
+                            }
                         }
                     }
+                    // Bare entrypoint (e.g., "mcp-server-cron") is a pre-compiled binary : not a script.
+                    // But if there are source files by extension AND no build system, it's a script.
+                    // has_source_code was set to true by has_source_file_by_extension which found .py/.js/.sh files.
+                    // Without Cargo.toml/package.json/pyproject.toml, these are script files.
+                    true
                 }
-                // Bare entrypoint (e.g., "mcp-server-cron") is a pre-compiled binary : not a script.
-                // But if there are source files by extension AND no build system, it's a script.
-                // has_source_code was set to true by has_source_file_by_extension which found .py/.js/.sh files.
-                // Without Cargo.toml/package.json/pyproject.toml, these are script files.
-                true
-            }
-        }).unwrap_or(false)
+            })
+            .unwrap_or(false)
     } else {
         false
     };
@@ -903,41 +912,41 @@ fn build_plugin_detail(
         String::new()
     } else {
         plugin_dir
-        .map(|dir| {
-            let dir_path = std::path::Path::new(dir);
-            if dir_path.join("Cargo.toml").exists() {
-                return "Rust".to_string();
-            }
-            if dir_path.join("package.json").exists() {
-                return "Node.js".to_string();
-            }
-            if let Some(ep) = manifest.entrypoint.as_ref() {
-                let cmd = ep.command.to_lowercase();
-                if cmd.contains(".py") || cmd.contains("python") {
-                    return "Python".to_string();
-                }
-                if cmd.contains(".js") || cmd.contains("node ") || cmd.contains("node.") {
-                    return "Node.js".to_string();
-                }
-            }
-            "unknown".to_string()
-        })
-        .unwrap_or_else(|| {
-            // No plugin_dir: try manifest entrypoint
-            if let Some(ep) = manifest.entrypoint.as_ref() {
-                let cmd = ep.command.to_lowercase();
-                if cmd.contains(".py") || cmd.contains("python") {
-                    return "Python".to_string();
-                }
-                if cmd.contains(".js") || cmd.contains("node ") || cmd.contains("node.") {
-                    return "Node.js".to_string();
-                }
-                if cmd.contains("mcp-server-") {
+            .map(|dir| {
+                let dir_path = std::path::Path::new(dir);
+                if dir_path.join("Cargo.toml").exists() {
                     return "Rust".to_string();
                 }
-            }
-            String::new()
-        })
+                if dir_path.join("package.json").exists() {
+                    return "Node.js".to_string();
+                }
+                if let Some(ep) = manifest.entrypoint.as_ref() {
+                    let cmd = ep.command.to_lowercase();
+                    if cmd.contains(".py") || cmd.contains("python") {
+                        return "Python".to_string();
+                    }
+                    if cmd.contains(".js") || cmd.contains("node ") || cmd.contains("node.") {
+                        return "Node.js".to_string();
+                    }
+                }
+                "unknown".to_string()
+            })
+            .unwrap_or_else(|| {
+                // No plugin_dir: try manifest entrypoint
+                if let Some(ep) = manifest.entrypoint.as_ref() {
+                    let cmd = ep.command.to_lowercase();
+                    if cmd.contains(".py") || cmd.contains("python") {
+                        return "Python".to_string();
+                    }
+                    if cmd.contains(".js") || cmd.contains("node ") || cmd.contains("node.") {
+                        return "Node.js".to_string();
+                    }
+                    if cmd.contains("mcp-server-") {
+                        return "Rust".to_string();
+                    }
+                }
+                String::new()
+            })
     };
 
     PluginDetail {
@@ -980,8 +989,8 @@ fn build_plugin_detail(
 /// (excluding typical build output, .git, and node_modules directories).
 fn has_source_file_by_extension(dir_path: &std::path::Path) -> bool {
     let source_extensions = [
-        ".py", ".js", ".ts", ".jsx", ".tsx", ".rb", ".go", ".sh",
-        ".java", ".kt", ".swift", ".c", ".cpp", ".h", ".hpp",
+        ".py", ".js", ".ts", ".jsx", ".tsx", ".rb", ".go", ".sh", ".java", ".kt", ".swift", ".c",
+        ".cpp", ".h", ".hpp",
     ];
     walkdir::WalkDir::new(dir_path)
         .max_depth(3)
@@ -993,8 +1002,10 @@ fn has_source_file_by_extension(dir_path: &std::path::Path) -> bool {
             // Skip .git, target/, node_modules/, .remote/ directories
             let parent = path.parent().unwrap_or(path);
             let parent_name = parent.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if parent_name == ".git" || parent_name == "target"
-                || parent_name == "node_modules" || parent_name == ".remote"
+            if parent_name == ".git"
+                || parent_name == "target"
+                || parent_name == "node_modules"
+                || parent_name == ".remote"
             {
                 return false;
             }
@@ -1229,7 +1240,11 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
 
             // For the primary source, pass the real YAML entry; for duplicates, pass None
             // to trigger default (disabled for built-in, and forced "duplicated" status)
-            let detail_yaml_entry = if is_primary.unwrap_or(true) { yaml_entry_ref } else { None };
+            let detail_yaml_entry = if is_primary.unwrap_or(true) {
+                yaml_entry_ref
+            } else {
+                None
+            };
 
             let detail = build_plugin_detail(
                 manifest,
@@ -2034,5 +2049,4 @@ providers:
             PathBuf::from(path).join("plugins.yml")
         );
     }
-
 }

@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-//  Constants 
+//  Constants
 
 fn private_key_path() -> String {
     let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| {
@@ -23,8 +23,9 @@ fn private_key_path() -> String {
         std::process::exit(1);
     });
     format!(
-
-"{0}/data/credentials/nexuslbs-app.2026-06-04.private-key.pem", data_dir)
+        "{0}/data/credentials/nexuslbs-app.2026-06-04.private-key.pem",
+        data_dir
+    )
 }
 
 fn dot_env_path() -> String {
@@ -39,7 +40,7 @@ const GITHUB_ORG: &str = "nexuslbs";
 const GITHUB_API: &str = "https://api.github.com";
 const USER_AGENT: &str = "mcp-server-git";
 
-//  Token Cache 
+//  Token Cache
 
 struct TokenCacheInner {
     token: Option<(String, u64)>,
@@ -71,7 +72,7 @@ impl TokenCacheInner {
 static TOKEN_CACHE: Lazy<Mutex<TokenCacheInner>> =
     Lazy::new(|| Mutex::new(TokenCacheInner { token: None }));
 
-//  Helpers 
+//  Helpers
 
 /// Base64url encode without padding.
 fn base64url_encode(data: &[u8]) -> String {
@@ -92,8 +93,8 @@ fn load_github_creds() -> Result<(String, String)> {
     let mut found_inst_id = inst_id;
 
     if Path::new(&dot_env_path()).exists() {
-        let content = std::fs::read_to_string(&dot_env_path())
-            .context("Failed to read .env file")?;
+        let content =
+            std::fs::read_to_string(&dot_env_path()).context("Failed to read .env file")?;
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -103,7 +104,9 @@ fn load_github_creds() -> Result<(String, String)> {
                 let val = v.trim().trim_matches('\'').trim_matches('"').to_string();
                 match k.trim() {
                     "GITHUB_APP_ID" if found_app_id.is_none() => found_app_id = Some(val),
-                    "GITHUB_INSTALLATION_ID" if found_inst_id.is_none() => found_inst_id = Some(val),
+                    "GITHUB_INSTALLATION_ID" if found_inst_id.is_none() => {
+                        found_inst_id = Some(val)
+                    }
                     _ => {}
                 }
             }
@@ -261,7 +264,7 @@ fn run_git(args: &[&str], cwd: Option<&str>, timeout_secs: u64) -> (String, Stri
     }
 }
 
-//  Tool Handlers 
+//  Tool Handlers
 
 /// `create_github_repo`: create a repository under nexuslbs org.
 fn handle_create_github_repo(args: Value) -> Result<(String, bool)> {
@@ -330,11 +333,7 @@ fn handle_create_github_repo(args: Value) -> Result<(String, bool)> {
 
     let err_msg = body["message"].as_str().unwrap_or("Unknown error");
     Ok((
-        format!(
-            "GitHub API error ({}): {}",
-            status.as_u16(),
-            err_msg
-        ),
+        format!("GitHub API error ({}): {}", status.as_u16(), err_msg),
         true,
     ))
 }
@@ -497,8 +496,11 @@ fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
         remote_url.clone()
     };
 
-    let (_push_stdout, push_stderr, push_rc) =
-        run_git(&["push", &push_url, &format!("HEAD:{}", branch)], Some(&repo_dir), 120);
+    let (_push_stdout, push_stderr, push_rc) = run_git(
+        &["push", &push_url, &format!("HEAD:{}", branch)],
+        Some(&repo_dir),
+        120,
+    );
 
     if push_rc != 0 {
         // Truncate stderr for display
@@ -561,7 +563,7 @@ fn handle_status(args: Value) -> Result<(String, bool)> {
     ))
 }
 
-//  Main 
+//  Main
 
 #[tokio::main]
 async fn main() -> Result<()> {

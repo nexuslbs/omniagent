@@ -54,10 +54,15 @@ impl ExternalProviderClient {
             .spawn()
             .ctx(format!("Failed to spawn provider plugin '{}'", self.name))?;
 
-        let child_stdin = child.stdin.take()
-            .ok_or_else(|| Error::Message(format!("Failed to open stdin for provider '{}'", self.name)))?;
-        let child_stdout = child.stdout.take()
-            .ok_or_else(|| Error::Message(format!("Failed to open stdout for provider '{}'", self.name)))?;
+        let child_stdin = child.stdin.take().ok_or_else(|| {
+            Error::Message(format!("Failed to open stdin for provider '{}'", self.name))
+        })?;
+        let child_stdout = child.stdout.take().ok_or_else(|| {
+            Error::Message(format!(
+                "Failed to open stdout for provider '{}'",
+                self.name
+            ))
+        })?;
 
         // Store process, stdin, stdout handles
         {
@@ -78,27 +83,39 @@ impl ExternalProviderClient {
         {
             let mut guard = self.stdin.lock().await;
             if let Some(stdin) = guard.as_mut() {
-                stdin.write_all(init_req.as_bytes()).await
-                    .ctx(format!("Failed to write initialize to provider '{}'", self.name))?;
-                stdin.flush().await
-                    .ctx(format!("Failed to flush stdin for provider '{}'", self.name))?;
+                stdin.write_all(init_req.as_bytes()).await.ctx(format!(
+                    "Failed to write initialize to provider '{}'",
+                    self.name
+                ))?;
+                stdin.flush().await.ctx(format!(
+                    "Failed to flush stdin for provider '{}'",
+                    self.name
+                ))?;
             }
         }
 
         // Read response via stored stdout (tokio::sync::Mutex is Send)
         let init_result = {
             let mut guard = self.stdout.lock().await;
-            let stdout = guard.as_mut()
-                .ok_or_else(|| Error::Message(format!("Stdout not available for provider '{}'", self.name)))?;
+            let stdout = guard.as_mut().ok_or_else(|| {
+                Error::Message(format!("Stdout not available for provider '{}'", self.name))
+            })?;
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
-            reader.read_line(&mut line).await
-                .ctx(format!("Failed to read initialize response from provider '{}'", self.name))?;
+            reader.read_line(&mut line).await.ctx(format!(
+                "Failed to read initialize response from provider '{}'",
+                self.name
+            ))?;
             if line.trim().is_empty() {
-                return Err(Error::Message(format!("Empty initialize response from provider '{}'", self.name)));
+                return Err(Error::Message(format!(
+                    "Empty initialize response from provider '{}'",
+                    self.name
+                )));
             }
-            let resp: ProviderResponse = serde_json::from_str(line.trim())
-                .ctx(format!("Failed to parse initialize response from provider '{}'", self.name))?;
+            let resp: ProviderResponse = serde_json::from_str(line.trim()).ctx(format!(
+                "Failed to parse initialize response from provider '{}'",
+                self.name
+            ))?;
             match resp {
                 ProviderResponse::Success { id: _, result } => result,
                 ProviderResponse::Error { id: _, error } => {
@@ -129,7 +146,8 @@ impl ExternalProviderClient {
     pub async fn complete(&self, params: &CompleteParams) -> AppResult<CompleteResult> {
         if !self.initialized.load(Ordering::SeqCst) {
             return Err(Error::Message(format!(
-                "Provider '{}' not initialized: call start() first", self.name
+                "Provider '{}' not initialized: call start() first",
+                self.name
             )));
         }
 
@@ -138,65 +156,111 @@ impl ExternalProviderClient {
         let request = build_complete_request(id, params) + "\n";
         {
             let mut guard = self.stdin.lock().await;
-            let stdin = guard.as_mut()
-                .ok_or_else(|| Error::Message(format!("Stdin not available for provider '{}'", self.name)))?;
-            stdin.write_all(request.as_bytes()).await
+            let stdin = guard.as_mut().ok_or_else(|| {
+                Error::Message(format!("Stdin not available for provider '{}'", self.name))
+            })?;
+            stdin
+                .write_all(request.as_bytes())
+                .await
                 .ctx(format!("Failed to write to provider '{}'", self.name))?;
-            stdin.flush().await
-                .ctx(format!("Failed to flush stdin for provider '{}'", self.name))?;
+            stdin.flush().await.ctx(format!(
+                "Failed to flush stdin for provider '{}'",
+                self.name
+            ))?;
         }
 
         // Read response via stored stdout
         let line = {
             let mut guard = self.stdout.lock().await;
-            let stdout = guard.as_mut()
-                .ok_or_else(|| Error::Message(format!("Stdout not available for provider '{}'", self.name)))?;
+            let stdout = guard.as_mut().ok_or_else(|| {
+                Error::Message(format!("Stdout not available for provider '{}'", self.name))
+            })?;
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
-            reader.read_line(&mut line).await
-                .ctx(format!("Failed to read completion response from provider '{}'", self.name))?;
+            reader.read_line(&mut line).await.ctx(format!(
+                "Failed to read completion response from provider '{}'",
+                self.name
+            ))?;
             line
         };
 
         if line.trim().is_empty() {
-            return Err(Error::Message(format!("Empty completion response from provider '{}'", self.name)));
+            return Err(Error::Message(format!(
+                "Empty completion response from provider '{}'",
+                self.name
+            )));
         }
 
-        let resp: ProviderResponse = serde_json::from_str(line.trim())
-            .ctx(format!("Failed to parse completion response: {}", line.trim()))?;
+        let resp: ProviderResponse = serde_json::from_str(line.trim()).ctx(format!(
+            "Failed to parse completion response: {}",
+            line.trim()
+        ))?;
 
         match resp {
-            ProviderResponse::Success { id: resp_id, result } => {
+            ProviderResponse::Success {
+                id: resp_id,
+                result,
+            } => {
                 if resp_id != id {
                     tracing::warn!(
                         "Provider '{}' returned id {} (expected {}), ignoring",
-                        self.name, resp_id, id
+                        self.name,
+                        resp_id,
+                        id
                     );
                 }
-                let content = result.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let reasoning = result.get("reasoning").and_then(|v| v.as_str()).map(String::from);
-                let tool_calls = result.get("tool_calls").and_then(|v| v.as_array())
-                    .cloned().unwrap_or_default();
-                let usage = result.get("usage").map(|u| crate::provider::external::UsageResult {
-                    prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                    completion_tokens: u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                    cached_tokens: u.get("cached_tokens").and_then(|v| v.as_u64()).map(|v| v as u32),
-                    reasoning_tokens: u.get("reasoning_tokens").and_then(|v| v.as_u64()).map(|v| v as u32),
-                });
-                Ok(CompleteResult { content, reasoning, tool_calls, usage })
+                let content = result
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let reasoning = result
+                    .get("reasoning")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let tool_calls = result
+                    .get("tool_calls")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let usage = result
+                    .get("usage")
+                    .map(|u| crate::provider::external::UsageResult {
+                        prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
+                            as u32,
+                        completion_tokens: u
+                            .get("completion_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32,
+                        cached_tokens: u
+                            .get("cached_tokens")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as u32),
+                        reasoning_tokens: u
+                            .get("reasoning_tokens")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as u32),
+                    });
+                Ok(CompleteResult {
+                    content,
+                    reasoning,
+                    tool_calls,
+                    usage,
+                })
             }
-            ProviderResponse::Error { id: _, error } => {
-                Err(Error::Message(format!(
-                    "Provider '{}' completion error (code {}): {}",
-                    self.name, error.code, error.message
-                )))
-            }
+            ProviderResponse::Error { id: _, error } => Err(Error::Message(format!(
+                "Provider '{}' completion error (code {}): {}",
+                self.name, error.code, error.message
+            ))),
         }
     }
 
     /// Get the list of models from initialization.
     pub fn models(&self) -> Vec<String> {
-        self.models.lock().expect("ModelsCache lock poisoned").clone()
+        self.models
+            .lock()
+            .expect("ModelsCache lock poisoned")
+            .clone()
     }
 }
 

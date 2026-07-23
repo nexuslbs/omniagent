@@ -52,26 +52,47 @@ pub async fn process_thread(
 
     if profile_registry.get(&profile_name).is_none() {
         return fail_thread(
-            cfg, thread, cause_msg, &mut next_seq,
-            format!("Invalid configuration: profile='{}' does not exist.", profile_name),
+            cfg,
+            thread,
+            cause_msg,
+            &mut next_seq,
+            format!(
+                "Invalid configuration: profile='{}' does not exist.",
+                profile_name
+            ),
             "invalid-profile",
-        ).await;
+        )
+        .await;
     }
 
     if provider_name.as_ref().is_none_or(|s| s.is_empty()) {
         return fail_thread(
-            cfg, thread, cause_msg, &mut next_seq,
-            format!("Invalid configuration: provider is not set on thread {}.", thread.id),
+            cfg,
+            thread,
+            cause_msg,
+            &mut next_seq,
+            format!(
+                "Invalid configuration: provider is not set on thread {}.",
+                thread.id
+            ),
             "no-provider",
-        ).await;
+        )
+        .await;
     }
 
     if model_name.as_ref().is_none_or(|s| s.is_empty()) {
         return fail_thread(
-            cfg, thread, cause_msg, &mut next_seq,
-            format!("Invalid configuration: model is not set on thread {}.", thread.id),
+            cfg,
+            thread,
+            cause_msg,
+            &mut next_seq,
+            format!(
+                "Invalid configuration: model is not set on thread {}.",
+                thread.id
+            ),
             "no-model",
-        ).await;
+        )
+        .await;
     }
 
     let prof = profile_registry
@@ -133,13 +154,22 @@ pub async fn process_thread(
 
     let tool_names: Vec<String> = cfg.plugin_manager.all_tool_names().await;
 
-    let (prompt_parts, template_section) = build_prompt_context(
-        cfg, thread, cause_msg, &channel, &profile_name, &tool_names,
-    ).await?;
+    let (prompt_parts, template_section) =
+        build_prompt_context(cfg, thread, cause_msg, &channel, &profile_name, &tool_names).await?;
     let saved = run_main_loop(
-        cfg, thread, cause_msg, &channel, &profile_name, &tool_names,
-        prompt_parts, template_section,
-        &mut next_seq, &per_thread_llm, &prof, start_time,
-    ).await?;
+        cfg,
+        thread,
+        cause_msg,
+        &channel,
+        &profile_name,
+        &tool_names,
+        prompt_parts,
+        template_section,
+        &mut next_seq,
+        &per_thread_llm,
+        &prof,
+        start_time,
+    )
+    .await?;
     Ok(saved)
 }

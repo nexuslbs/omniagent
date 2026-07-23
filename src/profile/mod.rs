@@ -105,7 +105,12 @@ impl Profile {
 /// Read the default profile name from the global config, falling back to "default".
 pub fn default_profile_name() -> String {
     crate::agent::config::get_global()
-        .map(|g| g.read().expect("GlobalConfig lock poisoned").default_profile.clone())
+        .map(|g| {
+            g.read()
+                .expect("GlobalConfig lock poisoned")
+                .default_profile
+                .clone()
+        })
         .unwrap_or_else(|| "omni".to_string())
 }
 

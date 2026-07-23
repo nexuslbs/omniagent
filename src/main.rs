@@ -131,7 +131,7 @@ async fn run_server() -> AppResult<()> {
     let mcp = mcp::default_registry(&mut ctx).await;
 
     let plugin_manager: Arc<dyn crate::agent::plugin_manager::PluginManager> = Arc::new(
-        crate::agent::plugin_manager::ActorPluginManager::new(mcp, external_clients.clone())
+        crate::agent::plugin_manager::ActorPluginManager::new(mcp, external_clients.clone()),
     );
 
     // Register platform-specific file readers for the read_attached_file tool
@@ -139,7 +139,10 @@ async fn run_server() -> AppResult<()> {
     // config gets a generic HTTP Bearer file reader. No plugin names are hardcoded.
     let file_readers = crate::platform::external::build_platform_file_readers(&external_plugins);
     for (platform_name, reader) in file_readers {
-        ctx.platform_file_readers.write().await.insert(platform_name, reader);
+        ctx.platform_file_readers
+            .write()
+            .await
+            .insert(platform_name, reader);
     }
 
     // Build the agent with shared mutable config

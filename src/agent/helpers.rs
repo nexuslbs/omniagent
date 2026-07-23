@@ -74,7 +74,11 @@ pub async fn persist_or_abort(
             )
             .await
             {
-                tracing::warn!("[helpers] Failed to mark thread {} failed after FK violation: {:?}", thread_id, e);
+                tracing::warn!(
+                    "[helpers] Failed to mark thread {} failed after FK violation: {:?}",
+                    thread_id,
+                    e
+                );
             }
             CreateMessageResult::FkViolation
         }

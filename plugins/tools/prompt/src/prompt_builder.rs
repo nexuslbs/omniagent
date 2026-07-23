@@ -20,7 +20,10 @@ pub struct PromptBuilderConfig {
 
 impl Default for PromptBuilderConfig {
     fn default() -> Self {
-        Self { memory_max_chars: 5_000, soul_max_chars: 1_000 }
+        Self {
+            memory_max_chars: 5_000,
+            soul_max_chars: 1_000,
+        }
     }
 }
 
@@ -34,42 +37,92 @@ fn build_dynamic_identity(tool_names: &[String]) -> String {
     let has_kanban = tool_names.iter().any(|n| n.starts_with("kanban"));
     let has_cron = tool_names.iter().any(|n| n.starts_with("cron"));
     let has_git = tool_names.iter().any(|n| {
-        n.starts_with("commit") || n.starts_with("create_github") || n.starts_with("clone_repo") || n == "status"
+        n.starts_with("commit")
+            || n.starts_with("create_github")
+            || n.starts_with("clone_repo")
+            || n == "status"
     });
     let has_subtasks = tool_names.iter().any(|n| n.starts_with("manage_subtask"));
-    let has_skills = tool_names.iter().any(|n| n.starts_with("create_skill") || n.starts_with("list_skills"));
-    let has_plugin = tool_names.iter().any(|n| n == "plugin_manager" || n == "list_plugins");
+    let has_skills = tool_names
+        .iter()
+        .any(|n| n.starts_with("create_skill") || n.starts_with("list_skills"));
+    let has_plugin = tool_names
+        .iter()
+        .any(|n| n == "plugin_manager" || n == "list_plugins");
 
     let mut parts: Vec<&str> = vec!["filesystem (read/write/list)"];
-    if has_fetch { parts.push("fetch (HTTP)"); }
-    if has_search { parts.push("search (messages/wiki)"); }
-    if has_query { parts.push("query_database (SQL)"); }
-    if has_kanban { parts.push("kanban"); }
-    if has_cron { parts.push("cron"); }
-    if has_git { parts.push("git"); }
-    if has_subtasks { parts.push("manage_subtasks"); }
-    if has_skills { parts.push("skills"); }
-    if has_plugin { parts.push("plugin_manager"); }
-
-    let is_categorized = |name: &str| -> bool {
-        name.starts_with("filesystem") || name == "fetch" || name.starts_with("search_")
-            || name.starts_with("query_") || name.starts_with("kanban") || name.starts_with("cron")
-            || name.starts_with("commit") || name.starts_with("create_github")
-            || name.starts_with("clone_repo") || name == "status"
-            || name.starts_with("manage_subtask") || name.starts_with("create_skill")
-            || name.starts_with("list_skills") || name == "plugin_manager" || name == "list_plugins"
-            || name == "list_tool_details" || name == "compose"
-            || name.starts_with("hindsight_") || name.starts_with("docker_")
-            || name == "promote_to_memory" || name == "list_memories"
-            || name == "review_memories" || name == "manage_memory"
-            || name == "get_metrics" || name.starts_with("setup_") || name.starts_with("kanban_")
-    };
-    let extra: Vec<&str> = tool_names.iter().map(|s| s.as_str()).filter(|n| !is_categorized(n)).collect();
-    if !extra.is_empty() {
-        for e in &extra { parts.push(e); }
+    if has_fetch {
+        parts.push("fetch (HTTP)");
+    }
+    if has_search {
+        parts.push("search (messages/wiki)");
+    }
+    if has_query {
+        parts.push("query_database (SQL)");
+    }
+    if has_kanban {
+        parts.push("kanban");
+    }
+    if has_cron {
+        parts.push("cron");
+    }
+    if has_git {
+        parts.push("git");
+    }
+    if has_subtasks {
+        parts.push("manage_subtasks");
+    }
+    if has_skills {
+        parts.push("skills");
+    }
+    if has_plugin {
+        parts.push("plugin_manager");
     }
 
-    let tool_list = if parts.is_empty() { tool_names.join(", ") } else { parts.join(", ") };
+    let is_categorized = |name: &str| -> bool {
+        name.starts_with("filesystem")
+            || name == "fetch"
+            || name.starts_with("search_")
+            || name.starts_with("query_")
+            || name.starts_with("kanban")
+            || name.starts_with("cron")
+            || name.starts_with("commit")
+            || name.starts_with("create_github")
+            || name.starts_with("clone_repo")
+            || name == "status"
+            || name.starts_with("manage_subtask")
+            || name.starts_with("create_skill")
+            || name.starts_with("list_skills")
+            || name == "plugin_manager"
+            || name == "list_plugins"
+            || name == "list_tool_details"
+            || name == "compose"
+            || name.starts_with("hindsight_")
+            || name.starts_with("docker_")
+            || name == "promote_to_memory"
+            || name == "list_memories"
+            || name == "review_memories"
+            || name == "manage_memory"
+            || name == "get_metrics"
+            || name.starts_with("setup_")
+            || name.starts_with("kanban_")
+    };
+    let extra: Vec<&str> = tool_names
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|n| !is_categorized(n))
+        .collect();
+    if !extra.is_empty() {
+        for e in &extra {
+            parts.push(e);
+        }
+    }
+
+    let tool_list = if parts.is_empty() {
+        tool_names.join(", ")
+    } else {
+        parts.join(", ")
+    };
 
     format!("You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice.")
 }
@@ -124,16 +177,24 @@ and they will be sent as native photos."),
 
 fn read_memory_section(memory_store: &MemoryStore) -> String {
     let raw = memory_store.get_memory_raw();
-    if raw.is_empty() { return String::new(); }
+    if raw.is_empty() {
+        return String::new();
+    }
     format!("## MEMORY (your personal notes)\n{}", raw)
 }
 
 fn read_user_profile_section(memory_store: &MemoryStore, soul_max_chars: usize) -> String {
     let raw = memory_store.get_user_raw();
-    if raw.is_empty() { return String::new(); }
+    if raw.is_empty() {
+        return String::new();
+    }
     let truncated = truncate_content(raw, soul_max_chars);
     let header = if raw.len() > soul_max_chars {
-        format!("## USER PROFILE (who the user is) [TRUNCATED: showing first {} of {} chars]", soul_max_chars, raw.len())
+        format!(
+            "## USER PROFILE (who the user is) [TRUNCATED: showing first {} of {} chars]",
+            soul_max_chars,
+            raw.len()
+        )
     } else {
         format!("## USER PROFILE (who the user is) [{} chars]", raw.len())
     };
@@ -141,9 +202,20 @@ fn read_user_profile_section(memory_store: &MemoryStore, soul_max_chars: usize) 
 }
 
 fn truncate_content(content: &str, max_chars: usize) -> String {
-    if content.len() <= max_chars { return content.to_string(); }
-    let truncate_at = content.char_indices().nth(max_chars).map(|(i, _)| i).unwrap_or(content.len());
-    format!("{}...\n\n[... truncated from {} to ~{} chars]", &content[..truncate_at], content.len(), max_chars)
+    if content.len() <= max_chars {
+        return content.to_string();
+    }
+    let truncate_at = content
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(content.len());
+    format!(
+        "{}...\n\n[... truncated from {} to ~{} chars]",
+        &content[..truncate_at],
+        content.len(),
+        max_chars
+    )
 }
 
 /// Truncate content to `max_chars` bytes (safe UTF-8 boundary).
@@ -162,7 +234,14 @@ pub fn build_system_prompt(
     tool_names: &[String],
     config: &PromptBuilderConfig,
 ) -> String {
-    let parts = build_system_prompt_parts(memory_store, platform, system_message, profile_name, tool_names, config);
+    let parts = build_system_prompt_parts(
+        memory_store,
+        platform,
+        system_message,
+        profile_name,
+        tool_names,
+        config,
+    );
     parts.join("\n\n")
 }
 
@@ -241,7 +320,6 @@ Be specific about which tool to use and what parameters to pass. \
 Aim for the minimum number of steps to complete the task. \
 Wrap your plan in a <plan> block. After delivering the final answer, \
 evaluate: if the task was completed, call the completion tool.",
-
             iter_note = if p.max_iterations > 1 {
                 format!(" (iteration {}/{})", p.plan_iteration + 1, p.max_iterations)
             } else {
@@ -256,7 +334,6 @@ Review what was done vs what remains. Identify the specific \
 blockage and create a revised plan. Each step must include \
 which tool to use and what parameters.\n\n\
 Previous plan:\n{}",
-
             p.plan_iteration + 1,
             p.max_iterations,
             p.previous_plan.unwrap_or("(none)")
@@ -306,7 +383,9 @@ pub struct ThreadSubtask {
 }
 
 pub fn format_subtask_section(subtasks: &[ThreadSubtask], thread_id: i64) -> Option<String> {
-    if subtasks.is_empty() { return None; }
+    if subtasks.is_empty() {
+        return None;
+    }
     let mut lines = vec![format!("## Subtasks (Thread #{thread_id})")];
     for (i, s) in subtasks.iter().enumerate() {
         let icon = match s.status {

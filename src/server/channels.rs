@@ -243,8 +243,7 @@ async fn update_channel_handler(
             || body.current_profile.is_some()
             || body.current_provider.is_some()
             || body.current_model.is_some();
-        let blocked =
-            body.name.is_some() || body.plan.is_some() || body.template.is_some();
+        let blocked = body.name.is_some() || body.plan.is_some() || body.template.is_some();
         if !allowed || blocked {
             return err_json(
                 StatusCode::FORBIDDEN,

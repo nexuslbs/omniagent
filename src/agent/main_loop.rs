@@ -26,7 +26,6 @@ pub(crate) async fn run_main_loop(
     prof: &crate::profile::Profile,
     start_time: std::time::Instant,
 ) -> AppResult<Message> {
-
     // Track cumulative token usage across all LLM calls
     let mut cumulative_usage: Option<crate::llm::Usage> = None;
     let mut force_failed: bool = false;
@@ -66,7 +65,8 @@ pub(crate) async fn run_main_loop(
             }
             if !prompt_parts.context.is_empty() {
                 planning_messages.push(ChatMessage::system(&format!(
-                    "=== Context ===\n{}", prompt_parts.context
+                    "=== Context ===\n{}",
+                    prompt_parts.context
                 )));
             }
             // Inject the task template so the plan is aware of the instructions
@@ -158,12 +158,18 @@ Previous plan:\n{}",
             match per_thread_llm.completion(plan_request).await {
                 Ok(resp) => {
                     helpers::merge_usage(&mut cumulative_usage, resp.usage.clone());
-                    let plan_token_usage = resp.usage.as_ref().map(|u| serde_json::json!({
-                        "prompt_tokens": u.prompt_tokens,
-                        "completion_tokens": u.completion_tokens,
-                        "cached_tokens": u.cached_tokens,
-                        "reasoning_tokens": u.reasoning_tokens,
-                    })).unwrap_or(serde_json::json!({}));
+                    let plan_token_usage = resp
+                        .usage
+                        .as_ref()
+                        .map(|u| {
+                            serde_json::json!({
+                                "prompt_tokens": u.prompt_tokens,
+                                "completion_tokens": u.completion_tokens,
+                                "cached_tokens": u.cached_tokens,
+                                "reasoning_tokens": u.reasoning_tokens,
+                            })
+                        })
+                        .unwrap_or(serde_json::json!({}));
                     let plan_duration_ms = resp.duration_ms as i32;
                     // Use reasoning as fallback when plan content is empty (e.g. DeepSeek
                     // puts everything in reasoning/thinking and leaves content empty).
@@ -208,12 +214,12 @@ Previous plan:\n{}",
                             summary_text: None,
                             is_summary: false,
                             msg_type: "plan".to_string(),
-                        msg_subtype: Some("markdown".to_string()),
-                        iteration_number: 1,
-                        duration_ms: plan_duration_ms,
-                        token_usage: plan_token_usage,
-                    };
-                                               match queries::create_message(&cfg.pool, &plan_msg).await {
+                            msg_subtype: Some("markdown".to_string()),
+                            iteration_number: 1,
+                            duration_ms: plan_duration_ms,
+                            token_usage: plan_token_usage,
+                        };
+                        match queries::create_message(&cfg.pool, &plan_msg).await {
                             Ok(_) => {}
                             Err(e) => warn!(
                                 "[plan] Failed to persist plan for thread {}: {:?}",
@@ -362,12 +368,14 @@ Previous plan:\n{}",
     messages.push(ChatMessage::user(&prompt_parts.user));
 
     // 5. Build tool definitions from the profile's allowed tools
-    let tools_def = cfg.plugin_manager.snapshot_registry().await.to_openai_tools(&prof.allowed_tools);
+    let tools_def = cfg
+        .plugin_manager
+        .snapshot_registry()
+        .await
+        .to_openai_tools(&prof.allowed_tools);
 
     // 6. Tool-calling loop: max iterations controls total LLM calls
-    let iter_limit =
-        queries::max_iterations_for_plan(&cfg.config_snapshot(), thread.plan)
-            as i32;
+    let iter_limit = queries::max_iterations_for_plan(&cfg.config_snapshot(), thread.plan) as i32;
     // The plan phase consumed 1 iteration (if it ran). Subtract it so the
     // tool-calling loop gets the remaining budget.
     let plan_consumed = if should_plan { 1 } else { 0 };
@@ -416,16 +424,36 @@ Previous plan:\n{}",
                 }),
                 id: String::new(),
             };
-            match cfg.plugin_manager.snapshot_registry().await.execute(&condense_call, cfg.ctx.clone()).await {
+            match cfg
+                .plugin_manager
+                .snapshot_registry()
+                .await
+                .execute(&condense_call, cfg.ctx.clone())
+                .await
+            {
                 Ok(res) => {
                     if let Ok(result) = serde_json::from_str::<serde_json::Value>(&res.content) {
-                        if result.get("was_condensed").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            if let Some(condensed) = result.get("messages").and_then(|v| v.as_array()) {
-                                messages = serde_json::from_value(serde_json::Value::Array(condensed.clone()))
-                                    .unwrap_or(messages);
+                        if result
+                            .get("was_condensed")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            if let Some(condensed) =
+                                result.get("messages").and_then(|v| v.as_array())
+                            {
+                                messages = serde_json::from_value(serde_json::Value::Array(
+                                    condensed.clone(),
+                                ))
+                                .unwrap_or(messages);
                                 last_condense_iteration = current_iter;
-                                let before = result.get("before_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                                let after = result.get("after_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let before = result
+                                    .get("before_count")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                let after = result
+                                    .get("after_count")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
                                 info!(
                                     "[context] Condensed messages via {}: {} → {} (iteration {})",
                                     condense_tool, before, after, current_iter,
@@ -435,7 +463,10 @@ Previous plan:\n{}",
                     }
                 }
                 Err(e) => {
-                    warn!("[context] Condense tool '{}' failed: {} : continuing without condensation", condense_tool, e);
+                    warn!(
+                        "[context] Condense tool '{}' failed: {} : continuing without condensation",
+                        condense_tool, e
+                    );
                 }
             }
         }
@@ -707,13 +738,7 @@ Previous plan:\n{}",
         let tool_content = response
             .tool_calls
             .iter()
-            .map(|tc| {
-                format!(
-                    "{}: {}",
-                    tc.function.name.clone(),
-                    tc.function.arguments
-                )
-            })
+            .map(|tc| format!("{}: {}", tc.function.name.clone(), tc.function.arguments))
             .collect::<Vec<_>>()
             .join("\n");
 
@@ -741,12 +766,18 @@ Previous plan:\n{}",
             msg_subtype: None,
             iteration_number: current_iter,
             duration_ms: response.duration_ms as i32,
-            token_usage: response.usage.as_ref().map(|u| serde_json::json!({
-                "prompt_tokens": u.prompt_tokens,
-                "completion_tokens": u.completion_tokens,
-                "cached_tokens": u.cached_tokens,
-                "reasoning_tokens": u.reasoning_tokens,
-            })).unwrap_or(serde_json::json!({})),
+            token_usage: response
+                .usage
+                .as_ref()
+                .map(|u| {
+                    serde_json::json!({
+                        "prompt_tokens": u.prompt_tokens,
+                        "completion_tokens": u.completion_tokens,
+                        "cached_tokens": u.cached_tokens,
+                        "reasoning_tokens": u.reasoning_tokens,
+                    })
+                })
+                .unwrap_or(serde_json::json!({})),
         };
         match helpers::persist_or_abort(&cfg.pool, &tool_call_msg, thread.id).await {
             helpers::CreateMessageResult::FkViolation => {
@@ -1101,10 +1132,24 @@ Previous plan:\n{}",
     // 9. Save the main agent response (when limit_reached, generate LLM summary instead)
     // 9. Save the main agent response + cleanup
     let saved = handle_response(
-        cfg, thread, cause_msg, &channel, *next_seq, start_time, &messages,
-        &mut cumulative_usage, &mut force_failed, limit_reached, current_iter,
-        iter_limit, &per_thread_llm, final_content, token_usage_json,
-        evidence_metadata, enable_subtasks,
-    ).await?;
-    return Ok(saved)
+        cfg,
+        thread,
+        cause_msg,
+        &channel,
+        *next_seq,
+        start_time,
+        &messages,
+        &mut cumulative_usage,
+        &mut force_failed,
+        limit_reached,
+        current_iter,
+        iter_limit,
+        &per_thread_llm,
+        final_content,
+        token_usage_json,
+        evidence_metadata,
+        enable_subtasks,
+    )
+    .await?;
+    return Ok(saved);
 }

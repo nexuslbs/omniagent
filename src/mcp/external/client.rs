@@ -152,7 +152,12 @@ pub trait McpServerClient: Send + Sync {
 
     /// Call a tool on the server. `meta` carries runtime context (channel_id, etc.)
     /// and is sent as the `_meta` field in the JSON-RPC params.
-    async fn call_tool(&self, name: &str, arguments: &Value, meta: Option<Value>) -> AppResult<McpToolResult>;
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: &Value,
+        meta: Option<Value>,
+    ) -> AppResult<McpToolResult>;
 
     /// Shutdown the connection.
     async fn shutdown(&self) -> AppResult<()>;
@@ -229,7 +234,11 @@ pub trait McpServerClient: Send + Sync {
                         if let Some(ref cn) = ctx.current_channel_name {
                             meta_map.insert("channel_name".to_string(), serde_json::json!(cn));
                         }
-                        let meta = if meta_map.is_empty() { None } else { Some(Value::Object(meta_map)) };
+                        let meta = if meta_map.is_empty() {
+                            None
+                        } else {
+                            Some(Value::Object(meta_map))
+                        };
 
                         match ctx.external_clients.call_tool(&sn, &tn, &args, meta).await {
                             Ok(res) => Ok(res),
@@ -240,7 +249,7 @@ pub trait McpServerClient: Send + Sync {
                                     sn, tn, e
                                 ),
                                 is_error: true,
-                            })
+                            }),
                         }
                     })
                 }),
@@ -262,7 +271,9 @@ pub struct ExternalMcpClients {
 
 impl std::fmt::Debug for ExternalMcpClients {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let names: Vec<String> = self.clients.read()
+        let names: Vec<String> = self
+            .clients
+            .read()
             .ok()
             .map(|r| r.keys().cloned().collect())
             .unwrap_or_default();
@@ -313,7 +324,10 @@ impl ExternalMcpClients {
         meta: Option<Value>,
     ) -> AppResult<McpToolResult> {
         let client = self.get(server_name).ok_or_else(|| {
-            err_str!("MCP server '{}' not found in client registry (not initialized)", server_name)
+            err_str!(
+                "MCP server '{}' not found in client registry (not initialized)",
+                server_name
+            )
         })?;
         client.call_tool(tool_name, args, meta).await
     }
@@ -520,14 +534,24 @@ impl StdioMcpClient {
                     "Failed to write configure message to MCP server '{}' stdin",
                     server_name
                 ))?;
-            process.stdin.write_all(b"\n").await.ctx(
-                "Failed to write newline to MCP server stdin after configure",
-            )?;
-            process.stdin.flush().await.ctx("Failed to flush MCP server stdin after configure")?;
+            process
+                .stdin
+                .write_all(b"\n")
+                .await
+                .ctx("Failed to write newline to MCP server stdin after configure")?;
+            process
+                .stdin
+                .flush()
+                .await
+                .ctx("Failed to flush MCP server stdin after configure")?;
             // Read the acknowledgment (with 5s timeout)
             let mut ack = String::new();
             let _ = timeout(Duration::from_secs(5), process.reader.read_line(&mut ack)).await;
-            tracing::debug!("MCP server '{}' configure response: {}", server_name, ack.trim());
+            tracing::debug!(
+                "MCP server '{}' configure response: {}",
+                server_name,
+                ack.trim()
+            );
         }
 
         // Step 1: Initialize
@@ -627,13 +651,20 @@ impl McpServerClient for StdioMcpClient {
         })?;
         let server_name = &self.config.name;
 
-        let result = Self::initialize_handshake(process, server_name, &self.next_id, &self.config.env).await?;
+        let result =
+            Self::initialize_handshake(process, server_name, &self.next_id, &self.config.env)
+                .await?;
 
         *self.tools.lock().await = result.tools.clone();
         Ok(result.tools)
     }
 
-    async fn call_tool(&self, name: &str, arguments: &Value, meta: Option<Value>) -> AppResult<McpToolResult> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: &Value,
+        meta: Option<Value>,
+    ) -> AppResult<McpToolResult> {
         if !self.circuit.is_allowed() {
             return Err(err_str!(
                 "Circuit breaker is OPEN for external MCP server '{}'. \
@@ -873,7 +904,12 @@ impl McpServerClient for HttpMcpClient {
         Ok(tools.tools)
     }
 
-    async fn call_tool(&self, name: &str, arguments: &Value, meta: Option<Value>) -> AppResult<McpToolResult> {
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: &Value,
+        meta: Option<Value>,
+    ) -> AppResult<McpToolResult> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req = build_call_tool_request(id, name, arguments, meta);
         let response = self.post(&req).await?;
@@ -943,7 +979,10 @@ pub fn create_client(config: McpServerConfig) -> Box<dyn McpServerClient> {
 /// Initialize all external MCP servers and register their tools.
 /// Returns a list of McpTool instances merged from all servers.
 /// Each initialized client is registered in `clients` for runtime tool dispatch.
-pub async fn initialize_external_tools(data_dir: &str, clients: &ExternalMcpClients) -> Vec<McpTool> {
+pub async fn initialize_external_tools(
+    data_dir: &str,
+    clients: &ExternalMcpClients,
+) -> Vec<McpTool> {
     let configs = crate::mcp::external::config::load_servers_config(data_dir);
     let mut all_tools = Vec::new();
 
@@ -967,12 +1006,8 @@ pub async fn initialize_external_tools(data_dir: &str, clients: &ExternalMcpClie
         }
 
         let client: Arc<dyn McpServerClient> = match cfg.transport {
-            crate::mcp::external::config::McpTransport::Stdio => {
-                Arc::new(StdioMcpClient::new(cfg))
-            }
-            crate::mcp::external::config::McpTransport::Http => {
-                Arc::new(HttpMcpClient::new(cfg))
-            }
+            crate::mcp::external::config::McpTransport::Stdio => Arc::new(StdioMcpClient::new(cfg)),
+            crate::mcp::external::config::McpTransport::Http => Arc::new(HttpMcpClient::new(cfg)),
         };
         let tools = client.to_mcp_tools().await;
         let count = tools.len();
@@ -1006,12 +1041,8 @@ pub async fn initialize_single_server_tools(
         .ok_or_else(|| format!("MCP server '{}' not found in config", server_name))?;
 
     let client: Arc<dyn McpServerClient> = match cfg.transport {
-        crate::mcp::external::config::McpTransport::Stdio => {
-            Arc::new(StdioMcpClient::new(cfg))
-        }
-        crate::mcp::external::config::McpTransport::Http => {
-            Arc::new(HttpMcpClient::new(cfg))
-        }
+        crate::mcp::external::config::McpTransport::Stdio => Arc::new(StdioMcpClient::new(cfg)),
+        crate::mcp::external::config::McpTransport::Http => Arc::new(HttpMcpClient::new(cfg)),
     };
     let tools = client.to_mcp_tools().await;
 

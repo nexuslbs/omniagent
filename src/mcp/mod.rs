@@ -114,12 +114,12 @@ pub struct AppContext {
 
 impl AppContext {
     pub fn new(
-            pool: PgPool,
-            readonly_pool: PgPool,
-            data_dir: &str,
-            platform_senders: HashMap<String, OutboundSender>,
-            external_clients: Arc<crate::mcp::external::client::ExternalMcpClients>,
-        ) -> Self {
+        pool: PgPool,
+        readonly_pool: PgPool,
+        data_dir: &str,
+        platform_senders: HashMap<String, OutboundSender>,
+        external_clients: Arc<crate::mcp::external::client::ExternalMcpClients>,
+    ) -> Self {
         Self {
             pool,
             readonly_pool,

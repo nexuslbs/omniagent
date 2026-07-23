@@ -436,7 +436,11 @@ async fn list_schedule_handler(
     for job in &mut jobs {
         if let Some(action_id) = &job.action_id {
             if job.action_name.is_none() {
-                job.action_name = actions.actions.get(action_id).map(|a| a.description.clone()).flatten();
+                job.action_name = actions
+                    .actions
+                    .get(action_id)
+                    .map(|a| a.description.clone())
+                    .flatten();
             }
         }
     }
@@ -947,13 +951,13 @@ async fn run_schedule_handler(
     let _force = body.force.unwrap_or(false);
 
     match crate::scheduler::fire_cron_job_by_id(
-            &state.pool,
-            &state.data_dir,
-            &state.plugin_manager,
-            &state.app_context,
-            &id,
-            true,
-        )
+        &state.pool,
+        &state.data_dir,
+        &state.plugin_manager,
+        &state.app_context,
+        &id,
+        true,
+    )
     .await
     {
         Ok(thread_id) => (

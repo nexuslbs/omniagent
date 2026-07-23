@@ -60,7 +60,11 @@ pub fn install_from_url(url: &str, data_dir: &str) -> AppResult<PluginManifest> 
     if let Ok(mut path_opt) = cleanup.lock() {
         if let Some(path) = path_opt.take() {
             if let Err(e) = std::fs::remove_dir_all(&path) {
-                tracing::warn!("[installer] Failed to clean up temp dir {:?}: {:?}", path, e);
+                tracing::warn!(
+                    "[installer] Failed to clean up temp dir {:?}: {:?}",
+                    path,
+                    e
+                );
             }
         }
     }
@@ -269,17 +273,11 @@ pub fn install_from_git(
     // Ensure the cache exists and is up to date
     if cache_path.join("HEAD").exists() {
         // Update existing bare mirror: delta-only fetch
-        tracing::info!(
-            "Updating git-cache for '{}' at {}",
-            url, cache_dir
-        );
+        tracing::info!("Updating git-cache for '{}' at {}", url, cache_dir);
         let fetch_status = std::process::Command::new("git")
             .args(["-C", &cache_dir, "remote", "update", "--prune"])
             .status()
-            .ctx(format!(
-                "Failed to update git-cache at {}",
-                cache_dir
-            ))?;
+            .ctx(format!("Failed to update git-cache at {}", cache_dir))?;
         if !fetch_status.success() {
             tracing::warn!(
                 "git-cache update failed for {}, falling back to traditional clone",
@@ -293,10 +291,8 @@ pub fn install_from_git(
     } else {
         // First time for this URL: create the bare mirror
         if cache_path.exists() {
-            std::fs::remove_dir_all(cache_path).ctx(format!(
-                "Failed to remove existing cache at {}",
-                cache_dir
-            ))?;
+            std::fs::remove_dir_all(cache_path)
+                .ctx(format!("Failed to remove existing cache at {}", cache_dir))?;
         }
         if let Some(parent) = cache_path.parent() {
             std::fs::create_dir_all(parent).ctx(format!(
@@ -304,10 +300,7 @@ pub fn install_from_git(
                 cache_dir
             ))?;
         }
-        tracing::info!(
-            "Creating git-cache for '{}' at {}",
-            url, cache_dir
-        );
+        tracing::info!("Creating git-cache for '{}' at {}", url, cache_dir);
         let clone_status = std::process::Command::new("git")
             .args(["clone", "--mirror", url, &cache_dir])
             .status()
@@ -321,7 +314,8 @@ pub fn install_from_git(
             }
             err_msg!(
                 "git mirror clone failed for '{}' with status: {}",
-                url, clone_status
+                url,
+                clone_status
             );
         }
     }
@@ -342,7 +336,9 @@ pub fn install_from_git(
     if initial_remote_path.join(".git").exists() {
         tracing::info!(
             "Updating existing git plugin '{}' from {} (ref: {:?})",
-            name, url, git_ref
+            name,
+            url,
+            git_ref
         );
 
         // Record pre-fetch HEAD
@@ -355,7 +351,15 @@ pub fn install_from_git(
 
         // Fetch and reset to latest
         let fetch_status = std::process::Command::new("git")
-            .args(["-C", &initial_remote_dir, "fetch", "--depth", "1", "origin", "HEAD"])
+            .args([
+                "-C",
+                &initial_remote_dir,
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                "HEAD",
+            ])
             .status()
             .ctx(format!(
                 "Failed to git fetch for '{}' in {}",
@@ -384,7 +388,8 @@ pub fn install_from_git(
             if !reset_status.success() {
                 err_msg!(
                     "git reset failed for '{}' with status: {}",
-                    name, reset_status
+                    name,
+                    reset_status
                 );
             }
 
@@ -417,17 +422,16 @@ pub fn install_from_git(
                     let checkout_status = std::process::Command::new("git")
                         .args(["-C", &initial_remote_dir, "checkout", ref_str])
                         .status()
-                        .ctx(format!(
-                            "Failed to git checkout {} for '{}'",
-                            ref_str, name
-                        ))?;
+                        .ctx(format!("Failed to git checkout {} for '{}'", ref_str, name))?;
                     if !checkout_status.success() {
                         if let Err(e) = std::fs::remove_dir_all(&initial_remote_dir) {
                             tracing::warn!("[installer] Failed to clean up remote dir after update checkout failure: {:?}", e);
                         }
                         err_msg!(
                             "git checkout '{}' failed for '{}' with status: {}",
-                            ref_str, name, checkout_status
+                            ref_str,
+                            name,
+                            checkout_status
                         );
                     }
                 }
@@ -452,7 +456,9 @@ pub fn install_from_git(
 
         tracing::info!(
             "Reference-cloning git plugin '{}' from cache {} (ref: {:?})",
-            name, cache_dir, git_ref
+            name,
+            cache_dir,
+            git_ref
         );
 
         // Reference clone from local cache: instant, hardlinks objects
@@ -466,7 +472,9 @@ pub fn install_from_git(
             .arg(&initial_remote_dir);
         tracing::info!(
             "Running: git clone --reference {} --depth 1 {} {}",
-            cache_dir, url, initial_remote_dir
+            cache_dir,
+            url,
+            initial_remote_dir
         );
         let output = cmd.output().ctx(format!(
             "Failed to execute git clone for '{}' from {}",
@@ -476,14 +484,22 @@ pub fn install_from_git(
             let stderr = String::from_utf8_lossy(&output.stderr);
             tracing::error!(
                 "git clone failed for '{}' from {}. stderr: {}",
-                name, url, stderr
+                name,
+                url,
+                stderr
             );
             if let Err(e) = std::fs::remove_dir_all(&initial_remote_dir) {
-                tracing::warn!("[installer] Failed to clean up remote dir after clone failure: {:?}", e);
+                tracing::warn!(
+                    "[installer] Failed to clean up remote dir after clone failure: {:?}",
+                    e
+                );
             }
             err_msg!(
                 "git clone failed for '{}' from {} with status: {}. stderr: {}",
-                name, url, output.status, stderr.trim()
+                name,
+                url,
+                output.status,
+                stderr.trim()
             );
         }
 
@@ -497,17 +513,16 @@ pub fn install_from_git(
                     .arg("checkout")
                     .arg(ref_str)
                     .status()
-                    .ctx(format!(
-                        "Failed to git checkout {} for '{}'",
-                        ref_str, name
-                    ))?;
+                    .ctx(format!("Failed to git checkout {} for '{}'", ref_str, name))?;
                 if !checkout_status.success() {
                     if let Err(e) = std::fs::remove_dir_all(&initial_remote_dir) {
                         tracing::warn!("[installer] Failed to clean up remote dir after checkout failure: {:?}", e);
                     }
                     err_msg!(
                         "git checkout '{}' failed for '{}' with status: {}",
-                        ref_str, name, checkout_status
+                        ref_str,
+                        name,
+                        checkout_status
                     );
                 }
             }
@@ -655,9 +670,7 @@ pub(crate) fn extract_plugin_key_from_path(base_path: &str) -> String {
 /// - `<workspace_dir>/plugins/<type>/<name>/plugin.json`: source: "bundled" (workspace - deduped against data_dir)
 /// - `<data_dir>/plugins/<type>/.remote/<name>/plugin.json`: source: "remote"
 /// - `/app/plugins/<type>/<name>/plugin.json or Cargo.toml`: source: "built-in"
-pub fn discover_plugins(
-    data_dir: &str,
-) -> Vec<(PluginManifest, String, String)> {
+pub fn discover_plugins(data_dir: &str) -> Vec<(PluginManifest, String, String)> {
     let mut results = Vec::new();
 
     // A. Scan data_dir plugins: <data_dir>/plugins/<type>/<name>/plugin.json
@@ -773,11 +786,11 @@ pub fn discover_plugins(
     // C1: remote.yml-driven using exact manifest paths
     // C2: fallback directory scan for orphan .remote/ dirs
     let _remote_plugins = crate::plugins_yaml::load_remote_plugins(data_dir);
-                    // C. Scan remote plugins using remote.yml for exact path resolution.
-                    // C1: remote.yml-driven using exact manifest paths
-                    // C2: fallback directory scan for orphan .remote/ dirs
-                    let remote_plugins = crate::plugins_yaml::load_remote_plugins(data_dir);
-                    let mut remote_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // C. Scan remote plugins using remote.yml for exact path resolution.
+    // C1: remote.yml-driven using exact manifest paths
+    // C2: fallback directory scan for orphan .remote/ dirs
+    let remote_plugins = crate::plugins_yaml::load_remote_plugins(data_dir);
+    let mut remote_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Helper to process entries for a given type
     macro_rules! process_remote_entries {
@@ -946,8 +959,7 @@ pub fn discover_plugins(
     // that aren't covered by bundled/remote/builtin plugin.json files.
     // These get synthetic manifests but won't have config_schema unless
     // a plugin.json is also present.
-    let mcp_plugin_servers =
-        crate::mcp::external::config::discover_plugin_servers(data_dir);
+    let mcp_plugin_servers = crate::mcp::external::config::discover_plugin_servers(data_dir);
     for srv in &mcp_plugin_servers {
         let already_exists =
             results
@@ -1011,9 +1023,7 @@ mod tests {
         let _workspace_dir = tempfile::tempdir().unwrap();
 
         // No plugin dirs exist yet
-        let plugins = discover_plugins(
-            data_dir.path().to_str().unwrap(),
-        );
+        let plugins = discover_plugins(data_dir.path().to_str().unwrap());
         // Builtin plugins may be found from /app/plugins/ but none from temp dirs
         // mcp_config entries also come from the CWD's plugins/ directory
         let from_temp: Vec<_> = plugins
@@ -1050,9 +1060,7 @@ mod tests {
         }"#;
         std::fs::write(plugin_dir.join("plugin.json"), manifest_content).unwrap();
 
-        let plugins = discover_plugins(
-            data_dir.path().to_str().unwrap(),
-        );
+        let plugins = discover_plugins(data_dir.path().to_str().unwrap());
         assert!(!plugins.is_empty());
         let found = plugins
             .iter()
@@ -1084,9 +1092,7 @@ mod tests {
         }"#;
         std::fs::write(plugin_dir.join("plugin.json"), manifest_content).unwrap();
 
-        let plugins = discover_plugins(
-            data_dir.path().to_str().unwrap(),
-        );
+        let plugins = discover_plugins(data_dir.path().to_str().unwrap());
         assert!(!plugins.is_empty());
         let found = plugins
             .iter()

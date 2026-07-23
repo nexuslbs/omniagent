@@ -127,21 +127,17 @@ pub(crate) async fn setup_plugin_handler(
                         std::path::PathBuf::from("/app/target/release").join(&entrypoint.command)
                     })
             }
-            "bundled" => {
-                std::path::Path::new(&data_dir)
-                    .join("plugins")
-                    .join(type_dir)
-                    .join(&name)
-                    .join(&entrypoint.command)
-            }
+            "bundled" => std::path::Path::new(&data_dir)
+                .join("plugins")
+                .join(type_dir)
+                .join(&name)
+                .join(&entrypoint.command),
             "remote" => {
                 // Remote plugins: resolve from remote.yml for the subpath
                 let remote_type = crate::plugins_yaml::PluginYamlType::from_type_str(type_dir);
-                if let Some(remote) = crate::plugins_yaml::get_remote_plugin(
-                    &data_dir,
-                    &remote_type,
-                    &name,
-                ) {
+                if let Some(remote) =
+                    crate::plugins_yaml::get_remote_plugin(&data_dir, &remote_type, &name)
+                {
                     let subpath = remote.path.as_deref().unwrap_or("");
                     std::path::Path::new(&data_dir)
                         .join("plugins")
@@ -286,7 +282,10 @@ pub(crate) async fn setup_plugin_handler(
         Some(s) => s,
         None => {
             if let Err(ke) = child.kill() {
-                tracing::warn!("[plugins] Failed to kill child after stdin failure: {:?}", ke);
+                tracing::warn!(
+                    "[plugins] Failed to kill child after stdin failure: {:?}",
+                    ke
+                );
             }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -302,7 +301,10 @@ pub(crate) async fn setup_plugin_handler(
         Some(s) => s,
         None => {
             if let Err(ke) = child.kill() {
-                tracing::warn!("[plugins] Failed to kill child after stdout failure: {:?}", ke);
+                tracing::warn!(
+                    "[plugins] Failed to kill child after stdout failure: {:?}",
+                    ke
+                );
             }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -326,7 +328,10 @@ pub(crate) async fn setup_plugin_handler(
             serde_json::to_string(&init_req).unwrap_or_default()
         ) {
             if let Err(ke) = child.kill() {
-                tracing::warn!("[plugins] Failed to kill child after init send failure: {:?}", ke);
+                tracing::warn!(
+                    "[plugins] Failed to kill child after init send failure: {:?}",
+                    ke
+                );
             }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -344,7 +349,10 @@ pub(crate) async fn setup_plugin_handler(
         let mut line = String::new();
         if let Err(e) = reader.read_line(&mut line) {
             if let Err(ke) = child.kill() {
-                tracing::warn!("[plugins] Failed to kill child after init read failure: {:?}", ke);
+                tracing::warn!(
+                    "[plugins] Failed to kill child after init read failure: {:?}",
+                    ke
+                );
             }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -368,7 +376,10 @@ pub(crate) async fn setup_plugin_handler(
             serde_json::to_string(&configure_req).unwrap_or_default()
         ) {
             if let Err(ke) = child.kill() {
-                tracing::warn!("[plugins] Failed to kill child after configure send failure: {:?}", ke);
+                tracing::warn!(
+                    "[plugins] Failed to kill child after configure send failure: {:?}",
+                    ke
+                );
             }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -386,7 +397,10 @@ pub(crate) async fn setup_plugin_handler(
         let mut line = String::new();
         if let Err(e) = reader.read_line(&mut line) {
             if let Err(ke) = child.kill() {
-                tracing::warn!("[plugins] Failed to kill child after configure read failure: {:?}", ke);
+                tracing::warn!(
+                    "[plugins] Failed to kill child after configure read failure: {:?}",
+                    ke
+                );
             }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -405,7 +419,10 @@ pub(crate) async fn setup_plugin_handler(
         use std::io::Write;
         if let Err(e) = writeln!(stdin, "{}", request_str) {
             if let Err(ke) = child.kill() {
-                tracing::warn!("[plugins] Failed to kill child after setup send failure: {:?}", ke);
+                tracing::warn!(
+                    "[plugins] Failed to kill child after setup send failure: {:?}",
+                    ke
+                );
             }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -424,11 +441,14 @@ pub(crate) async fn setup_plugin_handler(
     let start = std::time::Instant::now();
     let max_wait = std::time::Duration::from_secs(120);
 
-        let mut stdout_output = String::new();
+    let mut stdout_output = String::new();
     loop {
         if start.elapsed() >= max_wait {
             if let Err(ke) = child.kill() {
-                tracing::warn!("[plugins] Failed to kill child after setup timeout: {:?}", ke);
+                tracing::warn!(
+                    "[plugins] Failed to kill child after setup timeout: {:?}",
+                    ke
+                );
             }
             return (
                 StatusCode::REQUEST_TIMEOUT,
@@ -513,7 +533,7 @@ pub(crate) async fn setup_plugin_handler(
     }
 
     // Parse response
-        let first_line = stdout_output.lines().next().unwrap_or("");
+    let first_line = stdout_output.lines().next().unwrap_or("");
 
     match serde_json::from_str::<serde_json::Value>(first_line) {
         Ok(val) => {
@@ -582,7 +602,8 @@ pub(crate) async fn setup_plugin_handler(
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
             {
-                let reader = crate::platform::external::HttpBearerFileReader::new(bot_token.to_string());
+                let reader =
+                    crate::platform::external::HttpBearerFileReader::new(bot_token.to_string());
                 state
                     .app_context
                     .platform_file_readers
@@ -593,7 +614,6 @@ pub(crate) async fn setup_plugin_handler(
                     "Registered file reader for plugin '{}' (from setup bot_token)",
                     name
                 );
-
 
                 reload_platform_plugin(&state, &name).await;
             }
@@ -629,4 +649,3 @@ pub(crate) async fn setup_plugin_handler(
         }
     }
 }
-

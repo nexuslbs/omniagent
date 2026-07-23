@@ -1,8 +1,8 @@
+use crate::agent::task_registry;
 /// Built-in task management tools for non-blocking tool execution.
 /// Registered in default_registry() alongside list_tool_details and read_attached_file.
 use crate::error::AppResult;
 use crate::mcp::{AppContext, McpToolResult};
-use crate::agent::task_registry;
 use serde_json::Value;
 
 /// Build the arguments for poll_task, wait_task, cancel_task, read_task_logs
@@ -56,7 +56,10 @@ pub async fn handle_poll_task(args: Value, _ctx: AppContext) -> AppResult<McpToo
 
 pub async fn handle_wait_task(args: Value, _ctx: AppContext) -> AppResult<McpToolResult> {
     let task_id = get_task_id(&args).unwrap_or_default();
-    let timeout_secs = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(30);
+    let timeout_secs = args
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30);
     let tail = args.get("tail").and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
     let registry = task_registry::TASK_REGISTRY
         .get()
@@ -73,8 +76,20 @@ pub async fn handle_wait_task(args: Value, _ctx: AppContext) -> AppResult<McpToo
         if joined.len() <= tail {
             return joined;
         }
-        let truncated: String = joined.chars().rev().take(tail).collect::<String>().chars().rev().collect();
-        format!("...(showing last {} of {} chars)\n{}", tail, joined.len(), truncated)
+        let truncated: String = joined
+            .chars()
+            .rev()
+            .take(tail)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        format!(
+            "...(showing last {} of {} chars)\n{}",
+            tail,
+            joined.len(),
+            truncated
+        )
     };
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
@@ -82,10 +97,11 @@ pub async fn handle_wait_task(args: Value, _ctx: AppContext) -> AppResult<McpToo
         let info = registry.get_info(&task_id).await;
         match info {
             Some(info) => {
-                let done = matches!(&info.status, 
-                    task_registry::TaskStatus::Completed(_) 
-                    | task_registry::TaskStatus::Failed(_) 
-                    | task_registry::TaskStatus::Cancelled
+                let done = matches!(
+                    &info.status,
+                    task_registry::TaskStatus::Completed(_)
+                        | task_registry::TaskStatus::Failed(_)
+                        | task_registry::TaskStatus::Cancelled
                 );
                 if done {
                     let logs = get_log_tail().await;
@@ -115,7 +131,8 @@ pub async fn handle_wait_task(args: Value, _ctx: AppContext) -> AppResult<McpToo
             None => {
                 return Ok(McpToolResult {
                     call_id: String::new(),
-                    content: serde_json::json!({"status": "not_found", "task_id": task_id}).to_string(),
+                    content: serde_json::json!({"status": "not_found", "task_id": task_id})
+                        .to_string(),
                     is_error: false,
                 });
             }
@@ -141,7 +158,8 @@ pub async fn handle_wait_task(args: Value, _ctx: AppContext) -> AppResult<McpToo
                 }
                 None => Ok(McpToolResult {
                     call_id: String::new(),
-                    content: serde_json::json!({"status": "not_found", "task_id": task_id}).to_string(),
+                    content: serde_json::json!({"status": "not_found", "task_id": task_id})
+                        .to_string(),
                     is_error: false,
                 }),
             };
@@ -163,15 +181,22 @@ pub async fn handle_cancel_task(args: Value, _ctx: AppContext) -> AppResult<McpT
         content: serde_json::json!({
             "status": if cancelled { "cancelled" } else { "not_found" },
             "task_id": task_id,
-        }).to_string(),
+        })
+        .to_string(),
         is_error: false,
     })
 }
 
 pub async fn handle_read_task_logs(args: Value, _ctx: AppContext) -> AppResult<McpToolResult> {
     let task_id = get_task_id(&args).unwrap_or_default();
-    let cursor = args.get("cursor").and_then(|v| v.as_u64()).map(|c| c as usize);
-    let limit = args.get("limit").and_then(|v| v.as_u64()).map(|l| l as usize);
+    let cursor = args
+        .get("cursor")
+        .and_then(|v| v.as_u64())
+        .map(|c| c as usize);
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|l| l as usize);
     let registry = task_registry::TASK_REGISTRY
         .get()
         .cloned()
@@ -185,7 +210,8 @@ pub async fn handle_read_task_logs(args: Value, _ctx: AppContext) -> AppResult<M
             "task_id": task_id,
             "lines": lines,
             "next_cursor": next_cursor,
-        }).to_string(),
+        })
+        .to_string(),
         is_error: false,
     })
 }

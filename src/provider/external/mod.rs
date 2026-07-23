@@ -66,8 +66,12 @@ pub struct CompleteParams {
     pub tools: Option<Vec<serde_json::Value>>,
 }
 
-fn default_max_tokens() -> u32 { 4096 }
-fn default_temperature() -> f32 { 0.7 }
+fn default_max_tokens() -> u32 {
+    4096
+}
+fn default_temperature() -> f32 {
+    0.7
+}
 
 /// Result of a complete operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]

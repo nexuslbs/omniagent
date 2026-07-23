@@ -30,7 +30,9 @@ pub(crate) fn validate_source(source: &str) -> Result<(), (StatusCode, Json<serd
 }
 
 /// Validate a plugin type string from the URL path.
-pub(crate) fn validate_plugin_type(p_type: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+pub(crate) fn validate_plugin_type(
+    p_type: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     match p_type {
         "tools" | "platforms" | "providers" => Ok(()),
         _ => Err((
@@ -44,7 +46,11 @@ pub(crate) fn validate_plugin_type(p_type: &str) -> Result<(), (StatusCode, Json
 }
 
 /// Return a 400 error for operations not allowed on built-in plugins.
-pub(crate) fn reject_builtin_operation(source: &str, action: &str, name: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+pub(crate) fn reject_builtin_operation(
+    source: &str,
+    action: &str,
+    name: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     if source == "built-in" {
         Err((
             StatusCode::BAD_REQUEST,

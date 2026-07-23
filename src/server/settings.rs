@@ -128,10 +128,7 @@ pub(crate) fn load_settings_file(data_dir: &str) -> HashMap<String, String> {
 
 /// Extract key-value pairs from a single section mapping (no recursion —
 /// only one level deep). Keys are lowercased; values are stringified.
-fn flatten_section(
-    value: &serde_yaml::Value,
-    map: &mut HashMap<String, String>,
-) {
+fn flatten_section(value: &serde_yaml::Value, map: &mut HashMap<String, String>) {
     if let serde_yaml::Value::Mapping(mapping) = value {
         for (key, val) in mapping {
             let k = match key.as_str() {
@@ -169,35 +166,70 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
     // ── Section groupings for the nested YAML output ──
     let section_order = ["general", "execution", "prompt", "memory"];
     let sections: std::collections::HashMap<&str, Vec<&str>> = [
-        ("general", vec![
-            "condense_keep_turns", "delete_after_days", "default_provider",
-            "llm_provider", "max_inline_file_kb", "max_pool_connections",
-            "max_tokens", "max_unfinished_subtask_retries",
-            "old_message_char_budget", "soul_max_chars",
-            "state_block_update_interval", "temperature",
-            "thread_summary_tokens", "tokenizer_encoding",
-        ]),
-        ("execution", vec![
-            "max_iterations_no_plan", "max_iterations_plan",
-            "tool_bg_secs", "tool_long_timeout_secs", "tool_short_timeout_secs",
-        ]),
-        ("prompt", vec![
-            "prompt_char_budget_hard", "prompt_char_budget_soft",
-            "prompt_compact_messages_tool", "prompt_generate_tool",
-            "prompt_log_level", "prompt_token_budget_hard",
-            "prompt_token_budget_soft", "prompt_token_safety_factor",
-        ]),
-        ("memory", vec![
-            "memory_max_chars",
-            "messages_vectorization_api_key", "messages_vectorization_api_model",
-            "messages_vectorization_api_url", "messages_vectorization_interval",
-            "messages_vectorization_method", "messages_vectorization_protocol",
-            "vectorize_messages", "vectorize_wiki",
-            "wiki_vectorization_api_key", "wiki_vectorization_api_model",
-            "wiki_vectorization_api_url", "wiki_vectorization_interval",
-            "wiki_vectorization_method", "wiki_vectorization_protocol",
-        ]),
-    ].into_iter().collect();
+        (
+            "general",
+            vec![
+                "condense_keep_turns",
+                "delete_after_days",
+                "default_provider",
+                "llm_provider",
+                "max_inline_file_kb",
+                "max_tokens",
+                "max_unfinished_subtask_retries",
+                "old_message_char_budget",
+                "soul_max_chars",
+                "state_block_update_interval",
+                "temperature",
+                "thread_summary_tokens",
+                "tokenizer_encoding",
+            ],
+        ),
+        (
+            "execution",
+            vec![
+                "max_iterations_no_plan",
+                "max_iterations_plan",
+                "tool_bg_secs",
+                "tool_long_timeout_secs",
+                "tool_short_timeout_secs",
+            ],
+        ),
+        (
+            "prompt",
+            vec![
+                "prompt_char_budget_hard",
+                "prompt_char_budget_soft",
+                "prompt_compact_messages_tool",
+                "prompt_generate_tool",
+                "prompt_log_level",
+                "prompt_token_budget_hard",
+                "prompt_token_budget_soft",
+                "prompt_token_safety_factor",
+            ],
+        ),
+        (
+            "memory",
+            vec![
+                "memory_max_chars",
+                "messages_vectorization_api_key",
+                "messages_vectorization_api_model",
+                "messages_vectorization_api_url",
+                "messages_vectorization_interval",
+                "messages_vectorization_method",
+                "messages_vectorization_protocol",
+                "vectorize_messages",
+                "vectorize_wiki",
+                "wiki_vectorization_api_key",
+                "wiki_vectorization_api_model",
+                "wiki_vectorization_api_url",
+                "wiki_vectorization_interval",
+                "wiki_vectorization_method",
+                "wiki_vectorization_protocol",
+            ],
+        ),
+    ]
+    .into_iter()
+    .collect();
 
     /// Format a single YAML value with proper quoting.
     fn format_value(value: &str) -> String {
@@ -240,7 +272,8 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
     }
 
     // Any remaining keys not assigned to a section go under a general catch-all
-    let mut remaining: Vec<&String> = vars.keys()
+    let mut remaining: Vec<&String> = vars
+        .keys()
         .filter(|k| !written.contains(k.as_str()))
         .collect();
     if !remaining.is_empty() {
@@ -386,17 +419,6 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 options: None,
                 readonly: false,
                 default: Some("2048".into()),
-            },
-        ),
-        // ── Connections ──
-        (
-            "max_pool_connections".into(),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Maximum per-channel connections per MCP server. Each channel gets its own pool; this caps how many simultaneous tool calls a single server can handle per channel. Increase for multi-tool workloads, decrease to save memory. Minimum 1.".into(),
-                options: None,
-                readonly: false,
-                default: Some("5".into()),
             },
         ),
         (
@@ -587,10 +609,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
 const BOOTSTRAP_SETTINGS: &[&str] = &["host", "port", "database_url", "omni_dir"];
 
 /// Resolve a single setting value with $env:/$secret: support.
-pub(crate) async fn resolve_setting_value(
-    raw_value: &str,
-    pool: &sqlx::PgPool,
-) -> String {
+pub(crate) async fn resolve_setting_value(raw_value: &str, pool: &sqlx::PgPool) -> String {
     if raw_value.starts_with("$env:") || raw_value.starts_with("$secret:") {
         plugins_yaml::resolve_config_ref_value(raw_value, pool).await
     } else {
@@ -620,7 +639,10 @@ fn enrich_provider_options(meta: &mut SettingMeta, data_dir: &str) {
     meta.options = Some(
         providers
             .into_iter()
-            .map(|(id, _)| SettingOption { id: id.clone(), name: id })
+            .map(|(id, _)| SettingOption {
+                id: id.clone(),
+                name: id,
+            })
             .collect(),
     );
 }
@@ -632,9 +654,7 @@ fn enrich_provider_options(meta: &mut SettingMeta, data_dir: &str) {
 /// Values are resolved from settings.yml with $env:/$secret: support.
 /// Bootstrap settings (host, port, database_url, omni_dir) always come
 /// from process environment variables with UPPER_CASE names.
-pub async fn get_settings_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<SettingsResponse> {
+pub async fn get_settings_handler(State(state): State<Arc<AppState>>) -> Json<SettingsResponse> {
     // Load raw values from settings.yml
     let data_dir = state.data_dir.clone();
     let mut settings_values = tokio::task::spawn_blocking(move || load_settings_file(&data_dir))
@@ -664,7 +684,9 @@ pub async fn get_settings_handler(
         .collect();
 
     // Enrich default_provider options with dynamically loaded provider plugins
-    if let Some((_, _, ref mut meta)) = defs.iter_mut().find(|(name, _, _)| name == "default_provider")
+    if let Some((_, _, ref mut meta)) = defs
+        .iter_mut()
+        .find(|(name, _, _)| name == "default_provider")
     {
         enrich_provider_options(meta, &state.data_dir);
     }
@@ -673,13 +695,18 @@ pub async fn get_settings_handler(
     let registry = state.plugin_manager.snapshot_registry().await;
     let mcp_tools: Vec<&crate::mcp::McpTool> = registry.all();
     for tool_key in ["prompt_generate_tool", "prompt_compact_messages_tool"] {
-        if let Some((_, _, ref mut meta)) = defs.iter_mut().find(|(name, _, _)| name.as_str() == tool_key)
+        if let Some((_, _, ref mut meta)) = defs
+            .iter_mut()
+            .find(|(name, _, _)| name.as_str() == tool_key)
         {
             let mut options: Vec<SettingOption> = mcp_tools
                 .iter()
                 .map(|t| {
                     let id = t.full_name.clone();
-                    SettingOption { id: id.clone(), name: id }
+                    SettingOption {
+                        id: id.clone(),
+                        name: id,
+                    }
                 })
                 .collect();
             // Sort alphabetically
@@ -722,7 +749,6 @@ pub async fn update_settings_handler(
         "memory_max_chars",
         "soul_max_chars",
         "default_provider",
-        "max_pool_connections",
         "max_inline_file_kb",
         "tool_bg_secs",
         "prompt_log_level",
@@ -764,11 +790,7 @@ pub async fn update_settings_handler(
             tracing::info!("Settings updated: {:?}", applied);
             // Reload the global config from settings.yml so the change
             // takes effect immediately without requiring a container restart.
-            crate::agent::config::reload_global_from_settings(
-                &state.data_dir,
-                &state.pool,
-            )
-            .await;
+            crate::agent::config::reload_global_from_settings(&state.data_dir, &state.pool).await;
             (
                 StatusCode::OK,
                 Json(serde_json::json!({

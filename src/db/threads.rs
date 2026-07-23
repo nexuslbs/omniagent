@@ -86,10 +86,7 @@ pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> AppResult<()> {
 ///
 /// Returns `None` when no explicit preference is set: the plugin
 /// will decide based on its own config (max chars, keywords, etc.).
-pub fn resolve_thread_plan(
-    channel_plan: Option<bool>,
-    task_plan: Option<bool>,
-) -> Option<bool> {
+pub fn resolve_thread_plan(channel_plan: Option<bool>, task_plan: Option<bool>) -> Option<bool> {
     // 1. Task/Cron explicit setting (highest priority)
     if let Some(val) = task_plan {
         return Some(val);
@@ -181,8 +178,13 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
             ( :tid = msg.thread_id )
         )
         .execute(&mut *tx)
-        .await {
-            tracing::warn!("[complete_thread] Failed to reset kanban task to todo for skipped thread {}: {:?}", msg.thread_id, e);
+        .await
+        {
+            tracing::warn!(
+                "[complete_thread] Failed to reset kanban task to todo for skipped thread {}: {:?}",
+                msg.thread_id,
+                e
+            );
         }
 
         // Record the transition in history
@@ -195,7 +197,8 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
             ( :tid = msg.thread_id )
         )
         .execute(&mut *tx)
-        .await {
+        .await
+        {
             tracing::warn!("[complete_thread] Failed to record kanban running→todo history for skipped thread {}: {:?}", msg.thread_id, e);
         }
     }
@@ -240,18 +243,11 @@ pub async fn create_thread_with_cause(
     // from metadata (deprecated JSON field for backward compatibility).
     // When neither is set, the prompt plugin decides at runtime.
     // Priority: task_plan > channel.plan (column, if not NULL) > channel.metadata["plan"]
-    let channel_plan_from_column: Option<bool> = crate::db::channels::get_channel_plan(
-        pool, channel_id,
-    ).await?;
-    let channel_plan_from_metadata = channel
-        .metadata
-        .get("plan")
-        .and_then(|v| v.as_bool());
+    let channel_plan_from_column: Option<bool> =
+        crate::db::channels::get_channel_plan(pool, channel_id).await?;
+    let channel_plan_from_metadata = channel.metadata.get("plan").and_then(|v| v.as_bool());
     let channel_plan = channel_plan_from_column.or(channel_plan_from_metadata);
-    let plan = resolve_thread_plan(
-        channel_plan,
-        p.task_plan,
-    ).unwrap_or(false); // false = placeholder, plugin may override at runtime
+    let plan = resolve_thread_plan(channel_plan, p.task_plan).unwrap_or(false); // false = placeholder, plugin may override at runtime
 
     // 4. Resolve provider and model
     //
@@ -307,7 +303,12 @@ pub async fn create_thread_with_cause(
         // Global config level: default_provider from settings.yml
         else {
             let prov = crate::agent::config::get_global()
-                .map(|g| g.read().expect("GlobalConfig lock poisoned").default_provider.clone())
+                .map(|g| {
+                    g.read()
+                        .expect("GlobalConfig lock poisoned")
+                        .default_provider
+                        .clone()
+                })
                 .unwrap_or_default(); // Empty string hits the error path below
             if !prov.is_empty() {
                 let model = crate::llm::resolve_default_model(&prov);
@@ -507,8 +508,12 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
         ( :ch = channel_id )
     )
     .execute(pool)
-    .await {
-        tracing::warn!("[delete_channel] Failed to record kanban ready→todo history: {:?}", e);
+    .await
+    {
+        tracing::warn!(
+            "[delete_channel] Failed to record kanban ready→todo history: {:?}",
+            e
+        );
     }
 
     if let Err(e) = sql_forge!(
@@ -522,8 +527,12 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
         ( :ch = channel_id )
     )
     .execute(pool)
-    .await {
-        tracing::warn!("[delete_channel] Failed to record kanban running→blocked history: {:?}", e);
+    .await
+    {
+        tracing::warn!(
+            "[delete_channel] Failed to record kanban running→blocked history: {:?}",
+            e
+        );
     }
 
     // Now perform the status updates
@@ -535,8 +544,12 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
         ( :ch = channel_id )
     )
     .execute(pool)
-    .await {
-        tracing::warn!("[delete_channel] Failed to reset kanban tasks to todo: {:?}", e);
+    .await
+    {
+        tracing::warn!(
+            "[delete_channel] Failed to reset kanban tasks to todo: {:?}",
+            e
+        );
     }
 
     if let Err(e) = sql_forge!(
@@ -547,8 +560,12 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
         ( :ch = channel_id )
     )
     .execute(pool)
-    .await {
-        tracing::warn!("[delete_channel] Failed to set kanban tasks to blocked: {:?}", e);
+    .await
+    {
+        tracing::warn!(
+            "[delete_channel] Failed to set kanban tasks to blocked: {:?}",
+            e
+        );
     }
 
     Ok(result.rows_affected())

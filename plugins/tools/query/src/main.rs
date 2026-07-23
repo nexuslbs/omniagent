@@ -11,8 +11,8 @@
 
 use anyhow::{Context, Result};
 use mcp_server_util::*;
-use omniagent::db;
 use mcp_server_util::{vector_to_string, HashVectorizer};
+use omniagent::db;
 use serde_json::Value;
 use sql_forge::sql_forge;
 use sqlx::{Column, FromRow, PgPool, Row};
@@ -323,7 +323,8 @@ struct PluginConfig {
 impl PluginConfig {
     fn from_json(v: &serde_json::Value) -> Self {
         Self {
-            database_url: v.get("database_url")
+            database_url: v
+                .get("database_url")
                 .and_then(|v| v.as_str())
                 .map(String::from)
                 .unwrap_or_else(|| {
@@ -345,13 +346,11 @@ async fn main() -> Result<()> {
     let query_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_query.clone();
         Box::pin(async move {
-
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
             handle_query_database(&pool, &args).await
-
         })
     });
 
@@ -429,11 +428,13 @@ Database schema is documented in the tool description for reference.".to_string(
             let config = PluginConfig::from_json(&params);
             tokio::task::block_in_place(|| {
                 let rt = tokio::runtime::Handle::current();
-                let new_pool = rt.block_on(db::connect(&config.database_url))
+                let new_pool = rt
+                    .block_on(db::connect(&config.database_url))
                     .expect("Failed to connect to database");
                 *p.blocking_write() = Some(new_pool);
             });
             tracing::info!("Query plugin configured with database_url");
         })
-    }).await
+    })
+    .await
 }

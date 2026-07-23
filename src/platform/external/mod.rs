@@ -83,119 +83,118 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
         };
 
         for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let plugin_json_path = path.join("plugin.json");
-        if !plugin_json_path.exists() {
-            continue;
-        }
-        let content = match std::fs::read_to_string(&plugin_json_path) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to read platform manifest {}: {:?}",
-                    plugin_json_path.display(),
-                    e
-                );
+            let path = entry.path();
+            if !path.is_dir() {
                 continue;
             }
-        };
-        let manifest = match serde_json::from_str::<crate::plugin::PluginManifest>(&content) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to parse platform manifest {}: {:?}",
-                    plugin_json_path.display(),
-                    e
-                );
+            let plugin_json_path = path.join("plugin.json");
+            if !plugin_json_path.exists() {
                 continue;
             }
-        };
-        if manifest.plugin_type != crate::plugin::PluginType::Platform {
-            continue;
-        }
-        let entrypoint = match &manifest.entrypoint {
-            Some(ep) => ep,
-            None => {
-                tracing::warn!(
-                    "Platform plugin '{}' has no entrypoint, skipping",
-                    manifest.name,
-                );
+            let content = match std::fs::read_to_string(&plugin_json_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to read platform manifest {}: {:?}",
+                        plugin_json_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+            let manifest = match serde_json::from_str::<crate::plugin::PluginManifest>(&content) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to parse platform manifest {}: {:?}",
+                        plugin_json_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+            if manifest.plugin_type != crate::plugin::PluginType::Platform {
                 continue;
             }
-        };
+            let entrypoint = match &manifest.entrypoint {
+                Some(ep) => ep,
+                None => {
+                    tracing::warn!(
+                        "Platform plugin '{}' has no entrypoint, skipping",
+                        manifest.name,
+                    );
+                    continue;
+                }
+            };
 
-        // Resolve the command path: for bare-name commands, check if it's a
-        // workspace member binary (next to omniagent), otherwise use as-is.
-        let resolved_command = if entrypoint.command.contains('/') {
-            entrypoint.command.clone()
-        } else {
-            let bin_path =
-                crate::mcp::external::config::get_bin_path(&entrypoint.command);
-            if std::path::Path::new(&bin_path).exists() {
-                tracing::info!(
-                    "Resolved command for platform '{}' from '{}' to '{}'",
-                    manifest.name,
-                    entrypoint.command,
-                    bin_path
-                );
-                bin_path
-            } else {
+            // Resolve the command path: for bare-name commands, check if it's a
+            // workspace member binary (next to omniagent), otherwise use as-is.
+            let resolved_command = if entrypoint.command.contains('/') {
                 entrypoint.command.clone()
-            }
-        };
-
-        let config = PlatformPluginConfig {
-            name: manifest.name.clone(),
-            enabled: true,
-            command: resolved_command,
-            args: entrypoint.args.clone(),
-            env: manifest.env,
-            config: std::collections::HashMap::new(),
-            max_retries: 3,
-        };
-
-        // Validate that the entrypoint binary exists (for file-path commands).
-        // Commands that look like PATH lookups (no slash) are assumed to exist.
-        let command = &config.command;
-        let has_binary = if command.contains('/') {
-            let path = std::path::Path::new(command);
-            if path.is_relative() {
-                std::env::current_dir()
-                    .ok()
-                    .map(|cwd| cwd.join(path).exists())
-                    .unwrap_or(false)
             } else {
-                path.exists()
-            }
-        } else {
-            // PATH-based command: assume it's available
-            true
-        };
+                let bin_path = crate::mcp::external::config::get_bin_path(&entrypoint.command);
+                if std::path::Path::new(&bin_path).exists() {
+                    tracing::info!(
+                        "Resolved command for platform '{}' from '{}' to '{}'",
+                        manifest.name,
+                        entrypoint.command,
+                        bin_path
+                    );
+                    bin_path
+                } else {
+                    entrypoint.command.clone()
+                }
+            };
 
-        if !has_binary {
-            tracing::warn!(
+            let config = PlatformPluginConfig {
+                name: manifest.name.clone(),
+                enabled: true,
+                command: resolved_command,
+                args: entrypoint.args.clone(),
+                env: manifest.env,
+                config: std::collections::HashMap::new(),
+                max_retries: 3,
+            };
+
+            // Validate that the entrypoint binary exists (for file-path commands).
+            // Commands that look like PATH lookups (no slash) are assumed to exist.
+            let command = &config.command;
+            let has_binary = if command.contains('/') {
+                let path = std::path::Path::new(command);
+                if path.is_relative() {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|cwd| cwd.join(path).exists())
+                        .unwrap_or(false)
+                } else {
+                    path.exists()
+                }
+            } else {
+                // PATH-based command: assume it's available
+                true
+            };
+
+            if !has_binary {
+                tracing::warn!(
                 "Skipping platform plugin '{}': entrypoint binary not found at '{}' (resolved relative to CWD: {:?})",
                 manifest.name,
                 command,
                 std::env::current_dir().ok().map(|cwd| cwd.join(command)),
             );
-            continue;
-        }
+                continue;
+            }
 
-        let merged = merge_platform_config_env(
-            &config,
-            &serde_json::json!(manifest.config_schema),
-            data_dir,
-        );
-        tracing::info!(
-            "Loaded platform plugin '{}' from plugins/platforms/",
-            manifest.name
-        );
-        results.push(merged);
-    }
+            let merged = merge_platform_config_env(
+                &config,
+                &serde_json::json!(manifest.config_schema),
+                data_dir,
+            );
+            tracing::info!(
+                "Loaded platform plugin '{}' from plugins/platforms/",
+                manifest.name
+            );
+            results.push(merged);
+        }
     }
 
     results
@@ -703,7 +702,8 @@ pub fn build_platform_file_readers(
             std::env::var(env_var).unwrap_or_else(|_| {
                 tracing::warn!(
                     "Environment variable '{}' not set for platform '{}' access_token",
-                    env_var, plugin.name
+                    env_var,
+                    plugin.name
                 );
                 String::new()
             })

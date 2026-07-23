@@ -268,7 +268,8 @@ struct PluginConfig {
 impl PluginConfig {
     fn from_json(v: &serde_json::Value) -> Self {
         Self {
-            database_url: v.get("database_url")
+            database_url: v
+                .get("database_url")
                 .and_then(|v| v.as_str())
                 .map(String::from)
                 .unwrap_or_else(|| {
@@ -407,11 +408,13 @@ async fn main() -> Result<()> {
             let config = PluginConfig::from_json(&params);
             tokio::task::block_in_place(|| {
                 let rt = tokio::runtime::Handle::current();
-                let new_pool = rt.block_on(db::connect(&config.database_url))
+                let new_pool = rt
+                    .block_on(db::connect(&config.database_url))
                     .expect("Failed to connect to database");
                 *p.blocking_write() = Some(new_pool);
             });
             tracing::info!("Cron plugin configured with database_url");
         })
-    }).await
+    })
+    .await
 }

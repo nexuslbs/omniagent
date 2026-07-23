@@ -6,11 +6,11 @@
 //! Body: { provider, model, messages: [{role, content}], max_tokens?, temperature? }
 //! Returns: { content: "..." }
 
-use std::sync::Arc;
+use super::AppState;
+use crate::llm::{ApiMode, ChatMessage, CompletionRequest, LLMClient, LLMConfig};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
-use crate::llm::{ChatMessage, CompletionRequest, LLMClient, LLMConfig, ApiMode};
-use super::AppState;
+use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
 pub struct LlmChatRequest {
@@ -29,8 +29,12 @@ pub struct LlmMessage {
     pub content: String,
 }
 
-fn default_max_tokens() -> u32 { 4096 }
-fn default_temperature() -> f32 { 0.3 }
+fn default_max_tokens() -> u32 {
+    4096
+}
+fn default_temperature() -> f32 {
+    0.3
+}
 
 #[derive(Debug, Serialize)]
 pub struct LlmChatResponse {

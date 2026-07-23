@@ -173,7 +173,11 @@ pub async fn get_channel_plan(pool: &PgPool, channel_id: i64) -> AppResult<Optio
         Ok(Some(val)) => Ok(val),
         Ok(None) => Ok(None),
         Err(e) => {
-            tracing::warn!("get_channel_plan failed for channel {}: {:?}", channel_id, e);
+            tracing::warn!(
+                "get_channel_plan failed for channel {}: {:?}",
+                channel_id,
+                e
+            );
             Ok(None)
         }
     }

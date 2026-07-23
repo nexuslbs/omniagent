@@ -13,7 +13,8 @@ fn run(args: &[&str]) -> (String, String, i32) {
 
 fn api_get(path: &str) -> serde_json::Value {
     let (stdout, _, code) = run(&[
-        "sh", "-c",
+        "sh",
+        "-c",
         &format!("curl -sf http://localhost:8080/api{}", path),
     ]);
     assert_eq!(code, 0, "API GET {} failed: {}", path, stdout);
@@ -22,7 +23,8 @@ fn api_get(path: &str) -> serde_json::Value {
 
 fn api_post(path: &str) -> serde_json::Value {
     let (stdout, _, code) = run(&[
-        "sh", "-c",
+        "sh",
+        "-c",
         &format!("curl -sf -X POST http://localhost:8080/api{}", path),
     ]);
     assert_eq!(code, 0, "API POST {} failed: {}", path, stdout);
@@ -44,7 +46,10 @@ fn test_list_plugins_no_stale_entries() {
         .iter()
         .map(|p| p["name"].as_str().unwrap_or(""))
         .collect();
-    assert!(!names.contains(&"docker-compose"), "docker-compose should not appear");
+    assert!(
+        !names.contains(&"docker-compose"),
+        "docker-compose should not appear"
+    );
     assert!(!names.contains(&"external"), "external should not appear");
     assert!(!names.contains(&"util"), "util should not appear");
 }
@@ -54,11 +59,26 @@ fn test_list_plugins_no_stale_entries() {
 fn test_list_builtins_have_source_code() {
     let resp = api_get("/plugins");
     let data = resp["data"].as_array().expect("Expected data array");
-    for name in &["cron", "kanban", "memory", "metrics", "plugin-manager", "query", "search", "subtasks"] {
-        let plugin = data.iter().find(|p| p["name"] == *name && p["source"] == "built-in");
+    for name in &[
+        "cron",
+        "kanban",
+        "memory",
+        "metrics",
+        "plugin-manager",
+        "query",
+        "search",
+        "subtasks",
+    ] {
+        let plugin = data
+            .iter()
+            .find(|p| p["name"] == *name && p["source"] == "built-in");
         assert!(plugin.is_some(), "Builtin '{}' not found in listing", name);
         let p = plugin.unwrap();
-        assert_eq!(p["has_source_code"], true, "Builtin '{}' should have source code", name);
+        assert_eq!(
+            p["has_source_code"], true,
+            "Builtin '{}' should have source code",
+            name
+        );
     }
 }
 
@@ -68,7 +88,9 @@ fn test_list_bundled_exist() {
     let resp = api_get("/plugins");
     let data = resp["data"].as_array().expect("Expected data array");
     for name in &["actions", "fetch", "filesystem", "git", "skills"] {
-        let plugin = data.iter().find(|p| p["name"] == *name && p["source"] == "bundled");
+        let plugin = data
+            .iter()
+            .find(|p| p["name"] == *name && p["source"] == "bundled");
         assert!(plugin.is_some(), "Bundled '{}' not found in listing", name);
     }
 }
@@ -81,7 +103,10 @@ fn test_builtins_enabled_only_in_yaml() {
     for p in data {
         if p["source"] == "built-in" && p["status"] == "enabled" {
             let name = p["name"].as_str().unwrap_or("");
-            eprintln!("Builtin '{}' is enabled: verify YAML has source: built-in", name);
+            eprintln!(
+                "Builtin '{}' is enabled: verify YAML has source: built-in",
+                name
+            );
         }
     }
 }
@@ -91,14 +116,23 @@ fn test_builtins_enabled_only_in_yaml() {
 fn test_no_duplicated_primary_enabled() {
     let resp = api_get("/plugins");
     let data = resp["data"].as_array().expect("Expected data array");
-    let mut groups: std::collections::HashMap<String, Vec<&serde_json::Value>> = std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<String, Vec<&serde_json::Value>> =
+        std::collections::HashMap::new();
     for p in data {
-        groups.entry(p["name"].as_str().unwrap_or("").to_string()).or_default().push(p);
+        groups
+            .entry(p["name"].as_str().unwrap_or("").to_string())
+            .or_default()
+            .push(p);
     }
     for (name, entries) in &groups {
         if entries.len() > 1 {
             let enabled_count = entries.iter().filter(|e| e["status"] == "enabled").count();
-            assert!(enabled_count <= 1, "Plugin '{}' has {} enabled entries (max 1)", name, enabled_count);
+            assert!(
+                enabled_count <= 1,
+                "Plugin '{}' has {} enabled entries (max 1)",
+                name,
+                enabled_count
+            );
         }
     }
 }
@@ -110,13 +144,23 @@ fn test_remote_plugin_install_compile() {
     let base = "/plugins/tools/remote/test-rust-tool";
 
     // Ensure clean state
-    let _ = run(&["sh", "-c", &format!("curl -sf -X POST http://localhost:8080/api{}/disable 2>/dev/null || true", base)]);
+    let _ = run(&[
+        "sh",
+        "-c",
+        &format!(
+            "curl -sf -X POST http://localhost:8080/api{}/disable 2>/dev/null || true",
+            base
+        ),
+    ]);
     let _ = run(&["sh", "-c", &format!("curl -sf -X DELETE 'http://localhost:8080/api{base}?mode=uninstall' 2>/dev/null || true", base = base)]);
 
     let plugin = get_plugin(name).expect("test-rust-tool should exist via remote.yml");
     assert_eq!(plugin["source"], "remote");
-    assert!(["disabled", "not_found", "enabled"].contains(&plugin["status"].as_str().unwrap_or("")),
-        "Unexpected status '{}' for test-rust-tool", plugin["status"]);
+    assert!(
+        ["disabled", "not_found", "enabled"].contains(&plugin["status"].as_str().unwrap_or("")),
+        "Unexpected status '{}' for test-rust-tool",
+        plugin["status"]
+    );
 
     // Download source from git (required before install)
     let resp = api_post(&format!("{}/download", base));
@@ -127,16 +171,27 @@ fn test_remote_plugin_install_compile() {
 
     std::thread::sleep(std::time::Duration::from_secs(10));
 
-    let (stdout, _, code) = run(&["sh", "-c", &format!(
-        "ls /target/release/{} 2>/dev/null", name
-    )]);
+    let (stdout, _, code) = run(&[
+        "sh",
+        "-c",
+        &format!("ls /target/release/{} 2>/dev/null", name),
+    ]);
     assert_eq!(code, 0, "Binary not found after install:\n{}", stdout);
 
     let plugin = get_plugin(name).expect("test-rust-tool should exist after install");
-    assert!(["disabled", "enabled"].contains(&plugin["status"].as_str().unwrap_or("")),
-        "Should be disabled or enabled after install, got '{}'", plugin["status"]);
-    assert_eq!(plugin["needs_build"], false, "Should not need build anymore");
-    assert_eq!(plugin["has_source_code"], true, "Should still have source code");
+    assert!(
+        ["disabled", "enabled"].contains(&plugin["status"].as_str().unwrap_or("")),
+        "Should be disabled or enabled after install, got '{}'",
+        plugin["status"]
+    );
+    assert_eq!(
+        plugin["needs_build"], false,
+        "Should not need build anymore"
+    );
+    assert_eq!(
+        plugin["has_source_code"], true,
+        "Should still have source code"
+    );
 }
 
 #[test]
@@ -153,7 +208,10 @@ fn test_remote_plugin_enable_and_query() {
     assert_eq!(resp["success"], true, "Enable failed: {:?}", resp);
 
     let plugin = get_plugin(name).expect("test-rust-tool should exist after enable");
-    assert_eq!(plugin["status"], "enabled", "Should be enabled after enable call");
+    assert_eq!(
+        plugin["status"], "enabled",
+        "Should be enabled after enable call"
+    );
 }
 
 #[test]
@@ -178,9 +236,11 @@ fn test_remote_plugin_reinstall() {
 
     std::thread::sleep(std::time::Duration::from_secs(60));
 
-    let (stdout, _, code) = run(&["sh", "-c", &format!(
-        "ls /target/release/{} 2>/dev/null", name
-    )]);
+    let (stdout, _, code) = run(&[
+        "sh",
+        "-c",
+        &format!("ls /target/release/{} 2>/dev/null", name),
+    ]);
     assert_eq!(code, 0, "Binary not found after reinstall:\n{}", stdout);
 }
 
@@ -208,14 +268,20 @@ fn test_remote_plugin_uninstall() {
         resp
     );
 
-    let (_, _, _) = run(&["sh", "-c", &format!(
+    let (_, _, _) = run(&[
+        "sh",
+        "-c",
+        &format!(
         "curl -sf -X DELETE 'http://localhost:8080/api{base}?source=remote' 2>/dev/null || true",
         base = base
-    )]);
+    ),
+    ]);
 
-    let (stdout, _, _) = run(&["sh", "-c", &format!(
-        "ls /opt/omni/plugins/tools/.remote/{}/ 2>/dev/null", name
-    )]);
+    let (stdout, _, _) = run(&[
+        "sh",
+        "-c",
+        &format!("ls /opt/omni/plugins/tools/.remote/{}/ 2>/dev/null", name),
+    ]);
     assert!(
         stdout.is_empty(),
         "Remote directory should be removed after uninstall"
@@ -229,31 +295,62 @@ fn test_builtin_reinstall_rejected() {
     let base = "/plugins/tools/built-in/plugin-manager";
 
     let plugin = get_plugin(name).expect("plugin-manager should exist");
-    assert_eq!(plugin["source"], "built-in", "plugin-manager should be built-in");
+    assert_eq!(
+        plugin["source"], "built-in",
+        "plugin-manager should be built-in"
+    );
 
     // Reinstall on built-in should fail with error
     let (stdout, _, _) = run(&["sh", "-c", &format!(
         "curl -s -o /dev/null -w '%{{http_code}}' -X POST http://localhost:8080/api{}/reinstall", base
     )]);
-    assert_eq!(stdout.trim(), "400", "Built-in reinstall should return 400, got '{}'", stdout.trim());
+    assert_eq!(
+        stdout.trim(),
+        "400",
+        "Built-in reinstall should return 400, got '{}'",
+        stdout.trim()
+    );
 }
 
 #[test]
 #[ignore]
 fn test_no_mcp_directory_references() {
-    let (stdout, _, _code) = run(&["sh", "-c", "test -d /app/plugins/mcp && echo EXISTS || echo NOT_FOUND"]);
-    assert_eq!(stdout.trim(), "NOT_FOUND", "mcp/ directory should not exist: should be tools/");
-    let (stdout, _, _code) = run(&["sh", "-c", "test -d /app/plugins/tools && echo EXISTS || echo NOT_FOUND"]);
+    let (stdout, _, _code) = run(&[
+        "sh",
+        "-c",
+        "test -d /app/plugins/mcp && echo EXISTS || echo NOT_FOUND",
+    ]);
+    assert_eq!(
+        stdout.trim(),
+        "NOT_FOUND",
+        "mcp/ directory should not exist: should be tools/"
+    );
+    let (stdout, _, _code) = run(&[
+        "sh",
+        "-c",
+        "test -d /app/plugins/tools && echo EXISTS || echo NOT_FOUND",
+    ]);
     assert_eq!(stdout.trim(), "EXISTS", "tools/ directory should exist");
 }
 
 #[test]
 #[ignore]
 fn test_workspace_cargo_toml_uses_tools_not_mcp() {
-    let (stdout, _, _code) = run(&["sh", "-c", "grep 'plugins/mcp' /app/Cargo.toml || echo NO_MCP_REFS"]);
-    assert_eq!(stdout.trim(), "NO_MCP_REFS", "Cargo.toml should not reference plugins/mcp/");
+    let (stdout, _, _code) = run(&[
+        "sh",
+        "-c",
+        "grep 'plugins/mcp' /app/Cargo.toml || echo NO_MCP_REFS",
+    ]);
+    assert_eq!(
+        stdout.trim(),
+        "NO_MCP_REFS",
+        "Cargo.toml should not reference plugins/mcp/"
+    );
     let (stdout, _, _) = run(&["sh", "-c", "grep 'plugins/tools' /app/Cargo.toml | head -3"]);
-    assert!(!stdout.is_empty(), "Cargo.toml should reference plugins/tools/");
+    assert!(
+        !stdout.is_empty(),
+        "Cargo.toml should reference plugins/tools/"
+    );
 }
 
 #[test]
@@ -263,7 +360,11 @@ fn test_all_plugin_statuses_are_valid() {
     let data = resp["data"].as_array().expect("Expected data array");
     for p in data {
         let status = p["status"].as_str().unwrap_or("");
-        assert!(["enabled", "disabled", "error", "not_found"].contains(&status),
-            "Plugin '{}' has invalid status: '{}'", p["name"].as_str().unwrap_or("?"), status);
+        assert!(
+            ["enabled", "disabled", "error", "not_found"].contains(&status),
+            "Plugin '{}' has invalid status: '{}'",
+            p["name"].as_str().unwrap_or("?"),
+            status
+        );
     }
 }

@@ -520,21 +520,40 @@ struct PluginConfig {
 impl PluginConfig {
     fn from_value(v: &serde_json::Value) -> Self {
         Self {
-            database_url: v.get("database_url")
+            database_url: v
+                .get("database_url")
                 .and_then(|v| v.as_str())
                 .map(String::from)
                 .unwrap_or_else(|| {
                     eprintln!("FATAL: database_url not in configure message");
                     std::process::exit(1);
                 }),
-            omni_dir: v.get("omni_dir")
+            omni_dir: v
+                .get("omni_dir")
                 .and_then(|v| v.as_str())
                 .map(String::from)
-                .unwrap_or_else(|| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)).unwrap_or_default()),
-            summarize_after_days: v.get("summarize_after_days").and_then(|v| v.as_i64()).unwrap_or(7),
-            channel_summary_tokens: v.get("channel_summary_tokens").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(500),
-            summary_provider: v.get("summary_provider").and_then(|v| v.as_str()).map(String::from),
-            summary_model: v.get("summary_model").and_then(|v| v.as_str()).map(String::from),
+                .unwrap_or_else(|| {
+                    std::env::var("HOME")
+                        .map(|h| format!("{}/.omniagent", h))
+                        .unwrap_or_default()
+                }),
+            summarize_after_days: v
+                .get("summarize_after_days")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(7),
+            channel_summary_tokens: v
+                .get("channel_summary_tokens")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .unwrap_or(500),
+            summary_provider: v
+                .get("summary_provider")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            summary_model: v
+                .get("summary_model")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         }
     }
 }
@@ -569,7 +588,10 @@ async fn call_proxy_llm(
         .send()
         .await
         .context("LLM proxy request failed")?;
-    let body: Value = resp.json().await.context("Failed to parse LLM proxy response")?;
+    let body: Value = resp
+        .json()
+        .await
+        .context("Failed to parse LLM proxy response")?;
     body["content"]
         .as_str()
         .map(|s| s.to_string())
@@ -591,7 +613,10 @@ async fn handle_generate_summary(
     let window = config.summarize_after_days.max(1);
     let summary_tokens = config.channel_summary_tokens.max(256);
 
-    let (Some(ref provider_name), Some(ref model_name)) = (config.summary_provider.as_ref(), config.summary_model.as_ref()) else {
+    let (Some(ref provider_name), Some(ref model_name)) = (
+        config.summary_provider.as_ref(),
+        config.summary_model.as_ref(),
+    ) else {
         return Ok(("Summarization not configured: set summary_provider and summary_model in memory plugin config".to_string(), false));
     };
 
@@ -624,12 +649,10 @@ async fn handle_generate_summary(
         Err(e) => {
             tracing::warn!(
                 "[generate_summary] Failed to fetch completed threads for channel {}: {:?}",
-                channel_id, e
+                channel_id,
+                e
             );
-            return Ok((
-                format!("Failed to fetch threads: {}", e),
-                true,
-            ));
+            return Ok((format!("Failed to fetch threads: {}", e), true));
         }
     };
 
@@ -1044,7 +1067,8 @@ async fn main() -> Result<()> {
         // Connect to database using config's database_url
         tokio::task::block_in_place(|| {
             let rt = tokio::runtime::Handle::current();
-            let new_pool = rt.block_on(db::connect(&config.database_url))
+            let new_pool = rt
+                .block_on(db::connect(&config.database_url))
                 .expect("Failed to connect to database");
             *p_pool.blocking_write() = Some(new_pool);
             *dd_dir.blocking_write() = Some(config.omni_dir.clone());

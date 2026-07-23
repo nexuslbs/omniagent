@@ -71,14 +71,14 @@ pub(crate) fn err_json(status: StatusCode, msg: &str) -> (StatusCode, Json<serde
 }
 pub mod plugins;
 pub mod plugins_compile;
-pub mod plugins_types;
-pub mod plugins_reload;
-pub mod plugins_listing;
-pub mod plugins_setup;
 pub mod plugins_delete;
-pub mod plugins_install;
 pub mod plugins_enable;
 pub mod plugins_env;
+pub mod plugins_install;
+pub mod plugins_listing;
+pub mod plugins_reload;
+pub mod plugins_setup;
+pub mod plugins_types;
 
 /// Type alias for the platform restart signals map.
 type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicU64>, Arc<Notify>)>>>;
@@ -131,7 +131,7 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         shared_config: config.shared_config,
         platform_restart_signals: config.platform_restart_signals,
         plugin_manager: config.plugin_manager,
-        });
+    });
 
     let app = Router::new()
         .route("/health", get(health_handler))
@@ -506,11 +506,21 @@ async fn prompt_handler(
         .and_then(|c| c.platform.as_deref())
         .unwrap_or("");
     let tool_names: Vec<String> = state
-        .plugin_manager.snapshot_registry().await.all().iter().map(|t| t.full_name.clone()).collect();
+        .plugin_manager
+        .snapshot_registry()
+        .await
+        .all()
+        .iter()
+        .map(|t| t.full_name.clone())
+        .collect();
     let mut segments: Vec<String> = Vec::new();
 
     // Stable tier: simple identity + tool guidance
-    let tool_list = if tool_names.is_empty() { String::new() } else { tool_names.join(", ") };
+    let tool_list = if tool_names.is_empty() {
+        String::new()
+    } else {
+        tool_names.join(", ")
+    };
     segments.push(format!("You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice."));
     segments.push(format!("Active Hermes profile: {profile_name}."));
 
@@ -597,8 +607,18 @@ async fn prompt_preview_handler(
         .and_then(|c| c.platform.as_deref())
         .unwrap_or("");
     let tool_names: Vec<String> = state
-        .plugin_manager.snapshot_registry().await.all().iter().map(|t| t.full_name.clone()).collect();
-    let tool_list = if tool_names.is_empty() { String::new() } else { tool_names.join(", ") };
+        .plugin_manager
+        .snapshot_registry()
+        .await
+        .all()
+        .iter()
+        .map(|t| t.full_name.clone())
+        .collect();
+    let tool_list = if tool_names.is_empty() {
+        String::new()
+    } else {
+        tool_names.join(", ")
+    };
     let system_prompt = format!(
         "You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice.\n\nActive profile: {profile_name}.\n\n{}",
         if !memory_raw.is_empty() { format!("## MEMORY (your personal notes)\n{memory_raw}") } else { String::new() }
@@ -660,10 +680,14 @@ async fn prompt_preview_handler(
             .or_else(|| prof.provider.clone().filter(|s| !s.is_empty()))
             .or_else(|| {
                 crate::agent::config::get_global()
-                    .map(|g| g.read().expect("GlobalConfig lock poisoned").default_provider.clone())
+                    .map(|g| {
+                        g.read()
+                            .expect("GlobalConfig lock poisoned")
+                            .default_provider
+                            .clone()
+                    })
                     .filter(|s| !s.is_empty())
-            })
-        {
+            }) {
             Some(p) => p,
             None => {
                 return (
@@ -695,7 +719,11 @@ async fn prompt_preview_handler(
         let resolved_provider = crate::llm::ProviderId::new(&provider_name);
 
         // Build planning prompt inline
-        let tool_list = if tool_names.is_empty() { String::new() } else { format!("Your available tools: {}.", tool_names.join(", ")) };
+        let tool_list = if tool_names.is_empty() {
+            String::new()
+        } else {
+            format!("Your available tools: {}.", tool_names.join(", "))
+        };
         let planning_prompt = format!(
             "## Plan\nBefore responding, create a high-level plan with numbered steps. \
 {tool_list}\nBe specific about which tool to use and what parameters to pass. \
@@ -776,7 +804,12 @@ evaluate: if the task was completed, call the completion tool.",
 /// GET /mcp/tools: list all registered MCP tools with their input schemas.
 async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let tools: Vec<serde_json::Value> = state
-        .plugin_manager.snapshot_registry().await.all().iter().map(|t| {
+        .plugin_manager
+        .snapshot_registry()
+        .await
+        .all()
+        .iter()
+        .map(|t| {
             serde_json::json!({
                 "full_name": t.full_name,
                 "description": t.description,
@@ -811,7 +844,11 @@ async fn execute_mcp_tool_handler(
     };
 
     match state
-        .plugin_manager.snapshot_registry().await.execute(&call, state.app_context.clone()).await
+        .plugin_manager
+        .snapshot_registry()
+        .await
+        .execute(&call, state.app_context.clone())
+        .await
     {
         Ok(result) => Json(serde_json::json!({
             "success": true,
@@ -939,11 +976,22 @@ async fn call_prompt_context(
     channel_id: i64,
 ) -> String {
     let prompt_tool_name = crate::agent::config::get_global()
-        .map(|g| g.read().expect("GlobalConfig lock poisoned").prompt_tool_name.clone())
+        .map(|g| {
+            g.read()
+                .expect("GlobalConfig lock poisoned")
+                .prompt_tool_name
+                .clone()
+        })
         .unwrap_or_else(|| "prompt_generate".to_string());
 
     // Collect all available tool names (same as the executor does)
-    let tool_names: Vec<String> = plugin_manager.snapshot_registry().await.all().iter().map(|t| t.full_name.clone()).collect();
+    let tool_names: Vec<String> = plugin_manager
+        .snapshot_registry()
+        .await
+        .all()
+        .iter()
+        .map(|t| t.full_name.clone())
+        .collect();
     let mcp_call = McpToolCall {
         id: "preview-context".to_string(),
         name: prompt_tool_name,
@@ -957,15 +1005,17 @@ async fn call_prompt_context(
         }),
     };
 
-    let result = plugin_manager.snapshot_registry().await.execute(&mcp_call, app_context.clone()).await;
+    let result = plugin_manager
+        .snapshot_registry()
+        .await
+        .execute(&mcp_call, app_context.clone())
+        .await;
 
     match result {
-        Ok(r) if !r.is_error => {
-            serde_json::from_str::<serde_json::Value>(&r.content)
-                .ok()
-                .and_then(|v| v["context"].as_str().map(String::from))
-                .unwrap_or_default()
-        }
+        Ok(r) if !r.is_error => serde_json::from_str::<serde_json::Value>(&r.content)
+            .ok()
+            .and_then(|v| v["context"].as_str().map(String::from))
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }

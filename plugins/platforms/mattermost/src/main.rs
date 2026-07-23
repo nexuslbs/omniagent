@@ -188,11 +188,15 @@ impl MattermostClient {
 
         if !status.is_success() {
             let msg = body["message"].as_str().unwrap_or("unknown error");
-            return Err(anyhow::anyhow!("Mattermost getMe failed ({}): {}", status, msg));
+            return Err(anyhow::anyhow!(
+                "Mattermost getMe failed ({}): {}",
+                status,
+                msg
+            ));
         }
 
-        let user: MattermostUser = serde_json::from_value(body)
-            .context("Failed to parse Mattermost user")?;
+        let user: MattermostUser =
+            serde_json::from_value(body).context("Failed to parse Mattermost user")?;
 
         Ok(user)
     }
@@ -222,8 +226,8 @@ impl MattermostClient {
             ));
         }
 
-        let user: MattermostUser = serde_json::from_value(body)
-            .context("Failed to parse Mattermost user")?;
+        let user: MattermostUser =
+            serde_json::from_value(body).context("Failed to parse Mattermost user")?;
 
         Ok(user)
     }
@@ -232,10 +236,7 @@ impl MattermostClient {
     async fn get_teams(&self, user_id: &str) -> Result<Vec<MattermostTeam>> {
         let resp = self
             .http_client
-            .get(format!(
-                "{}/api/v4/users/{}/teams",
-                self.api_base, user_id
-            ))
+            .get(format!("{}/api/v4/users/{}/teams", self.api_base, user_id))
             .header("Authorization", &self.auth_header)
             .send()
             .await?;
@@ -255,14 +256,18 @@ impl MattermostClient {
             ));
         }
 
-        let teams: Vec<MattermostTeam> = serde_json::from_value(body)
-            .context("Failed to parse Mattermost teams")?;
+        let teams: Vec<MattermostTeam> =
+            serde_json::from_value(body).context("Failed to parse Mattermost teams")?;
 
         Ok(teams)
     }
 
     /// Get channels a user is a member of in a specific team.
-    async fn get_user_channels(&self, user_id: &str, team_id: &str) -> Result<Vec<MattermostChannel>> {
+    async fn get_user_channels(
+        &self,
+        user_id: &str,
+        team_id: &str,
+    ) -> Result<Vec<MattermostChannel>> {
         let resp = self
             .http_client
             .get(format!(
@@ -288,8 +293,8 @@ impl MattermostClient {
             ));
         }
 
-        let channels: Vec<MattermostChannel> = serde_json::from_value(body)
-            .context("Failed to parse Mattermost channels")?;
+        let channels: Vec<MattermostChannel> =
+            serde_json::from_value(body).context("Failed to parse Mattermost channels")?;
 
         Ok(channels)
     }
@@ -337,10 +342,7 @@ impl MattermostClient {
             })
             .unwrap_or_default();
 
-        let posts_map = body["posts"]
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        let posts_map = body["posts"].as_object().cloned().unwrap_or_default();
 
         let mut posts: Vec<MattermostPost> = Vec::with_capacity(order.len());
         for id in &order {
@@ -358,10 +360,7 @@ impl MattermostClient {
     async fn get_file_info(&self, file_id: &str) -> Result<MattermostFileInfo> {
         let resp = self
             .http_client
-            .get(format!(
-                "{}/api/v4/files/{}/info",
-                self.api_base, file_id
-            ))
+            .get(format!("{}/api/v4/files/{}/info", self.api_base, file_id))
             .header("Authorization", &self.auth_header)
             .send()
             .await?;
@@ -381,8 +380,8 @@ impl MattermostClient {
             ));
         }
 
-        let info: MattermostFileInfo = serde_json::from_value(body)
-            .context("Failed to parse Mattermost file info")?;
+        let info: MattermostFileInfo =
+            serde_json::from_value(body).context("Failed to parse Mattermost file info")?;
 
         Ok(info)
     }
@@ -392,10 +391,7 @@ impl MattermostClient {
     async fn get_file_content(&self, file_id: &str) -> Result<Vec<u8>> {
         let resp = self
             .http_client
-            .get(format!(
-                "{}/api/v4/files/{}",
-                self.api_base, file_id
-            ))
+            .get(format!("{}/api/v4/files/{}", self.api_base, file_id))
             .header("Authorization", &self.auth_header)
             .send()
             .await?;
@@ -471,7 +467,11 @@ impl MattermostClient {
         if status.is_success() || status.as_u16() == 409 {
             Ok(serde_json::from_str(&text).unwrap_or(serde_json::json!({})))
         } else {
-            Err(anyhow::anyhow!("Mattermost createUser failed ({}): {}", status, text))
+            Err(anyhow::anyhow!(
+                "Mattermost createUser failed ({}): {}",
+                status,
+                text
+            ))
         }
     }
 
@@ -494,7 +494,11 @@ impl MattermostClient {
         if status.is_success() || status.as_u16() == 409 {
             Ok(serde_json::from_str(&text).unwrap_or(serde_json::json!({})))
         } else {
-            Err(anyhow::anyhow!("Mattermost createTeam failed ({}): {}", status, text))
+            Err(anyhow::anyhow!(
+                "Mattermost createTeam failed ({}): {}",
+                status,
+                text
+            ))
         }
     }
 
@@ -512,7 +516,11 @@ impl MattermostClient {
         if status.is_success() {
             Ok(serde_json::from_str(&text).unwrap_or_default())
         } else {
-            Err(anyhow::anyhow!("Mattermost getTeamsAll failed ({}): {}", status, text))
+            Err(anyhow::anyhow!(
+                "Mattermost getTeamsAll failed ({}): {}",
+                status,
+                text
+            ))
         }
     }
 
@@ -529,7 +537,11 @@ impl MattermostClient {
         if status.is_success() {
             Ok(serde_json::from_str(&text).unwrap_or_default())
         } else {
-            Err(anyhow::anyhow!("Mattermost getUsersAll failed ({}): {}", status, text))
+            Err(anyhow::anyhow!(
+                "Mattermost getUsersAll failed ({}): {}",
+                status,
+                text
+            ))
         }
     }
 
@@ -538,7 +550,10 @@ impl MattermostClient {
         let body = serde_json::json!({"team_id": team_id, "user_id": user_id});
         let resp = self
             .http_client
-            .post(format!("{}/api/v4/teams/{}/members", self.api_base, team_id))
+            .post(format!(
+                "{}/api/v4/teams/{}/members",
+                self.api_base, team_id
+            ))
             .header("Authorization", &self.auth_header)
             .json(&body)
             .send()
@@ -548,7 +563,11 @@ impl MattermostClient {
             Ok(true)
         } else {
             let text = resp.text().await.unwrap_or_default();
-            Err(anyhow::anyhow!("Mattermost addTeamMember failed ({}): {}", status, text))
+            Err(anyhow::anyhow!(
+                "Mattermost addTeamMember failed ({}): {}",
+                status,
+                text
+            ))
         }
     }
 
@@ -572,7 +591,11 @@ impl MattermostClient {
         if status.is_success() || status.as_u16() == 409 {
             Ok(serde_json::from_str(&text).unwrap_or(serde_json::json!({})))
         } else {
-            Err(anyhow::anyhow!("Mattermost createChannel failed ({}): {}", status, text))
+            Err(anyhow::anyhow!(
+                "Mattermost createChannel failed ({}): {}",
+                status,
+                text
+            ))
         }
     }
 
@@ -581,7 +604,10 @@ impl MattermostClient {
         let body = serde_json::json!({"user_id": user_id});
         let resp = self
             .http_client
-            .post(format!("{}/api/v4/channels/{}/members", self.api_base, channel_id))
+            .post(format!(
+                "{}/api/v4/channels/{}/members",
+                self.api_base, channel_id
+            ))
             .header("Authorization", &self.auth_header)
             .json(&body)
             .send()
@@ -591,12 +617,21 @@ impl MattermostClient {
             Ok(true)
         } else {
             let text = resp.text().await.unwrap_or_default();
-            Err(anyhow::anyhow!("Mattermost addChannelMember failed ({}): {}", status, text))
+            Err(anyhow::anyhow!(
+                "Mattermost addChannelMember failed ({}): {}",
+                status,
+                text
+            ))
         }
     }
 
     /// Create a bot account from an existing user.
-    async fn create_bot(&self, user_id: &str, display_name: &str, description: &str) -> Result<Value> {
+    async fn create_bot(
+        &self,
+        user_id: &str,
+        display_name: &str,
+        description: &str,
+    ) -> Result<Value> {
         let body = serde_json::json!({
             "user_id": user_id,
             "display_name": display_name,
@@ -614,7 +649,11 @@ impl MattermostClient {
         if status.is_success() || status.as_u16() == 409 {
             Ok(serde_json::from_str(&text).unwrap_or(serde_json::json!({})))
         } else {
-            Err(anyhow::anyhow!("Mattermost createBot failed ({}): {}", status, text))
+            Err(anyhow::anyhow!(
+                "Mattermost createBot failed ({}): {}",
+                status,
+                text
+            ))
         }
     }
 
@@ -632,12 +671,15 @@ impl MattermostClient {
         let text = resp.text().await.unwrap_or_default();
         if status.is_success() {
             let val: Value = serde_json::from_str(&text)?;
-            val["token"]
-                .as_str()
-                .map(|s| s.to_string())
-                .ok_or_else(|| anyhow::anyhow!("Mattermost createUserToken response missing token field"))
+            val["token"].as_str().map(|s| s.to_string()).ok_or_else(|| {
+                anyhow::anyhow!("Mattermost createUserToken response missing token field")
+            })
         } else {
-            Err(anyhow::anyhow!("Mattermost createUserToken failed ({}): {}", status, text))
+            Err(anyhow::anyhow!(
+                "Mattermost createUserToken failed ({}): {}",
+                status,
+                text
+            ))
         }
     }
 
@@ -655,7 +697,11 @@ impl MattermostClient {
         if status.is_success() {
             Ok(serde_json::from_str(&text).unwrap_or_default())
         } else {
-            Err(anyhow::anyhow!("Mattermost getUserTokens failed ({}): {}", status, text))
+            Err(anyhow::anyhow!(
+                "Mattermost getUserTokens failed ({}): {}",
+                status,
+                text
+            ))
         }
     }
 
@@ -664,7 +710,10 @@ impl MattermostClient {
         let body = serde_json::json!({"new_password": new_password});
         let resp = self
             .http_client
-            .put(format!("{}/api/v4/users/{}/password", self.api_base, user_id))
+            .put(format!(
+                "{}/api/v4/users/{}/password",
+                self.api_base, user_id
+            ))
             .header("Authorization", &self.auth_header)
             .json(&body)
             .send()
@@ -674,7 +723,11 @@ impl MattermostClient {
             Ok(true)
         } else {
             let text = resp.text().await.unwrap_or_default();
-            Err(anyhow::anyhow!("Mattermost updateUserPassword failed ({}): {}", status, text))
+            Err(anyhow::anyhow!(
+                "Mattermost updateUserPassword failed ({}): {}",
+                status,
+                text
+            ))
         }
     }
 
@@ -683,7 +736,10 @@ impl MattermostClient {
     async fn get_team_members(&self, team_id: &str) -> Result<Vec<Value>> {
         let resp = self
             .http_client
-            .get(format!("{}/api/v4/teams/{}/members", self.api_base, team_id))
+            .get(format!(
+                "{}/api/v4/teams/{}/members",
+                self.api_base, team_id
+            ))
             .header("Authorization", &self.auth_header)
             .send()
             .await?;
@@ -692,7 +748,11 @@ impl MattermostClient {
         if status.is_success() {
             Ok(serde_json::from_str(&text).unwrap_or_default())
         } else {
-            Err(anyhow::anyhow!("Mattermost getTeamMembers failed ({}): {}", status, text))
+            Err(anyhow::anyhow!(
+                "Mattermost getTeamMembers failed ({}): {}",
+                status,
+                text
+            ))
         }
     }
 
@@ -714,7 +774,11 @@ impl MattermostClient {
             return Ok(team["id"].as_str().map(|s| s.to_string()));
         }
         let text = resp.text().await.unwrap_or_default();
-        Err(anyhow::anyhow!("Mattermost findTeamByName failed ({}): {}", status, text))
+        Err(anyhow::anyhow!(
+            "Mattermost findTeamByName failed ({}): {}",
+            status,
+            text
+        ))
     }
 
     /// Find user by username.
@@ -735,7 +799,8 @@ impl MattermostClient {
     async fn setup_bot_token(&self, bot_user_id: &str) -> Result<String> {
         // Always create a new token. The Mattermost GET tokens API returns only
         // token IDs (not values), so we cannot meaningfully reuse existing tokens.
-        self.create_user_token(bot_user_id, "OmniAgent bot access token").await
+        self.create_user_token(bot_user_id, "OmniAgent bot access token")
+            .await
     }
 }
 
@@ -808,7 +873,7 @@ struct FileAttachment {
     size: i64,
     mime_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    content: Option<String>,  // base64-encoded raw bytes
+    content: Option<String>, // base64-encoded raw bytes
 }
 
 /// File metadata returned by Mattermost file info API.
@@ -955,7 +1020,10 @@ struct PluginConfig {
     connection_mode: String,
     #[serde(default = "default_polling_enabled")]
     polling_enabled: bool,
-    #[serde(default = "default_polling_interval", deserialize_with = "deserialize_u64_from_string_or_number")]
+    #[serde(
+        default = "default_polling_interval",
+        deserialize_with = "deserialize_u64_from_string_or_number"
+    )]
     polling_interval: u64,
     // channel_ids removed: plugin auto-discovers channels from omniagent channel records
     #[serde(default)]
@@ -976,7 +1044,10 @@ struct PluginConfig {
     test_password: Option<String>,
     #[serde(default = "default_env_path")]
     env_path: String,
-    #[serde(default = "default_max_download_bytes", deserialize_with = "deserialize_u64_from_string_or_number")]
+    #[serde(
+        default = "default_max_download_bytes",
+        deserialize_with = "deserialize_u64_from_string_or_number"
+    )]
     max_download_bytes: u64,
 }
 
@@ -988,14 +1059,17 @@ fn default_polling_interval() -> u64 {
     15
 }
 
-
 fn default_server_url() -> String {
     "http://mattermost:8065".to_string()
 }
 
 fn default_env_path() -> String {
-    std::env::var("OMNI_DIR").map(|d| format!("{}/.env", d))
-        .unwrap_or_else(|_| { eprintln!("FATAL: OMNI_DIR must be set"); std::process::exit(1); })
+    std::env::var("OMNI_DIR")
+        .map(|d| format!("{}/.env", d))
+        .unwrap_or_else(|_| {
+            eprintln!("FATAL: OMNI_DIR must be set");
+            std::process::exit(1);
+        })
 }
 
 fn default_max_download_bytes() -> u64 {
@@ -1026,7 +1100,9 @@ where
         fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
             formatter.write_str("a u64, string, or empty value")
         }
-        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u64, E> { Ok(v) }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u64, E> {
+            Ok(v)
+        }
         fn visit_str<E: de::Error>(self, v: &str) -> Result<u64, E> {
             if v.is_empty() {
                 Ok(default_polling_interval())
@@ -1045,8 +1121,10 @@ where
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .with_writer(std::io::stderr)
         .init();
 
@@ -1062,7 +1140,7 @@ async fn main() -> Result<()> {
     let stdout = tokio::io::stdout();
     let mut writer = tokio::io::BufWriter::new(stdout);
 
-    //  1. Handle initialize (first message) 
+    //  1. Handle initialize (first message)
     let first_line = lines.next_line().await?.unwrap_or_default();
     let request: PluginRequest = serde_json::from_str(&first_line)
         .context("Expected initialize request as first message")?;
@@ -1088,14 +1166,18 @@ async fn main() -> Result<()> {
     writer.write_all(b"\n").await?;
     writer.flush().await?;
 
-    //  2. Handle configure (second message) 
+    //  2. Handle configure (second message)
     let second_line = lines.next_line().await?.unwrap_or_default();
     let request: PluginRequest = serde_json::from_str(&second_line)
         .context("Expected configure request as second message")?;
 
     let id = request.id.unwrap_or(2);
     let config: PluginConfig = match request.method.as_str() {
-        "configure" => match request.params.map(|p| serde_json::from_value(p)).transpose() {
+        "configure" => match request
+            .params
+            .map(|p| serde_json::from_value(p))
+            .transpose()
+        {
             Ok(Some(cfg)) => cfg,
             Ok(None) => {
                 let err_resp = make_error(id, -1, "Configure params missing");
@@ -1106,8 +1188,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             Err(e) => {
-                let err_resp =
-                    make_error(id, -1, &format!("Invalid configure params: {}", e));
+                let err_resp = make_error(id, -1, &format!("Invalid configure params: {}", e));
                 let response_line = serde_json::to_string(&err_resp)?;
                 writer.write_all(response_line.as_bytes()).await?;
                 writer.write_all(b"\n").await?;
@@ -1137,7 +1218,11 @@ async fn main() -> Result<()> {
     writer.flush().await?;
 
     let server_url = config.server_url;
-    let secret_name = config.access_token_name.as_deref().unwrap_or("").to_string();
+    let secret_name = config
+        .access_token_name
+        .as_deref()
+        .unwrap_or("")
+        .to_string();
     // Resolve access_token from secret name via omniagent secrets API
     let secrets_http = reqwest::Client::new();
     let access_token = if !secret_name.is_empty() {
@@ -1163,11 +1248,17 @@ async fn main() -> Result<()> {
             if !tok.is_empty() {
                 tracing::info!("Resolved access_token for '{}'", secret_name);
             } else {
-                tracing::info!("Secret '{}' is empty - will generate during setup", secret_name);
+                tracing::info!(
+                    "Secret '{}' is empty - will generate during setup",
+                    secret_name
+                );
                 tok_val = None;
             }
         } else {
-            tracing::info!("Secret '{}' not found - will generate during setup", secret_name);
+            tracing::info!(
+                "Secret '{}' not found - will generate during setup",
+                secret_name
+            );
         }
         tok_val
     } else {
@@ -1186,13 +1277,12 @@ async fn main() -> Result<()> {
     }
 
     if is_setup_mode {
-        //  Setup mode: read setup request, process, exit 
+        //  Setup mode: read setup request, process, exit
         let third_line = lines.next_line().await?.unwrap_or_default();
         let request: PluginRequest = match serde_json::from_str(&third_line) {
             Ok(r) => r,
             Err(e) => {
-                let err_resp =
-                    make_error(3, -1, &format!("Invalid setup request: {}", e));
+                let err_resp = make_error(3, -1, &format!("Invalid setup request: {}", e));
                 let response_line = serde_json::to_string(&err_resp)?;
                 writer.write_all(response_line.as_bytes()).await?;
                 writer.write_all(b"\n").await?;
@@ -1235,10 +1325,11 @@ async fn main() -> Result<()> {
         // config changes) always use an admin session, not a bot PAT which lacks
         // sufficient privileges.
         let client: MattermostClient = 'client: {
-            //  1. Try admin login with configured credentials 
+            //  1. Try admin login with configured credentials
             if !params.admin_user.is_empty() && !params.admin_password.is_empty() {
                 if let Some(adm) =
-                    login_admin_client(&server_url, &params.admin_user, &params.admin_password).await
+                    login_admin_client(&server_url, &params.admin_user, &params.admin_password)
+                        .await
                 {
                     tracing::info!("Logged in as admin '{}' for setup", params.admin_user);
                     break 'client adm;
@@ -1250,15 +1341,16 @@ async fn main() -> Result<()> {
                 );
             }
 
-                // 1b. Try empty password fallback - handles case where a previous
-                //     buggy test run created admin user with empty password.
-                if let Some(adm) =
-                    login_admin_client(&server_url, &params.admin_user, "").await
-                {
-                    tracing::info!("Logged in as admin '{}' with empty password fallback", params.admin_user);
-                    break 'client adm;
-                }
-            //  2. Try access token (bot PAT: valid auth but limited privileges) 
+            // 1b. Try empty password fallback - handles case where a previous
+            //     buggy test run created admin user with empty password.
+            if let Some(adm) = login_admin_client(&server_url, &params.admin_user, "").await {
+                tracing::info!(
+                    "Logged in as admin '{}' with empty password fallback",
+                    params.admin_user
+                );
+                break 'client adm;
+            }
+            //  2. Try access token (bot PAT: valid auth but limited privileges)
             if let Some(token) = &access_token {
                 let test_client = MattermostClient::new(&server_url, token);
                 match test_client.get_me().await {
@@ -1270,12 +1362,14 @@ async fn main() -> Result<()> {
                         break 'client test_client;
                     }
                     Err(_) => {
-                        tracing::warn!("Access token is also stale, trying to create first admin user");
+                        tracing::warn!(
+                            "Access token is also stale, trying to create first admin user"
+                        );
                     }
                 }
             }
 
-            //  4. Fresh DB: create first admin user (no auth needed) 
+            //  4. Fresh DB: create first admin user (no auth needed)
             if !params.admin_user.is_empty() {
                 if params.admin_password.is_empty() {
                     tracing::error!("admin_password is empty: must provide a password to create admin user '{}'", params.admin_user);
@@ -1287,16 +1381,30 @@ async fn main() -> Result<()> {
                         )}
                     });
                     let mut raw_stdout = tokio::io::stdout();
-                    raw_stdout.write_all(serde_json::to_string(&err_resp)?.as_bytes()).await?;
+                    raw_stdout
+                        .write_all(serde_json::to_string(&err_resp)?.as_bytes())
+                        .await?;
                     raw_stdout.write_all(b"\n").await?;
                     return Ok(());
                 }
                 let pw = &params.admin_password;
-                tracing::info!("Attempting to create first admin user '{}' (fresh DB path)", params.admin_user);
-                match create_first_user(&server_url, &params.admin_user, pw, &format!("{}@local.host", params.admin_user)).await {
+                tracing::info!(
+                    "Attempting to create first admin user '{}' (fresh DB path)",
+                    params.admin_user
+                );
+                match create_first_user(
+                    &server_url,
+                    &params.admin_user,
+                    pw,
+                    &format!("{}@local.host", params.admin_user),
+                )
+                .await
+                {
                     Ok(_) => {
                         tracing::info!("Created first admin user, logging in");
-                        if let Some(adm) = login_admin_client(&server_url, &params.admin_user, pw).await {
+                        if let Some(adm) =
+                            login_admin_client(&server_url, &params.admin_user, pw).await
+                        {
                             break 'client adm;
                         }
                         let err_resp = serde_json::json!({
@@ -1304,7 +1412,9 @@ async fn main() -> Result<()> {
                             "error": { "code": -1, "message": "Created admin user but login with those credentials failed" }
                         });
                         let mut raw_stdout = tokio::io::stdout();
-                        raw_stdout.write_all(serde_json::to_string(&err_resp)?.as_bytes()).await?;
+                        raw_stdout
+                            .write_all(serde_json::to_string(&err_resp)?.as_bytes())
+                            .await?;
                         raw_stdout.write_all(b"\n").await?;
                         return Ok(());
                     }
@@ -1326,25 +1436,38 @@ async fn main() -> Result<()> {
                             }
                         });
                         let mut raw_stdout = tokio::io::stdout();
-                        raw_stdout.write_all(serde_json::to_string(&err_resp)?.as_bytes()).await?;
+                        raw_stdout
+                            .write_all(serde_json::to_string(&err_resp)?.as_bytes())
+                            .await?;
                         raw_stdout.write_all(b"\n").await?;
                         return Ok(());
                     }
                 }
             }
 
-            //  5. Nothing worked: error 
+            //  5. Nothing worked: error
             let err_resp = serde_json::json!({
                 "id": id,
                 "error": { "code": -1, "message": "No valid access_token and no admin_user + admin_password provided for bootstrap" }
             });
             let mut raw_stdout = tokio::io::stdout();
-            raw_stdout.write_all(serde_json::to_string(&err_resp)?.as_bytes()).await?;
+            raw_stdout
+                .write_all(serde_json::to_string(&err_resp)?.as_bytes())
+                .await?;
             raw_stdout.write_all(b"\n").await?;
             return Ok(());
         };
 
-        let response = handle_setup(id, &client, &server_url, &params, &access_token, &secret_name, &secrets_http).await;
+        let response = handle_setup(
+            id,
+            &client,
+            &server_url,
+            &params,
+            &access_token,
+            &secret_name,
+            &secrets_http,
+        )
+        .await;
         let response_line = serde_json::to_string(&response)?;
         writer.write_all(response_line.as_bytes()).await?;
         writer.write_all(b"\n").await?;
@@ -1384,7 +1507,7 @@ async fn main() -> Result<()> {
                     "Failed to authenticate with Mattermost: {:?}. Attempting auto-recovery...",
                     e
                 );
-                //  Auto-recovery: create a new PAT using admin credentials 
+                //  Auto-recovery: create a new PAT using admin credentials
                 let recovered: Option<(MattermostClient, String, MattermostUser)> = 'recover: {
                     let admin_user = match config.admin_user {
                         Some(ref u) if !u.is_empty() => u.clone(),
@@ -1395,40 +1518,68 @@ async fn main() -> Result<()> {
                         _ => break 'recover None,
                     };
                     tracing::info!("Auto-recovery: logging in as admin '{}'", admin_user);
-                    let admin_client = match login_admin_client(&server_url, &admin_user, &admin_password).await {
-                        Some(c) => c,
-                        None => {
-                            tracing::warn!("Auto-recovery: admin login failed");
-                            break 'recover None;
-                        }
-                    };
+                    let admin_client =
+                        match login_admin_client(&server_url, &admin_user, &admin_password).await {
+                            Some(c) => c,
+                            None => {
+                                tracing::warn!("Auto-recovery: admin login failed");
+                                break 'recover None;
+                            }
+                        };
                     let bot_username = &config.bot_user;
                     tracing::info!("Auto-recovery: finding bot user '{}'", bot_username);
-                    let (bot_user_id, _) = match admin_client.find_user_by_username(bot_username).await {
+                    let (bot_user_id, _) = match admin_client
+                        .find_user_by_username(bot_username)
+                        .await
+                    {
                         Ok(Some(result)) => result,
                         Ok(None) => {
                             tracing::warn!("Auto-recovery: bot user '{}' not found", bot_username);
                             break 'recover None;
                         }
                         Err(e) => {
-                            tracing::warn!("Auto-recovery: failed to find bot user '{}': {:?}", bot_username, e);
+                            tracing::warn!(
+                                "Auto-recovery: failed to find bot user '{}': {:?}",
+                                bot_username,
+                                e
+                            );
                             break 'recover None;
                         }
                     };
-                    tracing::info!("Auto-recovery: found bot user '{}' (id: {})", bot_username, bot_user_id);
-                    let new_token = match admin_client.create_user_token(&bot_user_id, "OmniAgent bot access token (auto-recovered)").await {
+                    tracing::info!(
+                        "Auto-recovery: found bot user '{}' (id: {})",
+                        bot_username,
+                        bot_user_id
+                    );
+                    let new_token = match admin_client
+                        .create_user_token(
+                            &bot_user_id,
+                            "OmniAgent bot access token (auto-recovered)",
+                        )
+                        .await
+                    {
                         Ok(t) => t,
                         Err(e) => {
                             tracing::warn!("Auto-recovery: failed to create new token: {:?}", e);
                             break 'recover None;
                         }
                     };
-                    tracing::info!("Auto-recovery: created new access token for '{}'", bot_username);
+                    tracing::info!(
+                        "Auto-recovery: created new access token for '{}'",
+                        bot_username
+                    );
                     // Persist the new token to the omniagent secret store
                     if !secret_name.is_empty() {
                         match set_agent_secret(&secrets_http, &secret_name, &new_token).await {
-                            Ok(_) => tracing::info!("Auto-recovery: updated secret '{}' with new access token", secret_name),
-                            Err(we) => tracing::warn!("Auto-recovery: failed to update secret '{}': {:?}", secret_name, we),
+                            Ok(_) => tracing::info!(
+                                "Auto-recovery: updated secret '{}' with new access token",
+                                secret_name
+                            ),
+                            Err(we) => tracing::warn!(
+                                "Auto-recovery: failed to update secret '{}': {:?}",
+                                secret_name,
+                                we
+                            ),
                         }
                     }
                     // Create a new client with the recovered token and verify it
@@ -1437,12 +1588,16 @@ async fn main() -> Result<()> {
                         Ok(bot) => {
                             tracing::info!(
                                 "Auto-recovery successful: authenticated as {} ({})",
-                                bot.username, bot.id
+                                bot.username,
+                                bot.id
                             );
                             Some((new_client, new_token, bot))
                         }
                         Err(e2) => {
-                            tracing::warn!("Auto-recovery: new token also failed authentication: {:?}", e2);
+                            tracing::warn!(
+                                "Auto-recovery: new token also failed authentication: {:?}",
+                                e2
+                            );
                             None
                         }
                     }
@@ -1474,19 +1629,14 @@ async fn main() -> Result<()> {
     let channel_ids: Vec<String> = if let Some(ref bot) = bot_user {
         let ids = discover_channels(&client, &bot.id).await;
         if !ids.is_empty() {
-            tracing::info!(
-                "Watching {} channel(s): {}",
-                ids.len(),
-                ids.join(", ")
-            );
+            tracing::info!("Watching {} channel(s): {}", ids.len(), ids.join(", "));
         }
         ids
     } else {
         Vec::new()
     };
 
-
-    //  Inbound (polling or WebSocket) 
+    //  Inbound (polling or WebSocket)
     let use_websocket = connection_mode == "websocket";
     let inbound_handle: Option<tokio::task::JoinHandle<()>> = match bot_user.as_ref() {
         Some(bot) if use_websocket => {
@@ -1498,7 +1648,8 @@ async fn main() -> Result<()> {
                     vec![],
                     bot_id,
                     max_download_bytes,
-                ).await;
+                )
+                .await;
             }))
         }
         Some(bot) if polling_enabled => {
@@ -1538,7 +1689,13 @@ async fn main() -> Result<()> {
                                     ch_id
                                 );
                                 if !last_create_at.contains_key(ch_id.as_str()) {
-                                    init_channel_cursor(&poll_client, ch_id, &bot_id, &mut last_create_at).await;
+                                    init_channel_cursor(
+                                        &poll_client,
+                                        ch_id,
+                                        &bot_id,
+                                        &mut last_create_at,
+                                    )
+                                    .await;
                                 }
                             }
                         }
@@ -1556,15 +1713,21 @@ async fn main() -> Result<()> {
 
                     for ch_id in &current_ids {
                         let count = poll_channel(
-                            &poll_client, ch_id, &bot_id,
-                            &mut last_create_at, &mut bot_cache,
+                            &poll_client,
+                            ch_id,
+                            &bot_id,
+                            &mut last_create_at,
+                            &mut bot_cache,
                             &mut processed_posts,
-                            &server_url_poll, max_download_bytes,
-                        ).await;
+                            &server_url_poll,
+                            max_download_bytes,
+                        )
+                        .await;
                         if count > 0 {
                             tracing::debug!(
                                 "Polling: processed {} new post(s) in channel {}",
-                                count, ch_id
+                                count,
+                                ch_id
                             );
                         }
                     }
@@ -1574,7 +1737,7 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
-    //  Main request-response loop 
+    //  Main request-response loop
     // Cache bot_user_id for the react handler
     let bot_user_id: Option<&str> = bot_user.as_ref().map(|u| u.id.as_str());
 
@@ -1611,11 +1774,7 @@ async fn main() -> Result<()> {
             }
         };
 
-        tracing::debug!(
-            "Received request: method={}, id={}",
-            request.method,
-            req_id
-        );
+        tracing::debug!("Received request: method={}, id={}", request.method, req_id);
 
         let response = match request.method.as_str() {
             "initialize" => handle_initialize(req_id).await,
@@ -1623,9 +1782,7 @@ async fn main() -> Result<()> {
                 if let Some(params) = request.params {
                     match serde_json::from_value::<DeliverParams>(params) {
                         Ok(p) => handle_deliver(req_id, &client, &p).await,
-                        Err(e) => {
-                            make_error(req_id, -1, &format!("Invalid deliver params: {}", e))
-                        }
+                        Err(e) => make_error(req_id, -1, &format!("Invalid deliver params: {}", e)),
                     }
                 } else {
                     make_error(req_id, -1, "Missing params for deliver")
@@ -1635,9 +1792,7 @@ async fn main() -> Result<()> {
                 if let Some(params) = request.params {
                     match serde_json::from_value::<EditParams>(params) {
                         Ok(p) => handle_edit(req_id, &client, &p).await,
-                        Err(e) => {
-                            make_error(req_id, -1, &format!("Invalid edit params: {}", e))
-                        }
+                        Err(e) => make_error(req_id, -1, &format!("Invalid edit params: {}", e)),
                     }
                 } else {
                     make_error(req_id, -1, "Missing params for edit_message")
@@ -1647,9 +1802,7 @@ async fn main() -> Result<()> {
                 if let Some(params) = request.params {
                     match serde_json::from_value::<DeleteParams>(params) {
                         Ok(p) => handle_delete(req_id, &client, &p).await,
-                        Err(e) => {
-                            make_error(req_id, -1, &format!("Invalid delete params: {}", e))
-                        }
+                        Err(e) => make_error(req_id, -1, &format!("Invalid delete params: {}", e)),
                     }
                 } else {
                     make_error(req_id, -1, "Missing params for delete_message")
@@ -1659,9 +1812,7 @@ async fn main() -> Result<()> {
                 if let Some(params) = request.params {
                     match serde_json::from_value::<ReactParams>(params) {
                         Ok(p) => handle_react(req_id, &client, bot_user_id, &p).await,
-                        Err(e) => {
-                            make_error(req_id, -1, &format!("Invalid react params: {}", e))
-                        }
+                        Err(e) => make_error(req_id, -1, &format!("Invalid react params: {}", e)),
                     }
                 } else {
                     make_error(req_id, -1, "Missing params for react")
@@ -1671,19 +1822,13 @@ async fn main() -> Result<()> {
                 if let Some(params) = request.params {
                     match serde_json::from_value::<TypingParams>(params) {
                         Ok(p) => handle_typing(req_id, &client, &p).await,
-                        Err(e) => {
-                            make_error(req_id, -1, &format!("Invalid typing params: {}", e))
-                        }
+                        Err(e) => make_error(req_id, -1, &format!("Invalid typing params: {}", e)),
                     }
                 } else {
                     make_error(req_id, -1, "Missing params for typing")
                 }
             }
-            _ => make_error(
-                req_id,
-                -1,
-                &format!("Unknown method: {}", request.method),
-            ),
+            _ => make_error(req_id, -1, &format!("Unknown method: {}", request.method)),
         };
 
         let response_line = serde_json::to_string(&response).unwrap_or_default();
@@ -1791,49 +1936,22 @@ async fn handle_deliver(
                         "external_id": post_id,
                     }),
                 ),
-                Err(e) => {
-                    make_error(id, -1, &format!("Failed to send tool message: {}", e))
-                }
+                Err(e) => make_error(id, -1, &format!("Failed to send tool message: {}", e)),
             }
         }
 
-        "summary" => {
-            match client
-                .create_post(channel_id, content, root_id)
-                .await
-            {
-                Ok(post_id) => make_success(
-                    id,
-                    serde_json::json!({
-                        "delivered": true,
-                        "external_id": post_id,
-                    }),
-                ),
-                Err(e) => {
-                    make_error(id, -1, &format!("Failed to send summary: {}", e))
-                }
-            }
-        }
+        "summary" => match client.create_post(channel_id, content, root_id).await {
+            Ok(post_id) => make_success(
+                id,
+                serde_json::json!({
+                    "delivered": true,
+                    "external_id": post_id,
+                }),
+            ),
+            Err(e) => make_error(id, -1, &format!("Failed to send summary: {}", e)),
+        },
 
         "message" | "error" | "notification" => {
-            match client
-                .create_post(channel_id, content, root_id)
-                .await
-            {
-                Ok(post_id) => make_success(
-                    id,
-                    serde_json::json!({
-                        "delivered": true,
-                        "external_id": post_id,
-                    }),
-                ),
-                Err(e) => {
-                    make_error(id, -1, &format!("Failed to send message: {}", e))
-                }
-            }
-        }
-
-        _ => {
             match client.create_post(channel_id, content, root_id).await {
                 Ok(post_id) => make_success(
                     id,
@@ -1842,20 +1960,28 @@ async fn handle_deliver(
                         "external_id": post_id,
                     }),
                 ),
-                Err(e) => {
-                    make_error(id, -1, &format!("Failed to send message: {}", e))
-                }
+                Err(e) => make_error(id, -1, &format!("Failed to send message: {}", e)),
             }
         }
+
+        _ => match client.create_post(channel_id, content, root_id).await {
+            Ok(post_id) => make_success(
+                id,
+                serde_json::json!({
+                    "delivered": true,
+                    "external_id": post_id,
+                }),
+            ),
+            Err(e) => make_error(id, -1, &format!("Failed to send message: {}", e)),
+        },
     }
 }
 
-async fn handle_edit(
-    id: u64,
-    client: &MattermostClient,
-    params: &EditParams,
-) -> PluginResponse {
-    match client.update_post(&params.external_id, &params.content).await {
+async fn handle_edit(id: u64, client: &MattermostClient, params: &EditParams) -> PluginResponse {
+    match client
+        .update_post(&params.external_id, &params.content)
+        .await
+    {
         Ok(_) => make_success(id, serde_json::json!({"edited": true})),
         Err(e) => make_error(id, -1, &format!("Failed to edit message: {}", e)),
     }
@@ -1894,10 +2020,19 @@ async fn handle_react(
 ) -> PluginResponse {
     let bot_user_id = match bot_user_id {
         Some(id) => id,
-        None => return make_error(id, -1, "Cannot react: no authenticated Mattermost user (run setup first)"),
+        None => {
+            return make_error(
+                id,
+                -1,
+                "Cannot react: no authenticated Mattermost user (run setup first)",
+            )
+        }
     };
     let emoji = params.emoji.trim_matches(':').to_string();
-    match client.create_reaction(&params.external_id, bot_user_id, &emoji).await {
+    match client
+        .create_reaction(&params.external_id, bot_user_id, &emoji)
+        .await
+    {
         Ok(_) => make_success(id, serde_json::json!({"reacted": true})),
         Err(e) => make_error(id, -1, &format!("Failed to react: {}", e)),
     }
@@ -1907,7 +2042,11 @@ async fn handle_react(
 /// If the key already exists (e.g. `MATTERMOST_ACCESS_TOKEN=...`), its value is
 /// replaced. Otherwise the new entry is appended with a trailing newline.
 
-async fn login_admin_client(server_url: &str, admin_user: &str, admin_password: &str) -> Option<MattermostClient> {
+async fn login_admin_client(
+    server_url: &str,
+    admin_user: &str,
+    admin_password: &str,
+) -> Option<MattermostClient> {
     let http_client = reqwest::Client::new();
 
     // Login
@@ -1937,7 +2076,12 @@ async fn login_admin_client(server_url: &str, admin_user: &str, admin_password: 
 ///
 /// Mattermost does not require authentication for creating the first user.
 /// The first user automatically becomes a system administrator.
-async fn create_first_user(server_url: &str, username: &str, password: &str, email: &str) -> Result<Value> {
+async fn create_first_user(
+    server_url: &str,
+    username: &str,
+    password: &str,
+    email: &str,
+) -> Result<Value> {
     let http_client = reqwest::Client::new();
 
     let body = serde_json::json!({
@@ -1981,28 +2125,57 @@ async fn create_first_user(server_url: &str, username: &str, password: &str, ema
 /// Run the Mattermost setup process: create team, channel, users, bot, token.
 /// Validates required config fields, creates resources idempotently,
 /// and returns team_id, channel_id, bot_token, etc.
-async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, params: &SetupParams, access_token: &Option<String>, secret_name: &str, secrets_http: &reqwest::Client) -> PluginResponse {
+async fn handle_setup(
+    id: u64,
+    client: &MattermostClient,
+    server_url: &str,
+    params: &SetupParams,
+    access_token: &Option<String>,
+    secret_name: &str,
+    secrets_http: &reqwest::Client,
+) -> PluginResponse {
     // Validate required fields
     if params.setup_team.is_empty() {
-        return make_error(id, -1, "Missing required config: setup_team: set it in the plugin config");
+        return make_error(
+            id,
+            -1,
+            "Missing required config: setup_team: set it in the plugin config",
+        );
     }
     if params.setup_channel.is_empty() {
-        return make_error(id, -1, "Missing required config: setup_channel: set it in the plugin config");
+        return make_error(
+            id,
+            -1,
+            "Missing required config: setup_channel: set it in the plugin config",
+        );
     }
     if params.bot_user.is_empty() {
-        return make_error(id, -1, "Missing required config: bot_user: set it in the plugin config");
+        return make_error(
+            id,
+            -1,
+            "Missing required config: bot_user: set it in the plugin config",
+        );
     }
 
     tracing::info!(
         "Starting Mattermost setup: team={}, channel={}, bot_user={}",
-        params.setup_team, params.setup_channel, params.bot_user
+        params.setup_team,
+        params.setup_channel,
+        params.bot_user
     );
 
     // 1. Verify auth
     let bot_me = match client.get_me().await {
         Ok(u) => u,
         Err(e) => {
-            return make_error(id, -1, &format!("Authentication failed: check access_token and server_url: {}", e));
+            return make_error(
+                id,
+                -1,
+                &format!(
+                    "Authentication failed: check access_token and server_url: {}",
+                    e
+                ),
+            );
         }
     };
 
@@ -2013,30 +2186,57 @@ async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, para
             tid
         }
         Ok(None) => {
-            match client.create_team(&params.setup_team, &params.setup_team).await {
+            match client
+                .create_team(&params.setup_team, &params.setup_team)
+                .await
+            {
                 Ok(t) => match t["id"].as_str().map(|s| s.to_string()) {
                     Some(tid) => {
                         tracing::info!("Created team '{}'", params.setup_team);
                         tid
                     }
-                    None => return make_error(id, -1, &format!("Team '{}' created but no id returned", params.setup_team)),
+                    None => {
+                        return make_error(
+                            id,
+                            -1,
+                            &format!("Team '{}' created but no id returned", params.setup_team),
+                        )
+                    }
                 },
-                Err(e) => return make_error(id, -1, &format!("Failed to create team '{}': {}", params.setup_team, e)),
+                Err(e) => {
+                    return make_error(
+                        id,
+                        -1,
+                        &format!("Failed to create team '{}': {}", params.setup_team, e),
+                    )
+                }
             }
         }
-        Err(e) => return make_error(id, -1, &format!("Failed to look up team '{}': {}", params.setup_team, e)),
+        Err(e) => {
+            return make_error(
+                id,
+                -1,
+                &format!("Failed to look up team '{}': {}", params.setup_team, e),
+            )
+        }
     };
 
     // 3. Add bot to team
     let _ = client.add_team_member(&team_id, &bot_me.id).await;
 
     // 4. Create or find channel
-    let channels = client.get_user_channels(&bot_me.id, &team_id).await.unwrap_or_default();
+    let channels = client
+        .get_user_channels(&bot_me.id, &team_id)
+        .await
+        .unwrap_or_default();
     let channel_id = match channels.iter().find(|c| c.name == params.setup_channel) {
         Some(c) => c.id.clone(),
         None => {
             // Create channel
-            match client.create_channel(&team_id, &params.setup_channel, &params.setup_channel).await {
+            match client
+                .create_channel(&team_id, &params.setup_channel, &params.setup_channel)
+                .await
+            {
                 Ok(c) => c["id"].as_str().unwrap_or("").to_string(),
                 Err(_) => String::new(),
             }
@@ -2044,7 +2244,11 @@ async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, para
     };
 
     if channel_id.is_empty() {
-        return make_error(id, -1, &format!("Failed to create channel '{}'", params.setup_channel));
+        return make_error(
+            id,
+            -1,
+            &format!("Failed to create channel '{}'", params.setup_channel),
+        );
     }
     let _ = client.add_channel_member(&channel_id, &bot_me.id).await;
 
@@ -2056,12 +2260,15 @@ async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, para
         match client.find_user_by_username(&params.admin_user).await {
             Ok(Some((uid, _))) => {
                 match client.update_user_password(&uid, pw).await {
-                    Ok(_) => tracing::info!("Updated password for admin user '{}'", params.admin_user),
+                    Ok(_) => {
+                        tracing::info!("Updated password for admin user '{}'", params.admin_user)
+                    }
                     Err(e) => tracing::warn!(
                         "Could not update password for admin user '{}': {}. \
                          This is expected when the client is a bot PAT without admin privileges. \
                          The password will remain as previously set.",
-                        params.admin_user, e
+                        params.admin_user,
+                        e
                     ),
                 }
                 let _ = client.add_team_member(&team_id, &uid).await;
@@ -2069,7 +2276,14 @@ async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, para
                 admin_id = Some(uid);
             }
             Ok(None) => {
-                if let Ok(u) = client.create_user(&params.admin_user, pw, &format!("{}@local.host", params.admin_user)).await {
+                if let Ok(u) = client
+                    .create_user(
+                        &params.admin_user,
+                        pw,
+                        &format!("{}@local.host", params.admin_user),
+                    )
+                    .await
+                {
                     if let Some(uid) = u["id"].as_str().map(|s| s.to_string()) {
                         let _ = client.add_team_member(&team_id, &uid).await;
                         let _ = client.add_channel_member(&channel_id, &uid).await;
@@ -2078,7 +2292,11 @@ async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, para
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to look up admin user '{}': {}", params.admin_user, e);
+                tracing::warn!(
+                    "Failed to look up admin user '{}': {}",
+                    params.admin_user,
+                    e
+                );
             }
         }
     }
@@ -2093,7 +2311,14 @@ async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, para
                 let _ = client.add_channel_member(&channel_id, &uid).await;
             }
             Ok(None) => {
-                if let Ok(u) = client.create_user(&params.test_user, pw, &format!("{}@local.host", params.test_user)).await {
+                if let Ok(u) = client
+                    .create_user(
+                        &params.test_user,
+                        pw,
+                        &format!("{}@local.host", params.test_user),
+                    )
+                    .await
+                {
                     if let Some(uid) = u["id"].as_str().map(|s| s.to_string()) {
                         let _ = client.add_team_member(&team_id, &uid).await;
                         let _ = client.add_channel_member(&channel_id, &uid).await;
@@ -2108,7 +2333,9 @@ async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, para
     match client.find_user_by_username(&params.bot_user).await {
         Ok(Some((uid, _))) => {
             // Register as bot if not already
-            let _ = client.create_bot(&uid, "OmniAgent Bot", "Bot account for OmniAgent").await;
+            let _ = client
+                .create_bot(&uid, "OmniAgent Bot", "Bot account for OmniAgent")
+                .await;
             let _ = client.add_team_member(&team_id, &uid).await;
             let _ = client.add_channel_member(&channel_id, &uid).await;
 
@@ -2122,7 +2349,10 @@ async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, para
                         let test = MattermostClient::new(server_url, tok);
                         if let Ok(me) = test.get_me().await {
                             if me.id == uid {
-                                tracing::info!("Existing access_token valid for bot user '{}' — reusing", params.bot_user);
+                                tracing::info!(
+                                    "Existing access_token valid for bot user '{}' — reusing",
+                                    params.bot_user
+                                );
                                 reuse = Some(tok.clone());
                             }
                         }
@@ -2132,10 +2362,15 @@ async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, para
                     tok
                 } else if !params.admin_user.is_empty() && !params.admin_password.is_empty() {
                     // Login as admin to create/manage tokens
-                    let admin_client = login_admin_client(server_url, &params.admin_user, &params.admin_password).await;
+                    let admin_client =
+                        login_admin_client(server_url, &params.admin_user, &params.admin_password)
+                            .await;
                     match admin_client {
                         Some(adm) => {
-                            match adm.create_user_token(&uid, "OmniAgent bot access token").await {
+                            match adm
+                                .create_user_token(&uid, "OmniAgent bot access token")
+                                .await
+                            {
                                 Ok(t) => {
                                     tracing::info!("Created new token for bot user");
                                     t
@@ -2145,7 +2380,8 @@ async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, para
                                     // List existing tokens and find one for this bot user
                                     match adm.get_user_tokens(&uid).await {
                                         Ok(tokens) => {
-                                            let found = tokens.iter()
+                                            let found = tokens
+                                                .iter()
                                                 .filter_map(|t| t["token"].as_str())
                                                 .next()
                                                 .map(|s| s.to_string());
@@ -2153,7 +2389,9 @@ async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, para
                                                 tracing::info!("Found existing token for bot user");
                                                 tok
                                             } else {
-                                                tracing::warn!("No existing token found for bot user");
+                                                tracing::warn!(
+                                                    "No existing token found for bot user"
+                                                );
                                                 String::new()
                                             }
                                         }
@@ -2166,7 +2404,9 @@ async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, para
                             }
                         }
                         None => {
-                            tracing::warn!("Could not create admin client: token management may fail");
+                            tracing::warn!(
+                                "Could not create admin client: token management may fail"
+                            );
                             String::new()
                         }
                     }
@@ -2185,7 +2425,11 @@ async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, para
             // Persist the bot_token to the omniagent secret store
             if !bot_token.is_empty() && !secret_name.is_empty() {
                 if let Err(e) = set_agent_secret(&secrets_http, secret_name, &bot_token).await {
-                    tracing::warn!("Failed to persist bot_token to secret '{}': {:?}", secret_name, e);
+                    tracing::warn!(
+                        "Failed to persist bot_token to secret '{}': {:?}",
+                        secret_name,
+                        e
+                    );
                 } else {
                     tracing::info!("Persisted bot_token to secret '{}'", secret_name);
                 }
@@ -2212,40 +2456,64 @@ async fn handle_setup(id: u64, client: &MattermostClient, server_url: &str, para
                     params.bot_user
                 ));
             }
-            match client.create_user(&params.bot_user,
-                &params.bot_password,
-                &format!("{}@local.host", params.bot_user)).await {
+            match client
+                .create_user(
+                    &params.bot_user,
+                    &params.bot_password,
+                    &format!("{}@local.host", params.bot_user),
+                )
+                .await
+            {
                 Ok(u) => {
                     if let Some(uid) = u["id"].as_str().map(|s| s.to_string()) {
-                        let _ = client.create_bot(&uid, "OmniAgent Bot", "Bot account for OmniAgent").await;
+                        let _ = client
+                            .create_bot(&uid, "OmniAgent Bot", "Bot account for OmniAgent")
+                            .await;
                         let _ = client.add_team_member(&team_id, &uid).await;
                         let _ = client.add_channel_member(&channel_id, &uid).await;
 
                         match client.setup_bot_token(&uid).await {
                             Ok(token) => {
                                 let _ = set_agent_secret(&secrets_http, secret_name, &token).await;
-                                make_success(id, serde_json::json!({
-                                "success": true,
-                                "team_id": team_id,
-                                "team_name": params.setup_team,
-                                "channel_id": channel_id,
-                                "channel_name": params.setup_channel,
-                                "bot_user_id": uid,
-                                "bot_user": params.bot_user,
-                                "bot_token": token,
-                                "admin_user_id": admin_id,
-                            }))
-                            },
-                            Err(e) => make_error(id, -1, &format!("Failed to obtain bot token: {}", e)),
+                                make_success(
+                                    id,
+                                    serde_json::json!({
+                                        "success": true,
+                                        "team_id": team_id,
+                                        "team_name": params.setup_team,
+                                        "channel_id": channel_id,
+                                        "channel_name": params.setup_channel,
+                                        "bot_user_id": uid,
+                                        "bot_user": params.bot_user,
+                                        "bot_token": token,
+                                        "admin_user_id": admin_id,
+                                    }),
+                                )
+                            }
+                            Err(e) => {
+                                make_error(id, -1, &format!("Failed to obtain bot token: {}", e))
+                            }
                         }
                     } else {
-                        make_error(id, -1, &format!("Bot user '{}' created but no id returned", params.bot_user))
+                        make_error(
+                            id,
+                            -1,
+                            &format!("Bot user '{}' created but no id returned", params.bot_user),
+                        )
                     }
                 }
-                Err(e) => make_error(id, -1, &format!("Failed to create bot user '{}': {}", params.bot_user, e)),
+                Err(e) => make_error(
+                    id,
+                    -1,
+                    &format!("Failed to create bot user '{}': {}", params.bot_user, e),
+                ),
             }
         }
-        Err(e) => make_error(id, -1, &format!("Error looking up bot user '{}': {}", params.bot_user, e)),
+        Err(e) => make_error(
+            id,
+            -1,
+            &format!("Error looking up bot user '{}': {}", params.bot_user, e),
+        ),
     }
 }
 
@@ -2427,14 +2695,15 @@ async fn poll_channel(
             // Posts are newest-first from the API. We iterate in reverse
             // so we process oldest to newest (create_at is monotonic in rev()).
             for post in posts.iter().rev() {
-                //  Detect deleted posts that we previously processed 
+                //  Detect deleted posts that we previously processed
                 if post.delete_at != 0 {
                     if known.remove(&post.id) {
                         // This post was previously processed and is now deleted
                         send_delete_notification(ch_id, &post.id).await;
                         tracing::info!(
                             "Polling: detected deleted post {} in channel {}",
-                            post.id, ch_id
+                            post.id,
+                            ch_id
                         );
                     } else if post.create_at > last_ts {
                         // Post was created AND deleted between polling cycles.
@@ -2444,7 +2713,8 @@ async fn poll_channel(
                         send_delete_notification(ch_id, &post.id).await;
                         tracing::info!(
                             "Polling: detected cross-cycle deleted post {} in channel {}",
-                            post.id, ch_id
+                            post.id,
+                            ch_id
                         );
                     }
                     continue;
@@ -2475,7 +2745,8 @@ async fn poll_channel(
                 }
 
                 // This is a new post from a human user
-                send_inbound_notification(client, &post, ch_id, server_url, max_download_bytes).await;
+                send_inbound_notification(client, &post, ch_id, server_url, max_download_bytes)
+                    .await;
                 known.insert(post.id.clone());
                 count += 1;
             }
@@ -2515,17 +2786,10 @@ async fn init_channel_cursor(
                     return;
                 }
             }
-            tracing::warn!(
-                "No human posts in channel {}, polling from 0",
-                ch_id
-            );
+            tracing::warn!("No human posts in channel {}, polling from 0", ch_id);
         }
         Err(e) => {
-            tracing::error!(
-                "Failed to init cursor for channel {}: {:?}",
-                ch_id,
-                e
-            );
+            tracing::error!("Failed to init cursor for channel {}: {:?}", ch_id, e);
         }
     }
 }
@@ -2629,9 +2893,23 @@ async fn process_channel_event(
     loop {
         state.pending = false;
 
-        let count = poll_channel(client, ch_id, bot_id, last_create_at, bot_cache, processed_posts, server_url, max_download_bytes).await;
+        let count = poll_channel(
+            client,
+            ch_id,
+            bot_id,
+            last_create_at,
+            bot_cache,
+            processed_posts,
+            server_url,
+            max_download_bytes,
+        )
+        .await;
         if count > 0 {
-            tracing::info!("WS event: processed {} new post(s) in channel {}", count, ch_id);
+            tracing::info!(
+                "WS event: processed {} new post(s) in channel {}",
+                count,
+                ch_id
+            );
         }
 
         if state.pending {
@@ -2668,8 +2946,7 @@ async fn ws_event_loop(
     bot_cache.insert(bot_id.clone(), true);
 
     let watch_all = channel_ids.is_empty();
-    let channel_set: std::collections::HashSet<String> =
-        channel_ids.into_iter().collect();
+    let channel_set: std::collections::HashSet<String> = channel_ids.into_iter().collect();
 
     let mut backoff = 1u64;
     let mut debounce: HashMap<String, ChannelDebounce> = HashMap::new();
@@ -2684,7 +2961,7 @@ async fn ws_event_loop(
                 tracing::info!("WebSocket connected, authenticating...");
                 backoff = 1;
 
-                //  Catch-up on connect: process any missed messages 
+                //  Catch-up on connect: process any missed messages
                 let client = MattermostClient::new(&server_url, &access_token);
                 // Initialize cursors for channels that don't have one yet
                 // (first connect) or need catch-up (reconnect)
@@ -2692,8 +2969,10 @@ async fn ws_event_loop(
                     // In watch_all mode, discover all channels the bot is a member of
                     // and poll each one to catch up on missed messages during reconnect.
                     let discovered = discover_channels(&client, &bot_id).await;
-                    let known: std::collections::HashSet<String> =
-                        channel_set.union(&discovered.into_iter().collect()).cloned().collect();
+                    let known: std::collections::HashSet<String> = channel_set
+                        .union(&discovered.into_iter().collect())
+                        .cloned()
+                        .collect();
                     for ch_id in &known {
                         if !last_create_at.contains_key(ch_id.as_str()) {
                             init_channel_cursor(&client, ch_id, &bot_id, &mut last_create_at).await;
@@ -2706,15 +2985,21 @@ async fn ws_event_loop(
                 // Do a full poll for all known channels (catches missed messages)
                 for ch_id in &channels {
                     let count = poll_channel(
-                        &client, ch_id, &bot_id,
-                        &mut last_create_at, &mut bot_cache,
+                        &client,
+                        ch_id,
+                        &bot_id,
+                        &mut last_create_at,
+                        &mut bot_cache,
                         &mut processed_posts,
-                        &server_url, max_download_bytes,
-                    ).await;
+                        &server_url,
+                        max_download_bytes,
+                    )
+                    .await;
                     if count > 0 {
                         tracing::info!(
                             "WS catch-up: processed {} new post(s) in channel {}",
-                            count, ch_id
+                            count,
+                            ch_id
                         );
                     }
                 }
@@ -2773,7 +3058,9 @@ async fn ws_event_loop(
                                     {
                                         Some(c) => c.to_string(),
                                         None => {
-                                            tracing::debug!("posted event missing broadcast channel_id");
+                                            tracing::debug!(
+                                                "posted event missing broadcast channel_id"
+                                            );
                                             continue;
                                         }
                                     };
@@ -2785,18 +3072,30 @@ async fn ws_event_loop(
 
                                     // Initialize cursor lazily for new channels
                                     if !last_create_at.contains_key(&ch_id) {
-                                        init_channel_cursor(&client, &ch_id, &bot_id, &mut last_create_at).await;
+                                        init_channel_cursor(
+                                            &client,
+                                            &ch_id,
+                                            &bot_id,
+                                            &mut last_create_at,
+                                        )
+                                        .await;
                                     }
 
                                     // Trigger cursor-based processing for this channel
                                     // with debounce: if already processing, coalesces into
                                     // a single re-poll after current run + 5s wait.
                                     process_channel_event(
-                                        &client, &ch_id, &bot_id,
-                                        &mut last_create_at, &mut bot_cache,
-                                        &mut debounce, &mut processed_posts,
-                                        &server_url, max_download_bytes,
-                                    ).await;
+                                        &client,
+                                        &ch_id,
+                                        &bot_id,
+                                        &mut last_create_at,
+                                        &mut bot_cache,
+                                        &mut debounce,
+                                        &mut processed_posts,
+                                        &server_url,
+                                        max_download_bytes,
+                                    )
+                                    .await;
                                 }
                                 "post_deleted" => {
                                     // A post was deleted. Extract the post_id and channel_id,
@@ -2807,7 +3106,9 @@ async fn ws_event_loop(
                                     {
                                         Some(c) => c.to_string(),
                                         None => {
-                                            tracing::debug!("post_deleted event missing broadcast channel_id");
+                                            tracing::debug!(
+                                                "post_deleted event missing broadcast channel_id"
+                                            );
                                             continue;
                                         }
                                     };
@@ -2820,21 +3121,25 @@ async fn ws_event_loop(
                                     // The post field from Mattermost WS is a JSON-ENCODED STRING
                                     // like "{\"id\":\"post_id\",\"channel_id\":\"...\",...}".
                                     // We need to parse it as JSON to extract the actual ID.
-                                    let post_id: Option<String> = event
-                                        .pointer("/data/post")
-                                        .and_then(|v| {
+                                    let post_id: Option<String> =
+                                        event.pointer("/data/post").and_then(|v| {
                                             // First try: it's already a plain string (just the ID)
                                             if let Some(s) = v.as_str() {
                                                 // Try to parse it as JSON: if it works, extract the "id" field
-                                                if let Ok(post_obj) = serde_json::from_str::<Value>(s) {
-                                                    post_obj.get("id")
+                                                if let Ok(post_obj) =
+                                                    serde_json::from_str::<Value>(s)
+                                                {
+                                                    post_obj
+                                                        .get("id")
                                                         .and_then(|i| i.as_str())
                                                         .map(|id| id.to_string())
                                                 } else {
                                                     // Not JSON: it's just a plain post ID string
                                                     Some(s.to_string())
                                                 }
-                                            } else if let Some(id) = v.get("id").and_then(|i| i.as_str()) {
+                                            } else if let Some(id) =
+                                                v.get("id").and_then(|i| i.as_str())
+                                            {
                                                 Some(id.to_string())
                                             } else {
                                                 None
@@ -2844,7 +3149,8 @@ async fn ws_event_loop(
                                     if let Some(pid) = post_id {
                                         tracing::info!(
                                             "Post deleted in channel {}: post_id={}",
-                                            ch_id, pid
+                                            ch_id,
+                                            pid
                                         );
                                         send_delete_notification(&ch_id, &pid).await;
                                     } else {
@@ -2865,7 +3171,9 @@ async fn ws_event_loop(
                                     {
                                         Some(c) => c.to_string(),
                                         None => {
-                                            tracing::debug!("post_edited event missing broadcast channel_id");
+                                            tracing::debug!(
+                                                "post_edited event missing broadcast channel_id"
+                                            );
                                             continue;
                                         }
                                     };
@@ -2877,15 +3185,18 @@ async fn ws_event_loop(
 
                                     // The post field is a JSON-ENCODED STRING containing the
                                     // updated post, including the new "message" field.
-                                    let edit_info: Option<(String, String)> = event
-                                        .pointer("/data/post")
-                                        .and_then(|v| {
+                                    let edit_info: Option<(String, String)> =
+                                        event.pointer("/data/post").and_then(|v| {
                                             if let Some(s) = v.as_str() {
-                                                if let Ok(post_obj) = serde_json::from_str::<Value>(s) {
-                                                    let pid = post_obj.get("id")
+                                                if let Ok(post_obj) =
+                                                    serde_json::from_str::<Value>(s)
+                                                {
+                                                    let pid = post_obj
+                                                        .get("id")
                                                         .and_then(|i| i.as_str())
                                                         .map(|s| s.to_string());
-                                                    let msg = post_obj.get("message")
+                                                    let msg = post_obj
+                                                        .get("message")
                                                         .and_then(|m| m.as_str())
                                                         .map(|s| s.to_string());
                                                     pid.zip(msg)
@@ -2913,13 +3224,18 @@ async fn ws_event_loop(
                                 }
                                 _ => {
                                     // Log unknown event types for debugging
-                                    let data_summary = event.get("data")
+                                    let data_summary = event
+                                        .get("data")
                                         .map(|d| serde_json::to_string(d).unwrap_or_default())
                                         .unwrap_or_default();
                                     tracing::debug!(
                                         "WS: Unknown event type '{}': data: {}",
                                         event_type,
-                                        if data_summary.len() > 200 { format!("{}...", &data_summary[..200]) } else { data_summary }
+                                        if data_summary.len() > 200 {
+                                            format!("{}...", &data_summary[..200])
+                                        } else {
+                                            data_summary
+                                        }
                                     );
                                 }
                             }
@@ -2959,7 +3275,6 @@ async fn ws_event_loop(
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // OmniAgent secrets API helpers
 // ---------------------------------------------------------------------------
@@ -2985,7 +3300,11 @@ async fn get_agent_secret(http_client: &reqwest::Client, secret_name: &str) -> O
 }
 
 /// Store or update a secret via the omniagent secrets API.
-async fn set_agent_secret(http_client: &reqwest::Client, secret_name: &str, value: &str) -> anyhow::Result<()> {
+async fn set_agent_secret(
+    http_client: &reqwest::Client,
+    secret_name: &str,
+    value: &str,
+) -> anyhow::Result<()> {
     let base = agent_api_url();
     let payload = serde_json::json!({"value": value});
 

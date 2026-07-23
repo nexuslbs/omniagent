@@ -40,9 +40,14 @@ pub(crate) async fn build_prompt_context(
                 "plan": thread.plan,
             }),
         };
-        let result = cfg.plugin_manager.snapshot_registry().await.execute(&mcp_call, cfg.ctx.clone()).await?;
-        let parsed: serde_json::Value = serde_json::from_str(&result.content)
-            .unwrap_or(serde_json::json!({}));
+        let result = cfg
+            .plugin_manager
+            .snapshot_registry()
+            .await
+            .execute(&mcp_call, cfg.ctx.clone())
+            .await?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result.content).unwrap_or(serde_json::json!({}));
 
         // If the plugin returned a plan decision, persist it to the thread
         if parsed.get("plan").is_some() {
@@ -61,7 +66,10 @@ pub(crate) async fn build_prompt_context(
             soul: parsed["soul"].as_str().unwrap_or("").to_string(),
             context: parsed["context"].as_str().unwrap_or("").to_string(),
             user: parsed["user"].as_str().unwrap_or("").to_string(),
-            plan: parsed.get("plan").and_then(|v| v.as_bool()).unwrap_or(false),
+            plan: parsed
+                .get("plan")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         }
     };
 
@@ -88,7 +96,8 @@ pub(crate) async fn build_prompt_context(
                         .join(format!("{}.md", template))
                 };
                 let content = if template_path.exists() {
-                    std::fs::read_to_string(&template_path).ok()
+                    std::fs::read_to_string(&template_path)
+                        .ok()
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
                 } else {
