@@ -26,7 +26,13 @@ RUN cargo build --release && \
         -p mcp-server-subtasks -p mcp-server-hindsight \
         -p mcp-server-prompt -p mcp-server-actions \
         -p mcp-server-fetch -p mcp-server-filesystem \
-        -p mcp-server-git -p mcp-server-skills
+        -p mcp-server-git -p mcp-server-skills && \
+    # Build integration test binaries so they're available in the runtime image
+    cargo test --release --test api_tests --no-run 2>&1 | tail -1 && \
+    cargo test --release --test plugin_tests --no-run 2>&1 | tail -1 && \
+    # Copy test binaries to clean names (strip hash suffix)
+    cp $(ls -t /build/target/release/deps/api_tests-* 2>/dev/null | grep -v '\.d$' | head -1) /build/api_tests && \
+    cp $(ls -t /build/target/release/deps/plugin_tests-* 2>/dev/null | grep -v '\.d$' | head -1) /build/plugin_tests
 
 # Stage 2: Docker CLI binary
 FROM docker:cli AS docker-cli
@@ -47,6 +53,9 @@ COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=builder /build/target/release/omniagent /usr/local/bin/omniagent
 COPY --from=builder /build/target/release/mcp-server-* /usr/local/bin/
 COPY --from=builder /build/target/release/db-migrations /usr/local/bin/db-migrations
+# Copy integration test binaries (built with clean names in builder stage)
+COPY --from=builder /build/api_tests /usr/local/bin/api_tests
+COPY --from=builder /build/plugin_tests /usr/local/bin/plugin_tests
 
 EXPOSE 8080
 CMD ["omniagent"]
