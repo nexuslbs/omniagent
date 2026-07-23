@@ -7,13 +7,13 @@ Usage (inside omniagent container where DATABASE_URL is already set):
 
 What it does:
     1. Runs `cargo fmt` to format all source code.
-    2. Scans every workspace member for `sql_forge!` macro usage.
+    2. Finds workspace members that depend on `sqlx` (by inspecting each Cargo.toml).
     3. Runs `cargo sqlx prepare -- -p <pkg>` for each detected package.
     4. Runs `cargo fmt` a final pass.
 
 Note: `cargo sqlx prepare --workspace` does NOT capture queries from all members.
 Each must be prepared explicitly via `-- -p <pkg>`. This script auto-detects which
-packages need it, so adding new plugin crates with sql_forge! requires no changes here.
+packages need it (by looking at Cargo.toml, not source files).
 """
 
 import os
@@ -44,8 +44,8 @@ def run(cmd: list[str]) -> None:
 
 def find_sqlx_packages() -> list[str]:
     """
-    Scan all workspace members for sql_forge! macro usage.
-    Returns sorted unique package names (main crate + any plugin that uses sql_forge!).
+    Find workspace members that depend on the `sqlx` crate by inspecting
+    each member's Cargo.toml. Returns sorted unique package names.
     """
     cargo_toml = REPO_ROOT / "Cargo.toml"
     text = cargo_toml.read_text()
@@ -69,32 +69,76 @@ def find_sqlx_packages() -> list[str]:
         if not path.is_dir():
             continue
 
-        # Get package name from Cargo.toml
         cargo_path = path / "Cargo.toml"
         if not cargo_path.exists():
             continue
-        pkg_name = None
-        with open(cargo_path) as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("name = "):
-                    pkg_name = line.split("=", 1)[1].strip().strip('"')
-                    break
+
+        # Read Cargo.toml to get package name and check for sqlx dependency
+        cargo_text = cargo_path.read_text()
+        pkg_name = _parse_pkg_name(cargo_text)
         if not pkg_name:
             continue
 
-        # Scan for sql_forge! in .rs files
-        has_forge = False
-        for rs_file in sorted(path.rglob("*.rs")):
-            if rs_file.read_text().find("sql_forge!") >= 0:
-                has_forge = True
-                break
-
-        if has_forge:
+        if _depends_on_sqlx(cargo_text):
             packages.add(pkg_name)
             print(f"  Detected: {pkg_name}")
 
     return sorted(packages)
+
+
+def _parse_pkg_name(cargo_text: str) -> str | None:
+    """Extract the package name from a Cargo.toml string."""
+    for line in cargo_text.splitlines():
+        line = line.strip()
+        if line.startswith("name = "):
+            return line.split("=", 1)[1].strip().strip('"')
+    return None
+
+
+def _depends_on_sqlx(cargo_text: str) -> bool:
+    """
+    Check whether a Cargo.toml depends on `sqlx` (as a direct dependency,
+    not transitive). The sqlx crate typically appears as:
+        sqlx = { version = "...", features = [...] }
+    or simply:
+        sqlx = "0.8"
+    We also check that there isn't a [target.'cfg(...)'.dependencies]
+    section masking it, but the simple regex catches the common case.
+    """
+    # Strip [target.'cfg(…)'.dependencies] and [dev-dependencies] to avoid false positives
+    # We only want [dependencies] and workspace.dependencies
+    # Simple approach: search for `sqlx` in the dependency sections.
+    # Look for `sqlx = ` in a line that isn't inside a dev-dependencies block.
+    in_dev = False
+    in_workspace = False
+    for line in cargo_text.splitlines():
+        stripped = line.strip()
+
+        if stripped.startswith("[dev-dependencies"):
+            in_dev = True
+            continue
+        if stripped.startswith("[dependencies"):
+            in_dev = False
+            in_workspace = False
+            continue
+        if stripped.startswith("[workspace.dependencies"):
+            in_workspace = True
+            in_dev = False
+            continue
+        if stripped.startswith("[") and stripped.endswith("]"):
+            # Entering another section — reset flags if not already in one we care about
+            if not in_dev and not in_workspace:
+                continue
+            in_dev = False
+            in_workspace = False
+            continue
+
+        if in_dev:
+            continue
+        if re.match(r'^sqlx\s*=', stripped):
+            return True
+
+    return False
 
 
 def main() -> None:
@@ -102,10 +146,10 @@ def main() -> None:
         print("❌ DATABASE_URL not set — run inside the omniagent container", file=sys.stderr)
         sys.exit(1)
 
-    print("Step 1: Scanning workspace for sql_forge! usage")
+    print("Step 1: Scanning workspace members for sqlx dependency")
     packages = find_sqlx_packages()
     if not packages:
-        print("No packages with sql_forge! found — nothing to prepare")
+        print("No sqlx-dependent packages found — nothing to prepare")
         return
 
     print(f"\n  → {len(packages)} package(s) need preparation: {', '.join(packages)}")

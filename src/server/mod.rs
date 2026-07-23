@@ -951,7 +951,7 @@ async fn context_preview_handler(
         &state.plugin_manager,
         &state.app_context,
         profile_name,
-        &platform,
+        platform,
         &cause_content,
         thread_id,
         channel.id,

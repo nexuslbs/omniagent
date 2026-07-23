@@ -99,6 +99,7 @@ fn read_plugins_from_yaml(data_dir: &str) -> Result<Vec<ReloadPluginInfo>, Strin
         .map_err(|e| format!("Failed to read plugins.yml: {}", e))?;
 
     let mut plugins = Vec::new();
+    #[allow(clippy::type_complexity)]
     let sections: Vec<(
         &str,
         &str,
@@ -236,19 +237,17 @@ pub(crate) async fn reload_plugins(
                     stopped += 1;
                 }
             }
-            "platform" => {
-                if enabled && active_platforms.contains(name) {
-                    if let Some((flag, note)) = state
-                        .platform_restart_signals
-                        .lock()
-                        .await
-                        .get(name)
-                        .cloned()
-                    {
-                        flag.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        note.notify_one();
-                        started += 1;
-                    }
+            "platform" if enabled && active_platforms.contains(name) => {
+                if let Some((flag, note)) = state
+                    .platform_restart_signals
+                    .lock()
+                    .await
+                    .get(name)
+                    .cloned()
+                {
+                    flag.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    note.notify_one();
+                    started += 1;
                 }
             }
             _ => {}

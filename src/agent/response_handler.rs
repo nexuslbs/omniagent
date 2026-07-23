@@ -6,6 +6,7 @@ use crate::error::AppResult;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
 use tracing::{info, warn};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_response(
     cfg: &AgentContext,
     thread: &Thread,
