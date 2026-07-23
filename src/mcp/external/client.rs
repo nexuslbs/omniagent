@@ -1006,34 +1006,6 @@ impl McpClientPool {
         for i in 0..size {
             let mut proc = AsyncChildProcess::spawn(config)?;
 
-            // Step 0: Send plugin configuration before initialize (mirrors initialize_handshake)
-            if !config.env.is_empty() {
-                let cfg_req = build_configure_request(&config.env);
-                proc.stdin
-                    .write_all(cfg_req.as_bytes())
-                    .await
-                    .ctx(format!(
-                        "Failed to write configure message to MCP server '{}' stdin",
-                        config.name
-                    ))?;
-                proc.stdin.write_all(b"\n").await.ctx(format!(
-                    "Failed to write newline to MCP server '{}' stdin after configure",
-                    config.name
-                ))?;
-                proc.stdin.flush().await.ctx(format!(
-                    "Failed to flush MCP server '{}' stdin after configure",
-                    config.name
-                ))?;
-                // Read the acknowledgment (best-effort, with 5s timeout)
-                let mut ack = String::new();
-                let _ = timeout(Duration::from_secs(5), proc.reader.read_line(&mut ack)).await;
-                tracing::debug!(
-                    "MCP server '{}' configure response: {}",
-                    config.name,
-                    ack.trim()
-                );
-            }
-
             // Full MCP handshake (initialize + initialized notification)
             let req = build_initialize_request((i as u64) * 1000 + 1);
             let resp = proc.send_request(&req, &config.name).await?;

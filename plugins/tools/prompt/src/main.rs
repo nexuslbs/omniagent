@@ -21,8 +21,7 @@ use mcp_server_util::*;
 use serde_json::Value;
 use sqlx::{FromRow, PgPool};
 use std::sync::Arc;
-use tokio::sync::{RwLock, Notify};
-
+use tokio::sync::{RwLock, watch};
 // ---------------------------------------------------------------------------
 // Plugin config — received via configure message, never from env vars
 // ---------------------------------------------------------------------------
@@ -642,7 +641,7 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
 async fn main() -> Result<()> {
     // Shared pool — populated by configure callback before any tool call
     let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
-    let pool_ready: Arc<Notify> = Arc::new(Notify::new());
+    let (pool_ready_tx, pool_ready_rx) = tokio::sync::watch::channel(false);
 
     // Shared config — updated by configure message at startup
     let plugin_config = Arc::new(RwLock::new(PluginConfig::default()));
@@ -650,13 +649,17 @@ async fn main() -> Result<()> {
     // Generate full prompt handler
     let p_gen = pool.clone();
     let cfg_gen = plugin_config.clone();
-    let pool_ready_gen = pool_ready.clone();
+    let mut pool_ready_gen = pool_ready_rx;
     let gen_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let p = p_gen.clone();
         let cfg = cfg_gen.clone();
-        let ready = pool_ready_gen.clone();
+        let mut rx = pool_ready_gen.clone();
         Box::pin(async move {
-            ready.notified().await;
+            // Wait until pool is configured (persistent state — already-true fires
+            // immediately for latecomers, unlike Notify which misses them).
+            while !*rx.borrow() {
+                rx.changed().await.ok();
+            }
             let guard = p.read().await;
             let pool = guard.as_ref().expect("Pool not initialized").clone();
             let config = cfg.read().await.clone();
@@ -761,18 +764,18 @@ async fn main() -> Result<()> {
     let on_configure = {
         let cfg = plugin_config.clone();
         let p = pool.clone();
-        let ready = pool_ready.clone();
+        let ready_tx = pool_ready_tx.clone();
         Some(move |params: Value| {
             let new_config = PluginConfig::from_json(&params);
             let db_url = new_config.database_url.clone();
             let pc = p.clone();
-            let rc = ready.clone();
+            let tx = ready_tx.clone();
             let cfg_c = cfg.clone();
             tracing::info!("Prompt configure received: database_url present={}, omni_dir present={}",
                 !new_config.database_url.is_empty(),
                 !new_config.omni_dir.is_empty());
             // Spawn async DB connection — runs in background while
-            // the MCP loop continues. Handlers wait on pool_ready Notify.
+            // the MCP loop continues. Handlers wait on pool_ready.
             tokio::spawn(async move {
                 match connect_db(&db_url).await {
                     Ok(new_pool) => {
@@ -783,7 +786,7 @@ async fn main() -> Result<()> {
                         tracing::error!("Failed to connect to database: {:?}", e);
                     }
                 }
-                rc.notify_waiters();
+                tx.send(true).ok();
             });
             // Store config immediately (no DB needed for config values)
             tokio::spawn(async move {

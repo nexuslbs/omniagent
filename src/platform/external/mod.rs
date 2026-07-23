@@ -666,13 +666,10 @@ impl FileReader for HttpBearerFileReader {
 /// This is completely generic: no plugin name is hardcoded. Any platform
 /// plugin that exposes a REST API with Bearer token auth at
 /// `{server_url}/api/v4/files/{file_id}` will automatically get a file reader.
-pub async fn build_platform_file_readers(
+pub fn build_platform_file_readers(
     plugins: &[PlatformPluginConfig],
 ) -> HashMap<String, Arc<dyn FileReader + Send + Sync>> {
     let mut readers: HashMap<String, Arc<dyn FileReader + Send + Sync>> = HashMap::new();
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    let secrets_base = format!("http://localhost:{}/api/secrets", port);
-    let http_client = reqwest::Client::new();
     for plugin in plugins {
         // Try `access_token` first, then fall back to `access_token_name`.
         let raw_token = plugin
@@ -692,36 +689,13 @@ pub async fn build_platform_file_readers(
             raw_token
         };
         if raw_token.is_empty() || raw_token.starts_with("$secret:") {
-            let secret_name = raw_token.strip_prefix("$secret:").unwrap_or(&raw_token);
-            // Call the secrets API to resolve the secret value
-            let token = if !secret_name.is_empty() {
-                match get_agent_secret_internal(&http_client, &secrets_base, secret_name).await {
-                    Some(tok) if !tok.is_empty() => {
-                        tracing::info!(
-                            "Registered file reader for platform '{}' (resolved from secret '{}')",
-                            plugin.name,
-                            secret_name
-                        );
-                        tok
-                    }
-                    _ => {
-                        tracing::warn!(
-                            "Skipped file reader for platform '{}': secret '{}' not found or empty",
-                            plugin.name,
-                            secret_name
-                        );
-                        continue;
-                    }
-                }
-            } else {
-                tracing::warn!(
-                    "Skipped file reader for platform '{}': no access_token or access_token_name",
-                    plugin.name
-                );
-                continue;
-            };
-            let reader = HttpBearerFileReader::new(token);
-            readers.insert(plugin.name.clone(), Arc::new(reader));
+            // access_token_name is a secret name — the Mattermost setup stores
+            // the resolved token in `access_token` after setup completes, so
+            // if we reach here with only a secret name, skip until setup.
+            tracing::warn!(
+                "Skipped file reader for platform '{}': access_token not set yet (has access_token_name '{}')",
+                plugin.name, raw_token
+            );
             continue;
         }
         // Resolve $env:VAR references from the environment
@@ -747,24 +721,6 @@ pub async fn build_platform_file_readers(
         }
     }
     readers
-}
-
-/// Retrieve a secret value from the omniagent secrets API by name.
-async fn get_agent_secret_internal(
-    http_client: &reqwest::Client,
-    base_url: &str,
-    secret_name: &str,
-) -> Option<String> {
-    let url = format!("{}/{}", base_url, secret_name);
-    let resp = http_client.get(&url).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let body: serde_json::Value = resp.json().await.ok()?;
-    match body.get("data")?.get("current_value")?.as_str() {
-        Some(v) if !v.is_empty() => Some(v.to_string()),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
