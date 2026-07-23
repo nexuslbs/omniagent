@@ -41,9 +41,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::agent::config::AgentConfig;
+use crate::agent::plugin_manager::PluginManager;
 use crate::db::types as queries;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient};
-use crate::mcp::{AppContext, McpRegistry, McpToolCall};
+use crate::mcp::{AppContext, McpToolCall};
 use sql_forge::sql_forge;
 use std::sync::RwLock;
 
@@ -92,14 +93,14 @@ pub(crate) struct AppState {
     default_profile: String,
     /// Path to the .env file for settings API
     env_path: String,
-    /// MCP tool registry for executing actions (shared with agent)
-    tool_registry: Arc<tokio::sync::RwLock<crate::mcp::McpRegistry>>,
     /// Application context for MCP tool execution
     app_context: AppContext,
     /// Shared mutable config for hot-reload support
     shared_config: Arc<RwLock<AgentConfig>>,
     /// Per-platform restart signal flags + notify (keyed by plugin name)
     platform_restart_signals: PlatformRestartSignals,
+    /// Plugin manager — single authority for all plugin lifecycle operations
+    plugin_manager: Arc<dyn PluginManager>,
 }
 
 /// Configuration for the HTTP server.
@@ -111,10 +112,10 @@ pub struct ServerConfig {
     pub cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
     pub data_dir: String,
     pub default_profile: String,
-    pub tool_registry: Arc<tokio::sync::RwLock<McpRegistry>>,
     pub app_context: AppContext,
     pub shared_config: Arc<RwLock<AgentConfig>>,
     pub platform_restart_signals: PlatformRestartSignals,
+    pub plugin_manager: Arc<dyn PluginManager>,
 }
 
 /// Start the HTTP server on the given host and port.
@@ -125,11 +126,12 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         data_dir: config.data_dir.clone(),
         default_profile: config.default_profile.clone(),
         env_path: format!("{}/.env", config.data_dir),
-        tool_registry: config.tool_registry,
+        // plugin_manager replaces tool_registry
         app_context: config.app_context,
         shared_config: config.shared_config,
         platform_restart_signals: config.platform_restart_signals,
-    });
+        plugin_manager: config.plugin_manager,
+        });
 
     let app = Router::new()
         .route("/health", get(health_handler))
@@ -504,14 +506,7 @@ async fn prompt_handler(
         .and_then(|c| c.platform.as_deref())
         .unwrap_or("");
     let tool_names: Vec<String> = state
-        .tool_registry
-        .read()
-        .await
-        .all()
-        .iter()
-        .map(|t| t.full_name.clone())
-        .collect();
-    // Build system prompt TEMPLATE: stable (identity + guidance) + volatile (memory/soul) placeholders
+        .plugin_manager.snapshot_registry().await.all().iter().map(|t| t.full_name.clone()).collect();
     let mut segments: Vec<String> = Vec::new();
 
     // Stable tier: simple identity + tool guidance
@@ -602,15 +597,10 @@ async fn prompt_preview_handler(
         .and_then(|c| c.platform.as_deref())
         .unwrap_or("");
     let tool_names: Vec<String> = state
-        .tool_registry
-        .read()
-        .await
-        .all()
-        .iter()
-        .map(|t| t.full_name.clone())
-        .collect();
+        .plugin_manager.snapshot_registry().await.all().iter().map(|t| t.full_name.clone()).collect();
+    let tool_list = if tool_names.is_empty() { String::new() } else { tool_names.join(", ") };
     let system_prompt = format!(
-        "You are OmniAgent: precise, efficient, autonomous.\n\nActive profile: {profile_name}.\n\n{}",
+        "You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice.\n\nActive profile: {profile_name}.\n\n{}",
         if !memory_raw.is_empty() { format!("## MEMORY (your personal notes)\n{memory_raw}") } else { String::new() }
     );
 
@@ -631,7 +621,7 @@ async fn prompt_preview_handler(
 
                 // Use the prompt tool for context (same tool the agent uses)
                 let context_text = call_prompt_context(
-                    &state.tool_registry,
+                    &state.plugin_manager,
                     &state.app_context,
                     profile_name,
                     platform,
@@ -786,18 +776,12 @@ evaluate: if the task was completed, call the completion tool.",
 /// GET /mcp/tools: list all registered MCP tools with their input schemas.
 async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let tools: Vec<serde_json::Value> = state
-        .tool_registry
-        .read()
-        .await
-        .all()
-        .iter()
-        .map(|tool| {
+        .plugin_manager.snapshot_registry().await.all().iter().map(|t| {
             serde_json::json!({
-                "name": tool.name,
-                "full_name": tool.full_name,
-                "description": tool.description,
-                "input_schema": tool.input_schema,
-                "server_name": tool.server_name,
+                "full_name": t.full_name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+                "server_name": t.server_name,
             })
         })
         .collect();
@@ -827,11 +811,7 @@ async fn execute_mcp_tool_handler(
     };
 
     match state
-        .tool_registry
-        .read()
-        .await
-        .execute(&call, state.app_context.clone())
-        .await
+        .plugin_manager.snapshot_registry().await.execute(&call, state.app_context.clone()).await
     {
         Ok(result) => Json(serde_json::json!({
             "success": true,
@@ -931,7 +911,7 @@ async fn context_preview_handler(
 
     // Use the prompt tool for context (same tool the agent uses)
     let context_text = call_prompt_context(
-        &state.tool_registry,
+        &state.plugin_manager,
         &state.app_context,
         profile_name,
         &platform,
@@ -950,7 +930,7 @@ async fn context_preview_handler(
 /// Call the prompt_generate MCP tool to build context: same tool the agent executor uses.
 /// Falls back to empty string if the tool is not registered or fails.
 async fn call_prompt_context(
-    tool_registry: &tokio::sync::RwLock<McpRegistry>,
+    plugin_manager: &Arc<dyn PluginManager>,
     app_context: &AppContext,
     profile_name: &str,
     platform: &str,
@@ -963,14 +943,7 @@ async fn call_prompt_context(
         .unwrap_or_else(|| "prompt_generate".to_string());
 
     // Collect all available tool names (same as the executor does)
-    let tool_names: Vec<String> = tool_registry
-        .read()
-        .await
-        .all()
-        .iter()
-        .map(|t| t.name.clone())
-        .collect();
-
+    let tool_names: Vec<String> = plugin_manager.snapshot_registry().await.all().iter().map(|t| t.full_name.clone()).collect();
     let mcp_call = McpToolCall {
         id: "preview-context".to_string(),
         name: prompt_tool_name,
@@ -984,11 +957,7 @@ async fn call_prompt_context(
         }),
     };
 
-    let result = tool_registry
-        .read()
-        .await
-        .execute(&mcp_call, app_context.clone())
-        .await;
+    let result = plugin_manager.snapshot_registry().await.execute(&mcp_call, app_context.clone()).await;
 
     match result {
         Ok(r) if !r.is_error => {
@@ -1009,15 +978,15 @@ async fn call_prompt_context(
 async fn run_cron_handler(
     Path(schedule_id): Path<String>,
     State(state): State<Arc<AppState>>,
-    Query(params): Query<RunCronParams>,
+    Query(_params): Query<RunCronParams>,
 ) -> impl IntoResponse {
     match crate::scheduler::fire_cron_job_by_id(
         &state.pool,
         &state.data_dir,
-        &state.tool_registry,
+        &state.plugin_manager,
         &state.app_context,
         &schedule_id,
-        params.force.unwrap_or(false),
+        false,
     )
     .await
     {

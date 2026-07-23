@@ -143,8 +143,7 @@ pub(crate) async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Ve
 
     // 2. Snapshot current runtime state (tokio locks, Send-safe)
     let active_mcp: std::collections::HashSet<String> = {
-        let reg = state.tool_registry.read().await;
-        reg.all().iter().filter_map(|t| t.server_name.clone()).collect()
+        state.plugin_manager.snapshot_registry().await.all().iter().filter_map(|t| t.server_name.clone()).collect()
     };
     let active_platforms: std::collections::HashSet<String> = {
         let sigs = state.platform_restart_signals.lock().await;
@@ -167,7 +166,7 @@ pub(crate) async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Ve
                     // from blocking the entire reload endpoint indefinitely.
                     match tokio::time::timeout(
                         std::time::Duration::from_secs(15),
-                        crate::mcp::external::client::initialize_single_server_tools(
+                        state.plugin_manager.initialize_single_server(
                             &state.data_dir,
                             name,
                         ),
@@ -175,7 +174,7 @@ pub(crate) async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Ve
                     .await
                     {
                         Ok(Ok(ts)) => {
-                            state.tool_registry.write().await.register_all(ts);
+                            state.plugin_manager.register_tools(ts).await;
                             started += 1;
                         }
                         Ok(Err(e)) => errors.push(format!("{} MCP: {}", name, e)),
@@ -185,7 +184,7 @@ pub(crate) async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Ve
                         )),
                     }
                 } else if !enabled && running {
-                    state.tool_registry.write().await.remove_by_server(name);
+                    state.plugin_manager.remove_server_tools(name).await;
                     stopped += 1;
                 }
             }
@@ -251,7 +250,7 @@ pub(crate) async fn reload_plugins(state: Arc<AppState>) -> Result<(u32, u32, Ve
         all_plugins.iter().map(|p| p.name.as_str()).collect();
     for srv in &active_mcp {
         if !yaml_names.contains(srv.as_str()) {
-            state.tool_registry.write().await.remove_by_server(srv);
+            state.plugin_manager.remove_server_tools(srv).await;
             stopped += 1;
         }
     }

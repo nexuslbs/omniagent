@@ -107,16 +107,19 @@ pub struct AppContext {
     /// Wrapped in Arc<RwLock> so plugins can register readers dynamically.
     pub platform_file_readers:
         Arc<RwLock<HashMap<String, Arc<dyn crate::platform::external::FileReader + Send + Sync>>>>,
+    /// External MCP client registry. One client per server, shared across
+    /// all channels. Replaces the former per-channel PoolManager.
+    pub external_clients: Arc<crate::mcp::external::client::ExternalMcpClients>,
 }
 
 impl AppContext {
-    /// Create a new application context.
     pub fn new(
-        pool: PgPool,
-        readonly_pool: PgPool,
-        data_dir: &str,
-        platform_senders: HashMap<String, OutboundSender>,
-    ) -> Self {
+            pool: PgPool,
+            readonly_pool: PgPool,
+            data_dir: &str,
+            platform_senders: HashMap<String, OutboundSender>,
+            external_clients: Arc<crate::mcp::external::client::ExternalMcpClients>,
+        ) -> Self {
         Self {
             pool,
             readonly_pool,
@@ -130,6 +133,7 @@ impl AppContext {
             current_platform: None,
             current_profile_name: None,
             tool_catalog: Vec::new(),
+            external_clients,
         }
     }
 }
@@ -785,7 +789,7 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
 
     // External MCP servers (load from config + plugins/mcp/, best-effort)
     let external_tools =
-        external::client::initialize_external_tools(&ctx.data_dir).await;
+        external::client::initialize_external_tools(&ctx.data_dir, &ctx.external_clients).await;
     for tool in external_tools {
         registry.register(tool);
     }

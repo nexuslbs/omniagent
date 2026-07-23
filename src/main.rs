@@ -120,14 +120,19 @@ async fn run_server() -> AppResult<()> {
 
     // Create AppContext and MCP registry
     let readonly_pool = db::connect(&cfg.database_readonly_url).await?;
+    let external_clients = Arc::new(crate::mcp::external::client::ExternalMcpClients::new());
     let mut ctx = mcp::AppContext::new(
         pool.clone(),
         readonly_pool,
         &data_dir,
         platform_senders,
+        external_clients.clone(),
     );
     let mcp = mcp::default_registry(&mut ctx).await;
-    let mcp_shared = Arc::new(tokio::sync::RwLock::new(mcp));
+
+    let plugin_manager: Arc<dyn crate::agent::plugin_manager::PluginManager> = Arc::new(
+        crate::agent::plugin_manager::ActorPluginManager::new(mcp, external_clients.clone())
+    );
 
     // Register platform-specific file readers for the read_attached_file tool
     // Scans all configured platform plugins: any with an access_token in their
@@ -142,8 +147,8 @@ async fn run_server() -> AppResult<()> {
     let agent = agent::Agent::new(
         pool.clone(),
         shared_config_for_agent,
-        mcp_shared.clone(),
         ctx.clone(),
+        plugin_manager.clone(),
     );
 
     // ── STARTUP: Skip pending/processing messages BEFORE spawning any concurrent tasks ──
@@ -177,10 +182,10 @@ async fn run_server() -> AppResult<()> {
     let server_host = cfg.host.clone();
     let server_port = cfg.port;
     let data_dir_server = data_dir.clone();
-    let mcp_for_server = mcp_shared.clone();
     let ctx_for_server = ctx.clone();
     let shared_config_for_server = shared_config.clone();
     let platform_restart_signals_for_server = platform_restart_signals.clone();
+    let plugin_manager_server = plugin_manager.clone();
     let server_handle = tokio::spawn(async move {
         if let Err(e) = server::start_server(server::ServerConfig {
             pool: pool_server,
@@ -189,10 +194,10 @@ async fn run_server() -> AppResult<()> {
             cancel_tokens: cancel_tokens_server,
             data_dir: data_dir_server,
             default_profile: default_profile.clone(),
-            tool_registry: mcp_for_server,
             app_context: ctx_for_server,
             shared_config: shared_config_for_server,
             platform_restart_signals: platform_restart_signals_for_server,
+            plugin_manager: plugin_manager_server,
         })
         .await
         {
@@ -247,7 +252,7 @@ async fn run_server() -> AppResult<()> {
     let cron_handle = scheduler::spawn(
         pool.clone(),
         data_dir.clone(),
-        mcp_shared.clone(),
+        plugin_manager.clone(),
         ctx.clone(),
     );
 

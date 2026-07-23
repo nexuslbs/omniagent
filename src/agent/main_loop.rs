@@ -362,7 +362,7 @@ Previous plan:\n{}",
     messages.push(ChatMessage::user(&prompt_parts.user));
 
     // 5. Build tool definitions from the profile's allowed tools
-    let tools_def = cfg.mcp.read().await.to_openai_tools(&prof.allowed_tools);
+    let tools_def = cfg.plugin_manager.snapshot_registry().await.to_openai_tools(&prof.allowed_tools);
 
     // 6. Tool-calling loop: max iterations controls total LLM calls
     let iter_limit =
@@ -416,7 +416,7 @@ Previous plan:\n{}",
                 }),
                 id: String::new(),
             };
-            match cfg.mcp.read().await.execute(&condense_call, cfg.ctx.clone()).await {
+            match cfg.plugin_manager.snapshot_registry().await.execute(&condense_call, cfg.ctx.clone()).await {
                 Ok(res) => {
                     if let Ok(result) = serde_json::from_str::<serde_json::Value>(&res.content) {
                         if result.get("was_condensed").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -704,14 +704,13 @@ Previous plan:\n{}",
         // Persist a message showing what tool(s) the agent called
         // (single tool → msg_type: \"tool\", batch → msg_type: \"multi-tool\")
         // Previously only multi-tool was persisted; single tool calls were invisible in the thread.
-        let mcp_snapshot = cfg.mcp.read().await;
         let tool_content = response
             .tool_calls
             .iter()
             .map(|tc| {
                 format!(
                     "{}: {}",
-                    mcp_snapshot.qualified_name(&tc.function.name),
+                    tc.function.name.clone(),
                     tc.function.arguments
                 )
             })
@@ -785,14 +784,14 @@ Previous plan:\n{}",
             .collect();
 
         let pool = cfg.pool.clone();
-        let mcp_registry = cfg.mcp.clone();
+        // mcp_registry removed - use cfg.plugin_manager instead
         let mut join_set = JoinSet::new();
 
         for (idx, tc) in response.tool_calls.iter().enumerate() {
             let tool_name = tc.function.name.clone();
             let tool_args = tc.function.arguments.clone();
             let tc_id = tc.id.clone();
-            let qualified_name = mcp_registry.read().await.qualified_name(&tool_name);
+            let qualified_name = tool_name.clone(); // qualified_name is identity, no registry needed
 
             let mcp_call = McpToolCall {
                 id: tc.id.clone(),
@@ -810,14 +809,14 @@ Previous plan:\n{}",
             tool_ctx.current_allowed_tools = prof.allowed_tools.clone();
 
             let pool = pool.clone();
-            let mcp = mcp_registry.clone();
+            let pm = cfg.plugin_manager.clone();
             let seq = result_seqs[idx];
             let tid = thread.id;
             let iter_num = current_iter;
 
             // --- Phase 1: Read per-tool timeout from registry ---
             // Snapshot the registry outside the spawned task so we only read the lock once.
-            let mcp_snapshot = mcp.read().await.clone();
+            let mcp_snapshot = pm.snapshot_registry().await;
             let timeout_secs = mcp_snapshot.get_timeout_secs(&tool_name);
             let timeout_dur = std::time::Duration::from_secs(timeout_secs);
 

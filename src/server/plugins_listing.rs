@@ -63,7 +63,7 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
             // 2. Populate tool_names for all tool plugins (including disabled ones)
             //    so the frontend can show tool counts even when the server isn't running.
             {
-                let registry = state.tool_registry.read().await;
+                let registry = state.plugin_manager.snapshot_registry().await;
                 let all_tools = registry.all();
                 let mut server_tools: std::collections::HashMap<&str, Vec<String>> =
                     std::collections::HashMap::new();
@@ -171,7 +171,7 @@ pub(crate) async fn get_plugin_handler(
             // registered tools, the server failed to initialize: set
             // status to "error" so the frontend shows the right badge.
             if detail.plugin_type == "tool" && detail.status == "enabled" {
-                let registry = state.tool_registry.read().await;
+                let registry = state.plugin_manager.snapshot_registry().await;
                 let has_tools = registry
                     .all()
                     .iter()

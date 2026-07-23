@@ -1,5 +1,6 @@
+use crate::agent::plugin_manager::PluginManager;
 use crate::error::{AppResult, ErrorContext};
-use crate::mcp::{AppContext, McpRegistry};
+use crate::mcp::AppContext;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -128,8 +129,8 @@ pub struct AgentContext {
     pub pool: PgPool,
     pub llm: Arc<crate::llm::LLMClient>,
     pub config: Arc<RwLock<AgentConfig>>,
-    pub mcp: Arc<tokio::sync::RwLock<McpRegistry>>,
     pub ctx: AppContext,
+    pub plugin_manager: Arc<dyn PluginManager>,
 }
 
 impl AgentContext {

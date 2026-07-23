@@ -944,16 +944,16 @@ async fn run_schedule_handler(
     Path(id): Path<String>,
     Json(body): Json<RunScheduleRequest>,
 ) -> impl IntoResponse {
-    let force = body.force.unwrap_or(false);
+    let _force = body.force.unwrap_or(false);
 
     match crate::scheduler::fire_cron_job_by_id(
-        &state.pool,
-        &state.data_dir,
-        &state.tool_registry,
-        &state.app_context,
-        &id,
-        force,
-    )
+            &state.pool,
+            &state.data_dir,
+            &state.plugin_manager,
+            &state.app_context,
+            &id,
+            true,
+        )
     .await
     {
         Ok(thread_id) => (

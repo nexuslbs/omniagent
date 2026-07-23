@@ -7,20 +7,18 @@ use crate::mcp::McpToolCall;
 pub async fn trigger_summary_and_cleanup(cfg: &AgentContext, thread: &Thread) {
     // Trigger cross-thread summary check
     let mcp_call = McpToolCall {
-        id: "post-thread-summary".to_string(),
-        name: "memory_generate_summary".to_string(),
+        name: "prompt_summarize".to_string(),
         arguments: serde_json::json!({
-            "channel_id": thread.channel_id,
+            "thread_id": thread.id,
         }),
+        id: String::new(),
     };
-    if let Err(e) = cfg
-        .mcp
-        .read()
-        .await
-        .execute(&mcp_call, cfg.ctx.clone())
-        .await
+    match cfg.plugin_manager.snapshot_registry().await.execute(&mcp_call, cfg.ctx.clone()).await
     {
-        tracing::debug!("[executor] Post-thread summary failed (non-critical): {:?}", e);
+        Ok(_) => {}
+        Err(e) => {
+            tracing::debug!("[executor] Post-thread summary failed (non-critical): {:?}", e);
+        }
     }
 
     // Cancel any remaining background tasks for this thread

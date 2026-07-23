@@ -18,12 +18,11 @@ pub(crate) async fn enable_plugin_handler(
             if yaml_type == plugins_yaml::PluginYamlType::Platform {
                 reload_platform_plugin(&state, &name).await;
             } else if yaml_type == plugins_yaml::PluginYamlType::Tool {
-                crate::mcp::external::client::clear_server_pools(&name);
-                crate::mcp::external::client::remove_server_config(&name);
-                match crate::mcp::external::client::initialize_single_server_tools(&state.data_dir, &name).await {
+                state.plugin_manager.remove_client(&name);
+                match state.plugin_manager.initialize_single_server(&state.data_dir, &name).await {
                     Ok(tools) => {
-                        state.tool_registry.write().await.remove_by_server(&name);
-                        state.tool_registry.write().await.register_all(tools);
+                        state.plugin_manager.remove_server_tools(&name).await;
+                        state.plugin_manager.register_tools(tools).await;
                     }
                     Err(e) => {
                         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": format!("MCP server for '{}' failed to start: {}", name, e)}))).into_response();
@@ -44,8 +43,8 @@ pub(crate) async fn enable_plugin_handler(
                 }
             }
             if yaml_type == plugins_yaml::PluginYamlType::Tool {
-                if let Ok(tools) = crate::mcp::external::client::initialize_single_server_tools(&state.data_dir, &name).await {
-                    state.tool_registry.write().await.register_all(tools);
+                if let Ok(tools) = state.plugin_manager.initialize_single_server(&state.data_dir, &name).await {
+                    state.plugin_manager.register_tools(tools).await;
                 } else {
                     let _ = plugins_yaml::remove_entry(&state.data_dir, &yaml_type, &name);
                     return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": format!("MCP server for '{}' failed to start", name)}))).into_response();
@@ -76,9 +75,8 @@ pub(crate) async fn disable_plugin_handler(
     match plugins_yaml::set_entry_with_source(&state.data_dir, &yaml_type, &name, false, &source, serde_json::json!({})) {
         Ok(_entry) => {
             if yaml_type == plugins_yaml::PluginYamlType::Tool {
-                crate::mcp::external::client::clear_server_pools(&name);
-                crate::mcp::external::client::remove_server_config(&name);
-                state.tool_registry.write().await.remove_by_server(&name);
+                state.plugin_manager.remove_client(&name);
+                state.plugin_manager.remove_server_tools(&name).await;
             }
             if yaml_type == plugins_yaml::PluginYamlType::Platform {
                 reload_platform_plugin(&state, &name).await;
