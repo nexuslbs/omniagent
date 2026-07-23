@@ -373,7 +373,7 @@ pub async fn create_thread_with_cause(
             model: p.model.clone().or(Some(resolved_model.clone())),
             task_id: p.task_id.clone(),
             schedule_task_id: p.schedule_task_id.clone(),
-            plan: plan.clone(),
+            plan,
             parent_id: resolved_parent_id,
         },
     )

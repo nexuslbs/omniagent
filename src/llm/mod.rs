@@ -190,9 +190,7 @@ pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::ne
     // Bundled first, then installed overrides
     // If no providers are found, the metadata stays empty and callers
     // handle it gracefully (resolve_default_model returns None).
-    let map = scan_provider_manifests(&[&bundled, &installed]);
-
-    map
+    scan_provider_manifests(&[&bundled, &installed])
 });
 
 /// Resolve the default base URL for a provider from the plugin metadata.
@@ -746,9 +744,8 @@ impl LLMClient {
             })
         };
         if let Some(fut) = external_result {
-            match fut.await {
-                Ok(resp) => return Ok(resp),
-                Err(_) => {} // fall through to HTTP
+            if let Ok(resp) = fut.await {
+                return Ok(resp);
             }
         }
 

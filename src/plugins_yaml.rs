@@ -805,7 +805,7 @@ fn build_plugin_detail(
             // Deterministic binary path by plugin location:
             // - Under /app/plugins/ → workspace member (next to omniagent)
             // - Elsewhere (bundled/remote) → own target/release/
-            let pkg = cargo_package_name.as_deref().unwrap_or(&dir_name);
+            let pkg = cargo_package_name.as_deref().unwrap_or(dir_name);
             let expected_binary = if dir.starts_with("/app/plugins/") {
                 crate::mcp::external::config::get_bin_path(pkg)
             } else {
@@ -877,11 +877,10 @@ fn build_plugin_detail(
             .map(|dir| {
                 let dir_path = std::path::Path::new(dir);
                 // Compiled languages have build config files
-                if dir_path.join("Cargo.toml").exists() {
-                    false
-                } else if dir_path.join("package.json").exists() {
-                    false
-                } else if dir_path.join("pyproject.toml").exists() {
+                if dir_path.join("Cargo.toml").exists()
+                    || dir_path.join("package.json").exists()
+                    || dir_path.join("pyproject.toml").exists()
+                {
                     false
                 } else {
                     // No build config found : check if source files are script-like
@@ -1071,10 +1070,6 @@ fn pick_primary_source(group: &PluginSourceGroup) -> Option<usize> {
     // The frontend shows the disabled-card styling and buttons on all of them.
     None
 }
-
-/// List all plugins, combining disk discovery with YAML overrides.
-/// Groups multiple sources (bundled, built-in, remote) by name.
-/// YAML determines which source is primary; others show as "duplicated".
 
 /// List all plugins, combining disk discovery with YAML overrides.
 /// Groups multiple sources (bundled, built-in, remote) by name.

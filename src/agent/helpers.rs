@@ -43,7 +43,7 @@ fn is_fk_violation(e: &crate::error::Error) -> bool {
 /// Persist a message and detect FK violations that should abort thread processing.
 /// Returns the created message on success, or an error variant.
 pub enum CreateMessageResult {
-    Success(Message),
+    Success(Box<Message>),
     FkViolation,
     OtherError(crate::error::Error),
 }
@@ -54,7 +54,7 @@ pub async fn persist_or_abort(
     thread_id: i64,
 ) -> CreateMessageResult {
     match queries::create_message(pool, msg).await {
-        Ok(saved) => CreateMessageResult::Success(saved),
+        Ok(saved) => CreateMessageResult::Success(Box::new(saved)),
         Err(e) if is_fk_violation(&e) => {
             error!(
                 "FK violation inserting message for thread {}: marking thread as failed",

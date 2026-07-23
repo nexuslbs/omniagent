@@ -439,8 +439,7 @@ async fn list_schedule_handler(
                 job.action_name = actions
                     .actions
                     .get(action_id)
-                    .map(|a| a.description.clone())
-                    .flatten();
+                    .and_then(|a| a.description.clone());
             }
         }
     }
@@ -508,8 +507,7 @@ async fn get_schedule_handler(
             entry.action_name = actions
                 .actions
                 .get(action_id)
-                .map(|a| a.description.clone())
-                .flatten();
+                .and_then(|a| a.description.clone());
         }
     }
     ok_json(entry)

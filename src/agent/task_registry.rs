@@ -187,3 +187,9 @@ impl TaskRegistry {
             .count()
     }
 }
+
+impl Default for TaskRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}

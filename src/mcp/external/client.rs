@@ -283,6 +283,12 @@ impl std::fmt::Debug for ExternalMcpClients {
     }
 }
 
+impl Default for ExternalMcpClients {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ExternalMcpClients {
     /// Create a new empty client registry.
     pub fn new() -> Self {

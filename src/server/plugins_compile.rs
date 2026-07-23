@@ -270,19 +270,15 @@ pub(crate) async fn resolve_plugin_for_compile(
     _state_data_dir: &str,
     name: &str,
     handler_name: &str,
-    source: Option<&str>,
+    _source: Option<&str>,
 ) -> Result<ResolvedPlugin, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
     use axum::Json;
 
     // 1. Detect the plugin type by checking each YAML type
-    let yaml_type = if let Ok(Some(entry)) =
+    let yaml_type = if let Ok(Some(_entry)) =
         plugins_yaml::get_entry(data_dir, &plugins_yaml::PluginYamlType::Tool, name)
     {
-        if source.map_or(true, |s| entry.source == s) {
-            plugins_yaml::PluginYamlType::Tool
-        } else {
-            plugins_yaml::PluginYamlType::Tool
-        }
+        plugins_yaml::PluginYamlType::Tool
     } else if let Ok(Some(_)) =
         plugins_yaml::get_entry(data_dir, &plugins_yaml::PluginYamlType::Provider, name)
     {

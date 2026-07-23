@@ -418,7 +418,7 @@ pub(crate) async fn delete_plugin_handler(
         // ── Rule 4: Bundled (omni-stack) plugin ──
         // Remove workspace directory + YAML entry (if source matches bundled)
         if yaml_source == Some("bundled")
-            || yaml_source.as_deref() == Some("omni-stack")
+            || yaml_source == Some("omni-stack")
             || (yaml_source.is_none() && on_disk_bundled)
         {
             let yaml_type = yaml_info.as_ref().map(|(t, _)| t.clone());
@@ -595,7 +595,7 @@ pub(crate) async fn handle_remove_by_source(
                     }
                 }
             }
-            return respond_removed(name, removed);
+            respond_removed(name, removed)
         }
         "remote" => {
             let mut removed = false;
@@ -642,7 +642,7 @@ pub(crate) async fn handle_remove_by_source(
                 state.plugin_manager.remove_client(name);
                 state.plugin_manager.remove_server_tools(name).await;
             }
-            return respond_removed(name, removed);
+            respond_removed(name, removed)
         }
         "bundled" => {
             let mut removed = false;
@@ -697,17 +697,15 @@ pub(crate) async fn handle_remove_by_source(
                 state.plugin_manager.remove_client(name);
                 state.plugin_manager.remove_server_tools(name).await;
             }
-            return respond_removed(name, removed);
+            respond_removed(name, removed)
         }
-        _ => {
-            return (
+        _ => (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
                     "success": false,
                     "error": format!("Invalid source '{}': must be 'built-in', 'bundled', or 'remote'", source)
                 })),
-            ).into_response();
-        }
+            ).into_response(),
     }
 }
 

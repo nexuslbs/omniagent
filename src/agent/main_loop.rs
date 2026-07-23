@@ -786,11 +786,11 @@ Previous plan:\n{}",
             helpers::CreateMessageResult::OtherError(e) => {
                 error!("Failed to persist tool call message: {:?}", e)
             }
-            helpers::CreateMessageResult::Success(saved) => {
+            helpers::CreateMessageResult::Success(ref saved) => {
                 helpers::enqueue_delivery(
                     &cfg.ctx,
-                    &saved,
-                    &channel,
+                    saved,
+                    channel,
                     thread,
                     cause_msg.external_id.clone(),
                 )
@@ -890,7 +890,6 @@ Previous plan:\n{}",
                                         crate::agent::task_registry::TaskStatus::Cancelled).await;
                                     bg_registry.append_log(&task_id_bg,
                                         &format!("Tool '{}' was cancelled", bg_tool_name)).await;
-                                    return;
                                 }
                                 result = tokio::time::timeout(bg_timeout, bg_tool_future) => {
                                     match result {
@@ -1121,7 +1120,7 @@ Previous plan:\n{}",
             helpers::enqueue_delivery(
                 &cfg.ctx,
                 &reasoning_saved,
-                &channel,
+                channel,
                 thread,
                 cause_msg.external_id.clone(),
             )
@@ -1135,7 +1134,7 @@ Previous plan:\n{}",
         cfg,
         thread,
         cause_msg,
-        &channel,
+        channel,
         *next_seq,
         start_time,
         &messages,
@@ -1144,12 +1143,12 @@ Previous plan:\n{}",
         limit_reached,
         current_iter,
         iter_limit,
-        &per_thread_llm,
+        per_thread_llm,
         final_content,
         token_usage_json,
         evidence_metadata,
         enable_subtasks,
     )
     .await?;
-    return Ok(saved);
+    Ok(saved)
 }

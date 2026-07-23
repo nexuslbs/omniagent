@@ -265,6 +265,7 @@ impl ExternalProviderClient {
 }
 
 impl Drop for ExternalProviderClient {
+    #[allow(clippy::let_underscore_future)]
     fn drop(&mut self) {
         if let Ok(mut guard) = self.process.lock() {
             if let Some(mut child) = guard.take() {
