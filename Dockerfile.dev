@@ -17,6 +17,9 @@ RUN rustup component add rustfmt clippy
 # Install sqlx-cli for offline query cache generation (pre-built binary, no compilation)
 RUN cargo install sqlx-cli --locked
 
+# Install nodejs for test-js-tool MCP server (used in integration tests)
+RUN apt-get update -qq && apt-get install -y -qq nodejs && apt-get clean && rm -rf /var/lib/apt/lists/*
+
 # Trust all repos under /opt/workspace (container mounts host git repos)
 RUN git config --global --add safe.directory /opt/workspace/omni-stack/.git \
     && git config --global --add safe.directory /opt/workspace/omni-plugins/.git \
