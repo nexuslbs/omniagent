@@ -8,7 +8,7 @@
 //! The `HttpMcpClient` connects to an HTTP server endpoint using `reqwest` (async).
 
 use crate::err_str;
-use crate::error::{AppResult, Error, ErrorContext};
+use crate::error::{AppResult, ErrorContext};
 use crate::mcp::external::config::McpServerConfig;
 use crate::mcp::external::protocol::*;
 use crate::mcp::{McpTool, McpToolResult};
@@ -20,7 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 // ---------------------------------------------------------------------------
@@ -358,134 +359,31 @@ fn convert_input_schema(schema: &Value) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Internal process handle for async stdio communication
+// Multiplexed MCP Client (async, stdio)
 // ---------------------------------------------------------------------------
 
-/// Owned handles for a running external MCP subprocess.
-/// stdin/stdout are taken out of `child` so we can use tokio async I/O.
-#[derive(Debug)]
-struct AsyncChildProcess {
-    #[allow(dead_code)]
-    child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
-    reader: tokio::io::BufReader<tokio::process::ChildStdout>,
-}
-
-impl AsyncChildProcess {
-    /// Spawn the subprocess and take ownership of its stdio handles.
-    fn spawn(config: &McpServerConfig) -> AppResult<Self> {
-        let cmd = config.command.as_ref().ok_or_else(|| {
-            err_str!(
-                "stdio MCP server '{}' has no command configured",
-                config.name
-            )
-        })?;
-
-        tracing::info!(
-            "Spawning external MCP server '{}': {} {}",
-            config.name,
-            cmd,
-            config.args.join(" ")
-        );
-
-        let mut command = Command::new(cmd);
-        command
-            .args(&config.args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit());
-
-        // Set working directory if configured (for relative args like ["server.py"])
-        if let Some(dir) = &config.current_dir {
-            command.current_dir(dir);
-        }
-
-        for (key, value) in &config.env {
-            command.env(key, value);
-        }
-
-        let mut child = command
-            .spawn()
-            .ctx(format!("Failed to spawn MCP server '{}'", config.name))?;
-
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| err_str!("Failed to open stdin for MCP server"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| err_str!("Failed to open stdout for MCP server"))?;
-        let reader = BufReader::new(stdout);
-
-        Ok(Self {
-            child,
-            stdin,
-            reader,
-        })
-    }
-
-    /// Send a JSON-RPC request and read the response line.
-    async fn send_request(&mut self, request: &str, server_name: &str) -> AppResult<String> {
-        // Check if child is still alive before proceeding
-        match self.child.try_wait() {
-            Ok(Some(status)) => {
-                return Err(err_str!(
-                    "MCP server '{}' exited with status {} before responding",
-                    server_name,
-                    status
-                ));
-            }
-            Ok(None) => { /* still running, proceed */ }
-            Err(e) => {
-                return Err(err_str!(
-                    "Failed to check MCP server '{}' status: {}",
-                    server_name,
-                    e
-                ));
-            }
-        }
-
-        // Write request + newline
-        self.stdin.write_all(request.as_bytes()).await.ctx(format!(
-            "Failed to write to MCP server '{}' stdin",
-            server_name
-        ))?;
-        self.stdin
-            .write_all(b"\n")
-            .await
-            .ctx("Failed to write newline to MCP server stdin")?;
-        self.stdin
-            .flush()
-            .await
-            .ctx("Failed to flush MCP server stdin")?;
-
-        // Read the response line
-        let mut line = String::new();
-        let bytes_read = self.reader.read_line(&mut line).await.ctx(format!(
-            "Failed to read response from MCP server '{}'",
-            server_name
-        ))?;
-
-        if bytes_read == 0 {
-            return Err(err_str!(
-                "MCP server '{}' closed stdout without sending a response",
-                server_name
-            ));
-        }
-
-        Ok(line.trim().to_string())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Stdio MCP Client (async)
-// ---------------------------------------------------------------------------
-
-/// An MCP client that communicates with a subprocess via stdin/stdout.
+/// An MCP client that communicates with a subprocess via stdin/stdout
+/// using a **multiplexed** design: all JSON-RPC requests share one subprocess
+/// but concurrent callers are dispatched via request IDs instead of a Mutex.
+///
+/// A background reader task reads stdout lines, parses JSON-RPC responses,
+/// and sends the result to the waiting caller via a oneshot channel keyed
+/// by request ID. The `call_tool` method writes to stdin via an mpsc channel
+/// (non-blocking) and awaits the oneshot — zero locks in the hot path.
+///
+/// This replaces the old `Mutex<Option<AsyncChildProcess>>` which serialized
+/// ALL tool calls to the same server, even when the server could handle
+/// concurrent requests.
 pub struct StdioMcpClient {
     config: McpServerConfig,
-    process: Mutex<Option<AsyncChildProcess>>,
+    /// Non-blocking sender for writing JSON-RPC requests to stdin.
+    stdin_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
+    /// Pending requests keyed by JSON-RPC request ID.
+    pending: Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<String>>>>,
+    /// Background task: reads stdout and dispatches responses by ID.
+    read_task: Mutex<Option<JoinHandle<()>>>,
+    /// Child process handle (for lifecycle/cleanup).
+    child: Mutex<Option<tokio::process::Child>>,
     next_id: AtomicU64,
     tools: Mutex<Vec<McpExternalTool>>,
     circuit: CircuitBreaker,
@@ -498,7 +396,10 @@ impl StdioMcpClient {
         Self {
             circuit: CircuitBreaker::new(config.max_retries),
             config,
-            process: Mutex::new(None),
+            stdin_tx: Mutex::new(None),
+            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            read_task: Mutex::new(None),
+            child: Mutex::new(None),
             next_id: AtomicU64::new(1),
             tools: Mutex::new(Vec::new()),
             connected: Mutex::new(false),
@@ -506,53 +407,186 @@ impl StdioMcpClient {
         }
     }
 
-    /// Spawn the subprocess (under async lock).
-    async fn spawn_locked(
-        &self,
-    ) -> AppResult<tokio::sync::MutexGuard<'_, Option<AsyncChildProcess>>> {
-        let mut guard = self.process.lock().await;
-        if guard.is_some() {
-            return Ok(guard);
+    /// Spawn the subprocess and start the background reader task.
+    /// Returns the stdin sender for writing requests.
+    async fn spawn_process(&self) -> AppResult<mpsc::UnboundedSender<String>> {
+        let cmd = self.config.command.as_ref().ok_or_else(|| {
+            err_str!(
+                "stdio MCP server '{}' has no command configured",
+                self.config.name
+            )
+        })?;
+
+        tracing::info!(
+            "Spawning external MCP server '{}': {} {}",
+            self.config.name,
+            cmd,
+            self.config.args.join(" ")
+        );
+
+        let mut command = Command::new(cmd);
+        command
+            .args(&self.config.args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit());
+
+        if let Some(dir) = &self.config.current_dir {
+            command.current_dir(dir);
+        }
+        for (key, value) in &self.config.env {
+            command.env(key, value);
         }
 
-        let process = AsyncChildProcess::spawn(&self.config)?;
-        *self.connected.lock().await = true;
-        *guard = Some(process);
-        Ok(guard)
+        let mut child = command
+            .spawn()
+            .ctx(format!("Failed to spawn MCP server '{}'", self.config.name))?;
+
+        let child_stdin = child.stdin.take().ok_or_else(|| {
+            err_str!("Failed to open stdin for MCP server '{}'", self.config.name)
+        })?;
+        let child_stdout = child.stdout.take().ok_or_else(|| {
+            err_str!(
+                "Failed to open stdout for MCP server '{}'",
+                self.config.name
+            )
+        })?;
+
+        // Create mpsc channel for writing requests
+        let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
+        let pending = self.pending.clone();
+        let server_name = self.config.name.clone();
+        let reader = BufReader::new(child_stdout);
+
+        // Spawn background reader task
+        let handle = tokio::spawn(async move {
+            // Combine stdin writes (from mpsc) with stdout reads (from reader)
+            // in a single select loop.
+            let mut writer = child_stdin;
+            let mut reader = reader;
+            let mut line_buf = String::new();
+
+            loop {
+                tokio::select! {
+                    // Incoming JSON-RPC request to write to stdin
+                    Some(request) = stdin_rx.recv() => {
+                        if let Err(e) = writer.write_all(request.as_bytes()).await {
+                            tracing::error!("MCP server '{}' stdin write error: {}", server_name, e);
+                            break;
+                        }
+                        if let Err(e) = writer.write_all(b"\n").await {
+                            tracing::error!("MCP server '{}' stdin newline write error: {}", server_name, e);
+                            break;
+                        }
+                        if let Err(e) = writer.flush().await {
+                            tracing::error!("MCP server '{}' stdin flush error: {}", server_name, e);
+                            break;
+                        }
+                    }
+                    // Response from subprocess stdout
+                    result = reader.read_line(&mut line_buf) => {
+                        match result {
+                            Ok(0) => {
+                                tracing::info!("MCP server '{}' closed stdout", server_name);
+                                break; // EOF
+                            }
+                            Ok(_) => {
+                                let line = std::mem::take(&mut line_buf);
+                                let trimmed = line.trim().to_string();
+                                if trimmed.is_empty() {
+                                    continue;
+                                }
+                                // Parse JSON-RPC response to extract ID
+                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&trimmed) {
+                                    if let Some(id_val) = val.get("id") {
+                                        if let Some(id) = id_val.as_u64() {
+                                            if let Ok(mut map) = pending.lock() {
+                                                if let Some(tx) = map.remove(&id) {
+                                                    let _ = tx.send(trimmed);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("MCP server '{}' stdout read error: {}", server_name, e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            tracing::info!("MCP server '{}' background reader stopped", server_name);
+        });
+
+        *self.read_task.lock().await = Some(handle);
+        *self.child.lock().await = Some(child);
+        *self.stdin_tx.lock().await = Some(stdin_tx.clone());
+
+        Ok(stdin_tx)
+    }
+
+    /// Send a JSON-RPC request via the multiplexed channel and await the response.
+    /// Returns the response string on success.
+    async fn send_and_await(&self, request: &str, id: u64, timeout_secs: u64) -> AppResult<String> {
+        let (tx, rx) = oneshot::channel();
+
+        // Insert sender into pending map BEFORE sending (avoid race)
+        {
+            let mut pending = self.pending.lock().unwrap();
+            pending.insert(id, tx);
+        }
+
+        // Send the request via mpsc (non-blocking)
+        let tx_guard = self.stdin_tx.lock().await;
+        let sender = tx_guard
+            .as_ref()
+            .ok_or_else(|| err_str!("MCP server '{}' not initialized", self.config.name))?;
+        sender
+            .send(request.to_string())
+            .map_err(|_| err_str!("MCP server '{}' stdin channel closed", self.config.name))?;
+        drop(tx_guard); // release lock before awaiting
+
+        // Await the response via oneshot with timeout
+        let response = timeout(Duration::from_secs(timeout_secs), rx)
+            .await
+            .map_err(|_| {
+                // Clean up pending entry on timeout
+                let mut pending = self.pending.lock().unwrap();
+                pending.remove(&id);
+                err_str!(
+                    "MCP server '{}' did not respond within {}s (id={})",
+                    self.config.name,
+                    timeout_secs,
+                    id
+                )
+            })?
+            .map_err(|_| {
+                err_str!(
+                    "MCP server '{}' response channel cancelled (id={})",
+                    self.config.name,
+                    id
+                )
+            })?;
+
+        Ok(response)
     }
 
     /// Run a full MCP handshake: configure → initialize → initialized notification → tools/list.
+    /// Uses the multiplexed channel (background reader must be started first).
     async fn initialize_handshake(
-        process: &mut AsyncChildProcess,
-        server_name: &str,
-        next_id: &AtomicU64,
+        &self,
         config_env: &HashMap<String, String>,
     ) -> AppResult<ListToolsResult> {
+        let server_name = &self.config.name;
+
         // Step 0: Send plugin configuration before initialize
-        // The plugin's on_configure callback receives these values.
         if !config_env.is_empty() {
             let cfg_req = build_configure_request(config_env);
-            process
-                .stdin
-                .write_all(cfg_req.as_bytes())
-                .await
-                .ctx(format!(
-                    "Failed to write configure message to MCP server '{}' stdin",
-                    server_name
-                ))?;
-            process
-                .stdin
-                .write_all(b"\n")
-                .await
-                .ctx("Failed to write newline to MCP server stdin after configure")?;
-            process
-                .stdin
-                .flush()
-                .await
-                .ctx("Failed to flush MCP server stdin after configure")?;
-            // Read the acknowledgment (with 5s timeout)
-            let mut ack = String::new();
-            let _ = timeout(Duration::from_secs(5), process.reader.read_line(&mut ack)).await;
+            // configure always uses id=0 (hardcoded in build_configure_request)
+            let ack = self.send_and_await(&cfg_req, 0, 5).await?;
             tracing::debug!(
                 "MCP server '{}' configure response: {}",
                 server_name,
@@ -561,9 +595,9 @@ impl StdioMcpClient {
         }
 
         // Step 1: Initialize
-        let id = next_id.fetch_add(1, Ordering::SeqCst);
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req = build_initialize_request(id);
-        let response = process.send_request(&req, server_name).await?;
+        let response = self.send_and_await(&req, id, 30).await?;
         let init_result =
             match parse_response(&response).ctx("Failed to parse MCP initialize response")? {
                 JsonRpcResponse::Success { result, .. } => result,
@@ -593,29 +627,16 @@ impl StdioMcpClient {
 
         // Step 2: Send initialized notification (no response expected)
         let notif = build_initialized_notification();
-        process
-            .stdin
-            .write_all(notif.as_bytes())
-            .await
-            .ctx(format!(
-                "Failed to write notification to MCP server '{}' stdin",
-                server_name
-            ))?;
-        process
-            .stdin
-            .write_all(b"\n")
-            .await
-            .ctx("Failed to write newline to MCP server stdin")?;
-        process
-            .stdin
-            .flush()
-            .await
-            .ctx("Failed to flush MCP server stdin")?;
+        let tx_guard = self.stdin_tx.lock().await;
+        if let Some(sender) = tx_guard.as_ref() {
+            let _ = sender.send(notif);
+        }
+        drop(tx_guard);
 
         // Step 3: List tools
-        let id = next_id.fetch_add(1, Ordering::SeqCst);
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req = build_list_tools_request(id);
-        let response = process.send_request(&req, server_name).await?;
+        let response = self.send_and_await(&req, id, 30).await?;
         let list_result =
             match parse_response(&response).ctx("Failed to parse MCP tools/list response")? {
                 JsonRpcResponse::Success { result, .. } => result,
@@ -651,17 +672,14 @@ impl McpServerClient for StdioMcpClient {
             }
         }
 
-        let mut guard = self.spawn_locked().await?;
-        let process = guard.as_mut().ok_or_else(|| {
-            Error::Message("process guard should be Some after spawn".to_string())
-        })?;
-        let server_name = &self.config.name;
+        let _stdin_tx = self.spawn_process().await?;
 
-        let result =
-            Self::initialize_handshake(process, server_name, &self.next_id, &self.config.env)
-                .await?;
+        // Build config_env from the server config's env map
+        let config_env: HashMap<String, String> = self.config.env.clone();
+        let result = self.initialize_handshake(&config_env).await?;
 
         *self.tools.lock().await = result.tools.clone();
+        *self.connected.lock().await = true;
         Ok(result.tools)
     }
 
@@ -680,31 +698,65 @@ impl McpServerClient for StdioMcpClient {
             ));
         }
 
-        let mut guard = self.process.lock().await;
-        let process = guard
-            .as_mut()
-            .ok_or_else(|| err_str!("MCP server '{}' not initialized", self.config.name))?;
-        let server_name = &self.config.name;
+        // Check if background reader is still alive
+        {
+            let rt = self.read_task.lock().await;
+            if let Some(ref handle) = *rt {
+                if handle.is_finished() {
+                    return Err(err_str!(
+                        "MCP server '{}' background reader has stopped",
+                        self.config.name
+                    ));
+                }
+            } else {
+                return Err(err_str!(
+                    "MCP server '{}' not initialized",
+                    self.config.name
+                ));
+            }
+        }
 
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req = build_call_tool_request(id, name, arguments, meta);
 
-        let timeout_dur = std::time::Duration::from_secs(self.config.timeout_secs);
-        let response = tokio::time::timeout(timeout_dur, process.send_request(&req, server_name))
+        let timeout_dur = Duration::from_secs(self.config.timeout_secs);
+
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pending = self.pending.lock().unwrap();
+            pending.insert(id, tx);
+        }
+
+        {
+            let tx_guard = self.stdin_tx.lock().await;
+            let sender = tx_guard
+                .as_ref()
+                .ok_or_else(|| err_str!("MCP server '{}' not initialized", self.config.name))?;
+            sender
+                .send(req)
+                .map_err(|_| err_str!("MCP server '{}' stdin channel closed", self.config.name))?;
+        }
+
+        let response = tokio::time::timeout(timeout_dur, rx)
             .await
             .map_err(|_| {
                 self.circuit.record_failure();
+                let mut pending = self.pending.lock().unwrap();
+                pending.remove(&id);
                 err_str!(
                     "MCP server '{}' tool '{}' timed out after {} seconds",
-                    server_name,
+                    self.config.name,
                     name,
                     self.config.timeout_secs,
                 )
             })?
-            .ctx(format!(
-                "Failed to receive response from MCP server '{}'",
-                server_name
-            ))?;
+            .map_err(|_| {
+                self.circuit.record_failure();
+                err_str!(
+                    "MCP server '{}' response channel cancelled",
+                    self.config.name,
+                )
+            })?;
 
         let result_value =
             match parse_response(&response).ctx("Failed to parse MCP tool call response")? {
@@ -732,13 +784,30 @@ impl McpServerClient for StdioMcpClient {
     }
 
     async fn shutdown(&self) -> AppResult<()> {
-        let mut guard = self.process.lock().await;
-        if let Some(mut process) = guard.take() {
-            // Drop stdin first to send EOF / close the pipe
-            drop(process.stdin);
-            process.child.kill().await.ok();
-            process.child.wait().await.ok();
+        // Close stdin by dropping the sender (the reader task will stop on rx closed)
+        *self.stdin_tx.lock().await = None;
+
+        // Abort the background reader task
+        {
+            let mut rt = self.read_task.lock().await;
+            if let Some(handle) = rt.take() {
+                handle.abort();
+            }
         }
+
+        // Kill the child process
+        let mut guard = self.child.lock().await;
+        if let Some(mut child) = guard.take() {
+            child.kill().await.ok();
+            child.wait().await.ok();
+        }
+
+        // Cancel all pending requests
+        {
+            let mut pending = self.pending.lock().unwrap();
+            pending.clear();
+        }
+
         *self.connected.lock().await = false;
         Ok(())
     }
@@ -763,12 +832,15 @@ impl McpServerClient for StdioMcpClient {
 
 impl Drop for StdioMcpClient {
     fn drop(&mut self) {
-        // Best-effort: block on shutdown in the sync destructor.
-        // In practice the process gets reaped by the OS when the process ends.
-        if let Ok(mut guard) = self.process.try_lock() {
-            if let Some(mut process) = guard.take() {
-                drop(process.stdin);
-                let _ = process.child.try_wait(); // sync: non-blocking, best-effort
+        // Best-effort: shut down the background reader and kill the child.
+        if let Ok(mut rt) = self.read_task.try_lock() {
+            if let Some(handle) = rt.take() {
+                handle.abort();
+            }
+        }
+        if let Ok(mut guard) = self.child.try_lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.try_wait();
             }
         }
     }
