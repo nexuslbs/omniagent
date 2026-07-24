@@ -175,6 +175,9 @@ pub(crate) fn read_cargo_package_name(cargo_toml_path: &str) -> Option<String> {
 
 /// Compile a Rust crate at the given path. Returns true if compilation succeeded.
 ///
+/// When `force_rebuild` is true, removes the existing binary before building
+/// to force cargo to actually recompile (not just return "up to date" from cache).
+///
 /// Retries once on failure for remote plugins, since transient network timeouts
 /// (crates.io index update, dependency download) are the most common cause of
 /// first-attempt failures.
@@ -182,10 +185,11 @@ pub(crate) async fn compile_rust_crate(
     plugin_dir: &str,
     name: &str,
     source: &str,
+    force_rebuild: bool,
 ) -> Result<bool, String> {
     info!(
-        "[plugin/compile] Compiling plugin '{}' from {} (source: {})",
-        name, plugin_dir, source
+        "[plugin/compile] Compiling plugin '{}' from {} (source: {}, force_rebuild: {})",
+        name, plugin_dir, source, force_rebuild
     );
 
     // Locate the Cargo.toml — if none exists, skip compilation
@@ -202,6 +206,25 @@ pub(crate) async fn compile_rust_crate(
     // Determine the package name from Cargo.toml
     let pkg_name = read_cargo_package_name(&cargo_path)
         .ok_or_else(|| format!("Failed to read package name from {}", cargo_path))?;
+
+    // If force_rebuild, remove the existing binary so cargo actually recompiles
+    // (cargo build --release would otherwise return "up to date" from cache).
+    if force_rebuild {
+        let binary_path = format!("{}/target/release/{}", plugin_dir, pkg_name);
+        let bin_path = std::path::Path::new(&binary_path);
+        if bin_path.exists() {
+            info!(
+                "[plugin/compile] Force rebuild: removing existing binary at {}",
+                binary_path
+            );
+            if let Err(e) = std::fs::remove_file(bin_path) {
+                warn!(
+                    "[plugin/compile] Failed to remove existing binary for '{}': {}",
+                    name, e
+                );
+            }
+        }
+    }
 
     // Remote plugins get one retry for transient network failures (e.g. crates.io timeout)
     let max_attempts = if source == "remote" { 2 } else { 1 };
