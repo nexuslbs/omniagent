@@ -3,7 +3,9 @@
 //!
 //! Tools: add_subtask, list_subtasks, update_subtask, delete_subtask, get_subtask_counts
 
-use anyhow::{Context, Result};
+#![allow(dead_code)]
+
+use anyhow::Result;
 use mcp_server_util::*;
 use omniagent::subtask;
 use serde_json::Value;

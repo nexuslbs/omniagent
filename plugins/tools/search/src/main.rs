@@ -3,7 +3,7 @@
 //!
 //! Tools: search_messages, search_wiki
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use mcp_server_util::*;
 use serde_json::Value;
 use sql_forge::sql_forge;
@@ -200,6 +200,7 @@ fn handle_search_wiki(args: &Value) -> Result<(String, bool)> {
 /// Callback invoked when the host sends configuration via configure message.
 /// Plugin config — received via configure message.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct PluginConfig {
     pub database_url: String,
     pub omni_dir: String,

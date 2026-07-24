@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO kanban_task_dependencies (task_id, depends_on_id)\n        VALUES ($1, $2)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "650615d49bd66f88134384a1c17e1973826a9ca91ec4a53bb52f57ddb7bdbe95"
+}

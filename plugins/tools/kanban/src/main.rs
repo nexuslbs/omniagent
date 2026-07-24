@@ -4,7 +4,7 @@
 //! Tools: create_kanban_task, list_kanban_tasks, update_kanban_task,
 //!        delete_kanban_task, add_kanban_dependency, remove_kanban_dependency
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use mcp_server_util::*;
 use omniagent::db;
 use serde_json::Value;
