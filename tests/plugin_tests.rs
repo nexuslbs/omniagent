@@ -133,15 +133,16 @@ fn assert_remote_binary_exists(name: &str, msg: &str) {
             name, name, name
         )
     });
-    let (stdout, _, code) = run(&["sh", "-c", &format!("ls '{}' 2>/dev/null", bin_path)]);
-    if code != 0 {
+    // Direct check (no docker exec) since this test runs inside the container
+    let exists = std::path::Path::new(&bin_path).exists();
+    if !exists {
         // Fallback: check CARGO_TARGET_DIR (/target/release/)
         let fallback = format!("/target/release/{}", name);
-        let (_, _, code2) = run(&["sh", "-c", &format!("ls '{}' 2>/dev/null", fallback)]);
-        assert_eq!(
-            code2, 0,
-            "{} - binary not at {} nor at fallback {}:\n{}",
-            msg, bin_path, fallback, stdout
+        let fallback_exists = std::path::Path::new(&fallback).exists();
+        assert!(
+            fallback_exists,
+            "{} - binary not at {} nor at fallback {}",
+            msg, bin_path, fallback
         );
     }
 }
@@ -266,8 +267,6 @@ fn test_remote_plugin_install_compile() {
     // Install via API (handles YAML registration, clone, and compilation)
     setup_remote_plugin(name, base);
 
-    std::thread::sleep(std::time::Duration::from_secs(10));
-
     assert_remote_binary_exists(name, "After install");
 
     let plugin = get_plugin(name).expect("test-rust-tool should exist after install");
@@ -330,9 +329,10 @@ fn test_remote_plugin_reinstall() {
     let resp = api_post(&format!("{}/reinstall", base));
     assert_eq!(resp["success"], true, "Reinstall failed: {:?}", resp);
 
-    std::thread::sleep(std::time::Duration::from_secs(60));
-
-    assert_remote_binary_exists(name, "After reinstall");
+    // Verify the binary exists immediately after the API returns.
+    // The reinstall API is synchronous — it awaits compilation internally.
+    // If compilation succeeded, the binary is on disk right away.
+    assert_remote_binary_exists(name, "After reinstall (immediate)");
 }
 
 #[test]
