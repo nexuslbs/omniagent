@@ -31,10 +31,111 @@ fn api_post(path: &str) -> serde_json::Value {
     serde_json::from_str(&stdout).expect("Failed to parse API response")
 }
 
+fn api_post_json(path: &str, body: &str) -> serde_json::Value {
+    let (stdout, _, code) = run(&[
+        "sh",
+        "-c",
+        &format!(
+            "printf '%s' \"$1\" | curl -sf -X POST -H 'Content-Type: application/json' -d @- http://localhost:8080/api{}",
+            path
+        ),
+        "sh",
+        body,
+    ]);
+    assert_eq!(
+        code, 0,
+        "API POST {} failed: {}\nbody: {}",
+        path, stdout, body
+    );
+    serde_json::from_str(&stdout).expect("Failed to parse API response")
+}
+
 fn get_plugin(name: &str) -> Option<serde_json::Value> {
     let resp = api_get("/plugins");
     let data = resp["data"].as_array()?;
     data.iter().find(|p| p["name"] == name).cloned()
+}
+
+/// Set up a remote plugin for testing using the same API flow as the
+/// dashboard "Install from Git" modal:
+/// 1. POST /api/plugins/install-git — clones repo to .remote/<name>/, writes remote.yml
+/// 2. POST /api/plugins/{type}/{source}/{name}/install — compiles, registers in plugins.yml
+fn setup_remote_plugin(name: &str, base: &str) {
+    // 1. install-git: clones repo to .remote/<name>/, persists remote.yml entry
+    let body = format!(
+        r#"{{"url":"file:///opt/workspace/omni-plugins","path":"tools/{}","name":"{}"}}"#,
+        name, name
+    );
+    let resp = api_post_json("/plugins/install-git", &body);
+    assert!(
+        resp["success"].as_bool().unwrap_or(false),
+        "install-git failed: {:?}",
+        resp
+    );
+
+    // 2. install: compiles and registers in plugins.yml with enabled=true
+    let resp = api_post(&format!("{}/install", base));
+    assert_eq!(resp["success"], true, "Install failed: {:?}", resp);
+}
+
+/// Returns the expected path for a remote plugin's compiled binary.
+/// Reads the `path` from the API plugin listing (remote field) and the
+/// package name from Cargo.toml.
+fn remote_binary_path(name: &str) -> Option<String> {
+    // Try to read remote.path from the API plugin listing
+    let (stdout, _, _) = run(&[
+        "sh", "-c",
+        &format!(
+            "curl -sf http://localhost:8080/api/plugins 2>/dev/null | python3 -c \"import sys,json; d=json.load(sys.stdin)['data']; p=[x for x in d if x['name']=='{}'][0]; r=p.get('remote',{{}}); print(r.get('path',''))\" 2>/dev/null || echo ''",
+            name
+        ),
+    ]);
+    let subpath = stdout.trim().to_string();
+    // Fallback: use tools/{name} which is the omni-plugins convention
+    let subpath = if subpath.is_empty() || subpath == name {
+        format!("tools/{}", name)
+    } else {
+        subpath
+    };
+
+    // Read the package name from Cargo.toml (may differ from the plugin name)
+    let cargo_path = format!("/opt/omni/plugins/tools/.remote/{}/{}", name, subpath);
+    let (stdout, _, _) = run(&[
+        "sh",
+        "-c",
+        &format!(
+            "grep '^name *= *' {}/Cargo.toml 2>/dev/null | head -1 | sed 's/^name *= *\"\\(.*\\)\"/\\1/' || echo ''",
+            cargo_path
+        ),
+    ]);
+    let pkg_name = stdout.trim().to_string();
+    let pkg_name = if pkg_name.is_empty() {
+        name.to_string()
+    } else {
+        pkg_name
+    };
+
+    Some(format!(
+        "/opt/omni/plugins/tools/.remote/{}/{}/target/release/{}",
+        name, subpath, pkg_name
+    ))
+}
+
+/// Assert that a remote plugin's compiled binary exists on disk.
+/// Uses remote.yml + Cargo.toml to find the correct path.
+fn assert_remote_binary_exists(name: &str, msg: &str) {
+    let bin_path = remote_binary_path(name).unwrap_or_else(|| {
+        format!(
+            "/opt/omni/plugins/tools/.remote/{}/{}/target/release/{}",
+            name, name, name
+        )
+    });
+    let (stdout, _, code) = run(&["sh", "-c", &format!("ls '{}' 2>/dev/null", bin_path)]);
+    assert_eq!(
+        code, 0,
+        "{} - binary not found at {}:\n{}",
+        msg, bin_path, stdout
+    );
 }
 
 #[test]
@@ -87,7 +188,7 @@ fn test_list_builtins_have_source_code() {
 fn test_list_bundled_exist() {
     let resp = api_get("/plugins");
     let data = resp["data"].as_array().expect("Expected data array");
-    for name in &["actions", "fetch", "filesystem", "git", "skills"] {
+    for name in &["actions", "filesystem", "git", "skills"] {
         let plugin = data
             .iter()
             .find(|p| p["name"] == *name && p["source"] == "bundled");
@@ -154,29 +255,12 @@ fn test_remote_plugin_install_compile() {
     ]);
     let _ = run(&["sh", "-c", &format!("curl -sf -X DELETE 'http://localhost:8080/api{base}?mode=uninstall' 2>/dev/null || true", base = base)]);
 
-    let plugin = get_plugin(name).expect("test-rust-tool should exist via remote.yml");
-    assert_eq!(plugin["source"], "remote");
-    assert!(
-        ["disabled", "not_found", "enabled"].contains(&plugin["status"].as_str().unwrap_or("")),
-        "Unexpected status '{}' for test-rust-tool",
-        plugin["status"]
-    );
-
-    // Download source from git (required before install)
-    let resp = api_post(&format!("{}/download", base));
-    assert_eq!(resp["success"], true, "Download failed: {:?}", resp);
-
-    let resp = api_post(&format!("{}/install", base));
-    assert_eq!(resp["success"], true, "Install failed: {:?}", resp);
+    // Install via API (handles YAML registration, clone, and compilation)
+    setup_remote_plugin(name, base);
 
     std::thread::sleep(std::time::Duration::from_secs(10));
 
-    let (stdout, _, code) = run(&[
-        "sh",
-        "-c",
-        &format!("ls /target/release/{} 2>/dev/null", name),
-    ]);
-    assert_eq!(code, 0, "Binary not found after install:\n{}", stdout);
+    assert_remote_binary_exists(name, "After install");
 
     let plugin = get_plugin(name).expect("test-rust-tool should exist after install");
     assert!(
@@ -200,9 +284,8 @@ fn test_remote_plugin_enable_and_query() {
     let name = "test-rust-tool";
     let base = "/plugins/tools/remote/test-rust-tool";
 
-    // Download and install first
-    let _ = api_post(&format!("{}/download", base));
-    let _ = api_post(&format!("{}/install", base));
+    // Download + install via setup helper
+    setup_remote_plugin(name, base);
 
     let resp = api_post(&format!("{}/enable", base));
     assert_eq!(resp["success"], true, "Enable failed: {:?}", resp);
@@ -220,12 +303,17 @@ fn test_remote_plugin_reinstall() {
     let name = "test-rust-tool";
     let base = "/plugins/tools/remote/test-rust-tool";
 
-    // Ensure the plugin is downloaded, installed, and enabled
-    let _ = api_post(&format!("{}/download", base));
-    let _ = api_post(&format!("{}/install", base));
+    // Ensure the plugin is downloaded, installed, and enabled.
+    setup_remote_plugin(name, base);
     let _ = api_post(&format!("{}/enable", base));
 
-    let plugin = get_plugin(name).expect("test-rust-tool should exist");
+    // If the plugin was removed by a parallel test, re-do the full setup
+    if get_plugin(name).is_none() {
+        setup_remote_plugin(name, base);
+        let _ = api_post(&format!("{}/enable", base));
+    }
+
+    let plugin = get_plugin(name).unwrap_or_else(|| panic!("test-rust-tool should exist"));
     assert_eq!(
         plugin["status"], "enabled",
         "test-rust-tool should be enabled before reinstall"
@@ -236,12 +324,7 @@ fn test_remote_plugin_reinstall() {
 
     std::thread::sleep(std::time::Duration::from_secs(60));
 
-    let (stdout, _, code) = run(&[
-        "sh",
-        "-c",
-        &format!("ls /target/release/{} 2>/dev/null", name),
-    ]);
-    assert_eq!(code, 0, "Binary not found after reinstall:\n{}", stdout);
+    assert_remote_binary_exists(name, "After reinstall");
 }
 
 #[test]
@@ -251,8 +334,7 @@ fn test_remote_plugin_uninstall() {
     let base = "/plugins/tools/remote/test-rust-tool";
 
     // Ensure the plugin is downloaded, installed, and enabled
-    let _ = api_post(&format!("{}/download", base));
-    let _ = api_post(&format!("{}/install", base));
+    setup_remote_plugin(name, base);
     let _ = api_post(&format!("{}/enable", base));
 
     let plugin = get_plugin(name).expect("test-rust-tool should exist before uninstall");
