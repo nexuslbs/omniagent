@@ -2,8 +2,14 @@
 # OmniAgent — Development environment image
 # Rust toolchain + dev tooling. No code is built here — run builds
 # manually via docker compose exec or the scripts/build.py entry point.
+
+FROM docker:cli AS docker-cli
+
 FROM rust:1.96.0
 WORKDIR /app
+
+# Copy Docker CLI for integration tests (docker exec into the running container)
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
 # Rust dev components (fast — no compilation, just downloads)
 RUN rustup component add rustfmt clippy
