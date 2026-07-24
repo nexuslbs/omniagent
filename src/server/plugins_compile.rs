@@ -207,20 +207,10 @@ pub(crate) async fn compile_rust_crate(
     let max_attempts = if source == "remote" { 2 } else { 1 };
 
     let label = format!("{} (pkg: {})", name, pkg_name);
-    // Ensure the binary goes to the crate's own target/ directory, not
-    // a global CARGO_TARGET_DIR. This keeps the binary path deterministic
-    // for tools like assert_remote_binary_exists() and get_bin_path().
-    let target_dir = format!("{}/target", plugin_dir);
     for attempt in 1..=max_attempts {
         let output = tokio::process::Command::new("cargo")
-            .args([
-                "build",
-                "--release",
-                "--manifest-path",
-                &cargo_path,
-                "--target-dir",
-                &target_dir,
-            ])
+            .args(["build", "--release", "--manifest-path", &cargo_path])
+            .env_remove("CARGO_TARGET_DIR")
             .output()
             .await
             .map_err(|e| format!("Failed to run cargo build for '{}': {}", name, e))?;

@@ -124,6 +124,8 @@ fn remote_binary_path(name: &str) -> Option<String> {
 
 /// Assert that a remote plugin's compiled binary exists on disk.
 /// Uses remote.yml + Cargo.toml to find the correct path.
+/// Falls back to CARGO_TARGET_DIR (/target/release/) if the crate's own
+/// target/ is empty (CARGO_TARGET_DIR env var redirects cargo output).
 fn assert_remote_binary_exists(name: &str, msg: &str) {
     let bin_path = remote_binary_path(name).unwrap_or_else(|| {
         format!(
@@ -132,11 +134,16 @@ fn assert_remote_binary_exists(name: &str, msg: &str) {
         )
     });
     let (stdout, _, code) = run(&["sh", "-c", &format!("ls '{}' 2>/dev/null", bin_path)]);
-    assert_eq!(
-        code, 0,
-        "{} - binary not found at {}:\n{}",
-        msg, bin_path, stdout
-    );
+    if code != 0 {
+        // Fallback: check CARGO_TARGET_DIR (/target/release/)
+        let fallback = format!("/target/release/{}", name);
+        let (_, _, code2) = run(&["sh", "-c", &format!("ls '{}' 2>/dev/null", fallback)]);
+        assert_eq!(
+            code2, 0,
+            "{} - binary not at {} nor at fallback {}:\n{}",
+            msg, bin_path, fallback, stdout
+        );
+    }
 }
 
 #[test]
