@@ -62,8 +62,9 @@ fn get_plugin(name: &str) -> Option<serde_json::Value> {
 /// 2. POST /api/plugins/{type}/{source}/{name}/install — compiles, registers in plugins.yml
 fn setup_remote_plugin(name: &str, base: &str) {
     // 1. install-git: clones repo to .remote/<name>/, persists remote.yml entry
+    // Use HTTPS URL to avoid file:// git-cache issues
     let body = format!(
-        r#"{{"url":"file:///opt/workspace/omni-plugins","path":"tools/{}","name":"{}"}}"#,
+        r#"{{"url":"https://github.com/nexuslbs/omni-plugins.git","path":"tools/{}","name":"{}"}}"#,
         name, name
     );
     let resp = api_post_json("/plugins/install-git", &body);
