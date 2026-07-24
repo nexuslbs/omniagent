@@ -326,13 +326,38 @@ fn test_remote_plugin_reinstall() {
         "test-rust-tool should be enabled before reinstall"
     );
 
-    let resp = api_post(&format!("{}/reinstall", base));
-    assert_eq!(resp["success"], true, "Reinstall failed: {:?}", resp);
+    // Retry up to 2 times: parallel tests (test_remote_plugin_uninstall) may
+    // delete the binary between our reinstall and this check.
+    let mut binary_ok = false;
+    for attempt in 1..=2 {
+        let resp = api_post(&format!("{}/reinstall", base));
+        assert_eq!(resp["success"], true, "Reinstall failed: {:?}", resp);
 
-    // Verify the binary exists immediately after the API returns.
-    // The reinstall API is synchronous — it awaits compilation internally.
-    // If compilation succeeded, the binary is on disk right away.
-    assert_remote_binary_exists(name, "After reinstall (immediate)");
+        // Verify the binary exists immediately after the API returns.
+        // The reinstall API is synchronous — it awaits compilation internally.
+        // If compilation succeeded, the binary is on disk right away.
+        if std::path::Path::new(&remote_binary_path(name).unwrap_or_else(|| {
+            format!(
+                "/opt/omni/plugins/tools/.remote/{}/{}/target/release/{}",
+                name, name, name
+            )
+        }))
+        .exists()
+        {
+            binary_ok = true;
+            break;
+        }
+
+        if attempt == 1 {
+            // Parallel test likely deleted our source — re-install and retry
+            setup_remote_plugin(name, base);
+            let _ = api_post(&format!("{}/enable", base));
+        }
+    }
+    assert!(
+        binary_ok,
+        "After reinstall - binary not found after 2 attempts"
+    );
 }
 
 #[test]
