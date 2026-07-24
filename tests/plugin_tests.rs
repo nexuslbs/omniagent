@@ -2,7 +2,7 @@ use std::process::Command;
 
 fn run(args: &[&str]) -> (String, String, i32) {
     let output = Command::new("docker")
-        .args(["exec", "omnidev-omniagent-1"])
+        .args(["exec", "omnideploy-omniagent-1"])
         .args(args)
         .output()
         .expect("Failed to execute command");
