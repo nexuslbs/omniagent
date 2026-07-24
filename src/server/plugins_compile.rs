@@ -264,48 +264,78 @@ pub(crate) struct ResolvedPlugin {
 }
 
 /// Resolve the plugin source directory, type, and category.
-/// This is the shared preamble used by Install and Reinstall handlers.
+/// Uses type and source from the URL path deterministically — no guessing, no fallbacks.
+///
+/// - `source = "remote"` → reads remote.yml for sub-path, dir is `.remote/{name}/{sub_path}`
+/// - `source = "bundled"` → dir is `{data_dir}/plugins/{type_dir}/{name}`
+/// - Other sources → BAD_REQUEST error
+///
 /// Returns an HTTP response error tuple on failure.
 pub(crate) async fn resolve_plugin_for_compile(
     data_dir: &str,
-    _state_data_dir: &str,
+    plugin_type: &str,
+    source: &str,
     name: &str,
     handler_name: &str,
-    _source: Option<&str>,
 ) -> Result<ResolvedPlugin, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
-    use axum::Json;
+    use axum::{http::StatusCode, Json};
 
-    // 1. Detect the plugin type by checking each YAML type
-    let yaml_type = if let Ok(Some(_entry)) =
-        plugins_yaml::get_entry(data_dir, &plugins_yaml::PluginYamlType::Tool, name)
-    {
-        plugins_yaml::PluginYamlType::Tool
-    } else if let Ok(Some(_)) =
-        plugins_yaml::get_entry(data_dir, &plugins_yaml::PluginYamlType::Provider, name)
-    {
-        plugins_yaml::PluginYamlType::Provider
-    } else if let Ok(Some(_)) =
-        plugins_yaml::get_entry(data_dir, &plugins_yaml::PluginYamlType::Platform, name)
-    {
-        plugins_yaml::PluginYamlType::Platform
-    } else {
-        return Err((
-            axum::http::StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "success": false,
-                "error": format!("Plugin '{}' not found in any plugin type registry", name)
-            })),
-        ));
+    // 1. Parse YAML type from the URL path type string
+    let yaml_type = plugins_yaml::PluginYamlType::from_type_str(plugin_type);
+    let type_dir = yaml_type.type_dir_name();
+
+    // 2. Resolve category and directory based on source from URL path
+    let (category, plugin_dir) = match source {
+        "remote" => {
+            // Remote: read remote.yml to get the sub-path (deterministic lookup)
+            // Error if no remote.yml entry — the Add/install-git action must create it first.
+            let remote = crate::plugins_yaml::get_remote_plugin(data_dir, &yaml_type, name)
+                .ok_or_else(|| {
+                    (
+                        axum::http::StatusCode::NOT_FOUND,
+                        axum::Json(serde_json::json!({
+                            "success": false,
+                            "error": format!(
+                                "{}: Remote plugin '{}' (type={}) not found in remote.yml",
+                                handler_name, name, plugin_type
+                            )
+                        })),
+                    )
+                })?;
+            let base = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, name);
+            let dir = if let Some(ref sub_path) = remote.path {
+                if !sub_path.is_empty() {
+                    format!("{}/{}", base, sub_path)
+                } else {
+                    base
+                }
+            } else {
+                base
+            };
+            (PluginCategory::Remote, dir)
+        }
+        "bundled" => {
+            let dir = format!("{}/plugins/{}/{}", data_dir, type_dir, name);
+            (PluginCategory::OmniStack, dir)
+        }
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": format!(
+                        "{}: Invalid source '{}': must be 'remote' or 'bundled'",
+                        handler_name, source
+                    )
+                })),
+            ));
+        }
     };
 
-    // 2. Get plugin source directory with Builtin fallback
-    let category = detect_plugin_category(data_dir, &yaml_type, name);
-    let plugin_dir = get_plugin_dir_for_category(data_dir, &category, &yaml_type, name);
-
-    // 3. Verify the directory exists
+    // 3. Verify the directory exists on disk
     if !std::path::Path::new(&plugin_dir).exists() {
         return Err((
-            axum::http::StatusCode::NOT_FOUND,
+            StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "success": false,
                 "error": format!(

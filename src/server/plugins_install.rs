@@ -38,19 +38,12 @@ pub(crate) async fn install_plugin_handler(
         return e.into_response();
     }
 
-    // 1. Resolve plugin source via shared preamble (detect type, resolve dir, verify source)
-    let resolved = match resolve_plugin_for_compile(
-        data_dir,
-        &state.data_dir,
-        &name,
-        "Install",
-        Some(&source),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(response) => return response.into_response(),
-    };
+    // 1. Resolve plugin source via shared preamble (uses type+source from URL path deterministically)
+    let resolved =
+        match resolve_plugin_for_compile(data_dir, &p_type, &source, &name, "Install").await {
+            Ok(r) => r,
+            Err(response) => return response.into_response(),
+        };
 
     let yaml_type = resolved.yaml_type;
     let category = resolved.category.clone();
@@ -162,19 +155,12 @@ pub(crate) async fn reinstall_plugin_handler(
         return e.into_response();
     }
 
-    // 1. Resolve plugin source via shared preamble (detect type, resolve dir, verify source)
-    let resolved = match resolve_plugin_for_compile(
-        data_dir,
-        &state.data_dir,
-        &name,
-        "Reinstall",
-        Some(&source),
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(response) => return response.into_response(),
-    };
+    // 1. Resolve plugin source via shared preamble (uses type+source from URL path deterministically)
+    let resolved =
+        match resolve_plugin_for_compile(data_dir, &p_type, &source, &name, "Reinstall").await {
+            Ok(r) => r,
+            Err(response) => return response.into_response(),
+        };
 
     let _yaml_type = resolved.yaml_type;
     let category = resolved.category.clone();
@@ -463,40 +449,18 @@ pub(crate) async fn download_plugin_handler(
         ).into_response();
     }
 
-    // Find the YAML entry and extract remote info
-    let (_yaml_type, remote_info) = match plugins_yaml::get_entry_with_type(data_dir, &name) {
-        Ok(Some((pt, _entry))) => {
-            if let Some(remote) = plugins_yaml::get_remote_plugin(data_dir, &pt, &name) {
-                (pt, remote.clone())
-            } else {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": format!("Plugin '{}' has remote source but no remote.yml entry", name)
-                    })),
-                ).into_response();
-            }
-        }
-        Ok(None) => {
+    // Find remote info from remote.yml using type+source from URL path (no guessing)
+    let yaml_type = plugins_yaml::PluginYamlType::from_type_str(&p_type);
+    let remote_info = match plugins_yaml::get_remote_plugin(data_dir, &yaml_type, &name) {
+        Some(r) => r.clone(),
+        None => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({
                     "success": false,
-                    "error": format!("Plugin '{}' not found in YAML configuration", name)
+                    "error": format!("Download: remote plugin '{}' (type={}) not found in remote.yml", name, p_type)
                 })),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": format!("Failed to read YAML: {}", e)
-                })),
-            )
-                .into_response();
+            ).into_response();
         }
     };
 
@@ -623,46 +587,18 @@ pub(crate) async fn rename_plugin_handler(
 
     let data_dir = &state.data_dir;
 
-    // 1. Find the plugin in remote.yml across all types
-    let store = plugins_yaml::load_remote_plugins(data_dir);
-    let yaml_type = {
-        let mut found: Option<plugins_yaml::PluginYamlType> = None;
-        for (pt, entries) in [
-            (&store.tools, plugins_yaml::PluginYamlType::Tool),
-            (&store.platforms, plugins_yaml::PluginYamlType::Platform),
-            (&store.providers, plugins_yaml::PluginYamlType::Provider),
-        ] {
-            if let Some(ref map) = pt {
-                if map.contains_key(&name) {
-                    found = Some(entries);
-                    break;
-                }
-            }
-        }
-        match found {
-            Some(t) => t,
-            None => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": format!("Plugin '{}' not found in remote.yml", name)
-                    })),
-                )
-                    .into_response();
-            }
-        }
-    };
+    // 1. Determine type from URL path (no guessing across types)
+    let yaml_type = plugins_yaml::PluginYamlType::from_type_str(&p_type);
 
-    // 2. Get the remote info
+    // 2. Get remote info from remote.yml
     let remote_info = match plugins_yaml::get_remote_plugin(data_dir, &yaml_type, &name) {
         Some(r) => r,
         None => {
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::NOT_FOUND,
                 Json(serde_json::json!({
                     "success": false,
-                    "error": "Plugin found in remote.yml store but no data returned"
+                    "error": format!("Plugin '{}' (type={}) not found in remote.yml", name, p_type)
                 })),
             )
                 .into_response();

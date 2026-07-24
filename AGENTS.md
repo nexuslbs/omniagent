@@ -310,14 +310,69 @@ When Install/Reinstall is called and the categorized source directory has no Car
 
 ### Shared Plugin Resolution (Install/Reinstall)
 
-The `resolve_plugin_for_compile()` function (added 2026-07-07) extracts the common preamble from both Install and Reinstall handlers:
-- Plugin type detection (YAML cross-type + disk discovery)
-- Plugin directory resolution with Builtin fallback
-- Remote subpath resolution (e.g., `.remote/{name}/tools/test-rust-tool/`)
-- Source code verification (Cargo.toml, plugin.json, entrypoint)
-- Returns `ResolvedPlugin` struct with `yaml_type`, `category`, `plugin_dir`, `has_cargo_toml`, `has_entrypoint`
+## Plugin Action Handlers: Type+Source from URL Path (HARD RULE)
 
-Both handlers now call this shared function instead of duplicating ~160 lines each. Bug fixes to directory resolution or subpath handling now apply uniformly to both Install and Reinstall.
+### Core Principle
+**Every plugin action handler that has `{type}/{source}/{name}` in the URL path MUST use those values from the path.** No guessing, no fallbacks to `plugins.yml`, `remote.yml`, or disk directories.
+
+### Source Resolution Rules
+
+| URL source | Behavior | Directory Construction |
+|-----------|----------|----------------------|
+| `remote` | Read `remote.yml` to get sub-path | `{data_dir}/plugins/{type_dir}/.remote/{name}/{sub_path}` |
+| `bundled` | Construct directly | `{data_dir}/plugins/{type_dir}/{name}` |
+| `built-in` | Disallowed for install/reinstall/delete/rename/download | Only enable/disable allowed (handled by `reject_builtin_operation()`) |
+| any other | `BAD_REQUEST` error | |
+
+**The `install-git` endpoint** (`POST /api/plugins/install-git`) has no type/source in URL: it always works for remote plugins.
+
+### What Was Removed
+
+| Function | Replaced By |
+|----------|-------------|
+| `detect_plugin_category()` | Direct source matching from URL path |
+| `detect_plugin_category_cross_type()` | `PluginYamlType::from_type_str(&p_type)` |
+| `get_plugin_dir_for_category()` | Direct path construction |
+| `get_entry_with_type()` in download/rename | `get_remote_plugin(data_dir, &yaml_type, name)` |
+| `load_remote_plugins()` type iteration in rename | `PluginYamlType::from_type_str(&p_type)` |
+
+### Affected Endpoints
+
+| Endpoint | Handler |
+|----------|---------|
+| `POST /api/plugins/{type}/{source}/{name}/install` | `install_plugin_handler` |
+| `POST /api/plugins/{type}/{source}/{name}/reinstall` | `reinstall_plugin_handler` |
+| `POST /api/plugins/{type}/{source}/{name}/download` | `download_plugin_handler` |
+| `POST /api/plugins/{type}/{source}/{name}/rename` | `rename_plugin_handler` |
+| `DELETE /api/plugins/{type}/{source}/{name}` | `delete_plugin_handler` (uninstall + remove modes) |
+| `GET /api/plugins/{type}/{source}/{name}` | `get_plugin_handler` |
+| `POST /api/plugins/{type}/{source}/{name}/enable` | `enable_plugin_handler` |
+| `POST /api/plugins/{type}/{source}/{name}/disable` | `disable_plugin_handler` |
+
+### The `resolve_plugin_for_compile()` Function
+
+The shared preamble for Install and Reinstall now uses deterministic type+source from the URL path:
+
+```rust
+pub(crate) async fn resolve_plugin_for_compile(
+    data_dir: &str,
+    plugin_type: &str,      // from URL path: "tools"|"platforms"|"providers"
+    source: &str,            // from URL path: "remote"|"bundled"|"built-in"
+    name: &str,
+    handler_name: &str,
+) -> Result<ResolvedPlugin, ...>
+```
+
+The `resolve_plugin_for_compile()` function extracts the common preamble from both Install and Reinstall handlers. As of July 2026, it uses type+source from the URL path deterministically:
+
+- Plugin type is parsed from the URL path via `PluginYamlType::from_type_str(plugin_type)`
+- For `source = "remote"`: reads `remote.yml` to get the sub-path for directory resolution
+- For `source = "bundled"`: constructs dir as `{data_dir}/plugins/{type_dir}/{name}`
+- For any other source: returns `BAD_REQUEST`
+- Verifies the plugin directory exists on disk; returns `NOT_FOUND` if not
+- Returns `ResolvedPlugin` struct with `yaml_type`, `category`, `plugin_dir`
+
+No `detect_plugin_category()`, no `get_plugin_dir_for_category()`, no `get_entry_with_type()` — all replaced by deterministic path construction from URL parameters.
 
 ## External Platform Plugin Client — Race Condition Prevention
 

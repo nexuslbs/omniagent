@@ -16,7 +16,6 @@ use tracing::info;
 use crate::plugins_yaml;
 use crate::server::AppState;
 
-use super::plugins_compile::*;
 use super::plugins_types::*;
 
 pub(crate) async fn delete_plugin_handler(
@@ -46,73 +45,56 @@ pub(crate) async fn delete_plugin_handler(
         // ── Uninstall mode ──
         // For remote: remove target/ dir, set enabled=false (keep .remote/ source)
         // For non-remote: remove from YAML + remove compiled target/ directory
-        let is_remote = if let Some(source) = explicit_source {
-            source == "remote"
-        } else {
-            matches!(
-                detect_plugin_category_cross_type(data_dir, &name),
-                Some((_, PluginCategory::Remote))
-            )
-        };
+        // is_remote is determined by source from URL path (no guessing)
+        let is_remote = source == "remote";
 
         if is_remote {
             // Remove target/ directory (compiled binary), keep .remote/ source
-            if let Some((yaml_type, _category)) = detect_plugin_category_cross_type(data_dir, &name)
-            {
-                let type_dir = yaml_type.file_name();
-                // Remove base target/ dir
-                let base_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, name);
-                let target_dir = format!("{}/target", base_dir);
-                let target_path = std::path::Path::new(&target_dir);
-                if target_path.exists() && target_path.is_dir() {
-                    if let Err(e) = std::fs::remove_dir_all(target_path) {
-                        tracing::warn!(
-                            "[plugins] Failed to remove target dir for '{}': {:?}",
-                            name,
-                            e
-                        );
-                    }
-                    tracing::info!(
-                        "Uninstall: removed target/ directory for remote plugin '{}'",
-                        name
+            let yaml_type = plugins_yaml::PluginYamlType::from_type_str(&p_type);
+            let type_dir = yaml_type.type_dir_name();
+            // Remove base target/ dir
+            let base_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, name);
+            let target_dir = format!("{}/target", base_dir);
+            let target_path = std::path::Path::new(&target_dir);
+            if target_path.exists() && target_path.is_dir() {
+                if let Err(e) = std::fs::remove_dir_all(target_path) {
+                    tracing::warn!(
+                        "[plugins] Failed to remove target dir for '{}': {:?}",
+                        name,
+                        e
                     );
                 }
+                tracing::info!(
+                    "Uninstall: removed target/ directory for remote plugin '{}'",
+                    name
+                );
+            }
 
-                // Also remove target/ in the remote.yml subpath (e.g. tools/test-rust-tool)
-                if let Some(remote) = plugins_yaml::get_remote_plugin(data_dir, &yaml_type, &name) {
-                    if let Some(ref subpath) = remote.path {
-                        if !subpath.is_empty() {
-                            let sub_target = format!("{}/{}/target", base_dir, subpath);
-                            let sub_path = std::path::Path::new(&sub_target);
-                            if sub_path.exists() && sub_path.is_dir() {
-                                if let Err(e) = std::fs::remove_dir_all(sub_path) {
-                                    tracing::warn!(
-                                        "[plugins] Failed to remove subpath target dir: {:?}",
-                                        e
-                                    );
-                                }
-                                tracing::info!(
-                                    "Uninstall: removed target/ directory at subpath '{}' for remote plugin '{}'",
-                                    subpath, name
+            // Also remove target/ in the remote.yml subpath (e.g. tools/test-rust-tool)
+            if let Some(remote) = plugins_yaml::get_remote_plugin(data_dir, &yaml_type, &name) {
+                if let Some(ref subpath) = remote.path {
+                    if !subpath.is_empty() {
+                        let sub_target = format!("{}/{}/target", base_dir, subpath);
+                        let sub_path = std::path::Path::new(&sub_target);
+                        if sub_path.exists() && sub_path.is_dir() {
+                            if let Err(e) = std::fs::remove_dir_all(sub_path) {
+                                tracing::warn!(
+                                    "[plugins] Failed to remove subpath target dir: {:?}",
+                                    e
                                 );
                             }
+                            tracing::info!(
+                                "Uninstall: removed target/ directory at subpath '{}' for remote plugin '{}'",
+                                subpath, name
+                            );
                         }
                     }
                 }
             }
 
-            // Set enabled=false in YAML (keep the entry)
-            for yaml_type in &[
-                plugins_yaml::PluginYamlType::Platform,
-                plugins_yaml::PluginYamlType::Tool,
-                plugins_yaml::PluginYamlType::Provider,
-            ] {
-                if let Ok(Some(_)) = plugins_yaml::get_entry(data_dir, yaml_type, &name) {
-                    if let Err(e) = plugins_yaml::set_enabled(data_dir, yaml_type, &name, false) {
-                        tracing::error!("[plugins] Failed to set disabled in YAML: {:?}", e);
-                    }
-                    break;
-                }
+            // Set enabled=false in YAML (keep the entry) — using type from URL path
+            if let Err(e) = plugins_yaml::set_enabled(data_dir, &yaml_type, &name, false) {
+                tracing::error!("[plugins] Failed to set disabled in YAML: {:?}", e);
             }
 
             // Stop the MCP server and remove its tools from the registry
@@ -135,29 +117,17 @@ pub(crate) async fn delete_plugin_handler(
             // Non-remote: remove from YAML + remove compiled target/ directory
 
             // Remove target/ directory if it exists (the compiled binary)
-            if let Some((yaml_type, _category)) = detect_plugin_category_cross_type(data_dir, &name)
-            {
-                let type_dirs = [yaml_type.type_dir_name(), "tools", "platforms", "providers"];
-                let search_dirs = [data_dir, &state.data_dir];
-                for type_dir in &type_dirs {
-                    for base in &search_dirs {
-                        let plugin_dir = format!("{}/plugins/{}/{}", base, type_dir, name);
-                        let target_dir = format!("{}/target", plugin_dir);
-                        let target_path = std::path::Path::new(&target_dir);
-                        if target_path.exists() && target_path.is_dir() {
-                            if let Err(e) = std::fs::remove_dir_all(target_path) {
-                                tracing::warn!(
-                                    "[plugins] Failed to remove non-remote target dir: {:?}",
-                                    e
-                                );
-                            }
-                            tracing::info!(
-                                "Uninstall: removed target/ directory at {}",
-                                target_dir
-                            );
-                        }
-                    }
+            // Use type from URL path deterministically
+            let yaml_type = plugins_yaml::PluginYamlType::from_type_str(&p_type);
+            let type_dir = yaml_type.type_dir_name();
+            let plugin_dir = format!("{}/plugins/{}/{}", data_dir, type_dir, name);
+            let target_dir = format!("{}/target", plugin_dir);
+            let target_path = std::path::Path::new(&target_dir);
+            if target_path.exists() && target_path.is_dir() {
+                if let Err(e) = std::fs::remove_dir_all(target_path) {
+                    tracing::warn!("[plugins] Failed to remove non-remote target dir: {:?}", e);
                 }
+                tracing::info!("Uninstall: removed target/ directory at {}", target_dir);
             }
 
             // Stop MCP server if it was running
@@ -167,16 +137,7 @@ pub(crate) async fn delete_plugin_handler(
             );
             state.plugin_manager.remove_client(&name);
             state.plugin_manager.remove_server_tools(&name).await;
-            let mut removed = false;
-            for yaml_type in &[
-                plugins_yaml::PluginYamlType::Platform,
-                plugins_yaml::PluginYamlType::Tool,
-                plugins_yaml::PluginYamlType::Provider,
-            ] {
-                if let Ok(true) = plugins_yaml::remove_entry(data_dir, yaml_type, &name) {
-                    removed = true;
-                }
-            }
+            let removed = plugins_yaml::remove_entry(data_dir, &yaml_type, &name).unwrap_or(false);
             if removed {
                 return (
                     StatusCode::OK,
@@ -203,9 +164,16 @@ pub(crate) async fn delete_plugin_handler(
     // Source is required for all remove operations.
     match &explicit_source {
         Some(source) => {
-            return handle_remove_by_source(data_dir, &state.data_dir, &name, source, &state)
-                .await
-                .into_response();
+            return handle_remove_by_source(
+                data_dir,
+                &state.data_dir,
+                &name,
+                source,
+                &p_type,
+                &state,
+            )
+            .await
+            .into_response();
         }
         None => {
             return (
@@ -548,6 +516,7 @@ pub(crate) async fn handle_remove_by_source(
     _workspace_dir: &str,
     name: &str,
     source: &str,
+    p_type: &str,
     state: &Arc<AppState>,
 ) -> impl IntoResponse {
     match source {
@@ -599,42 +568,32 @@ pub(crate) async fn handle_remove_by_source(
         }
         "remote" => {
             let mut removed = false;
-            // Find which type has this remote plugin, remove .remote/ dir + remote.yml
-            for (pt, type_str) in &[
-                (plugins_yaml::PluginYamlType::Tool, "tools"),
-                (plugins_yaml::PluginYamlType::Platform, "platforms"),
-                (plugins_yaml::PluginYamlType::Provider, "providers"),
-            ] {
-                let remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_str, name);
-                let remote_path = std::path::Path::new(&remote_dir);
-                if remote_path.exists() && remote_path.is_dir() {
-                    if let Err(e) = std::fs::remove_dir_all(remote_path) {
-                        tracing::warn!("[plugins] Failed to remove remote dir: {:?}", e);
-                    }
-                    tracing::info!(
-                        "Remove: removed .remote/ directory for '{}' (source=remote)",
-                        name
-                    );
-                    removed = true;
+            let yaml_type = plugins_yaml::PluginYamlType::from_type_str(p_type);
+            let type_dir = yaml_type.type_dir_name();
+            // Remove .remote/ directory for this specific type
+            let remote_dir = format!("{}/plugins/{}/.remote/{}", data_dir, type_dir, name);
+            let remote_path = std::path::Path::new(&remote_dir);
+            if remote_path.exists() && remote_path.is_dir() {
+                if let Err(e) = std::fs::remove_dir_all(remote_path) {
+                    tracing::warn!("[plugins] Failed to remove remote dir: {:?}", e);
                 }
-                if let Err(e) = plugins_yaml::remove_remote_plugin(data_dir, pt, name) {
-                    tracing::warn!("[plugins] Failed to remove remote YAML: {:?}", e);
-                }
+                tracing::info!(
+                    "Remove: removed .remote/ directory for '{}' (source=remote)",
+                    name
+                );
+                removed = true;
+            }
+            // Remove remote.yml entry for this type
+            if let Err(e) = plugins_yaml::remove_remote_plugin(data_dir, &yaml_type, name) {
+                tracing::warn!("[plugins] Failed to remove remote YAML: {:?}", e);
             }
             // Remove YAML only if source matches
-            for pt in &[
-                plugins_yaml::PluginYamlType::Platform,
-                plugins_yaml::PluginYamlType::Tool,
-                plugins_yaml::PluginYamlType::Provider,
-            ] {
-                if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, pt, name) {
-                    if entry.source == "remote" {
-                        if let Err(e) = plugins_yaml::remove_entry(data_dir, pt, name) {
-                            tracing::warn!("[plugins] Failed to remove remote YAML: {:?}", e);
-                        }
-                        removed = true;
-                        break;
+            if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, &yaml_type, name) {
+                if entry.source == "remote" {
+                    if let Err(e) = plugins_yaml::remove_entry(data_dir, &yaml_type, name) {
+                        tracing::warn!("[plugins] Failed to remove remote YAML: {:?}", e);
                     }
+                    removed = true;
                 }
             }
             // Stop MCP server (only if we found and removed the plugin)
@@ -646,50 +605,32 @@ pub(crate) async fn handle_remove_by_source(
         }
         "bundled" => {
             let mut removed = false;
-            // Remove workspace + data dirs
-            for type_str in &["tools", "platforms", "providers"] {
-                let plugin_dir = format!("{}/plugins/{}/{}", data_dir, type_str, name);
-                let plugin_path = std::path::Path::new(&plugin_dir);
-                if plugin_path.exists() && plugin_path.is_dir() {
-                    if let Err(e) = std::fs::remove_dir_all(plugin_path) {
-                        tracing::warn!("[plugins] Failed to remove workspace dir: {:?}", e);
-                    }
-                    tracing::info!(
-                        "Remove: removed workspace directory for '{}' (source=bundled)",
-                        name
-                    );
-                    removed = true;
+            let yaml_type = plugins_yaml::PluginYamlType::from_type_str(p_type);
+            let type_dir = yaml_type.type_dir_name();
+            // Remove data dir for this specific type
+            let plugin_dir = format!("{}/plugins/{}/{}", data_dir, type_dir, name);
+            let plugin_path = std::path::Path::new(&plugin_dir);
+            if plugin_path.exists() && plugin_path.is_dir() {
+                if let Err(e) = std::fs::remove_dir_all(plugin_path) {
+                    tracing::warn!("[plugins] Failed to remove workspace dir: {:?}", e);
                 }
-                let data_plugin_dir = format!("{}/plugins/{}/{}", data_dir, type_str, name);
-                let data_plugin_path = std::path::Path::new(&data_plugin_dir);
-                if data_plugin_path.exists() && data_plugin_path.is_dir() {
-                    if let Err(e) = std::fs::remove_dir_all(data_plugin_path) {
-                        tracing::warn!("[plugins] Failed to remove data dir: {:?}", e);
-                    }
-                    tracing::info!(
-                        "Remove: removed data directory for '{}' (source=bundled)",
-                        name
-                    );
-                }
+                tracing::info!(
+                    "Remove: removed workspace directory for '{}' (source=bundled)",
+                    name
+                );
+                removed = true;
             }
             // Remove YAML only if source matches
-            for pt in &[
-                plugins_yaml::PluginYamlType::Platform,
-                plugins_yaml::PluginYamlType::Tool,
-                plugins_yaml::PluginYamlType::Provider,
-            ] {
-                if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, pt, name) {
-                    if entry.source == "bundled" || entry.source == "omni-stack" {
-                        if let Err(e) = plugins_yaml::remove_entry(data_dir, pt, name) {
-                            tracing::error!(
-                                "Remove: failed to remove YAML entry for '{}': {}",
-                                name,
-                                e
-                            );
-                        }
-                        removed = true;
-                        break;
+            if let Ok(Some(entry)) = plugins_yaml::get_entry(data_dir, &yaml_type, name) {
+                if entry.source == "bundled" || entry.source == "omni-stack" {
+                    if let Err(e) = plugins_yaml::remove_entry(data_dir, &yaml_type, name) {
+                        tracing::error!(
+                            "Remove: failed to remove YAML entry for '{}': {}",
+                            name,
+                            e
+                        );
                     }
+                    removed = true;
                 }
             }
             // Stop MCP server (only if we found and removed the plugin)
