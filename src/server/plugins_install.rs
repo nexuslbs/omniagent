@@ -57,7 +57,7 @@ pub(crate) async fn install_plugin_handler(
         "Install: compiling plugin '{}' from {} (source: {})",
         name, plugin_dir, category_source
     );
-    match compile_rust_crate(&plugin_dir, &name, category_source).await {
+    match compile_rust_crate(&plugin_dir, &name, category_source, false).await {
         Ok(true) | Ok(false) => {
             info!("Install: compilation succeeded for '{}'", name);
         }
@@ -171,24 +171,24 @@ pub(crate) async fn reinstall_plugin_handler(
     // It only recompiles the existing source code in .remote/<name>/.
     // To update from git, use the Download endpoint instead.
 
-    // 2. Compile
-    let compiled = match compile_rust_crate(&plugin_dir, &name, category_to_source(&category)).await
-    {
-        Ok(true) => true,
-        Ok(false) => false,
-        Err(e) => {
-            let msg = format!("Reinstall: compilation failed for '{}': {}", name, e);
-            tracing::error!("{}", msg);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "success": false,
-                    "error": msg,
-                })),
-            )
-                .into_response();
-        }
-    };
+    // 2. Compile (force rebuild: remove stale binary so cargo actually recompiles)
+    let compiled =
+        match compile_rust_crate(&plugin_dir, &name, category_to_source(&category), true).await {
+            Ok(true) => true,
+            Ok(false) => false,
+            Err(e) => {
+                let msg = format!("Reinstall: compilation failed for '{}': {}", name, e);
+                tracing::error!("{}", msg);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": msg,
+                    })),
+                )
+                    .into_response();
+            }
+        };
 
     // 5. Re-scan from disk and hot-reload
     match plugins_yaml::get_plugin(data_dir, &name) {
