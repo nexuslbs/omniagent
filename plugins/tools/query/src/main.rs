@@ -9,7 +9,7 @@
 //!
 //! All operations use a read-only PostgreSQL user. Writes are blocked at the DB level.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use mcp_server_util::*;
 use mcp_server_util::{vector_to_string, HashVectorizer};
 use omniagent::db;

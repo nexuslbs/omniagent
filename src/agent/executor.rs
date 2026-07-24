@@ -8,15 +8,6 @@ use crate::db::types::{Message, Thread};
 use crate::error::AppResult;
 use crate::llm::{LLMClient, LLMConfig, ProviderId};
 
-struct PromptParts {
-    system: String,
-    memory: String,
-    soul: String,
-    context: String,
-    user: String,
-    plan: bool,
-}
-
 pub async fn process_thread(
     cfg: &AgentContext,
     thread: &Thread,

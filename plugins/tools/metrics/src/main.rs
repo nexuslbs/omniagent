@@ -4,7 +4,7 @@
 //!
 //! Communicates via stdio JSON-RPC (MCP protocol).
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use mcp_server_util::*;
 use omniagent::db;
 use serde_json::Value;

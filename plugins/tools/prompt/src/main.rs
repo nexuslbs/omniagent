@@ -11,12 +11,14 @@
 //! Plugins never read env vars for config. Users can use $env: notation in
 //! plugins.yaml if they want values from env vars.
 
+#![allow(dead_code, unused_imports)]
+
+use anyhow::{Context, Result};
 mod chat_message;
 mod compact;
 mod memory_store;
 mod prompt_builder;
 
-use anyhow::{Context, Result};
 use mcp_server_util::*;
 use serde_json::Value;
 use sqlx::{FromRow, PgPool};
@@ -686,7 +688,7 @@ async fn main() -> Result<()> {
     // Generate full prompt handler
     let p_gen = pool.clone();
     let cfg_gen = plugin_config.clone();
-    let mut pool_ready_gen = pool_ready_rx;
+    let pool_ready_gen = pool_ready_rx;
     let gen_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let p = p_gen.clone();
         let cfg = cfg_gen.clone();

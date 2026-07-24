@@ -17,20 +17,6 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------
-// Environment helpers
-// ---------------------------------------------------------------------------
-
-/// Read DATA_DIR from env with a default fallback.
-fn data_dir() -> String {
-    std::env::var("DATA_DIR")
-        .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)))
-        .unwrap_or_else(|_| {
-            eprintln!("FATAL: OMNI_DIR must be set");
-            std::process::exit(1);
-        })
-}
-
-// ---------------------------------------------------------------------------
 // Tool: plugin_manager: list
 // ---------------------------------------------------------------------------
 

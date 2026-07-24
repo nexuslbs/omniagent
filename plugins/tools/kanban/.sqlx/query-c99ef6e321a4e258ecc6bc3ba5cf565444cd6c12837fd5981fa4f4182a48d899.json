@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE kanban_tasks SET profile = NULLIF($1, '')::text, updated_at = NOW() WHERE id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c99ef6e321a4e258ecc6bc3ba5cf565444cd6c12837fd5981fa4f4182a48d899"
+}
