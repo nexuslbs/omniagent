@@ -81,6 +81,73 @@ fn extract_default_model(manifest: &serde_json::Value) -> String {
         .to_string()
 }
 
+/// Parse a provider manifest from a plugin.json path, returning (name, metadata).
+/// Returns None if the file doesn't exist, isn't a provider, or can't be parsed.
+fn read_provider_manifest(manifest_path: &Path) -> Option<(String, ProviderMetadata)> {
+    if !manifest_path.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(manifest_path).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let plugin_type = manifest.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if plugin_type != "provider" {
+        return None;
+    }
+    let name = manifest
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let default_base_url = manifest
+        .get("default_base_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let api_mode = manifest
+        .get("api_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("chat_completions")
+        .to_string();
+    let api_modes: HashMap<String, Vec<String>> = manifest
+        .get("api_modes")
+        .and_then(|v| {
+            v.as_object().map(|obj| {
+                obj.iter()
+                    .filter_map(|(key, val)| {
+                        val.as_array().map(|arr| {
+                            (
+                                key.clone(),
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect(),
+                            )
+                        })
+                    })
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    let default_model = extract_default_model(&manifest);
+    let supports_reasoning = manifest
+        .get("supports_reasoning")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Some((
+        name.clone(),
+        ProviderMetadata {
+            name,
+            default_base_url,
+            api_mode,
+            api_modes,
+            default_model,
+            supports_reasoning,
+        },
+    ))
+}
+
 /// Scan filesystem directories for provider plugin manifests and return a map.
 fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
     let mut map = HashMap::new();
@@ -99,82 +166,25 @@ fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
                 continue;
             }
             let manifest_path = plugin_dir.join("plugin.json");
-            if !manifest_path.exists() {
-                continue;
+            if let Some((name, meta)) = read_provider_manifest(&manifest_path) {
+                map.insert(name, meta);
             }
-            let content = match std::fs::read_to_string(&manifest_path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let manifest: serde_json::Value = match serde_json::from_str(&content) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let plugin_type = manifest.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if plugin_type != "provider" {
-                continue;
-            }
-            let name = manifest
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if name.is_empty() {
-                continue;
-            }
-            let default_base_url = manifest
-                .get("default_base_url")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let api_mode = manifest
-                .get("api_mode")
-                .and_then(|v| v.as_str())
-                .unwrap_or("chat_completions")
-                .to_string();
-            let api_modes: HashMap<String, Vec<String>> = manifest
-                .get("api_modes")
-                .and_then(|v| {
-                    v.as_object().map(|obj| {
-                        obj.iter()
-                            .filter_map(|(key, val)| {
-                                val.as_array().map(|arr| {
-                                    (
-                                        key.clone(),
-                                        arr.iter()
-                                            .filter_map(|v| v.as_str().map(String::from))
-                                            .collect(),
-                                    )
-                                })
-                            })
-                            .collect()
-                    })
-                })
-                .unwrap_or_default();
-            let default_model = extract_default_model(&manifest);
-            let supports_reasoning = manifest
-                .get("supports_reasoning")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            map.insert(
-                name.clone(),
-                ProviderMetadata {
-                    name,
-                    default_base_url,
-                    api_mode,
-                    api_modes,
-                    default_model,
-                    supports_reasoning,
-                },
-            );
         }
     }
     map
 }
 
 /// Static cache of provider metadata loaded from plugin manifests.
-/// Scans development sources first (plugins/providers/), then installed
-/// plugins (data/plugins/installed/). Installed plugins override bundled ones.
+///
+/// The `source` field in `plugins.yml` is authoritative: each enabled provider
+/// is resolved from exactly one path based on its source:
+///
+/// - `built-in`  → `/app/plugins/providers/{name}/plugin.json` (image)
+/// - `bundled`   → `{OMNI_DIR}/plugins/providers/{name}/plugin.json` (volume)
+/// - `installed` → `{OMNI_DIR}/plugins/installed/{name}/plugin.json` (data)
+///
+/// No fallback ordering. If the manifest is missing at the source-declared
+/// path, the provider is skipped with a warning.
 pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::new(|| {
     let data_dir = match std::env::var("OMNI_DIR") {
         Ok(d) => d,
@@ -184,13 +194,54 @@ pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::ne
         }
     };
 
-    let bundled = format!("{}/plugins/providers", data_dir);
-    let installed = format!("{}/plugins/installed", data_dir);
+    let entries = match crate::plugins_yaml::load_raw(
+        &data_dir,
+        &crate::plugins_yaml::PluginYamlType::Provider,
+    ) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("Failed to load providers from plugins.yml: {:?}", e);
+            return HashMap::new();
+        }
+    };
 
-    // Bundled first, then installed overrides
-    // If no providers are found, the metadata stays empty and callers
-    // handle it gracefully (resolve_default_model returns None).
-    scan_provider_manifests(&[&bundled, &installed])
+    let mut map = HashMap::new();
+    for (name, entry) in &entries {
+        if !entry.enabled {
+            continue;
+        }
+
+        let manifest_path = match entry.source.as_str() {
+            "built-in" => format!("/app/plugins/providers/{}/plugin.json", name),
+            "bundled" => format!("{}/plugins/providers/{}/plugin.json", data_dir, name),
+            "installed" => format!("{}/plugins/installed/{}/plugin.json", data_dir, name),
+            other => {
+                tracing::warn!(
+                    "Provider '{}': unknown source '{}', skipping",
+                    name, other
+                );
+                continue;
+            }
+        };
+
+        let path = std::path::Path::new(&manifest_path);
+        if !path.exists() {
+            tracing::warn!(
+                "Provider '{}': manifest not found at {} (source: {}), skipping",
+                name, manifest_path, entry.source
+            );
+            continue;
+        }
+
+        if let Some((_, meta)) = read_provider_manifest(path) {
+            tracing::info!(
+                "Loaded provider '{}' from {} (source: {})",
+                name, manifest_path, entry.source
+            );
+            map.insert(name.clone(), meta);
+        }
+    }
+    map
 });
 
 /// Resolve the default base URL for a provider from the plugin metadata.
