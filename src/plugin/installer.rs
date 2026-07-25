@@ -320,6 +320,29 @@ pub fn install_from_git(
         }
     }
 
+    // If the mirror is shallow (source was a shallow clone, e.g. CI
+    // checkout with --depth=1), unshallow it so subsequent
+    // git clone --reference can use it without "shallow" error.
+    if cache_path.join("shallow").exists() {
+        tracing::info!(
+            "Git-cache at {} is shallow, unshallowing...",
+            cache_dir
+        );
+        let unshallow = std::process::Command::new("git")
+            .args(["-C", &cache_dir, "fetch", "--unshallow"])
+            .status()
+            .ctx(format!(
+                "Failed to unshallow git-cache at {}",
+                cache_dir
+            ))?;
+        if !unshallow.success() {
+            tracing::warn!(
+                "Failed to unshallow git-cache at {}, fallback may fail",
+                cache_dir
+            );
+        }
+    }
+
     // ── Clone / update in data_dir/plugins/tools/.remote/<name> first ──
     // We clone into tools first because that's the most common type. If the
     // manifest says otherwise, we rename to the correct type dir afterwards.
