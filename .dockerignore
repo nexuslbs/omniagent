@@ -1,3 +1,10 @@
+# Exclude Dockerfiles from the build context so changing them doesn't
+# invalidate the COPY . . cache layer in the builder stage, which would
+# trigger a full cargo workspace rebuild.
+Dockerfile
+Dockerfile.dev
+
+# Standard exclusions
 .git/
 .gitignore
 node_modules/

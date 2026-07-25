@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 # OmniAgent: production multi-stage build
-# Builds the Rust binary, then copies it into a minimal runtime image with Docker CLI.
+# Builds the Rust binary, then copies it into a runtime image with
+# Docker CLI and all plugin compilation toolchains (Rust, Node.js, Python).
 
 # Stage 1: Build the Rust binary
 FROM rust:1.96.0 AS builder
@@ -25,14 +26,39 @@ RUN python3 scripts/build.py
 # Stage 2: Docker CLI binary
 FROM docker:cli AS docker-cli
 
-# Stage 3: Runtime: slim image matching builder glibc
+# Stage 3: Runtime with build toolchains for on-demand plugin compilation
 FROM debian:trixie-slim
 
-# Install runtime dependencies
+# Install runtime dependencies + system libraries needed for
+# on-demand compilation of Rust plugins (openssl-sys req by reqwest):
+#   - pkg-config, libssl-dev: required by openssl-sys
+#   - ca-certificates, curl, git: for cloning remote plugin repos
+#   - python3, python3-pip: for Python plugins
+#   - nodejs: for JavaScript/Node.js MCP servers
 RUN apt-get update -qq && \
-    apt-get install -y -qq ca-certificates curl git python3 && \
+    apt-get install -y -qq \
+      ca-certificates \
+      curl \
+      git \
+      pkg-config \
+      libssl-dev \
+      python3 \
+      python3-pip \
+      nodejs && \
     rm -rf /var/lib/apt/lists/* && \
     git config --global --add safe.directory '*'
+
+# Copy Rust toolchain from builder for on-demand compilation of
+# remote Rust plugins. Copy the toolchain (compiler + stdlib) from
+# rustup and the cargo/rustc binaries from cargo's bin directory.
+# Skip cargo's registry/ and git/ caches to keep image size smaller;
+# cargo populates them on demand when compiling plugins.
+# Official rust images use /usr/local/cargo and /usr/local/rustup.
+COPY --from=builder /usr/local/rustup /usr/local/rustup
+COPY --from=builder /usr/local/cargo/bin /usr/local/cargo/bin
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV PATH="/usr/local/cargo/bin:${PATH}"
 
 # Copy Docker CLI (compose v2 is built into the docker binary)
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
