@@ -71,5 +71,10 @@ COPY --from=builder /build/target/release/mcp-server-* /usr/local/bin/
 COPY --from=builder /build/target/release/*-platform /usr/local/bin/
 COPY --from=builder /build/target/release/db-migrations /usr/local/bin/db-migrations
 
+# Copy plugin config files (plugin.json, mcp-config.json) so built-in
+# plugins are discoverable at /app/plugins/. The .dockerignore already
+# strips target/ and node_modules/ from the build context.
+COPY --from=builder /build/plugins /app/plugins
+
 EXPOSE 8080
 CMD ["omniagent"]
