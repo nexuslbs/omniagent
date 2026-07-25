@@ -77,9 +77,11 @@ def main() -> None:
     # Build the entire workspace in one invocation.
     # This compiles omniagent, db-migrations, and every plugin binary
     # (platforms + tools) — everything in [workspace].members.
+    # Without --workspace, cargo only builds the root package and its deps,
+    # skipping standalone member crates like the MCP servers.
     # Single-invocation builds are faster than per-package (-p) invocations
     # because cargo parallelizes across all crates.
-    run(["cargo", "build", "--release"], "Build workspace (release)")
+    run(["cargo", "build", "--release", "--workspace"], "Build workspace (release)")
 
     print(f"\n✅ All {len(names)} packages built successfully")
 
