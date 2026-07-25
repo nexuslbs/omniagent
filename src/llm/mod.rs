@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::Semaphore;
 use tracing::warn;
 
@@ -174,18 +174,35 @@ fn scan_provider_manifests(dirs: &[&str]) -> HashMap<String, ProviderMetadata> {
     map
 }
 
-/// Static cache of provider metadata loaded from plugin manifests.
+/// Refreshable cache of provider metadata loaded from plugin manifests.
 ///
 /// The `source` field in `plugins.yml` is authoritative: each enabled provider
 /// is resolved from exactly one path based on its source:
 ///
 /// - `built-in`  → `/app/plugins/providers/{name}/plugin.json` (image)
 /// - `bundled`   → `{OMNI_DIR}/plugins/providers/{name}/plugin.json` (volume)
-/// - `installed` → `{OMNI_DIR}/plugins/installed/{name}/plugin.json` (data)
+/// - `remote`    → `{OMNI_DIR}/plugins/providers/.remote/{name}/plugin.json` (git clone)
+/// - `installed` → `{OMNI_DIR}/plugins/installed/{name}/plugin.json` (URL download)
 ///
 /// No fallback ordering. If the manifest is missing at the source-declared
 /// path, the provider is skipped with a warning.
-pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::new(|| {
+///
+/// Use [`refresh_provider_metadata`] after enable/disable/install to keep the
+/// cache in sync without restarting.
+pub static PROVIDER_METADATA: Lazy<RwLock<HashMap<String, ProviderMetadata>>> =
+    Lazy::new(|| RwLock::new(build_provider_metadata()));
+
+/// Re-read all provider manifests from disk and update the static cache.
+/// Call this after enabling, disabling, or installing a provider plugin.
+pub fn refresh_provider_metadata() {
+    let new_map = build_provider_metadata();
+    if let Ok(mut map) = PROVIDER_METADATA.write() {
+        *map = new_map;
+    }
+}
+
+/// Build the provider metadata map by reading plugins.yml and scanning manifests.
+fn build_provider_metadata() -> HashMap<String, ProviderMetadata> {
     let data_dir = match std::env::var("OMNI_DIR") {
         Ok(d) => d,
         Err(_) => {
@@ -214,7 +231,15 @@ pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::ne
         let manifest_path = match entry.source.as_str() {
             "built-in" => format!("/app/plugins/providers/{}/plugin.json", name),
             "bundled" => format!("{}/plugins/providers/{}/plugin.json", data_dir, name),
-            "installed" => format!("{}/plugins/installed/{}/plugin.json", data_dir, name),
+            "remote" => {
+                format!(
+                    "{}/plugins/providers/.remote/{}/plugin.json",
+                    data_dir, name
+                )
+            }
+            "installed" => {
+                format!("{}/plugins/installed/{}/plugin.json", data_dir, name)
+            }
             other => {
                 tracing::warn!(
                     "Provider '{}': unknown source '{}', skipping",
@@ -242,11 +267,13 @@ pub static PROVIDER_METADATA: Lazy<HashMap<String, ProviderMetadata>> = Lazy::ne
         }
     }
     map
-});
+}
 
 /// Resolve the default base URL for a provider from the plugin metadata.
 pub fn resolve_default_base_url(provider_name: &str) -> String {
     PROVIDER_METADATA
+        .read()
+        .unwrap()
         .get(provider_name)
         .map(|m| m.default_base_url.clone())
         .unwrap_or_default()
@@ -255,7 +282,8 @@ pub fn resolve_default_base_url(provider_name: &str) -> String {
 /// Resolve the default model for a provider from the plugin metadata.
 /// Returns None if no default is found.
 pub fn resolve_default_model(provider_name: &str) -> Option<String> {
-    PROVIDER_METADATA.get(provider_name).and_then(|m| {
+    let meta = PROVIDER_METADATA.read().unwrap();
+    meta.get(provider_name).and_then(|m| {
         if m.default_model.is_empty() {
             None
         } else {
@@ -267,6 +295,8 @@ pub fn resolve_default_model(provider_name: &str) -> Option<String> {
 /// Resolve the API mode for a provider from the plugin metadata.
 pub fn resolve_provider_api_mode(provider_name: &str) -> String {
     PROVIDER_METADATA
+        .read()
+        .unwrap()
         .get(provider_name)
         .map(|m| m.api_mode.clone())
         .unwrap_or_else(|| "chat_completions".to_string())
@@ -291,7 +321,8 @@ pub enum ApiMode {
 /// Falls back to the provider's default `api_mode`.
 fn match_model_api_mode(provider_name: &str, model_id: &str) -> Option<ApiMode> {
     let normalized = model_id.trim().to_lowercase();
-    let metadata = PROVIDER_METADATA.get(provider_name)?;
+    let meta = PROVIDER_METADATA.read().unwrap();
+    let metadata = meta.get(provider_name)?;
     for (mode, patterns) in &metadata.api_modes {
         for pattern in patterns {
             let pattern_lower = pattern.to_lowercase();
@@ -394,6 +425,8 @@ impl LLMConfig {
         let api_key = String::new();
 
         let supports_reasoning = PROVIDER_METADATA
+            .read()
+            .unwrap()
             .get(&provider_name)
             .map(|m| m.supports_reasoning)
             .unwrap_or(false);
@@ -442,7 +475,8 @@ impl ProviderThrottle {
         let mut map = HashMap::new();
 
         // Pre-populate from known provider metadata
-        for name in PROVIDER_METADATA.keys() {
+        let meta = PROVIDER_METADATA.read().unwrap();
+        for name in meta.keys() {
             map.entry(name.clone())
                 .or_insert_with(|| Arc::new(Semaphore::new(max)));
         }
