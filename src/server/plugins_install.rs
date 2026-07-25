@@ -58,8 +58,33 @@ pub(crate) async fn install_plugin_handler(
         name, plugin_dir, category_source
     );
     match compile_rust_crate(&plugin_dir, &name, category_source, false).await {
-        Ok(true) | Ok(false) => {
+        Ok(true) => {
             info!("Install: compilation succeeded for '{}'", name);
+        }
+        Ok(false) => {
+            // Ok(false) means no Cargo.toml found — the plugin directory exists but
+            // isn't a Rust crate. For remote plugins this is an error: install-git
+            // should have cloned a proper Rust project. For bundled plugins, a missing
+            // Cargo.toml means it's a non-Rust plugin (e.g. Python) — let it through.
+            if category_source == "remote" {
+                let msg = format!(
+                    "Install: no Cargo.toml found for remote plugin '{}' at {}",
+                    name, plugin_dir
+                );
+                tracing::error!("{}", msg);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "success": false,
+                        "error": msg,
+                    })),
+                )
+                    .into_response();
+            }
+            info!(
+                "Install: compilation skipped for '{}' (no Cargo.toml)",
+                name
+            );
         }
         Err(e) => {
             let msg = format!("Install: compilation failed for '{}': {}", name, e);
