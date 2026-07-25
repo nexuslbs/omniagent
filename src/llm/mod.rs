@@ -241,10 +241,7 @@ fn build_provider_metadata() -> HashMap<String, ProviderMetadata> {
                 format!("{}/plugins/installed/{}/plugin.json", data_dir, name)
             }
             other => {
-                tracing::warn!(
-                    "Provider '{}': unknown source '{}', skipping",
-                    name, other
-                );
+                tracing::warn!("Provider '{}': unknown source '{}', skipping", name, other);
                 continue;
             }
         };
@@ -253,7 +250,9 @@ fn build_provider_metadata() -> HashMap<String, ProviderMetadata> {
         if !path.exists() {
             tracing::warn!(
                 "Provider '{}': manifest not found at {} (source: {}), skipping",
-                name, manifest_path, entry.source
+                name,
+                manifest_path,
+                entry.source
             );
             continue;
         }
@@ -261,7 +260,9 @@ fn build_provider_metadata() -> HashMap<String, ProviderMetadata> {
         if let Some((_, meta)) = read_provider_manifest(path) {
             tracing::info!(
                 "Loaded provider '{}' from {} (source: {})",
-                name, manifest_path, entry.source
+                name,
+                manifest_path,
+                entry.source
             );
             map.insert(name.clone(), meta);
         }
