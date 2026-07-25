@@ -125,6 +125,8 @@ pub async fn process_thread(
             max_tokens: cfg.config_snapshot().max_tokens,
             temperature: cfg.config_snapshot().temperature,
             supports_reasoning: crate::llm::PROVIDER_METADATA
+                .read()
+                .unwrap()
                 .get(&provider_name_val)
                 .map(|m| m.supports_reasoning)
                 .unwrap_or(false),

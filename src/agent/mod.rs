@@ -96,6 +96,8 @@ impl Agent {
             max_tokens,
             temperature,
             supports_reasoning: crate::llm::PROVIDER_METADATA
+                .read()
+                .unwrap()
                 .get(&provider_name)
                 .map(|m| m.supports_reasoning)
                 .unwrap_or(false),

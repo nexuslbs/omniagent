@@ -759,6 +759,8 @@ evaluate: if the task was completed, call the completion tool.",
             max_tokens: 1024,
             temperature: 0.3,
             supports_reasoning: crate::llm::PROVIDER_METADATA
+                .read()
+                .unwrap()
                 .get(&provider_name)
                 .map(|m| m.supports_reasoning)
                 .unwrap_or(false),
