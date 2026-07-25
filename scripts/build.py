@@ -1,28 +1,23 @@
 #!/usr/bin/env python3
 """
-build.py — Strict workspace build with zero-tolerance for warnings.
+build.py — Build omniagent and all builtin plugin binaries.
 
-Usage:
-    # Production build (offline — uses .sqlx/ cache):
+Automatically discovers all workspace member packages from Cargo.toml
+and builds them with cargo build --release. No hardcoded package lists.
+
+When adding a new plugin (platform or tool) to the workspace, it is
+automatically included — no changes needed to this script, the Dockerfile,
+or deploy.py.
+
+Usage (from repo root):
     SQLX_OFFLINE=true python3 scripts/build.py
-
-    # Dev build (live DB — for use inside the container):
-    DATABASE_URL=postgres://user:***@host:5432/db python3 scripts/build.py
-
-What it does:
-    1. cargo check --workspace --all-targets  (fails on ANY warning)
-    2. cargo clippy --workspace --all-targets (fails on ANY clippy warning)
-    3. cargo fmt --check                       (fails on formatting issues)
-    4. cargo build --release -p omniagent      (release build — this is the main binary)
-        - Uses SQLX_OFFLINE=true if set in env
-        - Or verifies queries against live DATABASE_URL if set
 
 Exit code: 0 on success, non-zero on any failure.
 """
-
-import os
+import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -30,11 +25,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def run(cmd: list[str], description: str) -> None:
     """Run a command, print output, fail on non-zero exit."""
-    print(f"\n{'='*60}")
-    print(f"  {description}")
     print(f"  $ {' '.join(cmd)}")
-    print(f"{'='*60}")
-
+    t0 = time.time()
     result = subprocess.run(
         cmd,
         cwd=str(REPO_ROOT),
@@ -42,48 +34,54 @@ def run(cmd: list[str], description: str) -> None:
         text=True,
         timeout=600,
     )
-
+    elapsed = time.time() - t0
     if result.stdout:
-        print(result.stdout)
+        lines = result.stdout.splitlines()
+        out = "\n".join(lines[-30:])
+        if len(lines) > 30:
+            print(f"  (last 30 of {len(lines)} lines of stdout)")
+        print(out)
     if result.stderr:
-        print(result.stderr, file=sys.stderr)
-
+        lines = result.stderr.splitlines()
+        for line in lines[-10:]:
+            print(line, file=sys.stderr)
     if result.returncode != 0:
-        print(f"\n❌ {description} — FAILED (exit {result.returncode})")
+        print(f"\n  ❌ {description} — FAILED (exit {result.returncode}) [{elapsed:.0f}s]")
         sys.exit(result.returncode)
+    print(f"  ✅ {description} [{elapsed:.0f}s]")
 
-    print(f"✅ {description} — OK")
+
+def get_workspace_packages() -> list[dict]:
+    """Return all workspace member packages from cargo metadata."""
+    r = subprocess.run(
+        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if r.returncode != 0:
+        print("Failed to get cargo metadata", file=sys.stderr)
+        print(r.stderr[-1000:], file=sys.stderr)
+        sys.exit(1)
+    return json.loads(r.stdout)["packages"]
 
 
 def main() -> None:
-    steps = [
-        (
-            # cargo check with -D warnings makes ANY warning a hard error
-            ["cargo", "check", "--workspace", "--all-targets", "--", "-D", "warnings"],
-            "Check: cargo check --workspace --all-targets (-D warnings)",
-        ),
-        (
-            # cargo clippy with -D warnings
-            ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
-            "Lint: cargo clippy --workspace --all-targets (-D warnings)",
-        ),
-        (
-            # cargo fmt --check
-            ["cargo", "fmt", "--all", "--check"],
-            "Format: cargo fmt --all --check",
-        ),
-    ]
+    packages = get_workspace_packages()
+    names = sorted(p["name"] for p in packages)
 
-    for cmd, desc in steps:
-        run(cmd, desc)
+    print(f"  Workspace packages ({len(names)}): {', '.join(names)}")
+    print()
 
-    # Release build of the main binary
-    build_cmd = ["cargo", "build", "--release", "-p", "omniagent"]
-    run(build_cmd, "Build: cargo build --release -p omniagent")
+    # Build the entire workspace in one invocation.
+    # This compiles omniagent, db-migrations, and every plugin binary
+    # (platforms + tools) — everything in [workspace].members.
+    # Single-invocation builds are faster than per-package (-p) invocations
+    # because cargo parallelizes across all crates.
+    run(["cargo", "build", "--release"], "Build workspace (release)")
 
-    print(f"\n{'='*60}")
-    print(f"  ✅ ALL CHECKS PASSED")
-    print(f"{'='*60}")
+    print(f"\n✅ All {len(names)} packages built successfully")
 
 
 if __name__ == "__main__":

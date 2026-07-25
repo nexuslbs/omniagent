@@ -17,16 +17,10 @@ RUN mkdir -p src plugins .sqlx && \
 # Copy the rest of the source and build
 COPY . .
 ENV SQLX_OFFLINE=true
-RUN cargo build --release && \
-    cargo build --release -p db-migrations && \
-    cargo build --release -p mcp-server-cron \
-        -p mcp-server-kanban -p mcp-server-search \
-        -p mcp-server-memory -p mcp-server-metrics \
-        -p mcp-server-query -p mcp-server-plugin-manager \
-        -p mcp-server-subtasks -p mcp-server-hindsight \
-        -p mcp-server-prompt -p mcp-server-actions \
-        -p mcp-server-fetch -p mcp-server-filesystem \
-        -p mcp-server-git -p mcp-server-skills
+# build.py auto-discovers all workspace members from Cargo.toml and
+# builds everything — omniagent, db-migrations, and all plugin binaries
+# (platforms + tools). No hardcoded package lists.
+RUN python3 scripts/build.py
 
 # Stage 2: Docker CLI binary
 FROM docker:cli AS docker-cli
@@ -43,9 +37,12 @@ RUN apt-get update -qq && \
 # Copy Docker CLI (compose v2 is built into the docker binary)
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
-# Copy the omniagent binary and all workspace member MCP server binaries
+# Copy the omniagent binary, db-migrations, and all plugin binaries.
+# Globs auto-catch new tools (mcp-server-*) and platforms (*-platform)
+# without requiring Dockerfile changes when plugins are added or removed.
 COPY --from=builder /build/target/release/omniagent /usr/local/bin/omniagent
 COPY --from=builder /build/target/release/mcp-server-* /usr/local/bin/
+COPY --from=builder /build/target/release/*-platform /usr/local/bin/
 COPY --from=builder /build/target/release/db-migrations /usr/local/bin/db-migrations
 
 EXPOSE 8080
