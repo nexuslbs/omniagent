@@ -64,3 +64,9 @@ impl ProviderRegistry {
         self.clients.remove(name);
     }
 }
+
+impl Default for ProviderRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
