@@ -155,7 +155,10 @@ fn read_plugins_from_yaml(data_dir: &str) -> Result<Vec<ReloadPluginInfo>, Strin
                                     "{}/plugins/{}/.remote/{}/{}",
                                     data_dir, type_dir, name, subpath
                                 );
-                                let old_prefix = format!("{}/plugins/{}", data_dir, type_dir);
+                                // Extract the last segment of subpath as the old bundled dir name
+                                let bundled_dir = subpath.rsplit('/').next().unwrap_or("");
+                                let old_prefix =
+                                    format!("{}/plugins/{}/{}", data_dir, type_dir, bundled_dir);
                                 manifest.entrypoint.as_ref().map(|ep| {
                                     ep.args
                                         .iter()
