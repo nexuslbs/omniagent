@@ -116,10 +116,69 @@ fn read_plugins_from_yaml(data_dir: &str) -> Result<Vec<ReloadPluginInfo>, Strin
                 let status = if entry.enabled { "enabled" } else { "disabled" };
                 // Load entrypoint lazily only for providers (needed to start them)
                 let entrypoint = if *type_name == "provider" {
-                    let manifest_path =
-                        format!("{}/plugins/{}/{}/plugin.json", data_dir, type_dir, name);
+                    let manifest_path = match entry.source.as_str() {
+                        "built-in" => format!("/app/plugins/{}/{}/plugin.json", type_dir, name),
+                        "bundled" => {
+                            format!("{}/plugins/{}/{}/plugin.json", data_dir, type_dir, name)
+                        }
+                        "remote" => {
+                            if let Some(remote) = crate::plugins_yaml::get_remote_plugin(
+                                data_dir,
+                                &crate::plugins_yaml::PluginYamlType::Provider,
+                                name,
+                            ) {
+                                let subpath = remote.path.as_deref().unwrap_or("");
+                                format!(
+                                    "{}/plugins/{}/.remote/{}/{}/plugin.json",
+                                    data_dir, type_dir, name, subpath
+                                )
+                            } else {
+                                format!(
+                                    "{}/plugins/{}/.remote/{}/plugin.json",
+                                    data_dir, type_dir, name
+                                )
+                            }
+                        }
+                        _ => format!("{}/plugins/{}/{}/plugin.json", data_dir, type_dir, name),
+                    };
                     if let Ok(manifest) = crate::plugin::load_manifest(&manifest_path) {
-                        manifest.entrypoint.map(|ep| (ep.command, ep.args))
+                        // For remote providers, resolve args paths to the install location
+                        if entry.source == "remote" {
+                            let resolved_args: Option<Vec<String>> = if let Some(remote) =
+                                crate::plugins_yaml::get_remote_plugin(
+                                    data_dir,
+                                    &crate::plugins_yaml::PluginYamlType::Provider,
+                                    name,
+                                ) {
+                                let subpath = remote.path.as_deref().unwrap_or("");
+                                let base_dir = format!(
+                                    "{}/plugins/{}/.remote/{}/{}",
+                                    data_dir, type_dir, name, subpath
+                                );
+                                let old_prefix = format!("{}/plugins/{}", data_dir, type_dir);
+                                manifest.entrypoint.as_ref().map(|ep| {
+                                    ep.args
+                                        .iter()
+                                        .map(|a| {
+                                            if a.starts_with(&old_prefix) {
+                                                a.replace(&old_prefix, &base_dir)
+                                            } else {
+                                                a.clone()
+                                            }
+                                        })
+                                        .collect()
+                                })
+                            } else {
+                                manifest.entrypoint.as_ref().map(|ep| ep.args.clone())
+                            };
+                            if let Some(args) = resolved_args {
+                                manifest.entrypoint.map(|ep| (ep.command, args))
+                            } else {
+                                None
+                            }
+                        } else {
+                            manifest.entrypoint.map(|ep| (ep.command, ep.args))
+                        }
                     } else {
                         None
                     }
