@@ -88,6 +88,8 @@ pub(crate) async fn enable_plugin_handler(
             }
             if yaml_type == plugins_yaml::PluginYamlType::Provider {
                 crate::llm::refresh_provider_metadata();
+                // Trigger plugin reload to start/stop external provider subprocess
+                let _ = super::plugins_env::reload_plugins(state.clone()).await;
             }
             match plugins_yaml::get_plugin(&state.data_dir, &name) {
                 Ok(Some(detail)) => (StatusCode::OK, Json(serde_json::json!({"success": true, "data": detail}))).into_response(),
@@ -130,6 +132,8 @@ pub(crate) async fn disable_plugin_handler(
             }
             if yaml_type == plugins_yaml::PluginYamlType::Provider {
                 crate::llm::refresh_provider_metadata();
+                // Trigger plugin reload to start/stop external provider subprocess
+                let _ = super::plugins_env::reload_plugins(state.clone()).await;
             }
             match plugins_yaml::get_plugin(&state.data_dir, &name) {
                 Ok(Some(detail)) => (StatusCode::OK, Json(serde_json::json!({"success": true, "data": detail}))).into_response(),
