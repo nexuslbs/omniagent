@@ -266,30 +266,45 @@ pub(crate) async fn reload_plugins(
                     .read()
                     .expect("PROVIDER_REGISTRY lock poisoned")
                     .has_provider(name);
+                tracing::info!(
+                    "Reload: provider '{}' enabled={} running={} has_entrypoint={}",
+                    name,
+                    enabled,
+                    running,
+                    plugin.entrypoint.is_some()
+                );
                 if enabled && !running {
-                    let provider = if let Some((cmd, args)) = &plugin.entrypoint {
-                        crate::provider::registry::PROVIDER_REGISTRY
-                            .write()
-                            .expect("PROVIDER_REGISTRY lock poisoned")
-                            .register(name, cmd, args);
-                        crate::provider::registry::PROVIDER_REGISTRY
-                            .read()
-                            .expect("PROVIDER_REGISTRY lock poisoned")
-                            .get_cloned(name)
-                    } else {
-                        None
-                    };
-                    if let Some(c) = provider {
-                        match c.start().await {
-                            Ok(()) => started += 1,
-                            Err(e) => {
+                    if let Some((cmd, args)) = &plugin.entrypoint {
+                        tracing::info!(
+                            "Reload: starting provider '{}' with cmd={} args={:?}",
+                            name,
+                            cmd,
+                            args
+                        );
+                        let client = Arc::new(
+                            crate::provider::external::client::ExternalProviderClient::new(
+                                name, cmd, args,
+                            ),
+                        );
+                        match client.start().await {
+                            Ok(()) => {
                                 crate::provider::registry::PROVIDER_REGISTRY
                                     .write()
                                     .expect("PROVIDER_REGISTRY lock poisoned")
-                                    .remove(name);
+                                    .register_arc(name, client);
+                                started += 1;
+                                tracing::info!("Reload: provider '{}' started successfully", name);
+                            }
+                            Err(e) => {
+                                tracing::error!("Reload: provider '{}' start FAILED: {}", name, e);
                                 errors.push(format!("{} provider: {}", name, e));
                             }
                         }
+                    } else {
+                        tracing::info!(
+                            "Reload: provider '{}' enabled but has no entrypoint, skipping",
+                            name
+                        );
                     }
                 } else if !enabled && running {
                     crate::provider::registry::PROVIDER_REGISTRY

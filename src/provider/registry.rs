@@ -1,35 +1,42 @@
-//! Provider registry: manages external provider plugin subprocesses.
+//! Global provider registry for external provider subprocesses.
 //!
-//! Provider plugins that have an `entrypoint` in their plugin.json are started
-//! as child processes and communicate via JSON-lines over stdio.
-//! HTTP-based providers are handled directly by `LLMClient`.
+//! Provides a thread-safe static registry of external provider clients,
+//! accessible by provider name from both the reload handler and the LLM client.
 
-use crate::error::AppResult;
 use crate::provider::external::client::ExternalProviderClient;
-use crate::provider::external::CompleteParams;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-/// Global registry of external provider subprocesses.
+/// Global provider registry: maps provider name to its subprocess client.
+/// Initialized empty — providers are populated on enable via `reload_plugins()`.
 pub static PROVIDER_REGISTRY: Lazy<RwLock<ProviderRegistry>> =
     Lazy::new(|| RwLock::new(ProviderRegistry::new()));
 
-/// Manages external provider plugin subprocesses.
+/// Thread-safe registry of external provider subprocess clients.
 pub struct ProviderRegistry {
     clients: HashMap<String, Arc<ExternalProviderClient>>,
 }
 
 impl ProviderRegistry {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             clients: HashMap::new(),
         }
     }
 
-    /// Register and start an external provider subprocess.
+    /// Create and register a new provider client.
+    /// The client is NOT started yet — call `start()` on the returned Arc.
     pub fn register(&mut self, name: &str, command: &str, args: &[String]) {
         let client = Arc::new(ExternalProviderClient::new(name, command, args));
+        self.clients.insert(name.to_string(), client);
+    }
+
+    /// Register a pre-built, already-started provider client.
+    /// Unlike `register()`, this does NOT create a new client — the caller
+    /// is responsible for having called `start()` on the arc before inserting.
+    /// This prevents races where another task grabs the Arc before start completes.
+    pub fn register_arc(&mut self, name: &str, client: Arc<ExternalProviderClient>) {
         self.clients.insert(name.to_string(), client);
     }
 
@@ -56,32 +63,4 @@ impl ProviderRegistry {
     pub fn remove(&mut self, name: &str) {
         self.clients.remove(name);
     }
-}
-
-/// Initiate a completion via an external provider subprocess, if one exists
-/// for the given provider name.
-pub async fn try_external_completion(
-    provider_name: &str,
-    model: &str,
-    messages: Vec<serde_json::Value>,
-    max_tokens: u32,
-    temperature: f32,
-) -> Option<AppResult<String>> {
-    let client = {
-        let registry = PROVIDER_REGISTRY.read().ok()?;
-        registry.get_cloned(provider_name)?
-    };
-    // Drop registry lock: client is an Arc clone, no borrow on the registry
-
-    let params = CompleteParams {
-        model: model.to_string(),
-        messages,
-        max_tokens,
-        temperature,
-        stream: false,
-        tools: None,
-    };
-
-    let result = client.complete(&params).await;
-    Some(result.map(|r| r.content))
 }
