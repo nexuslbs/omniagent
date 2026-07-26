@@ -42,6 +42,11 @@ pub(crate) async fn enable_plugin_handler(
                     }
                 }
             }
+            // Provider: ensure subprocess is running even if YAML was already enabled
+            if yaml_type == plugins_yaml::PluginYamlType::Provider {
+                crate::llm::refresh_provider_metadata();
+                let _ = super::plugins_env::reload_plugins(state.clone()).await;
+            }
             if let Ok(Some(detail)) = plugins_yaml::get_plugin(&state.data_dir, &name) {
                 return (
                     StatusCode::OK,

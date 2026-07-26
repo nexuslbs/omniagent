@@ -32,7 +32,7 @@ def run(cmd: list[str], description: str) -> None:
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
-        timeout=600,
+        timeout=1800,
     )
     elapsed = time.time() - t0
     if result.stdout:

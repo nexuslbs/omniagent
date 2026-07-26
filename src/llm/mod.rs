@@ -281,13 +281,34 @@ fn build_provider_metadata() -> HashMap<String, ProviderMetadata> {
 }
 
 /// Resolve the default base URL for a provider from the plugin metadata.
+/// Falls back to reading the plugin.json from disk if metadata is stale.
 pub fn resolve_default_base_url(provider_name: &str) -> String {
-    PROVIDER_METADATA
+    // First try the in-memory cache
+    if let Some(url) = PROVIDER_METADATA
         .read()
         .unwrap()
         .get(provider_name)
+        .filter(|m| !m.default_base_url.is_empty())
         .map(|m| m.default_base_url.clone())
-        .unwrap_or_default()
+    {
+        return url;
+    }
+    // Fallback: read plugin.json from disk (handles stale metadata after git checkout)
+    let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/omni".to_string());
+    for base in [
+        format!(
+            "{}/plugins/providers/{}/plugin.json",
+            data_dir, provider_name
+        ),
+        format!("/app/plugins/providers/{}/plugin.json", provider_name),
+    ] {
+        if let Some(meta) = read_provider_manifest(&std::path::PathBuf::from(&base)) {
+            if !meta.1.default_base_url.is_empty() {
+                return meta.1.default_base_url;
+            }
+        }
+    }
+    String::new()
 }
 
 /// Resolve the default model for a provider from the plugin metadata.
