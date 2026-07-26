@@ -14,6 +14,7 @@
 
 use crate::err_msg;
 use crate::error::{AppResult, Error, ErrorContext};
+use crate::plugins_yaml::{get_remote_plugin, PluginYamlType};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -232,10 +233,20 @@ fn build_provider_metadata() -> HashMap<String, ProviderMetadata> {
             "built-in" => format!("/app/plugins/providers/{}/plugin.json", name),
             "bundled" => format!("{}/plugins/providers/{}/plugin.json", data_dir, name),
             "remote" => {
-                format!(
-                    "{}/plugins/providers/.remote/{}/plugin.json",
-                    data_dir, name
-                )
+                if let Some(remote) =
+                    get_remote_plugin(&data_dir, &PluginYamlType::Provider, name)
+                {
+                    let subpath = remote.path.as_deref().unwrap_or("");
+                    format!(
+                        "{}/plugins/providers/.remote/{}/{}/plugin.json",
+                        data_dir, name, subpath
+                    )
+                } else {
+                    format!(
+                        "{}/plugins/providers/.remote/{}/plugin.json",
+                        data_dir, name
+                    )
+                }
             }
             "installed" => {
                 format!("{}/plugins/installed/{}/plugin.json", data_dir, name)
