@@ -233,8 +233,7 @@ fn build_provider_metadata() -> HashMap<String, ProviderMetadata> {
             "built-in" => format!("/app/plugins/providers/{}/plugin.json", name),
             "bundled" => format!("{}/plugins/providers/{}/plugin.json", data_dir, name),
             "remote" => {
-                if let Some(remote) =
-                    get_remote_plugin(&data_dir, &PluginYamlType::Provider, name)
+                if let Some(remote) = get_remote_plugin(&data_dir, &PluginYamlType::Provider, name)
                 {
                     let subpath = remote.path.as_deref().unwrap_or("");
                     format!(
