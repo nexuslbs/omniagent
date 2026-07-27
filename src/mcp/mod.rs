@@ -73,7 +73,9 @@ pub struct AppContext {
     pub data_dir: String,
     /// Per-platform outbound delivery senders.  Each platform gets its own
     /// mpsc channel so that a slow/failing platform never blocks others.
-    pub platform_senders: HashMap<String, OutboundSender>,
+    /// Wrapped in Arc<RwLock> so new platforms can be dynamically added at
+    /// runtime via the API.
+    pub platform_senders: Arc<RwLock<HashMap<String, OutboundSender>>>,
     /// Current thread ID being executed (set by `process_thread` before the
     /// tool-calling loop so MCP tools can auto-detect context without the LLM
     /// having to pass `thread_id` explicitly).
@@ -124,7 +126,7 @@ impl AppContext {
             pool,
             readonly_pool,
             data_dir: data_dir.to_string(),
-            platform_senders,
+            platform_senders: Arc::new(RwLock::new(platform_senders)),
             platform_file_readers: Arc::new(RwLock::new(HashMap::new())),
             current_thread_id: None,
             current_channel_id: None,

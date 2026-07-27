@@ -27,7 +27,9 @@ use tokio::sync::Mutex;
 use tokio::sync::Notify;
 
 /// Type alias for platform restart signals map.
-type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicU64>, Arc<Notify>)>>>;
+/// Each entry: (restart_count, stopped_flag, notify)
+type PlatformRestartSignals =
+    Arc<Mutex<HashMap<String, (Arc<AtomicU64>, Arc<AtomicBool>, Arc<Notify>)>>>;
 
 // ---------------------------------------------------------------------------
 // Circuit breaker
@@ -120,12 +122,17 @@ impl ExternalPlatformClient {
         let stopped = Arc::new(AtomicBool::new(false));
         let restart_notify = Arc::new(Notify::new());
 
-        // Register our restart count and notify in the shared map so the API can signal us
+        // Register our restart count, stopped flag, and notify in the shared map
+        // so the API can signal us for restart or stop.
         {
             let mut signals = platform_restart_signals.lock().await;
             signals.insert(
                 name.clone(),
-                (Arc::clone(&restart_count), Arc::clone(&restart_notify)),
+                (
+                    Arc::clone(&restart_count),
+                    Arc::clone(&stopped),
+                    Arc::clone(&restart_notify),
+                ),
             );
         }
 

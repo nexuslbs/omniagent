@@ -146,7 +146,7 @@ pub(crate) async fn update_config_handler(
             // the changes take effect without any additional action needed.
 
             // Return updated plugin detail
-            match plugins_yaml::get_plugin(&state.data_dir, &name) {
+            match plugins_yaml::get_plugin(&state.data_dir, &name, &yaml_type) {
                 Ok(Some(detail)) => {
                     info!("Updated config for plugin '{}'", name);
                     (
@@ -203,10 +203,11 @@ pub(crate) async fn update_config_handler(
 
 /// POST /api/plugins/{type}/{source}/{name}/refresh-models: refresh dynamic model list from external API.
 pub(crate) async fn refresh_models_handler(
-    Path((_p_type, _source, name)): Path<(String, String, String)>,
+    Path((p_type, _source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    match plugins_yaml::refresh_plugin_models(&state.data_dir, &name).await {
+    let pt = plugins_yaml::PluginYamlType::from_type_str(&p_type);
+    match plugins_yaml::refresh_plugin_models(&state.data_dir, &name, &pt).await {
         Ok(Some(detail)) => {
             let model_count = detail
                 .config_schema

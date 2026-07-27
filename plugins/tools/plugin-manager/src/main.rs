@@ -168,7 +168,7 @@ async fn handle_config(data_dir: &str, args: &Value) -> Result<(String, bool)> {
         .map_err(|e| anyhow::anyhow!("Failed to update plugin config: {:#}", e))?;
 
     // Return the updated plugin detail
-    match plugins_yaml::get_plugin(data_dir, name) {
+    match plugins_yaml::get_plugin(data_dir, name, &yaml_type) {
         Ok(Some(detail)) => Ok((
             format!(
                 "Plugin '{}' config updated. Current config: {}",

@@ -184,11 +184,22 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
                 continue;
             }
 
-            let merged = merge_platform_config_env(
+            let mut merged = merge_platform_config_env(
                 &config,
                 &serde_json::json!(manifest.config_schema),
                 data_dir,
             );
+
+            // Apply YAML enabled override: the manifest always sets enabled=true,
+            // but the plugins.yml entry may have enabled=false.
+            if let Ok(Some(yaml_entry)) = crate::plugins_yaml::get_entry(
+                data_dir,
+                &crate::plugins_yaml::PluginYamlType::Platform,
+                &manifest.name,
+            ) {
+                merged.enabled = yaml_entry.enabled;
+            }
+
             tracing::info!(
                 "Loaded platform plugin '{}' from plugins/platforms/",
                 manifest.name

@@ -1319,10 +1319,14 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
     Ok(results)
 }
 
-/// Get a single plugin by name, combining disk discovery with YAML state.
+/// Get a single plugin by name and type, combining disk discovery with YAML state.
 /// Returns the PRIMARY source for that plugin name based on YAML configuration,
 /// unlike list_plugins which returns all sources with is_duplicated flags.
-pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>> {
+pub fn get_plugin(
+    data_dir: &str,
+    name: &str,
+    pt: &PluginYamlType,
+) -> AppResult<Option<PluginDetail>> {
     let discovered = crate::plugin::installer::discover_plugins(data_dir);
 
     // Pre-load YAML entries
@@ -1413,6 +1417,11 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
     // (e.g., "cron" group + "cron-echo" group both match name "cron").
     let mut merged_group: Option<PluginSourceGroup> = None;
     for (key, group) in &groups {
+        // Only match groups whose yaml_type matches the requested type
+        let type_matches = group.yaml_type.as_ref().map(|gt| gt == pt).unwrap_or(true);
+        if !type_matches {
+            continue;
+        }
         let matches = key == name || group.sources.iter().any(|(m, _, _)| m.name == name);
         if !matches {
             continue;
@@ -1455,6 +1464,7 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
     if let Some(detail) = build_not_found_from_yaml(
         data_dir,
         name,
+        pt,
         &platform_entries,
         &tool_entries,
         &provider_entries,
@@ -1469,6 +1479,7 @@ pub fn get_plugin(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>>
 fn build_not_found_from_yaml(
     data_dir: &str,
     name: &str,
+    pt: &PluginYamlType,
     platform_entries: &BTreeMap<String, PluginYamlEntry>,
     tool_entries: &BTreeMap<String, PluginYamlEntry>,
     provider_entries: &BTreeMap<String, PluginYamlEntry>,
@@ -1478,6 +1489,10 @@ fn build_not_found_from_yaml(
         (PluginYamlType::Tool, tool_entries),
         (PluginYamlType::Provider, provider_entries),
     ] {
+        // Only check entries matching the requested type
+        if yaml_type != pt {
+            continue;
+        }
         if let Some(yaml_entry) = entries.get(name) {
             let is_remote = yaml_entry.source == "remote";
             let manifest = PluginManifest {
@@ -1727,8 +1742,12 @@ pub async fn fetch_enum_values(url: &str, api_key: Option<&str>) -> AppResult<Ve
 /// Fetches from the plugin's `refresh_url` (if any), updates the in-memory cache,
 /// and returns the enriched plugin detail with fresh `allowed_values`.
 /// Returns `None` if the plugin has no `refresh_url` fields.
-pub async fn refresh_plugin_models(data_dir: &str, name: &str) -> AppResult<Option<PluginDetail>> {
-    let detail = get_plugin(data_dir, name)?
+pub async fn refresh_plugin_models(
+    data_dir: &str,
+    name: &str,
+    pt: &PluginYamlType,
+) -> AppResult<Option<PluginDetail>> {
+    let detail = get_plugin(data_dir, name, pt)?
         .ok_or_else(|| Error::Message(format!("Plugin '{}' not found", name)))?;
 
     // Re-parse config_schema from the manifest to get mutable fields

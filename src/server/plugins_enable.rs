@@ -47,7 +47,7 @@ pub(crate) async fn enable_plugin_handler(
                 crate::llm::refresh_provider_metadata();
                 let _ = super::plugins_env::reload_plugins(state.clone()).await;
             }
-            if let Ok(Some(detail)) = plugins_yaml::get_plugin(&state.data_dir, &name) {
+            if let Ok(Some(detail)) = plugins_yaml::get_plugin(&state.data_dir, &name, &yaml_type) {
                 return (
                     StatusCode::OK,
                     Json(serde_json::json!({"success": true, "data": detail})),
@@ -96,7 +96,7 @@ pub(crate) async fn enable_plugin_handler(
                 // Trigger plugin reload to start/stop external provider subprocess
                 let _ = super::plugins_env::reload_plugins(state.clone()).await;
             }
-            match plugins_yaml::get_plugin(&state.data_dir, &name) {
+            match plugins_yaml::get_plugin(&state.data_dir, &name, &yaml_type) {
                 Ok(Some(detail)) => (StatusCode::OK, Json(serde_json::json!({"success": true, "data": detail}))).into_response(),
                 _ => (StatusCode::OK, Json(serde_json::json!({"success": true, "data": {"name": name, "status": "enabled"}}))).into_response(),
             }
@@ -133,14 +133,14 @@ pub(crate) async fn disable_plugin_handler(
                 state.plugin_manager.remove_server_tools(&name).await;
             }
             if yaml_type == plugins_yaml::PluginYamlType::Platform {
-                reload_platform_plugin(&state, &name).await;
+                stop_platform_plugin(&state, &name).await;
             }
             if yaml_type == plugins_yaml::PluginYamlType::Provider {
                 crate::llm::refresh_provider_metadata();
                 // Trigger plugin reload to start/stop external provider subprocess
                 let _ = super::plugins_env::reload_plugins(state.clone()).await;
             }
-            match plugins_yaml::get_plugin(&state.data_dir, &name) {
+            match plugins_yaml::get_plugin(&state.data_dir, &name, &yaml_type) {
                 Ok(Some(detail)) => (StatusCode::OK, Json(serde_json::json!({"success": true, "data": detail}))).into_response(),
                 _ => (StatusCode::OK, Json(serde_json::json!({"success": true, "data": {"name": name, "status": "disabled"}}))).into_response(),
             }

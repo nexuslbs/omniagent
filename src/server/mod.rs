@@ -33,6 +33,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -81,7 +82,9 @@ pub mod plugins_setup;
 pub mod plugins_types;
 
 /// Type alias for the platform restart signals map.
-type PlatformRestartSignals = Arc<Mutex<HashMap<String, (Arc<AtomicU64>, Arc<Notify>)>>>;
+/// Each entry: (restart_count, stopped_flag, notify)
+pub(crate) type PlatformRestartSignals =
+    Arc<Mutex<HashMap<String, (Arc<AtomicU64>, Arc<AtomicBool>, Arc<Notify>)>>>;
 
 /// Shared application state for the HTTP server.
 #[derive(Clone)]
@@ -738,7 +741,11 @@ evaluate: if the task was completed, call the completion tool.",
         let base_url = crate::llm::resolve_default_base_url(&provider_name);
 
         // Look up api_key from the provider's resolved plugin config
-        let api_key = match crate::plugins_yaml::get_plugin(&state.data_dir, &provider_name) {
+        let api_key = match crate::plugins_yaml::get_plugin(
+            &state.data_dir,
+            &provider_name,
+            &crate::plugins_yaml::PluginYamlType::Provider,
+        ) {
             Ok(Some(detail)) => detail
                 .config
                 .get("api_key")

@@ -245,6 +245,42 @@ A plugin's **source** is determined **solely by its physical location on disk**.
 | **No hardcoded built-in list in frontend**: BUILT_IN_TOOLS was removed (2026-07-07). All tools come from the backend's `/api/plugins` endpoint. The frontend no longer hardcodes "actions" or any other plugin: the backend discovers everything.
 | **`util` and similar config-only directories**: Directories without `plugin.json` at root are NOT discoverable as plugins. A dir like `util` (which only has Cargo.toml or config files, no plugin.json) should not appear in the /tools page unless explicitly defined in plugins.yml.
 
+## Plugin Identity: [type + source + name] is the Composite Key
+
+**A plugin's identity is `[type, source, name]`, NOT `name` alone.** Platforms, tools (MCP servers), and providers are entirely different things even when they share the same name. The name `test-python` can refer to a platform plugin, a tool plugin, and a provider plugin simultaneously — each is a distinct entity with its own configuration, lifecycle, and state.
+
+**All plugin lookups MUST use the composite key `[type, source, name]`:**
+
+```rust
+// ✅ CORRECT — unambiguous, type-aware
+plugins_yaml::get_plugin(data_dir, name, &PluginYamlType::Tool)
+
+// ❌ WRONG — ambiguous, mixes types
+// get_plugin(data_dir, name)  — no type parameter (DEPRECATED)
+```
+
+**API routes follow `/{type}/{source}/{name}/{action}` where type is required:**
+| Route | Example |
+|-------|---------|
+| `/{type}/{source}/{name}/enable` | `/plugins/platforms/bundled/mattermost/enable` |
+| `/{type}/{source}/{name}/disable` | `/plugins/tools/remote/test-rust-tool/disable` |
+| `/{type}/{source}/{name}` | `/plugins/providers/built-in/noop` |
+
+**Type parameter (`type` in URL, `pt` in code) MUST be one of:** `platforms`, `tools`, `providers`.
+
+**No function should look up a plugin by name alone.** Every function that takes a plugin identifier MUST also receive either:
+- A `PluginYamlType` enum (for Rust code)
+- A `plugin_type` filter in API response data (for Python/frontend code)
+
+Python/frontend code filtering plugin lists MUST include `plugin_type` in the filter:
+```python
+# ✅ CORRECT
+next((p for p in plugins if p["name"] == name and p.get("plugin_type") == "platform"), None)
+
+# ❌ WRONG — will find wrong plugin if types share a name
+# next((p for p in plugins if p["name"] == name), None)
+```
+
 ### Bundled Plugin Rules (Omni-Stack)
 
 - Bundled plugins live in `{workspace_dir}/plugins/{type}/{name}/`.

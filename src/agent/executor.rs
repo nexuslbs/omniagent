@@ -96,7 +96,11 @@ pub async fn process_thread(
     let per_thread_llm = {
         let base_url = crate::llm::resolve_default_base_url(&provider_name_val);
         let api_mode = crate::llm::ApiMode::resolve(&provider_name_val, &model_name_val);
-        let api_key = match crate::plugins_yaml::get_plugin(&cfg.ctx.data_dir, &provider_name_val) {
+        let api_key = match crate::plugins_yaml::get_plugin(
+            &cfg.ctx.data_dir,
+            &provider_name_val,
+            &crate::plugins_yaml::PluginYamlType::Provider,
+        ) {
             Ok(Some(mut detail)) => {
                 crate::plugins_yaml::resolve_config_refs(&mut detail.resolved_env, &cfg.pool).await;
                 detail
