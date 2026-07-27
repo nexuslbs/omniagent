@@ -1328,13 +1328,17 @@ impl Platform for ExternalPlatformClient {
             "file_id": file_id,
             "server_url": server_url,
         });
-        writeln!(stdin, "{}", serde_json::to_string(&request).unwrap_or_default())
-            .map_err(|e| {
-                crate::error::Error::Message(format!(
-                    "Failed to send read-file request to '{}': {}",
-                    plugin_name, e
-                ))
-            })?;
+        writeln!(
+            stdin,
+            "{}",
+            serde_json::to_string(&request).unwrap_or_default()
+        )
+        .map_err(|e| {
+            crate::error::Error::Message(format!(
+                "Failed to send read-file request to '{}': {}",
+                plugin_name, e
+            ))
+        })?;
         drop(stdin); // Close stdin — signals plugin to process and exit
 
         // Read response from stdout
@@ -1413,14 +1417,12 @@ impl Platform for ExternalPlatformClient {
 
         // Decode base64 content
         use base64::{engine::general_purpose, Engine};
-        let bytes = general_purpose::STANDARD
-            .decode(content)
-            .map_err(|e| {
-                crate::error::Error::Message(format!(
-                    "Failed to decode read-file content from '{}': {}",
-                    plugin_name, e
-                ))
-            })?;
+        let bytes = general_purpose::STANDARD.decode(content).map_err(|e| {
+            crate::error::Error::Message(format!(
+                "Failed to decode read-file content from '{}': {}",
+                plugin_name, e
+            ))
+        })?;
 
         tracing::info!(
             "Read file '{}' ({} bytes) via platform plugin '{}'",

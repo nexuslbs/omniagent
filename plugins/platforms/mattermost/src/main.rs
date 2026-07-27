@@ -2172,15 +2172,20 @@ async fn handle_read_file() -> Result<()> {
                             } else {
                                 None
                             }
-                        } else if let Some(name) = config.get("access_token_name").and_then(|v| v.as_str()) {
+                        } else if let Some(name) =
+                            config.get("access_token_name").and_then(|v| v.as_str())
+                        {
                             if !name.is_empty() {
                                 // Resolve the secret via omniagent secrets API
                                 let client = reqwest::Client::new();
-                                let secret_url = format!("http://localhost:8080/api/secrets/{}", name);
+                                let secret_url =
+                                    format!("http://localhost:8080/api/secrets/{}", name);
                                 match client.get(&secret_url).send().await {
                                     Ok(resp) => {
                                         if let Ok(body) = resp.json::<serde_json::Value>().await {
-                                            body.get("value").and_then(|v| v.as_str()).map(|s| s.to_string())
+                                            body.get("value")
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string())
                                         } else {
                                             None
                                         }
