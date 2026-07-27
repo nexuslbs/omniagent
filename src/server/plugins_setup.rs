@@ -617,6 +617,33 @@ pub(crate) async fn setup_plugin_handler(
                     name
                 );
 
+                // Persist the access_token to the YAML state config so it survives
+                // platform stop/start cycles. This is generic — any platform that
+                // returns a bot_token from setup gets it stored as access_token,
+                // which the file reader builder discovers on next start.
+                let yaml_type = crate::plugins_yaml::PluginYamlType::Platform;
+                if let Ok(Some(mut existing)) =
+                    crate::plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name)
+                {
+                    if let Some(map) = existing.config.as_object_mut() {
+                        map.insert(
+                            "access_token".to_string(),
+                            serde_json::Value::String(bot_token.to_string()),
+                        );
+                    }
+                    let _ = crate::plugins_yaml::set_entry(
+                        &state.data_dir,
+                        &yaml_type,
+                        &name,
+                        existing.enabled,
+                        existing.config,
+                    );
+                    tracing::info!(
+                        "Persisted access_token to YAML config for plugin '{}'",
+                        name
+                    );
+                }
+
                 reload_platform_plugin(&state, &name).await;
             }
 
