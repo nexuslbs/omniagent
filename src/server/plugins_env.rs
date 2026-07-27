@@ -220,11 +220,6 @@ pub(crate) async fn reload_plugins(
             .filter_map(|t| t.server_name.clone())
             .collect()
     };
-    let active_platforms: std::collections::HashSet<String> = {
-        let sigs = state.platform_restart_signals.lock().await;
-        sigs.keys().cloned().collect()
-    };
-
     let mut started = 0u32;
     let mut stopped = 0u32;
     let mut errors: Vec<String> = Vec::new();
@@ -312,19 +307,6 @@ pub(crate) async fn reload_plugins(
                         .expect("PROVIDER_REGISTRY lock poisoned")
                         .remove(name);
                     stopped += 1;
-                }
-            }
-            "platform" if enabled && active_platforms.contains(name) => {
-                if let Some((flag, note)) = state
-                    .platform_restart_signals
-                    .lock()
-                    .await
-                    .get(name)
-                    .cloned()
-                {
-                    flag.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    note.notify_one();
-                    started += 1;
                 }
             }
             _ => {}
