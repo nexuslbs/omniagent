@@ -108,8 +108,7 @@ pub struct AppContext {
     /// internally, so the core stays plugin-agnostic — no knowledge of
     /// plugin-specific config fields like `access_token`.
     /// Wrapped in Arc<RwLock> so platforms can be dynamically added/removed.
-    pub platforms:
-        Arc<RwLock<HashMap<String, Arc<dyn crate::platform::Platform>>>>,
+    pub platforms: Arc<RwLock<HashMap<String, Arc<dyn crate::platform::Platform>>>>,
     /// External MCP client registry. One client per server, shared across
     /// all channels. Replaces the former per-channel PoolManager.
     pub external_clients: Arc<crate::mcp::external::client::ExternalMcpClients>,

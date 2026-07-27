@@ -136,12 +136,10 @@ pub(crate) async fn start_platform_plugin(state: &Arc<AppState>, name: &str) -> 
     // The platform plugin implements read_file internally, so the core
     // stays plugin-agnostic — no knowledge of field names like access_token.
     // Just store the Arc<dyn Platform> in AppContext for the MCP tool to use.
-    state
-        .app_context
-        .platforms
-        .write()
-        .await
-        .insert(name.to_string(), client.clone() as Arc<dyn crate::platform::Platform>);
+    state.app_context.platforms.write().await.insert(
+        name.to_string(),
+        client.clone() as Arc<dyn crate::platform::Platform>,
+    );
 
     // 6. Spawn the client's start loop in a background task
     let pool = state.pool.clone();
