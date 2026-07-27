@@ -820,6 +820,7 @@ async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serd
         .iter()
         .map(|t| {
             serde_json::json!({
+                "name": t.name,
                 "full_name": t.full_name,
                 "description": t.description,
                 "input_schema": t.input_schema,

@@ -84,6 +84,7 @@ impl CircuitBreaker {
 /// The client spawns a subprocess, initializes it via the plugin protocol,
 /// then enters a main loop that forwards outbound envelopes to the plugin
 /// and handles inbound message notifications from the plugin.
+#[derive(Debug)]
 pub struct ExternalPlatformClient {
     /// Plugin name (cached, never changes).
     name: String,
@@ -1272,6 +1273,162 @@ impl Platform for ExternalPlatformClient {
             self.name
         );
         Ok(())
+    }
+
+    async fn read_file(&self, file_id: &str, server_url: &str) -> AppResult<Vec<u8>> {
+        let plugin_name = self.name.clone();
+        tracing::info!(
+            "Reading file '{}' via platform plugin '{}'",
+            file_id,
+            plugin_name
+        );
+
+        // Get plugin config for the binary path
+        let (command, args) = {
+            let config = self.config.read().map_err(|_| {
+                crate::error::Error::Message("Platform config lock poisoned".to_string())
+            })?;
+            (config.command.clone(), config.args.clone())
+        };
+
+        // Spawn the plugin with "read-file" argument (one-shot mode)
+        let mut child = std::process::Command::new(&command)
+            .arg("read-file")
+            .args(&args)
+            .env_clear()
+            .env("RUST_LOG", "info")
+            .env("OMNI_DIR", &self.data_dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                crate::error::Error::Message(format!(
+                    "Failed to spawn plugin '{}' for read-file: {}",
+                    plugin_name, e
+                ))
+            })?;
+
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            crate::error::Error::Message(format!(
+                "Failed to capture stdin for plugin '{}' read-file",
+                plugin_name
+            ))
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            crate::error::Error::Message(format!(
+                "Failed to capture stdout for plugin '{}' read-file",
+                plugin_name
+            ))
+        })?;
+
+        // Send file_id and server_url via stdin, then close stdin (EOF signals start)
+        use std::io::Write;
+        let request = serde_json::json!({
+            "file_id": file_id,
+            "server_url": server_url,
+        });
+        writeln!(stdin, "{}", serde_json::to_string(&request).unwrap_or_default())
+            .map_err(|e| {
+                crate::error::Error::Message(format!(
+                    "Failed to send read-file request to '{}': {}",
+                    plugin_name, e
+                ))
+            })?;
+        drop(stdin); // Close stdin — signals plugin to process and exit
+
+        // Read response from stdout
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        use std::io::BufRead;
+        reader.read_line(&mut line).map_err(|e| {
+            crate::error::Error::Message(format!(
+                "Failed to read read-file response from '{}': {}",
+                plugin_name, e
+            ))
+        })?;
+
+        // Wait for child to exit (with timeout)
+        let start = std::time::Instant::now();
+        let max_wait = std::time::Duration::from_secs(30);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        tracing::warn!(
+                            "Plugin '{}' read-file exited with status {}",
+                            plugin_name,
+                            status
+                        );
+                    }
+                    break;
+                }
+                Ok(None) => {
+                    if start.elapsed() >= max_wait {
+                        let _ = child.kill();
+                        return Err(crate::error::Error::Message(format!(
+                            "Plugin '{}' read-file timed out",
+                            plugin_name
+                        )));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => {
+                    return Err(crate::error::Error::Message(format!(
+                        "Error waiting for plugin '{}' read-file: {}",
+                        plugin_name, e
+                    )));
+                }
+            }
+        }
+
+        // Parse the response
+        let response: serde_json::Value = serde_json::from_str(line.trim()).map_err(|e| {
+            crate::error::Error::Message(format!(
+                "Invalid read-file response from '{}': {}",
+                plugin_name, e
+            ))
+        })?;
+
+        if let Some(error) = response.get("error") {
+            let msg = error
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown error");
+            return Err(crate::error::Error::Message(format!(
+                "Plugin '{}' read-file error: {}",
+                plugin_name, msg
+            )));
+        }
+
+        let content = response
+            .get("content")
+            .and_then(|c| c.as_str())
+            .ok_or_else(|| {
+                crate::error::Error::Message(format!(
+                    "No content in read-file response from '{}'",
+                    plugin_name
+                ))
+            })?;
+
+        // Decode base64 content
+        use base64::{engine::general_purpose, Engine};
+        let bytes = general_purpose::STANDARD
+            .decode(content)
+            .map_err(|e| {
+                crate::error::Error::Message(format!(
+                    "Failed to decode read-file content from '{}': {}",
+                    plugin_name, e
+                ))
+            })?;
+
+        tracing::info!(
+            "Read file '{}' ({} bytes) via platform plugin '{}'",
+            file_id,
+            bytes.len(),
+            plugin_name
+        );
+        Ok(bytes)
     }
 }
 

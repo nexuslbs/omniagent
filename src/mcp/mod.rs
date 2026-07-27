@@ -103,12 +103,13 @@ pub struct AppContext {
     /// LLM can introspect tool parameters at runtime without relying solely on
     /// error messages. Populated by `default_registry()`.
     pub tool_catalog: Vec<Value>,
-    /// Per-platform file readers for the `read_attached_file` MCP tool.
-    /// Keyed by platform name. Each reader knows how to fetch file content
-    /// from that platform's API using file_id + server_url.
-    /// Wrapped in Arc<RwLock> so plugins can register readers dynamically.
-    pub platform_file_readers:
-        Arc<RwLock<HashMap<String, Arc<dyn crate::platform::external::FileReader + Send + Sync>>>>,
+    /// Per-platform references for the `read_attached_file` MCP tool.
+    /// Keyed by platform name. Each platform plugin implements `read_file`
+    /// internally, so the core stays plugin-agnostic — no knowledge of
+    /// plugin-specific config fields like `access_token`.
+    /// Wrapped in Arc<RwLock> so platforms can be dynamically added/removed.
+    pub platforms:
+        Arc<RwLock<HashMap<String, Arc<dyn crate::platform::Platform>>>>,
     /// External MCP client registry. One client per server, shared across
     /// all channels. Replaces the former per-channel PoolManager.
     pub external_clients: Arc<crate::mcp::external::client::ExternalMcpClients>,
@@ -127,7 +128,7 @@ impl AppContext {
             readonly_pool,
             data_dir: data_dir.to_string(),
             platform_senders: Arc::new(RwLock::new(platform_senders)),
-            platform_file_readers: Arc::new(RwLock::new(HashMap::new())),
+            platforms: Arc::new(RwLock::new(HashMap::new())),
             current_thread_id: None,
             current_channel_id: None,
             current_allowed_tools: Vec::new(),
@@ -608,15 +609,15 @@ fn read_attached_file_tool() -> McpTool {
                     String::new()
                 };
 
-                let readers_guard = ctx.platform_file_readers.read().await;
-                let reader = match readers_guard.get(&platform) {
-                    Some(r) => r.clone(),
+                let platforms_guard = ctx.platforms.read().await;
+                let platform_client = match platforms_guard.get(&platform) {
+                    Some(p) => p.clone(),
                     None => {
-                        let available: Vec<String> = readers_guard.keys().cloned().collect();
+                        let available: Vec<String> = platforms_guard.keys().cloned().collect();
                         return Ok(McpToolResult {
                             call_id: String::new(),
                             content: format!(
-                                "Error: No file reader for platform '{}'. Available: {}",
+                                "Error: No platform client for '{}'. Available: {}",
                                 platform,
                                 available.join(", ")
                             ),
@@ -624,9 +625,9 @@ fn read_attached_file_tool() -> McpTool {
                         });
                     }
                 };
-                drop(readers_guard);
+                drop(platforms_guard);
 
-                match reader.read_file(&file_id, &server_url).await {
+                match platform_client.read_file(&file_id, &server_url).await {
                     Ok(bytes) => {
                         if let Ok(text) = String::from_utf8(bytes.clone()) {
                             Ok(McpToolResult {
@@ -807,7 +808,7 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
 
     // ── read_attached_file: platform-generic file reading ──
     // Allows the agent to read file attachments that exceed the inline
-    // size limit by delegating to the appropriate platform's FileReader.
+    // size limit by delegating to the platform's read_file implementation.
     registry.register(read_attached_file_tool());
 
     // ── Task management tools for non-blocking tool execution ──
