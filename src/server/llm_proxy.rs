@@ -52,7 +52,11 @@ pub(crate) async fn llm_chat_handler(
     let base_url = crate::llm::resolve_default_base_url(provider_name);
 
     // Look up api_key from the provider's resolved plugin config
-    let api_key = match crate::plugins_yaml::get_plugin(&state.data_dir, provider_name) {
+    let api_key = match crate::plugins_yaml::get_plugin(
+        &state.data_dir,
+        provider_name,
+        &crate::plugins_yaml::PluginYamlType::Provider,
+    ) {
         Ok(Some(detail)) => detail
             .config
             .get("api_key")

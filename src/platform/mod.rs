@@ -10,6 +10,7 @@
 use async_trait::async_trait;
 use sqlx::PgPool;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::error::AppResult;
 
@@ -112,13 +113,17 @@ impl PlatformRegistry {
 /// This sends a message directly to the platform without going through
 /// the database. The receiver will handle it as a notification
 /// (msg_type = "notification").
-pub fn enqueue_notification(
-    senders: &HashMap<String, OutboundSender>,
+pub async fn enqueue_notification(
+    senders: &Arc<tokio::sync::RwLock<HashMap<String, OutboundSender>>>,
     platform_name: &str,
     resource_identifier: &str,
     content: &str,
 ) {
-    let sender = match senders.get(platform_name) {
+    let sender = {
+        let map = senders.read().await;
+        map.get(platform_name).cloned()
+    };
+    let sender = match sender {
         Some(s) => s,
         None => {
             tracing::warn!(

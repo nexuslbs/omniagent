@@ -524,7 +524,7 @@ pub async fn enqueue_delivery(
     };
 
     // Look up the platform sender
-    let sender = match ctx.platform_senders.get(&platform) {
+    let sender = match ctx.platform_senders.read().await.get(&platform) {
         Some(s) => s.clone(),
         None => return,
     };
@@ -648,7 +648,8 @@ pub async fn enqueue_delivery(
                     &sub.subscriber_platform,
                     &sub.subscriber_resource,
                     &format!("[summary from {}]\n{}", channel.name, saved.content),
-                );
+                )
+                .await;
             }
         }
     }
@@ -665,7 +666,7 @@ pub async fn enqueue_reaction(
     external_id: &str,
     final_status: &str,
 ) {
-    let sender = match ctx.platform_senders.get(platform) {
+    let sender = match ctx.platform_senders.read().await.get(platform) {
         Some(s) => s.clone(),
         None => return,
     };
@@ -697,7 +698,7 @@ pub async fn enqueue_typing(
     resource_identifier: &str,
     parent_id: Option<String>,
 ) {
-    let sender = match ctx.platform_senders.get(platform) {
+    let sender = match ctx.platform_senders.read().await.get(platform) {
         Some(s) => s.clone(),
         None => return,
     };

@@ -26,8 +26,10 @@ pub(crate) async fn setup_plugin_handler(
     let data_dir = state.data_dir.clone();
     let data_dir_for_blocking = data_dir.clone();
     let name_clone = name.clone();
+    let p_type_clone = p_type.clone();
     let detail = match tokio::task::spawn_blocking(move || {
-        plugins_yaml::get_plugin(&data_dir_for_blocking, &name_clone)
+        let pt = plugins_yaml::PluginYamlType::from_type_str(&p_type_clone);
+        plugins_yaml::get_plugin(&data_dir_for_blocking, &name_clone, &pt)
     })
     .await
     .unwrap_or_else(|e| Err(err_str!("Task join error: {}", e)))

@@ -124,14 +124,18 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
 
 /// GET /api/plugins/{type}/{source}/{name}: get single plugin detail.
 pub(crate) async fn get_plugin_handler(
-    Path((_p_type, _source, name)): Path<(String, String, String)>,
+    Path((p_type, _source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     let data_dir = state.data_dir.clone();
     let name_clone = name.clone();
-    match tokio::task::spawn_blocking(move || plugins_yaml::get_plugin(&data_dir, &name_clone))
-        .await
-        .unwrap_or_else(|e| Err(err_str!("Task join error: {}", e)))
+    let p_type_clone = p_type.clone();
+    match tokio::task::spawn_blocking(move || {
+        let pt = crate::plugins_yaml::PluginYamlType::from_type_str(&p_type_clone);
+        plugins_yaml::get_plugin(&data_dir, &name_clone, &pt)
+    })
+    .await
+    .unwrap_or_else(|e| Err(err_str!("Task join error: {}", e)))
     {
         Ok(Some(mut detail)) => {
             // Resolve $secret: references in resolved_env

@@ -120,7 +120,7 @@ pub(crate) async fn install_plugin_handler(
             }
 
             // 6. Return the installed plugin detail
-            match plugins_yaml::get_plugin(data_dir, &name) {
+            match plugins_yaml::get_plugin(data_dir, &name, &yaml_type) {
                 Ok(Some(detail)) => {
                     info!("Installed plugin '{}' successfully", name);
                     (
@@ -187,7 +187,7 @@ pub(crate) async fn reinstall_plugin_handler(
             Err(response) => return response.into_response(),
         };
 
-    let _yaml_type = resolved.yaml_type;
+    let yaml_type = resolved.yaml_type;
     let category = resolved.category.clone();
     let plugin_dir = resolved.plugin_dir;
     let _source = category_to_source(&category);
@@ -216,7 +216,7 @@ pub(crate) async fn reinstall_plugin_handler(
         };
 
     // 5. Re-scan from disk and hot-reload
-    match plugins_yaml::get_plugin(data_dir, &name) {
+    match plugins_yaml::get_plugin(data_dir, &name, &yaml_type) {
         Ok(Some(detail)) => {
             // 6. If this is a tool (MCP) or platform plugin, restart the
             //    subprocess so the newly compiled binary takes effect immediately.
@@ -291,7 +291,7 @@ pub(crate) async fn install_url_handler(
         true,
         serde_json::json!({}),
     ) {
-        Ok(_entry) => match plugins_yaml::get_plugin(&state.data_dir, &manifest.name) {
+        Ok(_entry) => match plugins_yaml::get_plugin(&state.data_dir, &manifest.name, &yaml_type) {
             Ok(Some(detail)) => {
                 info!(
                     "Successfully installed plugin '{}' version {} from {}",
@@ -551,7 +551,7 @@ pub(crate) async fn download_plugin_handler(
         tracing::warn!("[plugins] Download: failed to set YAML entry: {:?}", e);
     }
 
-    match plugins_yaml::get_plugin(data_dir, &name) {
+    match plugins_yaml::get_plugin(data_dir, &name, &yaml_type) {
         Ok(Some(detail)) => {
             info!("Downloaded remote plugin '{}' successfully", name);
             (

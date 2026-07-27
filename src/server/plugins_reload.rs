@@ -7,6 +7,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use crate::platform::Platform;
 use crate::server::AppState;
 
 /// Read a `.env` file and set all key=value pairs as environment variables.
@@ -43,6 +44,8 @@ pub fn refresh_env_from_file(env_path: &str) -> u32 {
 }
 
 /// Trigger a hot-reload of a platform plugin after its config has been updated.
+/// If the platform is already running, a restart is signalled.
+/// If the platform is NOT running (e.g. enabled after boot), it is started dynamically.
 pub(crate) async fn reload_platform_plugin(state: &Arc<AppState>, name: &str) {
     tracing::info!("Reloading platform plugin '{}' after config update", name);
 
@@ -54,12 +57,14 @@ pub(crate) async fn reload_platform_plugin(state: &Arc<AppState>, name: &str) {
         );
     }
 
+    // Check if the platform is already running (has registered restart signals)
     let signal = {
         let signals = state.platform_restart_signals.lock().await;
         signals.get(name).cloned()
     };
 
-    if let Some((restart_count, restart_notify)) = signal {
+    if let Some((restart_count, _stopped, restart_notify)) = signal {
+        // Platform is running — signal a restart
         restart_count.fetch_add(1, Ordering::SeqCst);
         restart_notify.notify_one();
         tracing::info!(
@@ -68,9 +73,187 @@ pub(crate) async fn reload_platform_plugin(state: &Arc<AppState>, name: &str) {
             restart_count.load(Ordering::SeqCst)
         );
     } else {
+        // Platform is NOT running — start it dynamically
+        tracing::info!(
+            "Platform plugin '{}' is not currently running — starting dynamically",
+            name
+        );
+        if let Err(e) = start_platform_plugin(state, name).await {
+            tracing::error!("Failed to start platform plugin '{}': {}", name, e);
+        }
+    }
+}
+
+/// Start a platform plugin dynamically (after boot, when enabled via API).
+///
+/// Creates a new `ExternalPlatformClient`, registers its restart signals,
+/// sets up the outbound message channel, adds the sender to the shared
+/// platform senders map, and spawns the client's main loop in a tokio task.
+pub(crate) async fn start_platform_plugin(state: &Arc<AppState>, name: &str) -> Result<(), String> {
+    tracing::info!("Starting platform plugin '{}' dynamically", name);
+
+    // 1. Load platform config from disk
+    let configs = crate::platform::external::load_plugins_config(&state.data_dir);
+    let plugin_config = match configs.into_iter().find(|c| c.name == name) {
+        Some(c) => {
+            if !c.enabled {
+                return Err(format!("Platform plugin '{}' is disabled in config", name));
+            }
+            c
+        }
+        None => {
+            return Err(format!(
+                "Platform plugin '{}' not found in plugin config",
+                name
+            ));
+        }
+    };
+
+    // 2. Create the ExternalPlatformClient
+    //    This automatically registers restart/stop signals in the shared map.
+    let client = Arc::new(
+        crate::platform::external::client::ExternalPlatformClient::new(
+            plugin_config.clone(),
+            &state.data_dir,
+            state.platform_restart_signals.clone(),
+        )
+        .await,
+    );
+
+    // 3. Create an outbound delivery channel (sender + receiver)
+    let (tx, rx) = crate::platform::queue::outbound_channel(1024);
+
+    // 4. Add the sender to the shared platform senders map
+    //    This must be done BEFORE spawning the client, so the agent can start
+    //    delivering messages immediately when the platform is ready.
+    {
+        let mut senders = state.app_context.platform_senders.write().await;
+        senders.insert(name.to_string(), tx);
+        tracing::info!("Registered outbound sender for platform plugin '{}'", name);
+    }
+
+    // 5. Register platform file readers (for read_attached_file tool)
+    //
+    // Load readers from the manifest-based config first (this is always
+    // empty for access_token because load_plugins_config only reads
+    // plugin.json, not the YAML state). Then also read the YAML entry
+    // config which may have access_token_name or access_token set.
+    let file_readers = crate::platform::external::build_platform_file_readers(
+        std::slice::from_ref(&plugin_config),
+    );
+    for (platform_name, reader) in file_readers {
+        state
+            .app_context
+            .platform_file_readers
+            .write()
+            .await
+            .insert(platform_name, reader);
+    }
+
+    // Also try reading the YAML state config for this platform, which
+    // may contain access_token (resolved from $secret:) or access_token_name.
+    let pt = crate::plugins_yaml::PluginYamlType::Platform;
+    if let Ok(Some(entry)) = crate::plugins_yaml::get_entry(&state.data_dir, &pt, name) {
+        if let Some(config_map) = entry.config.as_object() {
+            let access_token = config_map
+                .get("access_token")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+            let access_token_name = config_map
+                .get("access_token_name")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty());
+
+            let raw_token = access_token.or(access_token_name).unwrap_or("").to_string();
+            if !raw_token.is_empty() {
+                // Resolve $secret: references via the pool
+                let mut resolved_map = std::collections::HashMap::new();
+                resolved_map.insert("token".to_string(), raw_token);
+                crate::plugins_yaml::resolve_config_refs(&mut resolved_map, &state.pool).await;
+                let resolved_token = resolved_map.remove("token").unwrap_or_default();
+
+                if !resolved_token.is_empty() && !resolved_token.starts_with("$secret:") {
+                    let reader =
+                        crate::platform::external::HttpBearerFileReader::new(resolved_token);
+                    state
+                        .app_context
+                        .platform_file_readers
+                        .write()
+                        .await
+                        .insert(name.to_string(), Arc::new(reader));
+                    tracing::info!(
+                        "Registered file reader for platform '{}' from YAML config (resolved access_token)",
+                        name
+                    );
+                }
+            }
+        }
+    }
+
+    // 6. Spawn the client's start loop in a background task
+    let pool = state.pool.clone();
+    let name_for_spawn = name.to_string();
+    tokio::spawn(async move {
+        tracing::info!(
+            "Starting dynamically-enabled platform plugin: {}",
+            name_for_spawn
+        );
+        if let Err(e) = client.start(pool, rx).await {
+            tracing::error!(
+                "Platform plugin '{}' exited with error: {:?}",
+                name_for_spawn,
+                e
+            );
+        } else {
+            tracing::info!("Platform plugin '{}' stopped cleanly", name_for_spawn);
+        }
+    });
+
+    tracing::info!(
+        "Platform plugin '{}' started dynamically (task spawned)",
+        name
+    );
+    Ok(())
+}
+
+/// Stop a running platform plugin.
+///
+/// Sets the stopped flag in the shared restart signals, notifies the
+/// platform's outer loop, and removes the sender from the shared map
+/// so no further outbound messages are sent to this platform.
+pub(crate) async fn stop_platform_plugin(state: &Arc<AppState>, name: &str) {
+    tracing::info!("Stopping platform plugin '{}'", name);
+
+    // 1. Remove sender from the shared map so no more outbound messages
+    //    are sent to this platform.
+    {
+        let mut senders = state.app_context.platform_senders.write().await;
+        senders.remove(name);
+        tracing::info!("Removed outbound sender for platform plugin '{}'", name);
+    }
+
+    // 2. Remove platform file readers
+    {
+        let mut readers = state.app_context.platform_file_readers.write().await;
+        readers.remove(name);
+    }
+
+    // 3. Signal the running client to stop (set stopped flag + notify)
+    let signal = {
+        let mut signals = state.platform_restart_signals.lock().await;
+        signals.remove(name)
+    };
+
+    if let Some((_restart_count, stopped, restart_notify)) = signal {
+        stopped.store(true, Ordering::SeqCst);
+        restart_notify.notify_one();
+        tracing::info!(
+            "Set stop flag for platform plugin '{}': subprocess will exit",
+            name
+        );
+    } else {
         tracing::warn!(
-            "Platform plugin '{}' is not currently registered: restart flag not found. \
-             The new config will take effect on next omniagent start.",
+            "Platform plugin '{}' was not registered — already stopped or never started",
             name
         );
     }
