@@ -101,6 +101,7 @@ async fn run_server() -> AppResult<()> {
 
     // Load external platform plugins from config
     let external_plugins = platform::external::load_plugins_config(&data_dir);
+    let mut clients: Vec<Arc<dyn platform::Platform>> = Vec::new();
     for plugin_config in &external_plugins {
         if !plugin_config.enabled {
             tracing::info!("Skipping disabled platform plugin: {}", plugin_config.name);
@@ -112,12 +113,15 @@ async fn run_server() -> AppResult<()> {
             plugin_config.command,
             plugin_config.args.join(" ")
         );
-        let client = platform::external::client::ExternalPlatformClient::new(
-            plugin_config.clone(),
-            &data_dir,
-            platform_restart_signals.clone(),
-        )
-        .await;
+        let client = Arc::new(
+            platform::external::client::ExternalPlatformClient::new(
+                plugin_config.clone(),
+                &data_dir,
+                platform_restart_signals.clone(),
+            )
+            .await,
+        );
+        clients.push(client.clone());
         registry.register(Box::new(client));
     }
 
@@ -140,15 +144,15 @@ async fn run_server() -> AppResult<()> {
         crate::agent::plugin_manager::ActorPluginManager::new(mcp, external_clients.clone()),
     );
 
-    // Register platform-specific file readers for the read_attached_file tool
-    // Scans all configured platform plugins: any with an access_token in their
-    // config gets a generic HTTP Bearer file reader. No plugin names are hardcoded.
-    let file_readers = crate::platform::external::build_platform_file_readers(&external_plugins);
-    for (platform_name, reader) in file_readers {
-        ctx.platform_file_readers
+    // Register platform clients for the read_attached_file MCP tool
+    // Each platform plugin implements read_file internally, so the core
+    // never needs to know plugin-specific config fields like access_token.
+    // Just pass each client's Arc<dyn Platform> into the context.
+    for client in &clients {
+        ctx.platforms
             .write()
             .await
-            .insert(platform_name, reader);
+            .insert(client.name().to_string(), client.clone());
     }
 
     // Build the agent with shared mutable config

@@ -23,7 +23,7 @@ pub use queue::{OutboundEnvelope, OutboundReceiver, OutboundSender};
 /// A platform that can receive messages from external sources and send
 /// responses back to them.
 #[async_trait]
-pub trait Platform: Send + Sync {
+pub trait Platform: Send + Sync + std::fmt::Debug {
     fn name(&self) -> &str;
 
     /// Start the listener loop for this platform.
@@ -33,6 +33,41 @@ pub trait Platform: Send + Sync {
 
     #[allow(dead_code)]
     async fn send_response(&self, pool: &PgPool, message_id: i64) -> AppResult<()>;
+
+    /// Read a file from this platform by file_id.
+    ///
+    /// The platform plugin implements this by fetching the file content from
+    /// its own API using its own authentication. The core does not know about
+    /// platform-specific config fields like `access_token` — each plugin handles
+    /// file retrieval internally.
+    ///
+    /// Returns the raw file bytes on success. Returns an error if the platform
+    /// does not support file reading (default implementation).
+    async fn read_file(&self, _file_id: &str, _server_url: &str) -> AppResult<Vec<u8>> {
+        Err(crate::error::Error::Message(format!(
+            "Platform '{}' does not support file reading",
+            self.name()
+        )))
+    }
+}
+
+#[async_trait]
+impl<T: Platform + Send + Sync + ?Sized> Platform for Arc<T> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    async fn start(&self, pool: PgPool, receiver: OutboundReceiver) -> AppResult<()> {
+        (**self).start(pool, receiver).await
+    }
+
+    async fn send_response(&self, pool: &PgPool, message_id: i64) -> AppResult<()> {
+        (**self).send_response(pool, message_id).await
+    }
+
+    async fn read_file(&self, file_id: &str, server_url: &str) -> AppResult<Vec<u8>> {
+        (**self).read_file(file_id, server_url).await
+    }
 }
 
 /// Registry that holds all registered platform implementations.

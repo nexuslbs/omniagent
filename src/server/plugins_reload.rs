@@ -132,53 +132,16 @@ pub(crate) async fn start_platform_plugin(state: &Arc<AppState>, name: &str) -> 
         tracing::info!("Registered outbound sender for platform plugin '{}'", name);
     }
 
-    // 5. Register platform file readers (for read_attached_file tool)
-    //
-    // Load readers from the manifest-based config (always empty for
-    // access_token since load_plugins_config only reads plugin.json).
-    // Then merge in YAML entry config generically so build_platform_file_readers
-    // finds whatever config keys the platform plugin has set (e.g. access_token
-    // persisted by setup). This keeps the core agnostic to plugin field names.
-    // Resolve $secret: and $env: references so the file reader receives real values.
-    let mut merged_config = plugin_config.config.clone();
-
-    // Merge YAML entry config into the manifest config (YAML values win)
-    let pt = crate::plugins_yaml::PluginYamlType::Platform;
-    if let Ok(Some(entry)) = crate::plugins_yaml::get_entry(&state.data_dir, &pt, name) {
-        if let Some(config_map) = entry.config.as_object() {
-            for (key, value) in config_map {
-                if let Some(s) = value.as_str() {
-                    merged_config.insert(key.clone(), s.to_string());
-                }
-            }
-        }
-    }
-
-    // Resolve $secret: and $env: references so the file reader gets real values
-    crate::plugins_yaml::resolve_config_refs(&mut merged_config, &state.pool).await;
-
-    // Build a temporary PlatformPluginConfig with the merged config for
-    // build_platform_file_readers, which generically checks for access_token.
-    let reader_plugin_config = crate::platform::external::PlatformPluginConfig {
-        name: plugin_config.name.clone(),
-        enabled: plugin_config.enabled,
-        command: plugin_config.command.clone(),
-        args: plugin_config.args.clone(),
-        env: plugin_config.env.clone(),
-        config: merged_config,
-        max_retries: plugin_config.max_retries,
-    };
-    let file_readers = crate::platform::external::build_platform_file_readers(
-        std::slice::from_ref(&reader_plugin_config),
-    );
-    for (platform_name, reader) in file_readers {
-        state
-            .app_context
-            .platform_file_readers
-            .write()
-            .await
-            .insert(platform_name, reader);
-    }
+    // 5. Register platform client for the read_attached_file MCP tool
+    // The platform plugin implements read_file internally, so the core
+    // stays plugin-agnostic — no knowledge of field names like access_token.
+    // Just store the Arc<dyn Platform> in AppContext for the MCP tool to use.
+    state
+        .app_context
+        .platforms
+        .write()
+        .await
+        .insert(name.to_string(), client.clone() as Arc<dyn crate::platform::Platform>);
 
     // 6. Spawn the client's start loop in a background task
     let pool = state.pool.clone();
@@ -222,10 +185,10 @@ pub(crate) async fn stop_platform_plugin(state: &Arc<AppState>, name: &str) {
         tracing::info!("Removed outbound sender for platform plugin '{}'", name);
     }
 
-    // 2. Remove platform file readers
+    // 2. Remove platform from the shared platforms map (for read_attached_file)
     {
-        let mut readers = state.app_context.platform_file_readers.write().await;
-        readers.remove(name);
+        let mut platforms = state.app_context.platforms.write().await;
+        platforms.remove(name);
     }
 
     // 3. Signal the running client to stop (set stopped flag + notify)

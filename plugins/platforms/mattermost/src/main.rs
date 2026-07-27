@@ -1132,6 +1132,11 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let is_setup_mode = args.get(1).map(|s| s.as_str()) == Some("setup");
 
+    // Check if we're in read-file mode (one-shot file retrieval)
+    if args.get(1).map(|s| s.as_str()) == Some("read-file") {
+        return handle_read_file().await;
+    }
+
     // Stdio reader/writer
     let stdin = tokio::io::stdin();
     let reader = BufReader::new(stdin);
@@ -2116,6 +2121,145 @@ async fn create_first_user(
     );
 
     Ok(user)
+}
+
+// ---------------------------------------------------------------------------
+// Read-File Handler (one-shot, invoked as "mattermost-platform read-file")
+// ---------------------------------------------------------------------------
+
+/// Handle a one-shot read-file request. Reads file_id and server_url from
+/// stdin, fetches the file from Mattermost API using the plugin's own access
+/// token (resolved from secrets API), and outputs base64-encoded content on
+/// stdout.
+async fn handle_read_file() -> Result<()> {
+    use std::io::{BufRead, Write};
+
+    // Read request from stdin (single JSON line: {"file_id": "...", "server_url": "..."})
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let request: serde_json::Value = serde_json::from_str(line.trim())?;
+
+    let file_id = request["file_id"].as_str().unwrap_or("");
+    let server_url = request["server_url"].as_str().unwrap_or("");
+
+    if file_id.is_empty() || server_url.is_empty() {
+        let err = serde_json::json!({
+            "error": {"code": -1, "message": "file_id and server_url are required"}
+        });
+        let mut stdout = std::io::stdout();
+        writeln!(stdout, "{}", serde_json::to_string(&err)?)?;
+        stdout.flush()?;
+        return Ok(());
+    }
+
+    // Get OMNI_DIR from environment to read our own config
+    let omni_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| ".".to_string());
+
+    // Read the platform YAML entry to get our access_token_name
+    let yaml_path = format!("{}/plugins.yml", omni_dir);
+    let plugin_name = "mattermost";
+
+    let access_token = if let Ok(content) = std::fs::read_to_string(&yaml_path) {
+        if let Ok(yaml_doc) = content.parse::<serde_yaml::Value>() {
+            if let Some(platforms) = yaml_doc.get("platforms") {
+                if let Some(plugin) = platforms.get(plugin_name) {
+                    if let Some(config) = plugin.get("config") {
+                        // Try access_token first, then access_token_name
+                        if let Some(token) = config.get("access_token").and_then(|v| v.as_str()) {
+                            if !token.is_empty() {
+                                Some(token.to_string())
+                            } else {
+                                None
+                            }
+                        } else if let Some(name) = config.get("access_token_name").and_then(|v| v.as_str()) {
+                            if !name.is_empty() {
+                                // Resolve the secret via omniagent secrets API
+                                let client = reqwest::Client::new();
+                                let secret_url = format!("http://localhost:8080/api/secrets/{}", name);
+                                match client.get(&secret_url).send().await {
+                                    Ok(resp) => {
+                                        if let Ok(body) = resp.json::<serde_json::Value>().await {
+                                            body.get("value").and_then(|v| v.as_str()).map(|s| s.to_string())
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    Err(_) => None,
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let token = match access_token {
+        Some(t) => t,
+        None => {
+            let err = serde_json::json!({
+                "error": {"code": -1, "message": "access_token not found for mattermost plugin"}
+            });
+            let mut stdout = std::io::stdout();
+            writeln!(stdout, "{}", serde_json::to_string(&err)?)?;
+            stdout.flush()?;
+            return Ok(());
+        }
+    };
+
+    // Fetch the file from Mattermost API
+    let base_url = server_url.trim_end_matches('/');
+    let url = format!("{}/api/v4/files/{}", base_url, file_id);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
+
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let err = serde_json::json!({
+            "error": {
+                "code": resp.status().as_u16(),
+                "message": format!("File fetch failed: status {} for file_id={}", resp.status(), file_id)
+            }
+        });
+        let mut stdout = std::io::stdout();
+        writeln!(stdout, "{}", serde_json::to_string(&err)?)?;
+        stdout.flush()?;
+        return Ok(());
+    }
+
+    let bytes = resp.bytes().await?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+
+    let result = serde_json::json!({
+        "content": b64
+    });
+
+    let mut stdout = std::io::stdout();
+    writeln!(stdout, "{}", serde_json::to_string(&result)?)?;
+    stdout.flush()?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

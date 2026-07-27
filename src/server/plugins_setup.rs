@@ -598,54 +598,9 @@ pub(crate) async fn setup_plugin_handler(
                 }
             }
 
-            // Register file reader for any bot_token returned by setup
-            if let Some(bot_token) = result
-                .get("bot_token")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                let reader =
-                    crate::platform::external::HttpBearerFileReader::new(bot_token.to_string());
-                state
-                    .app_context
-                    .platform_file_readers
-                    .write()
-                    .await
-                    .insert(name.clone(), Arc::new(reader));
-                tracing::info!(
-                    "Registered file reader for plugin '{}' (from setup bot_token)",
-                    name
-                );
-
-                // Persist the access_token to the YAML state config so it survives
-                // platform stop/start cycles. This is generic — any platform that
-                // returns a bot_token from setup gets it stored as access_token,
-                // which the file reader builder discovers on next start.
-                let yaml_type = crate::plugins_yaml::PluginYamlType::Platform;
-                if let Ok(Some(mut existing)) =
-                    crate::plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name)
-                {
-                    if let Some(map) = existing.config.as_object_mut() {
-                        map.insert(
-                            "access_token".to_string(),
-                            serde_json::Value::String(bot_token.to_string()),
-                        );
-                    }
-                    let _ = crate::plugins_yaml::set_entry(
-                        &state.data_dir,
-                        &yaml_type,
-                        &name,
-                        existing.enabled,
-                        existing.config,
-                    );
-                    tracing::info!(
-                        "Persisted access_token to YAML config for plugin '{}'",
-                        name
-                    );
-                }
-
-                reload_platform_plugin(&state, &name).await;
-            }
+            // The platform plugin implements read_file internally, so the core
+            // stays plugin-agnostic — no need to register file readers or persist
+            // access_token from setup. The platform client is already in AppContext.
 
             (
                 StatusCode::OK,
