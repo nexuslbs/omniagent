@@ -15,6 +15,7 @@
 //!   Polls channels for new posts and sends inbound_message notifications to stdout.
 
 use anyhow::{Context, Result};
+use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -2137,7 +2138,7 @@ async fn handle_read_file() -> Result<()> {
     // Read request from stdin (single JSON line: {"file_id": "...", "server_url": "..."})
     let stdin = std::io::stdin();
     let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
+    stdin.lock().read_line(&mut line)?;
     let request: serde_json::Value = serde_json::from_str(line.trim())?;
 
     let file_id = request["file_id"].as_str().unwrap_or("");
@@ -2161,7 +2162,7 @@ async fn handle_read_file() -> Result<()> {
     let plugin_name = "mattermost";
 
     let access_token = if let Ok(content) = std::fs::read_to_string(&yaml_path) {
-        if let Ok(yaml_doc) = content.parse::<serde_yaml::Value>() {
+        if let Ok(yaml_doc) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
             if let Some(platforms) = yaml_doc.get("platforms") {
                 if let Some(plugin) = platforms.get(plugin_name) {
                     if let Some(config) = plugin.get("config") {
