@@ -134,12 +134,42 @@ pub(crate) async fn start_platform_plugin(state: &Arc<AppState>, name: &str) -> 
 
     // 5. Register platform file readers (for read_attached_file tool)
     //
-    // Load readers from the manifest-based config first (this is always
-    // empty for access_token because load_plugins_config only reads
-    // plugin.json, not the YAML state). Then also read the YAML entry
-    // config which may have access_token_name or access_token set.
+    // Load readers from the manifest-based config (always empty for
+    // access_token since load_plugins_config only reads plugin.json).
+    // Then merge in YAML entry config generically so build_platform_file_readers
+    // finds whatever config keys the platform plugin has set (e.g. access_token
+    // persisted by setup). This keeps the core agnostic to plugin field names.
+    // Resolve $secret: and $env: references so the file reader receives real values.
+    let mut merged_config = plugin_config.config.clone();
+
+    // Merge YAML entry config into the manifest config (YAML values win)
+    let pt = crate::plugins_yaml::PluginYamlType::Platform;
+    if let Ok(Some(entry)) = crate::plugins_yaml::get_entry(&state.data_dir, &pt, name) {
+        if let Some(config_map) = entry.config.as_object() {
+            for (key, value) in config_map {
+                if let Some(s) = value.as_str() {
+                    merged_config.insert(key.clone(), s.to_string());
+                }
+            }
+        }
+    }
+
+    // Resolve $secret: and $env: references so the file reader gets real values
+    crate::plugins_yaml::resolve_config_refs(&mut merged_config, &state.pool).await;
+
+    // Build a temporary PlatformPluginConfig with the merged config for
+    // build_platform_file_readers, which generically checks for access_token.
+    let reader_plugin_config = crate::platform::external::PlatformPluginConfig {
+        name: plugin_config.name.clone(),
+        enabled: plugin_config.enabled,
+        command: plugin_config.command.clone(),
+        args: plugin_config.args.clone(),
+        env: plugin_config.env.clone(),
+        config: merged_config,
+        max_retries: plugin_config.max_retries,
+    };
     let file_readers = crate::platform::external::build_platform_file_readers(
-        std::slice::from_ref(&plugin_config),
+        std::slice::from_ref(&reader_plugin_config),
     );
     for (platform_name, reader) in file_readers {
         state
@@ -148,46 +178,6 @@ pub(crate) async fn start_platform_plugin(state: &Arc<AppState>, name: &str) -> 
             .write()
             .await
             .insert(platform_name, reader);
-    }
-
-    // Also try reading the YAML state config for this platform, which
-    // may contain access_token (resolved from $secret:) or access_token_name.
-    let pt = crate::plugins_yaml::PluginYamlType::Platform;
-    if let Ok(Some(entry)) = crate::plugins_yaml::get_entry(&state.data_dir, &pt, name) {
-        if let Some(config_map) = entry.config.as_object() {
-            let access_token = config_map
-                .get("access_token")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty());
-            let access_token_name = config_map
-                .get("access_token_name")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty());
-
-            let raw_token = access_token.or(access_token_name).unwrap_or("").to_string();
-            if !raw_token.is_empty() {
-                // Resolve $secret: references via the pool
-                let mut resolved_map = std::collections::HashMap::new();
-                resolved_map.insert("token".to_string(), raw_token);
-                crate::plugins_yaml::resolve_config_refs(&mut resolved_map, &state.pool).await;
-                let resolved_token = resolved_map.remove("token").unwrap_or_default();
-
-                if !resolved_token.is_empty() && !resolved_token.starts_with("$secret:") {
-                    let reader =
-                        crate::platform::external::HttpBearerFileReader::new(resolved_token);
-                    state
-                        .app_context
-                        .platform_file_readers
-                        .write()
-                        .await
-                        .insert(name.to_string(), Arc::new(reader));
-                    tracing::info!(
-                        "Registered file reader for platform '{}' from YAML config (resolved access_token)",
-                        name
-                    );
-                }
-            }
-        }
     }
 
     // 6. Spawn the client's start loop in a background task
