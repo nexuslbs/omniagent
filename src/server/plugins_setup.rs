@@ -16,8 +16,6 @@ use crate::plugin;
 use crate::plugins_yaml;
 use crate::server::AppState;
 
-use super::plugins_reload::*;
-
 pub(crate) async fn setup_plugin_handler(
     Path((p_type, source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
