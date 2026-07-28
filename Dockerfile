@@ -40,6 +40,7 @@ RUN apt-get update -qq && \
       ca-certificates \
       curl \
       git \
+      procps \
       pkg-config \
       libssl-dev \
       python3 \
