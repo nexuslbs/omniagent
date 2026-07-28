@@ -15,6 +15,9 @@ RUN mkdir -p src plugins .sqlx && \
     echo "fn main() {}" > src/main.rs && \
     cargo build --release 2>/dev/null || true
 
+# Install dev components needed for lint checks
+RUN rustup component add rustfmt clippy
+
 # Copy the rest of the source and build
 COPY . .
 ENV SQLX_OFFLINE=true
@@ -22,6 +25,14 @@ ENV SQLX_OFFLINE=true
 # builds everything — omniagent, db-migrations, and all plugin binaries
 # (platforms + tools). No hardcoded package lists.
 RUN python3 scripts/build.py
+
+# Run lint checks and unit tests. These always re-execute when source
+# changes (Docker layer after COPY . .). Matches CI pretest steps so
+# `docker build` catches failures that CI would catch on the runner.
+RUN cargo fmt --check && \
+    RUSTFLAGS="-D warnings" cargo check --release && \
+    cargo clippy --release -- -D warnings && \
+    cargo test --release
 
 # Stage 2: Docker CLI binary
 FROM docker:cli AS docker-cli
