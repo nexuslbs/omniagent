@@ -59,17 +59,17 @@ pub(crate) fn get_plugin_dir_for_category(
     name: &str,
 ) -> Result<String, String> {
     match category {
-        PluginCategory::Builtin => {
-            Ok(format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name))
-        }
-        PluginCategory::OmniStack => {
-            Ok(format!(
-                "{}/plugins/{}/{}",
-                data_dir,
-                yaml_type.type_dir_name(),
-                name
-            ))
-        }
+        PluginCategory::Builtin => Ok(format!(
+            "/app/plugins/{}/{}",
+            yaml_type.type_dir_name(),
+            name
+        )),
+        PluginCategory::OmniStack => Ok(format!(
+            "{}/plugins/{}/{}",
+            data_dir,
+            yaml_type.type_dir_name(),
+            name
+        )),
         PluginCategory::Remote => {
             let base = format!(
                 "{}/plugins/{}/.remote/{}",
