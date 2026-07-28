@@ -215,3 +215,45 @@ pub async fn handle_read_task_logs(args: Value, _ctx: AppContext) -> AppResult<M
         is_error: false,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_get_task_id_with_valid_string() {
+        let args = json!({"task_id": "abc-123"});
+        assert_eq!(get_task_id(&args), Some("abc-123".to_string()));
+    }
+
+    #[test]
+    fn test_get_task_id_missing_key() {
+        let args = json!({"other": "value"});
+        assert_eq!(get_task_id(&args), None);
+    }
+
+    #[test]
+    fn test_get_task_id_non_string_value() {
+        let args = json!({"task_id": 42});
+        assert_eq!(get_task_id(&args), None);
+    }
+
+    #[test]
+    fn test_get_task_id_null_value() {
+        let args = json!({"task_id": null});
+        assert_eq!(get_task_id(&args), None);
+    }
+
+    #[test]
+    fn test_get_task_id_empty_string() {
+        let args = json!({"task_id": ""});
+        assert_eq!(get_task_id(&args), Some("".to_string()));
+    }
+
+    #[test]
+    fn test_get_task_id_empty_object() {
+        let args = json!({});
+        assert_eq!(get_task_id(&args), None);
+    }
+}

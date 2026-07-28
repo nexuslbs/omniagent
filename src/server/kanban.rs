@@ -1652,3 +1652,166 @@ async fn list_subtasks_handler(
     let entries: Vec<SubtaskEntry> = rows.into_iter().map(subtask_row_to_entry).collect();
     ok_json(entries)
 }
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_status_valid() {
+        assert!(validate_status("backlog"));
+        assert!(validate_status("todo"));
+        assert!(validate_status("ready"));
+        assert!(validate_status("running"));
+        assert!(validate_status("review"));
+        assert!(validate_status("blocked"));
+        assert!(validate_status("done"));
+    }
+
+    #[test]
+    fn test_validate_status_invalid() {
+        assert!(!validate_status("invalid"));
+        assert!(!validate_status(""));
+        assert!(!validate_status("DONE"));
+    }
+
+    #[test]
+    fn test_task_row_to_entry_basic() {
+        let row = KanbanTaskRow {
+            id: "task-1".to_string(),
+            title: "Test Task".to_string(),
+            body: Some("A body".to_string()),
+            status: "todo".to_string(),
+            priority: Some(3),
+            position: Some(1),
+            assignee: Some("alice".to_string()),
+            channel_id: Some(42),
+            profile: Some("default".to_string()),
+            archived: Some(false),
+            template: None,
+            plan: None,
+            created_at: None,
+            updated_at: None,
+        };
+        let entry = task_row_to_entry(row);
+        assert_eq!(entry.id, "task-1");
+        assert_eq!(entry.priority, 3);
+        assert_eq!(entry.position, 1);
+        assert!(!entry.archived);
+    }
+
+    #[test]
+    fn test_task_row_to_entry_defaults() {
+        let row = KanbanTaskRow {
+            id: "task-2".to_string(),
+            title: "No Options".to_string(),
+            body: None,
+            status: "done".to_string(),
+            priority: None,
+            position: None,
+            assignee: None,
+            channel_id: None,
+            profile: None,
+            archived: None,
+            template: None,
+            plan: None,
+            created_at: None,
+            updated_at: None,
+        };
+        let entry = task_row_to_entry(row);
+        assert_eq!(entry.priority, 0);
+        assert_eq!(entry.position, 0);
+        assert!(!entry.archived);
+        assert_eq!(entry.created_at, None);
+    }
+
+    #[test]
+    fn test_dep_row_to_entry() {
+        use chrono::TimeZone;
+        let dt = chrono::Utc.with_ymd_and_hms(2026, 1, 15, 10, 30, 0).unwrap();
+        let row = DependencyRow {
+            id: "dep-1".to_string(),
+            title: "Depends on X".to_string(),
+            status: "todo".to_string(),
+            priority: Some(2),
+            created_at: Some(dt),
+        };
+        let entry = dep_row_to_entry(row);
+        assert_eq!(entry.id, "dep-1");
+        assert_eq!(entry.priority, 2);
+        assert!(entry.created_at.unwrap().contains("2026-01-15T10:30:00"));
+    }
+
+    #[test]
+    fn test_dep_row_to_entry_defaults() {
+        let row = DependencyRow {
+            id: "dep-2".to_string(),
+            title: "No priority".to_string(),
+            status: "blocked".to_string(),
+            priority: None,
+            created_at: None,
+        };
+        let entry = dep_row_to_entry(row);
+        assert_eq!(entry.priority, 0);
+        assert_eq!(entry.created_at, None);
+    }
+
+    #[test]
+    fn test_history_row_to_entry() {
+        let row = HistoryRow {
+            id: 1,
+            kanban_task_id: "task-1".to_string(),
+            action: "status_change".to_string(),
+            initial_board: Some("todo".to_string()),
+            final_board: Some("done".to_string()),
+            previous_values: None,
+            created_at: Some("2026-01-15T10:30:00Z".to_string()),
+        };
+        let entry = history_row_to_entry(row);
+        assert_eq!(entry.id, 1);
+        assert_eq!(entry.action, "status_change");
+        assert_eq!(entry.initial_board, Some("todo".to_string()));
+        assert_eq!(entry.created_at, Some("2026-01-15T10:30:00Z".to_string()));
+    }
+
+    #[test]
+    fn test_subtask_row_to_entry() {
+        use chrono::TimeZone;
+        let dt = chrono::Utc.with_ymd_and_hms(2026, 2, 1, 8, 0, 0).unwrap();
+        let row = SubtaskRow {
+            id: 10,
+            description: "Do the thing".to_string(),
+            status: Some("done".to_string()),
+            priority: Some(1),
+            thread_id: 123,
+            thread_title: Some("Main thread".to_string()),
+            created_at: Some(dt),
+            updated_at: Some(dt),
+        };
+        let entry = subtask_row_to_entry(row);
+        assert_eq!(entry.id, 10);
+        assert_eq!(entry.description, "Do the thing");
+        assert_eq!(entry.priority, 1);
+        assert_eq!(entry.thread_id, 123);
+    }
+
+    #[test]
+    fn test_subtask_row_to_entry_defaults() {
+        let row = SubtaskRow {
+            id: 11,
+            description: "Another subtask".to_string(),
+            status: None,
+            priority: None,
+            thread_id: 456,
+            thread_title: None,
+            created_at: None,
+            updated_at: None,
+        };
+        let entry = subtask_row_to_entry(row);
+        assert_eq!(entry.priority, 0);
+        assert_eq!(entry.status, None);
+        assert_eq!(entry.created_at, None);
+    }
+}
