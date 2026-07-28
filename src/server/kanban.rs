@@ -1730,7 +1730,9 @@ mod tests {
     #[test]
     fn test_dep_row_to_entry() {
         use chrono::TimeZone;
-        let dt = chrono::Utc.with_ymd_and_hms(2026, 1, 15, 10, 30, 0).unwrap();
+        let dt = chrono::Utc
+            .with_ymd_and_hms(2026, 1, 15, 10, 30, 0)
+            .unwrap();
         let row = DependencyRow {
             id: "dep-1".to_string(),
             title: "Depends on X".to_string(),

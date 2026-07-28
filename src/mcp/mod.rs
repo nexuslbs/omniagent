@@ -918,7 +918,10 @@ mod tests {
 
     #[test]
     fn test_tool_qualify_redundant_prefix() {
-        assert_eq!(tool_qualify("filesystem", "filesystem_read"), "filesystem_read");
+        assert_eq!(
+            tool_qualify("filesystem", "filesystem_read"),
+            "filesystem_read"
+        );
     }
 
     #[test]
@@ -971,7 +974,10 @@ mod tests {
 
     #[test]
     fn test_levenshtein_single_diff() {
-        assert_eq!(levenshtein_distance("filesystem_read", "filesystem_reax"), 1);
+        assert_eq!(
+            levenshtein_distance("filesystem_read", "filesystem_reax"),
+            1
+        );
     }
 
     #[test]
@@ -1051,10 +1057,7 @@ mod tests {
     #[test]
     fn test_registry_register_all() {
         let mut registry = McpRegistry::new();
-        let tools = vec![
-            make_tool("read", None, 30),
-            make_tool("write", None, 30),
-        ];
+        let tools = vec![make_tool("read", None, 30), make_tool("write", None, 30)];
         registry.register_all(tools);
         assert_eq!(registry.all().len(), 2);
     }
@@ -1120,7 +1123,10 @@ mod tests {
     #[test]
     fn test_get_timeout_secs_not_found_default() {
         let registry = McpRegistry::new();
-        assert_eq!(registry.get_timeout_secs("nonexistent"), DEFAULT_TOOL_TIMEOUT_SECS);
+        assert_eq!(
+            registry.get_timeout_secs("nonexistent"),
+            DEFAULT_TOOL_TIMEOUT_SECS
+        );
     }
 
     #[test]

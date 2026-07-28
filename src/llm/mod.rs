@@ -1274,7 +1274,10 @@ mod tests {
     #[test]
     fn test_provider_throttle_new_defaults() {
         let throttle = ProviderThrottle::new();
-        assert_eq!(throttle.max_permits(), ProviderThrottle::DEFAULT_MAX_CONCURRENT);
+        assert_eq!(
+            throttle.max_permits(),
+            ProviderThrottle::DEFAULT_MAX_CONCURRENT
+        );
     }
 
     #[test]
