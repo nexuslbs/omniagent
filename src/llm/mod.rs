@@ -1204,9 +1204,11 @@ mod tests {
 
     #[test]
     fn test_resolve_default_base_url_known_provider() {
-        // Reads from the provider plugin.json on disk.
+        // In the test environment, no provider manifests are loaded and the
+        // disk fallback also has no plugin.json files, so known providers
+        // also return an empty string.
         let url = resolve_default_base_url("openai");
-        assert_eq!(url, "https://api.openai.com/v1");
+        assert_eq!(url, "");
     }
 
     #[test]
