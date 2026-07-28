@@ -1203,14 +1203,15 @@ mod tests {
     // without panicking.
 
     #[test]
-    fn test_resolve_default_base_url_known_provider_returns_empty_in_test() {
-        // Without provider manifests, known providers return empty string.
+    fn test_resolve_default_base_url_known_provider() {
+        // Reads from the provider plugin.json on disk.
         let url = resolve_default_base_url("openai");
-        assert_eq!(url, "");
+        assert_eq!(url, "https://api.openai.com/v1");
     }
 
     #[test]
     fn test_resolve_default_base_url_anthropic() {
+        // No anthropic plugin.json on disk → returns empty.
         let url = resolve_default_base_url("anthropic");
         assert_eq!(url, "");
     }
