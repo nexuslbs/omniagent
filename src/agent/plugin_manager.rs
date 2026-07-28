@@ -275,3 +275,115 @@ impl PluginManager for ActorPluginManager {
         rx.await.unwrap_or(Err("Actor channel closed".to_string()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::external::client::ExternalMcpClients;
+    use crate::mcp::{AppContext, McpToolHandler, McpToolResult};
+    use serde_json::{json, Value};
+
+    fn make_test_handler() -> McpToolHandler {
+        Arc::new(|_args: Value, _ctx: AppContext| {
+            Box::pin(async {
+                Ok(McpToolResult {
+                    call_id: String::new(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                })
+            })
+        })
+    }
+
+    fn make_test_tool(name: &str) -> McpTool {
+        McpTool {
+            name: name.to_string(),
+            full_name: name.to_string(),
+            description: "test".to_string(),
+            input_schema: json!({"type": "object"}),
+            server_name: None,
+            timeout_secs: 30,
+            handler: make_test_handler(),
+        }
+    }
+
+    fn make_test_manager() -> ActorPluginManager {
+        ActorPluginManager::new(McpRegistry::new(), Arc::new(ExternalMcpClients::new()))
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_registry_empty() {
+        let mgr = make_test_manager();
+        let registry = mgr.snapshot_registry().await;
+        assert!(registry.all().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_all_tool_names_empty() {
+        let mgr = make_test_manager();
+        let names = mgr.all_tool_names().await;
+        assert!(names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_register_tools_then_snapshot() {
+        let mgr = make_test_manager();
+        mgr.register_tools(vec![make_test_tool("tool_a"), make_test_tool("tool_b")])
+            .await;
+
+        let registry = mgr.snapshot_registry().await;
+        let names: Vec<&str> = registry.all().iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"tool_a"));
+        assert!(names.contains(&"tool_b"));
+        assert_eq!(registry.all().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_all_tool_names_after_register() {
+        let mgr = make_test_manager();
+        mgr.register_tools(vec![make_test_tool("tool_a"), make_test_tool("tool_b")])
+            .await;
+
+        let names = mgr.all_tool_names().await;
+        assert!(names.contains(&"tool_a".to_string()));
+        assert!(names.contains(&"tool_b".to_string()));
+        assert_eq!(names.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_remove_server_tools() {
+        let mut tool_a = make_test_tool("tool_a");
+        tool_a.server_name = Some("server1".to_string());
+        tool_a.full_name = "server1_tool-a".to_string();
+
+        let mut tool_b = make_test_tool("tool_b");
+        tool_b.server_name = Some("server1".to_string());
+        tool_b.full_name = "server1_tool-b".to_string();
+
+        let mut tool_c = make_test_tool("tool_c");
+        tool_c.server_name = Some("server2".to_string());
+        tool_c.full_name = "server2_tool-c".to_string();
+
+        let mgr = make_test_manager();
+        mgr.register_tools(vec![tool_a, tool_b, tool_c]).await;
+
+        let removed = mgr.remove_server_tools("server1").await;
+        assert_eq!(removed.len(), 2);
+        assert!(removed.contains(&"server1_tool-a".to_string()));
+        assert!(removed.contains(&"server1_tool-b".to_string()));
+
+        let names = mgr.all_tool_names().await;
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0], "tool_c");
+    }
+
+    #[tokio::test]
+    async fn test_actor_can_be_cloned() {
+        let mgr = make_test_manager();
+        let mgr2 = mgr.clone();
+        mgr2.register_tools(vec![make_test_tool("cloned_tool")])
+            .await;
+        let names = mgr.all_tool_names().await;
+        assert!(names.contains(&"cloned_tool".to_string()));
+    }
+}

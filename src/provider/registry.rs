@@ -70,3 +70,75 @@ impl Default for ProviderRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_is_empty() {
+        let registry = ProviderRegistry::new();
+        assert!(!registry.has_provider("nonexistent"));
+        assert!(registry.get_cloned("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_register_and_has_provider() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("test-provider", "echo", &["hello".to_string()]);
+        assert!(registry.has_provider("test-provider"));
+    }
+
+    #[test]
+    fn test_register_and_get_cloned() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("test-provider", "echo", &["hello".to_string()]);
+        let client = registry.get_cloned("test-provider");
+        assert!(client.is_some());
+    }
+
+    #[test]
+    fn test_get_cloned_missing_returns_none() {
+        let registry = ProviderRegistry::new();
+        assert!(registry.get_cloned("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_remove_removes_provider() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("test-provider", "echo", &["hello".to_string()]);
+        assert!(registry.has_provider("test-provider"));
+        registry.remove("test-provider");
+        assert!(!registry.has_provider("test-provider"));
+    }
+
+    #[test]
+    fn test_double_register_replaces() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("p1", "echo", &["a".to_string()]);
+        registry.register("p1", "cat", &["b".to_string()]);
+        assert!(registry.has_provider("p1"));
+        assert!(registry.get_cloned("p1").is_some());
+    }
+
+    #[test]
+    fn test_register_arc() {
+        let mut registry = ProviderRegistry::new();
+        let client = Arc::new(ExternalProviderClient::new("p1", "echo", &[]));
+        registry.register_arc("p1", client);
+        assert!(registry.has_provider("p1"));
+        assert!(registry.get_cloned("p1").is_some());
+    }
+
+    #[test]
+    fn test_has_provider_false_for_missing() {
+        let registry = ProviderRegistry::new();
+        assert!(!registry.has_provider("missing"));
+    }
+
+    #[test]
+    fn test_default_is_empty() {
+        let registry = ProviderRegistry::default();
+        assert!(registry.get_cloned("anything").is_none());
+    }
+}
