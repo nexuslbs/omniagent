@@ -122,22 +122,19 @@ fn read_plugins_from_yaml(data_dir: &str) -> Result<Vec<ReloadPluginInfo>, Strin
                             format!("{}/plugins/{}/{}/plugin.json", data_dir, type_dir, name)
                         }
                         "remote" => {
-                            if let Some(remote) = crate::plugins_yaml::get_remote_plugin(
+                            let remote = crate::plugins_yaml::get_remote_plugin(
                                 data_dir,
                                 &crate::plugins_yaml::PluginYamlType::Provider,
                                 name,
-                            ) {
-                                let subpath = remote.path.as_deref().unwrap_or("");
-                                format!(
-                                    "{}/plugins/{}/.remote/{}/{}/plugin.json",
-                                    data_dir, type_dir, name, subpath
-                                )
-                            } else {
-                                format!(
-                                    "{}/plugins/{}/.remote/{}/plugin.json",
-                                    data_dir, type_dir, name
-                                )
-                            }
+                            ).ok_or_else(|| format!(
+                                "Remote provider '{}' has no entry in remote.yml. The plugin was registered with source=remote but no remote.yml entry exists. Expected an entry under 'providers' section. Re-register the plugin or update remote.yml manually.",
+                                name
+                            ))?;
+                            let subpath = remote.path.as_deref().unwrap_or("");
+                            format!(
+                                "{}/plugins/{}/.remote/{}/{}/plugin.json",
+                                data_dir, type_dir, name, subpath
+                            )
                         }
                         _ => format!("{}/plugins/{}/{}/plugin.json", data_dir, type_dir, name),
                     };
