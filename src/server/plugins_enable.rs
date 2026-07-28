@@ -57,13 +57,20 @@ pub(crate) async fn enable_plugin_handler(
         }
     }
     let existing_remote = plugins_yaml::get_remote_plugin(&state.data_dir, &yaml_type, &name);
+    // Preserve the existing config (access_token_name, etc.) when enabling.
+    // The old call passed `serde_json::json!({})` which erased all config.
+    let existing_config = plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name)
+        .ok()
+        .flatten()
+        .map(|e| e.config)
+        .unwrap_or(serde_json::json!({}));
     match plugins_yaml::set_entry_with_source(
         &state.data_dir,
         &yaml_type,
         &name,
         true,
         &source,
-        serde_json::json!({}),
+        existing_config,
     ) {
         Ok(_entry) => {
             if source == "remote" {
@@ -119,13 +126,19 @@ pub(crate) async fn disable_plugin_handler(
         return e.into_response();
     }
     let yaml_type = plugins_yaml::PluginYamlType::from_type_str(&p_type);
+    // Preserve existing config when disabling — only toggle the enabled flag.
+    let existing_config = plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name)
+        .ok()
+        .flatten()
+        .map(|e| e.config)
+        .unwrap_or(serde_json::json!({}));
     match plugins_yaml::set_entry_with_source(
         &state.data_dir,
         &yaml_type,
         &name,
         false,
         &source,
-        serde_json::json!({}),
+        existing_config,
     ) {
         Ok(_entry) => {
             if yaml_type == plugins_yaml::PluginYamlType::Tool {
