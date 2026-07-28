@@ -1165,3 +1165,199 @@ impl LLMClient {
         })
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── resolve_llm_api_key ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_llm_api_key_valid() {
+        let result = resolve_llm_api_key(Some("sk-test-key-12345"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "sk-test-key-12345");
+    }
+
+    #[test]
+    fn test_resolve_llm_api_key_empty() {
+        let result = resolve_llm_api_key(Some(""));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_llm_api_key_none() {
+        let result = resolve_llm_api_key(None);
+        assert!(result.is_err());
+    }
+
+    // ── resolve_default_base_url ────────────────────────────────────────────
+    // NOTE: In the test environment without OMNI_DIR set and without provider
+    // plugin manifests on disk, PROVIDER_METADATA is empty and the fallback
+    // disk reads also fail, so resolve_default_base_url returns an empty string
+    // for all providers. These tests verify the function handles all cases
+    // without panicking.
+
+    #[test]
+    fn test_resolve_default_base_url_known_provider_returns_empty_in_test() {
+        // Without provider manifests, known providers return empty string.
+        let url = resolve_default_base_url("openai");
+        assert_eq!(url, "");
+    }
+
+    #[test]
+    fn test_resolve_default_base_url_anthropic() {
+        let url = resolve_default_base_url("anthropic");
+        assert_eq!(url, "");
+    }
+
+    #[test]
+    fn test_resolve_default_base_url_unknown() {
+        let url = resolve_default_base_url("nonexistent-provider");
+        assert_eq!(url, "");
+    }
+
+    #[test]
+    fn test_resolve_default_base_url_empty_name() {
+        let url = resolve_default_base_url("");
+        assert_eq!(url, "");
+    }
+
+    // ── resolve_default_model ───────────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_default_model_returns_none_in_test() {
+        // Without provider manifests, all providers return None.
+        let model = resolve_default_model("openai");
+        assert!(model.is_none());
+    }
+
+    #[test]
+    fn test_resolve_default_model_unknown() {
+        let model = resolve_default_model("nonexistent");
+        assert!(model.is_none());
+    }
+
+    #[test]
+    fn test_resolve_default_model_empty_name() {
+        let model = resolve_default_model("");
+        assert!(model.is_none());
+    }
+
+    // ── resolve_provider_api_mode ───────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_provider_api_mode_unknown_returns_default() {
+        // Without provider manifests, returns the default "chat_completions".
+        let mode = resolve_provider_api_mode("openai");
+        assert_eq!(mode, "chat_completions");
+    }
+
+    #[test]
+    fn test_resolve_provider_api_mode_unknown_provider() {
+        let mode = resolve_provider_api_mode("nonexistent");
+        assert_eq!(mode, "chat_completions");
+    }
+
+    #[test]
+    fn test_resolve_provider_api_mode_empty_name() {
+        let mode = resolve_provider_api_mode("");
+        assert_eq!(mode, "chat_completions");
+    }
+
+    // ── ProviderThrottle ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_provider_throttle_new_defaults() {
+        let throttle = ProviderThrottle::new();
+        assert_eq!(throttle.max_permits(), ProviderThrottle::DEFAULT_MAX_CONCURRENT);
+    }
+
+    #[test]
+    fn test_provider_throttle_with_custom_max() {
+        let throttle = ProviderThrottle::with_max_permits(2);
+        assert_eq!(throttle.max_permits(), 2);
+    }
+
+    #[test]
+    fn test_provider_throttle_available_permits_unknown_provider() {
+        // Without provider metadata, all providers are unknown.
+        let throttle = ProviderThrottle::new();
+        assert!(throttle.available_permits("openai").is_none());
+    }
+
+    #[test]
+    fn test_provider_throttle_default_max() {
+        assert_eq!(ProviderThrottle::DEFAULT_MAX_CONCURRENT, 5);
+    }
+
+    // ── ProviderId ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_provider_id_new_and_display() {
+        let pid = ProviderId::new("openai");
+        assert_eq!(pid.to_string(), "openai");
+        assert_eq!(pid.0, "openai");
+    }
+
+    #[test]
+    fn test_provider_id_equality() {
+        assert_eq!(ProviderId::new("a"), ProviderId::new("a"));
+        assert_ne!(ProviderId::new("a"), ProviderId::new("b"));
+    }
+
+    // ── ApiMode ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_api_mode_resolve_default() {
+        // Without metadata, defaults to ChatCompletions for unknown providers.
+        let mode = ApiMode::resolve("nonexistent", "gpt-4");
+        assert_eq!(mode, ApiMode::ChatCompletions);
+    }
+
+    #[test]
+    fn test_api_mode_equality() {
+        assert_eq!(ApiMode::ChatCompletions, ApiMode::ChatCompletions);
+        assert_eq!(ApiMode::AnthropicMessages, ApiMode::AnthropicMessages);
+        assert_ne!(ApiMode::ChatCompletions, ApiMode::AnthropicMessages);
+    }
+
+    // ── ChatMessage ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_chat_message_system() {
+        let msg = ChatMessage::system("You are a helpful assistant.");
+        assert_eq!(msg.role, "system");
+        assert_eq!(msg.content, "You are a helpful assistant.");
+        assert!(msg.tool_call_id.is_none());
+        assert!(msg.tool_calls.is_none());
+        assert!(msg.name.is_none());
+    }
+
+    #[test]
+    fn test_chat_message_user() {
+        let msg = ChatMessage::user("Hello!");
+        assert_eq!(msg.role, "user");
+        assert_eq!(msg.content, "Hello!");
+    }
+
+    #[test]
+    fn test_chat_message_assistant() {
+        let msg = ChatMessage::assistant("I can help with that.");
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.content, "I can help with that.");
+    }
+
+    #[test]
+    fn test_chat_message_tool_result() {
+        let msg = ChatMessage::tool_result("call_123", "get_weather", "Sunny, 72°F");
+        assert_eq!(msg.role, "tool");
+        assert_eq!(msg.content, "Sunny, 72°F");
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_123"));
+        assert_eq!(msg.name.as_deref(), Some("get_weather"));
+    }
+}

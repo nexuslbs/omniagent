@@ -145,6 +145,7 @@ impl AgentContext {
     }
 }
 
+
 impl AgentConfig {
     /// Load agent configuration at startup.
     ///
@@ -257,5 +258,137 @@ impl AgentConfig {
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
             default_profile: get("default_profile", "omni"),
         })
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── AgentConfig construction ────────────────────────────────────────────
+
+    #[test]
+    fn test_agent_config_default_like_construction() {
+        // Test that AgentConfig can be constructed with typical defaults.
+        let cfg = AgentConfig {
+            llm_api_key: "".to_string(),
+            default_provider: "openai".to_string(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            max_iterations_no_plan: 30,
+            max_iterations_plan: 120,
+            thread_summary_tokens: 2048,
+            max_unfinished_subtask_retries: 3,
+            delete_after_days: 30,
+            prompt_tool_name: "prompt_generate".to_string(),
+            compact_messages_tool_name: "prompt_compact-messages".to_string(),
+            prompt_log_level: "first".to_string(),
+            tool_bg_secs: 30,
+            database_url: "postgres://localhost:***@host:5432/db".to_string(),
+            database_readonly_url: "postgres://user:***@host:5432/db_ro".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+            platform_max_spawn_retries: 10,
+            max_inline_file_kb: 500,
+            default_profile: "custom".to_string(),
+        };
+        assert_eq!(cfg.default_provider, "openai");
+        assert_eq!(cfg.max_tokens, 4096);
+        assert_eq!(cfg.temperature, 0.7);
+        assert_eq!(cfg.host, "127.0.0.1");
+        assert_eq!(cfg.port, 3000);
+        assert_eq!(cfg.default_profile, "custom");
+        assert_eq!(cfg.database_url, "postgres://localhost:***@host:5432/db");
+        assert_eq!(cfg.database_readonly_url, "postgres://user:***@host:5432/db_ro");
+        assert_eq!(cfg.max_inline_file_kb, 500);
+        assert_eq!(cfg.platform_max_spawn_retries, 10);
+    }
+
+    #[test]
+    fn test_agent_config_complete_field_count() {
+        // AgentConfig has 21 fields. This test verifies all are present,
+        // by constructing a minimal config and checking all fields are accessible.
+        let cfg = AgentConfig {
+            llm_api_key: String::new(),
+            default_provider: String::new(),
+            max_tokens: 0,
+            temperature: 0.0,
+            max_iterations_no_plan: 0,
+            max_iterations_plan: 0,
+            thread_summary_tokens: 0,
+            max_unfinished_subtask_retries: 0,
+            delete_after_days: 0,
+            prompt_tool_name: String::new(),
+            compact_messages_tool_name: String::new(),
+            prompt_log_level: String::new(),
+            tool_bg_secs: 0,
+            database_url: "postgres://localhost:5432/omniagent".to_string(),
+            database_readonly_url: String::new(),
+            host: String::new(),
+            port: 0,
+            platform_max_spawn_retries: 0,
+            max_inline_file_kb: 0,
+            default_profile: String::new(),
+        };
+        // Verify a few key fields are accessible
+        assert_eq!(cfg.database_url, "postgres://localhost:5432/omniagent");
+        assert_eq!(cfg.max_tokens, 0);
+        assert_eq!(cfg.temperature, 0.0);
+    }
+
+    // ── config_snapshot ─────────────────────────────────────────────────────
+    // config_snapshot requires an AgentContext which needs PgPool, LLMClient,
+    // AppContext, and PluginManager — all infrastructure-heavy. We skip that
+    // test here since it would require real DB connections.
+
+    // ── from_env helper closure ─────────────────────────────────────────────
+    // The 'get' closure used inside from_env() is testable in isolation.
+
+    #[test]
+    fn test_from_env_get_closure_behavior() {
+        // Simulate the get closure logic used in from_env():
+        // let get = |key: &str, default: &str| -> String {
+        //     settings.get(key).cloned().unwrap_or_else(|| default.to_string())
+        // };
+        use std::collections::HashMap;
+
+        let mut settings = HashMap::new();
+        settings.insert("default_provider".to_string(), "custom".to_string());
+
+        let get = |key: &str, default: &str| -> String {
+            settings
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| default.to_string())
+        };
+
+        assert_eq!(get("default_provider", "openai"), "custom");
+        assert_eq!(get("nonexistent", "fallback"), "fallback");
+        assert_eq!(get("max_tokens", "4096"), "4096");
+    }
+
+    #[test]
+    fn test_get_closure_numeric_parsing() {
+        // Test the numeric parsing pattern used in from_env().
+        let parse_or_default = |val: &str, default: u32| -> u32 {
+            val.parse().unwrap_or(default)
+        };
+
+        assert_eq!(parse_or_default("4096", 2048), 4096);
+        assert_eq!(parse_or_default("abc", 2048), 2048);
+        assert_eq!(parse_or_default("0", 100), 0);
+    }
+
+    #[test]
+    fn test_get_closure_float_parsing() {
+        let parse_or_default = |val: &str, default: f32| -> f32 {
+            val.parse().unwrap_or(default)
+        };
+
+        assert_eq!(parse_or_default("0.7", 0.5), 0.7);
+        assert_eq!(parse_or_default("invalid", 0.5), 0.5);
+        assert_eq!(parse_or_default("1.0", 0.0), 1.0);
     }
 }

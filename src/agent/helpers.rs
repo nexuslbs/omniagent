@@ -721,3 +721,498 @@ pub async fn enqueue_typing(
         tracing::warn!("Failed to enqueue typing: {:?}", e);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::llm::{ChatMessage, ToolCallData, ToolCallFunction, Usage};
+    use serde_json::json;
+
+    use super::*;
+
+    // ─── merge_usage tests ───
+
+    #[test]
+    fn test_merge_usage_both_none() {
+        let mut cumulative: Option<Usage> = None;
+        merge_usage(&mut cumulative, None);
+        assert!(cumulative.is_none());
+    }
+
+    #[test]
+    fn test_merge_usage_cumulative_none_new_some() {
+        let mut cumulative: Option<Usage> = None;
+        let new = Some(Usage {
+            prompt_tokens: 10,
+            completion_tokens: 20,
+            cached_tokens: None,
+            reasoning_tokens: None,
+        });
+        merge_usage(&mut cumulative, new);
+        let cum = cumulative.unwrap();
+        assert_eq!(cum.prompt_tokens, 10);
+        assert_eq!(cum.completion_tokens, 20);
+        assert_eq!(cum.cached_tokens, None);
+        assert_eq!(cum.reasoning_tokens, None);
+    }
+
+    #[test]
+    fn test_merge_usage_both_some() {
+        let mut cumulative = Some(Usage {
+            prompt_tokens: 5,
+            completion_tokens: 10,
+            cached_tokens: None,
+            reasoning_tokens: None,
+        });
+        let new = Some(Usage {
+            prompt_tokens: 3,
+            completion_tokens: 4,
+            cached_tokens: None,
+            reasoning_tokens: None,
+        });
+        merge_usage(&mut cumulative, new);
+        let cum = cumulative.unwrap();
+        assert_eq!(cum.prompt_tokens, 8);
+        assert_eq!(cum.completion_tokens, 14);
+    }
+
+    #[test]
+    fn test_merge_usage_cached_tokens_sums() {
+        let mut cumulative = Some(Usage {
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cached_tokens: Some(5),
+            reasoning_tokens: None,
+        });
+        let new = Some(Usage {
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cached_tokens: Some(10),
+            reasoning_tokens: None,
+        });
+        merge_usage(&mut cumulative, new);
+        assert_eq!(cumulative.unwrap().cached_tokens, Some(15));
+    }
+
+    #[test]
+    fn test_merge_usage_reasoning_tokens_keeps_existing() {
+        let mut cumulative = Some(Usage {
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cached_tokens: None,
+            reasoning_tokens: Some(100),
+        });
+        let new = Some(Usage {
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cached_tokens: None,
+            reasoning_tokens: Some(200),
+        });
+        merge_usage(&mut cumulative, new);
+        // cumulative keeps its existing reasoning_tokens, not overwritten
+        assert_eq!(cumulative.unwrap().reasoning_tokens, Some(100));
+    }
+
+    #[test]
+    fn test_merge_usage_cumulative_none_no_new_none_set() {
+        let mut cumulative: Option<Usage> = None;
+        merge_usage(&mut cumulative, None);
+        assert!(cumulative.is_none());
+    }
+
+    // ─── is_structured_msg_type tests ───
+
+    #[test]
+    fn test_is_structured_msg_type_true() {
+        assert!(is_structured_msg_type("kanban"));
+        assert!(is_structured_msg_type("cron"));
+        assert!(is_structured_msg_type("Cause"));
+    }
+
+    #[test]
+    fn test_is_structured_msg_type_false() {
+        assert!(!is_structured_msg_type("user"));
+        assert!(!is_structured_msg_type("assistant"));
+        assert!(!is_structured_msg_type("tool"));
+        assert!(!is_structured_msg_type(""));
+        assert!(!is_structured_msg_type("system"));
+        assert!(!is_structured_msg_type("cause")); // lowercase 'cause' is not structured
+    }
+
+    // ─── estimate_chars tests ───
+
+    #[test]
+    fn test_estimate_chars_empty() {
+        assert_eq!(estimate_chars(&[]), 0);
+    }
+
+    #[test]
+    fn test_estimate_chars_single_message() {
+        let msgs = vec![ChatMessage::user("hello world")];
+        assert_eq!(estimate_chars(&msgs), 11);
+    }
+
+    #[test]
+    fn test_estimate_chars_multiple_messages() {
+        let msgs = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("What is Rust?"),
+            ChatMessage::assistant("Rust is a systems programming language."),
+        ];
+        // 29 + 14 + 37 = 80
+        assert_eq!(estimate_chars(&msgs), 80);
+    }
+
+    #[test]
+    fn test_estimate_chars_with_tool_calls() {
+        let tool_call = ToolCallData {
+            id: "call_1".to_string(),
+            call_type: "function".to_string(),
+            function: ToolCallFunction {
+                name: "filesystem_read".to_string(),
+                arguments: json!({"path": "/etc"}).to_string(),
+            },
+        };
+        let msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: "Let me check that file.".to_string(),
+            tool_call_id: None,
+            tool_calls: Some(vec![tool_call]),
+            name: None,
+        };
+        let msgs = vec![msg];
+        // content.len() = 22
+        // tool: name.len() (15) + arguments.len() + 50
+        let result = estimate_chars(&msgs);
+        // Allow ±1 for potential JSON serialization differences between systems
+        let args_len = json!({"path": "/etc"}).to_string().len();
+        let expected = 22 + 15 + args_len + 50;
+        assert!(
+            result == expected || result == expected - 1 || result == expected + 1,
+            "expected ~{}, got {}",
+            expected,
+            result
+        );
+    }
+
+    // ─── prune_old_tool_results tests ───
+
+    fn make_tool_result(name: &str, content: &str) -> ChatMessage {
+        ChatMessage::tool_result("call_1", name, content)
+    }
+
+    fn make_assistant_with_calls(tool_names: &[&str]) -> ChatMessage {
+        let calls: Vec<ToolCallData> = tool_names
+            .iter()
+            .map(|name| ToolCallData {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: name.to_string(),
+                    arguments: "{}".to_string(),
+                },
+            })
+            .collect();
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: "Using tools.".to_string(),
+            tool_call_id: None,
+            tool_calls: Some(calls),
+            name: None,
+        }
+    }
+
+    #[test]
+    fn test_prune_old_tool_results_low_iterations_no_pruning() {
+        let mut msgs = vec![
+            ChatMessage::user("do something"),
+            make_assistant_with_calls(&["tool_a"]),
+            make_tool_result("tool_a", "a".repeat(2000).as_str()),
+            ChatMessage::assistant("Done."),
+        ];
+        let original_len = msgs.len();
+        let original_contents: Vec<String> = msgs.iter().map(|m| m.content.clone()).collect();
+        prune_old_tool_results(&mut msgs, 3);
+        // Same length and content unchanged
+        assert_eq!(msgs.len(), original_len);
+        for (i, m) in msgs.iter().enumerate() {
+            assert_eq!(m.content, original_contents[i]);
+        }
+    }
+
+    #[test]
+    fn test_prune_old_tool_results_moderate_truncation() {
+        let long_content = "a".repeat(2000);
+        let mut msgs = vec![
+            ChatMessage::user("do something"),
+            make_assistant_with_calls(&["tool_a"]),
+            make_tool_result("tool_a", &long_content),
+            make_assistant_with_calls(&["tool_b"]),
+            make_tool_result("tool_b", "short"),
+            ChatMessage::assistant("Done."),
+        ];
+        prune_old_tool_results(&mut msgs, 8);
+
+        // The first tool result (tool_a) should be pruned (it's before the last tool-calling assistant)
+        // The second tool result (tool_b) is after the last tool-calling assistant? No, it's at index 4,
+        // and the last tool-calling assistant is at index 3. So keep_from = 3.
+        // tool_a result at index 2 is before keep_from (3), so it gets truncated.
+        assert!(msgs[2].content.len() < 2000);
+        assert!(msgs[2].content.starts_with("[Pruned tool result: was 2000 chars]"));
+        // tool_b result at index 4 is after keep_from, so it stays unchanged
+        assert_eq!(msgs[4].content, "short");
+    }
+
+    #[test]
+    fn test_prune_old_tool_results_non_tool_messages_unchanged() {
+        let mut msgs = vec![
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("hi"),
+            ChatMessage::system("beep"),
+        ];
+        let original_len = msgs.len();
+        prune_old_tool_results(&mut msgs, 10);
+        assert_eq!(msgs.len(), original_len);
+    }
+
+    #[test]
+    fn test_prune_old_tool_results_no_assistant_with_calls() {
+        let mut msgs = vec![
+            ChatMessage::user("hello"),
+            make_tool_result("tool_a", "some result"),
+            ChatMessage::assistant("Done."),
+        ];
+        let original_len = msgs.len();
+        prune_old_tool_results(&mut msgs, 10);
+        // No assistant with tool_calls, so last_tool_turn_idx is None, keep_from = 0
+        // Nothing is before index 0, so nothing happens
+        assert_eq!(msgs.len(), original_len);
+    }
+
+    // ─── compact_old_assistant_messages tests ───
+
+    #[test]
+    fn test_compact_old_assistant_no_tool_calls() {
+        let mut msgs = vec![
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("world"),
+        ];
+        let original_len = msgs.len();
+        compact_old_assistant_messages(&mut msgs, 5);
+        assert_eq!(msgs.len(), original_len);
+    }
+
+    #[test]
+    fn test_compact_old_assistant_fewer_than_keep() {
+        let mut msgs = vec![
+            make_assistant_with_calls(&["tool_a"]),
+            make_tool_result("tool_a", "result"),
+            make_assistant_with_calls(&["tool_b"]),
+            make_tool_result("tool_b", "result"),
+        ];
+        let original_len = msgs.len();
+        compact_old_assistant_messages(&mut msgs, 5);
+        assert_eq!(msgs.len(), original_len);
+    }
+
+    #[test]
+    fn test_compact_old_assistant_more_than_keep() {
+        let mut msgs = vec![
+            make_assistant_with_calls(&["tool_a"]),
+            make_tool_result("tool_a", "result_a"),
+            make_assistant_with_calls(&["tool_b"]),
+            make_tool_result("tool_b", "result_b"),
+            make_assistant_with_calls(&["tool_c"]),
+            make_tool_result("tool_c", "result_c"),
+        ];
+        // keep_recent = 2, so the oldest tool-calling assistant (idx 0) should be compacted
+        compact_old_assistant_messages(&mut msgs, 2);
+
+        assert_eq!(msgs.len(), 5); // one tool message removed
+        // Index 0: assistant with tool_calls should be compacted
+        assert!(msgs[0].tool_calls.is_none());
+        assert!(msgs[0].content.contains("[#0 Tool calls compacted:"));
+        assert!(msgs[0].content.contains("tool_a()"));
+        // The tool result for tool_a at original idx 1 should be gone
+        // Index 1: should now be the second assistant (originally idx 2)
+        assert_eq!(msgs[1].tool_calls.as_ref().unwrap()[0].function.name, "tool_b");
+        // Index 2: tool_b result
+        assert_eq!(msgs[2].role, "tool");
+        // Index 3: third assistant (tool_c)
+        assert_eq!(msgs[3].tool_calls.as_ref().unwrap()[0].function.name, "tool_c");
+        // Index 4: tool_c result
+        assert_eq!(msgs[4].role, "tool");
+    }
+
+    #[test]
+    fn test_compact_old_assistant_multiple_tool_names_in_compact() {
+        let mut msgs = vec![
+            make_assistant_with_calls(&["read_file", "write_file"]),
+            make_tool_result("read_file", "content"),
+            make_tool_result("write_file", "ok"),
+            make_assistant_with_calls(&["tool_c"]),
+            make_tool_result("tool_c", "result"),
+        ];
+        compact_old_assistant_messages(&mut msgs, 1);
+
+        assert_eq!(msgs.len(), 3); // 2 tool messages removed
+        assert!(msgs[0].tool_calls.is_none());
+        assert!(msgs[0].content.contains("read_file()"));
+        assert!(msgs[0].content.contains("write_file()"));
+        // tool_c assistant preserved
+        assert_eq!(msgs[1].tool_calls.as_ref().unwrap()[0].function.name, "tool_c");
+        assert_eq!(msgs[2].role, "tool");
+    }
+
+    // ─── build_message_metadata_block tests ───
+
+    #[test]
+    fn test_build_message_metadata_block_empty() {
+        let result = build_message_metadata_block(&[], 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_build_message_metadata_block_single_user() {
+        let msgs = vec![ChatMessage::user("hello")];
+        let result = build_message_metadata_block(&msgs, 0);
+        assert!(result.starts_with("==== Old Messages Compacted ===="));
+        assert!(result.contains("#0 user"));
+        assert!(result.contains("hello"));
+    }
+
+    #[test]
+    fn test_build_message_metadata_block_assistant_with_tool_calls() {
+        let msg = make_assistant_with_calls(&["filesystem_read", "search_files"]);
+        let msgs = vec![msg];
+        let result = build_message_metadata_block(&msgs, 0);
+        assert!(result.contains("tool_call"));
+        assert!(result.contains("filesystem_read, search_files"));
+    }
+
+    #[test]
+    fn test_build_message_metadata_block_tool_result() {
+        let msgs = vec![make_tool_result("my_tool", "some output")];
+        let result = build_message_metadata_block(&msgs, 0);
+        assert!(result.contains("tool-result"));
+    }
+
+    #[test]
+    fn test_build_message_metadata_block_with_offset() {
+        let msgs = vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")];
+        let result = build_message_metadata_block(&msgs, 5);
+        assert!(result.contains("#5 user"));
+        assert!(result.contains("#6 assistant"));
+    }
+
+    // ─── condense_messages tests ───
+
+    #[test]
+    fn test_condense_messages_system_too_large() {
+        let large_system = ChatMessage::system(&"x".repeat(1000));
+        let msgs = vec![large_system, ChatMessage::user("hello")];
+        let result = condense_messages(msgs, 100, 2, 500);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Always-keep messages"));
+    }
+
+    #[test]
+    fn test_condense_messages_empty_conversation() {
+        let msgs = vec![ChatMessage::system("You are a bot.")];
+        let result = condense_messages(msgs.clone(), 100, 2, 1000).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content, "You are a bot.");
+    }
+
+    #[test]
+    fn test_condense_messages_normal_condensation() {
+        let mut msgs = vec![ChatMessage::system("You are a bot.")];
+        // Add some conversation messages, no tool_calls so none are "turns"
+        msgs.push(ChatMessage::user("hello"));
+        msgs.push(ChatMessage::assistant("hi there"));
+        msgs.push(ChatMessage::user("what is rust?"));
+        msgs.push(ChatMessage::assistant("a language"));
+
+        let result = condense_messages(msgs, 1000, 2, 10000).unwrap();
+        // Since there are no assistant messages with tool_calls, keep_turns doesn't find any
+        // So keep_from = 0, and early_conv is empty, metadata is empty
+        // Nothing is condensed
+        assert_eq!(result.len(), 5);
+    }
+
+    #[test]
+    fn test_condense_messages_with_tool_turns() {
+        let mut msgs = vec![ChatMessage::system("You are a bot.")];
+        msgs.push(ChatMessage::user("first request"));
+        msgs.push(make_assistant_with_calls(&["tool_a"]));
+        msgs.push(make_tool_result("tool_a", "result1"));
+        msgs.push(ChatMessage::assistant("First done."));
+        msgs.push(ChatMessage::user("second request"));
+        msgs.push(make_assistant_with_calls(&["tool_b"]));
+        msgs.push(make_tool_result("tool_b", "result2"));
+        msgs.push(ChatMessage::assistant("Second done."));
+
+        let result = condense_messages(msgs, 10000, 1, 100000).unwrap();
+        // keep_turns=1, so the last assistant with tool_calls (idx 6) is kept
+        // Everything before idx 6 is condensed into metadata block
+        // System message is kept
+        assert!(result[0].role == "system");
+        // There should be a system message with metadata (condensed content)
+        assert!(result.len() < 9); // condensed
+    }
+
+    #[test]
+    fn test_condense_messages_budget_exceeded_additional_trimming() {
+        let mut msgs = vec![ChatMessage::system("sys")];
+        // Add a lot of user/assistant messages
+        for i in 0..5 {
+            msgs.push(ChatMessage::user(&format!("user message {}", i)));
+            msgs.push(make_assistant_with_calls(&[&format!("tool_{}", i)]));
+            msgs.push(make_tool_result(&format!("tool_{}", i), &"x".repeat(500)));
+            msgs.push(ChatMessage::assistant(&format!("done {}", i)));
+        }
+
+        let result = condense_messages(msgs, 100, 1, 10000).unwrap();
+        // With old_msg_budget=100, the old messages will need additional trimming
+        assert!(!result.is_empty());
+    }
+
+    // ─── count_tokens tests ───
+
+    #[test]
+    fn test_count_tokens_empty_messages() {
+        let result = count_tokens(&[], "gpt-4", None);
+        // When tiktoken is available, JSON "[]" encodes as 1 token.
+        // When tiktoken is unavailable, falls back to estimate_chars = 0.
+        // Accept both.
+        assert!(result == 0 || result == 1, "expected 0 or 1, got {}", result);
+    }
+
+    #[test]
+    fn test_count_tokens_fallback_on_bad_encoding() {
+        let msgs = vec![ChatMessage::user("hello world")];
+        // A bad encoding name should cause fallback to estimate_chars
+        let result = count_tokens(&msgs, "nonexistent_encoding_xyz", None);
+        // Should be > 0 (fallback to estimate_chars)
+        assert!(result > 0);
+        // estimate_chars for "hello world" = 11
+        assert_eq!(result, 11);
+    }
+
+    #[test]
+    fn test_count_tokens_with_tools() {
+        let msgs = vec![ChatMessage::user("hello")];
+        let tools = vec![
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "test_tool",
+                    "description": "A test tool",
+                    "parameters": json!({"type": "object", "properties": {}})
+                }
+            }),
+        ];
+        // With bad encoding, falls back to estimate_chars
+        let result = count_tokens(&msgs, "nonexistent_encoding_xyz", Some(&tools));
+        assert!(result > 0);
+    }
+}

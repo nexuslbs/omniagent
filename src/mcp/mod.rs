@@ -860,3 +860,320 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     }
     prev[b_len]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ─── truncate_content tests ───
+
+    #[test]
+    fn test_truncate_content_short_enough() {
+        assert_eq!(truncate_content("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_content_exact_boundary() {
+        assert_eq!(truncate_content("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_content_truncated() {
+        let result = truncate_content("hello world this is long", 5);
+        assert!(result.starts_with("hello"));
+        assert!(result.contains("[... truncated from"));
+    }
+
+    #[test]
+    fn test_truncate_content_empty() {
+        assert_eq!(truncate_content("", 10), "");
+    }
+
+    #[test]
+    fn test_truncate_content_multi_byte_utf8() {
+        // Use content with multi-byte characters and truncate
+        let result = truncate_content("héllo wörld", 5);
+        // Should not panic, should give some truncated string
+        // Note: truncation suffix can make result longer than original
+        assert!(result.starts_with("héllo") || result.starts_with("héll"));
+        assert!(result.contains("[... truncated from"));
+    }
+
+    #[test]
+    fn test_truncate_content_shows_correct_stats() {
+        let content = "hello world this is a long message";
+        let result = truncate_content(content, 10);
+        // Extract the actual length from the truncation note
+        assert!(result.contains("[... truncated from "));
+        assert!(result.contains(&format!("{}", content.len())));
+    }
+
+    // ─── tool_qualify tests ───
+
+    #[test]
+    fn test_tool_qualify_normal() {
+        assert_eq!(tool_qualify("filesystem", "read"), "filesystem_read");
+    }
+
+    #[test]
+    fn test_tool_qualify_redundant_prefix() {
+        assert_eq!(tool_qualify("filesystem", "filesystem_read"), "filesystem_read");
+    }
+
+    #[test]
+    fn test_tool_qualify_redundant_prefix_with_dash() {
+        assert_eq!(tool_qualify("my-srv", "my-srv-read"), "my-srv_read");
+    }
+
+    #[test]
+    fn test_tool_qualify_empty_after_stripping() {
+        assert_eq!(tool_qualify("fetch", "fetch"), "fetch_fetch");
+    }
+
+    #[test]
+    fn test_tool_qualify_underscore_to_dash_in_tool_name() {
+        assert_eq!(tool_qualify("server", "my_tool"), "server_my-tool");
+    }
+
+    #[test]
+    fn test_tool_qualify_redundant_with_dash_separator() {
+        assert_eq!(tool_qualify("server", "server.my_tool"), "server_my-tool");
+    }
+
+    #[test]
+    fn test_tool_qualify_redundant_with_underscore_separator() {
+        assert_eq!(tool_qualify("server", "server_my_tool"), "server_my-tool");
+    }
+
+    // ─── levenshtein_distance tests ───
+
+    #[test]
+    fn test_levenshtein_equal() {
+        assert_eq!(levenshtein_distance("hello", "hello"), 0);
+    }
+
+    #[test]
+    fn test_levenshtein_case_insensitive() {
+        assert_eq!(levenshtein_distance("Hello", "hello"), 0);
+    }
+
+    #[test]
+    fn test_levenshtein_completely_different() {
+        assert_eq!(levenshtein_distance("abc", "xyz"), 3);
+    }
+
+    #[test]
+    fn test_levenshtein_one_empty() {
+        assert_eq!(levenshtein_distance("", "hello"), 5);
+        assert_eq!(levenshtein_distance("hello", ""), 5);
+    }
+
+    #[test]
+    fn test_levenshtein_single_diff() {
+        assert_eq!(levenshtein_distance("filesystem_read", "filesystem_reax"), 1);
+    }
+
+    #[test]
+    fn test_levenshtein_insertion() {
+        assert_eq!(levenshtein_distance("cat", "cats"), 1);
+    }
+
+    #[test]
+    fn test_levenshtein_deletion() {
+        assert_eq!(levenshtein_distance("cats", "cat"), 1);
+    }
+
+    #[test]
+    fn test_levenshtein_substitution() {
+        assert_eq!(levenshtein_distance("kitten", "sitten"), 1);
+    }
+
+    #[test]
+    fn test_levenshtein_case_insensitive_mixed() {
+        assert_eq!(levenshtein_distance("ABC", "abc"), 0);
+        assert_eq!(levenshtein_distance("AbC", "aBc"), 0);
+    }
+
+    // ─── McpRegistry tests ───
+
+    fn make_test_handler() -> McpToolHandler {
+        Arc::new(|_args: Value, _ctx: AppContext| {
+            Box::pin(async {
+                Ok(McpToolResult {
+                    call_id: String::new(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                })
+            })
+        })
+    }
+
+    fn make_tool(name: &str, server: Option<&str>, timeout: u64) -> McpTool {
+        let full_name = if let Some(srv) = server {
+            tool_qualify(srv, name)
+        } else {
+            name.to_string()
+        };
+        McpTool {
+            name: name.to_string(),
+            full_name,
+            description: format!("Tool: {}", name),
+            input_schema: json!({"type": "object", "properties": {}}),
+            server_name: server.map(|s| s.to_string()),
+            timeout_secs: timeout,
+            handler: make_test_handler(),
+        }
+    }
+
+    #[test]
+    fn test_registry_new_is_empty() {
+        let registry = McpRegistry::new();
+        assert!(registry.all().is_empty());
+    }
+
+    #[test]
+    fn test_registry_register_and_get() {
+        let mut registry = McpRegistry::new();
+        let tool = make_tool("read", None, 30);
+        let name = tool.full_name.clone();
+        registry.register(tool);
+        assert!(registry.get(&name).is_some());
+        assert_eq!(registry.get(&name).unwrap().name, "read");
+    }
+
+    #[test]
+    fn test_registry_get_non_existent() {
+        let registry = McpRegistry::new();
+        assert!(registry.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_registry_register_all() {
+        let mut registry = McpRegistry::new();
+        let tools = vec![
+            make_tool("read", None, 30),
+            make_tool("write", None, 30),
+        ];
+        registry.register_all(tools);
+        assert_eq!(registry.all().len(), 2);
+    }
+
+    #[test]
+    fn test_registry_remove_by_server() {
+        let mut registry = McpRegistry::new();
+        registry.register(make_tool("read", Some("fs"), 30));
+        registry.register(make_tool("write", Some("fs"), 30));
+        registry.register(make_tool("other", Some("another"), 30));
+
+        let removed = registry.remove_by_server("fs");
+        assert_eq!(removed.len(), 2);
+        assert!(removed.iter().any(|n| n.contains("read")));
+        assert!(removed.iter().any(|n| n.contains("write")));
+        assert_eq!(registry.all().len(), 1);
+    }
+
+    #[test]
+    fn test_registry_remove_by_server_no_match() {
+        let mut registry = McpRegistry::new();
+        registry.register(make_tool("read", Some("fs"), 30));
+        let removed = registry.remove_by_server("nonexistent");
+        assert!(removed.is_empty());
+        assert_eq!(registry.all().len(), 1);
+    }
+
+    #[test]
+    fn test_registry_all() {
+        let mut registry = McpRegistry::new();
+        registry.register(make_tool("read", None, 30));
+        registry.register(make_tool("write", None, 60));
+        assert_eq!(registry.all().len(), 2);
+    }
+
+    #[test]
+    fn test_registry_allowed() {
+        let mut registry = McpRegistry::new();
+        registry.register(make_tool("read", None, 30));
+        registry.register(make_tool("write", None, 30));
+
+        let allowed_names = vec!["read".to_string()];
+        let allowed = registry.allowed(&allowed_names);
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed[0].name, "read");
+    }
+
+    #[test]
+    fn test_registry_allowed_empty_list() {
+        let mut registry = McpRegistry::new();
+        registry.register(make_tool("read", None, 30));
+        let allowed = registry.allowed(&[]);
+        assert!(allowed.is_empty());
+    }
+
+    #[test]
+    fn test_get_timeout_secs_found() {
+        let mut registry = McpRegistry::new();
+        registry.register(make_tool("read", None, 42));
+        assert_eq!(registry.get_timeout_secs("read"), 42);
+    }
+
+    #[test]
+    fn test_get_timeout_secs_not_found_default() {
+        let registry = McpRegistry::new();
+        assert_eq!(registry.get_timeout_secs("nonexistent"), DEFAULT_TOOL_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn test_to_openai_tools() {
+        let mut registry = McpRegistry::new();
+        registry.register(make_tool("my_tool", None, 30));
+        let allowed = vec!["my_tool".to_string()];
+        let openai_tools = registry.to_openai_tools(&allowed);
+        assert_eq!(openai_tools.len(), 1);
+
+        let tool_def = &openai_tools[0];
+        assert_eq!(tool_def["type"], "function");
+        assert_eq!(tool_def["function"]["name"], "my_tool");
+        assert_eq!(tool_def["function"]["description"], "Tool: my_tool");
+    }
+
+    #[test]
+    fn test_to_openai_tools_all() {
+        let mut registry = McpRegistry::new();
+        registry.register(make_tool("tool_a", None, 30));
+        registry.register(make_tool("tool_b", None, 30));
+        let openai_tools = registry.to_openai_tools_all();
+        assert_eq!(openai_tools.len(), 2);
+    }
+
+    #[test]
+    fn test_to_openai_tools_all_empty() {
+        let registry = McpRegistry::new();
+        let openai_tools = registry.to_openai_tools_all();
+        assert!(openai_tools.is_empty());
+    }
+
+    #[test]
+    fn test_registry_allowed_filters_by_full_name() {
+        let mut registry = McpRegistry::new();
+        // Register a tool with a specific full_name, but test allowed with that full_name
+        let tool = McpTool {
+            name: "read".to_string(),
+            full_name: "fs_read".to_string(),
+            description: "Read tool".to_string(),
+            input_schema: json!({"type": "object", "properties": {}}),
+            server_name: Some("fs".to_string()),
+            timeout_secs: 30,
+            handler: make_test_handler(),
+        };
+        registry.register(tool);
+
+        // Allowed with matching full_name
+        let allowed = registry.allowed(&["fs_read".to_string()]);
+        assert_eq!(allowed.len(), 1);
+
+        // Allowed with non-matching name
+        let allowed = registry.allowed(&["read".to_string()]);
+        assert!(allowed.is_empty());
+    }
+}
