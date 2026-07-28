@@ -406,7 +406,11 @@ mod tests {
         let raw = r#"{"jsonrpc":"2.0","id":1,"result":{"ok": true}}"#;
         let resp = parse_response(raw).unwrap();
         match resp {
-            JsonRpcResponse::Success { jsonrpc, id, result } => {
+            JsonRpcResponse::Success {
+                jsonrpc,
+                id,
+                result,
+            } => {
                 assert_eq!(jsonrpc, "2.0");
                 assert_eq!(id, 1);
                 assert_eq!(result, json!({"ok": true}));
@@ -417,7 +421,8 @@ mod tests {
 
     #[test]
     fn test_parse_response_error() {
-        let raw = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found"}}"#;
+        let raw =
+            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found"}}"#;
         let resp = parse_response(raw).unwrap();
         match resp {
             JsonRpcResponse::Error { jsonrpc, id, error } => {

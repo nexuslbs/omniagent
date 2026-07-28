@@ -957,7 +957,9 @@ mod tests {
         // and the last tool-calling assistant is at index 3. So keep_from = 3.
         // tool_a result at index 2 is before keep_from (3), so it gets truncated.
         assert!(msgs[2].content.len() < 2000);
-        assert!(msgs[2].content.starts_with("[Pruned tool result: was 2000 chars]"));
+        assert!(msgs[2]
+            .content
+            .starts_with("[Pruned tool result: was 2000 chars]"));
         // tool_b result at index 4 is after keep_from, so it stays unchanged
         assert_eq!(msgs[4].content, "short");
     }
@@ -992,10 +994,7 @@ mod tests {
 
     #[test]
     fn test_compact_old_assistant_no_tool_calls() {
-        let mut msgs = vec![
-            ChatMessage::user("hello"),
-            ChatMessage::assistant("world"),
-        ];
+        let mut msgs = vec![ChatMessage::user("hello"), ChatMessage::assistant("world")];
         let original_len = msgs.len();
         compact_old_assistant_messages(&mut msgs, 5);
         assert_eq!(msgs.len(), original_len);
@@ -1028,17 +1027,23 @@ mod tests {
         compact_old_assistant_messages(&mut msgs, 2);
 
         assert_eq!(msgs.len(), 5); // one tool message removed
-        // Index 0: assistant with tool_calls should be compacted
+                                   // Index 0: assistant with tool_calls should be compacted
         assert!(msgs[0].tool_calls.is_none());
         assert!(msgs[0].content.contains("[#0 Tool calls compacted:"));
         assert!(msgs[0].content.contains("tool_a()"));
         // The tool result for tool_a at original idx 1 should be gone
         // Index 1: should now be the second assistant (originally idx 2)
-        assert_eq!(msgs[1].tool_calls.as_ref().unwrap()[0].function.name, "tool_b");
+        assert_eq!(
+            msgs[1].tool_calls.as_ref().unwrap()[0].function.name,
+            "tool_b"
+        );
         // Index 2: tool_b result
         assert_eq!(msgs[2].role, "tool");
         // Index 3: third assistant (tool_c)
-        assert_eq!(msgs[3].tool_calls.as_ref().unwrap()[0].function.name, "tool_c");
+        assert_eq!(
+            msgs[3].tool_calls.as_ref().unwrap()[0].function.name,
+            "tool_c"
+        );
         // Index 4: tool_c result
         assert_eq!(msgs[4].role, "tool");
     }
@@ -1059,7 +1064,10 @@ mod tests {
         assert!(msgs[0].content.contains("read_file()"));
         assert!(msgs[0].content.contains("write_file()"));
         // tool_c assistant preserved
-        assert_eq!(msgs[1].tool_calls.as_ref().unwrap()[0].function.name, "tool_c");
+        assert_eq!(
+            msgs[1].tool_calls.as_ref().unwrap()[0].function.name,
+            "tool_c"
+        );
         assert_eq!(msgs[2].role, "tool");
     }
 
@@ -1184,7 +1192,11 @@ mod tests {
         // When tiktoken is available, JSON "[]" encodes as 1 token.
         // When tiktoken is unavailable, falls back to estimate_chars = 0.
         // Accept both.
-        assert!(result == 0 || result == 1, "expected 0 or 1, got {}", result);
+        assert!(
+            result == 0 || result == 1,
+            "expected 0 or 1, got {}",
+            result
+        );
     }
 
     #[test]
@@ -1201,16 +1213,14 @@ mod tests {
     #[test]
     fn test_count_tokens_with_tools() {
         let msgs = vec![ChatMessage::user("hello")];
-        let tools = vec![
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "test_tool",
-                    "description": "A test tool",
-                    "parameters": json!({"type": "object", "properties": {}})
-                }
-            }),
-        ];
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "test_tool",
+                "description": "A test tool",
+                "parameters": json!({"type": "object", "properties": {}})
+            }
+        })];
         // With bad encoding, falls back to estimate_chars
         let result = count_tokens(&msgs, "nonexistent_encoding_xyz", Some(&tools));
         assert!(result > 0);

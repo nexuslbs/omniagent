@@ -145,7 +145,6 @@ impl AgentContext {
     }
 }
 
-
 impl AgentConfig {
     /// Load agent configuration at startup.
     ///
@@ -301,7 +300,10 @@ mod tests {
         assert_eq!(cfg.port, 3000);
         assert_eq!(cfg.default_profile, "custom");
         assert_eq!(cfg.database_url, "postgres://localhost:***@host:5432/db");
-        assert_eq!(cfg.database_readonly_url, "postgres://user:***@host:5432/db_ro");
+        assert_eq!(
+            cfg.database_readonly_url,
+            "postgres://user:***@host:5432/db_ro"
+        );
         assert_eq!(cfg.max_inline_file_kb, 500);
         assert_eq!(cfg.platform_max_spawn_retries, 10);
     }
@@ -372,9 +374,7 @@ mod tests {
     #[test]
     fn test_get_closure_numeric_parsing() {
         // Test the numeric parsing pattern used in from_env().
-        let parse_or_default = |val: &str, default: u32| -> u32 {
-            val.parse().unwrap_or(default)
-        };
+        let parse_or_default = |val: &str, default: u32| -> u32 { val.parse().unwrap_or(default) };
 
         assert_eq!(parse_or_default("4096", 2048), 4096);
         assert_eq!(parse_or_default("abc", 2048), 2048);
@@ -383,9 +383,7 @@ mod tests {
 
     #[test]
     fn test_get_closure_float_parsing() {
-        let parse_or_default = |val: &str, default: f32| -> f32 {
-            val.parse().unwrap_or(default)
-        };
+        let parse_or_default = |val: &str, default: f32| -> f32 { val.parse().unwrap_or(default) };
 
         assert_eq!(parse_or_default("0.7", 0.5), 0.7);
         assert_eq!(parse_or_default("invalid", 0.5), 0.5);

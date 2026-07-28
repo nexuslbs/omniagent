@@ -212,7 +212,9 @@ mod tests {
     async fn test_set_status_completed() {
         let registry = TaskRegistry::new();
         let (task_id, _rx, _log) = registry.register(42, "tool").await;
-        let result = registry.set_status(&task_id, TaskStatus::Completed("done".to_string())).await;
+        let result = registry
+            .set_status(&task_id, TaskStatus::Completed("done".to_string()))
+            .await;
         assert!(result);
         let info = registry.get_info(&task_id).await.unwrap();
         assert!(matches!(&info.status, TaskStatus::Completed(msg) if msg == "done"));
@@ -370,17 +372,23 @@ mod tests {
         let (id2, _rx2, _log2) = registry.register(1, "tool_b").await;
         assert_eq!(registry.running_count().await, 2);
 
-        registry.set_status(&id1, TaskStatus::Completed("ok".to_string())).await;
+        registry
+            .set_status(&id1, TaskStatus::Completed("ok".to_string()))
+            .await;
         assert_eq!(registry.running_count().await, 1);
 
-        registry.set_status(&id2, TaskStatus::Failed("err".to_string())).await;
+        registry
+            .set_status(&id2, TaskStatus::Failed("err".to_string()))
+            .await;
         assert_eq!(registry.running_count().await, 0);
     }
 
     #[tokio::test]
     async fn test_set_status_non_existent() {
         let registry = TaskRegistry::new();
-        let result = registry.set_status("nonexistent", TaskStatus::Completed("ok".to_string())).await;
+        let result = registry
+            .set_status("nonexistent", TaskStatus::Completed("ok".to_string()))
+            .await;
         assert!(!result);
     }
 
