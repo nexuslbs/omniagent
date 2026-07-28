@@ -14,6 +14,7 @@ use crate::db::{channels, types::CreateChannelParams};
 use crate::err_str;
 use crate::plugin;
 use crate::plugins_yaml;
+use crate::server::plugins_reload::reload_platform_plugin;
 use crate::server::AppState;
 
 pub(crate) async fn setup_plugin_handler(
@@ -599,6 +600,10 @@ pub(crate) async fn setup_plugin_handler(
             // The platform plugin implements read_file internally, so the core
             // stays plugin-agnostic — no need to register file readers or persist
             // access_token from setup. The platform client is already in AppContext.
+
+            // After setup, restart the platform binary so it picks up the new
+            // access token from secrets API.
+            reload_platform_plugin(&state, &name).await;
 
             (
                 StatusCode::OK,
