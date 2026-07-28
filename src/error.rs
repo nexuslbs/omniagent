@@ -208,3 +208,176 @@ impl<T> Required<T> for Option<T> {
         self.ok_or(Error::NotNullExpected)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── Display output tests ───
+
+    #[test]
+    fn test_display_io() {
+        let err = Error::Io(std::io::Error::other("disk full"));
+        let s = format!("{}", err);
+        assert!(s.contains("I/O error"));
+        assert!(s.contains("disk full"));
+    }
+
+    #[test]
+    fn test_display_message() {
+        let err = Error::Message("hello".to_string());
+        assert_eq!(format!("{}", err), "hello");
+    }
+
+    #[test]
+    fn test_display_action_not_found() {
+        let err = Error::ActionNotFound("foo".to_string());
+        assert_eq!(format!("{}", err), "Action 'foo' not found");
+    }
+
+    #[test]
+    fn test_display_plugin_not_found() {
+        let err = Error::PluginNotFound("bar".to_string());
+        assert_eq!(format!("{}", err), "Plugin 'bar' not found");
+    }
+
+    #[test]
+    fn test_display_channel_not_found() {
+        let err = Error::ChannelNotFound(42);
+        assert_eq!(format!("{}", err), "Channel 42 not found");
+    }
+
+    #[test]
+    fn test_display_schedule_not_found() {
+        let err = Error::ScheduleNotFound("job1".to_string());
+        assert_eq!(format!("{}", err), "Cron job 'job1' not found");
+    }
+
+    #[test]
+    fn test_display_invalid_thread_cause() {
+        let err = Error::InvalidThreadCause("cause".to_string());
+        assert_eq!(
+            format!("{}", err),
+            "Invalid thread cause 'cause': must be 'user' or 'system'"
+        );
+    }
+
+    #[test]
+    fn test_display_not_found() {
+        let err = Error::NotFound;
+        assert_eq!(format!("{}", err), "Resource not found");
+    }
+
+    #[test]
+    fn test_display_lock_poisoned() {
+        let err = Error::LockPoisoned;
+        assert_eq!(format!("{}", err), "Internal lock poisoned");
+    }
+
+    #[test]
+    fn test_display_mcp_protocol() {
+        let err = Error::McpProtocol("err".to_string());
+        assert_eq!(format!("{}", err), "MCP protocol error: err");
+    }
+
+    #[test]
+    fn test_display_not_null_expected() {
+        let err = Error::NotNullExpected;
+        assert_eq!(format!("{}", err), "Unexpected null value");
+    }
+
+    // ─── From conversions ───
+
+    #[test]
+    fn test_from_str() {
+        let err: Error = "hello from str".into();
+        assert!(matches!(err, Error::Message(ref s) if s == "hello from str"));
+    }
+
+    #[test]
+    fn test_from_string() {
+        let err: Error = "hello from string".to_string().into();
+        assert!(matches!(err, Error::Message(ref s) if s == "hello from string"));
+    }
+
+    #[test]
+    fn test_from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
+        let err: Error = io_err.into();
+        assert!(matches!(err, Error::Io(_)));
+    }
+
+    #[test]
+    fn test_from_serde_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let err: Error = json_err.into();
+        assert!(matches!(err, Error::SerdeJson(_)));
+    }
+
+    // ─── ErrorContext tests ───
+
+    #[test]
+    fn test_error_context_on_ok() {
+        let result: Result<i32, &str> = Ok(42);
+        let wrapped = result.ctx("prefix");
+        assert_eq!(wrapped.unwrap(), 42);
+    }
+
+    #[test]
+    fn test_error_context_on_err() {
+        let result: Result<i32, &str> = Err("msg");
+        let wrapped = result.ctx("prefix");
+        assert!(matches!(wrapped, Err(Error::Message(ref s)) if s == "prefix: msg"));
+    }
+
+    #[test]
+    fn test_error_context_empty_prefix() {
+        let result: Result<i32, &str> = Err("err");
+        let wrapped = result.ctx("");
+        assert!(matches!(wrapped, Err(Error::Message(ref s)) if s == ": err"));
+    }
+
+    // ─── Required trait tests ───
+
+    #[test]
+    fn test_required_on_some() {
+        let val: Option<i32> = Some(42);
+        assert_eq!(val.required().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_required_on_none() {
+        let val: Option<i32> = None;
+        let result = val.required();
+        assert!(matches!(result, Err(Error::NotNullExpected)));
+    }
+
+    #[test]
+    fn test_required_on_some_string() {
+        let val: Option<String> = Some("hello".to_string());
+        assert_eq!(val.required().unwrap(), "hello");
+    }
+
+    // ─── Macro tests ───
+
+    #[test]
+    fn test_err_msg_macro() {
+        fn helper() -> AppResult<()> {
+            err_msg!("test {}", 123);
+        }
+        let result = helper();
+        assert!(matches!(result, Err(Error::Message(ref s)) if s == "test 123"));
+    }
+
+    #[test]
+    fn test_err_str_macro() {
+        let err = err_str!("test {}", 456);
+        assert!(matches!(err, Error::Message(ref s) if s == "test 456"));
+    }
+
+    #[test]
+    fn test_err_str_macro_no_args() {
+        let err = err_str!("static string");
+        assert!(matches!(err, Error::Message(ref s) if s == "static string"));
+    }
+}

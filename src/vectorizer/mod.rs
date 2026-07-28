@@ -840,3 +840,321 @@ pub async fn spawn_vectorizers(
     // Keep running until cancelled (we never return)
     futures::future::pending::<()>().await;
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── vector_to_string ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_vector_to_string_empty() {
+        let v: Vec<f32> = vec![];
+        assert_eq!(vector_to_string(&v), "[]");
+    }
+
+    #[test]
+    fn test_vector_to_string_single() {
+        let v = vec![0.5];
+        assert_eq!(vector_to_string(&v), "[0.5]");
+    }
+
+    #[test]
+    fn test_vector_to_string_multiple() {
+        let v = vec![1.0, 2.0, 3.0];
+        let s = vector_to_string(&v);
+        assert!(s.starts_with('['));
+        assert!(s.ends_with(']'));
+        assert!(s.contains("1"));
+        assert!(s.contains("2"));
+        assert!(s.contains("3"));
+        // Check comma separation
+        assert!(s.contains(","));
+    }
+
+    #[test]
+    fn test_vector_to_string_negative() {
+        let v = vec![-1.5, 0.0, 3.14];
+        let s = vector_to_string(&v);
+        assert!(s.contains("-1.5"));
+        assert!(s.contains("0"));
+        assert!(s.contains("3.14"));
+    }
+
+    #[test]
+    fn test_vector_to_string_large() {
+        let v: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let s = vector_to_string(&v);
+        assert!(s.starts_with('['));
+        assert!(s.ends_with(']'));
+        // Should contain first and last values
+        assert!(s.contains("0"));
+        assert!(s.contains("99"));
+    }
+
+    // ── HashVectorizer ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_hash_vectorizer_deterministic() {
+        let vec = HashVectorizer;
+        let a = vec.generate_embedding("hello world").await;
+        let b = vec.generate_embedding("hello world").await;
+        assert_eq!(a, b, "HashVectorizer should be deterministic");
+    }
+
+    #[tokio::test]
+    async fn test_hash_vectorizer_dimension() {
+        let vec = HashVectorizer;
+        let embedding = vec.generate_embedding("some input text").await;
+        assert_eq!(embedding.len(), 1536);
+    }
+
+    #[tokio::test]
+    async fn test_hash_vectorizer_similar_inputs_similar_embeddings() {
+        let vec = HashVectorizer;
+        let a = vec.generate_embedding("hello world foo bar").await;
+        let b = vec.generate_embedding("hello world foo baz").await;
+        // Different inputs should produce different embeddings
+        assert_ne!(a, b);
+    }
+
+    #[tokio::test]
+    async fn test_hash_vectorizer_short_input() {
+        let vec = HashVectorizer;
+        // Input shorter than 3 chars: should produce a zero vector
+        let embedding = vec.generate_embedding("ab").await;
+        assert_eq!(embedding.len(), 1536);
+        assert!(embedding.iter().all(|&x| x == 0.0));
+    }
+
+    #[tokio::test]
+    async fn test_hash_vectorizer_empty_input() {
+        let vec = HashVectorizer;
+        let embedding = vec.generate_embedding("").await;
+        assert_eq!(embedding.len(), 1536);
+        assert!(embedding.iter().all(|&x| x == 0.0));
+    }
+
+    // ── EmbeddingProtocol::build_request ────────────────────────────────────
+
+    #[test]
+    fn test_embedding_protocol_openai_build_request() {
+        let protocol = EmbeddingProtocol("openai".to_string());
+        let (url, headers, body) = protocol.build_request(
+            "test text",
+            "https://api.openai.com/v1",
+            &None,
+            "text-embedding-ada-002",
+        );
+        assert_eq!(url, "https://api.openai.com/v1/embeddings");
+        assert!(headers.is_empty());
+        assert_eq!(body["input"], "test text");
+        assert_eq!(body["model"], "text-embedding-ada-002");
+    }
+
+    #[test]
+    fn test_embedding_protocol_openai_with_api_key() {
+        let protocol = EmbeddingProtocol("openai".to_string());
+        let (_, headers, _) = protocol.build_request(
+            "test",
+            "https://api.openai.com/v1",
+            &Some("sk-test".to_string()),
+            "ada",
+        );
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].0, "Authorization");
+        assert_eq!(headers[0].1, "Bearer sk-test");
+    }
+
+    #[test]
+    fn test_embedding_protocol_gemini_build_request() {
+        let protocol = EmbeddingProtocol("gemini".to_string());
+        let (url, headers, body) = protocol.build_request(
+            "test text",
+            "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004",
+            &Some("test-key".to_string()),
+            "models/text-embedding-004",
+        );
+        assert!(url.ends_with(":embedContent"));
+        assert!(!headers.is_empty());
+        assert_eq!(headers[0].0, "x-goog-api-key");
+        assert_eq!(headers[0].1, "test-key");
+        assert_eq!(body["model"], "models/text-embedding-004");
+        assert_eq!(body["content"]["parts"][0]["text"], "test text");
+    }
+
+    #[test]
+    fn test_embedding_protocol_cohere_build_request() {
+        let protocol = EmbeddingProtocol("cohere".to_string());
+        let (url, headers, body) = protocol.build_request(
+            "test text",
+            "https://api.cohere.com/v1",
+            &Some("co-key".to_string()),
+            "embed-english-v3.0",
+        );
+        assert!(url.ends_with("/embed"));
+        assert_eq!(headers[0].0, "Authorization");
+        assert_eq!(headers[0].1, "Bearer co-key");
+        assert_eq!(body["texts"][0], "test text");
+        assert_eq!(body["model"], "embed-english-v3.0");
+        assert_eq!(body["input_type"], "search_document");
+    }
+
+    #[test]
+    fn test_embedding_protocol_jina_build_request() {
+        let protocol = EmbeddingProtocol("jina".to_string());
+        let (url, headers, body) = protocol.build_request(
+            "test text",
+            "https://api.jina.ai/v1",
+            &Some("jina-key".to_string()),
+            "jina-embeddings-v3",
+        );
+        assert!(url.ends_with("/embeddings"));
+        assert_eq!(headers[0].0, "Authorization");
+        assert_eq!(body["input"][0], "test text");
+        assert_eq!(body["model"], "jina-embeddings-v3");
+    }
+
+    #[test]
+    fn test_embedding_protocol_unknown_defaults_to_openai() {
+        let protocol = EmbeddingProtocol("unknown-protocol".to_string());
+        let (url, headers, body) = protocol.build_request(
+            "test",
+            "https://example.com",
+            &None,
+            "some-model",
+        );
+        // Unknown protocols should default to OpenAI-compatible format
+        assert!(url.ends_with("/embeddings"));
+        assert!(headers.is_empty());
+        assert_eq!(body["input"], "test");
+    }
+
+    #[test]
+    fn test_embedding_protocol_no_trailing_slash_handling() {
+        let protocol = EmbeddingProtocol("openai".to_string());
+        let (url, _, _) = protocol.build_request(
+            "test",
+            "https://api.openai.com/v1/",
+            &None,
+            "model",
+        );
+        // Should strip trailing slash before appending /embeddings
+        assert_eq!(url, "https://api.openai.com/v1/embeddings");
+    }
+
+    // ── EmbeddingProtocol::extract_embedding ────────────────────────────────
+
+    #[test]
+    fn test_extract_embedding_openai_success() {
+        let protocol = EmbeddingProtocol("openai".to_string());
+        let response = json!({
+            "data": [{"embedding": [0.1, 0.2, 0.3]}],
+            "model": "text-embedding-ada-002",
+        });
+        let result = protocol.extract_embedding(&response).unwrap();
+        assert_eq!(result, vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn test_extract_embedding_openai_missing_field() {
+        let protocol = EmbeddingProtocol("openai".to_string());
+        let response = json!({});
+        let result = protocol.extract_embedding(&response);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_embedding_gemini_success() {
+        let protocol = EmbeddingProtocol("gemini".to_string());
+        let response = json!({
+            "embedding": {
+                "values": [0.5, 0.6, 0.7]
+            }
+        });
+        let result = protocol.extract_embedding(&response).unwrap();
+        assert_eq!(result, vec![0.5, 0.6, 0.7]);
+    }
+
+    #[test]
+    fn test_extract_embedding_gemini_missing_field() {
+        let protocol = EmbeddingProtocol("gemini".to_string());
+        let response = json!({"embedding": {}});
+        let result = protocol.extract_embedding(&response);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_embedding_cohere_success() {
+        let protocol = EmbeddingProtocol("cohere".to_string());
+        let response = json!({
+            "embeddings": [[0.8, 0.9]],
+            "meta": {}
+        });
+        let result = protocol.extract_embedding(&response).unwrap();
+        assert_eq!(result, vec![0.8, 0.9]);
+    }
+
+    #[test]
+    fn test_extract_embedding_cohere_missing_field() {
+        let protocol = EmbeddingProtocol("cohere".to_string());
+        let response = json!({});
+        let result = protocol.extract_embedding(&response);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_embedding_jina_openai_compatible() {
+        // Jina uses the default (OpenAI-compatible) response format
+        let protocol = EmbeddingProtocol("jina".to_string());
+        let response = json!({
+            "data": [{"embedding": [1.0, 2.0]}]
+        });
+        let result = protocol.extract_embedding(&response).unwrap();
+        assert_eq!(result, vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_extract_embedding_unknown_protocol() {
+        // Unknown protocols use the default OpenAI-compatible extraction
+        let protocol = EmbeddingProtocol("custom".to_string());
+        let response = json!({
+            "data": [{"embedding": [3.0, 4.0]}]
+        });
+        let result = protocol.extract_embedding(&response).unwrap();
+        assert_eq!(result, vec![3.0, 4.0]);
+    }
+
+    // ── EmbeddingProtocol from_str ──────────────────────────────────────────
+
+    #[test]
+    fn test_embedding_protocol_from_str() {
+        let p: EmbeddingProtocol = "OPENAI".parse().unwrap();
+        assert_eq!(p, EmbeddingProtocol("openai".to_string()));
+    }
+
+    #[test]
+    fn test_embedding_protocol_from_str_mixed_case() {
+        let p: EmbeddingProtocol = "Gemini".parse().unwrap();
+        assert_eq!(p, EmbeddingProtocol("gemini".to_string()));
+    }
+
+    // ── VectorizerConfig ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_vectorizer_config_defaults() {
+        let cfg = VectorizerConfig::default();
+        assert_eq!(cfg.method, "local");
+        assert_eq!(cfg.protocol, "openai");
+        assert_eq!(cfg.batch_size, 50);
+        assert_eq!(cfg.poll_interval_secs, 3600);
+        assert!(cfg.api_url.is_none());
+        assert!(cfg.api_key.is_none());
+        assert!(cfg.api_model.is_none());
+    }
+}

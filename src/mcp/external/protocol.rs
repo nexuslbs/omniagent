@@ -281,3 +281,272 @@ pub fn extract_tool_result_text(result: &CallToolResult) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── build_initialize_request ────────────────────────────────────────────
+
+    #[test]
+    fn test_build_initialize_request_basic() {
+        let s = build_initialize_request(1);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["id"], 1);
+        assert_eq!(v["method"], "initialize");
+        assert!(v["params"].is_object());
+        assert_eq!(v["params"]["protocolVersion"], "2025-03-26");
+        assert_eq!(v["params"]["clientInfo"]["name"], "omniagent");
+        assert!(v["params"]["capabilities"]["tools"].is_object());
+    }
+
+    #[test]
+    fn test_build_initialize_request_different_id() {
+        let s = build_initialize_request(42);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["id"], 42);
+    }
+
+    // ── build_initialized_notification ──────────────────────────────────────
+
+    #[test]
+    fn test_build_initialized_notification() {
+        let s = build_initialized_notification();
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["method"], "notifications/initialized");
+        assert!(v.get("id").is_none());
+        assert!(v.get("params").is_none() || v["params"].is_null());
+    }
+
+    // ── build_list_tools_request ────────────────────────────────────────────
+
+    #[test]
+    fn test_build_list_tools_request() {
+        let s = build_list_tools_request(2);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["id"], 2);
+        assert_eq!(v["method"], "tools/list");
+        // params is optional; check it's absent or null
+        assert!(v.get("params").is_none() || v["params"].is_null());
+    }
+
+    // ── build_configure_request ─────────────────────────────────────────────
+
+    #[test]
+    fn test_build_configure_request_empty() {
+        let cfg = HashMap::new();
+        let s = build_configure_request(&cfg);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["id"], 0);
+        assert_eq!(v["method"], "configure");
+        assert!(v["params"].is_object());
+        assert!(v["params"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_build_configure_request_with_values() {
+        let mut cfg = HashMap::new();
+        cfg.insert("api_key".to_string(), "sk-test".to_string());
+        cfg.insert("model".to_string(), "gpt-4".to_string());
+        let s = build_configure_request(&cfg);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["method"], "configure");
+        assert_eq!(v["params"]["api_key"], "sk-test");
+        assert_eq!(v["params"]["model"], "gpt-4");
+    }
+
+    // ── build_call_tool_request ─────────────────────────────────────────────
+
+    #[test]
+    fn test_build_call_tool_request_no_meta() {
+        let s = build_call_tool_request(3, "test_tool", &json!({"arg": "val"}), None);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["id"], 3);
+        assert_eq!(v["method"], "tools/call");
+        assert_eq!(v["params"]["name"], "test_tool");
+        assert_eq!(v["params"]["arguments"]["arg"], "val");
+        // _meta should not be present when None
+        assert!(v["params"].get("_meta").is_none());
+    }
+
+    #[test]
+    fn test_build_call_tool_request_with_meta() {
+        let meta = json!({"channel_id": "123", "profile": "test"});
+        let s = build_call_tool_request(5, "weather", &json!({"city": "NYC"}), Some(meta));
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["params"]["name"], "weather");
+        assert_eq!(v["params"]["arguments"]["city"], "NYC");
+        assert_eq!(v["params"]["_meta"]["channel_id"], "123");
+        assert_eq!(v["params"]["_meta"]["profile"], "test");
+    }
+
+    #[test]
+    fn test_build_call_tool_request_empty_args() {
+        let s = build_call_tool_request(7, "ping", &json!({}), None);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["params"]["name"], "ping");
+        assert!(v["params"]["arguments"].as_object().unwrap().is_empty());
+    }
+
+    // ── parse_response ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_response_success() {
+        let raw = r#"{"jsonrpc":"2.0","id":1,"result":{"ok": true}}"#;
+        let resp = parse_response(raw).unwrap();
+        match resp {
+            JsonRpcResponse::Success { jsonrpc, id, result } => {
+                assert_eq!(jsonrpc, "2.0");
+                assert_eq!(id, 1);
+                assert_eq!(result, json!({"ok": true}));
+            }
+            _ => panic!("Expected Success variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_response_error() {
+        let raw = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found"}}"#;
+        let resp = parse_response(raw).unwrap();
+        match resp {
+            JsonRpcResponse::Error { jsonrpc, id, error } => {
+                assert_eq!(jsonrpc, "2.0");
+                assert_eq!(id, 2);
+                assert_eq!(error.code, -32601);
+                assert_eq!(error.message, "Method not found");
+                assert!(error.data.is_none());
+            }
+            _ => panic!("Expected Error variant"),
+        }
+    }
+
+    #[test]
+    fn test_parse_response_empty_string() {
+        let result = parse_response("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_response_malformed_json() {
+        let result = parse_response("not json at all");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_response_partial_json() {
+        let result = parse_response(r#"{"jsonrpc":"2.0""#);
+        assert!(result.is_err());
+    }
+
+    // ── extract_tool_result_text ────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_tool_result_text_single() {
+        let result = CallToolResult {
+            content: vec![ToolContent::Text {
+                text: "Hello world".to_string(),
+            }],
+            is_error: false,
+        };
+        assert_eq!(extract_tool_result_text(&result), "Hello world");
+    }
+
+    #[test]
+    fn test_extract_tool_result_text_multiple() {
+        let result = CallToolResult {
+            content: vec![
+                ToolContent::Text {
+                    text: "First".to_string(),
+                },
+                ToolContent::Text {
+                    text: "Second".to_string(),
+                },
+                ToolContent::Text {
+                    text: "Third".to_string(),
+                },
+            ],
+            is_error: false,
+        };
+        assert_eq!(extract_tool_result_text(&result), "First\nSecond\nThird");
+    }
+
+    #[test]
+    fn test_extract_tool_result_text_empty() {
+        let result = CallToolResult {
+            content: vec![],
+            is_error: false,
+        };
+        assert_eq!(extract_tool_result_text(&result), "");
+    }
+
+    #[test]
+    fn test_extract_tool_result_text_mixed_content() {
+        let result = CallToolResult {
+            content: vec![
+                ToolContent::Text {
+                    text: "text block".to_string(),
+                },
+                ToolContent::Resource {
+                    resource: ResourceContent {
+                        text: "resource text".to_string(),
+                        uri: Some("file:///test".to_string()),
+                        mime_type: Some("text/plain".to_string()),
+                    },
+                },
+            ],
+            is_error: false,
+        };
+        assert_eq!(
+            extract_tool_result_text(&result),
+            "text block\nresource text"
+        );
+    }
+
+    #[test]
+    fn test_extract_tool_result_text_resource_no_uri() {
+        let result = CallToolResult {
+            content: vec![ToolContent::Resource {
+                resource: ResourceContent {
+                    text: "just text".to_string(),
+                    uri: None,
+                    mime_type: None,
+                },
+            }],
+            is_error: false,
+        };
+        assert_eq!(extract_tool_result_text(&result), "just text");
+    }
+
+    // ── ToolContent::text helper ────────────────────────────────────────────
+
+    #[test]
+    fn test_tool_content_text_from_text() {
+        let tc = ToolContent::Text {
+            text: "hello".to_string(),
+        };
+        assert_eq!(tc.text(), "hello");
+    }
+
+    #[test]
+    fn test_tool_content_text_from_resource() {
+        let tc = ToolContent::Resource {
+            resource: ResourceContent {
+                text: "resource hello".to_string(),
+                uri: None,
+                mime_type: None,
+            },
+        };
+        assert_eq!(tc.text(), "resource hello");
+    }
+}
