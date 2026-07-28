@@ -57,18 +57,18 @@ pub(crate) fn get_plugin_dir_for_category(
     category: &PluginCategory,
     yaml_type: &plugins_yaml::PluginYamlType,
     name: &str,
-) -> String {
+) -> Result<String, String> {
     match category {
         PluginCategory::Builtin => {
-            format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name)
+            Ok(format!("/app/plugins/{}/{}", yaml_type.type_dir_name(), name))
         }
         PluginCategory::OmniStack => {
-            format!(
+            Ok(format!(
                 "{}/plugins/{}/{}",
                 data_dir,
                 yaml_type.type_dir_name(),
                 name
-            )
+            ))
         }
         PluginCategory::Remote => {
             let base = format!(
@@ -86,24 +86,26 @@ pub(crate) fn get_plugin_dir_for_category(
             // Remote plugins may have a sub-path inside the cloned repo
             // (e.g. path: "tools/test-rust-tool" in remote.yml). Append it
             // so compile_rust_crate finds the actual Cargo.toml.
-            if let Some(remote) = crate::plugins_yaml::get_remote_plugin(data_dir, yaml_type, name)
-            {
-                tracing::debug!(
-                    "[compile] Found remote plugin: path={:?}, url={}",
-                    remote.path,
-                    remote.url
-                );
-                if let Some(ref sub_path) = remote.path {
-                    if !sub_path.is_empty() {
-                        let resolved = format!("{}/{}", base, sub_path);
-                        tracing::debug!("[compile] Resolved plugin_dir: {}", resolved);
-                        return resolved;
-                    }
+            let remote = crate::plugins_yaml::get_remote_plugin(data_dir, yaml_type, name)
+                .ok_or_else(|| format!(
+                    "Remote plugin '{}' (type={:?}) has no entry in remote.yml. Expected entry under '{}' section. Re-register the plugin or update remote.yml manually.",
+                    name,
+                    yaml_type,
+                    yaml_type.type_dir_name()
+                ))?;
+            tracing::debug!(
+                "[compile] Found remote plugin: path={:?}, url={}",
+                remote.path,
+                remote.url
+            );
+            if let Some(ref sub_path) = remote.path {
+                if !sub_path.is_empty() {
+                    let resolved = format!("{}/{}", base, sub_path);
+                    tracing::debug!("[compile] Resolved plugin_dir: {}", resolved);
+                    return Ok(resolved);
                 }
-            } else {
-                tracing::warn!("[compile] get_remote_plugin returned None for '{}'", name);
             }
-            base
+            Ok(base)
         }
     }
 }
