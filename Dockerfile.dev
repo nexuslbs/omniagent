@@ -22,7 +22,9 @@ RUN cargo install sqlx-cli --locked
 RUN apt-get update -qq && apt-get install -y -qq nodejs && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Trust all repos under /opt/workspace (container mounts host git repos)
-RUN git config --global --add safe.directory /opt/workspace/omni-stack/.git \
+# * also covers /opt/omni/.git-cache/* created by install-git API clone
+RUN git config --global safe.directory '*' \
+    && git config --global --add safe.directory /opt/workspace/omni-stack/.git \
     && git config --global --add safe.directory /opt/workspace/omni-plugins/.git \
     && git config --global --add safe.directory /opt/workspace/omni-dashboard/.git \
     && git config --global --add safe.directory /opt/workspace/omniagent/.git

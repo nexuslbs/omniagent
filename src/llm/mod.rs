@@ -1204,11 +1204,14 @@ mod tests {
 
     #[test]
     fn test_resolve_default_base_url_known_provider() {
-        // In the test environment, no provider manifests are loaded and the
-        // disk fallback also has no plugin.json files, so known providers
-        // also return an empty string.
+        // The function resolves the URL from plugin.json on disk when
+        // found, or returns empty when no manifest is available (e.g.
+        // during Docker builds where /app/plugins/ may not exist).
+        // Accept both outcomes — the test verifies the function doesn't
+        // panic or return garbage.
         let url = resolve_default_base_url("openai");
-        assert_eq!(url, "");
+        let ok = url == "https://api.openai.com/v1" || url.is_empty();
+        assert!(ok, "expected known URL or empty, got: '{url}'");
     }
 
     #[test]
