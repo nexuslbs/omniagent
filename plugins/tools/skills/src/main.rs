@@ -120,7 +120,13 @@ fn handle_skills_list(_args: Value, config: &Config) -> Result<(String, bool)> {
     let mut results: Vec<Value> = Vec::new();
 
     let mut category_entries: Vec<_> = fs::read_dir(&skills_root)
-        .map_err(|e| anyhow::anyhow!("Failed to read skills directory '{}': {}", skills_root.display(), e))?
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to read skills directory '{}': {}",
+                skills_root.display(),
+                e
+            )
+        })?
         .filter_map(|e| e.ok())
         .collect();
     category_entries.sort_by_key(|e| e.file_name());
@@ -190,8 +196,13 @@ fn collect_skill_info(
     usage_data: &HashMap<String, Value>,
     results: &mut Vec<Value>,
 ) -> Result<()> {
-    let metadata = fs::metadata(skill_file)
-        .map_err(|e| anyhow::anyhow!("Failed to read metadata for '{}': {}", skill_file.display(), e))?;
+    let metadata = fs::metadata(skill_file).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to read metadata for '{}': {}",
+            skill_file.display(),
+            e
+        )
+    })?;
     let file_size = metadata.len();
 
     let content = fs::read_to_string(skill_file)
@@ -199,8 +210,8 @@ fn collect_skill_info(
     let line_count = content.lines().count();
 
     // Extract name from frontmatter, fall back to directory/file name
-    let name = extract_frontmatter_field(&content, "name")
-        .unwrap_or_else(|| default_name.to_string());
+    let name =
+        extract_frontmatter_field(&content, "name").unwrap_or_else(|| default_name.to_string());
 
     // Look up enabled status: try category/name first, then bare name
     let enabled = get_skill_enabled(usage_data, &name, category);

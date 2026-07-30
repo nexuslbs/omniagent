@@ -21,7 +21,9 @@ const ALLOWED_VERBS: &[&str] = &[
 ];
 
 /// Characters forbidden in non-exec/run arguments (compose verb, service name, flags).
-const FORBIDDEN_CHARS: &[char] = &['|', ';', '&', '`', '$', '>', '<', '?', '[', ']', '{', '}', '!', '~'];
+const FORBIDDEN_CHARS: &[char] = &[
+    '|', ';', '&', '`', '$', '>', '<', '?', '[', ']', '{', '}', '!', '~',
+];
 
 /// Default timeouts per command verb (seconds).
 fn default_timeout(verb: &str) -> u64 {
@@ -98,7 +100,11 @@ fn build_compose_command(
     // forbidden-char rejections if passed through.  Strip them out.
     let is_exec_or_run = verb == "exec" || verb == "run";
     let extra_parts: Vec<&str> = if is_exec_or_run {
-        parts[1..].iter().filter(|p| p.starts_with('-')).copied().collect()
+        parts[1..]
+            .iter()
+            .filter(|p| p.starts_with('-'))
+            .copied()
+            .collect()
     } else {
         parts[1..].to_vec()
     };
@@ -187,14 +193,19 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
         );
     }
 
-    let mut cmd = build_compose_command(&command, &project_dir, service_name, exec_args, raw_script)?;
+    let mut cmd =
+        build_compose_command(&command, &project_dir, service_name, exec_args, raw_script)?;
     let cmd_repr = format!("{:?}", cmd);
 
     // Truncated command display for error messages (max 1000 chars to avoid
     // bloating LLM context with huge inline scripts in exec_args).
     const CMD_DISPLAY_MAX: usize = 1000;
     let cmd_display = if cmd_repr.len() > CMD_DISPLAY_MAX {
-        format!("{}... [truncated from {} chars]", &cmd_repr[..CMD_DISPLAY_MAX], cmd_repr.len())
+        format!(
+            "{}... [truncated from {} chars]",
+            &cmd_repr[..CMD_DISPLAY_MAX],
+            cmd_repr.len()
+        )
     } else {
         cmd_repr.clone()
     };
@@ -222,10 +233,18 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
         if rc != 0 {
             let mut msg = format!("docker compose command failed (exit {}):\n\n", rc);
             if !stdout.is_empty() {
-                msg.push_str(&format!("--- stdout ({} chars) ---\n{}\n", stdout.len(), stdout));
+                msg.push_str(&format!(
+                    "--- stdout ({} chars) ---\n{}\n",
+                    stdout.len(),
+                    stdout
+                ));
             }
             if !stderr.is_empty() {
-                msg.push_str(&format!("--- stderr ({} chars) ---\n{}\n", stderr.len(), stderr));
+                msg.push_str(&format!(
+                    "--- stderr ({} chars) ---\n{}\n",
+                    stderr.len(),
+                    stderr
+                ));
             }
             if stdout.is_empty() && stderr.is_empty() {
                 msg.push_str("(no output)\n");
@@ -235,7 +254,11 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
         }
 
         let content = if stdout.is_empty() {
-            format!("docker compose {}: ok ({} bytes script piped via stdin)", command, raw_script.len())
+            format!(
+                "docker compose {}: ok ({} bytes script piped via stdin)",
+                command,
+                raw_script.len()
+            )
         } else {
             let max_chars: usize = 50_000;
             if stdout.len() > max_chars {

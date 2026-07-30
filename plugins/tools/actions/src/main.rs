@@ -363,7 +363,11 @@ fn resolve_default_model(provider: &str) -> Option<String> {
 // Tool: hindsight_populator
 // ---------------------------------------------------------------------------
 
-async fn handle_hindsight_populator(pool: &PgPool, _args: &Value, config: &Config) -> Result<(String, bool)> {
+async fn handle_hindsight_populator(
+    pool: &PgPool,
+    _args: &Value,
+    config: &Config,
+) -> Result<(String, bool)> {
     let dir = &config.omni_dir;
     let watermark_path = format!("{}/hindsight_watermark.json", dir);
     let last_id: i64 = match std::fs::read_to_string(&watermark_path) {
@@ -406,7 +410,11 @@ async fn handle_hindsight_populator(pool: &PgPool, _args: &Value, config: &Confi
 // Tool: relevance_indexer
 // ---------------------------------------------------------------------------
 
-async fn handle_relevance_indexer(_pool: &PgPool, _args: &Value, config: &Config) -> Result<(String, bool)> {
+async fn handle_relevance_indexer(
+    _pool: &PgPool,
+    _args: &Value,
+    config: &Config,
+) -> Result<(String, bool)> {
     let profile = default_profile_name();
     let wiki_dir = format!("{}/profiles/{}/wiki", config.omni_dir, profile);
     let wiki_path = std::path::Path::new(&wiki_dir);
