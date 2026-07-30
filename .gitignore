@@ -46,6 +46,9 @@ plugins/mcp/.remote/
 plugins/tools/.remote/
 plugins/.remote/
 
+# Broken env-var expansion artifacts (scripts that don't properly expand ${VAR})
+**/\${*
+
 # Compiled binaries
 /omniagent
 /omniagent.new
