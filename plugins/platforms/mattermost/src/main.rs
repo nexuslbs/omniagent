@@ -2179,8 +2179,7 @@ async fn handle_read_file() -> Result<()> {
                             if !name.is_empty() {
                                 // Resolve the secret via omniagent secrets API
                                 let client = reqwest::Client::new();
-                                let secret_url =
-                                    format!("http://localhost:8080/secrets/{}", name);
+                                let secret_url = format!("http://localhost:8080/secrets/{}", name);
                                 match client.get(&secret_url).send().await {
                                     Ok(resp) => {
                                         if let Ok(body) = resp.json::<serde_json::Value>().await {

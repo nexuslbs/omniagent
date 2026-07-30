@@ -687,15 +687,19 @@ async fn main() -> Result<()> {
         version: "0.1.0".to_string(),
     };
 
-    run_server_with_config(server_info, tools, Some(move |params: Value| {
-        if let Ok(mut cfg) = CONFIG.lock() {
-            if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
-                if !dir.is_empty() {
-                    cfg.omni_dir = dir.to_string();
+    run_server_with_config(
+        server_info,
+        tools,
+        Some(move |params: Value| {
+            if let Ok(mut cfg) = CONFIG.lock() {
+                if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
+                    if !dir.is_empty() {
+                        cfg.omni_dir = dir.to_string();
+                    }
                 }
             }
-        }
-        tracing::info!("Git plugin configured with omni_dir");
-    }))
+            tracing::info!("Git plugin configured with omni_dir");
+        }),
+    )
     .await
 }

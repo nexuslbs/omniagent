@@ -428,8 +428,7 @@ Database schema is documented in the tool description for reference.".to_string(
             let config = PluginConfig::from_json(&params);
             tokio::task::block_in_place(|| {
                 let rt = tokio::runtime::Handle::current();
-                let new_pool = rt
-                    .block_on(db::connect(&config.database_url));
+                let new_pool = rt.block_on(db::connect(&config.database_url));
                 match new_pool {
                     Ok(pool) => {
                         *p.blocking_write() = Some(pool);

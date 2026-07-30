@@ -250,7 +250,9 @@ async fn main() -> Result<()> {
             let guard = p.read().await;
             let pool = guard
                 .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Database pool not initialized. Configure plugin first."))?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Database pool not initialized. Configure plugin first.")
+                })?
                 .clone();
             handle_search_messages(&pool, &args).await
         })
@@ -263,7 +265,11 @@ async fn main() -> Result<()> {
         let d = d1.clone();
         Box::pin(async move {
             let cfg = c.lock().unwrap_or_else(|e| e.into_inner());
-            let omni_dir = if cfg.omni_dir.is_empty() { &d } else { &cfg.omni_dir };
+            let omni_dir = if cfg.omni_dir.is_empty() {
+                &d
+            } else {
+                &cfg.omni_dir
+            };
             handle_search_wiki(&args, omni_dir)
         })
     });
