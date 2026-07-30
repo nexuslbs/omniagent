@@ -1,12 +1,26 @@
-//! mcp-server-search: standalone MCP server for searching wiki content.
+//! mcp-server-search: standalone MCP server for searching messages and wiki content.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
-//! Tools: search_wiki only (search_messages is handled by omniagent built-in)
+//! Tools: search_messages, search_wiki
 
 use anyhow::Result;
 use mcp_server_util::*;
 use serde_json::Value;
+use sql_forge::sql_forge;
+use sqlx::{FromRow, PgPool};
 use std::sync::{Arc, Mutex};
+use tokio::sync::RwLock;
+
+// ---------------------------------------------------------------------------
+// Shared row type
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, FromRow)]
+struct SearchResult {
+    id: i64,
+    role: String,
+    content: String,
+}
 
 // ---------------------------------------------------------------------------
 // Plugin config — received via MCP configure message, not from env vars
@@ -14,7 +28,78 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Default, Clone)]
 struct Config {
+    database_url: String,
     omni_dir: String,
+}
+
+// ---------------------------------------------------------------------------
+// Tool: search_messages
+// ---------------------------------------------------------------------------
+
+async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+    let query = args["query"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'query'"))?;
+    let limit = args["limit"].as_i64().unwrap_or(10).min(50);
+    let channel_id = args["channel_id"].as_i64();
+
+    let query_owned = query.to_string();
+    let pool_ref = pool.clone();
+
+    let results: Vec<SearchResult> = if let Some(cid) = channel_id {
+        sql_forge!(
+            SearchResult,
+            r#"
+            SELECT m.id, m.role, m.content FROM messages m
+            JOIN threads t ON t.id = m.thread_id
+            WHERE t.channel_id = :channel_id
+              AND m.content ILIKE '%' || :query || '%'
+            ORDER BY m.created_at DESC
+            LIMIT :limit
+            "#,
+            ( :channel_id = cid, :query = &query_owned, :limit = limit )
+        )
+        .fetch_all(&pool_ref)
+        .await
+        .map_err(|e: sqlx::Error| anyhow::anyhow!("Database query failed: {e}"))?
+    } else {
+        sql_forge!(
+            SearchResult,
+            r#"
+            SELECT id, role, content FROM messages
+            WHERE content ILIKE '%' || :query || '%'
+            ORDER BY created_at DESC
+            LIMIT :limit
+            "#,
+            ( :query = &query_owned, :limit = limit )
+        )
+        .fetch_all(&pool_ref)
+        .await
+        .map_err(|e: sqlx::Error| anyhow::anyhow!("Database query failed: {e}"))?
+    };
+
+    if results.is_empty() {
+        return Ok(("No matching messages found.".to_string(), false));
+    }
+
+    let mut lines = Vec::new();
+    for r in &results {
+        let preview = if r.content.len() > 200 {
+            let truncate_to = r
+                .content
+                .char_indices()
+                .nth(200)
+                .map(|(i, _)| i)
+                .unwrap_or(r.content.len());
+            format!("{}...", &r.content[..truncate_to])
+        } else {
+            r.content.clone()
+        };
+        lines.push(format!("#{} [{}]: {}", r.id, r.role, preview));
+    }
+
+    let output = format!("Found {} result(s):\n{}", results.len(), lines.join("\n\n"));
+    Ok((output, false))
 }
 
 // ---------------------------------------------------------------------------
@@ -122,11 +207,30 @@ async fn main() -> Result<()> {
     // Plugin config — received via MCP configure message
     let config: Arc<Mutex<Config>> = Arc::new(Mutex::new(Config::default()));
 
+    // Shared database pool — populated by configure callback before any tool call
+    let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
+
     // on_configure: called when omniagent sends the resolved plugin config
     let on_configure = {
         let config = config.clone();
+        let pool = pool.clone();
         Some(move |params: Value| {
             if let Ok(mut cfg) = config.lock() {
+                if let Some(url) = params.get("database_url").and_then(|v| v.as_str()) {
+                    if !url.is_empty() {
+                        cfg.database_url = url.to_string();
+
+                        // Also initialize the database pool
+                        let url_clone = url.to_string();
+                        tokio::task::block_in_place(|| {
+                            let rt = tokio::runtime::Handle::current();
+                            let new_pool = rt
+                                .block_on(omniagent::db::connect(&url_clone))
+                                .expect("Failed to connect to database");
+                            *pool.blocking_write() = Some(new_pool);
+                        });
+                    }
+                }
                 if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
                     if !dir.is_empty() {
                         cfg.omni_dir = dir.to_string();
@@ -138,6 +242,19 @@ async fn main() -> Result<()> {
     };
 
     let default_omni_dir = "/opt/omni".to_string();
+
+    let p_search = pool.clone();
+    let search_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let p = p_search.clone();
+        Box::pin(async move {
+            let guard = p.read().await;
+            let pool = guard
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Database pool not initialized. Configure plugin first."))?
+                .clone();
+            handle_search_messages(&pool, &args).await
+        })
+    });
 
     let c1 = config.clone();
     let d1 = default_omni_dir.clone();
@@ -154,8 +271,34 @@ async fn main() -> Result<()> {
     let tools = vec![
         McpToolEntry {
             def: McpToolDef {
+                name: "search_messages".to_string(),
+                description: "Search message history across all channels. Use this tool when the LLM needs to find information from past conversations. Use specific keywords and narrow the scope with channel_id when possible. Does NOT search wiki pages: use search_wiki for that.".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query to find in messages"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results (max 50)",
+                            "default": 10
+                        },
+                        "channel_id": {
+                            "type": "integer",
+                            "description": "Optional channel ID filter"
+                        }
+                    },
+                    "required": ["query"]
+                }),
+            },
+            handler: search_handler,
+        },
+        McpToolEntry {
+            def: McpToolDef {
                 name: "search_wiki".to_string(),
-                description: "Search wiki pages for relevant documentation. Use this to find documentation, guides, and notes.".to_string(),
+                description: "Search wiki pages for relevant documentation. Use this to find documentation, guides, and notes. Does NOT search message history: use search_messages for that.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
