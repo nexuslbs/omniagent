@@ -18,11 +18,16 @@
     },
     {
       "key": "database_url",
-      "default": "$env:DATABASE_URL"
+      "default": "$env:DATABASE_URL",
+      "label": "Database Url",
+      "type": "string"
     },
     {
       "key": "omni_dir",
-      "default": "$env:OMNI_DIR"
+      "default": "$env:OMNI_DIR",
+      "label": "Omni Dir",
+      "type": "string"
     }
-  ]
+  ],
+  "label": "actions"
 }

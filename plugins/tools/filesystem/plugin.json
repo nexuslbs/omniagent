@@ -1,6 +1,7 @@
 {
   "id": "mcp-server-filesystem",
   "name": "Filesystem MCP Server",
+  "label": "filesystem",
   "version": "0.1.0",
   "description": "Filesystem tools: read, write, list, search, info on local files",
   "type": "mcp",
@@ -12,7 +13,15 @@
   "config_schema": [
     {
       "key": "omni_dir",
-      "default": "$env:OMNI_DIR"
+      "default": "$env:OMNI_DIR",
+      "label": "Omni Dir",
+      "type": "string"
+    },
+    {
+      "key": "workspace_dir",
+      "default": "/opt/workspace",
+      "label": "Workspace Dir",
+      "type": "string"
     }
   ]
 }

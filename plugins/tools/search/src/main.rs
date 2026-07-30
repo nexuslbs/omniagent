@@ -1,114 +1,34 @@
-//! mcp-server-search: standalone MCP server for searching messages and wiki content.
+//! mcp-server-search: standalone MCP server for searching wiki content.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
-//! Tools: search_messages, search_wiki
+//! Tools: search_wiki only (search_messages is handled by omniagent built-in)
 
 use anyhow::Result;
 use mcp_server_util::*;
 use serde_json::Value;
-use sql_forge::sql_forge;
-use sqlx::{FromRow, PgPool};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
-// Shared row type
+// Plugin config — received via MCP configure message, not from env vars
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, FromRow)]
-struct SearchResult {
-    id: i64,
-    role: String,
-    content: String,
-}
-
-// ---------------------------------------------------------------------------
-// Tool: search_messages
-// ---------------------------------------------------------------------------
-
-async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
-    let query = args["query"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'query'"))?;
-    let limit = args["limit"].as_i64().unwrap_or(10).min(50);
-    let channel_id = args["channel_id"].as_i64();
-
-    let query_owned = query.to_string();
-    let pool_ref = pool.clone();
-
-    let results: Vec<SearchResult> = if let Some(cid) = channel_id {
-        sql_forge!(
-            SearchResult,
-            r#"
-            SELECT m.id, m.role, m.content FROM messages m
-            JOIN threads t ON t.id = m.thread_id
-            WHERE t.channel_id = :channel_id
-              AND m.content ILIKE '%' || :query || '%'
-            ORDER BY m.created_at DESC
-            LIMIT :limit
-            "#,
-            ( :channel_id = cid, :query = &query_owned, :limit = limit )
-        )
-        .fetch_all(&pool_ref)
-        .await
-        .map_err(|e: sqlx::Error| anyhow::anyhow!("Database query failed: {e}"))?
-    } else {
-        sql_forge!(
-            SearchResult,
-            r#"
-            SELECT id, role, content FROM messages
-            WHERE content ILIKE '%' || :query || '%'
-            ORDER BY created_at DESC
-            LIMIT :limit
-            "#,
-            ( :query = &query_owned, :limit = limit )
-        )
-        .fetch_all(&pool_ref)
-        .await
-        .map_err(|e: sqlx::Error| anyhow::anyhow!("Database query failed: {e}"))?
-    };
-
-    if results.is_empty() {
-        return Ok(("No matching messages found.".to_string(), false));
-    }
-
-    let mut lines = Vec::new();
-    for r in &results {
-        let preview = if r.content.len() > 200 {
-            let truncate_to = r
-                .content
-                .char_indices()
-                .nth(200)
-                .map(|(i, _)| i)
-                .unwrap_or(r.content.len());
-            format!("{}...", &r.content[..truncate_to])
-        } else {
-            r.content.clone()
-        };
-        lines.push(format!("#{} [{}]: {}", r.id, r.role, preview));
-    }
-
-    let output = format!("Found {} result(s):\n{}", results.len(), lines.join("\n\n"));
-    Ok((output, false))
+#[derive(Default, Clone)]
+struct Config {
+    omni_dir: String,
 }
 
 // ---------------------------------------------------------------------------
 // Tool: search_wiki
 // ---------------------------------------------------------------------------
 
-fn handle_search_wiki(args: &Value) -> Result<(String, bool)> {
+fn handle_search_wiki(args: &Value, omni_dir: &str) -> Result<(String, bool)> {
     let query = args["query"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'query'"))?;
     let limit = args["limit"].as_i64().unwrap_or(10).min(30) as usize;
-    let default_profile = omniagent::profile::default_profile_name();
-    let profile = args["profile"].as_str().unwrap_or(&default_profile);
+    let profile = args["profile"].as_str().unwrap_or("default");
 
-    let data_dir = std::env::var("OMNI_DIR")
-        .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)))
-        .expect("OMNI_DIR must be set");
-
-    let wiki_dir = format!("{}/profiles/{}/wiki", data_dir, profile);
+    let wiki_dir = format!("{}/profiles/{}/wiki", omni_dir, profile);
     let wiki_dir_path = std::path::Path::new(&wiki_dir);
 
     if !wiki_dir_path.exists() {
@@ -194,99 +114,48 @@ fn handle_search_wiki(args: &Value) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Plugin config hook
-// ---------------------------------------------------------------------------
-
-/// Callback invoked when the host sends configuration via configure message.
-/// Plugin config — received via configure message.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct PluginConfig {
-    pub database_url: String,
-    pub omni_dir: String,
-}
-
-impl PluginConfig {
-    fn from_json(v: &serde_json::Value) -> Self {
-        Self {
-            database_url: v
-                .get("database_url")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| {
-                    eprintln!("FATAL: database_url not in configure message");
-                    std::process::exit(1);
-                }),
-            omni_dir: v
-                .get("omni_dir")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| {
-                    std::env::var("HOME")
-                        .map(|h| format!("{}/.omniagent", h))
-                        .unwrap_or_default()
-                }),
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Shared pool — populated by configure callback before any tool call
-    let pool = Arc::new(RwLock::new(None::<PgPool>));
+    // Plugin config — received via MCP configure message
+    let config: Arc<Mutex<Config>> = Arc::new(Mutex::new(Config::default()));
 
-    let p_search = pool.clone();
-
-    let search_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
-        let p = p_search.clone();
-        Box::pin(async move {
-            let guard = p.read().await;
-
-            let pool = guard.as_ref().expect("Pool not initialized").clone();
-
-            handle_search_messages(&pool, &args).await
+    // on_configure: called when omniagent sends the resolved plugin config
+    let on_configure = {
+        let config = config.clone();
+        Some(move |params: Value| {
+            if let Ok(mut cfg) = config.lock() {
+                if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
+                    if !dir.is_empty() {
+                        cfg.omni_dir = dir.to_string();
+                    }
+                }
+            }
+            tracing::info!("Search plugin configured");
         })
-    });
+    };
 
+    let default_omni_dir = "/opt/omni".to_string();
+
+    let c1 = config.clone();
+    let d1 = default_omni_dir.clone();
     let wiki_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
-        Box::pin(async move { handle_search_wiki(&args) })
+        let c = c1.clone();
+        let d = d1.clone();
+        Box::pin(async move {
+            let cfg = c.lock().unwrap_or_else(|e| e.into_inner());
+            let omni_dir = if cfg.omni_dir.is_empty() { &d } else { &cfg.omni_dir };
+            handle_search_wiki(&args, omni_dir)
+        })
     });
 
     let tools = vec![
         McpToolEntry {
             def: McpToolDef {
-                name: "search_messages".to_string(),
-                description: "Search message history across all channels. Use this tool when the LLM needs to find information from past conversations. Use specific keywords and narrow the scope with channel_id when possible. Does NOT search wiki pages: use search_wiki for that.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query to find in messages"
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Max results (max 50)",
-                            "default": 10
-                        },
-                        "channel_id": {
-                            "type": "integer",
-                            "description": "Optional channel ID filter"
-                        }
-                    },
-                    "required": ["query"]
-                }),
-            },
-            handler: search_handler,
-        },
-        McpToolEntry {
-            def: McpToolDef {
                 name: "search_wiki".to_string(),
-                description: "Search wiki pages for relevant documentation. Use this to find documentation, guides, and notes. Does NOT search message history: use search_messages for that.".to_string(),
+                description: "Search wiki pages for relevant documentation. Use this to find documentation, guides, and notes.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -316,19 +185,5 @@ async fn main() -> Result<()> {
         version: env!("CARGO_PKG_VERSION").to_string(),
     };
 
-    run_server_with_config(server_info, tools, {
-        let p = pool.clone();
-        Some(move |params: serde_json::Value| {
-            let config = PluginConfig::from_json(&params);
-            tokio::task::block_in_place(|| {
-                let rt = tokio::runtime::Handle::current();
-                let new_pool = rt
-                    .block_on(omniagent::db::connect(&config.database_url))
-                    .expect("Failed to connect to database");
-                *p.blocking_write() = Some(new_pool);
-            });
-            tracing::info!("Search plugin configured with database_url");
-        })
-    })
-    .await
+    run_server_with_config(server_info, tools, on_configure).await
 }

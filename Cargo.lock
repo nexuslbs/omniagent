@@ -1283,6 +1283,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcp-server-compose"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mcp-server-util",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "mcp-server-cron"
 version = "0.1.0"
 dependencies = [

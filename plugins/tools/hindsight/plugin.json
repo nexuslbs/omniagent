@@ -66,5 +66,6 @@
       "default": 15,
       "description": "Timeout in seconds for hindsight HTTP requests"
     }
-  ]
+  ],
+  "label": "hindsight"
 }

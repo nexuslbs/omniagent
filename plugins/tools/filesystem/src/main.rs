@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 /// Resolve and validate a path is within allowed directories.
 fn restrict_path(path: &str, data_dir: &str, workspace_dir: &str) -> Result<String> {
@@ -260,37 +261,129 @@ fn handle_info(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(Stri
 }
 
 // ---------------------------------------------------------------------------
+// Plugin config — received via MCP configure message, not from env vars
+// ---------------------------------------------------------------------------
+
+#[derive(Default, Clone)]
+struct Config {
+    data_dir: String,
+    workspace_dir: String,
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| {
-        eprintln!("FATAL: OMNI_DIR must be set");
-        std::process::exit(1);
+    let config: Arc<Mutex<Config>> = Arc::new(Mutex::new(Config::default()));
+
+    // on_configure: called when omniagent sends the resolved plugin config
+    let on_configure = {
+        let config = config.clone();
+        Some(move |params: Value| {
+            if let Ok(mut cfg) = config.lock() {
+                if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
+                    if !dir.is_empty() {
+                        cfg.data_dir = dir.to_string();
+                    }
+                }
+                if let Some(dir) = params.get("workspace_dir").and_then(|v| v.as_str()) {
+                    if !dir.is_empty() {
+                        cfg.workspace_dir = dir.to_string();
+                    }
+                }
+            }
+        })
+    };
+
+    // Default fallback directory if no config received
+    let default_workspace = "/opt/workspace".to_string();
+
+    let c1 = config.clone();
+    let dw1 = default_workspace.clone();
+    let read_handler = soft_error(move |args: Value| {
+        let cfg = c1.lock().unwrap_or_else(|e| e.into_inner());
+        let dd = if cfg.data_dir.is_empty() {
+            "/opt/omni"
+        } else {
+            &cfg.data_dir
+        };
+        let wd = if cfg.workspace_dir.is_empty() {
+            &dw1
+        } else {
+            &cfg.workspace_dir
+        };
+        handle_read(args, dd, wd)
     });
-    let workspace_dir =
-        std::env::var("WORKSPACE_DIR").unwrap_or_else(|_| "/opt/workspace".to_string());
 
-    let d1 = data_dir.clone();
-    let w1 = workspace_dir.clone();
-    let read_handler = soft_error(move |args: Value| handle_read(args, &d1, &w1));
+    let c2 = config.clone();
+    let dw2 = default_workspace.clone();
+    let write_handler = soft_error(move |args: Value| {
+        let cfg = c2.lock().unwrap_or_else(|e| e.into_inner());
+        let dd = if cfg.data_dir.is_empty() {
+            "/opt/omni"
+        } else {
+            &cfg.data_dir
+        };
+        let wd = if cfg.workspace_dir.is_empty() {
+            &dw2
+        } else {
+            &cfg.workspace_dir
+        };
+        handle_write(args, dd, wd)
+    });
 
-    let d2 = data_dir.clone();
-    let w2 = workspace_dir.clone();
-    let write_handler = soft_error(move |args: Value| handle_write(args, &d2, &w2));
+    let c3 = config.clone();
+    let dw3 = default_workspace.clone();
+    let list_handler = soft_error(move |args: Value| {
+        let cfg = c3.lock().unwrap_or_else(|e| e.into_inner());
+        let dd = if cfg.data_dir.is_empty() {
+            "/opt/omni"
+        } else {
+            &cfg.data_dir
+        };
+        let wd = if cfg.workspace_dir.is_empty() {
+            &dw3
+        } else {
+            &cfg.workspace_dir
+        };
+        handle_list(args, dd, wd)
+    });
 
-    let d3 = data_dir.clone();
-    let w3 = workspace_dir.clone();
-    let list_handler = soft_error(move |args: Value| handle_list(args, &d3, &w3));
+    let c4 = config.clone();
+    let dw4 = default_workspace.clone();
+    let search_handler = soft_error(move |args: Value| {
+        let cfg = c4.lock().unwrap_or_else(|e| e.into_inner());
+        let dd = if cfg.data_dir.is_empty() {
+            "/opt/omni"
+        } else {
+            &cfg.data_dir
+        };
+        let wd = if cfg.workspace_dir.is_empty() {
+            &dw4
+        } else {
+            &cfg.workspace_dir
+        };
+        handle_search(args, dd, wd)
+    });
 
-    let d4 = data_dir.clone();
-    let w4 = workspace_dir.clone();
-    let search_handler = soft_error(move |args: Value| handle_search(args, &d4, &w4));
-
-    let d5 = data_dir;
-    let w5 = workspace_dir;
-    let info_handler = soft_error(move |args: Value| handle_info(args, &d5, &w5));
+    let c5 = config.clone();
+    let dw5 = default_workspace;
+    let info_handler = soft_error(move |args: Value| {
+        let cfg = c5.lock().unwrap_or_else(|e| e.into_inner());
+        let dd = if cfg.data_dir.is_empty() {
+            "/opt/omni"
+        } else {
+            &cfg.data_dir
+        };
+        let wd = if cfg.workspace_dir.is_empty() {
+            &dw5
+        } else {
+            &cfg.workspace_dir
+        };
+        handle_info(args, dd, wd)
+    });
 
     let tools = vec![
         McpToolEntry {
@@ -403,5 +496,5 @@ async fn main() -> Result<()> {
         version: "0.1.0".to_string(),
     };
 
-    run_server(server_info, tools).await
+    run_server_with_config(server_info, tools, on_configure).await
 }

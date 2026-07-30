@@ -178,7 +178,7 @@ async fn get_secret_handler(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let rows = match sql_forge!(
+    let row = match sql_forge!(
         SecretRow,
         r#"
         SELECT id, name, field_type, current_value, created_at, updated_at

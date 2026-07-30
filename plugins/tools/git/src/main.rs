@@ -12,16 +12,28 @@ use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 //  Constants
 
+#[derive(Clone)]
+struct Config {
+    omni_dir: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            omni_dir: "/opt/omni".to_string(),
+        }
+    }
+}
+
+static CONFIG: Lazy<Mutex<Config>> = Lazy::new(|| Mutex::new(Config::default()));
+
 fn private_key_path() -> String {
-    let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| {
-        eprintln!("FATAL: OMNI_DIR must be set");
-        std::process::exit(1);
-    });
+    let data_dir = CONFIG.lock().unwrap().omni_dir.clone();
     format!(
         "{0}/data/credentials/nexuslbs-app.2026-06-04.private-key.pem",
         data_dir
@@ -29,10 +41,7 @@ fn private_key_path() -> String {
 }
 
 fn dot_env_path() -> String {
-    let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| {
-        eprintln!("FATAL: OMNI_DIR must be set");
-        std::process::exit(1);
-    });
+    let data_dir = CONFIG.lock().unwrap().omni_dir.clone();
     format!("{}/.env", data_dir)
 }
 
@@ -678,5 +687,15 @@ async fn main() -> Result<()> {
         version: "0.1.0".to_string(),
     };
 
-    run_server(server_info, tools).await
+    run_server_with_config(server_info, tools, Some(move |params: Value| {
+        if let Ok(mut cfg) = CONFIG.lock() {
+            if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
+                if !dir.is_empty() {
+                    cfg.omni_dir = dir.to_string();
+                }
+            }
+        }
+        tracing::info!("Git plugin configured with omni_dir");
+    }))
+    .await
 }

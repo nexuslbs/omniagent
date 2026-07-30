@@ -1,6 +1,7 @@
 {
   "id": "mcp-server-skills",
   "name": "Skills MCP Server",
+  "label": "skills",
   "version": "0.1.0",
   "description": "Skills tool: create reusable task procedure skills",
   "type": "mcp",
@@ -12,7 +13,9 @@
   "config_schema": [
     {
       "key": "omni_dir",
-      "default": "$env:OMNI_DIR"
+      "default": "$env:OMNI_DIR",
+      "label": "Omni Dir",
+      "type": "string"
     }
   ]
 }
