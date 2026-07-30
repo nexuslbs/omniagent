@@ -249,7 +249,10 @@ async fn main() -> Result<()> {
         let dd_inner = dd.clone();
         Box::pin(async move {
             let guard = dd_inner.read().await;
-            let data_dir = guard.as_ref().expect("data_dir not initialized").clone();
+            let data_dir = match guard.as_ref() {
+                Some(d) => d.clone(),
+                None => return Ok(("Plugin manager not configured: omni_dir not set. The plugin needs an omni_dir in its config.".to_string(), true)),
+            };
             handle_plugin_manager(&data_dir, &args).await
         })
     });
@@ -295,10 +298,14 @@ async fn main() -> Result<()> {
         let dd = data_dir.clone();
         Some(move |params: serde_json::Value| {
             let config = PluginConfig::from_json(&params);
-            tokio::task::block_in_place(|| {
-                *dd.blocking_write() = Some(config.omni_dir.clone());
-            });
-            tracing::info!("Plugin-manager configured with omni_dir");
+            if !config.omni_dir.is_empty() {
+                tokio::task::block_in_place(|| {
+                    *dd.blocking_write() = Some(config.omni_dir.clone());
+                });
+                tracing::info!("Plugin-manager configured with omni_dir");
+            } else {
+                tracing::warn!("Plugin-manager configure called without omni_dir");
+            }
         })
     })
     .await

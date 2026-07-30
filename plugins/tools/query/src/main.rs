@@ -327,10 +327,7 @@ impl PluginConfig {
                 .get("database_url")
                 .and_then(|v| v.as_str())
                 .map(String::from)
-                .unwrap_or_else(|| {
-                    eprintln!("FATAL: database_url not in configure message");
-                    std::process::exit(1);
-                }),
+                .unwrap_or_default(),
         }
     }
 }
@@ -348,7 +345,10 @@ async fn main() -> Result<()> {
         Box::pin(async move {
             let guard = p.read().await;
 
-            let pool = guard.as_ref().expect("Pool not initialized").clone();
+            let pool = match guard.as_ref() {
+                Some(p) => p.clone(),
+                None => return Ok(("Query database pool not configured. The plugin may need a database_url in its config.".to_string(), true)),
+            };
 
             handle_query_database(&pool, &args).await
         })
@@ -429,9 +429,15 @@ Database schema is documented in the tool description for reference.".to_string(
             tokio::task::block_in_place(|| {
                 let rt = tokio::runtime::Handle::current();
                 let new_pool = rt
-                    .block_on(db::connect(&config.database_url))
-                    .expect("Failed to connect to database");
-                *p.blocking_write() = Some(new_pool);
+                    .block_on(db::connect(&config.database_url));
+                match new_pool {
+                    Ok(pool) => {
+                        *p.blocking_write() = Some(pool);
+                    }
+                    Err(e) => {
+                        tracing::error!("Query plugin failed to connect to database: {:#}", e);
+                    }
+                }
             });
             tracing::info!("Query plugin configured with database_url");
         })
