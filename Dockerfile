@@ -72,8 +72,9 @@ ENV CARGO_HOME=/usr/local/cargo
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV PATH="/usr/local/cargo/bin:${PATH}"
 
-# Copy Docker CLI (compose v2 is built into the docker binary)
+# Copy Docker CLI and compose plugin
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 
 # Copy the omniagent binary, db-migrations, and all plugin binaries.
 # Globs auto-catch new tools (mcp-server-*) and platforms (*-platform)
