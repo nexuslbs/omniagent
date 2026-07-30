@@ -524,10 +524,7 @@ impl PluginConfig {
                 .get("database_url")
                 .and_then(|v| v.as_str())
                 .map(String::from)
-                .unwrap_or_else(|| {
-                    eprintln!("FATAL: database_url not in configure message");
-                    std::process::exit(1);
-                }),
+                .unwrap_or_default(),
             omni_dir: v
                 .get("omni_dir")
                 .and_then(|v| v.as_str())
@@ -1067,10 +1064,15 @@ async fn main() -> Result<()> {
         // Connect to database using config's database_url
         tokio::task::block_in_place(|| {
             let rt = tokio::runtime::Handle::current();
-            let new_pool = rt
-                .block_on(db::connect(&config.database_url))
-                .expect("Failed to connect to database");
-            *p_pool.blocking_write() = Some(new_pool);
+            let new_pool = rt.block_on(db::connect(&config.database_url));
+            match new_pool {
+                Ok(pool) => {
+                    *p_pool.blocking_write() = Some(pool);
+                }
+                Err(e) => {
+                    tracing::error!("Memory plugin failed to connect to database: {:#}", e);
+                }
+            }
             *dd_dir.blocking_write() = Some(config.omni_dir.clone());
         });
         // Store plugin config
