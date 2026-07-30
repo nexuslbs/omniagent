@@ -8,16 +8,14 @@ use mcp_server_util::*;
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
 // Tool: create_skill
 // ---------------------------------------------------------------------------
 
-fn handle_create_skill(args: Value) -> Result<(String, bool)> {
-    let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| {
-        eprintln!("FATAL: OMNI_DIR must be set");
-        std::process::exit(1);
-    });
+fn handle_create_skill(args: Value, config: &Config) -> Result<(String, bool)> {
+    let data_dir = &config.omni_dir;
 
     let name = args["name"]
         .as_str()
@@ -100,13 +98,50 @@ fn handle_create_skill(args: Value) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
+// Plugin config — received via MCP configure message, not from env vars
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct Config {
+    omni_dir: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            omni_dir: "/opt/omni".to_string(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let create_skill_handler: ToolHandler = Box::new(|args: Value, _meta: Option<McpMeta>| {
-        Box::pin(async move { handle_create_skill(args) })
+    let config: Arc<Mutex<Config>> = Arc::new(Mutex::new(Config::default()));
+
+    let on_configure = {
+        let config = config.clone();
+        Some(move |params: Value| {
+            if let Ok(mut cfg) = config.lock() {
+                if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
+                    if !dir.is_empty() {
+                        cfg.omni_dir = dir.to_string();
+                    }
+                }
+            }
+        })
+    };
+
+    let c1 = config.clone();
+    let create_skill_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let c = c1.clone();
+        Box::pin(async move {
+            let config = c.lock().unwrap().clone();
+            handle_create_skill(args, &config)
+        })
     });
 
     let tools = vec![McpToolEntry {
@@ -146,5 +181,5 @@ async fn main() -> Result<()> {
         version: "0.1.0".to_string(),
     };
 
-    run_server(server_info, tools).await
+    run_server_with_config(server_info, tools, on_configure).await
 }

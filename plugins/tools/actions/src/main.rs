@@ -12,22 +12,32 @@ use mcp_server_util::*;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn default_profile_name() -> String {
-    "omni".to_string()
+// ---------------------------------------------------------------------------
+// Plugin config — received via MCP configure message, not from env vars
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct Config {
+    omni_dir: String,
 }
 
-fn data_dir() -> String {
-    std::env::var("OMNI_DIR").unwrap_or_else(|_| {
-        eprintln!("FATAL: OMNI_DIR must be set");
-        std::process::exit(1);
-    })
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            omni_dir: "/opt/omni".to_string(),
+        }
+    }
+}
+
+fn default_profile_name() -> String {
+    "omni".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -353,8 +363,8 @@ fn resolve_default_model(provider: &str) -> Option<String> {
 // Tool: hindsight_populator
 // ---------------------------------------------------------------------------
 
-async fn handle_hindsight_populator(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
-    let dir = data_dir();
+async fn handle_hindsight_populator(pool: &PgPool, _args: &Value, config: &Config) -> Result<(String, bool)> {
+    let dir = &config.omni_dir;
     let watermark_path = format!("{}/hindsight_watermark.json", dir);
     let last_id: i64 = match std::fs::read_to_string(&watermark_path) {
         Ok(content) => serde_json::from_str::<Value>(&content)
@@ -396,9 +406,9 @@ async fn handle_hindsight_populator(pool: &PgPool, _args: &Value) -> Result<(Str
 // Tool: relevance_indexer
 // ---------------------------------------------------------------------------
 
-async fn handle_relevance_indexer(_pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
+async fn handle_relevance_indexer(_pool: &PgPool, _args: &Value, config: &Config) -> Result<(String, bool)> {
     let profile = default_profile_name();
-    let wiki_dir = format!("{}/profiles/{}/wiki", data_dir(), profile);
+    let wiki_dir = format!("{}/profiles/{}/wiki", config.omni_dir, profile);
     let wiki_path = std::path::Path::new(&wiki_dir);
 
     if !wiki_path.exists() {
@@ -546,6 +556,7 @@ async fn handle_setup_knowledge_pipeline(pool: &PgPool, args: &Value) -> Result<
 async fn main() -> Result<()> {
     // Shared pool — populated by configure callback before any tool call
     let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
+    let config: Arc<Mutex<Config>> = Arc::new(Mutex::new(Config::default()));
 
     let p_kanban = pool.clone();
     let kanban_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
@@ -558,22 +569,28 @@ async fn main() -> Result<()> {
     });
 
     let p_hindsight = pool.clone();
+    let c_hindsight = config.clone();
     let hindsight_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_hindsight.clone();
+        let c = c_hindsight.clone();
         Box::pin(async move {
             let guard = p.read().await;
             let pool = guard.as_ref().expect("Pool not initialized").clone();
-            handle_hindsight_populator(&pool, &args).await
+            let config = c.lock().unwrap().clone();
+            handle_hindsight_populator(&pool, &args, &config).await
         })
     });
 
     let p_relevance = pool.clone();
+    let c_relevance = config.clone();
     let relevance_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_relevance.clone();
+        let c = c_relevance.clone();
         Box::pin(async move {
             let guard = p.read().await;
             let pool = guard.as_ref().expect("Pool not initialized").clone();
-            handle_relevance_indexer(&pool, &args).await
+            let config = c.lock().unwrap().clone();
+            handle_relevance_indexer(&pool, &args, &config).await
         })
     });
 
@@ -655,6 +672,7 @@ async fn main() -> Result<()> {
         tools,
         {
             let p = pool.clone();
+            let c = config.clone();
             Some(move |params: serde_json::Value| {
                 let database_url = params
                     .get("database_url")
@@ -664,6 +682,14 @@ async fn main() -> Result<()> {
                         eprintln!("FATAL: database_url not in configure message");
                         std::process::exit(1);
                     });
+                // Store config
+                if let Ok(mut cfg) = c.lock() {
+                    if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
+                        if !dir.is_empty() {
+                            cfg.omni_dir = dir.to_string();
+                        }
+                    }
+                }
                 tokio::task::block_in_place(|| {
                     let rt = tokio::runtime::Handle::current();
                     let new_pool = rt

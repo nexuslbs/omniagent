@@ -126,7 +126,6 @@ async fn run_server() -> AppResult<()> {
     }
 
     let platform_senders = registry.clone_senders();
-    let _platform_handles = registry.start_all(pool.clone());
 
     // Create AppContext and MCP registry
     let readonly_pool = db::connect(&cfg.database_readonly_url).await?;
@@ -217,6 +216,21 @@ async fn run_server() -> AppResult<()> {
             tracing::error!("HTTP server error: {:?}", e);
         }
     });
+
+    // Wait for HTTP server to be ready before starting platform plugins
+    // (platforms need to resolve secrets via the API, so the server must be up)
+    let server_addr = format!("{}:{}", cfg.host, cfg.port);
+    for i in 0..30 {
+        if tokio::net::TcpStream::connect(&server_addr).await.is_ok() {
+            tracing::info!("HTTP server accepting connections, starting platforms...");
+            break;
+        }
+        if i == 29 {
+            tracing::warn!("HTTP server not ready after 15s, starting platforms anyway");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    let _platform_handles = registry.start_all(pool.clone());
 
     tracing::info!(
         "OmniAgent is ready! HTTP server on {}:{}",

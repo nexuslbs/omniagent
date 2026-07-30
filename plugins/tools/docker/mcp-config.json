@@ -1,16 +1,16 @@
 {
   "servers": [
     {
-      "name": "hindsight",
+      "name": "docker",
       "transport": "stdio",
-      "timeout_secs": 30,
-      "max_retries": 2,
+      "args": [],
+      "timeout_secs": 910,
+      "max_retries": 1,
       "allowed_tools": [
         "*"
       ],
       "env": {
-        "DATABASE_URL": "${DATABASE_URL}",
-        "OMNI_DIR": "${OMNI_DIR}",
+        "WORKSPACE_DIR": "${WORKSPACE_DIR:-/opt/workspace}",
         "RUST_LOG": "info"
       }
     }

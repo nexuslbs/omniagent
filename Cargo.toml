@@ -4,6 +4,7 @@ members = [
     "db-migrations",
     "plugins/tools/util",
     "plugins/tools/cron",
+    "plugins/tools/docker",
     "plugins/tools/kanban",
     "plugins/tools/search",
     "plugins/tools/memory",

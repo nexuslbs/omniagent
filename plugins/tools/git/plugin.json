@@ -1,12 +1,15 @@
 {
   "name": "git",
+  "label": "git",
   "version": "0.1.0",
   "type": "mcp",
   "description": "Git/GitHub operations \u2014 create repos, clone, commit, push, status",
   "config_schema": [
     {
       "key": "omni_dir",
-      "default": "$env:OMNI_DIR"
+      "default": "$env:OMNI_DIR",
+      "label": "Omni Dir",
+      "type": "string"
     }
   ],
   "entrypoint": {

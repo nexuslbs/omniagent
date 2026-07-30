@@ -352,9 +352,7 @@ async fn handle_generate_full(
         .unwrap_or_default();
     let thread_id = extract_i64(args, &meta, "thread_id");
     let channel_id = extract_i64(args, &meta, "channel_id");
-    let data_dir = std::env::var("OMNI_DIR")
-        .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.omniagent", h)))
-        .context("OMNI_DIR must be set")?;
+    let data_dir = &cfg.omni_dir;
 
     // 1. Build system prompt parts using the builder
     let base_path = format!("{}/profiles/{}", data_dir, profile_name);
