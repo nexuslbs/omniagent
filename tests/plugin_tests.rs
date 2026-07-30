@@ -198,10 +198,15 @@ fn test_list_bundled_exist() {
     let resp = api_get("/plugins");
     let data = resp["data"].as_array().expect("Expected data array");
     for name in &["actions", "filesystem", "git", "skills"] {
-        let plugin = data
-            .iter()
-            .find(|p| p["name"] == *name && p["source"] == "bundled");
-        assert!(plugin.is_some(), "Bundled '{}' not found in listing", name);
+        // Plugin may be listed as "bundled" or "built-in" depending on migration status
+        let plugin = data.iter().find(|p| {
+            p["name"] == *name && (p["source"] == "bundled" || p["source"] == "built-in")
+        });
+        assert!(
+            plugin.is_some(),
+            "Plugin '{}' not found in listing (neither bundled nor built-in)",
+            name
+        );
     }
 }
 
