@@ -37,7 +37,14 @@ pub(crate) async fn build_prompt_context(
                 "tool_names": tool_names,
                 "thread_id": thread.id,
                 "channel_id": thread.channel_id,
-                "plan": thread.plan,
+                // Only an explicit plan=true forces planning. For anything
+                // else (false or undecided) pass null so the prompt plugin's
+                // complexity config decides at runtime.
+                "plan": if thread.plan {
+                    serde_json::Value::Bool(true)
+                } else {
+                    serde_json::Value::Null
+                },
             }),
         };
         let result = cfg
