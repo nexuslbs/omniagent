@@ -518,6 +518,37 @@ struct SecretValueRow {
     current_value: String,
 }
 
+/// Env vars with agent-defined defaults, mirroring `AgentConfig::from_env`
+/// (HOST binds 0.0.0.0, PORT serves 8080). `$env:NAME` references expand to
+/// these defaults when the env var is absent, so plugin configs can rely on
+/// the agent's defaults without the vars being defined in the container
+/// environment.
+pub(crate) fn agent_env_default(var_name: &str) -> Option<String> {
+    match var_name {
+        "HOST" => Some("0.0.0.0".to_string()),
+        "PORT" => Some("8080".to_string()),
+        _ => None,
+    }
+}
+
+/// Resolve a `$env:NAME` reference: the env var value if set (and non-empty),
+/// else the agent default for that name, else empty with a warning.
+pub(crate) fn resolve_env_ref(var_name: &str) -> String {
+    if let Ok(v) = std::env::var(var_name) {
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    if let Some(default) = agent_env_default(var_name) {
+        return default;
+    }
+    tracing::warn!(
+        "Config ref $env:{} env var not set and no agent default",
+        var_name
+    );
+    String::new()
+}
+
 /// Resolve $env:VAR_NAME prefix in a config value string.
 /// Returns the env var value if found, or the original string if not (graceful fallback).
 ///
@@ -525,14 +556,10 @@ struct SecretValueRow {
 /// (use the async `resolve_config_ref_value` for full resolution with a DB pool).
 ///
 /// This function is for YAML plugin config values ONLY. It does NOT handle
-/// `${VAR}` syntax: that legacy format is only supported in `plugin.json`
-/// and `mcp-config.json` env blocks via `resolve_env_var`.
+/// `${VAR}` syntax: that legacy format is treated as a literal string.
 pub fn resolve_config_value(value: &str) -> String {
     if let Some(var_name) = value.strip_prefix("$env:") {
-        return std::env::var(var_name).unwrap_or_else(|_| {
-            tracing::warn!("Config references $env:{} but env var is not set", var_name);
-            String::new()
-        });
+        return resolve_env_ref(var_name);
     }
     // $secret: passes through: can't resolve without DB pool
     if value.starts_with("$secret:") {
@@ -542,57 +569,27 @@ pub fn resolve_config_value(value: &str) -> String {
     value.to_string()
 }
 
-/// Resolve ${VAR} references in a string against the process environment.
-/// Unresolvable references are replaced with empty string.
-///
-/// This function is kept for backward compatibility but should not be used
-/// by any new code. All env resolution uses `$env:` syntax instead.
-pub fn resolve_legacy_env_vars(value: &str) -> String {
-    resolve_legacy_vars(value)
-}
-
 /// Resolve `$env:VAR` references in a manifest env value for `build_plugin_detail`.
 /// YAML plugin config values should use `resolve_config_value` instead.
+/// `${VAR}` is treated as a literal — never interpolated.
 fn resolve_env_var(value: &str) -> String {
     if let Some(var_name) = value.strip_prefix("$env:") {
-        return std::env::var(var_name).unwrap_or_else(|_| {
-            tracing::warn!("Config env ref $env:{} not set", var_name);
-            String::new()
-        });
+        return resolve_env_ref(var_name);
     }
-    // No ${VAR} support: that syntax is not used anywhere
     value.to_string()
 }
 
-/// Resolve `${VAR}` references (legacy format) in a value string.
-fn resolve_legacy_vars(value: &str) -> String {
-    let mut result = value.to_string();
-    loop {
-        let before = result.clone();
-        while let Some(start) = result.find("${") {
-            if let Some(end) = result[start..].find('}') {
-                let var_name = &result[start + 2..start + end];
-                match std::env::var(var_name) {
-                    Ok(val) => {
-                        result.replace_range(start..start + end + 1, &val);
-                    }
-                    Err(_) => {
-                        result.replace_range(start..start + end + 1, "");
-                    }
-                }
-            } else {
-                break;
-            }
-        }
-        if result == before {
-            break;
-        }
-    }
-    result
+/// Resolve `${VAR}` references in a string against the process environment.
+///
+/// DEPRECATED: `${VAR}` is never interpolated anymore — it is treated as a
+/// literal string. Only `$env:` references are resolved (see
+/// `resolve_config_value`). This function exists only for API compatibility.
+pub fn resolve_legacy_env_vars(value: &str) -> String {
+    value.to_string()
 }
 
 // ---------------------------------------------------------------------------
-// Shared async config reference resolvers (for $env:, $secret:, ${VAR})
+// Shared async config reference resolvers (for $env:, $secret:)
 // ---------------------------------------------------------------------------
 
 /// Resolve `$env:VAR` and `$secret:NAME` references in a single value.
@@ -601,14 +598,10 @@ fn resolve_legacy_vars(value: &str) -> String {
 /// - `$secret:NAME`: reads from the `secrets` table in the DB
 ///
 /// For `$secret:`, returns the original string if DB lookup fails.
-/// Does NOT handle `${VAR}`: that legacy syntax is only resolved in
-/// `plugin.json`/`mcp-config.json` env blocks via the sync resolve path.
+/// `${VAR}` is never interpolated — treated as a literal string.
 pub async fn resolve_config_ref_value(value: &str, pool: &sqlx::PgPool) -> String {
     if let Some(var_name) = value.strip_prefix("$env:") {
-        return std::env::var(var_name).unwrap_or_else(|_| {
-            tracing::warn!("Config ref $env:{} env var not set", var_name);
-            String::new()
-        });
+        return resolve_env_ref(var_name);
     }
     if let Some(secret_name) = value.strip_prefix("$secret:") {
         match sql_forge!(
@@ -2042,6 +2035,27 @@ providers:
         assert_eq!(
             PluginYamlType::from_plugin_type(&PluginType::Provider),
             PluginYamlType::Provider
+        );
+    }
+
+    #[test]
+    fn test_resolve_env_ref_agent_defaults() {
+        // HOST/PORT expand to agent defaults even when the env vars are unset
+        std::env::remove_var("HOST");
+        std::env::remove_var("PORT");
+        assert_eq!(resolve_env_ref("HOST"), "0.0.0.0");
+        assert_eq!(resolve_env_ref("PORT"), "8080");
+        assert_eq!(resolve_config_value("$env:HOST"), "0.0.0.0");
+        assert_eq!(resolve_config_value("$env:PORT"), "8080");
+        // A set env var still wins over the default
+        std::env::set_var("HOST", "example.test");
+        assert_eq!(resolve_env_ref("HOST"), "example.test");
+        std::env::remove_var("HOST");
+        // Unknown vars without a default still resolve to empty
+        std::env::remove_var("OMNIAGENT_TEST_UNSET_VAR_XYZ");
+        assert_eq!(
+            resolve_config_value("$env:OMNIAGENT_TEST_UNSET_VAR_XYZ"),
+            ""
         );
     }
 

@@ -206,12 +206,10 @@ pub(crate) async fn setup_plugin_handler(
     if let Ok(manifest) = serde_json::from_value::<plugin::PluginManifest>(detail.manifest.clone())
     {
         for (env_key, env_val) in &manifest.env {
-            let resolved = if let Some(var_name) =
-                env_val.strip_prefix("${").and_then(|s| s.strip_suffix('}'))
-            {
-                std::env::var(var_name).unwrap_or_default()
-            } else if let Some(var_name) = env_val.strip_prefix("$env:") {
-                std::env::var(var_name).unwrap_or_default()
+            // Only $env: references are resolved. ${VAR} is treated as a
+            // literal string — it is never interpolated.
+            let resolved = if let Some(var_name) = env_val.strip_prefix("$env:") {
+                crate::plugins_yaml::resolve_env_ref(var_name)
             } else {
                 env_val.clone()
             };
