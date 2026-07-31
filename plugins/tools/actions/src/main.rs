@@ -15,6 +15,16 @@ use sqlx::PgPool;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
+/// Row for the kanban task query used when creating a thread from a task.
+type KanbanTaskRow = (
+    String,
+    String,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -112,7 +122,7 @@ async fn handle_kanban_dispatcher(
 
         // ── All deps satisfied — create thread for this kanban task ──
         // 1. Get full task data
-        let task_data: Option<(String, String, Option<i64>, Option<String>, Option<String>, String)> = sqlx::query_as(
+        let task_data: Option<KanbanTaskRow> = sqlx::query_as(
             "SELECT id, title, channel_id, profile, template, planning_mode FROM kanban_tasks WHERE id = $1"
         )
         .bind(id)

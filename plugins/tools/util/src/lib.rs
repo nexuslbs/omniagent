@@ -224,7 +224,7 @@ where
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| format!("info").into()),
+                .unwrap_or_else(|_| "info".to_string().into()),
         )
         .with_writer(std::io::stderr)
         .try_init();

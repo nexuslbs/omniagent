@@ -377,13 +377,8 @@ async fn handle_generate_full(
 
     for part in &all_parts {
         if part.starts_with("## MEMORY") || part.starts_with("## USER PROFILE") {
-            if part.starts_with("## USER PROFILE") {
-                memory_text.push_str(part);
-                memory_text.push('\n');
-            } else {
-                memory_text.push_str(part);
-                memory_text.push('\n');
-            }
+            memory_text.push_str(part);
+            memory_text.push('\n');
         } else if system_message.is_some()
             && !system_message.unwrap().is_empty()
             && part == system_message.unwrap()
@@ -454,7 +449,7 @@ async fn handle_generate_full(
     }
 
     // 2c. Skills
-    let skills = get_skills(&data_dir, profile_name);
+    let skills = get_skills(data_dir, profile_name);
     if !skills.is_empty() {
         context_blocks.push(format!("Available skills:\n{}", skills.join("\n")));
     }
@@ -628,11 +623,7 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
         };
 
         if after_size > target_budget {
-            let aggressive_keep = if condense_keep_turns > 1 {
-                condense_keep_turns - 1
-            } else {
-                0
-            };
+            let aggressive_keep = condense_keep_turns.saturating_sub(1);
             crate::compact::compact_old_assistant_messages(&mut messages, aggressive_keep);
         }
         true

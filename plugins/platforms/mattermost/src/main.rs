@@ -1092,46 +1092,6 @@ fn default_agent_port() -> String {
     "8080".to_string()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Deserialize a PluginConfig with only the given host (all other
-    /// fields fall back to their serde defaults).
-    fn cfg_with_host(host: &str) -> PluginConfig {
-        serde_json::from_str::<PluginConfig>(&serde_json::json!({ "host": host }).to_string())
-            .unwrap()
-    }
-
-    #[test]
-    fn agent_api_base_connects_via_localhost_for_bind_addresses() {
-        // Bind wildcards (the agent HOST default is 0.0.0.0) are not
-        // connect targets — they must become localhost.
-        assert_eq!(
-            cfg_with_host("0.0.0.0").agent_api_base(),
-            "http://localhost:8080"
-        );
-        assert_eq!(
-            cfg_with_host("::").agent_api_base(),
-            "http://localhost:8080"
-        );
-        // Empty host (serde fallback when config omitted) → localhost
-        assert_eq!(cfg_with_host("").agent_api_base(), "http://localhost:8080");
-    }
-
-    #[test]
-    fn agent_api_base_honors_explicit_host_and_port() {
-        let mut cfg = cfg_with_host("agent.internal");
-        assert_eq!(cfg.agent_api_base(), "http://agent.internal:8080");
-        cfg.port = "9000".to_string();
-        assert_eq!(cfg.agent_api_base(), "http://agent.internal:9000");
-        // Explicit port with wildcard host still resolves host to localhost
-        let mut wild = cfg_with_host("0.0.0.0");
-        wild.port = "9000".to_string();
-        assert_eq!(wild.agent_api_base(), "http://localhost:9000");
-    }
-}
-
 fn default_server_url() -> String {
     "http://mattermost:8065".to_string()
 }
@@ -3509,5 +3469,45 @@ fn make_error(id: u64, code: i64, message: &str) -> PluginResponse {
             code,
             message: message.to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deserialize a PluginConfig with only the given host (all other
+    /// fields fall back to their serde defaults).
+    fn cfg_with_host(host: &str) -> PluginConfig {
+        serde_json::from_str::<PluginConfig>(&serde_json::json!({ "host": host }).to_string())
+            .unwrap()
+    }
+
+    #[test]
+    fn agent_api_base_connects_via_localhost_for_bind_addresses() {
+        // Bind wildcards (the agent HOST default is 0.0.0.0) are not
+        // connect targets — they must become localhost.
+        assert_eq!(
+            cfg_with_host("0.0.0.0").agent_api_base(),
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            cfg_with_host("::").agent_api_base(),
+            "http://localhost:8080"
+        );
+        // Empty host (serde fallback when config omitted) → localhost
+        assert_eq!(cfg_with_host("").agent_api_base(), "http://localhost:8080");
+    }
+
+    #[test]
+    fn agent_api_base_honors_explicit_host_and_port() {
+        let mut cfg = cfg_with_host("agent.internal");
+        assert_eq!(cfg.agent_api_base(), "http://agent.internal:8080");
+        cfg.port = "9000".to_string();
+        assert_eq!(cfg.agent_api_base(), "http://agent.internal:9000");
+        // Explicit port with wildcard host still resolves host to localhost
+        let mut wild = cfg_with_host("0.0.0.0");
+        wild.port = "9000".to_string();
+        assert_eq!(wild.agent_api_base(), "http://localhost:9000");
     }
 }

@@ -411,7 +411,7 @@ async fn handle_delete(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to fetch task before delete: {e}"))?;
 
-    let previous_json = before.as_ref().map(|t| task_to_json(t));
+    let previous_json = before.as_ref().map(task_to_json);
 
     // ── Kanban history: record deletion with full previous values ──
     insert_history(pool, &id_clone, "deleted", None, None, previous_json).await?;
