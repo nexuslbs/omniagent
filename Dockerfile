@@ -7,13 +7,48 @@
 FROM rust:1.96.0 AS builder
 WORKDIR /build
 
-# Copy manifests first for dependency caching
+# ── Dependency caching ─────────────────────────────────────────────
+# Copy ALL workspace manifests + lockfile FIRST so the dep-compile layer
+# below only invalidates when Cargo.toml/Cargo.lock change — not on every
+# source edit. Without every member manifest present, `cargo build` fails
+# instantly and NOTHING gets cached (each build recompiles all deps).
 COPY Cargo.toml Cargo.lock* ./
+COPY db-migrations/Cargo.toml ./db-migrations/
+COPY plugins/tools/util/Cargo.toml ./plugins/tools/util/
+COPY plugins/tools/cron/Cargo.toml ./plugins/tools/cron/
+COPY plugins/tools/docker/Cargo.toml ./plugins/tools/docker/
+COPY plugins/tools/kanban/Cargo.toml ./plugins/tools/kanban/
+COPY plugins/tools/search/Cargo.toml ./plugins/tools/search/
+COPY plugins/tools/memory/Cargo.toml ./plugins/tools/memory/
+COPY plugins/tools/metrics/Cargo.toml ./plugins/tools/metrics/
+COPY plugins/tools/query/Cargo.toml ./plugins/tools/query/
+COPY plugins/tools/plugin-manager/Cargo.toml ./plugins/tools/plugin-manager/
+COPY plugins/tools/subtasks/Cargo.toml ./plugins/tools/subtasks/
+COPY plugins/tools/hindsight/Cargo.toml ./plugins/tools/hindsight/
+COPY plugins/tools/prompt/Cargo.toml ./plugins/tools/prompt/
+COPY plugins/tools/actions/Cargo.toml ./plugins/tools/actions/
+COPY plugins/tools/fetch/Cargo.toml ./plugins/tools/fetch/
+COPY plugins/tools/filesystem/Cargo.toml ./plugins/tools/filesystem/
+COPY plugins/tools/git/Cargo.toml ./plugins/tools/git/
+COPY plugins/tools/skills/Cargo.toml ./plugins/tools/skills/
+COPY plugins/platforms/mattermost/Cargo.toml ./plugins/platforms/mattermost/
 
-# Create minimal src to cache deps
-RUN mkdir -p src plugins .sqlx && \
-    echo "fn main() {}" > src/main.rs && \
-    cargo build --release 2>/dev/null || true
+# Stub every workspace member (BOTH bin and lib targets — the root
+# declares [lib], and plugins depend on mcp-server-util / db-migrations
+# as libs, so a main.rs-only stub fails manifest resolution and caches
+# nothing) so cargo compiles all dependencies once here. Real sources
+# replace the stubs in the COPY . . step below; surviving stubs (lib-only
+# crates that got a main.rs stub, bin-only crates that got a lib.rs stub)
+# carry a //STUB marker and are deleted before the real build.
+RUN mkdir -p src .sqlx && \
+    echo "fn main() {} //STUB" > src/main.rs && \
+    echo "//STUB" > src/lib.rs && \
+    for d in db-migrations plugins/tools/* plugins/platforms/*; do \
+      mkdir -p "$d/src"; \
+      echo "fn main() {} //STUB" > "$d/src/main.rs"; \
+      echo "//STUB" > "$d/src/lib.rs"; \
+    done; \
+    cargo build --release --workspace 2>/dev/null || true
 
 # Install dev components needed for lint checks
 RUN rustup component add rustfmt clippy
@@ -21,6 +56,12 @@ RUN rustup component add rustfmt clippy
 # Copy the rest of the source and build
 COPY . .
 ENV SQLX_OFFLINE=true
+# Remove any stub files that survived COPY . . (lib-only crates whose
+# real source has no main.rs, bin-only crates with no lib.rs) so they
+# don't compile as phantom targets. Scoped to source dirs only — never
+# touch target/ (compiled deps from the stub build must be preserved).
+RUN grep -rl "//STUB" --include="*.rs" src db-migrations plugins 2>/dev/null | xargs -r rm && \
+    echo "stub cleanup done"
 # build.py auto-discovers all workspace members from Cargo.toml and
 # builds everything — omniagent, db-migrations, and all plugin binaries
 # (platforms + tools). No hardcoded package lists.
