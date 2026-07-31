@@ -942,6 +942,16 @@ impl Platform for ExternalPlatformClient {
                                                                 text.push_str(&file_lines.join("\n"));
                                                                 }
 
+                                                                // Decide whether the thread should use plan mode. Explicit
+                                                                // "Task:" requests and longer substantive messages get the full
+                                                                // plan budget (plan phase + max_iterations_plan) so complex work
+                                                                // can run to completion; short chat messages run without the
+                                                                // plan phase so simple questions answer fast.
+                                                                let is_task_request = {
+                                                                    let t = text.trim_start().to_lowercase();
+                                                                    t.starts_with("task:") || text.chars().count() > 250
+                                                                };
+
                                                                 if let Ok((thread, _msg)) = crate::db::types::create_thread_with_cause(
                                                                 &pool,
                                                                 &self.data_dir,
@@ -970,7 +980,7 @@ impl Platform for ExternalPlatformClient {
                                                                     },
                                                                     msg_type: "Cause".to_string(),
                                                                     msg_subtype: Some(plugin_name.clone()),
-                                                                    task_plan: Some(false),
+                                                                    task_plan: Some(is_task_request),
                                                                 },
                                                             ).await {
                                                                 // success: message and thread created

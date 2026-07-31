@@ -524,7 +524,7 @@ async fn prompt_handler(
     } else {
         tool_names.join(", ")
     };
-    segments.push(format!("You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice."));
+    segments.push(format!("You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice. HONESTY RULE: if you cannot complete the task, your final summary MUST clearly state that you gave up and why, and what remains undone — NEVER claim the task was completed unless every requested step was actually done and verified."));
     segments.push(format!("Active Hermes profile: {profile_name}."));
 
     // Volatile tier: memory/soul placeholders
@@ -623,7 +623,7 @@ async fn prompt_preview_handler(
         tool_names.join(", ")
     };
     let system_prompt = format!(
-        "You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice.\n\nActive profile: {profile_name}.\n\n{}",
+        "You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice. HONESTY RULE: if you cannot complete the task, your final summary MUST clearly state that you gave up and why, and what remains undone — NEVER claim the task was completed unless every requested step was actually done and verified.\n\nActive profile: {profile_name}.\n\n{}",
         if !memory_raw.is_empty() { format!("## MEMORY (your personal notes)\n{memory_raw}") } else { String::new() }
     );
 
