@@ -226,11 +226,7 @@ impl PluginConfig {
                 .get("omni_dir")
                 .and_then(|v| v.as_str())
                 .map(String::from)
-                .unwrap_or_else(|| {
-                    std::env::var("HOME")
-                        .map(|h| format!("{}/.omniagent", h))
-                        .unwrap_or_default()
-                }),
+                .unwrap_or_else(|| "/opt/omni".to_string()),
         }
     }
 }

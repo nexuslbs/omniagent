@@ -615,31 +615,12 @@ fn apply_config_schema_defaults(env: &mut HashMap<String, String>, plugin_dir: &
 }
 
 /// Resolve environment variable references in a config value.
-/// Supports `${VAR_NAME}` syntax.
+///
+/// DEPRECATED: `${VAR_NAME}` is never interpolated — it is treated as a
+/// literal string. Only `$env:` references are resolved (see
+/// `plugins_yaml::resolve_config_value`).
 pub fn resolve_env_vars(value: &str) -> String {
-    let mut result = value.to_string();
-    while let Some(start) = result.find("${") {
-        if let Some(end) = result[start..].find('}') {
-            let raw = &result[start + 2..start + end];
-            // Support ${VAR:-default} syntax
-            let (var_name, default_val) = if let Some(delim) = raw.find(":-") {
-                let var = &raw[..delim];
-                let default = &raw[delim + 2..];
-                (var, Some(default.to_string()))
-            } else {
-                (raw, None)
-            };
-            let env_val = std::env::var(var_name)
-                .ok()
-                .filter(|v| !v.is_empty())
-                .or(default_val)
-                .unwrap_or_default();
-            result.replace_range(start..start + end + 1, &env_val);
-        } else {
-            break;
-        }
-    }
-    result
+    value.to_string()
 }
 
 #[cfg(test)]
@@ -647,23 +628,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_resolve_env_vars() {
+    fn test_resolve_env_vars_are_literal() {
         std::env::set_var("TEST_MCP_KEY", "secret-key-123");
+        // ${VAR} is NEVER interpolated — it stays as a literal string.
         let resolved = resolve_env_vars("${TEST_MCP_KEY}");
-        assert_eq!(resolved, "secret-key-123");
+        assert_eq!(resolved, "${TEST_MCP_KEY}");
     }
 
     #[test]
-    fn test_resolve_env_vars_missing() {
+    fn test_resolve_env_vars_missing_stays_literal() {
         let resolved = resolve_env_vars("${NONEXISTENT_VAR}");
-        assert_eq!(resolved, "");
+        assert_eq!(resolved, "${NONEXISTENT_VAR}");
     }
 
     #[test]
-    fn test_resolve_env_vars_mixed() {
+    fn test_resolve_env_vars_mixed_stays_literal() {
         std::env::set_var("MCP_HOST", "localhost");
         let resolved = resolve_env_vars("http://${MCP_HOST}:8080/mcp");
-        assert_eq!(resolved, "http://localhost:8080/mcp");
+        assert_eq!(resolved, "http://${MCP_HOST}:8080/mcp");
     }
 
     #[test]

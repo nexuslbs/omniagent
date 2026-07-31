@@ -8,11 +8,7 @@
             "max_retries": 2,
             "allowed_tools": [
                 "*"
-            ],
-            "env": {
-                "OMNI_DIR": "${OMNI_DIR:-/opt/data}",
-                "RUST_LOG": "info"
-            }
+            ]
         }
     ]
 }

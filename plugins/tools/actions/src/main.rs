@@ -26,12 +26,14 @@ use tokio::sync::RwLock;
 #[derive(Clone)]
 struct Config {
     omni_dir: String,
+    llm_provider: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             omni_dir: "/opt/omni".to_string(),
+            llm_provider: String::new(),
         }
     }
 }
@@ -44,7 +46,11 @@ fn default_profile_name() -> String {
 // Tool: kanban_dispatcher
 // ---------------------------------------------------------------------------
 
-async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
+async fn handle_kanban_dispatcher(
+    pool: &PgPool,
+    _args: &Value,
+    config: &Config,
+) -> Result<(String, bool)> {
     // Query ALL todo tasks ordered by priority, then position
     let tasks: Vec<(String, String)> = sqlx::query_as(
         "SELECT id, title FROM kanban_tasks WHERE status = 'todo' ORDER BY priority ASC, position ASC"
@@ -179,7 +185,7 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
         let planning_mode = task_planning_mode.clone();
 
         // Resolve provider and model for the thread
-        // Chain: channel.current_provider → LLM_PROVIDER env
+        // Chain: channel.current_provider → config llm_provider (from $env:LLM_PROVIDER)
         let (resolved_provider, resolved_model): (String, Option<String>) = {
             let chan_prov: Option<(Option<String>, Option<String>)> = sqlx::query_as(
                 "SELECT current_provider, current_model FROM channels WHERE id = $1",
@@ -194,14 +200,11 @@ async fn handle_kanban_dispatcher(pool: &PgPool, _args: &Value) -> Result<(Strin
                     .filter(|m| !m.is_empty())
                     .or_else(|| resolve_default_model(&prov));
                 (prov, resolved)
+            } else if !config.llm_provider.is_empty() {
+                let resolved = resolve_default_model(&config.llm_provider);
+                (config.llm_provider.clone(), resolved)
             } else {
-                match std::env::var("LLM_PROVIDER") {
-                    Ok(prov) if !prov.is_empty() => {
-                        let model = resolve_default_model(&prov);
-                        (prov, model)
-                    }
-                    _ => ("openai".to_string(), None),
-                }
+                ("openai".to_string(), None)
             }
         };
 
@@ -567,12 +570,15 @@ async fn main() -> Result<()> {
     let config: Arc<Mutex<Config>> = Arc::new(Mutex::new(Config::default()));
 
     let p_kanban = pool.clone();
+    let c_kanban = config.clone();
     let kanban_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_kanban.clone();
+        let c = c_kanban.clone();
         Box::pin(async move {
             let guard = p.read().await;
             let pool = guard.as_ref().expect("Pool not initialized").clone();
-            handle_kanban_dispatcher(&pool, &args).await
+            let config = c.lock().unwrap().clone();
+            handle_kanban_dispatcher(&pool, &args, &config).await
         })
     });
 
@@ -695,6 +701,11 @@ async fn main() -> Result<()> {
                     if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
                         if !dir.is_empty() {
                             cfg.omni_dir = dir.to_string();
+                        }
+                    }
+                    if let Some(prov) = params.get("llm_provider").and_then(|v| v.as_str()) {
+                        if !prov.is_empty() {
+                            cfg.llm_provider = prov.to_string();
                         }
                     }
                 }

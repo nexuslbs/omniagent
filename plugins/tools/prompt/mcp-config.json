@@ -2,10 +2,7 @@
   "servers": [
     {
       "name": "prompt",
-      "transport": "stdio",
-      "env": {
-        "DATABASE_URL": "postgres://omniagent:mmuser-pass@postgres:5432/omniagent"
-      }
+      "transport": "stdio"
     }
   ]
 }
