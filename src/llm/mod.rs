@@ -660,6 +660,10 @@ pub struct CompletionResponse {
     pub usage: Option<Usage>,
     /// Wall-clock time of the LLM call in milliseconds.
     pub duration_ms: u64,
+    /// Provider finish reason (e.g. "stop", "length", "tool_calls").
+    /// `length` means the response was truncated by the token budget —
+    /// the model may not have finished emitting its action or answer.
+    pub finish_reason: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -847,6 +851,7 @@ impl LLMClient {
                                     reasoning_tokens: u.reasoning_tokens,
                                 }),
                                 duration_ms: start.elapsed().as_millis() as u64,
+                                finish_reason: None,
                             })
                         }
                         Err(e) => {
@@ -1018,6 +1023,11 @@ impl LLMClient {
             tool_calls,
             usage: response.usage,
             duration_ms: 0,
+            finish_reason: if finish_reason.is_empty() {
+                None
+            } else {
+                Some(finish_reason)
+            },
         })
     }
 
@@ -1037,12 +1047,20 @@ impl LLMClient {
             }
         }
 
+        // finish_reason arrives on the final chunk of a stream.
+        let finish_reason = response
+            .choices
+            .iter()
+            .rev()
+            .find_map(|c| c.finish_reason.clone().filter(|f| !f.is_empty()));
+
         Ok(CompletionResponse {
             content,
             reasoning,
             tool_calls: vec![],
             usage: response.usage,
             duration_ms: 0,
+            finish_reason,
         })
     }
 
@@ -1162,6 +1180,7 @@ impl LLMClient {
             tool_calls: vec![],
             usage,
             duration_ms: 0,
+            finish_reason: None,
         })
     }
 }

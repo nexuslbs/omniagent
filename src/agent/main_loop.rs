@@ -388,6 +388,14 @@ Previous plan:\n{}",
     current_iter = plan_consumed; // 0 for prompt_only, 1 if plan already ran
     let mut unfinished_subtask_retries: u32 = 0;
     let mut calls_since_subtask_management: u32 = 0;
+    // How many consecutive *truncated* responses (finish_reason="length":
+    // the provider cut the response off at the token budget) we tolerate
+    // before giving up. Truncation is the only case where retrying a
+    // reasoning-only response is correct — the model did not choose to
+    // stop, it was interrupted mid-generation. A voluntary reasoning-only
+    // stop (no tool call) is TERMINAL and is never retried.
+    const MAX_TRUNCATION_RETRIES: u32 = 3;
+    let mut truncation_retries: u32 = 0;
     // Track when condensation last occurred so soft-budget triggers use
     // iteration-since-last-condense rather than a fixed modulo schedule.
     // This prevents aggressive condensation on every Nth iteration even when
@@ -691,11 +699,52 @@ Previous plan:\n{}",
                     "The LLM returned an empty response: likely caused by context explosion."
                         .to_string()
                 } else {
-                    // Reasoning has content but no response content. Leave
-                    // final_content empty: the reasoning is already saved
-                    // as a separate `reasoning` message (step 8 below).
-                    // Using reasoning as final_content would cause the
-                    // summary message to duplicate the reasoning text.
+                    // Reasoning has content but no response content and no
+                    // tool calls. A reasoning-only response with no tool
+                    // call is a TERMINAL state for the agent: the model has
+                    // decided to stop. We do NOT nudge or retry — forcing a
+                    // stopped model to continue produces degraded or
+                    // fabricated continuations. Leave final_content empty:
+                    // the post-loop fallback reports the give-up truthfully
+                    // (thread fails) and the reasoning is saved separately
+                    // as a `reasoning` message (step 8 below).
+                    //
+                    // The one exception is genuine truncation: if the
+                    // provider reports finish_reason="length", the response
+                    // was cut off by the token budget before the model could
+                    // emit its action/answer. Retry that case a limited
+                    // number of times with a continuation nudge.
+                    let truncated = response
+                        .finish_reason
+                        .as_deref()
+                        .map(|f| f == "length")
+                        .unwrap_or(false);
+                    if truncated {
+                        truncation_retries += 1;
+                        if truncation_retries >= MAX_TRUNCATION_RETRIES {
+                            warn!(
+                                "[executor] response truncated by token budget {} consecutive times (thread {}): giving up truthfully",
+                                truncation_retries, thread.id,
+                            );
+                            final_tool_call = false;
+                            break;
+                        }
+                        info!(
+                            "[executor] response truncated (finish_reason=length, attempt {}/{}): retrying with continuation (thread {})",
+                            truncation_retries, MAX_TRUNCATION_RETRIES, thread.id,
+                        );
+                        messages.push(ChatMessage::system(&format!(
+                            "[System] Your previous response was cut off by the token limit (attempt {}/{}). \
+                             Continue exactly where you left off: emit your next tool call, or if the task is \
+                             complete, write your final answer.",
+                            truncation_retries, MAX_TRUNCATION_RETRIES,
+                        )));
+                        // Don't consume the iteration budget for this retry overhead.
+                        current_iter -= 1;
+                        continue;
+                    }
+                    // Voluntary stop: terminal. Empty final_content triggers
+                    // the truthful give-up fallback after the loop.
                     String::new()
                 }
             } else {
@@ -1049,10 +1098,18 @@ Previous plan:\n{}",
         }
     } // end for _turn
 
-    // If we exited the loop without a final text response, provide a fallback
+    // If we exited the loop without a final text response, provide a truthful
+    // fallback. The old hardcoded "I've completed the requested operations"
+    // string was a FALSE SUCCESS: when the LLM returns reasoning-only content
+    // (i.e. it gives up without producing a final answer), that fallback made
+    // the agent claim completion it never achieved. Report the give-up clearly
+    // and force the thread to fail so callers see the task was NOT done.
     if final_content.is_empty() && !final_tool_call {
-        final_content =
-            "I've completed the requested operations using my available tools.".to_string();
+        final_content = "The agent gave up without producing a final answer. \
+The task was NOT completed: no final response was generated after the tool-calling loop ended. \
+Review the tool results above to see what was attempted and what remains."
+            .to_string();
+        force_failed = true;
     } else if final_content.is_empty() && final_tool_call {
         // The loop exhausted all iterations while the LLM was still issuing tool
         // calls: no final answer was produced. Set limit_reached (interrupted)
