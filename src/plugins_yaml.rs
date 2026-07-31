@@ -519,14 +519,15 @@ struct SecretValueRow {
 }
 
 /// Env vars with agent-defined defaults, mirroring `AgentConfig::from_env`
-/// (HOST binds 0.0.0.0, PORT serves 8080). `$env:NAME` references expand to
-/// these defaults when the env var is absent, so plugin configs can rely on
-/// the agent's defaults without the vars being defined in the container
-/// environment.
+/// (HOST binds 0.0.0.0, PORT serves 8080, OMNI_DIR defaults to /opt/omni).
+/// `$env:NAME` references expand to these defaults when the env var is
+/// absent, so plugin configs can rely on the agent's defaults without the
+/// vars being defined in the container environment.
 pub(crate) fn agent_env_default(var_name: &str) -> Option<String> {
     match var_name {
         "HOST" => Some("0.0.0.0".to_string()),
         "PORT" => Some("8080".to_string()),
+        "OMNI_DIR" => Some("/opt/omni".to_string()),
         _ => None,
     }
 }
@@ -2043,10 +2044,13 @@ providers:
         // HOST/PORT expand to agent defaults even when the env vars are unset
         std::env::remove_var("HOST");
         std::env::remove_var("PORT");
+        std::env::remove_var("OMNI_DIR");
         assert_eq!(resolve_env_ref("HOST"), "0.0.0.0");
         assert_eq!(resolve_env_ref("PORT"), "8080");
+        assert_eq!(resolve_env_ref("OMNI_DIR"), "/opt/omni");
         assert_eq!(resolve_config_value("$env:HOST"), "0.0.0.0");
         assert_eq!(resolve_config_value("$env:PORT"), "8080");
+        assert_eq!(resolve_config_value("$env:OMNI_DIR"), "/opt/omni");
         // A set env var still wins over the default
         std::env::set_var("HOST", "example.test");
         assert_eq!(resolve_env_ref("HOST"), "example.test");

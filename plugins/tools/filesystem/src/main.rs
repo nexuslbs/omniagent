@@ -36,8 +36,6 @@ fn truncate_content(content: &str, max_chars: usize) -> String {
     )
 }
 
-/// Return thresholds and labels for human-readable sizes.
-
 /// Wrap a handler so any Err(e) becomes Ok((error_msg, true)).
 /// This prevents access-denied and file-not-found errors from
 /// triggering the circuit breaker on the MCP client side.

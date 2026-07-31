@@ -606,7 +606,7 @@ async fn handle_generate_summary(
     let window = config.summarize_after_days.max(1);
     let summary_tokens = config.channel_summary_tokens.max(256);
 
-    let (Some(ref provider_name), Some(ref model_name)) = (
+    let (Some(provider_name), Some(model_name)) = (
         config.summary_provider.as_ref(),
         config.summary_model.as_ref(),
     ) else {

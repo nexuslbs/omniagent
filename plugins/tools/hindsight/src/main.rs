@@ -151,7 +151,7 @@ async fn handle_recall(args: Value, cfg: &PluginConfig) -> Result<(String, bool)
     // Tags: parse from args["tags"] if present, else from config
     let tags = args["tags"]
         .as_str()
-        .and_then(|s| parse_comma_separated(s))
+        .and_then(parse_comma_separated)
         .or_else(|| parse_comma_separated(&cfg.tags));
     if let Some(ref t) = tags {
         payload["tags"] = serde_json::json!(t);
@@ -162,7 +162,7 @@ async fn handle_recall(args: Value, cfg: &PluginConfig) -> Result<(String, bool)
     // Types: parse from args["types"] if present, else from config
     let types = args["types"]
         .as_str()
-        .and_then(|s| parse_comma_separated(s))
+        .and_then(parse_comma_separated)
         .or_else(|| parse_comma_separated(&cfg.types));
     if let Some(ref t) = types {
         payload["types"] = serde_json::json!(t);
@@ -173,7 +173,7 @@ async fn handle_recall(args: Value, cfg: &PluginConfig) -> Result<(String, bool)
         Err(e) => return Ok((format!("Failed to build HTTP client: {}", e), true)),
     };
 
-    match client.post(&recall_url(cfg)).json(&payload).send().await {
+    match client.post(recall_url(cfg)).json(&payload).send().await {
         Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
             Ok(data) => {
                 let memories = data["results"].as_array().cloned().unwrap_or_default();
@@ -255,7 +255,7 @@ async fn handle_retain(args: Value, cfg: &PluginConfig) -> Result<(String, bool)
         Err(e) => return Ok((format!("Failed to build HTTP client: {}", e), true)),
     };
 
-    match client.post(&retain_url(cfg)).json(&payload).send().await {
+    match client.post(retain_url(cfg)).json(&payload).send().await {
         Ok(resp) if resp.status().is_success() => {
             Ok(("Memory retained successfully.".to_string(), false))
         }
@@ -286,7 +286,7 @@ async fn handle_reflect(args: Value, cfg: &PluginConfig) -> Result<(String, bool
         Err(e) => return Ok((format!("Failed to build HTTP client: {}", e), true)),
     };
 
-    match client.post(&reflect_url(cfg)).json(&payload).send().await {
+    match client.post(reflect_url(cfg)).json(&payload).send().await {
         Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
             Ok(data) => {
                 let text = data["text"].as_str().unwrap_or("No reflection");

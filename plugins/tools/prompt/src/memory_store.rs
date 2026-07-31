@@ -52,7 +52,7 @@ fn format_thousands(n: usize) -> String {
     let s = n.to_string();
     let mut result = String::with_capacity(s.len() + s.len() / 3);
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(c);
@@ -91,7 +91,7 @@ impl MemoryStore {
                     let hash = format!("{:x}", Sha256::digest(raw.as_bytes()));
                     let expected =
                         Self::read_expected_hash(&self.memories_dir.join("MEMORY.md.sha256"));
-                    let valid = expected.as_ref().map_or(true, |e| e == &hash);
+                    let valid = expected.as_ref().is_none_or(|e| e == &hash);
                     (Some(hash), valid)
                 }
                 Err(_) => (None, true),
