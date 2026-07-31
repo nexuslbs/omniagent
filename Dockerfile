@@ -60,8 +60,15 @@ ENV SQLX_OFFLINE=true
 # real source has no main.rs, bin-only crates with no lib.rs) so they
 # don't compile as phantom targets. Scoped to source dirs only — never
 # touch target/ (compiled deps from the stub build must be preserved).
+# Also touch every real source: COPY . . preserves host file mtimes,
+# which predate the stub-build artifacts, so cargo's mtime freshness
+# check would otherwise consider the STUB rlibs up-to-date and skip
+# recompiling the real sources (plugins then link an empty omniagent
+# lib — "unresolved import omniagent::db"). Touching forces cargo to
+# recompile the workspace crates while still reusing cached deps.
 RUN grep -rl "//STUB" --include="*.rs" src db-migrations plugins 2>/dev/null | xargs -r rm && \
-    echo "stub cleanup done"
+    find src db-migrations plugins -name "*.rs" -exec touch {} + && \
+    echo "stub cleanup + source touch done"
 # build.py auto-discovers all workspace members from Cargo.toml and
 # builds everything — omniagent, db-migrations, and all plugin binaries
 # (platforms + tools). No hardcoded package lists.
