@@ -8,13 +8,7 @@
       "max_retries": 2,
       "allowed_tools": [
         "*"
-      ],
-      "env": {
-        "DATABASE_URL": "${DATABASE_URL}",
-        "OMNI_DIR": "${OMNI_DIR}",
-        "HINDSIGHT_URL": "${HINDSIGHT_URL:-http://hindsight:8888}",
-        "RUST_LOG": "info"
-      }
+      ]
     }
   ]
 }

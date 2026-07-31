@@ -15,6 +15,22 @@
   },
   "config_schema": [
     {
+      "key": "host",
+      "label": "Agent API Host",
+      "type": "string",
+      "required": false,
+      "default": "$env:HOST",
+      "description": "Host of the omniagent HTTP API (used to resolve/store secrets). Falls back to the HOST env var, then localhost."
+    },
+    {
+      "key": "port",
+      "label": "Agent API Port",
+      "type": "string",
+      "required": false,
+      "default": "$env:PORT",
+      "description": "Port of the omniagent HTTP API (used to resolve/store secrets). Falls back to the PORT env var, then 8080."
+    },
+    {
       "key": "server_url",
       "label": "Mattermost Server URL",
       "type": "string",
@@ -134,8 +150,5 @@
       "max": 1073741824,
       "description": "Maximum file size in bytes to download from the platform API. Files larger than this are not downloaded; only metadata and a file URL reference are included. Default: 10 MB (10485760)."
     }
-  ],
-  "env": {
-    "RUST_LOG": "mattermost_platform=debug"
-  }
+  ]
 }

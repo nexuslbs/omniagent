@@ -214,7 +214,8 @@ impl ExternalPlatformClient {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit());
 
-        // Resolve $env:, $secret:, and ${VAR} references in env values.
+        // Resolve $env: and $secret: references in env values.
+        // ${VAR} is never interpolated — treated as a literal.
         // This ensures that env vars set at runtime (e.g. by the setup handler
         // via std::env::set_var) and secrets stored in the DB are picked up
         // even after a config reload.
@@ -451,9 +452,10 @@ impl Platform for ExternalPlatformClient {
                     (config.name.clone(), config.config.clone())
                     // RwLockReadGuard dropped here
                 };
-                // Resolve all config refs ($env:, $secret:, ${VAR}) so the plugin
+                // Resolve all config refs ($env:, $secret:) so the plugin
                 // receives actual values (e.g. access_token), not literal
                 // references like "$env:ACCESS_TOKEN" or "$secret:my_key".
+                // ${VAR} is never interpolated — treated as a literal.
                 let mut resolved_config = config_map;
                 crate::plugins_yaml::resolve_config_refs(&mut resolved_config, &pool).await;
                 let req =
@@ -1283,13 +1285,24 @@ impl Platform for ExternalPlatformClient {
             plugin_name
         );
 
-        // Get plugin config for the binary path
-        let (command, args) = {
+        // Get plugin config for the binary path and config map
+        let (command, args, config_map) = {
             let config = self.config.read().map_err(|_| {
                 crate::error::Error::Message("Platform config lock poisoned".to_string())
             })?;
-            (config.command.clone(), config.args.clone())
+            (
+                config.command.clone(),
+                config.args.clone(),
+                config.config.clone(),
+            )
         };
+        // The plugin needs its access_token_name to resolve its own token.
+        // Pass it via the request — no env vars, no OMNI_DIR.
+        let access_token_name = config_map
+            .get("access_token_name")
+            .map(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         // Spawn the plugin with "read-file" argument (one-shot mode)
         let mut child = std::process::Command::new(&command)
@@ -1297,7 +1310,6 @@ impl Platform for ExternalPlatformClient {
             .args(&args)
             .env_clear()
             .env("RUST_LOG", "info")
-            .env("OMNI_DIR", &self.data_dir)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1322,11 +1334,13 @@ impl Platform for ExternalPlatformClient {
             ))
         })?;
 
-        // Send file_id and server_url via stdin, then close stdin (EOF signals start)
+        // Send file_id, server_url, and access_token_name via stdin, then close
+        // stdin (EOF signals start)
         use std::io::Write;
         let request = serde_json::json!({
             "file_id": file_id,
             "server_url": server_url,
+            "access_token_name": access_token_name,
         });
         writeln!(
             stdin,

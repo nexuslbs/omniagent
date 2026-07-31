@@ -1013,6 +1013,10 @@ struct SetupParams {
 /// Operational config received via configure message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PluginConfig {
+    #[serde(default = "default_agent_host")]
+    host: String,
+    #[serde(default = "default_agent_port")]
+    port: String,
     #[serde(default = "default_server_url")]
     server_url: String,
     #[serde(default)]
@@ -1043,13 +1047,30 @@ struct PluginConfig {
     test_user: String,
     #[serde(default)]
     test_password: Option<String>,
-    #[serde(default = "default_env_path")]
-    env_path: String,
     #[serde(
         default = "default_max_download_bytes",
         deserialize_with = "deserialize_u64_from_string_or_number"
     )]
     max_download_bytes: u64,
+}
+
+impl PluginConfig {
+    /// Base URL of the omniagent HTTP API, used to resolve/store secrets.
+    /// Falls back to localhost:8080 when host/port are empty (e.g. when the
+    /// `$env:HOST`/`$env:PORT` defaults resolve to empty strings).
+    fn agent_api_base(&self) -> String {
+        let host = if self.host.is_empty() {
+            "localhost"
+        } else {
+            &self.host
+        };
+        let port = if self.port.is_empty() {
+            "8080"
+        } else {
+            &self.port
+        };
+        format!("http://{}:{}", host, port)
+    }
 }
 
 fn default_connection_mode() -> String {
@@ -1060,17 +1081,16 @@ fn default_polling_interval() -> u64 {
     15
 }
 
-fn default_server_url() -> String {
-    "http://mattermost:8065".to_string()
+fn default_agent_host() -> String {
+    "localhost".to_string()
 }
 
-fn default_env_path() -> String {
-    std::env::var("OMNI_DIR")
-        .map(|d| format!("{}/.env", d))
-        .unwrap_or_else(|_| {
-            eprintln!("FATAL: OMNI_DIR must be set");
-            std::process::exit(1);
-        })
+fn default_agent_port() -> String {
+    "8080".to_string()
+}
+
+fn default_server_url() -> String {
+    "http://mattermost:8065".to_string()
 }
 
 fn default_max_download_bytes() -> u64 {
@@ -1223,33 +1243,18 @@ async fn main() -> Result<()> {
     writer.write_all(b"\n").await?;
     writer.flush().await?;
 
+    let api_base = config.agent_api_base();
     let server_url = config.server_url;
     let secret_name = config
         .access_token_name
         .as_deref()
         .unwrap_or("")
         .to_string();
-    // Resolve access_token from secret name via omniagent secrets API
+    // Resolve access_token from secret name via omniagent secrets API.
+    // No env-var fallbacks: all configuration arrives via the configure message.
     let secrets_http = reqwest::Client::new();
     let access_token = if !secret_name.is_empty() {
-        let mut tok_val = get_agent_secret(&secrets_http, &secret_name).await;
-        if tok_val.as_ref().map_or(true, |s| s.is_empty()) {
-            let env_name = format!("{}_ACCESS_TOKEN", "MATTERMOST");
-            if let Ok(env_tok) = std::env::var(&env_name) {
-                if !env_tok.is_empty() {
-                    tracing::info!("Resolved access_token from env var '{}'", env_name);
-                    tok_val = Some(env_tok);
-                }
-            }
-            if tok_val.as_ref().map_or(true, |s| s.is_empty()) {
-                if let Ok(env_tok) = std::env::var(&secret_name) {
-                    if !env_tok.is_empty() {
-                        tracing::info!("Resolved access_token from env var '{}'", secret_name);
-                        tok_val = Some(env_tok);
-                    }
-                }
-            }
-        }
+        let mut tok_val = get_agent_secret(&secrets_http, &api_base, &secret_name).await;
         if let Some(ref tok) = tok_val {
             if !tok.is_empty() {
                 tracing::info!("Resolved access_token for '{}'", secret_name);
@@ -1472,6 +1477,7 @@ async fn main() -> Result<()> {
             &access_token,
             &secret_name,
             &secrets_http,
+            &api_base,
         )
         .await;
         let response_line = serde_json::to_string(&response)?;
@@ -1576,7 +1582,9 @@ async fn main() -> Result<()> {
                     );
                     // Persist the new token to the omniagent secret store
                     if !secret_name.is_empty() {
-                        match set_agent_secret(&secrets_http, &secret_name, &new_token).await {
+                        match set_agent_secret(&secrets_http, &api_base, &secret_name, &new_token)
+                            .await
+                        {
                             Ok(_) => tracing::info!(
                                 "Auto-recovery: updated secret '{}' with new access token",
                                 secret_name
@@ -2128,10 +2136,10 @@ async fn create_first_user(
 // Read-File Handler (one-shot, invoked as "mattermost-platform read-file")
 // ---------------------------------------------------------------------------
 
-/// Handle a one-shot read-file request. Reads file_id and server_url from
-/// stdin, fetches the file from Mattermost API using the plugin's own access
-/// token (resolved from secrets API), and outputs base64-encoded content on
-/// stdout.
+/// Handle a one-shot read-file request. Reads file_id, server_url, and
+/// access_token_name from stdin, fetches the file from Mattermost API using
+/// the plugin's own access token (resolved from secrets API), and outputs
+/// base64-encoded content on stdout.
 async fn handle_read_file() -> Result<()> {
     use std::io::{BufRead, Write};
 
@@ -2154,65 +2162,31 @@ async fn handle_read_file() -> Result<()> {
         return Ok(());
     }
 
-    // Get OMNI_DIR from environment to read our own config
-    let omni_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| ".".to_string());
+    // access_token_name is sent by the core in the request (it knows the
+    // plugin's config). No env vars, no plugins.yml reads.
+    let access_token_name = request["access_token_name"].as_str().unwrap_or("");
 
-    // Read the platform YAML entry to get our access_token_name
-    let yaml_path = format!("{}/plugins.yml", omni_dir);
-    let plugin_name = "mattermost";
-
-    let access_token = if let Ok(content) = std::fs::read_to_string(&yaml_path) {
-        if let Ok(yaml_doc) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-            if let Some(platforms) = yaml_doc.get("platforms") {
-                if let Some(plugin) = platforms.get(plugin_name) {
-                    if let Some(config) = plugin.get("config") {
-                        // Try access_token first, then access_token_name
-                        if let Some(token) = config.get("access_token").and_then(|v| v.as_str()) {
-                            if !token.is_empty() {
-                                Some(token.to_string())
-                            } else {
-                                None
-                            }
-                        } else if let Some(name) =
-                            config.get("access_token_name").and_then(|v| v.as_str())
-                        {
-                            if !name.is_empty() {
-                                // Resolve the secret via omniagent secrets API
-                                let client = reqwest::Client::new();
-                                let secret_url = format!("http://localhost:8080/secrets/{}", name);
-                                match client.get(&secret_url).send().await {
-                                    Ok(resp) => {
-                                        if let Ok(body) = resp.json::<serde_json::Value>().await {
-                                            body.get("data")
-                                                .and_then(|d| d.get("current_value"))
-                                                .and_then(|v| v.as_str())
-                                                .map(|s| s.to_string())
-                                        } else {
-                                            None
-                                        }
-                                    }
-                                    Err(_) => None,
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
+    let access_token = if access_token_name.is_empty() {
+        None
+    } else {
+        // Resolve the secret via omniagent secrets API. Read-file mode has no
+        // configure message, so use the default agent API base (localhost:8080
+        // — the plugin is co-located with omniagent).
+        let client = reqwest::Client::new();
+        let secret_url = format!("http://localhost:8080/secrets/{}", access_token_name);
+        match client.get(&secret_url).send().await {
+            Ok(resp) => {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    body.get("data")
+                        .and_then(|d| d.get("current_value"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
                 } else {
                     None
                 }
-            } else {
-                None
             }
-        } else {
-            None
+            Err(_) => None,
         }
-    } else {
-        None
     };
 
     let token = match access_token {
@@ -2283,6 +2257,7 @@ async fn handle_setup(
     access_token: &Option<String>,
     secret_name: &str,
     secrets_http: &reqwest::Client,
+    api_base: &str,
 ) -> PluginResponse {
     // Validate required fields
     if params.setup_team.is_empty() {
@@ -2574,7 +2549,9 @@ async fn handle_setup(
 
             // Persist the bot_token to the omniagent secret store
             if !bot_token.is_empty() && !secret_name.is_empty() {
-                if let Err(e) = set_agent_secret(&secrets_http, secret_name, &bot_token).await {
+                if let Err(e) =
+                    set_agent_secret(&secrets_http, api_base, secret_name, &bot_token).await
+                {
                     tracing::warn!(
                         "Failed to persist bot_token to secret '{}': {:?}",
                         secret_name,
@@ -2624,7 +2601,9 @@ async fn handle_setup(
 
                         match client.setup_bot_token(&uid).await {
                             Ok(token) => {
-                                let _ = set_agent_secret(&secrets_http, secret_name, &token).await;
+                                let _ =
+                                    set_agent_secret(&secrets_http, api_base, secret_name, &token)
+                                        .await;
                                 make_success(
                                     id,
                                     serde_json::json!({
@@ -3429,15 +3408,14 @@ async fn ws_event_loop(
 // OmniAgent secrets API helpers
 // ---------------------------------------------------------------------------
 
-/// Get the omniagent HTTP API URL from env vars.
-fn agent_api_url() -> String {
-    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    format!("http://localhost:{}", port)
-}
-
 /// Retrieve a secret value from the omniagent secrets API by name.
-async fn get_agent_secret(http_client: &reqwest::Client, secret_name: &str) -> Option<String> {
-    let url = format!("{}/secrets/{}", agent_api_url(), secret_name);
+/// `api_base` is the omniagent HTTP API base URL (from plugin config host/port).
+async fn get_agent_secret(
+    http_client: &reqwest::Client,
+    api_base: &str,
+    secret_name: &str,
+) -> Option<String> {
+    let url = format!("{}/secrets/{}", api_base, secret_name);
     let resp = http_client.get(&url).send().await.ok()?;
     if !resp.status().is_success() {
         return None;
@@ -3450,15 +3428,16 @@ async fn get_agent_secret(http_client: &reqwest::Client, secret_name: &str) -> O
 }
 
 /// Store or update a secret via the omniagent secrets API.
+/// `api_base` is the omniagent HTTP API base URL (from plugin config host/port).
 async fn set_agent_secret(
     http_client: &reqwest::Client,
+    api_base: &str,
     secret_name: &str,
     value: &str,
 ) -> anyhow::Result<()> {
-    let base = agent_api_url();
     let payload = serde_json::json!({"value": value});
 
-    let put_url = format!("{}/secrets/{}", base, secret_name);
+    let put_url = format!("{}/secrets/{}", api_base, secret_name);
     let resp = http_client
         .put(&put_url)
         .json(&payload)
@@ -3467,7 +3446,7 @@ async fn set_agent_secret(
         .context("Failed to PUT agent secret")?;
 
     if resp.status().as_u16() == 404 {
-        let post_url = format!("{}/secrets", base);
+        let post_url = format!("{}/secrets", api_base);
         let create_body = serde_json::json!({
             "name": secret_name,
             "fieldType": "password",

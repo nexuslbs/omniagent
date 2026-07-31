@@ -27,6 +27,14 @@
       "default": "$env:OMNI_DIR",
       "label": "Omni Dir",
       "type": "string"
+    },
+    {
+      "key": "llm_provider",
+      "default": "$env:LLM_PROVIDER",
+      "label": "LLM Provider",
+      "type": "string",
+      "required": false,
+      "description": "Default LLM provider used for kanban-dispatched threads when the channel has no provider set."
     }
   ],
   "label": "actions"

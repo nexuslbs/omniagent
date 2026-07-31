@@ -12,7 +12,7 @@ use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 //  Constants
@@ -20,12 +20,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Clone)]
 struct Config {
     omni_dir: String,
+    github_app_id: String,
+    github_installation_id: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             omni_dir: "/opt/omni".to_string(),
+            github_app_id: String::new(),
+            github_installation_id: String::new(),
         }
     }
 }
@@ -38,11 +42,6 @@ fn private_key_path() -> String {
         "{0}/data/credentials/nexuslbs-app.2026-06-04.private-key.pem",
         data_dir
     )
-}
-
-fn dot_env_path() -> String {
-    let data_dir = CONFIG.lock().unwrap().omni_dir.clone();
-    format!("{}/.env", data_dir)
 }
 
 const GITHUB_ORG: &str = "nexuslbs";
@@ -89,46 +88,25 @@ fn base64url_encode(data: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(data)
 }
 
-/// Load GITHUB_APP_ID and GITHUB_INSTALLATION_ID from env or .env file.
+/// Load GITHUB_APP_ID and GITHUB_INSTALLATION_ID from plugin config.
+/// Values arrive via the configure message (config_schema defaults resolve
+/// `$env:GITHUB_APP_ID` / `$env:GITHUB_INSTALLATION_ID` in the core).
+/// No direct env-var or .env reads.
 fn load_github_creds() -> Result<(String, String)> {
-    let app_id = std::env::var("GITHUB_APP_ID").ok();
-    let inst_id = std::env::var("GITHUB_INSTALLATION_ID").ok();
-
-    if let (Some(a), Some(i)) = (app_id.as_ref(), inst_id.as_ref()) {
-        return Ok((a.clone(), i.clone()));
+    let cfg = CONFIG
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Config lock error: {}", e))?;
+    if cfg.github_app_id.is_empty() || cfg.github_installation_id.is_empty() {
+        anyhow::bail!(
+            "GITHUB_APP_ID and GITHUB_INSTALLATION_ID must be set in the plugin config \
+             (config_schema defaults resolve them from the GITHUB_APP_ID / GITHUB_INSTALLATION_ID \
+             env vars of the omniagent process)"
+        );
     }
-
-    let mut found_app_id = app_id;
-    let mut found_inst_id = inst_id;
-
-    if Path::new(&dot_env_path()).exists() {
-        let content =
-            std::fs::read_to_string(&dot_env_path()).context("Failed to read .env file")?;
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((k, v)) = line.split_once('=') {
-                let val = v.trim().trim_matches('\'').trim_matches('"').to_string();
-                match k.trim() {
-                    "GITHUB_APP_ID" if found_app_id.is_none() => found_app_id = Some(val),
-                    "GITHUB_INSTALLATION_ID" if found_inst_id.is_none() => {
-                        found_inst_id = Some(val)
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    match (found_app_id, found_inst_id) {
-        (Some(a), Some(i)) => Ok((a, i)),
-        _ => anyhow::bail!(
-            "GITHUB_APP_ID and GITHUB_INSTALLATION_ID must be set in environment or {}",
-            dot_env_path()
-        ),
-    }
+    Ok((
+        cfg.github_app_id.clone(),
+        cfg.github_installation_id.clone(),
+    ))
 }
 
 /// Create a JWT using RS256 via openssl subprocess.
@@ -697,8 +675,21 @@ async fn main() -> Result<()> {
                         cfg.omni_dir = dir.to_string();
                     }
                 }
+                if let Some(v) = params.get("github_app_id").and_then(|v| v.as_str()) {
+                    if !v.is_empty() {
+                        cfg.github_app_id = v.to_string();
+                    }
+                }
+                if let Some(v) = params
+                    .get("github_installation_id")
+                    .and_then(|v| v.as_str())
+                {
+                    if !v.is_empty() {
+                        cfg.github_installation_id = v.to_string();
+                    }
+                }
             }
-            tracing::info!("Git plugin configured with omni_dir");
+            tracing::info!("Git plugin configured with omni_dir + github creds");
         }),
     )
     .await

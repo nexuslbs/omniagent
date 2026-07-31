@@ -265,7 +265,8 @@ pub async fn resolve_env_ref_value(value: &str, pool: &sqlx::PgPool) -> String {
 }
 
 /// Resolve `$env:VAR` and `$secret:NAME` references in all values of an env map.
-/// Also resolves legacy `${VAR}` references.
+///
+/// `${VAR}` is never interpolated — treated as a literal.
 ///
 /// Delegates to the shared `crate::plugins_yaml::resolve_config_refs`.
 pub async fn resolve_env_refs(
@@ -276,7 +277,9 @@ pub async fn resolve_env_refs(
 }
 
 /// Resolve environment variable references in a config value.
-/// Supports `${VAR_NAME}` syntax for legacy `plugin.json` env blocks.
+///
+/// DEPRECATED: `${VAR_NAME}` is never interpolated — it is treated as a
+/// literal string. Only `$env:` references are resolved.
 ///
 /// Delegates to the shared `crate::plugins_yaml::resolve_legacy_env_vars`.
 pub fn resolve_env_vars(value: &str) -> String {
@@ -602,23 +605,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_resolve_env_vars() {
+    fn test_resolve_env_vars_are_literal() {
         std::env::set_var("TEST_PLATFORM_KEY", "my-token");
+        // ${VAR} is NEVER interpolated — it stays as a literal string.
         let resolved = resolve_env_vars("${TEST_PLATFORM_KEY}");
-        assert_eq!(resolved, "my-token");
+        assert_eq!(resolved, "${TEST_PLATFORM_KEY}");
     }
 
     #[test]
-    fn test_resolve_env_vars_missing() {
+    fn test_resolve_env_vars_missing_stays_literal() {
         let resolved = resolve_env_vars("${NONEXISTENT_VAR}");
-        assert_eq!(resolved, "");
+        assert_eq!(resolved, "${NONEXISTENT_VAR}");
     }
 
     #[test]
-    fn test_resolve_env_vars_mixed() {
+    fn test_resolve_env_vars_mixed_stays_literal() {
         std::env::set_var("PLATFORM_TOKEN", "abc123");
         let resolved = resolve_env_vars("token=${PLATFORM_TOKEN}");
-        assert_eq!(resolved, "token=abc123");
+        assert_eq!(resolved, "token=${PLATFORM_TOKEN}");
     }
 
     #[test]

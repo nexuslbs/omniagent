@@ -10,6 +10,20 @@
       "default": "$env:OMNI_DIR",
       "label": "Omni Dir",
       "type": "string"
+    },
+    {
+      "key": "github_app_id",
+      "default": "$env:GITHUB_APP_ID",
+      "label": "GitHub App ID",
+      "type": "string",
+      "required": false
+    },
+    {
+      "key": "github_installation_id",
+      "default": "$env:GITHUB_INSTALLATION_ID",
+      "label": "GitHub Installation ID",
+      "type": "string",
+      "required": false
     }
   ],
   "entrypoint": {
