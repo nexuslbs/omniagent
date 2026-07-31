@@ -29,10 +29,14 @@ RUN python3 scripts/build.py
 # Run lint checks and unit tests. These always re-execute when source
 # changes (Docker layer after COPY . .). Matches CI pretest steps so
 # `docker build` catches failures that CI would catch on the runner.
-RUN cargo fmt --check && \
-    RUSTFLAGS="-D warnings" cargo check --release && \
-    cargo clippy --release -- -D warnings && \
-    cargo test --release
+# --all / --workspace / --all-targets are REQUIRED: without them cargo
+# only validates the root package and every plugin crate (tools +
+# platforms) would ship un-linted. These flags match deploy.py's
+# run_pretests() so the image build gates on the same checks as CI.
+RUN cargo fmt --all --check && \
+    RUSTFLAGS="-D warnings" cargo check --workspace --all-targets --release && \
+    cargo clippy --workspace --all-targets --release -- -D warnings && \
+    cargo test --workspace --release
 
 # Stage 2: Docker CLI binary
 FROM docker:cli AS docker-cli
