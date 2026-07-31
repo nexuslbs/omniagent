@@ -1056,13 +1056,16 @@ struct PluginConfig {
 
 impl PluginConfig {
     /// Base URL of the omniagent HTTP API, used to resolve/store secrets.
-    /// Falls back to localhost:8080 when host/port are empty (e.g. when the
-    /// `$env:HOST`/`$env:PORT` defaults resolve to empty strings).
+    ///
+    /// The `host` config carries the agent's BIND address (the HOST env
+    /// default is `0.0.0.0`). A bind address is not a connect target, so
+    /// wildcard values (`0.0.0.0`, `::`) — and empty values — are
+    /// translated to `localhost` for connecting, with port defaulting to
+    /// `8080`.
     fn agent_api_base(&self) -> String {
-        let host = if self.host.is_empty() {
-            "localhost"
-        } else {
-            &self.host
+        let host = match self.host.as_str() {
+            "" | "0.0.0.0" | "::" => "localhost",
+            h => h,
         };
         let port = if self.port.is_empty() {
             "8080"
@@ -1087,6 +1090,46 @@ fn default_agent_host() -> String {
 
 fn default_agent_port() -> String {
     "8080".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deserialize a PluginConfig with only the given host (all other
+    /// fields fall back to their serde defaults).
+    fn cfg_with_host(host: &str) -> PluginConfig {
+        serde_json::from_str::<PluginConfig>(&serde_json::json!({ "host": host }).to_string())
+            .unwrap()
+    }
+
+    #[test]
+    fn agent_api_base_connects_via_localhost_for_bind_addresses() {
+        // Bind wildcards (the agent HOST default is 0.0.0.0) are not
+        // connect targets — they must become localhost.
+        assert_eq!(
+            cfg_with_host("0.0.0.0").agent_api_base(),
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            cfg_with_host("::").agent_api_base(),
+            "http://localhost:8080"
+        );
+        // Empty host (serde fallback when config omitted) → localhost
+        assert_eq!(cfg_with_host("").agent_api_base(), "http://localhost:8080");
+    }
+
+    #[test]
+    fn agent_api_base_honors_explicit_host_and_port() {
+        let mut cfg = cfg_with_host("agent.internal");
+        assert_eq!(cfg.agent_api_base(), "http://agent.internal:8080");
+        cfg.port = "9000".to_string();
+        assert_eq!(cfg.agent_api_base(), "http://agent.internal:9000");
+        // Explicit port with wildcard host still resolves host to localhost
+        let mut wild = cfg_with_host("0.0.0.0");
+        wild.port = "9000".to_string();
+        assert_eq!(wild.agent_api_base(), "http://localhost:9000");
+    }
 }
 
 fn default_server_url() -> String {
@@ -1199,11 +1242,7 @@ async fn main() -> Result<()> {
 
     let id = request.id.unwrap_or(2);
     let config: PluginConfig = match request.method.as_str() {
-        "configure" => match request
-            .params
-            .map(|p| serde_json::from_value(p))
-            .transpose()
-        {
+        "configure" => match request.params.map(serde_json::from_value).transpose() {
             Ok(Some(cfg)) => cfg,
             Ok(None) => {
                 let err_resp = make_error(id, -1, "Configure params missing");
@@ -1302,11 +1341,7 @@ async fn main() -> Result<()> {
             }
         };
 
-        let params: SetupParams = match request
-            .params
-            .map(|p| serde_json::from_value(p))
-            .transpose()
-        {
+        let params: SetupParams = match request.params.map(serde_json::from_value).transpose() {
             Ok(Some(p)) => p,
             Ok(None) => SetupParams::default(),
             Err(e) => {
@@ -2055,7 +2090,6 @@ async fn handle_react(
 /// Update or add a variable in a .env-style file.
 /// If the key already exists (e.g. `MATTERMOST_ACCESS_TOKEN=...`), its value is
 /// replaced. Otherwise the new entry is appended with a trailing newline.
-
 async fn login_admin_client(
     server_url: &str,
     admin_user: &str,
@@ -2249,6 +2283,7 @@ async fn handle_read_file() -> Result<()> {
 /// Run the Mattermost setup process: create team, channel, users, bot, token.
 /// Validates required config fields, creates resources idempotently,
 /// and returns team_id, channel_id, bot_token, etc.
+#[allow(clippy::too_many_arguments)]
 async fn handle_setup(
     id: u64,
     client: &MattermostClient,
@@ -2550,7 +2585,7 @@ async fn handle_setup(
             // Persist the bot_token to the omniagent secret store
             if !bot_token.is_empty() && !secret_name.is_empty() {
                 if let Err(e) =
-                    set_agent_secret(&secrets_http, api_base, secret_name, &bot_token).await
+                    set_agent_secret(secrets_http, api_base, secret_name, &bot_token).await
                 {
                     tracing::warn!(
                         "Failed to persist bot_token to secret '{}': {:?}",
@@ -2602,7 +2637,7 @@ async fn handle_setup(
                         match client.setup_bot_token(&uid).await {
                             Ok(token) => {
                                 let _ =
-                                    set_agent_secret(&secrets_http, api_base, secret_name, &token)
+                                    set_agent_secret(secrets_http, api_base, secret_name, &token)
                                         .await;
                                 make_success(
                                     id,
@@ -2803,6 +2838,7 @@ async fn send_edit_notification(ch_id: &str, post_id: &str, new_message: &str) {
 
 /// Fetch and process new posts for a single channel since the last known cursor.
 /// Returns the number of new posts processed.
+#[allow(clippy::too_many_arguments)]
 async fn poll_channel(
     client: &MattermostClient,
     ch_id: &str,
@@ -2874,7 +2910,7 @@ async fn poll_channel(
                 }
 
                 // This is a new post from a human user
-                send_inbound_notification(client, &post, ch_id, server_url, max_download_bytes)
+                send_inbound_notification(client, post, ch_id, server_url, max_download_bytes)
                     .await;
                 known.insert(post.id.clone());
                 count += 1;
@@ -2964,7 +3000,7 @@ fn ws_api_url(server_url: &str, access_token: &str) -> String {
     let base = server_url.trim_end_matches('/');
     let mut url = base.replacen("http", "ws", 1).to_string() + "/api/v4/websocket";
     url.push_str("?auth_token=");
-    url.push_str(&urlencoding(&access_token));
+    url.push_str(&urlencoding(access_token));
     url
 }
 
@@ -2994,6 +3030,7 @@ struct ChannelDebounce {
 /// for this channel, just mark `pending` (coalesces N events into 1).
 /// After the current poll finishes, if `pending` is true, wait 5s then
 /// re-poll (catches up via cursor), looping until the channel goes quiet.
+#[allow(clippy::too_many_arguments)]
 async fn process_channel_event(
     client: &MattermostClient,
     ch_id: &str,
@@ -3142,7 +3179,7 @@ async fn ws_event_loop(
                     "data": { "token": access_token }
                 });
                 let auth_text = serde_json::to_string(&auth_msg).unwrap_or_default();
-                if let Err(e) = write.send(Message::Text(auth_text.into())).await {
+                if let Err(e) = write.send(Message::Text(auth_text)).await {
                     tracing::error!("Failed to send WS auth: {:?}", e);
                     continue;
                 }
@@ -3266,12 +3303,10 @@ async fn ws_event_loop(
                                                     // Not JSON: it's just a plain post ID string
                                                     Some(s.to_string())
                                                 }
-                                            } else if let Some(id) =
-                                                v.get("id").and_then(|i| i.as_str())
-                                            {
-                                                Some(id.to_string())
                                             } else {
-                                                None
+                                                v.get("id")
+                                                    .and_then(|i| i.as_str())
+                                                    .map(|id| id.to_string())
                                             }
                                         });
 
