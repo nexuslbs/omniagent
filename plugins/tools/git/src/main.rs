@@ -21,6 +21,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 struct Config {
     omni_dir: String,
     workspace_dir: String,
+    github_app_token: String,
     github_app_id: String,
     github_installation_id: String,
 }
@@ -30,6 +31,7 @@ impl Default for Config {
         Self {
             omni_dir: "/opt/omni".to_string(),
             workspace_dir: String::new(),
+            github_app_token: String::new(),
             github_app_id: String::new(),
             github_installation_id: String::new(),
         }
@@ -213,7 +215,18 @@ fn get_installation_token(app_id: &str, inst_id: &str) -> Result<String> {
 }
 
 /// Get a GitHub installation access token.
+///
+/// Preferred: a static token from config (`github_app_token`, e.g. resolved
+/// from `$secret:GH_APP_TOKEN` by the core) — used directly, no JWT/private
+/// key needed. Fallback: classic JWT → installation-token exchange.
 fn get_github_token() -> Result<String> {
+    let cfg_token = {
+        let cfg = CONFIG.lock().unwrap();
+        cfg.github_app_token.clone()
+    };
+    if !cfg_token.is_empty() {
+        return Ok(cfg_token);
+    }
     let (app_id, inst_id) = load_github_creds()?;
     get_installation_token(&app_id, &inst_id)
 }
@@ -225,6 +238,12 @@ fn run_git(args: &[&str], cwd: Option<&str>, timeout_secs: u64) -> (String, Stri
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
+    // CRITICAL: pipe stdout/stderr BEFORE spawn. `Child::wait_with_output()`
+    // only captures pipes that were configured on the Command; without this,
+    // git inherits the plugin's own stdout/stderr (the MCP channel + logs),
+    // every run returns empty output, and the MCP JSON-RPC stream gets
+    // corrupted by leaked git output.
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let child = match cmd.spawn() {
         Ok(c) => c,
@@ -239,11 +258,19 @@ fn run_git(args: &[&str], cwd: Option<&str>, timeout_secs: u64) -> (String, Stri
 
     let timeout = Duration::from_secs(timeout_secs);
     match rx.recv_timeout(timeout) {
-        Ok(Ok(output)) => (
-            String::from_utf8_lossy(&output.stdout).trim().to_string(),
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-            output.status.code().unwrap_or(-1),
-        ),
+        Ok(Ok(output)) => {
+            let out = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            tracing::info!(
+                "run_git {:?} -> rc={} stdout_len={} stderr_len={} out_head={:?}",
+                args,
+                output.status.code().unwrap_or(-1),
+                out.len(),
+                err.len(),
+                &out.chars().take(60).collect::<String>(),
+            );
+            (out, err, output.status.code().unwrap_or(-1))
+        }
         Ok(Err(e)) => (String::new(), format!("git output error: {}", e), -1),
         Err(_) => (
             String::new(),
@@ -480,18 +507,16 @@ fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
     // Commit
     let (out, stderr, rc) = run_git(&["commit", "-m", &message], Some(&repo_dir), 30);
 
+    let mut commit_note = String::new();
     if rc != 0 {
         if stderr.contains("nothing to commit") || out.contains("nothing to commit") {
-            return Ok((
-                serde_json::json!({
-                    "success": true,
-                    "note": "Nothing to commit: working tree clean"
-                })
-                .to_string(),
-                false,
-            ));
+            // Nothing new to commit — but there may still be unpushed
+            // commits ahead of origin. Fall through to the push below so
+            // `commit_and_push` actually pushes pending work.
+            commit_note = "Nothing to commit: working tree clean".to_string();
+        } else {
+            return Ok((format!("git commit failed: {}", stderr), true));
         }
-        return Ok((format!("git commit failed: {}", stderr), true));
     }
 
     // Push
@@ -548,6 +573,12 @@ fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
     // Update local tracking refs
     run_git(&["fetch", "origin", "--quiet"], Some(&repo_dir), 30);
 
+    let note = if commit_note.is_empty() {
+        "Committed and pushed".to_string()
+    } else {
+        format!("{}; pushed pending commits", commit_note)
+    };
+
     Ok((
         serde_json::json!({
             "success": true,
@@ -555,7 +586,7 @@ fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
                 .canonicalize()
                 .map(|p| p.display().to_string())
                 .unwrap_or(repo_dir),
-            "note": "Committed and pushed"
+            "note": note
         })
         .to_string(),
         false,
@@ -728,6 +759,11 @@ async fn main() -> Result<()> {
                 if let Some(dir) = params.get("workspace_dir").and_then(|v| v.as_str()) {
                     if !dir.is_empty() {
                         cfg.workspace_dir = dir.to_string();
+                    }
+                }
+                if let Some(v) = params.get("github_app_token").and_then(|v| v.as_str()) {
+                    if !v.is_empty() {
+                        cfg.github_app_token = v.to_string();
                     }
                 }
                 if let Some(v) = params.get("github_app_id").and_then(|v| v.as_str()) {
