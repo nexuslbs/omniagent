@@ -119,7 +119,32 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .await
         .ok();
 
-    tracing::info!("[migration] Schema v4: messages.duration_ms + messages.token_usage added");
+    // ── Inbound dedup: prevent duplicate threads for the same platform post ──
+    // messages.channel_id denormalizes threads.channel_id so we can enforce
+    // per-channel uniqueness of seq-0 external_ids. New inserts populate it
+    // via subquery (see db/threads.rs + db/messages.rs); the partial unique
+    // index makes double-thread creation impossible even under concurrent
+    // delivery (websocket + polling overlap, restart catch-up re-scan).
+    // Note: no backfill UPDATE here — messages is append-only (trigger
+    // trg_messages_append_only blocks UPDATE); existing rows keep NULL
+    // channel_id and the index simply doesn't cover them (NULLs are distinct
+    // in btree unique indexes), so enforcement applies to new inserts only.
+    sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS channel_id BIGINT")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_messages_seq0_external_id \
+         ON messages (channel_id, external_id) \
+         WHERE thread_sequence = 0 AND external_id IS NOT NULL",
+    )
+    .execute(pool)
+    .await
+    .ok();
+
+    tracing::info!(
+        "[migration] Schema v5: messages.channel_id + seq-0 external_id dedup index added"
+    );
     Ok(())
 }
 

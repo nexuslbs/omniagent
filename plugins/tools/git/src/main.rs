@@ -20,6 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Clone)]
 struct Config {
     omni_dir: String,
+    workspace_dir: String,
     github_app_id: String,
     github_installation_id: String,
 }
@@ -28,6 +29,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             omni_dir: "/opt/omni".to_string(),
+            workspace_dir: String::new(),
             github_app_id: String::new(),
             github_installation_id: String::new(),
         }
@@ -325,6 +327,37 @@ fn handle_create_github_repo(args: Value) -> Result<(String, bool)> {
     ))
 }
 
+/// Resolve the base directory git operations should run in.
+///
+/// Priority:
+///   1. Explicit `workspace_dir` from plugin config (see plugin.json).
+///   2. `/opt/workspace` if it exists (dev/omnidev layout).
+///   3. `{omni_dir}/data/workspace` (created on demand).
+///
+/// The git plugin must NEVER default to its own plugin directory — that
+/// pollutes the repo tree with clones.
+fn resolve_workspace_dir() -> String {
+    let (cfg_ws, omni) = {
+        let cfg = CONFIG.lock().unwrap();
+        (cfg.workspace_dir.clone(), cfg.omni_dir.clone())
+    };
+    if !cfg_ws.is_empty() {
+        return cfg_ws;
+    }
+    if Path::new("/opt/workspace").is_dir() {
+        return "/opt/workspace".to_string();
+    }
+    format!("{}/data/workspace", omni)
+}
+
+/// Ensure the workspace directory exists and is usable.
+fn ensure_workspace_dir() -> Result<String> {
+    let dir = resolve_workspace_dir();
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create workspace dir {}", dir))?;
+    Ok(dir)
+}
+
 /// `clone_repo`: clone a git repository to local filesystem.
 fn handle_clone_repo(args: Value) -> Result<(String, bool)> {
     let url = args["url"]
@@ -336,20 +369,33 @@ fn handle_clone_repo(args: Value) -> Result<(String, bool)> {
         anyhow::bail!("URL cannot be empty");
     }
 
+    let base_dir = ensure_workspace_dir()?;
+
     let target_dir = args["dir"].as_str().unwrap_or("").to_string();
 
+    // Resolve the clone destination:
+    //   - absolute `dir`  → used as-is
+    //   - relative `dir`  → resolved under the workspace dir
+    //   - no `dir`        → {workspace_dir}/{repo-name}
+    let repo_name = url
+        .trim_end_matches('/')
+        .split('/')
+        .next_back()
+        .unwrap_or("repo")
+        .trim_end_matches(".git")
+        .to_string();
+
     let actual_dir = if target_dir.is_empty() {
-        url.trim_end_matches('/')
-            .split('/')
-            .next_back()
-            .unwrap_or("repo")
-            .trim_end_matches(".git")
-            .to_string()
-    } else {
+        Path::new(&base_dir).join(&repo_name).display().to_string()
+    } else if Path::new(&target_dir).is_absolute() {
         target_dir
+    } else {
+        Path::new(&base_dir).join(&target_dir).display().to_string()
     };
 
-    let (_stdout, stderr, rc) = run_git(&["clone", &url, &actual_dir], None, 120);
+    // Run the clone with an explicit cwd so relative paths never resolve
+    // against the plugin's own directory.
+    let (_stdout, stderr, rc) = run_git(&["clone", &url, &actual_dir], Some(&base_dir), 120);
 
     if rc != 0 {
         let git_dir = format!("{}/.git", actual_dir);
@@ -589,7 +635,11 @@ async fn main() -> Result<()> {
                 name: "clone_repo".to_string(),
                 description:
                     "CLONE a git repository to the local filesystem. \
-                    If no target directory is specified, it defaults to the repository name. \
+                    Clones into the git workspace directory (/opt/workspace in dev, \
+                    configurable via the git plugin 'workspace_dir' setting) — NEVER \
+                    into the plugin directory. If 'dir' is absolute it is used as-is; \
+                    if relative it is resolved under the workspace directory; if omitted \
+                    it defaults to the repository name inside the workspace directory. \
                     If the directory already exists with a .git folder, returns success with a note."
                         .to_string(),
                 input_schema: serde_json::json!({
@@ -601,7 +651,7 @@ async fn main() -> Result<()> {
                         },
                         "dir": {
                             "type": "string",
-                            "description": "Target directory for the clone (optional, defaults to repo name)"
+                            "description": "Target directory: absolute path, or relative path resolved under the git workspace dir (defaults to the repository name in the workspace dir)"
                         }
                     },
                     "required": ["url"]
@@ -673,6 +723,11 @@ async fn main() -> Result<()> {
                 if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
                     if !dir.is_empty() {
                         cfg.omni_dir = dir.to_string();
+                    }
+                }
+                if let Some(dir) = params.get("workspace_dir").and_then(|v| v.as_str()) {
+                    if !dir.is_empty() {
+                        cfg.workspace_dir = dir.to_string();
                     }
                 }
                 if let Some(v) = params.get("github_app_id").and_then(|v| v.as_str()) {

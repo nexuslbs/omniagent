@@ -19,12 +19,13 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> AppResult<Messag
             thread_id, role, content, thread_sequence, external_id,
             metadata, embedding, summary_text, is_summary,
             msg_type, msg_subtype, iteration_number,
-            duration_ms, token_usage
+            duration_ms, token_usage, channel_id
         )
         VALUES (:thread_id, :role, :content, :thread_sequence, NULLIF(:external_id, '')::text,
             :metadata, NULLIF(:embedding, '')::text, NULLIF(:summary_text, '')::text, :is_summary,
             :msg_type, NULLIF(:msg_subtype, '')::text, :iteration_number,
-            :duration_ms, COALESCE(NULLIF(:token_usage, '')::jsonb, '{}'::jsonb))
+            :duration_ms, COALESCE(NULLIF(:token_usage, '')::jsonb, '{}'::jsonb),
+            (SELECT channel_id FROM threads WHERE id = :thread_id))
         RETURNING
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,

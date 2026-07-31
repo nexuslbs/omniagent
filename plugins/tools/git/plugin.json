@@ -12,6 +12,13 @@
       "type": "string"
     },
     {
+      "key": "workspace_dir",
+      "default": "$env:WORKSPACE_DIR",
+      "label": "Workspace Dir",
+      "type": "string",
+      "required": false
+    },
+    {
       "key": "github_app_id",
       "default": "$env:GITHUB_APP_ID",
       "label": "GitHub App ID",
