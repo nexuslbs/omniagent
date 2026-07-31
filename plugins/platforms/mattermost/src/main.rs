@@ -3440,22 +3440,40 @@ async fn set_agent_secret(
         .await
         .context("Failed to PUT agent secret")?;
 
-    if resp.status().as_u16() == 404 {
-        let post_url = format!("{}/secrets", api_base);
-        let create_body = serde_json::json!({
-            "name": secret_name,
-            "fieldType": "password",
-            "value": value
-        });
-        http_client
-            .post(&post_url)
-            .json(&create_body)
-            .send()
-            .await
-            .context("Failed to POST agent secret")?;
+    match resp.status().as_u16() {
+        // Updated successfully (the secrets API returns 200 on success)
+        200..=299 => Ok(()),
+        // Secret does not exist yet — create it via POST /secrets
+        404 => {
+            let post_url = format!("{}/secrets", api_base);
+            let create_body = serde_json::json!({
+                "name": secret_name,
+                "fieldType": "password",
+                "value": value
+            });
+            let create_resp = http_client
+                .post(&post_url)
+                .json(&create_body)
+                .send()
+                .await
+                .context("Failed to POST agent secret")?;
+            if create_resp.status().is_success() {
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "Failed to create agent secret '{}': HTTP {}",
+                    secret_name,
+                    create_resp.status()
+                );
+            }
+        }
+        // Any other status (500, 401, 403, ...) is a failure — never treat as success
+        other => anyhow::bail!(
+            "Failed to update agent secret '{}': HTTP {}",
+            secret_name,
+            other
+        ),
     }
-
-    Ok(())
 }
 
 fn make_success(id: u64, result: Value) -> PluginResponse {
@@ -3475,6 +3493,7 @@ fn make_error(id: u64, code: i64, message: &str) -> PluginResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     /// Deserialize a PluginConfig with only the given host (all other
     /// fields fall back to their serde defaults).
@@ -3509,5 +3528,117 @@ mod tests {
         let mut wild = cfg_with_host("0.0.0.0");
         wild.port = "9000".to_string();
         assert_eq!(wild.agent_api_base(), "http://localhost:9000");
+    }
+
+    // ── set_agent_secret status-code tests ───────────────────────────────────
+    //
+    // Spin up a tiny local HTTP server that answers each request with a
+    // pre-configured status, so we can assert the client only treats the
+    // expected statuses as success.
+
+    struct ScriptedServer {
+        addr: String,
+        received_paths: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ScriptedServer {
+        fn start(statuses: Vec<u16>) -> Self {
+            let received_paths = Arc::new(Mutex::new(Vec::new()));
+            let paths = received_paths.clone();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let addr = format!("http://{}", listener.local_addr().unwrap());
+            std::thread::spawn(move || {
+                for status in statuses {
+                    let (mut stream, _) = listener.accept().expect("accept");
+                    // Read the request head (enough to capture method + path)
+                    let mut buf = [0u8; 4096];
+                    let n = std::io::Read::read(&mut stream, &mut buf).unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if let Some(first) = head.lines().next() {
+                        if let Some(path) = first.split_whitespace().nth(1) {
+                            paths.lock().unwrap().push(path.to_string());
+                        }
+                    }
+                    let reason = match status {
+                        200 => "OK",
+                        404 => "Not Found",
+                        500 => "Internal Server Error",
+                        _ => "Error",
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        status, reason
+                    );
+                    std::io::Write::write_all(&mut stream, resp.as_bytes()).expect("write resp");
+                }
+            });
+            ScriptedServer {
+                addr,
+                received_paths,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn set_agent_secret_accepts_200_from_put() {
+        let srv = ScriptedServer::start(vec![200]);
+        let client = reqwest::Client::new();
+        let result = set_agent_secret(&client, &srv.addr, "mm-token", "abc").await;
+        assert!(
+            result.is_ok(),
+            "expected Ok on 200 PUT, got {:?}",
+            result.err()
+        );
+        assert_eq!(
+            *srv.received_paths.lock().unwrap(),
+            vec!["/secrets/mm-token"]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_agent_secret_creates_on_404_then_accepts_200_post() {
+        let srv = ScriptedServer::start(vec![404, 200]);
+        let client = reqwest::Client::new();
+        let result = set_agent_secret(&client, &srv.addr, "mm-token", "abc").await;
+        assert!(
+            result.is_ok(),
+            "expected Ok on 404→POST 200, got {:?}",
+            result.err()
+        );
+        assert_eq!(
+            *srv.received_paths.lock().unwrap(),
+            vec!["/secrets/mm-token", "/secrets"]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_agent_secret_errors_on_500_from_put() {
+        let srv = ScriptedServer::start(vec![500]);
+        let client = reqwest::Client::new();
+        let result = set_agent_secret(&client, &srv.addr, "mm-token", "abc").await;
+        let err = result.expect_err("expected Err on 500 PUT");
+        assert!(
+            err.to_string().contains("HTTP 500"),
+            "unexpected error: {}",
+            err
+        );
+        // No create fallback should have been attempted
+        assert_eq!(
+            *srv.received_paths.lock().unwrap(),
+            vec!["/secrets/mm-token"]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_agent_secret_errors_when_create_post_fails() {
+        let srv = ScriptedServer::start(vec![404, 500]);
+        let client = reqwest::Client::new();
+        let result = set_agent_secret(&client, &srv.addr, "mm-token", "abc").await;
+        let err = result.expect_err("expected Err when POST create fails");
+        assert!(
+            err.to_string().contains("HTTP 500"),
+            "unexpected error: {}",
+            err
+        );
     }
 }
