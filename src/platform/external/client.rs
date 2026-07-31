@@ -942,7 +942,23 @@ impl Platform for ExternalPlatformClient {
                                                                 text.push_str(&file_lines.join("\n"));
                                                                 }
 
-                                                                if let Ok((thread, _msg)) = crate::db::types::create_thread_with_cause(
+                                                                // Dedup: skip if this post already created a thread. Without this,
+                                                                // one Mattermost post can spawn two threads with the same
+                                                                // external_id — e.g. when the poller re-processes a post after an
+                                                                // omniagent restart, or when both the websocket and the polling
+                                                                // path deliver the same message.
+                                                                let already_has_thread = thread_exists_for_external_id(
+                                                                    &pool,
+                                                                    channel.id,
+                                                                    &inbound.external_id,
+                                                                )
+                                                                .await;
+                                                                if already_has_thread {
+                                                                    tracing::info!(
+                                                                        "Skipping duplicate inbound message from '{}': thread already exists for external_id={}",
+                                                                        plugin_name, inbound.external_id,
+                                                                    );
+                                                                } else if let Ok((thread, _msg)) = crate::db::types::create_thread_with_cause(
                                                                 &pool,
                                                                 &self.data_dir,
                                                                 "user",
@@ -1732,8 +1748,47 @@ async fn send_react(
     }
 }
 
-/// Handle a `message_deleted` notification from a platform plugin.
+/// Returns true if a thread already exists whose seq-0 (cause) message has
+/// the given `external_id` on the given channel. Used to dedup inbound
+/// messages that were already turned into a thread (restart re-scan, or both
+/// websocket and polling delivering the same post).
 ///
+/// Errors are treated as "no thread" (returns false) so a transient DB issue
+/// never causes a message to be silently dropped.
+async fn thread_exists_for_external_id(
+    pool: &PgPool,
+    channel_id: i64,
+    external_id: &str,
+) -> bool {
+    if external_id.is_empty() {
+        return false;
+    }
+    #[derive(sqlx::FromRow)]
+    struct ExtRow {
+        id: i64,
+    }
+    let row: Option<ExtRow> = sql_forge!(
+        ExtRow,
+        r#"
+        SELECT m.id
+        FROM messages m
+        JOIN threads t ON t.id = m.thread_id
+        WHERE m.external_id = :external_id
+          AND m.thread_sequence = 0
+          AND t.channel_id = :channel_id
+        LIMIT 1
+        "#,
+        (
+            :external_id = external_id,
+            :channel_id = channel_id,
+        )
+    )
+    .fetch_optional(pool)
+    .await
+    .unwrap_or(None);
+    row.is_some()
+}
+
 /// Looks for a thread whose seq-0 (cause) message has the given `external_id`
 /// and belongs to a channel matching the given platform + resource_identifier.
 ///
