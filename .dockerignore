@@ -8,10 +8,20 @@ Dockerfile.dev
 .git/
 .gitignore
 node_modules/
+**/node_modules/
 docs/
 skills/
 data/
 target/
-plugins/platforms/mattermost/target/
+**/target/
 *.zip
 Vagrantfile
+
+# Stray committed build artifacts (binary files checked into git by
+# mistake — entrypoints resolve via PATH to /usr/local/bin/, so these
+# are never used at runtime). Excluding them shrinks the build context
+# by ~300MB and the runtime image by the same.
+mcp-server-prompt
+**/mcp-server-prompt
+**/mcp-server-*
+**/*-platform
