@@ -19,6 +19,13 @@
       "required": false
     },
     {
+      "key": "github_app_token",
+      "default": "$env:GH_APP_TOKEN",
+      "label": "GitHub App Token",
+      "type": "string",
+      "required": false
+    },
+    {
       "key": "github_app_id",
       "default": "$env:GITHUB_APP_ID",
       "label": "GitHub App ID",
