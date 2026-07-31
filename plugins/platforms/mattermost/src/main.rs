@@ -1321,6 +1321,28 @@ async fn main() -> Result<()> {
 
         let id = request.id.unwrap_or(1);
 
+        // 0. Wait for the Mattermost server to be fully ready (API + DB).
+        //    The container can accept connections while first-run migrations
+        //    still run, and the create/login calls below would fail with
+        //    transport errors in that window. 90s fits inside omniagent's
+        //    120s setup kill timeout.
+        match wait_for_mattermost_ready(&server_url, Duration::from_secs(90)).await {
+            Ok(()) => tracing::info!("Mattermost server is ready for setup"),
+            Err(e) => {
+                tracing::error!("Mattermost server not ready for setup: {}", e);
+                let err_resp = serde_json::json!({
+                    "id": id,
+                    "error": { "code": -1, "message": format!("Mattermost server not ready: {}", e) }
+                });
+                let mut raw_stdout = tokio::io::stdout();
+                raw_stdout
+                    .write_all(serde_json::to_string(&err_resp)?.as_bytes())
+                    .await?;
+                raw_stdout.write_all(b"\n").await?;
+                return Ok(());
+            }
+        }
+
         // Determine which client to use for setup.
         // Priority: admin credentials (full admin privileges) >
         //           default password fallback (handles password-changed scenario) >
@@ -1425,19 +1447,23 @@ async fn main() -> Result<()> {
                         return Ok(());
                     }
                     Err(e) => {
-                        // create_first_user failed: users already exist and all auth methods exhausted
-                        tracing::error!("All authentication methods exhausted: admin login, default password, access token, and create_first_user all failed. Users likely exist with an unknown password.");
+                        // All four auth paths failed. Do NOT claim the admin
+                        // user exists with a wrong password — that was a false
+                        // heuristic: on a fresh DB the real cause is usually a
+                        // transport failure (Mattermost still running first-run
+                        // DB migrations). Report what actually happened so the
+                        // caller can wait and retry instead of chasing passwords.
+                        tracing::error!("All authentication methods exhausted: admin login, empty-password fallback, access token, and create_first_user all failed: {}", e);
                         let err_resp = serde_json::json!({
                             "id": id,
                             "error": {
                                 "code": -1,
                                 "message": format!(
-                                    "Cannot authenticate to Mattermost as admin. The admin user '{}' exists but none of the tried passwords match. \
-                                    To fix: run the following command in the omniagent container (or any container with mmctl):\n\
-                                    docker exec omm-mattermost /tmp/mmctl --local user change-password {} --password '<new-password>'\n\
-                                    Then update MM_USER_PASSWORD in .env to match and run setup again.\n\
-                                    Underlying error: {}",
-                                    params.admin_user, params.admin_user, e
+                                    "Could not complete Mattermost setup: all authentication paths failed (admin login, empty-password fallback, access token, and first-user creation). \
+                                    If the Mattermost server was still starting up (first-run DB migrations), wait for it to become ready and run setup again — setup is idempotent. \
+                                    If the server is already ready, the configured admin credentials may be wrong; fix them with: docker exec omm-mattermost /tmp/mmctl --local user change-password {} --password '<new-password>' \
+                                    and re-run setup. Underlying error: {}",
+                                    params.admin_user, e
                                 )
                             }
                         });
@@ -2078,6 +2104,41 @@ async fn login_admin_client(
         api_base: server_url.trim_end_matches('/').to_string(),
         auth_header: session_auth,
     })
+}
+
+/// Wait until the Mattermost server's API + DB are fully serving.
+///
+/// The server accepts connections (ping → 200) while its first-run DB
+/// migrations are still running in background jobs, so a ping is NOT a
+/// reliable readiness signal — consumers that run setup immediately after
+/// container start race the half-migrated DB and fail with transport errors.
+/// A DB-backed endpoint (`GET /api/v4/users`, which requires auth) only
+/// returns a definitive status (401/403/200) once the API layer AND the
+/// database are actually serving; connection errors / 5xx mean still warming.
+async fn wait_for_mattermost_ready(server_url: &str, timeout: Duration) -> Result<()> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v4/users", server_url.trim_end_matches('/'));
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last = String::from("no attempt");
+    while tokio::time::Instant::now() < deadline {
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                let code = resp.status().as_u16();
+                if code == 401 || code == 403 || code == 200 {
+                    return Ok(());
+                }
+                last = format!("HTTP {}", code);
+            }
+            Err(e) => last = e.to_string(),
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+    anyhow::bail!(
+        "Mattermost server at {} not ready after {:?}: {}",
+        server_url,
+        timeout,
+        last
+    );
 }
 
 /// Create the first admin user on a fresh Mattermost instance.
