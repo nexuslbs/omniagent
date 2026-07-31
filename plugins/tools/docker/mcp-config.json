@@ -8,11 +8,7 @@
       "max_retries": 1,
       "allowed_tools": [
         "*"
-      ],
-      "env": {
-        "WORKSPACE_DIR": "${WORKSPACE_DIR:-/opt/workspace}",
-        "RUST_LOG": "info"
-      }
+      ]
     }
   ]
 }

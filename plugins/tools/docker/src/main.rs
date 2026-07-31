@@ -5,6 +5,14 @@
 //!
 //! **Concurrency**: Each tool call runs in its own tokio task, so long-running
 //! compose commands (up, exec, run) do not block other concurrent tool calls.
+//!
+//! **Config**: The plugin reads all configuration from the MCP `configure`
+//! message (delivered by omniagent from the plugin config / config_schema).
+//! It does NOT read environment variables. The single config key is
+//! `workspace_dir` (default `/opt/workspace`) — the root under which the agent
+//! may run compose projects. Every tool call must pass `compose_file` (the path
+//! to the docker-compose.yml file), which must resolve inside `workspace_dir`
+//! or any of its subdirectories.
 
 use anyhow::Result;
 use mcp_server_util::*;
@@ -40,34 +48,79 @@ fn contains_forbidden_chars(s: &str) -> bool {
     s.chars().any(|c| FORBIDDEN_CHARS.contains(&c))
 }
 
-/// Validate that a project directory is under the allowed workspace.
-fn validate_workspace_path(project_dir: &str, workspace_dir: &str) -> Result<()> {
-    if project_dir.is_empty() {
-        return Ok(());
+/// Resolve a workspace directory (user-supplied `workspace_dir` argument, if any)
+/// and validate it is inside the configured workspace root.
+///
+/// Returns the canonicalized effective workspace directory.
+fn resolve_workspace_dir(requested: &str, configured: &str) -> Result<String> {
+    let configured_path = Path::new(configured)
+        .canonicalize()
+        .unwrap_or_else(|_| Path::new(configured).to_path_buf());
+
+    if requested.is_empty() {
+        return Ok(configured_path.display().to_string());
     }
-    let resolved = Path::new(project_dir)
+
+    let resolved = Path::new(requested)
         .canonicalize()
-        .map_err(|e| anyhow::anyhow!("Invalid project directory '{}': {}", project_dir, e))?;
-    let workspace = Path::new(workspace_dir)
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(workspace_dir).to_path_buf());
-    if !resolved.starts_with(&workspace) {
+        .map_err(|e| anyhow::anyhow!("Invalid workspace directory '{}': {}", requested, e))?;
+    if !resolved.starts_with(&configured_path) {
         anyhow::bail!(
-            "Project directory must be under {}, got: {}",
-            workspace_dir,
-            project_dir
+            "Workspace directory must be under {}, got: {}",
+            configured,
+            requested
         );
     }
     if !resolved.is_dir() {
-        anyhow::bail!("Project directory does not exist: {}", resolved.display());
+        anyhow::bail!("Workspace directory does not exist: {}", resolved.display());
     }
-    Ok(())
+    Ok(resolved.display().to_string())
+}
+
+/// Validate that a compose file path resolves inside the effective workspace
+/// directory (or any subdirectory) and is a regular file.
+///
+/// Relative paths are resolved against `workspace_dir`; absolute paths are
+/// used as-is. Either way the final path must be inside `workspace_dir`.
+///
+/// Returns the canonical absolute path to pass to `docker compose -f`.
+fn resolve_compose_file(compose_file: &str, workspace_dir: &str) -> Result<String> {
+    if compose_file.is_empty() {
+        anyhow::bail!(
+            "Missing 'compose_file' argument: path to a docker-compose.yml inside workspace_dir"
+        );
+    }
+    let workspace = Path::new(workspace_dir)
+        .canonicalize()
+        .unwrap_or_else(|_| Path::new(workspace_dir).to_path_buf());
+
+    let candidate = Path::new(compose_file);
+    let candidate = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        workspace.join(candidate)
+    };
+
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("Invalid compose file '{}': {}", compose_file, e))?;
+    if !resolved.starts_with(&workspace) {
+        anyhow::bail!(
+            "Compose file must be inside workspace_dir ({}), got: {}",
+            workspace_dir,
+            compose_file
+        );
+    }
+    if !resolved.is_file() {
+        anyhow::bail!("Compose file does not exist: {}", resolved.display());
+    }
+    Ok(resolved.display().to_string())
 }
 
 /// Build a tokio::process::Command for `docker compose`.
 fn build_compose_command(
     command: &str,
-    project_dir: &str,
+    compose_file: &str,
     service_name: &str,
     exec_args: &str,
     raw_script: &str,
@@ -84,10 +137,11 @@ fn build_compose_command(
     let mut cmd = Command::new("docker");
     cmd.arg("compose");
 
-    if !project_dir.is_empty() {
-        cmd.arg("--project-directory");
-        cmd.arg(&project_dir);
-    }
+    // Always pin the compose file explicitly. The agent chooses which compose
+    // project to operate on — the file must be inside workspace_dir (validated
+    // by the caller).
+    cmd.arg("-f");
+    cmd.arg(compose_file);
 
     let parts: Vec<&str> = command.split_whitespace().collect();
     cmd.arg(verb);
@@ -149,12 +203,13 @@ fn build_compose_command(
 // ---------------------------------------------------------------------------
 
 async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> {
-    let workspace_dir = &config.workspace_dir;
+    let configured_workspace = &config.workspace_dir;
 
     let command = args["command"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!(
-            "Missing 'command' argument. Valid parameters: project_dir (string) - directory with docker-compose.yml, \
+            "Missing 'command' argument. Valid parameters: compose_file (string, required) - path to the docker-compose.yml to operate on (must be inside workspace_dir), \
+            workspace_dir (string, optional) - base directory containing compose projects (defaults to the configured workspace_dir), \
             command (string, required) - compose verb + flags (e.g. 'up -d', 'build', 'ps', 'logs --tail=50'), \
             service (string) - container name (required for exec/run), \
             args (string) - command to run inside container (for exec/run, no char restrictions), \
@@ -163,7 +218,8 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
         ))?
         .to_string();
 
-    let project_dir = args["project_dir"].as_str().unwrap_or("").to_string();
+    let compose_file = args["compose_file"].as_str().unwrap_or("").to_string();
+    let workspace_dir_arg = args["workspace_dir"].as_str().unwrap_or("").to_string();
     let service_name = args["service"].as_str().unwrap_or("");
     let exec_args = args["args"].as_str().unwrap_or("");
     let raw_script = args["script"].as_str().unwrap_or("");
@@ -173,13 +229,15 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
         .as_u64()
         .or_else(|| args["timeout"].as_str().and_then(|s| s.parse().ok()));
 
-    // Validate project_dir
-    if contains_forbidden_chars(&project_dir) {
-        anyhow::bail!("Forbidden characters in project_dir argument");
+    // Validate compose_file
+    if contains_forbidden_chars(&compose_file) {
+        anyhow::bail!("Forbidden characters in compose_file argument");
     }
-    if !project_dir.is_empty() {
-        validate_workspace_path(&project_dir, &workspace_dir)?;
-    }
+    // Resolve the effective workspace: the user-supplied workspace_dir argument
+    // (if any) must be inside the configured workspace root.
+    let effective_workspace = resolve_workspace_dir(&workspace_dir_arg, configured_workspace)?;
+    // Resolve the compose file to a canonical absolute path inside the workspace.
+    let resolved_compose_file = resolve_compose_file(&compose_file, &effective_workspace)?;
 
     let verb = command.split_whitespace().next().unwrap_or("");
     let timeout_secs = timeout_override.unwrap_or_else(|| default_timeout(verb));
@@ -193,8 +251,13 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
         );
     }
 
-    let mut cmd =
-        build_compose_command(&command, &project_dir, service_name, exec_args, raw_script)?;
+    let mut cmd = build_compose_command(
+        &command,
+        &resolved_compose_file,
+        service_name,
+        exec_args,
+        raw_script,
+    )?;
     let cmd_repr = format!("{:?}", cmd);
 
     // Truncated command display for error messages (max 1000 chars to avoid
@@ -371,9 +434,12 @@ async fn main() -> Result<()> {
         def: McpToolDef {
             name: "compose".to_string(),
             description:
-                "Run docker compose commands. \
-                 Use 'project_dir' for the directory with docker-compose.yml. \
+                "Run docker compose commands on any compose project under the workspace. \
+                 Use 'compose_file' for the path to the docker-compose.yml file to operate on \
+                 (must be inside workspace_dir or a subdirectory of it). \
                  Use 'command' for the compose verb + flags (e.g. 'up -d', 'ps', 'build', 'logs --tail=50'). \
+                 'workspace_dir' is optional and defaults to the configured workspace root; \
+                 if provided it must be inside the configured root. \
                  For exec/run: use 'service' (container name) and 'args' (command to run inside container). \
                  'args' have NO character restrictions -- automatically wrapped in sh -c, \
                  so use shell operators (&&, ||, |, quotes) exactly as on a host terminal. \
@@ -384,9 +450,13 @@ async fn main() -> Result<()> {
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "project_dir": {
+                    "workspace_dir": {
                         "type": "string",
-                        "description": "Directory containing docker-compose.yml"
+                        "description": "Base directory containing compose projects. Defaults to the configured workspace_dir. Must be inside the configured workspace root."
+                    },
+                    "compose_file": {
+                        "type": "string",
+                        "description": "Path to the docker-compose.yml file to operate on. Must be inside workspace_dir or a subdirectory."
                     },
                     "command": {
                         "type": "string",
@@ -409,7 +479,7 @@ async fn main() -> Result<()> {
                         "description": "Optional -- override default timeout in seconds. Defaults: build/pull=600, up/restart=300, exec/run=600, ps/logs/down/stop=300"
                     }
                 },
-                "required": ["project_dir", "command"]
+                "required": ["compose_file", "command"]
             }),
         },
         handler: Box::new(move |args: Value, _meta: Option<McpMeta>| {
