@@ -590,12 +590,12 @@ async fn main() -> Result<()> {
                 "required": ["project_dir", "command"]
             }),
         },
-        handler: Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        handler: soft_error_async(move |args: Value, _meta: Option<McpMeta>| {
             let c = c1.clone();
-            Box::pin(async move {
+            async move {
                 let config = c.lock().unwrap().clone();
                 handle_compose(args, &config).await
-            })
+            }
         }),
     }];
 

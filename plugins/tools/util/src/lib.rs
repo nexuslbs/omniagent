@@ -177,6 +177,29 @@ pub type ToolHandler = Box<
         + Sync,
 >;
 
+/// Wrap an ASYNC handler so any Err(e) becomes Ok((error_msg, true)).
+///
+/// Same contract as `soft_error` but for async handlers: an expected failure
+/// (invalid input, sandbox rejection, command not found) must surface as a
+/// tool error result — NOT as a handler Err — so it never trips the MCP
+/// circuit breaker on the client side. Plugins that validate user input
+/// (docker, git, filesystem, ...) should route their handlers through this.
+pub fn soft_error_async<F, Fut>(handler: F) -> ToolHandler
+where
+    F: Fn(Value, Option<McpMeta>) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<(String, bool)>> + Send + 'static,
+{
+    Box::new(move |args: Value, meta: Option<McpMeta>| {
+        let h = handler.clone();
+        Box::pin(async move {
+            match h(args, meta).await {
+                Ok((text, is_error)) => Ok((text, is_error)),
+                Err(e) => Ok((format!("{}", e), true)),
+            }
+        })
+    })
+}
+
 /// A registered tool definition + handler.
 pub struct McpToolEntry {
     pub def: McpToolDef,
@@ -536,4 +559,52 @@ impl HashVectorizer {
 pub fn vector_to_string(vec: &[f32]) -> String {
     let parts: Vec<String> = vec.iter().map(|v| v.to_string()).collect();
     format!("[{}]", parts.join(","))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn soft_error_async_converts_err_to_tool_error() {
+        // An async handler that fails must come back as Ok((msg, true)) —
+        // never as Err — so the MCP circuit breaker stays closed.
+        let failing = soft_error_async(|_args: Value, _meta: Option<McpMeta>| async move {
+            anyhow::bail!("expected failure: bad verb")
+        });
+        let (msg, is_error) = failing(serde_json::json!({}), None)
+            .await
+            .expect("soft_error_async always returns Ok");
+        assert!(is_error);
+        assert!(msg.contains("expected failure"));
+    }
+
+    #[tokio::test]
+    async fn soft_error_async_passes_through_success() {
+        let ok_handler = soft_error_async(|_args: Value, _meta: Option<McpMeta>| async move {
+            Ok(("all good".to_string(), false))
+        });
+        let (msg, is_error) = ok_handler(serde_json::json!({}), None)
+            .await
+            .expect("soft_error_async always returns Ok");
+        assert!(!is_error);
+        assert_eq!(msg, "all good");
+    }
+
+    #[tokio::test]
+    async fn soft_error_async_passes_through_existing_tool_error() {
+        // Handlers that ALREADY return (msg, true) keep their shape.
+        let handler = soft_error_async(|_args: Value, _meta: Option<McpMeta>| async move {
+            Ok(("already an error".to_string(), true))
+        });
+        let (msg, is_error) = handler(serde_json::json!({}), None)
+            .await
+            .expect("soft_error_async always returns Ok");
+        assert!(is_error);
+        assert_eq!(msg, "already an error");
+    }
 }
