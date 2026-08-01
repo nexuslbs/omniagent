@@ -12,16 +12,11 @@
   },
   "config_schema": [
     {
-      "key": "omni_dir",
-      "default": "$env:OMNI_DIR",
-      "label": "Omni Dir",
-      "type": "string"
-    },
-    {
       "key": "workspace_dir",
       "default": "/opt/workspace",
-      "label": "Workspace Dir",
-      "type": "string"
+      "label": "Workspace Dir (sandbox — all filesystem operations only allowed here and in subdirectories)",
+      "type": "string",
+      "required": true
     }
   ]
 }
