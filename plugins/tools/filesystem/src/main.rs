@@ -2,6 +2,10 @@
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
 //! Tools: filesystem_read, filesystem_write, filesystem_list, filesystem_search, filesystem_info
+//!
+//! SANDBOX: all tools operate ONLY inside the configured `workspace_dir`
+//! (default `/opt/workspace`) and its subdirectories. Writes, reads, lists,
+//! searches, and metadata lookups outside the sandbox are rejected.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -9,18 +13,65 @@ use mcp_server_util::*;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::sync::{Arc, Mutex};
 
-/// Resolve and validate a path is within allowed directories.
-fn restrict_path(path: &str, data_dir: &str, workspace_dir: &str) -> Result<String> {
-    let data_real = Path::new(data_dir).canonicalize()?;
-    let ws_real = Path::new(workspace_dir).canonicalize()?;
-    let requested = Path::new(path).canonicalize()?;
-    if !requested.starts_with(&data_real) && !requested.starts_with(&ws_real) {
-        anyhow::bail!("Access denied: path is outside the data or workspace directory");
+const DEFAULT_WORKSPACE_DIR: &str = "/opt/workspace";
+
+/// Resolve the sandbox workspace dir: configured value or `/opt/workspace`.
+fn resolve_workspace_dir(cfg_ws: &str) -> String {
+    if cfg_ws.is_empty() {
+        DEFAULT_WORKSPACE_DIR.to_string()
+    } else {
+        cfg_ws.to_string()
     }
-    Ok(requested.to_string_lossy().to_string())
+}
+
+/// Normalize a path, resolving `.` / `..` lexically (no filesystem access).
+fn normalize_path(p: &Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Validate that a path is INSIDE the workspace sandbox.
+///
+/// All filesystem operations are confined to `workspace_dir` (default
+/// `/opt/workspace`) and its subdirectories. The workspace root itself is
+/// allowed. Absolute paths outside the sandbox are rejected; `.`/`..`
+/// components are normalized so traversal cannot escape.
+///
+/// For paths that don't exist yet (new files being written), the check is
+/// purely lexical — the parent chain must stay inside the sandbox.
+fn restrict_to_workspace(path: &str, workspace_dir: &str) -> Result<String> {
+    let ws = Path::new(workspace_dir);
+    let requested = Path::new(path);
+
+    let ws_norm = normalize_path(ws);
+    let req_norm = if requested.is_absolute() {
+        normalize_path(requested)
+    } else {
+        // Relative paths resolve against the workspace root.
+        normalize_path(&ws.join(requested))
+    };
+
+    if !req_norm.starts_with(&ws_norm) {
+        anyhow::bail!(
+            "Access denied: path '{}' is outside the filesystem workspace sandbox '{}'. \
+             All filesystem operations are only allowed in the workspace dir and its subdirectories.",
+            path,
+            workspace_dir
+        );
+    }
+    Ok(req_norm.to_string_lossy().to_string())
 }
 
 /// Truncate content to max_chars with a note.
@@ -70,11 +121,11 @@ fn format_size(size: u64) -> String {
 // Tool: filesystem_read
 // ---------------------------------------------------------------------------
 
-fn handle_read(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(String, bool)> {
+fn handle_read(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
-    let safe_path = restrict_path(path, data_dir, workspace_dir)?;
+    let safe_path = restrict_to_workspace(path, workspace_dir)?;
     let content = fs::read_to_string(&safe_path)
         .map_err(|e| anyhow::anyhow!("Failed to read file '{}': {}", safe_path, e))?;
     Ok((truncate_content(&content, 50_000), false))
@@ -84,7 +135,7 @@ fn handle_read(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(Stri
 // Tool: filesystem_write
 // ---------------------------------------------------------------------------
 
-fn handle_write(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(String, bool)> {
+fn handle_write(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
@@ -92,24 +143,10 @@ fn handle_write(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(Str
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'content' argument"))?;
 
-    // Validate path is within allowed dirs
-    let safe_path = Path::new(path);
-    let safe_path_str = safe_path.to_string_lossy();
-    let canonical = safe_path
-        .canonicalize()
-        .unwrap_or_else(|_| safe_path.to_path_buf());
-    let data_real = Path::new(data_dir)
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(data_dir).to_path_buf());
-    let ws_real = Path::new(workspace_dir)
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(workspace_dir).to_path_buf());
-    if !canonical.starts_with(&data_real) && !canonical.starts_with(&ws_real) {
-        // For new files that don't exist yet, check prefix of the path string
-        if !safe_path_str.starts_with(data_dir) && !safe_path_str.starts_with(workspace_dir) {
-            anyhow::bail!("Access denied: path is outside the data or workspace directory");
-        }
-    }
+    // Validate path is within the workspace sandbox (lexical — works for
+    // files that don't exist yet).
+    let safe_path_str = restrict_to_workspace(path, workspace_dir)?;
+    let safe_path = Path::new(&safe_path_str);
 
     if let Some(parent) = safe_path.parent() {
         fs::create_dir_all(parent)
@@ -131,11 +168,11 @@ fn handle_write(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(Str
 // Tool: filesystem_list
 // ---------------------------------------------------------------------------
 
-fn handle_list(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(String, bool)> {
+fn handle_list(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
-    let safe_path = restrict_path(path, data_dir, workspace_dir)?;
+    let safe_path = restrict_to_workspace(path, workspace_dir)?;
 
     let entries = fs::read_dir(&safe_path)
         .map_err(|e| anyhow::anyhow!("Failed to list '{}': {}", safe_path, e))?;
@@ -175,12 +212,13 @@ fn handle_list(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(Stri
 // Tool: filesystem_search
 // ---------------------------------------------------------------------------
 
-fn handle_search(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(String, bool)> {
+fn handle_search(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let pattern = args["pattern"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'pattern' argument"))?;
-    let base_path = args["path"].as_str().unwrap_or(data_dir);
-    let safe_base = restrict_path(base_path, data_dir, workspace_dir)?;
+    // Default the search base to the workspace root (was data_dir).
+    let base_path = args["path"].as_str().unwrap_or(workspace_dir);
+    let safe_base = restrict_to_workspace(base_path, workspace_dir)?;
 
     let glob_pattern = format!("{}/{}", safe_base.trim_end_matches('/'), pattern);
     let entries =
@@ -214,11 +252,11 @@ fn handle_search(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(St
 // Tool: filesystem_info
 // ---------------------------------------------------------------------------
 
-fn handle_info(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(String, bool)> {
+fn handle_info(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
-    let safe_path = restrict_path(path, data_dir, workspace_dir)?;
+    let safe_path = restrict_to_workspace(path, workspace_dir)?;
 
     let metadata = fs::metadata(&safe_path)
         .map_err(|e| anyhow::anyhow!("Failed to stat '{}': {}", safe_path, e))?;
@@ -264,7 +302,6 @@ fn handle_info(args: Value, data_dir: &str, workspace_dir: &str) -> Result<(Stri
 
 #[derive(Default, Clone)]
 struct Config {
-    data_dir: String,
     workspace_dir: String,
 }
 
@@ -281,11 +318,6 @@ async fn main() -> Result<()> {
         let config = config.clone();
         Some(move |params: Value| {
             if let Ok(mut cfg) = config.lock() {
-                if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
-                    if !dir.is_empty() {
-                        cfg.data_dir = dir.to_string();
-                    }
-                }
                 if let Some(dir) = params.get("workspace_dir").and_then(|v| v.as_str()) {
                     if !dir.is_empty() {
                         cfg.workspace_dir = dir.to_string();
@@ -295,92 +327,40 @@ async fn main() -> Result<()> {
         })
     };
 
-    // Default fallback directory if no config received
-    let default_workspace = "/opt/workspace".to_string();
-
+    // Resolve the effective workspace dir from the (possibly empty) config.
     let c1 = config.clone();
-    let dw1 = default_workspace.clone();
     let read_handler = soft_error(move |args: Value| {
         let cfg = c1.lock().unwrap_or_else(|e| e.into_inner());
-        let dd = if cfg.data_dir.is_empty() {
-            "/opt/omni"
-        } else {
-            &cfg.data_dir
-        };
-        let wd = if cfg.workspace_dir.is_empty() {
-            &dw1
-        } else {
-            &cfg.workspace_dir
-        };
-        handle_read(args, dd, wd)
+        let wd = resolve_workspace_dir(&cfg.workspace_dir);
+        handle_read(args, &wd)
     });
 
     let c2 = config.clone();
-    let dw2 = default_workspace.clone();
     let write_handler = soft_error(move |args: Value| {
         let cfg = c2.lock().unwrap_or_else(|e| e.into_inner());
-        let dd = if cfg.data_dir.is_empty() {
-            "/opt/omni"
-        } else {
-            &cfg.data_dir
-        };
-        let wd = if cfg.workspace_dir.is_empty() {
-            &dw2
-        } else {
-            &cfg.workspace_dir
-        };
-        handle_write(args, dd, wd)
+        let wd = resolve_workspace_dir(&cfg.workspace_dir);
+        handle_write(args, &wd)
     });
 
     let c3 = config.clone();
-    let dw3 = default_workspace.clone();
     let list_handler = soft_error(move |args: Value| {
         let cfg = c3.lock().unwrap_or_else(|e| e.into_inner());
-        let dd = if cfg.data_dir.is_empty() {
-            "/opt/omni"
-        } else {
-            &cfg.data_dir
-        };
-        let wd = if cfg.workspace_dir.is_empty() {
-            &dw3
-        } else {
-            &cfg.workspace_dir
-        };
-        handle_list(args, dd, wd)
+        let wd = resolve_workspace_dir(&cfg.workspace_dir);
+        handle_list(args, &wd)
     });
 
     let c4 = config.clone();
-    let dw4 = default_workspace.clone();
     let search_handler = soft_error(move |args: Value| {
         let cfg = c4.lock().unwrap_or_else(|e| e.into_inner());
-        let dd = if cfg.data_dir.is_empty() {
-            "/opt/omni"
-        } else {
-            &cfg.data_dir
-        };
-        let wd = if cfg.workspace_dir.is_empty() {
-            &dw4
-        } else {
-            &cfg.workspace_dir
-        };
-        handle_search(args, dd, wd)
+        let wd = resolve_workspace_dir(&cfg.workspace_dir);
+        handle_search(args, &wd)
     });
 
     let c5 = config.clone();
-    let dw5 = default_workspace;
     let info_handler = soft_error(move |args: Value| {
         let cfg = c5.lock().unwrap_or_else(|e| e.into_inner());
-        let dd = if cfg.data_dir.is_empty() {
-            "/opt/omni"
-        } else {
-            &cfg.data_dir
-        };
-        let wd = if cfg.workspace_dir.is_empty() {
-            &dw5
-        } else {
-            &cfg.workspace_dir
-        };
-        handle_info(args, dd, wd)
+        let wd = resolve_workspace_dir(&cfg.workspace_dir);
+        handle_info(args, &wd)
     });
 
     let tools = vec![
@@ -388,7 +368,8 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "filesystem_read".to_string(),
                 description:
-                    "READ A LOCAL FILE from disk. Use this to read any file on the filesystem (markdown, text files, config files, code files, research documents). This is the ONLY tool for reading existing file content. Do NOT use search_messages for file reading."
+                    "READ A LOCAL FILE from disk. Use this to read any file on the filesystem (markdown, text files, config files, code files, research documents). This is the ONLY tool for reading existing file content. Do NOT use search_messages for file reading. \
+                    SANDBOX: only paths inside the workspace dir (/opt/workspace by default) and its subdirectories are readable."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -407,7 +388,8 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "filesystem_write".to_string(),
                 description:
-                    "WRITE/CREATE A LOCAL FILE on disk. Use this to save content to a new or existing file. Creates parent directories automatically. This is the ONLY tool for writing file content."
+                    "WRITE/CREATE A LOCAL FILE on disk. Use this to save content to a new or existing file. Creates parent directories automatically. This is the ONLY tool for writing file content. \
+                    SANDBOX: only paths inside the workspace dir (/opt/workspace by default) and its subdirectories can be written."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -430,7 +412,8 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "filesystem_list".to_string(),
                 description:
-                    "LIST FILES AND DIRECTORIES at a given path. Use this to explore a directory and see what files exist before reading them. Returns names and types (file vs directory)."
+                    "LIST FILES AND DIRECTORIES at a given path. Use this to explore a directory and see what files exist before reading them. Returns names and types (file vs directory). \
+                    SANDBOX: only paths inside the workspace dir (/opt/workspace by default) and its subdirectories can be listed."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -449,7 +432,8 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "filesystem_search".to_string(),
                 description:
-                    "SEARCH FOR FILES BY NAME matching a glob pattern (e.g. '*.md', '**/*.rs'). Searches recursively from the given path. Use this when you need to find files with specific names or extensions."
+                    "SEARCH FOR FILES BY NAME matching a glob pattern (e.g. '*.md', '**/*.rs'). Searches recursively from the given path. Use this when you need to find files with specific names or extensions. \
+                    SANDBOX: only paths inside the workspace dir (/opt/workspace by default) and its subdirectories can be searched (defaults to the workspace root)."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -472,7 +456,8 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "filesystem_info".to_string(),
                 description:
-                    "GET FILE/DIRECTORY METADATA. Returns size, type (file or directory), modification time, and permissions. Use this to check if a path exists and get details about it before reading."
+                    "GET FILE/DIRECTORY METADATA. Returns size, type (file or directory), modification time, and permissions. Use this to check if a path exists and get details about it before reading. \
+                    SANDBOX: only paths inside the workspace dir (/opt/workspace by default) and its subdirectories can be inspected."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -495,4 +480,129 @@ async fn main() -> Result<()> {
     };
 
     run_server_with_config(server_info, tools, on_configure).await
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sandbox_accepts_workspace_root() {
+        assert!(restrict_to_workspace("/opt/workspace", "/opt/workspace").is_ok());
+    }
+
+    #[test]
+    fn sandbox_accepts_subdirectory() {
+        assert!(
+            restrict_to_workspace("/opt/workspace/playground/movie-db", "/opt/workspace").is_ok()
+        );
+        assert!(restrict_to_workspace("/opt/workspace/omniagent", "/opt/workspace").is_ok());
+    }
+
+    #[test]
+    fn sandbox_rejects_outside_path() {
+        let err = restrict_to_workspace("/opt/omni/plugins", "/opt/workspace").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("outside the filesystem workspace sandbox"));
+        assert!(restrict_to_workspace("/etc", "/opt/workspace").is_err());
+        assert!(restrict_to_workspace("/tmp", "/opt/workspace").is_err());
+        assert!(restrict_to_workspace("/", "/opt/workspace").is_err());
+    }
+
+    #[test]
+    fn sandbox_rejects_traversal_escape() {
+        // /opt/workspace/../etc → /opt/etc — outside the sandbox.
+        assert!(restrict_to_workspace("/opt/workspace/../etc", "/opt/workspace").is_err());
+        // Traversal that stays inside is fine.
+        assert!(restrict_to_workspace("/opt/workspace/sub/../omniagent", "/opt/workspace").is_ok());
+    }
+
+    #[test]
+    fn sandbox_accepts_relative_path() {
+        // Relative paths resolve against the workspace root.
+        assert!(restrict_to_workspace("omniagent", "/opt/workspace").is_ok());
+        assert!(restrict_to_workspace("", "/opt/workspace").is_ok());
+        assert!(restrict_to_workspace("playground/movie-db", "/opt/workspace").is_ok());
+    }
+
+    #[test]
+    fn sandbox_respects_custom_workspace_dir() {
+        assert!(restrict_to_workspace("/tmp/custom-ws/project", "/tmp/custom-ws").is_ok());
+        assert!(restrict_to_workspace("/opt/workspace/project", "/tmp/custom-ws").is_err());
+    }
+
+    #[test]
+    fn default_workspace_is_opt_workspace() {
+        assert_eq!(resolve_workspace_dir(""), "/opt/workspace");
+        assert_eq!(resolve_workspace_dir("/tmp/ws"), "/tmp/ws");
+    }
+
+    #[test]
+    fn write_outside_sandbox_rejected() {
+        // The raw handler returns Err; soft_error at the MCP boundary converts
+        // it to Ok((msg, true)) so the circuit breaker never trips.
+        let err = handle_write(
+            serde_json::json!({
+                "path": "/opt/omni/evil.txt",
+                "content": "boom",
+            }),
+            "/opt/workspace",
+        )
+        .expect_err("write outside sandbox must be rejected");
+        assert!(err
+            .to_string()
+            .contains("outside the filesystem workspace sandbox"));
+    }
+
+    #[tokio::test]
+    async fn write_outside_sandbox_soft_error_does_not_trip() {
+        // Through soft_error the rejection arrives as Ok((msg, true)) — NOT a
+        // handler Err — so the MCP circuit breaker stays closed.
+        let (msg, is_error) = soft_error(|args: Value| handle_write(args, "/opt/workspace"))(
+            serde_json::json!({
+                "path": "/opt/omni/evil.txt",
+                "content": "boom",
+            }),
+            None,
+        )
+        .await
+        .expect("soft_error always returns Ok");
+        assert!(is_error);
+        assert!(msg.contains("outside the filesystem workspace sandbox"));
+    }
+
+    #[test]
+    fn write_inside_sandbox_succeeds() {
+        let dir = std::env::temp_dir().join("fs-sandbox-test");
+        let _ = fs::remove_dir_all(&dir);
+        let (msg, is_error) = handle_write(
+            serde_json::json!({
+                "path": dir.join("sub/deep/file.txt").to_string_lossy(),
+                "content": "hello",
+            }),
+            &dir.to_string_lossy(),
+        )
+        .expect("write inside sandbox succeeds");
+        assert!(!is_error, "msg: {}", msg);
+        let content = fs::read_to_string(dir.join("sub/deep/file.txt")).unwrap();
+        assert_eq!(content, "hello");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_outside_sandbox_rejected() {
+        let err = handle_read(
+            serde_json::json!({"path": "/etc/hostname"}),
+            "/opt/workspace",
+        )
+        .expect_err("read outside sandbox must be rejected");
+        assert!(err
+            .to_string()
+            .contains("outside the filesystem workspace sandbox"));
+    }
 }
