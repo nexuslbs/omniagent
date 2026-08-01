@@ -451,7 +451,10 @@ async fn handle_generate_full(
     // 2c. Skills
     let skills = get_skills(data_dir, profile_name);
     if !skills.is_empty() {
-        context_blocks.push(format!("Available skills:\n{}", skills.join("\n")));
+        context_blocks.push(format!(
+            "Available skills (read one with view_skill before acting when it matches the task):\n{}",
+            skills.join("\n")
+        ));
     }
 
     // 2d. Subtasks
