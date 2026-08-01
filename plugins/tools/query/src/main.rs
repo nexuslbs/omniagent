@@ -182,6 +182,181 @@ async fn handle_search_channel_prompts(pool: &PgPool, args: &Value) -> Result<(S
     ))
 }
 
+/// Write/DDL SQL keywords that are forbidden in read-only queries. Matching is
+/// done on whole tokens after stripping comments and string literals.
+const WRITE_KEYWORDS: &[&str] = &[
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "DROP",
+    "ALTER",
+    "CREATE",
+    "TRUNCATE",
+    "GRANT",
+    "REVOKE",
+    "MERGE",
+    "CALL",
+    "COPY",
+    "LOCK",
+    "COMMENT",
+    "SET",
+    "RESET",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "END",
+    "DO",
+    "VACUUM",
+    "ANALYZE",
+    "REINDEX",
+    "CLUSTER",
+    "NOTIFY",
+    "LISTEN",
+    "UNLISTEN",
+    "PREPARE",
+    "EXECUTE",
+    "DEALLOCATE",
+    "SECURITY",
+    "IMPORT",
+    "REFRESH",
+    "DISCARD",
+    "CHECKPOINT",
+    "DECLARE",
+    "FETCH",
+    "MOVE",
+    "CLOSE",
+    "OPEN",
+    "LOAD",
+];
+
+/// Strips SQL comments and string/identifier literals, replacing their contents
+/// with spaces so keywords inside them can't create false positives (or hide).
+fn strip_sql_literals_and_comments(sql: &str) -> String {
+    let bytes = sql.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    while i < bytes.len() {
+        if !in_line_comment
+            && !in_block_comment
+            && bytes[i] == b'-'
+            && i + 1 < bytes.len()
+            && bytes[i + 1] == b'-'
+        {
+            in_line_comment = true;
+            out.extend_from_slice(b"  ");
+            i += 2;
+            continue;
+        }
+        if !in_line_comment
+            && !in_block_comment
+            && bytes[i] == b'/'
+            && i + 1 < bytes.len()
+            && bytes[i + 1] == b'*'
+        {
+            in_block_comment = true;
+            out.extend_from_slice(b"  ");
+            i += 2;
+            continue;
+        }
+        if in_line_comment {
+            if bytes[i] == b'\n' {
+                in_line_comment = false;
+                out.push(b'\n');
+            } else {
+                out.push(b' ');
+            }
+            i += 1;
+            continue;
+        }
+        if in_block_comment {
+            if bytes[i] == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                in_block_comment = false;
+                out.extend_from_slice(b"  ");
+                i += 2;
+            } else {
+                out.push(b' ');
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'\'' {
+            out.push(b' ');
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\'' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                        out.extend_from_slice(b"  ");
+                        i += 2;
+                        continue;
+                    }
+                    out.push(b' ');
+                    i += 1;
+                    break;
+                }
+                out.push(b' ');
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'"' {
+            out.push(b' ');
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'"' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                        out.extend_from_slice(b"  ");
+                        i += 2;
+                        continue;
+                    }
+                    out.push(b' ');
+                    i += 1;
+                    break;
+                }
+                out.push(b' ');
+                i += 1;
+            }
+            continue;
+        }
+        // Dollar-quoted string: $tag$ ... $tag$
+        if bytes[i] == b'$' {
+            if let Some(rel) = sql[i + 1..].find('$') {
+                let tag_end = i + 1 + rel;
+                let end_tag = format!("${}$", &sql[i + 1..tag_end]);
+                if let Some(body_rel) = sql[tag_end + 1..].find(&end_tag) {
+                    let abs_end = tag_end + 1 + body_rel + end_tag.len();
+                    out.extend(std::iter::repeat_n(b' ', abs_end - i));
+                    i = abs_end;
+                    continue;
+                }
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| sql.to_string())
+}
+
+/// Returns the first forbidden keyword found in the cleaned SQL, if any.
+fn find_write_keyword(cleaned: &str) -> Option<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for ch in cleaned.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            cur.push(ch.to_ascii_uppercase());
+        } else if !cur.is_empty() {
+            tokens.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
+        .into_iter()
+        .find(|t| WRITE_KEYWORDS.contains(&t.as_str()))
+}
+
 /// query: direct SQL (runtime only, must be SELECT).
 async fn handle_query(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let sql_owned = args["sql"]
@@ -189,20 +364,50 @@ async fn handle_query(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
         .ok_or_else(|| anyhow::anyhow!("'sql' is required for query operation"))?
         .to_string();
 
-    // Basic safety: reject non-SELECT statements at the application level
-    let trimmed = sql_owned.trim().to_uppercase();
-    if !trimmed.starts_with("SELECT") && !trimmed.starts_with("WITH") {
+    // ── Read-only enforcement (defense in depth) ──────────────────────────
+    // 1) The statement must START with SELECT or WITH (token-level check).
+    // 2) Write/DDL keywords are rejected ANYWHERE in the statement, after
+    //    stripping comments and string literals. This blocks data-modifying
+    //    CTEs such as `WITH x AS (DELETE FROM messages RETURNING *) SELECT ...`
+    //    that previously slipped past the starts-with check.
+    // 3) `AssertSqlSafe` is a sqlx MARKER type, not a semicolon validator;
+    //    multi-statement SQL is rejected by the extended query protocol.
+    // 4) The statement runs inside an explicit `BEGIN TRANSACTION READ ONLY`,
+    //    so PostgreSQL itself refuses any write even if this role were granted
+    //    extra privileges in the future.
+    let plain = strip_sql_literals_and_comments(&sql_owned);
+    let first = plain.split_whitespace().next().unwrap_or("").to_uppercase();
+    if first != "SELECT" && first != "WITH" {
         anyhow::bail!(
-            "Only SELECT (or WITH) statements are allowed. \
-             INSERT/UPDATE/DELETE/DROP/ALTER are rejected by the read-only database user."
+            "Only SELECT (or WITH) statements are allowed (statement must start with SELECT or WITH)."
+        );
+    }
+    if let Some(bad) = find_write_keyword(&plain) {
+        anyhow::bail!(
+            "Query rejected: write/DDL keyword '{bad}' is not allowed in read-only queries."
         );
     }
 
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to acquire connection: {e}"))?;
+    sqlx::query("BEGIN TRANSACTION READ ONLY")
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to begin read-only transaction: {e}"))?;
+
     let results: Vec<serde_json::Value> = {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(sql_owned.as_str()))
-            .fetch_all(pool)
+        let rows = match sqlx::query(sqlx::AssertSqlSafe(sql_owned.as_str()))
+            .fetch_all(&mut *conn)
             .await
-            .map_err(|e| anyhow::anyhow!("Query failed: {e}"))?;
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                return Err(anyhow::anyhow!("Query failed: {e}"));
+            }
+        };
 
         let mut json_rows: Vec<serde_json::Value> = Vec::new();
         for row in &rows {
@@ -230,6 +435,11 @@ async fn handle_query(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
         }
         json_rows
     };
+
+    sqlx::query("COMMIT")
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to commit read-only transaction: {e}"))?;
 
     let output = serde_json::to_string_pretty(&results)?;
     Ok((output, false))
@@ -426,9 +636,16 @@ Database schema is documented in the tool description for reference.".to_string(
         let p = pool.clone();
         Some(move |params: serde_json::Value| {
             let config = PluginConfig::from_json(&params);
+            // Connect with the MAIN database user via the plugin's database_url
+            // config field. The framework resolves the "$env:DATABASE_URL"
+            // default before sending the configure message, so the plugin never
+            // reads env vars directly. Read-only is enforced per-query by
+            // BEGIN TRANSACTION READ ONLY in handle_query (PostgreSQL refuses
+            // any write inside a read-only transaction, SQLSTATE 25006).
+            let url = config.database_url.clone();
             tokio::task::block_in_place(|| {
                 let rt = tokio::runtime::Handle::current();
-                let new_pool = rt.block_on(db::connect(&config.database_url));
+                let new_pool = rt.block_on(db::connect(&url));
                 match new_pool {
                     Ok(pool) => {
                         *p.blocking_write() = Some(pool);

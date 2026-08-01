@@ -404,6 +404,13 @@ Previous plan:\n{}",
     // stop (no tool call) is TERMINAL and is never retried.
     const MAX_TRUNCATION_RETRIES: u32 = 3;
     let mut truncation_retries: u32 = 0;
+    // Consecutive LLM provider errors before the thread is marked failed.
+    // The provider just returns the error; omniagent owns the retry policy.
+    // Config: provider_max_retries (default 3). Even if a tool misbehaves
+    // (e.g. compaction), we stop after this many consecutive errors instead
+    // of burning tokens re-sending a bloated context.
+    let provider_max_retries = cfg.config_snapshot().provider_max_retries;
+    let mut provider_error_retries: u32 = 0;
     // Track when condensation last occurred so soft-budget triggers use
     // iteration-since-last-condense rather than a fixed modulo schedule.
     // This prevents aggressive condensation on every Nth iteration even when
@@ -449,27 +456,24 @@ Previous plan:\n{}",
             {
                 Ok(res) => {
                     if let Ok(result) = serde_json::from_str::<serde_json::Value>(&res.content) {
-                        if result
-                            .get("was_condensed")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                        {
-                            if let Some(condensed) =
-                                result.get("messages").and_then(|v| v.as_array())
-                            {
+                        // Contract: the tool returns the compacted messages array
+                        // (apply it) OR null/absent (no change). No boolean gate —
+                        // presence of a messages array is the only signal.
+                        if let Some(condensed) = result.get("messages").and_then(|v| v.as_array()) {
+                            let before = result
+                                .get("before_count")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let after = result
+                                .get("after_count")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            if (after as usize) < (before as usize) {
                                 messages = serde_json::from_value(serde_json::Value::Array(
                                     condensed.clone(),
                                 ))
                                 .unwrap_or(messages);
                                 last_condense_iteration = current_iter;
-                                let before = result
-                                    .get("before_count")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                let after = result
-                                    .get("after_count")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
                                 info!(
                                     "[context] Condensed messages via {}: {} → {} (iteration {})",
                                     condense_tool, before, after, current_iter,
@@ -560,11 +564,33 @@ Previous plan:\n{}",
         };
 
         let response = match per_thread_llm.completion(request).await {
-            Ok(resp) => resp,
+            Ok(resp) => {
+                // Success resets the consecutive-error counter.
+                provider_error_retries = 0;
+                resp
+            }
             Err(e) => {
                 error!("LLM call failed: {:?}", e);
-                final_content = format!("I encountered an error: {}", e);
-                break;
+                provider_error_retries += 1;
+                if provider_error_retries >= provider_max_retries.max(1) {
+                    warn!(
+                        "[executor] LLM provider failed {} consecutive time(s) (max {}) for thread {}: {:?}; marking thread failed",
+                        provider_error_retries, provider_max_retries, thread.id, e,
+                    );
+                    final_content = format!(
+                        "The LLM provider returned an error {} consecutive times (max {}). Last error: {}. The thread was marked as failed.",
+                        provider_error_retries, provider_max_retries, e,
+                    );
+                    force_failed = true;
+                    break;
+                }
+                info!(
+                    "[executor] LLM provider error (attempt {}/{}): retrying for thread {}",
+                    provider_error_retries, provider_max_retries, thread.id,
+                );
+                // Don't consume from the iteration budget for provider retries.
+                current_iter -= 1;
+                continue;
             }
         };
 
