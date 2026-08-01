@@ -142,6 +142,29 @@ pub async fn process_thread(
         .await?
         .unwrap_or_default();
 
+    // ── System-thread seq-0 delivery fix ──
+    // For system-originated threads (kanban, cron) whose seq-0 cause message
+    // has no external_id yet (created via direct SQL by the kanban dispatcher,
+    // which bypasses enqueue_delivery), deliver the cause to the platform FIRST
+    // so it creates the root post. Without this, the platform has no thread
+    // context and skips every subsequent delivery with
+    // "no thread context available (cause_external_id=None, cause_root_id=None)".
+    // The platform's deliver response is saved back as the cause external_id
+    // (client.rs save-back path), which gives seq-1+ messages a reply target.
+    if cause_msg.external_id.is_none() && cause_msg.thread_sequence == 0 {
+        if let Some(ref platform_name) = channel.platform {
+            if let Some(ref resource) = channel.resource_identifier {
+                tracing::info!(
+                    "[executor] Delivering seq-0 cause for system thread {} to platform '{}' (resource {})",
+                    thread.id,
+                    platform_name,
+                    resource
+                );
+                helpers::enqueue_delivery(&cfg.ctx, cause_msg, &channel, thread, None).await;
+            }
+        }
+    }
+
     if let Some(ref platform_name) = channel.platform {
         if let Some(ref resource) = channel.resource_identifier {
             let parent_id = cause_msg.external_id.clone();
