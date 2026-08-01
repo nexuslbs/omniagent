@@ -549,8 +549,17 @@ async fn handle_compact_messages(args: &Value) -> Result<(String, bool)> {
     crate::compact::compact_old_assistant_messages(&mut messages, keep_recent);
     let after = messages.len();
 
+    // Contract: return the compacted messages array when something changed,
+    // or null when nothing was compacted. No boolean flags — the caller
+    // applies the result iff it receives an array.
     let result = serde_json::json!({
-        "messages": messages,
+        "messages": if before != after {
+            serde_json::Value::Array(
+                messages.iter().map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null)).collect()
+            )
+        } else {
+            serde_json::Value::Null
+        },
         "was_compacted": before != after,
         "before_count": before,
         "after_count": after,

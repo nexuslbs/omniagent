@@ -83,6 +83,10 @@ pub struct AgentConfig {
     pub thread_summary_tokens: u32,
     /// Max retries for unfinished subtasks before marking the thread as failed.
     pub max_unfinished_subtask_retries: u32,
+    /// Max consecutive LLM provider errors before the thread is marked failed.
+    /// The provider just returns the error; omniagent owns the retry policy.
+    /// Default: 3.
+    pub provider_max_retries: u32,
     /// Days before old messages and summaries are deleted.
     pub delete_after_days: u32,
     /// MCP tool name for generating the LLM prompt (system prompt + context assembly).
@@ -176,6 +180,7 @@ impl AgentConfig {
             max_unfinished_subtask_retries: get("max_unfinished_subtask_retries", "3")
                 .parse()
                 .unwrap_or(3),
+            provider_max_retries: get("provider_max_retries", "3").parse().unwrap_or(3),
             delete_after_days: get("delete_after_days", "30").parse().unwrap_or(30),
             prompt_tool_name: get("prompt_generate_tool", "prompt_generate"),
             compact_messages_tool_name: get(
@@ -231,6 +236,7 @@ impl AgentConfig {
             max_unfinished_subtask_retries: get("max_unfinished_subtask_retries", "3")
                 .parse()
                 .unwrap_or(3),
+            provider_max_retries: get("provider_max_retries", "3").parse().unwrap_or(3),
             delete_after_days: get("delete_after_days", "30").parse().unwrap_or(30),
             prompt_tool_name: get("prompt_generate_tool", "prompt_generate"),
             compact_messages_tool_name: get(
@@ -280,6 +286,7 @@ mod tests {
             max_iterations_plan: 120,
             thread_summary_tokens: 2048,
             max_unfinished_subtask_retries: 3,
+            provider_max_retries: 3,
             delete_after_days: 30,
             prompt_tool_name: "prompt_generate".to_string(),
             compact_messages_tool_name: "prompt_compact-messages".to_string(),
@@ -321,6 +328,7 @@ mod tests {
             max_iterations_plan: 0,
             thread_summary_tokens: 0,
             max_unfinished_subtask_retries: 0,
+            provider_max_retries: 0,
             delete_after_days: 0,
             prompt_tool_name: String::new(),
             compact_messages_tool_name: String::new(),
