@@ -44,28 +44,58 @@ static CONFIG: Lazy<Mutex<Config>> = Lazy::new(|| Mutex::new(Config::default()))
 
 /// Path to the GitHub App private key used for JWT signing.
 ///
-/// Preferred: the key provided through plugin config (`github_app_private_key`,
-/// e.g. resolved from `$secret:GH_APP_PRIVATE_KEY` by the core) is written to
-/// a process-scoped temp file (chmod 600) and used from there. This keeps the
-/// durable key in the secrets store and lets the plugin regenerate
-/// installation tokens indefinitely — no 1-hour static token to expire.
+/// The key provided through plugin config (`github_app_private_key`, e.g.
+/// resolved from `$secret:GITHUB_APP_KEY` by the core) is written to a
+/// STABLE temp path (chmod 600) and used from there. This keeps the durable
+/// key in the secrets store and lets the plugin regenerate installation
+/// tokens indefinitely — no 1-hour static token to expire.
 ///
-/// Fallback: the legacy on-disk key path for local development.
-fn resolve_key_path() -> String {
+/// The path is fixed (NOT pid-suffixed) so repeated calls in the same process
+/// reuse one file, and if /tmp is ever cleaned mid-run the next call simply
+/// rewrites it. The write is verified (stat after write) so a failure surfaces
+/// as a clear error instead of a confusing openssl "private key not found".
+///
+/// Fallback: the legacy on-disk key path for local development — only used
+/// when the config key is empty AND that legacy file actually exists.
+fn resolve_key_path() -> Result<String> {
     let key_cfg = CONFIG.lock().unwrap().github_app_private_key.clone();
     if !key_cfg.is_empty() {
-        let tmp = format!("/tmp/mcp-git-gh-key-{}.pem", std::process::id());
-        if let Ok(()) = std::fs::write(&tmp, key_cfg.as_bytes()) {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-            return tmp;
+        let stable = "/tmp/mcp-git-gh-key.pem".to_string();
+        match std::fs::write(&stable, key_cfg.as_bytes()) {
+            Ok(()) => {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&stable, std::fs::Permissions::from_mode(0o600));
+                // Verify the file actually exists on disk — if the write was
+                // silently lost (e.g. /tmp remounted, cleaned between calls),
+                // fail loudly rather than let openssl fail cryptically later.
+                if Path::new(&stable).exists() {
+                    return Ok(stable);
+                }
+                anyhow::bail!(
+                    "GitHub App private key write to {} was not persisted — cannot sign JWT",
+                    stable
+                );
+            }
+            Err(e) => anyhow::bail!(
+                "Failed to write GitHub App private key to {}: {}",
+                stable,
+                e
+            ),
         }
-        // write failed — fall through to the legacy on-disk key path
     }
     let data_dir = CONFIG.lock().unwrap().omni_dir.clone();
-    format!(
+    let legacy = format!(
         "{0}/data/credentials/nexuslbs-app.2026-06-04.private-key.pem",
         data_dir
+    );
+    if Path::new(&legacy).exists() {
+        return Ok(legacy);
+    }
+    anyhow::bail!(
+        "No GitHub App credentials configured: set github_app_private_key \
+         (PEM, via $secret:) plus github_app_id and github_installation_id \
+         in the git plugin config (no legacy key at {})",
+        legacy
     )
 }
 
@@ -152,8 +182,9 @@ fn create_jwt(app_id: &str) -> Result<String> {
 
     let signing_input = format!("{}.{}", header, payload);
 
+    let key_path = resolve_key_path()?;
     let mut child = Command::new("openssl")
-        .args(["dgst", "-sha256", "-sign", &resolve_key_path()])
+        .args(["dgst", "-sha256", "-sign", &key_path])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -254,7 +285,9 @@ fn get_github_token() -> Result<String> {
     };
 
     // Durable path: regenerate an installation token from the app private key.
-    if !key_cfg.is_empty() || Path::new(&resolve_key_path()).exists() {
+    // resolve_key_path() now returns Err (with a clear message) when neither
+    // the config key nor a legacy key file exists — treat that as "no key".
+    if !key_cfg.is_empty() || resolve_key_path().is_ok() {
         let (app_id, inst_id) = load_github_creds()?;
         return get_installation_token(&app_id, &inst_id);
     }
@@ -425,6 +458,22 @@ fn ensure_workspace_dir() -> Result<String> {
     Ok(dir)
 }
 
+/// Lexically normalize a path: resolve `.` and `..` components without
+/// touching the filesystem (pure string/component math, no symlinks).
+fn normalize_path(p: &Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// Validate that a repo path is INSIDE the git workspace sandbox.
 ///
 /// Git operations are only allowed on repositories located in the configured
@@ -447,22 +496,8 @@ fn validate_repo_within_workspace(repo_dir: &str) -> Result<()> {
         ws_abs.join(repo_abs)
     };
 
-    // Normalize away `.` / `..` so traversal can't escape the sandbox.
-    let norm = |p: &std::path::Path| -> std::path::PathBuf {
-        let mut out = std::path::PathBuf::new();
-        for comp in p.components() {
-            match comp {
-                std::path::Component::ParentDir => {
-                    out.pop();
-                }
-                std::path::Component::CurDir => {}
-                other => out.push(other.as_os_str()),
-            }
-        }
-        out
-    };
-    let ws_norm = norm(ws_abs);
-    let repo_norm = norm(&repo_path);
+    let ws_norm = normalize_path(ws_abs);
+    let repo_norm = normalize_path(&repo_path);
 
     if !repo_norm.starts_with(&ws_norm) {
         anyhow::bail!(
@@ -472,6 +507,511 @@ fn validate_repo_within_workspace(repo_dir: &str) -> Result<()> {
             ws
         );
     }
+    Ok(())
+}
+
+/// Assert that a path argument (absolute, or relative to `repo_dir`) resolves
+/// inside the workspace sandbox. `label` names the git flag for the error.
+fn assert_path_in_workspace(ws: &str, repo_dir: &str, label: &str, p: &str) -> Result<()> {
+    let joined = if Path::new(p).is_absolute() {
+        p.to_string()
+    } else {
+        Path::new(repo_dir).join(p).display().to_string()
+    };
+    let norm = normalize_path(Path::new(&joined));
+    let ws_norm = normalize_path(Path::new(ws));
+    if !norm.starts_with(&ws_norm) {
+        anyhow::bail!(
+            "git argument '{}' references '{}', which is outside the git workspace sandbox \
+             '{}'. All git operations must stay inside the workspace.",
+            label,
+            p,
+            ws
+        );
+    }
+    Ok(())
+}
+
+/// Git config keys whose value is a shell command git may execute.
+/// `-c <key>=<value>` overrides carrying these are rejected outright: the
+/// command could write anywhere (e.g. `core.pager='sh -c "echo x > /tmp/pwn"'`).
+const EXEC_CONFIG_KEYS: &[&str] = &[
+    "alias.",
+    "core.sshcommand",
+    "core.pager",
+    "core.editor",
+    "core.fsmonitor",
+    "core.gitproxy",
+    "core.askpass",
+    "credential.helper",
+    "filter.",
+    "difftool.",
+    "mergetool.",
+    "pager.",
+    "sequence.editor",
+    "gpg.program",
+    "gpg.ssh.program",
+    "man.viewer",
+];
+
+/// Git config keys whose value is a filesystem path. The path itself must
+/// stay inside the workspace (e.g. `core.hooksPath=/etc` would execute
+/// attacker-controlled hooks on commit).
+const PATH_CONFIG_KEYS: &[&str] = &[
+    "core.hookspath",
+    "core.excludesfile",
+    "core.attributesfile",
+    "include.path",
+    "http.sslcert",
+    "http.sslchainfile",
+    "http.sslkey",
+];
+
+/// Reject `-c <key>=<value>` config overrides that are exec vectors or point
+/// paths outside the workspace. Benign overrides (user.name, core.autocrlf,
+/// core.bare, ...) pass through.
+fn validate_config_override(ws: &str, repo_dir: &str, kv: &str) -> Result<()> {
+    let (key, value) = kv.split_once('=').unwrap_or((kv, ""));
+    let key_lc = key.trim().to_ascii_lowercase();
+
+    for pat in EXEC_CONFIG_KEYS {
+        let pat = *pat;
+        if key_lc == pat || key_lc.starts_with(pat) {
+            anyhow::bail!(
+                "git argument '-c {}' is not allowed: '{}' configures a command git may \
+                 execute, which could write outside the git workspace sandbox '{}'.",
+                kv,
+                key,
+                ws
+            );
+        }
+    }
+    for pat in PATH_CONFIG_KEYS {
+        let pat = *pat;
+        if key_lc == pat || key_lc.starts_with(pat) {
+            assert_path_in_workspace(ws, repo_dir, &format!("-c {}", key), value)?;
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Extract positional (non-flag) arguments, skipping values of flags that take
+/// one. Handles `--flag=value` and attached short values (`-ofile`).
+fn positional_args(args: &[String], value_flags: &[&str]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--" {
+            out.extend(args[i + 1..].iter().cloned());
+            break;
+        }
+        if a.starts_with('-') {
+            if a.contains('=') {
+                i += 1;
+                continue;
+            }
+            let mut consumed = false;
+            for vf in value_flags {
+                if a == vf {
+                    i += 2;
+                    consumed = true;
+                    break;
+                }
+                // attached short form: -o<value>
+                if a.starts_with(vf) && vf.len() == 2 && a.len() > 2 {
+                    i += 1;
+                    consumed = true;
+                    break;
+                }
+            }
+            if !consumed {
+                i += 1;
+            }
+            continue;
+        }
+        out.push(a.clone());
+        i += 1;
+    }
+    out
+}
+
+/// Validate that git ARGUMENTS cannot redirect writes (or executions) outside
+/// the workspace sandbox.
+///
+/// `validate_repo_within_workspace` only pins the process cwd to a repo inside
+/// the workspace. Git arguments themselves can redirect operations elsewhere:
+///
+/// - Global redirects: `-C <dir>`, `--git-dir=`, `--work-tree=`,
+///   `--git-common-dir=`, `--object-dir=`, `--exec-path=`, `--template=`,
+///   `--shallow-file=` (path or exec vectors).
+/// - `-c <key>=<value>` overrides that execute commands (`core.pager`,
+///   `alias.*`, `credential.helper`, ...) or point paths outside
+///   (`core.hooksPath`, `core.excludesFile`, ...).
+/// - Subcommand destinations: `clone <url> <dir>`, `init <dir>`,
+///   `config --file <path>`, `archive --output=`, `format-patch -o`,
+///   `diff --output=`, `apply --directory=`, `bundle create <file>`,
+///   `worktree add|move <path>`, `checkout-index --prefix=`.
+/// - `config --global` / `--system` (writes ~/.gitconfig / /etc/gitconfig).
+/// - `maintenance start|register` (writes cron/systemd timers outside the repo).
+///
+/// Returns a tool-error style message (via the caller mapping to
+/// `Ok((msg, true))`) so legitimate blocks never trip the MCP circuit breaker.
+fn validate_git_args_within_workspace(repo_dir: &str, git_args: &[String]) -> Result<()> {
+    let ws = resolve_workspace_dir();
+
+    // ── 1. Global flags (everything before the subcommand token) ──
+    let mut subcmd: Option<&str> = None;
+    let mut i = 0;
+    while i < git_args.len() {
+        let a = git_args[i].as_str();
+        if !a.starts_with('-') {
+            subcmd = Some(a);
+            break;
+        }
+        match a {
+            "-C" | "--git-dir" | "--work-tree" | "--git-common-dir" | "--object-dir"
+            | "--exec-path" | "--template" | "--shallow-file" => {
+                let v = git_args
+                    .get(i + 1)
+                    .ok_or_else(|| anyhow::anyhow!("git flag '{}' is missing its value", a))?;
+                assert_path_in_workspace(&ws, repo_dir, a, v)?;
+                i += 2;
+                continue;
+            }
+            "-c" => {
+                let kv = git_args
+                    .get(i + 1)
+                    .ok_or_else(|| anyhow::anyhow!("git flag '-c' is missing its value"))?;
+                validate_config_override(&ws, repo_dir, kv)?;
+                i += 2;
+                continue;
+            }
+            _ => {
+                // --flag=value / -c<kv> / -C<dir> attached forms
+                if let Some(v) = a
+                    .strip_prefix("--git-dir=")
+                    .or_else(|| a.strip_prefix("--work-tree="))
+                    .or_else(|| a.strip_prefix("--git-common-dir="))
+                    .or_else(|| a.strip_prefix("--object-dir="))
+                    .or_else(|| a.strip_prefix("--exec-path="))
+                    .or_else(|| a.strip_prefix("--template="))
+                    .or_else(|| a.strip_prefix("--shallow-file="))
+                {
+                    assert_path_in_workspace(&ws, repo_dir, a, v)?;
+                    i += 1;
+                    continue;
+                }
+                if let Some(v) = a.strip_prefix("-C") {
+                    if !v.is_empty() {
+                        assert_path_in_workspace(&ws, repo_dir, "-C", v)?;
+                    }
+                    i += 1;
+                    continue;
+                }
+                if let Some(kv) = a.strip_prefix("-c") {
+                    if !kv.is_empty() {
+                        validate_config_override(&ws, repo_dir, kv)?;
+                    }
+                    i += 1;
+                    continue;
+                }
+                // benign global flag (--no-pager, --version, --help, ...)
+                i += 1;
+            }
+        }
+    }
+
+    // ── 2. Subcommand-specific write destinations ──
+    // The loop above breaks AT the subcommand token; skip past it so the
+    // subcommand itself isn't mistaken for a positional argument.
+    let rest = if subcmd.is_some() {
+        &git_args[i + 1..]
+    } else {
+        &git_args[i..]
+    };
+    let sc = subcmd.unwrap_or("");
+    match sc {
+        "clone" => {
+            // value flags: -o <name>, -b <branch>, -u <upload-pack>,
+            // -c <k=v>, --config <k=v>, --depth, --branch, --origin,
+            // --reference, --reference-if-able, --separate-git-dir,
+            // --template, --filter, --jobs, --server-option
+            let value_flags = [
+                "-o",
+                "-b",
+                "-u",
+                "-c",
+                "--config",
+                "--depth",
+                "--branch",
+                "--origin",
+                "--upload-pack",
+                "--reference",
+                "--reference-if-able",
+                "--separate-git-dir",
+                "--template",
+                "--filter",
+                "--jobs",
+                "--server-option",
+                "--config-env",
+            ];
+            // explicit path-valued flags must stay inside the workspace
+            for w in rest.windows(2) {
+                let flag = w[0].as_str();
+                if matches!(
+                    flag,
+                    "--reference" | "--reference-if-able" | "--separate-git-dir" | "--template"
+                ) {
+                    assert_path_in_workspace(&ws, repo_dir, flag, &w[1])?;
+                }
+                if flag == "-c" || flag == "--config" || flag == "--config-env" {
+                    validate_config_override(&ws, repo_dir, &w[1])?;
+                }
+            }
+            for arg in rest {
+                if let Some(v) = arg
+                    .strip_prefix("--reference=")
+                    .or_else(|| arg.strip_prefix("--reference-if-able="))
+                    .or_else(|| arg.strip_prefix("--separate-git-dir="))
+                    .or_else(|| arg.strip_prefix("--template="))
+                {
+                    assert_path_in_workspace(&ws, repo_dir, arg, v)?;
+                }
+                if let Some(kv) = arg
+                    .strip_prefix("--config=")
+                    .or_else(|| arg.strip_prefix("--config-env="))
+                {
+                    validate_config_override(&ws, repo_dir, kv)?;
+                }
+            }
+            let pos = positional_args(rest, &value_flags);
+            // clone [opts] <repo> [<dir>] — destination is the LAST positional
+            if let Some(dest) = pos.last() {
+                assert_path_in_workspace(&ws, repo_dir, "clone destination", dest)?;
+            }
+        }
+        "init" => {
+            let value_flags = [
+                "-b",
+                "--initial-branch",
+                "--separate-git-dir",
+                "--template",
+                "--object-format",
+                "--ref-format",
+            ];
+            for w in rest.windows(2) {
+                if matches!(w[0].as_str(), "--separate-git-dir" | "--template") {
+                    assert_path_in_workspace(&ws, repo_dir, &w[0], &w[1])?;
+                }
+            }
+            for arg in rest {
+                if let Some(v) = arg
+                    .strip_prefix("--separate-git-dir=")
+                    .or_else(|| arg.strip_prefix("--template="))
+                {
+                    assert_path_in_workspace(&ws, repo_dir, arg, v)?;
+                }
+            }
+            let pos = positional_args(rest, &value_flags);
+            if let Some(dir) = pos.first() {
+                assert_path_in_workspace(&ws, repo_dir, "init directory", dir)?;
+            }
+        }
+        "config" => {
+            for arg in rest {
+                if arg == "--global" || arg == "--system" {
+                    anyhow::bail!(
+                        "git config {} is not allowed: it writes to {} outside the git \
+                         workspace sandbox '{}'. Use repo-local config (omit the flag).",
+                        arg,
+                        if arg == "--global" {
+                            "~/.gitconfig"
+                        } else {
+                            "/etc/gitconfig"
+                        },
+                        ws
+                    );
+                }
+            }
+            let value_flags = [
+                "--file",
+                "-f",
+                "--blob",
+                "--type",
+                "--get",
+                "--add",
+                "--unset",
+                "--unset-all",
+                "--replace-all",
+                "--rename-section",
+                "--remove-section",
+            ];
+            for w in rest.windows(2) {
+                if matches!(w[0].as_str(), "--file" | "-f") {
+                    assert_path_in_workspace(&ws, repo_dir, &w[0], &w[1])?;
+                }
+            }
+            for arg in rest {
+                if let Some(v) = arg
+                    .strip_prefix("--file=")
+                    .or_else(|| arg.strip_prefix("-f="))
+                {
+                    assert_path_in_workspace(&ws, repo_dir, arg, v)?;
+                }
+            }
+            let _ = positional_args(rest, &value_flags);
+        }
+        "archive" => {
+            let value_flags = [
+                "--output", "-o", "--prefix", "--format", "--remote", "--exec",
+            ];
+            for w in rest.windows(2) {
+                if matches!(w[0].as_str(), "--output" | "-o") {
+                    assert_path_in_workspace(&ws, repo_dir, &w[0], &w[1])?;
+                }
+                if w[0] == "--exec" {
+                    anyhow::bail!(
+                        "git archive --exec runs a remote helper command — not allowed in \
+                         the git workspace sandbox '{}'.",
+                        ws
+                    );
+                }
+            }
+            for arg in rest {
+                if let Some(v) = arg
+                    .strip_prefix("--output=")
+                    .or_else(|| arg.strip_prefix("-o="))
+                {
+                    assert_path_in_workspace(&ws, repo_dir, arg, v)?;
+                }
+            }
+            let _ = positional_args(rest, &value_flags);
+        }
+        "format-patch" => {
+            let value_flags = [
+                "-o",
+                "--output-directory",
+                "--attach",
+                "--inline",
+                "--subject-prefix",
+                "--filename-max-length",
+                "--from",
+                "--to",
+                "--cc",
+                "--add-header",
+                "--base",
+            ];
+            for w in rest.windows(2) {
+                if matches!(w[0].as_str(), "-o" | "--output-directory") {
+                    assert_path_in_workspace(&ws, repo_dir, &w[0], &w[1])?;
+                }
+            }
+            for arg in rest {
+                if let Some(v) = arg
+                    .strip_prefix("--output-directory=")
+                    .or_else(|| arg.strip_prefix("-o="))
+                {
+                    assert_path_in_workspace(&ws, repo_dir, arg, v)?;
+                }
+            }
+            let _ = positional_args(rest, &value_flags);
+        }
+        "diff" | "diff-files" | "diff-index" | "diff-tree" | "apply" | "fast-export" => {
+            let value_flags = [
+                "--output",
+                "--directory",
+                "--prefix",
+                "--format",
+                "--refspec",
+            ];
+            for w in rest.windows(2) {
+                if matches!(w[0].as_str(), "--output" | "--directory" | "--prefix") {
+                    assert_path_in_workspace(&ws, repo_dir, &w[0], &w[1])?;
+                }
+            }
+            for arg in rest {
+                if let Some(v) = arg
+                    .strip_prefix("--output=")
+                    .or_else(|| arg.strip_prefix("--directory="))
+                    .or_else(|| arg.strip_prefix("--prefix="))
+                {
+                    assert_path_in_workspace(&ws, repo_dir, arg, v)?;
+                }
+            }
+            let _ = positional_args(rest, &value_flags);
+        }
+        "checkout-index" => {
+            let value_flags = ["--prefix"];
+            for w in rest.windows(2) {
+                if w[0] == "--prefix" {
+                    assert_path_in_workspace(&ws, repo_dir, "--prefix", &w[1])?;
+                }
+            }
+            for arg in rest {
+                if let Some(v) = arg.strip_prefix("--prefix=") {
+                    assert_path_in_workspace(&ws, repo_dir, arg, v)?;
+                }
+            }
+            let _ = positional_args(rest, &value_flags);
+        }
+        "bundle" => {
+            // git bundle create <file> [<refs>...]
+            let value_flags: [&str; 0] = [];
+            let pos = positional_args(rest, &value_flags);
+            if pos.first().map(|s| s.as_str()) == Some("create") {
+                if let Some(file) = pos.get(1) {
+                    assert_path_in_workspace(&ws, repo_dir, "bundle create", file)?;
+                }
+            }
+        }
+        "worktree" => {
+            // git worktree add|move <path> ...
+            let value_flags = ["-b", "-B", "--reason", "--detach", "--checkout"];
+            let pos = positional_args(rest, &value_flags);
+            if let Some(action) = pos.first() {
+                if action == "add" || action == "move" {
+                    if let Some(path) = pos.get(1) {
+                        assert_path_in_workspace(
+                            &ws,
+                            repo_dir,
+                            &format!("worktree {}", action),
+                            path,
+                        )?;
+                    }
+                }
+            }
+        }
+        "maintenance" => {
+            for arg in rest {
+                if arg == "start" || arg == "register" {
+                    anyhow::bail!(
+                        "git maintenance {} is not allowed: it registers cron/systemd \
+                         timers outside the git workspace sandbox '{}'.",
+                        arg,
+                        ws
+                    );
+                }
+            }
+        }
+        "credential-store" => {
+            let value_flags = ["--file", "-f"];
+            for w in rest.windows(2) {
+                if matches!(w[0].as_str(), "--file" | "-f") {
+                    assert_path_in_workspace(&ws, repo_dir, &w[0], &w[1])?;
+                }
+            }
+            for arg in rest {
+                if let Some(v) = arg.strip_prefix("--file=") {
+                    assert_path_in_workspace(&ws, repo_dir, arg, v)?;
+                }
+            }
+            let _ = positional_args(rest, &value_flags);
+        }
+        _ => {}
+    }
+
     Ok(())
 }
 
@@ -791,6 +1331,16 @@ fn handle_run_command(args: Value) -> Result<(String, bool)> {
         }
     }
 
+    // Sandbox the ARGUMENTS themselves: git flags like `-C`, `--git-dir`,
+    // `--work-tree`, `clone <url> <dir>`, `init <dir>`, `config --global`,
+    // `archive --output=`, `-c core.hooksPath=...` can redirect writes (and
+    // executions) outside the workspace even when repo_dir is inside it.
+    // Returned as a tool error (is_error=true) — never a handler Err — so
+    // legitimate blocks don't trip the MCP circuit breaker.
+    if let Err(e) = validate_git_args_within_workspace(&repo_dir, &git_args) {
+        return Ok((e.to_string(), true));
+    }
+
     let use_auth = args["use_auth"].as_bool().unwrap_or(false);
     let timeout_secs = args["timeout"]
         .as_u64()
@@ -983,8 +1533,18 @@ async fn main() -> Result<()> {
                     [\"stash\"], [\"tag\", \"-l\"], [\"show\", \"HEAD\"]. \
                     'repo_dir' (required) is the path to the git repository; \
                     'args' (required) is the array of git arguments — NEVER a shell string, \
-                    so no shell injection is possible. \
-                    'use_auth' (optional bool, default false): when true, injects the GitHub App \
+                    so no shell injection is possible. \\
+                    SANDBOX: both 'repo_dir' AND every path-bearing argument must stay inside \\
+                    the git workspace dir (/opt/workspace by default). Redirect flags \\
+                    (-C, --git-dir, --work-tree, --object-dir, --exec-path, --template, \\
+                    --shallow-file), write destinations (clone <url> <dir>, init <dir>, \\
+                    config --file, archive --output, format-patch -o, diff --output, \\
+                    apply --directory, bundle create, worktree add/move, checkout-index \\
+                    --prefix), config --global/--system, maintenance start/register, and \\
+                    exec/path -c overrides (core.pager, alias.*, credential.helper, \\
+                    core.hooksPath, core.excludesFile, ...) are validated and rejected \\
+                    when they would leave the workspace. \\
+                    'use_auth' (optional bool, default false): when true, injects the GitHub App \\
                     installation token for this single invocation (via a -c url.insteadOf override — \
                     the repo's own .git/config is NEVER modified) so push/fetch/pull against the \
                     origin https remote authenticate like commit_and_push does. \
@@ -1080,27 +1640,35 @@ mod tests {
     use super::*;
 
     /// Point the CONFIG workspace_dir at a temp dir for sandbox tests.
-    fn set_ws(dir: &str) {
+    ///
+    /// Returns a guard for a static test lock: the CONFIG workspace_dir is
+    /// shared mutable state, so every test that calls `set_ws` must bind the
+    /// returned guard (`let _g = set_ws(...)`) to serialize against the other
+    /// sandbox tests — otherwise a parallel test can flip the dir mid-assert.
+    fn set_ws(dir: &str) -> std::sync::MutexGuard<'static, ()> {
+        static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+        let guard = TEST_LOCK.lock().unwrap();
         CONFIG.lock().unwrap().workspace_dir = dir.to_string();
+        guard
     }
 
     #[test]
     fn sandbox_accepts_workspace_root() {
         let ws = "/opt/workspace";
-        set_ws(ws);
+        let _g = set_ws(ws);
         assert!(validate_repo_within_workspace(ws).is_ok());
     }
 
     #[test]
     fn sandbox_accepts_subdirectory() {
-        set_ws("/opt/workspace");
+        let _g = set_ws("/opt/workspace");
         assert!(validate_repo_within_workspace("/opt/workspace/playground/movie-db").is_ok());
         assert!(validate_repo_within_workspace("/opt/workspace/omniagent").is_ok());
     }
 
     #[test]
     fn sandbox_rejects_outside_path() {
-        set_ws("/opt/workspace");
+        let _g = set_ws("/opt/workspace");
         let err = validate_repo_within_workspace("/opt/omni/plugins").unwrap_err();
         assert!(err
             .to_string()
@@ -1111,7 +1679,7 @@ mod tests {
 
     #[test]
     fn sandbox_rejects_traversal_escape() {
-        set_ws("/opt/workspace");
+        let _g = set_ws("/opt/workspace");
         // workspace/../etc would resolve to /opt/etc — outside the sandbox.
         assert!(validate_repo_within_workspace("/opt/workspace/../etc").is_err());
         // But a traversal that stays inside is fine.
@@ -1120,7 +1688,7 @@ mod tests {
 
     #[test]
     fn sandbox_accepts_relative_repo_path() {
-        set_ws("/opt/workspace");
+        let _g = set_ws("/opt/workspace");
         // Relative paths resolve against the workspace root.
         assert!(validate_repo_within_workspace("omniagent").is_ok());
         assert!(validate_repo_within_workspace("").is_ok()); // workspace itself
@@ -1128,14 +1696,14 @@ mod tests {
 
     #[test]
     fn sandbox_respects_custom_workspace_dir() {
-        set_ws("/tmp/custom-ws");
+        let _g = set_ws("/tmp/custom-ws");
         assert!(validate_repo_within_workspace("/tmp/custom-ws/project").is_ok());
         assert!(validate_repo_within_workspace("/opt/workspace/project").is_err());
     }
 
     #[test]
     fn sandbox_clone_destination_enforced() {
-        set_ws("/opt/workspace");
+        let _g = set_ws("/opt/workspace");
         // Clone with an absolute dir outside the workspace must be rejected
         // as a tool error (is_error=true), before any network access.
         let args = serde_json::json!({
@@ -1149,12 +1717,156 @@ mod tests {
 
     #[test]
     fn sandbox_rejections_do_not_trip_handler_error() {
-        set_ws("/opt/workspace");
+        let _g = set_ws("/opt/workspace");
         // A sandbox rejection must come back as Ok((msg, true)) — NOT as an
         // Err — so the MCP circuit breaker doesn't count it as a server
         // failure and open the circuit after a few legitimate blocks.
         let (msg, is_error) = handle_status(serde_json::json!({
             "repo_dir": "/tmp/not-a-repo-outside",
+        }))
+        .expect("sandbox rejection must be an Ok result");
+        assert!(is_error);
+        assert!(msg.contains("outside the git workspace sandbox"));
+    }
+
+    // ── Argument-level sandbox: redirect flags & write destinations ──
+
+    /// Shorthand: run arg validation against a repo inside /opt/workspace.
+    fn validate_args(args: &[&str]) -> Result<()> {
+        let _g = set_ws("/opt/workspace");
+        let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        validate_git_args_within_workspace("/opt/workspace/omniagent", &owned)
+    }
+
+    #[test]
+    fn args_reject_chdir_escape() {
+        // The proven live escape: git -C /tmp init wrote /tmp/.git.
+        let err = validate_args(&["-C", "/tmp", "init"]).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("outside the git workspace sandbox"));
+        // Attached form too.
+        assert!(validate_args(&["-C/tmp", "init"]).is_err());
+    }
+
+    #[test]
+    fn args_reject_git_dir_redirect() {
+        assert!(validate_args(&["--git-dir=/etc", "status"]).is_err());
+        assert!(validate_args(&["--work-tree=/", "status"]).is_err());
+        assert!(validate_args(&["--git-common-dir=/opt/omni", "status"]).is_err());
+        assert!(validate_args(&["--object-dir=/var/lib", "cat-file", "-p", "HEAD"]).is_err());
+        assert!(validate_args(&["--exec-path=/tmp", "rev-parse", "HEAD"]).is_err());
+        assert!(validate_args(&["--template=/etc", "init"]).is_err());
+        assert!(validate_args(&["--shallow-file=/tmp/s", "rev-parse", "HEAD"]).is_err());
+        // Space-separated form.
+        assert!(validate_args(&["--git-dir", "/etc", "status"]).is_err());
+    }
+
+    #[test]
+    fn args_reject_clone_destination_escape() {
+        let err = validate_args(&["clone", "https://github.com/nexuslbs/foo.git", "/tmp/foo"])
+            .unwrap_err();
+        assert!(err.to_string().contains("clone destination"));
+        // Relative escape via .. — repo_dir is /opt/workspace/omniagent, so
+        // ../../escape resolves to /opt/escape (outside the workspace).
+        assert!(validate_args(&[
+            "clone",
+            "https://github.com/nexuslbs/foo.git",
+            "../../escape"
+        ])
+        .is_err());
+        // A .. that stays inside the workspace is fine.
+        assert!(
+            validate_args(&["clone", "https://github.com/nexuslbs/foo.git", "../escape"]).is_ok()
+        );
+        // Inside workspace is fine.
+        assert!(
+            validate_args(&["clone", "https://github.com/nexuslbs/foo.git", "subdir/foo"]).is_ok()
+        );
+    }
+
+    #[test]
+    fn args_reject_init_directory_escape() {
+        let err = validate_args(&["init", "/tmp/foo"]).unwrap_err();
+        assert!(err.to_string().contains("init directory"));
+        assert!(validate_args(&["init", "subdir"]).is_ok());
+    }
+
+    #[test]
+    fn args_reject_config_global_and_file_escape() {
+        let err = validate_args(&["config", "--global", "user.name", "x"]).unwrap_err();
+        assert!(err.to_string().contains("~/.gitconfig"));
+        assert!(validate_args(&["config", "--system", "core.autocrlf", "true"]).is_err());
+        let err = validate_args(&["config", "--file", "/tmp/cfg", "user.name", "x"]).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("outside the git workspace sandbox"));
+        // Repo-local config is fine.
+        assert!(validate_args(&["config", "user.name", "x"]).is_ok());
+    }
+
+    #[test]
+    fn args_reject_output_redirection_escape() {
+        assert!(validate_args(&["archive", "--output=/tmp/out.tar", "HEAD"]).is_err());
+        assert!(validate_args(&["archive", "-o", "/tmp/out.tar", "HEAD"]).is_err());
+        assert!(validate_args(&["format-patch", "-o", "/tmp/patchdir"]).is_err());
+        assert!(validate_args(&["format-patch", "--output-directory=/tmp/patchdir"]).is_err());
+        assert!(validate_args(&["diff", "--output=/tmp/d.patch"]).is_err());
+        assert!(validate_args(&["apply", "--directory=/tmp", "x.patch"]).is_err());
+        assert!(validate_args(&["checkout-index", "--prefix=/tmp/", "--all"]).is_err());
+        assert!(validate_args(&["bundle", "create", "/tmp/x.bundle", "main"]).is_err());
+        assert!(validate_args(&["worktree", "add", "/tmp/wt", "-b", "x"]).is_err());
+        // Inside-workspace outputs are fine.
+        assert!(validate_args(&["archive", "--output=out.tar", "HEAD"]).is_ok());
+        assert!(validate_args(&["format-patch", "-o", "patches"]).is_ok());
+        assert!(validate_args(&["worktree", "add", "wt", "-b", "x"]).is_ok());
+    }
+
+    #[test]
+    fn args_reject_exec_config_overrides() {
+        let err =
+            validate_args(&["-c", "core.pager=sh -c 'echo x > /tmp/pwn'", "log"]).unwrap_err();
+        assert!(err.to_string().contains("configures a command"));
+        assert!(validate_args(&["-c", "alias.evil=!rm -rf /", "evil"]).is_err());
+        assert!(validate_args(&["-c", "credential.helper=!sh -c 'x'", "fetch"]).is_err());
+        assert!(validate_args(&["-c", "core.hooksPath=/etc", "commit"]).is_err());
+        assert!(validate_args(&["-c", "core.excludesFile=/tmp/x", "status"]).is_err());
+        // Benign overrides pass through.
+        assert!(validate_args(&["-c", "user.name=Test", "commit"]).is_ok());
+        assert!(validate_args(&["-c", "core.autocrlf=true", "status"]).is_ok());
+    }
+
+    #[test]
+    fn args_reject_maintenance_register() {
+        let err = validate_args(&["maintenance", "start"]).unwrap_err();
+        assert!(err.to_string().contains("cron/systemd"));
+        assert!(validate_args(&["maintenance", "register"]).is_err());
+        // Running maintenance in the repo is fine.
+        assert!(validate_args(&["maintenance", "run"]).is_ok());
+    }
+
+    #[test]
+    fn args_allow_benign_commands() {
+        assert!(validate_args(&["log", "--oneline", "-10"]).is_ok());
+        assert!(validate_args(&["diff"]).is_ok());
+        assert!(validate_args(&["status"]).is_ok());
+        assert!(validate_args(&["remote", "-v"]).is_ok());
+        assert!(validate_args(&["fetch", "origin"]).is_ok());
+        assert!(validate_args(&["reset", "--soft", "HEAD~1"]).is_ok());
+        assert!(validate_args(&["stash"]).is_ok());
+        assert!(validate_args(&["tag", "-l"]).is_ok());
+        assert!(validate_args(&["show", "HEAD"]).is_ok());
+        assert!(validate_args(&["branch", "-a"]).is_ok());
+        assert!(validate_args(&["push", "origin", "main"]).is_ok());
+    }
+
+    #[test]
+    fn args_rejections_do_not_trip_handler_error() {
+        let _g = set_ws("/opt/workspace");
+        // -C escape must come back as Ok((msg, true)), not Err.
+        let (msg, is_error) = handle_run_command(serde_json::json!({
+            "repo_dir": "/opt/workspace/omniagent",
+            "args": ["-C", "/tmp", "init"],
         }))
         .expect("sandbox rejection must be an Ok result");
         assert!(is_error);

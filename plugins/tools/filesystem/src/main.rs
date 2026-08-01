@@ -3,9 +3,11 @@
 //!
 //! Tools: filesystem_read, filesystem_write, filesystem_list, filesystem_search, filesystem_info
 //!
-//! SANDBOX: all tools operate ONLY inside the configured `workspace_dir`
-//! (default `/opt/workspace`) and its subdirectories. Writes, reads, lists,
-//! searches, and metadata lookups outside the sandbox are rejected.
+//! SANDBOX: only WRITE operations are confined to the configured
+//! `workspace_dir` (default `/opt/workspace`) and its subdirectories.
+//! Reads, lists, searches, and metadata lookups are allowed anywhere —
+//! reading is side-effect free, and the agent legitimately needs to inspect
+//! files outside the workspace (configs, wiki, credentials paths, ...).
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -42,9 +44,9 @@ fn normalize_path(p: &Path) -> std::path::PathBuf {
     out
 }
 
-/// Validate that a path is INSIDE the workspace sandbox.
+/// Validate that a WRITE path is INSIDE the workspace sandbox.
 ///
-/// All filesystem operations are confined to `workspace_dir` (default
+/// Only write operations are confined to `workspace_dir` (default
 /// `/opt/workspace`) and its subdirectories. The workspace root itself is
 /// allowed. Absolute paths outside the sandbox are rejected; `.`/`..`
 /// components are normalized so traversal cannot escape.
@@ -66,12 +68,27 @@ fn restrict_to_workspace(path: &str, workspace_dir: &str) -> Result<String> {
     if !req_norm.starts_with(&ws_norm) {
         anyhow::bail!(
             "Access denied: path '{}' is outside the filesystem workspace sandbox '{}'. \
-             All filesystem operations are only allowed in the workspace dir and its subdirectories.",
+             Writes are only allowed in the workspace dir and its subdirectories.",
             path,
             workspace_dir
         );
     }
     Ok(req_norm.to_string_lossy().to_string())
+}
+
+/// Resolve a READ path: reads are unrestricted (anywhere on the filesystem),
+/// so this only normalizes the path. Relative paths still resolve against the
+/// workspace root for convenience, but absolute paths may point anywhere —
+/// reading is side-effect free.
+fn resolve_read_path(path: &str, workspace_dir: &str) -> String {
+    let requested = Path::new(path);
+    if requested.is_absolute() {
+        normalize_path(requested).to_string_lossy().to_string()
+    } else {
+        normalize_path(&Path::new(workspace_dir).join(requested))
+            .to_string_lossy()
+            .to_string()
+    }
 }
 
 /// Truncate content to max_chars with a note.
@@ -125,7 +142,8 @@ fn handle_read(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
-    let safe_path = restrict_to_workspace(path, workspace_dir)?;
+    // Reads are unrestricted — allowed anywhere on the filesystem.
+    let safe_path = resolve_read_path(path, workspace_dir);
     let content = fs::read_to_string(&safe_path)
         .map_err(|e| anyhow::anyhow!("Failed to read file '{}': {}", safe_path, e))?;
     Ok((truncate_content(&content, 50_000), false))
@@ -172,7 +190,8 @@ fn handle_list(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
-    let safe_path = restrict_to_workspace(path, workspace_dir)?;
+    // Listing is a read — allowed anywhere on the filesystem.
+    let safe_path = resolve_read_path(path, workspace_dir);
 
     let entries = fs::read_dir(&safe_path)
         .map_err(|e| anyhow::anyhow!("Failed to list '{}': {}", safe_path, e))?;
@@ -216,9 +235,10 @@ fn handle_search(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let pattern = args["pattern"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'pattern' argument"))?;
-    // Default the search base to the workspace root (was data_dir).
+    // Default the search base to the workspace root, but searches may point
+    // anywhere — searching is a read.
     let base_path = args["path"].as_str().unwrap_or(workspace_dir);
-    let safe_base = restrict_to_workspace(base_path, workspace_dir)?;
+    let safe_base = resolve_read_path(base_path, workspace_dir);
 
     let glob_pattern = format!("{}/{}", safe_base.trim_end_matches('/'), pattern);
     let entries =
@@ -256,7 +276,8 @@ fn handle_info(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
-    let safe_path = restrict_to_workspace(path, workspace_dir)?;
+    // Metadata lookup is a read — allowed anywhere on the filesystem.
+    let safe_path = resolve_read_path(path, workspace_dir);
 
     let metadata = fs::metadata(&safe_path)
         .map_err(|e| anyhow::anyhow!("Failed to stat '{}': {}", safe_path, e))?;
@@ -369,7 +390,7 @@ async fn main() -> Result<()> {
                 name: "filesystem_read".to_string(),
                 description:
                     "READ A LOCAL FILE from disk. Use this to read any file on the filesystem (markdown, text files, config files, code files, research documents). This is the ONLY tool for reading existing file content. Do NOT use search_messages for file reading. \
-                    SANDBOX: only paths inside the workspace dir (/opt/workspace by default) and its subdirectories are readable."
+                    READS ARE UNRESTRICTED: any path on the filesystem can be read (only WRITES are confined to the workspace dir)."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -413,7 +434,7 @@ async fn main() -> Result<()> {
                 name: "filesystem_list".to_string(),
                 description:
                     "LIST FILES AND DIRECTORIES at a given path. Use this to explore a directory and see what files exist before reading them. Returns names and types (file vs directory). \
-                    SANDBOX: only paths inside the workspace dir (/opt/workspace by default) and its subdirectories can be listed."
+                    LISTS ARE UNRESTRICTED: any path on the filesystem can be listed (only WRITES are confined to the workspace dir)."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -433,7 +454,7 @@ async fn main() -> Result<()> {
                 name: "filesystem_search".to_string(),
                 description:
                     "SEARCH FOR FILES BY NAME matching a glob pattern (e.g. '*.md', '**/*.rs'). Searches recursively from the given path. Use this when you need to find files with specific names or extensions. \
-                    SANDBOX: only paths inside the workspace dir (/opt/workspace by default) and its subdirectories can be searched (defaults to the workspace root)."
+                    SEARCHES ARE UNRESTRICTED: any base path on the filesystem can be searched (defaults to the workspace root; only WRITES are confined to the workspace dir)."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -457,7 +478,7 @@ async fn main() -> Result<()> {
                 name: "filesystem_info".to_string(),
                 description:
                     "GET FILE/DIRECTORY METADATA. Returns size, type (file or directory), modification time, and permissions. Use this to check if a path exists and get details about it before reading. \
-                    SANDBOX: only paths inside the workspace dir (/opt/workspace by default) and its subdirectories can be inspected."
+                    INFO IS UNRESTRICTED: any path on the filesystem can be inspected (only WRITES are confined to the workspace dir)."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -595,14 +616,54 @@ mod tests {
     }
 
     #[test]
-    fn read_outside_sandbox_rejected() {
-        let err = handle_read(
+    fn read_outside_workspace_allowed() {
+        // Reads are UNRESTRICTED — only writes are sandboxed. Reading
+        // /etc/hostname (outside /opt/workspace) must succeed.
+        let (msg, is_error) = handle_read(
             serde_json::json!({"path": "/etc/hostname"}),
             "/opt/workspace",
         )
-        .expect_err("read outside sandbox must be rejected");
-        assert!(err
-            .to_string()
-            .contains("outside the filesystem workspace sandbox"));
+        .expect("read outside workspace must succeed");
+        assert!(!is_error, "msg: {}", msg);
+        assert!(msg.contains("hostname") || !msg.trim().is_empty());
+    }
+
+    #[test]
+    fn read_relative_path_resolves_to_workspace() {
+        // Relative reads still resolve against the workspace root.
+        let (msg, is_error) = handle_read(
+            serde_json::json!({"path": "omniagent/Cargo.toml"}),
+            "/opt/workspace",
+        )
+        .expect("relative read must succeed");
+        assert!(!is_error, "msg: {}", msg);
+        assert!(msg.contains("workspace"));
+    }
+
+    #[test]
+    fn list_and_info_outside_workspace_allowed() {
+        // Listing /etc is a read — allowed.
+        let (msg, is_error) = handle_list(serde_json::json!({"path": "/etc"}), "/opt/workspace")
+            .expect("list outside workspace must succeed");
+        assert!(!is_error, "msg: {}", msg);
+        // info on a file outside the workspace is allowed too.
+        let (msg2, is_error2) = handle_info(
+            serde_json::json!({"path": "/etc/hostname"}),
+            "/opt/workspace",
+        )
+        .expect("info outside workspace must succeed");
+        assert!(!is_error2, "msg: {}", msg2);
+        assert!(msg2.contains("Type: file"));
+    }
+
+    #[test]
+    fn search_outside_workspace_allowed() {
+        // Searching /usr/share is a read — allowed.
+        let (msg, is_error) = handle_search(
+            serde_json::json!({"path": "/usr/share", "pattern": "*.md"}),
+            "/opt/workspace",
+        )
+        .expect("search outside workspace must succeed");
+        assert!(!is_error, "msg: {}", msg);
     }
 }
