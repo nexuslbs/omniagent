@@ -396,21 +396,24 @@ Previous plan:\n{}",
     current_iter = plan_consumed; // 0 for prompt_only, 1 if plan already ran
     let mut unfinished_subtask_retries: u32 = 0;
     let mut calls_since_subtask_management: u32 = 0;
-    // How many consecutive *truncated* responses (finish_reason="length":
-    // the provider cut the response off at the token budget) we tolerate
-    // before giving up. Truncation is the only case where retrying a
-    // reasoning-only response is correct — the model did not choose to
-    // stop, it was interrupted mid-generation. A voluntary reasoning-only
-    // stop (no tool call) is TERMINAL and is never retried.
-    const MAX_TRUNCATION_RETRIES: u32 = 3;
-    let mut truncation_retries: u32 = 0;
-    // Consecutive LLM provider errors before the thread is marked failed.
-    // The provider just returns the error; omniagent owns the retry policy.
-    // Config: provider_max_retries (default 3). Even if a tool misbehaves
-    // (e.g. compaction), we stop after this many consecutive errors instead
-    // of burning tokens re-sending a bloated context.
-    let provider_max_retries = cfg.config_snapshot().provider_max_retries;
-    let mut provider_error_retries: u32 = 0;
+    // How many consecutive LLM errors (provider errors, truncation,
+    // empty responses) we tolerate before marking the thread failed.
+    // A correct (non-error) response resets the counter to 0. The limit
+    // comes from config `provider_max_retries` (default 3); MAX_LLM_RETRIES
+    // is the fallback when the setting is 0. This bounds token waste even
+    // if a tool misbehaves (e.g. compaction) — we stop after this many
+    // consecutive errors instead of burning tokens re-sending a bloated
+    // context.
+    const MAX_LLM_RETRIES: u32 = 3;
+    let llm_max_retries = {
+        let configured = cfg.config_snapshot().provider_max_retries;
+        if configured > 0 {
+            configured
+        } else {
+            MAX_LLM_RETRIES
+        }
+    };
+    let mut llm_error_retries: u32 = 0;
     // Track when condensation last occurred so soft-budget triggers use
     // iteration-since-last-condense rather than a fixed modulo schedule.
     // This prevents aggressive condensation on every Nth iteration even when
@@ -564,29 +567,25 @@ Previous plan:\n{}",
         };
 
         let response = match per_thread_llm.completion(request).await {
-            Ok(resp) => {
-                // Success resets the consecutive-error counter.
-                provider_error_retries = 0;
-                resp
-            }
+            Ok(resp) => resp,
             Err(e) => {
                 error!("LLM call failed: {:?}", e);
-                provider_error_retries += 1;
-                if provider_error_retries >= provider_max_retries.max(1) {
+                llm_error_retries += 1;
+                if llm_error_retries >= llm_max_retries {
                     warn!(
                         "[executor] LLM provider failed {} consecutive time(s) (max {}) for thread {}: {:?}; marking thread failed",
-                        provider_error_retries, provider_max_retries, thread.id, e,
+                        llm_error_retries, llm_max_retries, thread.id, e,
                     );
                     final_content = format!(
                         "The LLM provider returned an error {} consecutive times (max {}). Last error: {}. The thread was marked as failed.",
-                        provider_error_retries, provider_max_retries, e,
+                        llm_error_retries, llm_max_retries, e,
                     );
                     force_failed = true;
                     break;
                 }
                 info!(
                     "[executor] LLM provider error (attempt {}/{}): retrying for thread {}",
-                    provider_error_retries, provider_max_retries, thread.id,
+                    llm_error_retries, llm_max_retries, thread.id,
                 );
                 // Don't consume from the iteration budget for provider retries.
                 current_iter -= 1;
@@ -718,20 +717,60 @@ Previous plan:\n{}",
                                 .collect::<Vec<_>>(),
                             Err(_) => Vec::new(),
                         };
-                    force_failed = true; // empty response: thread must fail
-                    if pending_subtasks.is_empty() {
-                        "The LLM returned an empty response with no pending subtasks: likely caused by context explosion.".to_string()
+                    llm_error_retries += 1; // empty response counts as an LLM error
+                    if llm_error_retries >= llm_max_retries {
+                        warn!(
+                            "[executor] LLM returned empty response {} consecutive time(s) (max {}) for thread {}: marking thread failed",
+                            llm_error_retries, llm_max_retries, thread.id,
+                        );
+                        force_failed = true; // empty response: thread must fail
+                        if pending_subtasks.is_empty() {
+                            "The LLM returned an empty response with no pending subtasks: likely caused by context explosion.".to_string()
+                        } else {
+                            format!(
+                                "The LLM returned an empty response. The following subtasks were never completed:\n{}",
+                                pending_subtasks.iter().map(|st| format!("- #{}: {} ({})", st.id, st.description, st.status)).collect::<Vec<_>>().join("\n"),
+                            )
+                        }
                     } else {
-                        format!(
-                            "The LLM returned an empty response. The following subtasks were never completed:\n{}",
-                            pending_subtasks.iter().map(|st| format!("- #{}: {} ({})", st.id, st.description, st.status)).collect::<Vec<_>>().join("\n"),
-                        )
+                        info!(
+                            "[executor] LLM empty response (attempt {}/{}): retrying with a nudge (thread {})",
+                            llm_error_retries, llm_max_retries, thread.id,
+                        );
+                        messages.push(ChatMessage::system(&format!(
+                            "[System] Your previous response was empty (attempt {}/{}). \
+                             Emit your next tool call, or if the task is complete, write your final answer.",
+                            llm_error_retries, llm_max_retries,
+                        )));
+                        // Don't consume the iteration budget for this retry overhead.
+                        current_iter -= 1;
+                        continue;
                     }
                 } else if reasoning_empty {
                     // No subtask mode, but content AND reasoning are both empty
-                    force_failed = true; // empty response: thread must fail
-                    "The LLM returned an empty response: likely caused by context explosion."
-                        .to_string()
+                    llm_error_retries += 1; // empty response counts as an LLM error
+                    if llm_error_retries >= llm_max_retries {
+                        warn!(
+                            "[executor] LLM returned empty response {} consecutive time(s) (max {}) for thread {}: marking thread failed",
+                            llm_error_retries, llm_max_retries, thread.id,
+                        );
+                        force_failed = true; // empty response: thread must fail
+                        "The LLM returned an empty response: likely caused by context explosion."
+                            .to_string()
+                    } else {
+                        info!(
+                            "[executor] LLM empty response (attempt {}/{}): retrying with a nudge (thread {})",
+                            llm_error_retries, llm_max_retries, thread.id,
+                        );
+                        messages.push(ChatMessage::system(&format!(
+                            "[System] Your previous response was empty (attempt {}/{}). \
+                             Emit your next tool call, or if the task is complete, write your final answer.",
+                            llm_error_retries, llm_max_retries,
+                        )));
+                        // Don't consume the iteration budget for this retry overhead.
+                        current_iter -= 1;
+                        continue;
+                    }
                 } else {
                     // Reasoning has content but no response content and no
                     // tool calls. A reasoning-only response with no tool
@@ -754,24 +793,24 @@ Previous plan:\n{}",
                         .map(|f| f == "length")
                         .unwrap_or(false);
                     if truncated {
-                        truncation_retries += 1;
-                        if truncation_retries >= MAX_TRUNCATION_RETRIES {
+                        llm_error_retries += 1;
+                        if llm_error_retries >= llm_max_retries {
                             warn!(
                                 "[executor] response truncated by token budget {} consecutive times (thread {}): giving up truthfully",
-                                truncation_retries, thread.id,
+                                llm_error_retries, thread.id,
                             );
                             final_tool_call = false;
                             break;
                         }
                         info!(
                             "[executor] response truncated (finish_reason=length, attempt {}/{}): retrying with continuation (thread {})",
-                            truncation_retries, MAX_TRUNCATION_RETRIES, thread.id,
+                            llm_error_retries, llm_max_retries, thread.id,
                         );
                         messages.push(ChatMessage::system(&format!(
                             "[System] Your previous response was cut off by the token limit (attempt {}/{}). \
                              Continue exactly where you left off: emit your next tool call, or if the task is \
                              complete, write your final answer.",
-                            truncation_retries, MAX_TRUNCATION_RETRIES,
+                            llm_error_retries, llm_max_retries,
                         )));
                         // Don't consume the iteration budget for this retry overhead.
                         current_iter -= 1;
@@ -782,6 +821,9 @@ Previous plan:\n{}",
                     String::new()
                 }
             } else {
+                // Correct response with content (loop ends right after this,
+                // so no counter reset needed here — the tool-call path below
+                // resets it for iterations that continue).
                 response.content
             };
             final_tool_call = false;
@@ -810,6 +852,8 @@ Previous plan:\n{}",
         }
 
         // We have tool calls: add assistant message with tool_calls
+        // A tool-calling response is correct: reset the consecutive-error counter.
+        llm_error_retries = 0;
         final_tool_call = true;
         let mut assistant_msg = ChatMessage::assistant("");
         assistant_msg.tool_calls = Some(response.tool_calls.clone());
