@@ -15,11 +15,14 @@ COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr
 # Rust dev components (fast — no compilation, just downloads)
 RUN rustup component add rustfmt clippy
 
+# cargo-expand: expand macros (used by prepare.py / debugging)
+RUN cargo install cargo-expand --locked
+
 # Install sqlx-cli for offline query cache generation (pre-built binary, no compilation)
 RUN cargo install sqlx-cli --locked
 
-# Install nodejs for test-js-tool MCP server (used in integration tests)
-RUN apt-get update -qq && apt-get install -y -qq nodejs && apt-get clean && rm -rf /var/lib/apt/lists/*
+# Dev tooling: nodejs (test-js-tool MCP server) + python3 (scripts/prepare.py, scripts/build.py)
+RUN apt-get update -qq && apt-get install -y -qq nodejs python3 && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Trust all repos under /opt/workspace (container mounts host git repos)
 # * also covers /opt/omni/.git-cache/* created by install-git API clone
