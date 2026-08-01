@@ -139,9 +139,12 @@ async fn run_server() -> AppResult<()> {
     );
     let mcp = mcp::default_registry(&mut ctx).await;
 
-    let plugin_manager: Arc<dyn crate::agent::plugin_manager::PluginManager> = Arc::new(
-        crate::agent::plugin_manager::ActorPluginManager::new(mcp, external_clients.clone()),
-    );
+    let plugin_manager: Arc<dyn crate::agent::plugin_manager::PluginManager> =
+        Arc::new(crate::agent::plugin_manager::ActorPluginManager::new(
+            mcp,
+            external_clients.clone(),
+            Some(pool.clone()), // resolves $secret:NAME refs in MCP plugin configs
+        ));
 
     // Register platform clients for the read_attached_file MCP tool
     // Each platform plugin implements read_file internally, so the core

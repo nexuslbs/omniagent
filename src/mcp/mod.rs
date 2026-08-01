@@ -790,8 +790,15 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
     // External servers are auto-discovered via load_servers_config() below.
 
     // External MCP servers (load from config + plugins/mcp/, best-effort)
-    let external_tools =
-        external::client::initialize_external_tools(&ctx.data_dir, &ctx.external_clients).await;
+    // Pass the DB pool so $secret:NAME refs in plugin configs resolve to real
+    // secret values (e.g. git plugin's GITHUB_APP_KEY) instead of passing the
+    // literal "$secret:..." string to the subprocess / configure message.
+    let external_tools = external::client::initialize_external_tools(
+        &ctx.data_dir,
+        Some(&ctx.pool),
+        &ctx.external_clients,
+    )
+    .await;
     for tool in external_tools {
         registry.register(tool);
     }

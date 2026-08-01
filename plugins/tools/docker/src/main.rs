@@ -190,7 +190,12 @@ fn build_compose_command(
 
     if verb == "exec" || verb == "run" {
         if service_name.is_empty() {
-            anyhow::bail!("'service' is required for '{}' command", verb);
+            anyhow::bail!(
+                "'service' is required for '{}' command. Add it to the tool call, e.g. \
+                 {{\"project_dir\": \"/opt/workspace/my-project\", \"command\": \"exec\", \
+                 \"service\": \"backend\", \"args\": \"ls -la\"}}",
+                verb
+            );
         }
         if verb == "exec" && !raw_script.is_empty() {
             // Pipe script via stdin to avoid forbidden chars in command args.
@@ -217,6 +222,97 @@ fn build_compose_command(
 }
 
 // ---------------------------------------------------------------------------
+// Error enrichment helpers
+// ---------------------------------------------------------------------------
+
+/// Detect a host port allocation conflict in docker compose stderr and build a
+/// helpful message naming the port and suggesting a fix.
+///
+/// Docker-on-Docker (this Hermes container) has NO host port mapping, so agent
+/// projects commonly collide with other containers that DO publish ports
+/// (movie-db backend hit "Bind for 0.0.0.0:8080 failed: port is already
+/// allocated"). When the error contains the classic Docker message, extract the
+/// offending port and tell the agent what to do instead of dumping raw stderr.
+fn enrich_port_conflict(stderr: &str) -> Option<String> {
+    // Match: "Bind for 0.0.0.0:8080 failed: port is already allocated"
+    // or:     "Error response from daemon: driver failed programming external
+    //          connectivity on endpoint X (...): Bind for 0.0.0.0:8080 failed:
+    //          port is already allocated"
+    // Extract the port manually (no regex dependency).
+    let marker = "port is already allocated";
+    if !stderr.contains(marker) {
+        return None;
+    }
+    let bind_marker = "Bind for ";
+    let idx = stderr.find(bind_marker)?;
+    let rest = &stderr[idx + bind_marker.len()..];
+    let after_addr = rest.find(':')?;
+    let after_addr = &rest[after_addr + 1..];
+    let port: String = after_addr
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if port.is_empty() {
+        return None;
+    }
+
+    let mut msg = format!(
+        "HOST PORT CONFLICT: port {} is already allocated by another container on this host.\n\n",
+        port
+    );
+    msg.push_str(
+        "This usually means another service (e.g. the omni stack itself) already publishes that port, \
+         or a previous container of this project is still running.\n\n",
+    );
+    msg.push_str("Fixes:\n");
+    msg.push_str(&format!(
+        "1. Pick a different host port for this service (e.g. map 8081:8080 instead of {}:8080) \
+         and update the ports: mapping in your compose file.\n",
+        port
+    ));
+    msg.push_str(
+        "2. If the conflict is with a leftover container from a previous run of THIS project, \
+         stop it first: docker compose -f <compose-file> down  (or 'docker rm -f <container-name>').\n",
+    );
+    msg.push_str(
+        "3. Remember: services only need to reach each other INSIDE the docker network — \
+         prefer omitting host 'ports:' entirely and use the service name as the hostname \
+         (e.g. http://backend:8080 from another container).\n",
+    );
+    Some(msg)
+}
+
+/// Build a "command failed" error message, enriching known failure modes
+/// (port conflicts) with actionable guidance.
+fn build_failure_message(rc: i32, stdout: &str, stderr: &str, cmd_display: &str) -> String {
+    let mut msg = format!("docker compose command failed (exit {}):\n\n", rc);
+    if !stdout.is_empty() {
+        msg.push_str(&format!(
+            "--- stdout ({} chars) ---\n{}\n",
+            stdout.len(),
+            stdout
+        ));
+    }
+    if !stderr.is_empty() {
+        msg.push_str(&format!(
+            "--- stderr ({} chars) ---\n{}\n",
+            stderr.len(),
+            stderr
+        ));
+    }
+    if stdout.is_empty() && stderr.is_empty() {
+        msg.push_str("(no output)\n");
+    }
+    // Enrich known failure modes
+    if let Some(port_msg) = enrich_port_conflict(stderr) {
+        msg.push('\n');
+        msg.push_str(&port_msg);
+    }
+    msg.push_str(&format!("\nCommand:\n{}", cmd_display));
+    msg
+}
+
+// ---------------------------------------------------------------------------
 // Tool: compose (async handler)
 // ---------------------------------------------------------------------------
 
@@ -226,14 +322,10 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
     let command = args["command"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!(
-            "Missing 'command' argument. Valid parameters: project_dir (string, required) - the compose project directory (workspace dir or a subdirectory), \
-            compose_file (string, optional) - compose file relative to project_dir (default docker-compose.yml), \
-            env_file (string, optional) - .env file relative to project_dir (passed via --env-file), \
-            command (string, required) - compose verb + flags (e.g. 'up -d', 'build', 'ps', 'logs --tail=50'), \
-            service (string) - container name (required for exec/run), \
-            args (string) - command to run inside container (for exec/run, no char restrictions), \
-            script (string) - Python code piped via stdin to python3 inside container (for exec only), \
-            timeout (number) - override default timeout in seconds"
+            "Missing 'command' argument. Required fields: project_dir (string, required) - the compose project directory (workspace dir or a subdirectory), \
+            command (string, required) - compose verb + flags (e.g. 'up -d', 'build', 'ps', 'logs --tail=50'). \
+            For exec/run you ALSO need: service (string) - container/service name, args (string) - command to run inside the container. \
+            Example: {{\"project_dir\": \"/opt/workspace/my-project\", \"command\": \"exec\", \"service\": \"backend\", \"args\": \"npm run build\"}}"
         ))?
         .to_string();
 
@@ -327,25 +419,7 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
         let rc = output.status.code().unwrap_or(-1);
 
         if rc != 0 {
-            let mut msg = format!("docker compose command failed (exit {}):\n\n", rc);
-            if !stdout.is_empty() {
-                msg.push_str(&format!(
-                    "--- stdout ({} chars) ---\n{}\n",
-                    stdout.len(),
-                    stdout
-                ));
-            }
-            if !stderr.is_empty() {
-                msg.push_str(&format!(
-                    "--- stderr ({} chars) ---\n{}\n",
-                    stderr.len(),
-                    stderr
-                ));
-            }
-            if stdout.is_empty() && stderr.is_empty() {
-                msg.push_str("(no output)\n");
-            }
-            msg.push_str(&format!("\nCommand:\n{}", cmd_display));
+            let msg = build_failure_message(rc, &stdout, &stderr, &cmd_display);
             return Ok((msg, true));
         }
 
@@ -381,17 +455,7 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
             let rc = output.status.code().unwrap_or(-1);
 
             if rc != 0 {
-                let mut msg = format!("docker compose command failed (exit {}):\n\n", rc);
-                if !stdout.is_empty() {
-                    msg.push_str(&format!("--- stdout ({} chars) ---\n{}\n", stdout.len(), stdout));
-                }
-                if !stderr.is_empty() {
-                    msg.push_str(&format!("--- stderr ({} chars) ---\n{}\n", stderr.len(), stderr));
-                }
-                if stdout.is_empty() && stderr.is_empty() {
-                    msg.push_str("(no output)\n");
-                }
-                msg.push_str(&format!("\nCommand:\n{}", cmd_display));
+                let msg = build_failure_message(rc, &stdout, &stderr, &cmd_display);
                 return Ok((msg, true));
             }
 
@@ -475,11 +539,17 @@ async fn main() -> Result<()> {
                  (must stay inside project_dir). \
                  Use 'command' for the compose verb + flags (e.g. 'up -d', 'ps', 'build', 'logs --tail=50'). \
                  For exec/run: use 'service' (container name) and 'args' (command to run inside container). \
+                 USAGE EXAMPLES: \
+                 - start a project: {{\"project_dir\": \"/opt/workspace/my-project\", \"command\": \"up -d\"}} \
+                 - run a command inside a container: {{\"project_dir\": \"/opt/workspace/my-project\", \"command\": \"exec\", \"service\": \"backend\", \"args\": \"npm run build\"}} \
+                 - view logs: {{\"project_dir\": \"/opt/workspace/my-project\", \"command\": \"logs --tail=50\"}} \
                  'args' have NO character restrictions -- automatically wrapped in sh -c, \
                  so use shell operators (&&, ||, |, quotes) exactly as on a host terminal. \
                  For exec with 'script': pass Python code as the 'script' parameter and it will be piped \
                  to python3 inside the container via stdin (no character restrictions -- ideal for complex scripts). \
-                 Optional 'timeout' parameter overrides the default timeout for long-running commands."
+                 Optional 'timeout' parameter overrides the default timeout for long-running commands. \
+                 NOTE: if a command fails with a host port conflict, pick a different host port or omit \
+                 the host 'ports:' mapping (services reach each other by service name inside the docker network)."
                     .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -535,4 +605,60 @@ async fn main() -> Result<()> {
     };
 
     run_server_with_config(server_info, tools, on_configure).await
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn port_conflict_detected_plain() {
+        let stderr = "Error response from daemon: driver failed programming external connectivity on endpoint movie-db-backend (abc123): Bind for 0.0.0.0:8080 failed: port is already allocated";
+        let msg = enrich_port_conflict(stderr).expect("should detect port conflict");
+        assert!(
+            msg.contains("8080"),
+            "should name the offending port: {}",
+            msg
+        );
+        assert!(msg.contains("HOST PORT CONFLICT"));
+        assert!(
+            msg.contains("8081:8080"),
+            "should suggest an alternative port"
+        );
+    }
+
+    #[test]
+    fn port_conflict_detected_simple() {
+        let stderr = "Bind for 0.0.0.0:5173 failed: port is already allocated";
+        let msg = enrich_port_conflict(stderr).expect("should detect port conflict");
+        assert!(msg.contains("5173"));
+    }
+
+    #[test]
+    fn no_port_conflict_returns_none() {
+        assert!(enrich_port_conflict("some other error: permission denied").is_none());
+        assert!(enrich_port_conflict("").is_none());
+        assert!(enrich_port_conflict("Bind for 0.0.0.0:8080 failed").is_none());
+    }
+
+    #[test]
+    fn failure_message_includes_guidance_on_port_conflict() {
+        let stderr = "Bind for 0.0.0.0:8080 failed: port is already allocated";
+        let msg = build_failure_message(1, "", stderr, "docker compose up -d");
+        assert!(msg.contains("HOST PORT CONFLICT"));
+        assert!(msg.contains("8080"));
+        assert!(msg.contains("Command:"));
+    }
+
+    #[test]
+    fn failure_message_plain_error_no_guidance() {
+        let stderr = "service \"db\" is undefined";
+        let msg = build_failure_message(1, "", stderr, "docker compose up -d");
+        assert!(!msg.contains("HOST PORT CONFLICT"));
+        assert!(msg.contains("service \"db\" is undefined"));
+    }
 }
