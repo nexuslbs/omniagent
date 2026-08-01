@@ -57,14 +57,22 @@ pub trait PluginManager: Send + Sync + 'static {
 pub struct LegacyPluginManager {
     registry: Arc<tokio::sync::RwLock<McpRegistry>>,
     clients: Arc<crate::mcp::external::client::ExternalMcpClients>,
+    // DB pool for resolving $secret:NAME refs in MCP plugin configs.
+    // Option so unit tests can construct the manager without a DB.
+    pool: Option<sqlx::PgPool>,
 }
 
 impl LegacyPluginManager {
     pub fn new(
         registry: Arc<tokio::sync::RwLock<McpRegistry>>,
         clients: Arc<crate::mcp::external::client::ExternalMcpClients>,
+        pool: Option<sqlx::PgPool>,
     ) -> Self {
-        Self { registry, clients }
+        Self {
+            registry,
+            clients,
+            pool,
+        }
     }
 
     /// Get the inner registry (for call sites that need direct lock access).
@@ -108,6 +116,7 @@ impl PluginManager for LegacyPluginManager {
     ) -> Result<Vec<McpTool>, String> {
         crate::mcp::external::client::initialize_single_server_tools(
             data_dir,
+            self.pool.as_ref(),
             server_name,
             &self.clients,
         )
@@ -139,6 +148,8 @@ enum PluginCommand {
         data_dir: String,
         server_name: String,
         clients: std::sync::Arc<crate::mcp::external::client::ExternalMcpClients>,
+        // DB pool for resolving $secret:NAME refs in MCP plugin configs.
+        pool: Option<sqlx::PgPool>,
         resp: oneshot::Sender<Result<Vec<McpTool>, String>>,
     },
 }
@@ -154,6 +165,9 @@ enum PluginCommand {
 pub struct ActorPluginManager {
     tx: mpsc::UnboundedSender<PluginCommand>,
     clients: Arc<crate::mcp::external::client::ExternalMcpClients>,
+    // DB pool for resolving $secret:NAME refs in MCP plugin configs.
+    // Option so unit tests can construct the manager without a DB.
+    pool: Option<sqlx::PgPool>,
 }
 
 impl ActorPluginManager {
@@ -164,10 +178,11 @@ impl ActorPluginManager {
     pub fn new(
         initial_registry: McpRegistry,
         clients: Arc<crate::mcp::external::client::ExternalMcpClients>,
+        pool: Option<sqlx::PgPool>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel::<PluginCommand>();
         tokio::spawn(actor_loop(initial_registry, rx));
-        Self { tx, clients }
+        Self { tx, clients, pool }
     }
 }
 
@@ -196,12 +211,14 @@ async fn actor_loop(mut registry: McpRegistry, mut rx: mpsc::UnboundedReceiver<P
                 data_dir,
                 server_name,
                 clients,
+                pool,
                 resp,
             } => {
                 // Spawn a subtask so the actor isn't blocked on MCP I/O
                 let result = tokio::spawn(async move {
                     crate::mcp::external::client::initialize_single_server_tools(
                         &data_dir,
+                        pool.as_ref(),
                         &server_name,
                         &clients,
                     )
@@ -270,6 +287,7 @@ impl PluginManager for ActorPluginManager {
             data_dir: data_dir.to_string(),
             server_name: server_name.to_string(),
             clients: self.clients.clone(),
+            pool: self.pool.clone(),
             resp: tx,
         });
         rx.await.unwrap_or(Err("Actor channel closed".to_string()))
@@ -308,7 +326,11 @@ mod tests {
     }
 
     fn make_test_manager() -> ActorPluginManager {
-        ActorPluginManager::new(McpRegistry::new(), Arc::new(ExternalMcpClients::new()))
+        ActorPluginManager::new(
+            McpRegistry::new(),
+            Arc::new(ExternalMcpClients::new()),
+            None, // no DB pool in unit tests
+        )
     }
 
     #[tokio::test]

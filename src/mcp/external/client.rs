@@ -1057,11 +1057,27 @@ pub fn create_client(config: McpServerConfig) -> Box<dyn McpServerClient> {
 /// Initialize all external MCP servers and register their tools.
 /// Returns a list of McpTool instances merged from all servers.
 /// Each initialized client is registered in `clients` for runtime tool dispatch.
+///
+/// `pool` is used to resolve `$secret:NAME` references in each server's env
+/// map (the sync config loader passes them through verbatim because it has no
+/// DB access). Resolving here means the subprocess env AND the `configure`
+/// message both carry real secret values — e.g. the git plugin receives the
+/// actual GITHUB_APP_KEY instead of the literal "$secret:GITHUB_APP_KEY".
+/// Pass `None` when no DB pool is available (resolution is skipped).
 pub async fn initialize_external_tools(
     data_dir: &str,
+    pool: Option<&sqlx::PgPool>,
     clients: &ExternalMcpClients,
 ) -> Vec<McpTool> {
-    let configs = crate::mcp::external::config::load_servers_config(data_dir);
+    let mut configs = crate::mcp::external::config::load_servers_config(data_dir);
+    // Resolve $env:/$secret: refs now that we have a DB pool (the sync loader
+    // in config.rs passes $secret: through verbatim).
+    if let Some(pool) = pool {
+        for cfg in &mut configs {
+            crate::plugins_yaml::resolve_config_refs(&mut cfg.env, pool).await;
+        }
+    }
+
     let mut all_tools = Vec::new();
 
     // Load enabled/disabled state from tools.yml
@@ -1106,17 +1122,28 @@ pub async fn initialize_external_tools(
 /// Used for hot-reloading when a plugin is enabled via the dashboard.
 /// Returns an error if the server config is not found or initialization fails.
 /// Creates and registers an MCP client in `clients` for runtime tool dispatch.
+///
+/// `pool` resolves `$secret:NAME` references in the server's env map (see
+/// `initialize_external_tools`). Pass `None` when no DB pool is available.
 pub async fn initialize_single_server_tools(
     data_dir: &str,
+    pool: Option<&sqlx::PgPool>,
     server_name: &str,
     clients: &ExternalMcpClients,
 ) -> Result<Vec<McpTool>, String> {
     // Load all configs to find this server
-    let configs = crate::mcp::external::config::load_servers_config(data_dir);
-    let cfg = configs
-        .into_iter()
+    let mut configs = crate::mcp::external::config::load_servers_config(data_dir);
+    let mut cfg = configs
+        .iter_mut()
         .find(|c| c.name == server_name)
+        .cloned()
         .ok_or_else(|| format!("MCP server '{}' not found in config", server_name))?;
+
+    // Resolve $env:/$secret: refs now that we have a DB pool (the sync loader
+    // in config.rs passes $secret: through verbatim).
+    if let Some(pool) = pool {
+        crate::plugins_yaml::resolve_config_refs(&mut cfg.env, pool).await;
+    }
 
     let client: Arc<dyn McpServerClient> = match cfg.transport {
         crate::mcp::external::config::McpTransport::Stdio => Arc::new(StdioMcpClient::new(cfg)),
