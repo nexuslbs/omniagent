@@ -22,6 +22,7 @@ struct Config {
     omni_dir: String,
     workspace_dir: String,
     github_app_token: String,
+    github_app_private_key: String,
     github_app_id: String,
     github_installation_id: String,
 }
@@ -32,6 +33,7 @@ impl Default for Config {
             omni_dir: "/opt/omni".to_string(),
             workspace_dir: String::new(),
             github_app_token: String::new(),
+            github_app_private_key: String::new(),
             github_app_id: String::new(),
             github_installation_id: String::new(),
         }
@@ -40,7 +42,26 @@ impl Default for Config {
 
 static CONFIG: Lazy<Mutex<Config>> = Lazy::new(|| Mutex::new(Config::default()));
 
-fn private_key_path() -> String {
+/// Path to the GitHub App private key used for JWT signing.
+///
+/// Preferred: the key provided through plugin config (`github_app_private_key`,
+/// e.g. resolved from `$secret:GH_APP_PRIVATE_KEY` by the core) is written to
+/// a process-scoped temp file (chmod 600) and used from there. This keeps the
+/// durable key in the secrets store and lets the plugin regenerate
+/// installation tokens indefinitely — no 1-hour static token to expire.
+///
+/// Fallback: the legacy on-disk key path for local development.
+fn resolve_key_path() -> String {
+    let key_cfg = CONFIG.lock().unwrap().github_app_private_key.clone();
+    if !key_cfg.is_empty() {
+        let tmp = format!("/tmp/mcp-git-gh-key-{}.pem", std::process::id());
+        if let Ok(()) = std::fs::write(&tmp, key_cfg.as_bytes()) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+            return tmp;
+        }
+        // write failed — fall through to the legacy on-disk key path
+    }
     let data_dir = CONFIG.lock().unwrap().omni_dir.clone();
     format!(
         "{0}/data/credentials/nexuslbs-app.2026-06-04.private-key.pem",
@@ -132,7 +153,7 @@ fn create_jwt(app_id: &str) -> Result<String> {
     let signing_input = format!("{}.{}", header, payload);
 
     let mut child = Command::new("openssl")
-        .args(["dgst", "-sha256", "-sign", &private_key_path()])
+        .args(["dgst", "-sha256", "-sign", &resolve_key_path()])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -216,19 +237,38 @@ fn get_installation_token(app_id: &str, inst_id: &str) -> Result<String> {
 
 /// Get a GitHub installation access token.
 ///
-/// Preferred: a static token from config (`github_app_token`, e.g. resolved
-/// from `$secret:GH_APP_TOKEN` by the core) — used directly, no JWT/private
-/// key needed. Fallback: classic JWT → installation-token exchange.
+/// Preferred: regenerate via JWT → installation-token exchange using the app
+/// private key (`github_app_private_key`, e.g. resolved from
+/// `$secret:GH_APP_PRIVATE_KEY` by the core). Tokens are cached and
+/// re-exchanged before GitHub's 1-hour expiry, so auth never goes stale.
+///
+/// Legacy fallback: a static token from config (`github_app_token`, e.g.
+/// `$secret:GH_APP_TOKEN`) — used directly, no JWT/private key needed.
 fn get_github_token() -> Result<String> {
-    let cfg_token = {
+    let (key_cfg, static_token) = {
         let cfg = CONFIG.lock().unwrap();
-        cfg.github_app_token.clone()
+        (
+            cfg.github_app_private_key.clone(),
+            cfg.github_app_token.clone(),
+        )
     };
-    if !cfg_token.is_empty() {
-        return Ok(cfg_token);
+
+    // Durable path: regenerate an installation token from the app private key.
+    if !key_cfg.is_empty() || Path::new(&resolve_key_path()).exists() {
+        let (app_id, inst_id) = load_github_creds()?;
+        return get_installation_token(&app_id, &inst_id);
     }
-    let (app_id, inst_id) = load_github_creds()?;
-    get_installation_token(&app_id, &inst_id)
+
+    // Legacy fallback: a static installation token from config.
+    if !static_token.is_empty() {
+        return Ok(static_token);
+    }
+
+    anyhow::bail!(
+        "No GitHub App credentials configured: set github_app_private_key \
+         (PEM, via $secret:) plus github_app_id and github_installation_id \
+         in the git plugin config"
+    )
 }
 
 /// Run a git command and return (stdout, stderr, exit_code).
@@ -764,6 +804,14 @@ async fn main() -> Result<()> {
                 if let Some(v) = params.get("github_app_token").and_then(|v| v.as_str()) {
                     if !v.is_empty() {
                         cfg.github_app_token = v.to_string();
+                    }
+                }
+                if let Some(v) = params
+                    .get("github_app_private_key")
+                    .and_then(|v| v.as_str())
+                {
+                    if !v.is_empty() {
+                        cfg.github_app_private_key = v.to_string();
                     }
                 }
                 if let Some(v) = params.get("github_app_id").and_then(|v| v.as_str()) {

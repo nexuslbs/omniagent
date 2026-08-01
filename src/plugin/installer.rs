@@ -344,8 +344,11 @@ pub fn install_from_git(
     let initial_remote_path = std::path::Path::new(&initial_remote_dir);
 
     // Track whether the git content actually changed (for callers to decide
-    // whether a recompile is needed).
-    let content_changed: bool;
+    // whether a recompile is needed). Defaults to true: any clone/fetch-fallback
+    // path (first install, or fetch failure → fresh reference clone) always
+    // means content changed. The fetch+reset path overrides this below with
+    // pre/post HEAD comparison.
+    let mut content_changed: bool = true;
 
     // If the directory already exists and has a .git dir, do a fetch+reset
     // instead of rm -rf + fresh clone. This avoids re-downloading the entire
@@ -383,7 +386,13 @@ pub fn install_from_git(
                 name, initial_remote_dir
             ))?;
         if !fetch_status.success() {
-            // Fetch failed: fall back to fresh clone from cache
+            // Fetch failed: fall back to fresh clone from cache. We remove the
+            // broken checkout here; the clone block below (guarded by
+            // `if !initial_remote_path.join(".git").exists()`) then does a
+            // fresh reference clone from cache. Previously this path fell
+            // straight through to find_plugin_json() on a deleted directory —
+            // a transient fetch failure nuked the install instead of
+            // recovering from the local cache.
             tracing::warn!(
                 "git fetch failed for '{}', falling back to reference clone from cache",
                 name
@@ -393,7 +402,6 @@ pub fn install_from_git(
                 initial_remote_dir
             ))?;
             content_changed = true;
-            // Fall through to clone below
         } else {
             let reset_status = std::process::Command::new("git")
                 .args(["-C", &initial_remote_dir, "reset", "--hard", "FETCH_HEAD"])
@@ -454,8 +462,14 @@ pub fn install_from_git(
                 }
             }
         }
-    } else {
-        // First time: reference clone from cache (instant, no network)
+    }
+
+    // Clone from cache if there's no valid checkout: first-time install OR
+    // fetch failure above removed the broken clone. Previously this was an
+    // `else` to the `.git exists` check above, so the fetch-failure path
+    // fell straight through to find_plugin_json() on a deleted directory.
+    if !initial_remote_path.join(".git").exists() {
+        // Reference clone from cache (instant, no network)
         content_changed = true;
 
         if initial_remote_path.exists() {

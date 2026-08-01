@@ -21,7 +21,14 @@
     {
       "key": "github_app_token",
       "default": "$env:GH_APP_TOKEN",
-      "label": "GitHub App Token",
+      "label": "GitHub App Token (legacy static token)",
+      "type": "string",
+      "required": false
+    },
+    {
+      "key": "github_app_private_key",
+      "default": "$env:GH_APP_PRIVATE_KEY",
+      "label": "GitHub App Private Key (PEM)",
       "type": "string",
       "required": false
     },
