@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO messages (\n            thread_id, role, content, thread_sequence, external_id,\n            metadata, embedding, summary_text, is_summary,\n            msg_type, msg_subtype, iteration_number,\n            duration_ms, token_usage\n        )\n        VALUES ($1, $2, $3, $4, NULLIF($5, '')::text,\n            $6, NULLIF($7, '')::text, NULLIF($8, '')::text, $9,\n            $10, NULLIF($11, '')::text, $12,\n            $13, COALESCE(NULLIF($14, '')::jsonb, '{}'::jsonb))\n        RETURNING\n            id, thread_id, role, content, thread_sequence, external_id,\n            metadata::text AS \"metadata\", embedding, summary_text, is_summary,\n            msg_type, msg_subtype, iteration_number,\n            duration_ms, token_usage::text AS \"token_usage\",\n            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\"\n        ",
+  "query": "\n        INSERT INTO messages (\n            thread_id, role, content, thread_sequence, external_id,\n            metadata, embedding, summary_text, is_summary,\n            msg_type, msg_subtype, iteration_number,\n            duration_ms, token_usage, channel_id\n        )\n        VALUES ($1, $2, $3, $4, NULLIF($5, '')::text,\n            $6, NULLIF($7, '')::text, NULLIF($8, '')::text, $9,\n            $10, NULLIF($11, '')::text, $12,\n            $13, COALESCE(NULLIF($14, '')::jsonb, '{}'::jsonb),\n            (SELECT channel_id FROM threads WHERE id = $15))\n        RETURNING\n            id, thread_id, role, content, thread_sequence, external_id,\n            metadata::text AS \"metadata\", embedding, summary_text, is_summary,\n            msg_type, msg_subtype, iteration_number,\n            duration_ms, token_usage::text AS \"token_usage\",\n            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\"\n        ",
   "describe": {
     "columns": [
       {
@@ -180,7 +180,8 @@
         "Text",
         "Int4",
         "Int4",
-        "Text"
+        "Text",
+        "Int8"
       ]
     },
     "nullable": [
@@ -202,5 +203,5 @@
       null
     ]
   },
-  "hash": "aa269c091964ac4e43ce84054b04723492cb661b69644ab29deacb6ba2c13f32"
+  "hash": "12e182a7957f93b66f2ef567b7d75253f30d522fd0041b7ef547af8461e7d265"
 }
