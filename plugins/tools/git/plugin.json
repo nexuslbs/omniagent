@@ -13,8 +13,8 @@
     },
     {
       "key": "workspace_dir",
-      "default": "$env:WORKSPACE_DIR",
-      "label": "Workspace Dir",
+      "default": "/opt/workspace",
+      "label": "Workspace Dir (sandbox — git actions only allowed here and in subdirectories)",
       "type": "string",
       "required": false
     },
