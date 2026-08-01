@@ -48,7 +48,10 @@ const IGNORE_INT: i64 = -999_999;
 
 /// Sentinel used for optional text fields where empty string is a valid value
 /// (body) so we can distinguish "not provided" from "explicitly empty".
-const IGNORE_STR: &str = "\x00__NO_UPDATE__\x00";
+/// NOTE: cannot contain NUL bytes (Postgres rejects 0x00 in text params with
+/// error 22021 "invalid byte sequence for encoding UTF8"). Use a unique
+/// printable sentinel that users are extremely unlikely to type.
+const IGNORE_STR: &str = "\u{10FFFF}__NO_UPDATE__\u{10FFFF}";
 
 // ---------------------------------------------------------------------------
 // Router
