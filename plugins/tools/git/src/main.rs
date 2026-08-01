@@ -31,7 +31,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             omni_dir: "/opt/omni".to_string(),
-            workspace_dir: String::new(),
+            workspace_dir: "/opt/workspace".to_string(),
             github_app_token: String::new(),
             github_app_private_key: String::new(),
             github_app_id: String::new(),
@@ -425,6 +425,56 @@ fn ensure_workspace_dir() -> Result<String> {
     Ok(dir)
 }
 
+/// Validate that a repo path is INSIDE the git workspace sandbox.
+///
+/// Git operations are only allowed on repositories located in the configured
+/// `workspace_dir` (default `/opt/workspace`) or one of its subdirectories.
+/// This prevents the agent from running git against arbitrary paths outside
+/// the workspace (e.g. `/opt/omni`, `/`, or other containers' data).
+///
+/// Accepts the workspace dir itself (a repo at the workspace root) and any
+/// descendant. Rejects absolute paths outside the workspace. Resolves `..`
+/// components so `workspace/../etc` cannot escape the sandbox.
+fn validate_repo_within_workspace(repo_dir: &str) -> Result<()> {
+    let ws = resolve_workspace_dir();
+    let ws_abs = Path::new(&ws);
+    let repo_abs = Path::new(repo_dir);
+
+    // If the repo path is relative, it's relative to the workspace root.
+    let repo_path = if repo_abs.is_absolute() {
+        repo_abs.to_path_buf()
+    } else {
+        ws_abs.join(repo_abs)
+    };
+
+    // Normalize away `.` / `..` so traversal can't escape the sandbox.
+    let norm = |p: &std::path::Path| -> std::path::PathBuf {
+        let mut out = std::path::PathBuf::new();
+        for comp in p.components() {
+            match comp {
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                std::path::Component::CurDir => {}
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out
+    };
+    let ws_norm = norm(ws_abs);
+    let repo_norm = norm(&repo_path);
+
+    if !repo_norm.starts_with(&ws_norm) {
+        anyhow::bail!(
+            "Path '{}' is outside the git workspace sandbox '{}'. \
+             Git operations are only allowed in the workspace dir and its subdirectories.",
+            repo_dir,
+            ws
+        );
+    }
+    Ok(())
+}
+
 /// `clone_repo`: clone a git repository to local filesystem.
 fn handle_clone_repo(args: Value) -> Result<(String, bool)> {
     let url = args["url"]
@@ -459,6 +509,11 @@ fn handle_clone_repo(args: Value) -> Result<(String, bool)> {
     } else {
         Path::new(&base_dir).join(&target_dir).display().to_string()
     };
+
+    // Sandbox: clone destinations must stay inside the workspace dir.
+    if let Err(e) = validate_repo_within_workspace(&actual_dir) {
+        return Ok((e.to_string(), true));
+    }
 
     // Run the clone with an explicit cwd so relative paths never resolve
     // against the plugin's own directory.
@@ -518,6 +573,14 @@ fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
 
     if message.is_empty() {
         anyhow::bail!("Commit message cannot be empty");
+    }
+
+    // Sandbox FIRST: repo must live inside the configured workspace dir.
+    // Returned as a tool error (is_error=true), NOT a handler Err — a
+    // sandbox rejection is an expected outcome, not a server failure, and
+    // must not trip the MCP circuit breaker.
+    if let Err(e) = validate_repo_within_workspace(&repo_dir) {
+        return Ok((e.to_string(), true));
     }
 
     let git_dir = format!("{}/.git", repo_dir);
@@ -644,6 +707,11 @@ fn handle_status(args: Value) -> Result<(String, bool)> {
         anyhow::bail!("repo_dir cannot be empty");
     }
 
+    // Sandbox FIRST: repo must live inside the configured workspace dir.
+    if let Err(e) = validate_repo_within_workspace(&repo_dir) {
+        return Ok((e.to_string(), true));
+    }
+
     let git_dir = format!("{}/.git", repo_dir);
     if !Path::new(&git_dir).is_dir() {
         anyhow::bail!("Not a git repository: {}", repo_dir);
@@ -687,6 +755,11 @@ fn handle_run_command(args: Value) -> Result<(String, bool)> {
 
     if repo_dir.is_empty() {
         anyhow::bail!("repo_dir cannot be empty");
+    }
+
+    // Sandbox FIRST: repo must live inside the configured workspace dir.
+    if let Err(e) = validate_repo_within_workspace(&repo_dir) {
+        return Ok((e.to_string(), true));
     }
 
     let git_dir = format!("{}/.git", repo_dir);
@@ -996,4 +1069,95 @@ async fn main() -> Result<()> {
         }),
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Point the CONFIG workspace_dir at a temp dir for sandbox tests.
+    fn set_ws(dir: &str) {
+        CONFIG.lock().unwrap().workspace_dir = dir.to_string();
+    }
+
+    #[test]
+    fn sandbox_accepts_workspace_root() {
+        let ws = "/opt/workspace";
+        set_ws(ws);
+        assert!(validate_repo_within_workspace(ws).is_ok());
+    }
+
+    #[test]
+    fn sandbox_accepts_subdirectory() {
+        set_ws("/opt/workspace");
+        assert!(validate_repo_within_workspace("/opt/workspace/playground/movie-db").is_ok());
+        assert!(validate_repo_within_workspace("/opt/workspace/omniagent").is_ok());
+    }
+
+    #[test]
+    fn sandbox_rejects_outside_path() {
+        set_ws("/opt/workspace");
+        let err = validate_repo_within_workspace("/opt/omni/plugins").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("outside the git workspace sandbox"));
+        assert!(validate_repo_within_workspace("/etc").is_err());
+        assert!(validate_repo_within_workspace("/tmp").is_err());
+    }
+
+    #[test]
+    fn sandbox_rejects_traversal_escape() {
+        set_ws("/opt/workspace");
+        // workspace/../etc would resolve to /opt/etc — outside the sandbox.
+        assert!(validate_repo_within_workspace("/opt/workspace/../etc").is_err());
+        // But a traversal that stays inside is fine.
+        assert!(validate_repo_within_workspace("/opt/workspace/sub/../omniagent").is_ok());
+    }
+
+    #[test]
+    fn sandbox_accepts_relative_repo_path() {
+        set_ws("/opt/workspace");
+        // Relative paths resolve against the workspace root.
+        assert!(validate_repo_within_workspace("omniagent").is_ok());
+        assert!(validate_repo_within_workspace("").is_ok()); // workspace itself
+    }
+
+    #[test]
+    fn sandbox_respects_custom_workspace_dir() {
+        set_ws("/tmp/custom-ws");
+        assert!(validate_repo_within_workspace("/tmp/custom-ws/project").is_ok());
+        assert!(validate_repo_within_workspace("/opt/workspace/project").is_err());
+    }
+
+    #[test]
+    fn sandbox_clone_destination_enforced() {
+        set_ws("/opt/workspace");
+        // Clone with an absolute dir outside the workspace must be rejected
+        // as a tool error (is_error=true), before any network access.
+        let args = serde_json::json!({
+            "url": "https://github.com/nexuslbs/foo.git",
+            "dir": "/tmp/escape-clone",
+        });
+        let (msg, is_error) = handle_clone_repo(args).expect("returns Ok with is_error");
+        assert!(is_error, "clone outside sandbox should be an error result");
+        assert!(msg.contains("outside the git workspace sandbox"));
+    }
+
+    #[test]
+    fn sandbox_rejections_do_not_trip_handler_error() {
+        set_ws("/opt/workspace");
+        // A sandbox rejection must come back as Ok((msg, true)) — NOT as an
+        // Err — so the MCP circuit breaker doesn't count it as a server
+        // failure and open the circuit after a few legitimate blocks.
+        let (msg, is_error) = handle_status(serde_json::json!({
+            "repo_dir": "/tmp/not-a-repo-outside",
+        }))
+        .expect("sandbox rejection must be an Ok result");
+        assert!(is_error);
+        assert!(msg.contains("outside the git workspace sandbox"));
+    }
 }
