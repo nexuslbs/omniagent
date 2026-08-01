@@ -667,6 +667,125 @@ fn handle_status(args: Value) -> Result<(String, bool)> {
     ))
 }
 
+/// `run_command`: run an arbitrary git command in a repository.
+///
+/// Generic escape hatch — lets the agent run ANY git command the focused
+/// tools (status / clone_repo / commit_and_push / create_github_repo) don't
+/// cover, e.g. `git log`, `git diff`, `git branch`, `git remote -v`,
+/// `git fetch`, `git reset --soft`, `git stash`, `git tag`.
+///
+/// Args are passed as an array (never a shell string) so no shell injection
+/// is possible. `use_auth: true` injects the GitHub App installation token
+/// via a `-c url.<token-url>.insteadOf=<original-url>` config override (the
+/// repo's own .git/config is NEVER modified), so push/fetch/pull against the
+/// origin https remote work with the same auth as commit_and_push.
+fn handle_run_command(args: Value) -> Result<(String, bool)> {
+    let repo_dir = args["repo_dir"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing required parameter: repo_dir"))?
+        .to_string();
+
+    if repo_dir.is_empty() {
+        anyhow::bail!("repo_dir cannot be empty");
+    }
+
+    let git_dir = format!("{}/.git", repo_dir);
+    if !Path::new(&git_dir).is_dir() {
+        anyhow::bail!("Not a git repository: {}", repo_dir);
+    }
+
+    let git_args = args["args"]
+        .as_array()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Missing required parameter: args (array of git arguments, \
+                 e.g. [\"log\", \"--oneline\", \"-5\"])"
+            )
+        })?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(|s| s.to_string())
+        .collect::<Vec<String>>();
+
+    if git_args.is_empty() {
+        anyhow::bail!("args cannot be empty");
+    }
+
+    // Refuse NUL bytes (would truncate the argv at exec time).
+    for a in &git_args {
+        if a.contains('\u{0}') {
+            anyhow::bail!("Forbidden NUL byte in git argument");
+        }
+    }
+
+    let use_auth = args["use_auth"].as_bool().unwrap_or(false);
+    let timeout_secs = args["timeout"]
+        .as_u64()
+        .or_else(|| args["timeout"].as_str().and_then(|s| s.parse().ok()))
+        .unwrap_or(60);
+
+    // ── Auth injection: `git -c url.<token-url>.insteadOf=<orig-url> <args>` ──
+    // Never mutates the repo config; only affects this one invocation.
+    let mut full_args: Vec<String> = Vec::new();
+    if use_auth {
+        let token = match get_github_token() {
+            Ok(t) => t,
+            Err(e) => return Ok((format!("Cannot authenticate: {}", e), true)),
+        };
+        // Read the origin remote to know which https host to rewrite.
+        let (remote_out, _, _) = run_git(&["remote", "get-url", "origin"], Some(&repo_dir), 15);
+        let remote_url = remote_out.trim().to_string();
+        if remote_url.starts_with("https://") {
+            let rest = remote_url
+                .split_once("://")
+                .map(|(_, r)| r)
+                .unwrap_or(&remote_url);
+            // git -c url."https://x-access-token:TOKEN@host/".insteadOf="https://host/"
+            let host_path = rest.split('/').next().unwrap_or(rest);
+            let token_url = format!("https://x-access-token:{}@{}", token, host_path);
+            let orig_url = format!("https://{}", host_path);
+            full_args.push("-c".to_string());
+            full_args.push(format!("url.\"{}\".insteadOf=\"{}\"", token_url, orig_url));
+            tracing::info!(
+                "run_command: injected auth for host {} (repo {})",
+                host_path,
+                repo_dir
+            );
+        } else {
+            tracing::warn!(
+                "run_command: use_auth=true but origin '{}' is not https — running unauthenticated",
+                remote_url
+            );
+        }
+    }
+    full_args.extend(git_args.iter().cloned());
+
+    let arg_refs: Vec<&str> = full_args.iter().map(|s| s.as_str()).collect();
+    let (stdout, stderr, rc) = run_git(&arg_refs, Some(&repo_dir), timeout_secs);
+
+    // Truncate huge outputs (same policy as docker_compose: 50k chars).
+    const MAX_OUT: usize = 50_000;
+    let trunc = |s: String| -> String {
+        if s.len() > MAX_OUT {
+            format!("{}... [truncated from {} chars]", &s[..MAX_OUT], s.len())
+        } else {
+            s
+        }
+    };
+
+    Ok((
+        serde_json::json!({
+            "success": rc == 0,
+            "exit_code": rc,
+            "command": format!("git {}", git_args.join(" ")),
+            "stdout": trunc(stdout),
+            "stderr": trunc(stderr),
+        })
+        .to_string(),
+        rc != 0,
+    ))
+}
+
 //  Main
 
 #[tokio::main]
@@ -778,6 +897,51 @@ async fn main() -> Result<()> {
                 }),
             },
             handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_status(args) })),
+        },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "run_command".to_string(),
+                description:
+                    "RUN an arbitrary git command inside a repository. \
+                    Generic escape hatch when the focused git tools (status, clone_repo, \
+                    commit_and_push, create_github_repo) are not specific enough. \
+                    Examples: [\"log\", \"--oneline\", \"-10\"], [\"diff\"], [\"branch\", \"-a\"], \
+                    [\"remote\", \"-v\"], [\"fetch\", \"origin\"], [\"reset\", \"--soft\", \"HEAD~1\"], \
+                    [\"stash\"], [\"tag\", \"-l\"], [\"show\", \"HEAD\"]. \
+                    'repo_dir' (required) is the path to the git repository; \
+                    'args' (required) is the array of git arguments — NEVER a shell string, \
+                    so no shell injection is possible. \
+                    'use_auth' (optional bool, default false): when true, injects the GitHub App \
+                    installation token for this single invocation (via a -c url.insteadOf override — \
+                    the repo's own .git/config is NEVER modified) so push/fetch/pull against the \
+                    origin https remote authenticate like commit_and_push does. \
+                    'timeout' (optional number, default 60s) overrides the command timeout."
+                        .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "repo_dir": {
+                            "type": "string",
+                            "description": "Path to the git repository"
+                        },
+                        "args": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Git arguments as an array, e.g. [\"log\", \"--oneline\", \"-5\"]"
+                        },
+                        "use_auth": {
+                            "type": "boolean",
+                            "description": "Inject GitHub App installation token for this invocation (push/fetch/pull against https origin). Default false."
+                        },
+                        "timeout": {
+                            "type": "number",
+                            "description": "Override default timeout in seconds (default 60)"
+                        }
+                    },
+                    "required": ["repo_dir", "args"]
+                }),
+            },
+            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_run_command(args) })),
         },
     ];
 
