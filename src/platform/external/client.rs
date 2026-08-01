@@ -1755,11 +1755,7 @@ async fn send_react(
 ///
 /// Errors are treated as "no thread" (returns false) so a transient DB issue
 /// never causes a message to be silently dropped.
-async fn thread_exists_for_external_id(
-    pool: &PgPool,
-    channel_id: i64,
-    external_id: &str,
-) -> bool {
+async fn thread_exists_for_external_id(pool: &PgPool, channel_id: i64, external_id: &str) -> bool {
     if external_id.is_empty() {
         return false;
     }
