@@ -3,7 +3,7 @@
   "name": "Filesystem MCP Server",
   "label": "filesystem",
   "version": "0.1.0",
-  "description": "Filesystem tools: read, write, list, search, info on local files",
+  "description": "Filesystem tools: read, write, list, search, info on local files (writes sandboxed to workspace_dir; reads unrestricted)",
   "type": "mcp",
   "entrypoint": {
     "command": "mcp-server-filesystem",
@@ -14,7 +14,7 @@
     {
       "key": "workspace_dir",
       "default": "/opt/workspace",
-      "label": "Workspace Dir (sandbox — all filesystem operations only allowed here and in subdirectories)",
+      "label": "Workspace Dir (write sandbox — file WRITES only allowed here and in subdirectories; reads are unrestricted)",
       "type": "string",
       "required": true
     }
