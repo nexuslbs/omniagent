@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT t.id, t.status\n        FROM messages m\n        JOIN threads t ON t.id = m.thread_id\n        JOIN channels ch ON ch.id = t.channel_id\n        WHERE m.external_id = $1\n          AND m.thread_sequence = 0\n          AND ch.platform = $2\n          AND ch.resource_identifier = $3\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "status"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b4bbdb089d44dd61224fe60ae2da6b23cf24cd9c9b01ab46c65b1ad91840a861"
+}

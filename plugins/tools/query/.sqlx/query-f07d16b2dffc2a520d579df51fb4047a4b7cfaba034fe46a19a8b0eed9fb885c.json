@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values)\n            VALUES ($1, 'edited', NULL, NULL, $2::jsonb)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f07d16b2dffc2a520d579df51fb4047a4b7cfaba034fe46a19a8b0eed9fb885c"
+}

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE messages SET external_id = $1 WHERE id = $2 AND external_id IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4d82ba660a3ca7ca3669ace9a0d38da53f6288f7ac1f67b7e24d36d59b033ed5"
+}
