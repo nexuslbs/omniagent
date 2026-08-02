@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE channels\n                SET current_provider = NULLIF($1, '')::text,\n                    current_model = NULLIF($2, '')::text,\n                    updated_at = NOW()\n                WHERE id = $3\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "09789abcf31d8111e67faad5ea35bc91b80f3b9994a5f09c2a326d6925bd1383"
+}

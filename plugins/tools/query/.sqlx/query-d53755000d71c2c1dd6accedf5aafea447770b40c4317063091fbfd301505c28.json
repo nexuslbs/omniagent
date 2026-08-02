@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE threads SET status = 'skipped', ended_at = NOW(), terminal = true, iterations = COALESCE((SELECT MAX(iteration_number) FROM messages WHERE thread_id = threads.id), 0) WHERE channel_id = $1 AND status IN ('pending', 'processing') AND NOT terminal",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d53755000d71c2c1dd6accedf5aafea447770b40c4317063091fbfd301505c28"
+}

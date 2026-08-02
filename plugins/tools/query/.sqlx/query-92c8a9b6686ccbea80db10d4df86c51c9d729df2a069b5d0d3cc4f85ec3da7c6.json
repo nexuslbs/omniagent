@@ -1,0 +1,116 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            t.id,\n            t.channel_id,\n            t.id AS thread_id,\n            LEFT(COALESCE(m.content, ''), 200) AS content_preview,\n            COALESCE(t.status, 'unknown') AS status,\n            t.duration_ms AS processing_time_ms,\n            (t.input_tokens + t.output_tokens) AS total_tokens,\n            COALESCE(t.created_at, NOW()) AS created_at,\n            COALESCE(c.name, 'unknown') AS channel_name,\n            t.model,\n            (SELECT COUNT(*) FROM messages sub WHERE sub.thread_id = t.id) AS thread_count\n        FROM threads t\n        JOIN messages m ON m.thread_id = t.id AND m.thread_sequence = 0\n        LEFT JOIN channels c ON c.id = t.channel_id\n        ORDER BY t.id DESC\n        LIMIT 10\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "thread_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "content_preview",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "processing_time_ms",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "duration_ms"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "total_tokens",
+        "type_info": "Int4",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "channel_name",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "model",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "model"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "thread_count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      null,
+      true,
+      null,
+      null,
+      null,
+      true,
+      null
+    ]
+  },
+  "hash": "92c8a9b6686ccbea80db10d4df86c51c9d729df2a069b5d0d3cc4f85ec3da7c6"
+}

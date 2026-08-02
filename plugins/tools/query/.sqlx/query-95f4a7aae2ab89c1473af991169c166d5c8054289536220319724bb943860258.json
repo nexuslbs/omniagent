@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE channels\n        SET platform = NULLIF($1, '')::text,\n            resource_identifier = NULLIF($2, '')::text,\n            external_id = NULLIF($3, '')::text,\n            updated_at = NOW()\n        WHERE id = $4\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "95f4a7aae2ab89c1473af991169c166d5c8054289536220319724bb943860258"
+}

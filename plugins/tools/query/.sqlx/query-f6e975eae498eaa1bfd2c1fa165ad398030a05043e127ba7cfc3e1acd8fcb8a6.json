@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            id, channel_id, subscriber_platform, subscriber_resource,\n            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\"\n        FROM channel_subscriptions\n        WHERE channel_id = $1\n        ORDER BY id ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_subscriptions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_subscriptions",
+            "name": "channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "subscriber_platform",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channel_subscriptions",
+            "name": "subscriber_platform"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "subscriber_resource",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channel_subscriptions",
+            "name": "subscriber_resource"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "created_at",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "f6e975eae498eaa1bfd2c1fa165ad398030a05043e127ba7cfc3e1acd8fcb8a6"
+}
