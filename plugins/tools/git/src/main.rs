@@ -1966,4 +1966,83 @@ mod tests {
         let (out, _, rc) = run_git(&["-c", cfg.as_str(), "config", "--list"], Some(&repo), 15);
         assert_eq!(rc, 0, "git must parse the override: {}", out);
     }
+
+    // ── Mutex poisoning resilience ──
+    //
+    // Regression tests (Aug 2026): the git plugin's shared state (CONFIG,
+    // TOKEN_CACHE) was std::sync::Mutex + .lock().unwrap(). A panic while a
+    // handler held the lock POISONED it, permanently bricking the plugin
+    // (every later .lock().unwrap() panics) and, in tests, cascading opaque
+    // PoisonError failures onto unrelated tests. parking_lot::Mutex never
+    // poisons. These tests simulate the panic and prove the plugin survives:
+    // they FAIL on the old std::sync::Mutex code and PASS with parking_lot.
+
+    /// Run `f` and report whether it panicked. Simulates a hypothetical
+    /// handler bug that panics mid-critical-section while holding a lock.
+    fn caught_panic<F: FnOnce()>(f: F) -> bool {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err()
+    }
+
+    #[test]
+    fn panic_while_holding_config_does_not_poison_plugin() {
+        // Plugin configured and healthy.
+        let _g = set_ws("/tmp/poison-test-ws");
+
+        // A handler panics while CONFIG is held. With std::sync::Mutex the
+        // mutex is poisoned on unwind; parking_lot releases it cleanly.
+        assert!(
+            caught_panic(|| {
+                let _guard = CONFIG.lock();
+                panic!("simulated handler panic while holding CONFIG");
+            }),
+            "the simulated panic must have been caught"
+        );
+
+        // The plugin must still be fully operational.
+        assert_eq!(resolve_workspace_dir(), "/tmp/poison-test-ws");
+
+        // A git call that ERRORS (sandbox rejection) must come back as a
+        // clean tool error — not panic on a poisoned lock.
+        let (msg, is_error) = handle_run_command(serde_json::json!({
+            "repo_dir": "/etc",
+            "args": ["status"],
+        }))
+        .expect("git call after simulated poison must return Ok, not panic");
+        assert!(is_error);
+        assert!(msg.contains("outside the git workspace sandbox"));
+    }
+
+    #[test]
+    fn panic_while_holding_token_cache_does_not_poison_plugin() {
+        assert!(
+            caught_panic(|| {
+                let _guard = TOKEN_CACHE.lock();
+                panic!("simulated handler panic while holding TOKEN_CACHE");
+            }),
+            "the simulated panic must have been caught"
+        );
+
+        // The cache must still be lockable and in its default empty state.
+        let cache = TOKEN_CACHE.lock();
+        assert!(cache.get_cached().is_none());
+    }
+
+    #[test]
+    fn git_handler_errors_leave_shared_state_healthy() {
+        // A git call that fails must not corrupt the shared config: the
+        // next call sees the same workspace and behaves identically.
+        let _g = set_ws("/tmp/err-test-ws");
+
+        let (msg, is_error) = handle_run_command(serde_json::json!({
+            "repo_dir": "/etc",
+            "args": ["init"],
+        }))
+        .expect("sandbox rejection returns Ok, not Err");
+        assert!(is_error);
+        assert!(msg.contains("outside the git workspace sandbox"));
+
+        // Config intact; a subsequent pure validation still works.
+        assert_eq!(resolve_workspace_dir(), "/tmp/err-test-ws");
+        assert!(validate_repo_within_workspace("/tmp/err-test-ws").is_ok());
+    }
 }
