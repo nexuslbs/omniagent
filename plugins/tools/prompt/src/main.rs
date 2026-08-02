@@ -553,6 +553,13 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // and causing an infinite re-emit loop (deploy Groups 13/14 regression).
     // Use the configured budgets (same as the condense path) so real long
     // threads are bounded but short conversations are never touched.
+    //
+    // The gate applies ONLY to automatic calls from the main loop (which pass
+    // `current_iteration`). Explicit calls — the agent or a test invoking the
+    // tool directly with `messages` + `keep_recent` — compact unconditionally:
+    // the caller explicitly asked for compaction, and the noop corruption only
+    // happens when the main loop fires the tool on every turn of a tiny script.
+    let is_auto_call = args.get("current_iteration").is_some();
     let use_tokens = !cfg.tokenizer_encoding.is_empty();
     let current_size: usize = if use_tokens {
         messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
@@ -580,9 +587,10 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
         && current_size > soft_budget
         && state_interval > 0
         && (current_iteration - last_condense_iteration) >= state_interval;
+    let should_compact = !is_auto_call || needs_hard || needs_soft;
 
     let before = messages.len();
-    if needs_hard || needs_soft {
+    if should_compact {
         crate::compact::compact_old_assistant_messages(&mut messages, keep_recent);
     }
     let after = messages.len();
