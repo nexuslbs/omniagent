@@ -564,6 +564,11 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // then compaction runs on EVERY call (no cadence) until the size drops
     // back to the soft budget — the soft budget is the REDUCTION TARGET, not
     // a trigger. When the tool decides not to compact, it returns null.
+    //
+    // Compaction itself runs at most 3 passes with a progressively smaller
+    // keep_recent; if the size is still over the soft budget after that and
+    // material remains to compact, the tool raises an error (is_error=true)
+    // instead of looping forever.
     let use_tokens = !cfg.tokenizer_encoding.is_empty();
     let current_size: usize = if use_tokens {
         messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
@@ -588,8 +593,13 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
         // stops when size <= soft or there is nothing more to compact
         // (keep_recent would hit 0 — compact_old_assistant_messages then
         // compacts every assistant tool-call message).
+        //
+        // At most 3 passes: if the size is still over the soft budget after
+        // 3 progressively more aggressive compactions and there is material
+        // left to compact (keep_recent has not yet reached 0), raise an
+        // error instead of looping forever.
         let mut keep = keep_recent;
-        loop {
+        for pass in 0..3 {
             crate::compact::compact_old_assistant_messages(&mut messages, keep);
             let after_size: usize = if use_tokens {
                 messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
@@ -598,6 +608,17 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
             };
             if after_size <= soft_budget || keep == 0 {
                 break;
+            }
+            if pass == 2 {
+                // 3 passes done, still over soft, and keep > 0 means more
+                // material could still be compacted but we are capped.
+                return Ok((
+                    format!(
+                        "Compaction failed: after 3 passes, size {} still exceeds soft budget {} (stopped at keep_recent={}, would need to compact further to reach the soft budget)",
+                        after_size, soft_budget, keep
+                    ),
+                    true,
+                ));
             }
             keep -= 1;
         }
