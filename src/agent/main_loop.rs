@@ -1034,10 +1034,42 @@ Previous plan:\n{}",
                     );
                 }
 
-                // Execute with short timeout (fast path) + background fallback
+                // Execute with short timeout (fast path) + background fallback.
+                // Builtin task tools (wait/poll/cancel/read-task-logs) are the
+                // INTERFACE to the background system — they must never be
+                // backgrounded themselves. wait-task declares timeout_secs=310
+                // and blocks polling; applying the 5s bg switch to it would
+                // return a NEW task_id instead of the awaited result, so the
+                // agent loops forever waiting on a task that never resolves
+                // (deploy Groups 13/14 regression). External tools get the
+                // bg-threshold switch so long operations run in background.
                 let tool_future = mcp_snapshot.execute(&mcp_call, tool_ctx.clone());
 
-                let result = match tokio::time::timeout(bg_threshold, tool_future).await {
+                let is_builtin_task_tool = matches!(
+                    tool_name.as_str(),
+                    "builtin_wait-task"
+                        | "builtin_poll-task"
+                        | "builtin_cancel-task"
+                        | "builtin_read-task-logs"
+                        | "builtin_read-attached-file"
+                );
+
+                let result = if is_builtin_task_tool {
+                    // Run synchronously with the tool's own registered timeout.
+                    match tokio::time::timeout(timeout_dur, tool_future).await {
+                        Ok(result) => result,
+                        Err(_) => Ok(McpToolResult {
+                            call_id: tc_id.clone(),
+                            content: format!(
+                                "Tool '{}' timed out after {}s",
+                                tool_name,
+                                timeout_dur.as_secs()
+                            ),
+                            is_error: true,
+                        }),
+                    }
+                } else {
+                match tokio::time::timeout(bg_threshold, tool_future).await {
                     Ok(result) => result,
                     Err(_elapsed) => {
                         // Short timeout exceeded : switch to background mode.
@@ -1112,6 +1144,7 @@ Previous plan:\n{}",
                             is_error: false,
                         })
                     }
+                }
                 };
 
                 let (output, is_error) = match &result {
