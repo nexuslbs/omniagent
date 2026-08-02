@@ -15,7 +15,9 @@ use mcp_server_util::{vector_to_string, HashVectorizer};
 use omniagent::db;
 use serde_json::Value;
 use sql_forge::sql_forge;
-use sqlx::{Column, FromRow, PgPool, Row};
+use sqlx::types::chrono::{DateTime, NaiveDate, Utc};
+use sqlx::types::Uuid;
+use sqlx::{Column, FromRow, PgPool, Row, TypeInfo};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -358,6 +360,91 @@ fn find_write_keyword(cleaned: &str) -> Option<String> {
 }
 
 /// query: direct SQL (runtime only, must be SELECT).
+const MAX_QUERY_ROWS: usize = 1000;
+
+/// Decode a single result cell by its PostgreSQL column type so timestamps,
+/// UUIDs, JSONB, bytea and arrays serialize as real values instead of NULL.
+fn decode_column_value(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Value {
+    let type_name = row.column(i).type_info().name();
+    match type_name {
+        "TIMESTAMPTZ" | "TIMESTAMP" => match row.try_get::<Option<DateTime<Utc>>, _>(i) {
+            Ok(Some(dt)) => serde_json::Value::String(dt.to_rfc3339()),
+            _ => serde_json::Value::Null,
+        },
+        "DATE" => match row.try_get::<Option<NaiveDate>, _>(i) {
+            Ok(Some(d)) => serde_json::Value::String(d.to_string()),
+            _ => serde_json::Value::Null,
+        },
+        "UUID" => match row.try_get::<Option<Uuid>, _>(i) {
+            Ok(Some(u)) => serde_json::Value::String(u.to_string()),
+            _ => serde_json::Value::Null,
+        },
+        "JSONB" | "JSON" => match row.try_get::<Option<serde_json::Value>, _>(i) {
+            Ok(Some(v)) => v,
+            _ => serde_json::Value::Null,
+        },
+        "BYTEA" => match row.try_get::<Option<Vec<u8>>, _>(i) {
+            Ok(Some(b)) => serde_json::Value::String(
+                b.iter().map(|byte| format!("{:02x}", byte)).collect::<String>(),
+            ),
+            _ => serde_json::Value::Null,
+        },
+        // Arrays: PostgreSQL type names start with an underscore.
+        _ if type_name.starts_with('_') => decode_array_value(row, i),
+        // Everything else: try scalar decodes in order of likelihood.
+        _ => {
+            if let Ok(s) = row.try_get::<&str, _>(i) {
+                serde_json::Value::String(s.to_string())
+            } else if let Ok(n) = row.try_get::<i64, _>(i) {
+                serde_json::json!(n)
+            } else if let Ok(n) = row.try_get::<f64, _>(i) {
+                serde_json::json!(n)
+            } else if let Ok(b) = row.try_get::<bool, _>(i) {
+                serde_json::json!(b)
+            } else {
+                row.try_get::<Option<String>, _>(i)
+                    .ok()
+                    .flatten()
+                    .map(serde_json::Value::String)
+                    .unwrap_or(serde_json::Value::Null)
+            }
+        }
+    }
+}
+
+/// Decode a PostgreSQL array column into a JSON array. Tries the common
+/// element types in order; falls back to NULL for exotic element types.
+fn decode_array_value(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Value {
+    if let Ok(Some(v)) = row.try_get::<Option<Vec<String>>, _>(i) {
+        return serde_json::Value::Array(v.into_iter().map(serde_json::Value::String).collect());
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<Vec<i64>>, _>(i) {
+        return serde_json::Value::Array(v.into_iter().map(|n| serde_json::json!(n)).collect());
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<Vec<f64>>, _>(i) {
+        return serde_json::Value::Array(v.into_iter().map(|n| serde_json::json!(n)).collect());
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<Vec<bool>>, _>(i) {
+        return serde_json::Value::Array(v.into_iter().map(|b| serde_json::json!(b)).collect());
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<Vec<Uuid>>, _>(i) {
+        return serde_json::Value::Array(
+            v.into_iter().map(|u| serde_json::Value::String(u.to_string())).collect(),
+        );
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<Vec<DateTime<Utc>>>, _>(i) {
+        return serde_json::Value::Array(
+            v.into_iter()
+                .map(|dt| serde_json::Value::String(dt.to_rfc3339()))
+                .collect(),
+        );
+    }
+    if let Ok(Some(v)) = row.try_get::<Option<Vec<serde_json::Value>>, _>(i) {
+        return serde_json::Value::Array(v);
+    }
+    serde_json::Value::Null
+}
+
 async fn handle_query(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let sql_owned = args["sql"]
         .as_str()
@@ -414,27 +501,16 @@ async fn handle_query(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
             let mut map = serde_json::Map::new();
             for (i, col) in row.columns().iter().enumerate() {
                 let name = col.name();
-                let value: serde_json::Value = if let Ok(s) = row.try_get::<&str, _>(i) {
-                    serde_json::Value::String(s.to_string())
-                } else if let Ok(n) = row.try_get::<i64, _>(i) {
-                    serde_json::json!(n)
-                } else if let Ok(n) = row.try_get::<f64, _>(i) {
-                    serde_json::json!(n)
-                } else if let Ok(b) = row.try_get::<bool, _>(i) {
-                    serde_json::json!(b)
-                } else {
-                    row.try_get::<Option<String>, _>(i)
-                        .ok()
-                        .flatten()
-                        .map(serde_json::Value::String)
-                        .unwrap_or(serde_json::Value::Null)
-                };
+                let value = decode_column_value(row, i);
                 map.insert(name.to_string(), value);
             }
             json_rows.push(serde_json::Value::Object(map));
         }
         json_rows
     };
+
+    // Defense in depth: cap the result set regardless of the caller's LIMIT.
+    let results = results.into_iter().take(MAX_QUERY_ROWS).collect::<Vec<_>>();
 
     sqlx::query("COMMIT")
         .execute(&mut *conn)

@@ -19,7 +19,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     create_indexes(pool).await?;
     create_vector_support(pool).await?;
     create_triggers(pool).await?;
-    create_readonly_user(pool).await?;
     seed_kanban_channel(pool).await?;
     seed_cron_channel(pool).await?;
     // All messages store the time it took to produce (LLM call time for
@@ -693,46 +692,6 @@ async fn create_triggers(pool: &PgPool) -> Result<()> {
     .await?;
 
     tracing::info!("[migration] Append-only trigger created on messages");
-    Ok(())
-}
-
-// ── Read-only user ──────────────────────────────────────────────────────────
-
-async fn create_readonly_user(pool: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"DO $$
-        BEGIN
-            CREATE USER omniagent_readonly WITH PASSWORD 'omniagent_readonly';
-        EXCEPTION
-            WHEN duplicate_object THEN NULL;
-        END $$;"#,
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query("GRANT CONNECT ON DATABASE omniagent TO omniagent_readonly")
-        .execute(pool)
-        .await
-        .ok();
-
-    sqlx::query("GRANT USAGE ON SCHEMA public TO omniagent_readonly")
-        .execute(pool)
-        .await
-        .ok();
-
-    sqlx::query("GRANT SELECT ON ALL TABLES IN SCHEMA public TO omniagent_readonly")
-        .execute(pool)
-        .await
-        .ok();
-
-    sqlx::query(
-        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO omniagent_readonly",
-    )
-    .execute(pool)
-    .await
-    .ok();
-
-    tracing::info!("[migration] Read-only user omniagent_readonly configured");
     Ok(())
 }
 
