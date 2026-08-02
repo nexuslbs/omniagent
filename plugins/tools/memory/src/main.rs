@@ -871,8 +871,8 @@ async fn main() -> Result<()> {
     });
 
     // Shared config: populated via configure message from omniagent
-    let plugin_config: std::sync::Arc<std::sync::Mutex<PluginConfig>> =
-        std::sync::Arc::new(std::sync::Mutex::new(PluginConfig::default()));
+    let plugin_config: std::sync::Arc<parking_lot::Mutex<PluginConfig>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(PluginConfig::default()));
 
     // generate_summary handler: captures pool and config
     let p_summary = pool.clone();
@@ -883,7 +883,7 @@ async fn main() -> Result<()> {
         Box::pin(async move {
             let guard = p.read().await;
             let pool = guard.as_ref().expect("Pool not initialized").clone();
-            let config = cfg.lock().unwrap().clone();
+            let config = cfg.lock().clone();
             handle_generate_summary(&pool, &config, &args).await
         })
     });
@@ -1072,7 +1072,7 @@ async fn main() -> Result<()> {
             *dd_dir.blocking_write() = Some(config.omni_dir.clone());
         });
         // Store plugin config
-        let mut locked = cfg_callback.lock().unwrap();
+        let mut locked = cfg_callback.lock();
         *locked = config;
         tracing::info!("Memory plugin configured");
     });

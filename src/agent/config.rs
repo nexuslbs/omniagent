@@ -1,10 +1,10 @@
 use crate::agent::plugin_manager::PluginManager;
 use crate::error::{AppResult, ErrorContext};
 use crate::mcp::AppContext;
+use parking_lot::RwLock;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::RwLock;
 
 // ── Global mutable config ──────────────────────────────────────────────────
 
@@ -31,9 +31,8 @@ pub fn reload_global() {
         match AgentConfig::from_env() {
             Ok(new_config) => {
                 tracing::info!("Reloaded global config from environment");
-                if let Ok(mut guard) = global.write() {
-                    *guard = new_config;
-                }
+                let mut guard = global.write();
+                *guard = new_config;
             }
             Err(e) => {
                 tracing::error!("Failed to reload config from environment: {:?}", e);
@@ -51,9 +50,8 @@ pub async fn reload_global_from_settings(data_dir: &str, pool: &PgPool) {
         match AgentConfig::from_settings_yaml(data_dir, pool).await {
             Ok(new_config) => {
                 tracing::info!("Reloaded global config from settings.yml");
-                if let Ok(mut guard) = global.write() {
-                    *guard = new_config;
-                }
+                let mut guard = global.write();
+                *guard = new_config;
             }
             Err(e) => {
                 tracing::error!("Failed to reload config from settings.yml: {:?}", e);
@@ -142,10 +140,7 @@ impl AgentContext {
     /// This ensures consistent field values throughout one processing cycle
     /// even if the global config is updated concurrently.
     pub fn config_snapshot(&self) -> AgentConfig {
-        self.config
-            .read()
-            .expect("AgentConfig lock poisoned")
-            .clone()
+        self.config.read().clone()
     }
 }
 

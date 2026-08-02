@@ -13,7 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use std::time::{Duration, SystemTime};
 
 use crate::err_msg;
@@ -744,7 +744,7 @@ pub async fn spawn_vectorizers(
         wiki_interval,
         qdrant_url,
     ) = {
-        let cfg = config.read().expect("VectorizerConfig lock poisoned");
+        let cfg = config.read();
         (
             cfg.vectorize_messages,
             cfg.messages_vectorization_method.clone(),

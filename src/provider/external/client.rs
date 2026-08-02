@@ -10,8 +10,9 @@ use crate::provider::external::{
     build_complete_request, build_initialize_request, CompleteParams, CompleteResult,
     ProviderResponse,
 };
+use parking_lot::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
@@ -66,7 +67,7 @@ impl ExternalProviderClient {
 
         // Store process, stdin, stdout handles
         {
-            let mut guard = self.process.lock().expect("ExternalProvider lock poisoned");
+            let mut guard = self.process.lock();
             *guard = Some(child);
         }
         {
@@ -132,9 +133,8 @@ impl ExternalProviderClient {
                 .iter()
                 .filter_map(|m| m.as_str().map(String::from))
                 .collect();
-            if let Ok(mut guard) = self.models.lock() {
-                *guard = model_list;
-            }
+            let mut guard = self.models.lock();
+            *guard = model_list;
         }
 
         self.initialized.store(true, Ordering::SeqCst);
@@ -257,20 +257,16 @@ impl ExternalProviderClient {
 
     /// Get the list of models from initialization.
     pub fn models(&self) -> Vec<String> {
-        self.models
-            .lock()
-            .expect("ModelsCache lock poisoned")
-            .clone()
+        self.models.lock().clone()
     }
 }
 
 impl Drop for ExternalProviderClient {
     #[allow(clippy::let_underscore_future)]
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.process.lock() {
-            if let Some(mut child) = guard.take() {
-                let _ = child.kill();
-            }
+        let mut guard = self.process.lock();
+        if let Some(mut child) = guard.take() {
+            let _ = child.kill();
         }
     }
 }

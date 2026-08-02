@@ -5,8 +5,9 @@
 
 use crate::provider::external::client::ExternalProviderClient;
 use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 /// Global provider registry: maps provider name to its subprocess client.
 /// Initialized empty — providers are populated on enable via `reload_plugins()`.

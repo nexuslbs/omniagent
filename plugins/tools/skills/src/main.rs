@@ -5,11 +5,12 @@
 
 use anyhow::Result;
 use mcp_server_util::*;
+use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Tool: create_skill
@@ -482,11 +483,10 @@ async fn main() -> Result<()> {
     let on_configure = {
         let config = config.clone();
         Some(move |params: Value| {
-            if let Ok(mut cfg) = config.lock() {
-                if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
-                    if !dir.is_empty() {
-                        cfg.omni_dir = dir.to_string();
-                    }
+            let mut cfg = config.lock();
+            if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
+                if !dir.is_empty() {
+                    cfg.omni_dir = dir.to_string();
                 }
             }
         })
@@ -496,7 +496,7 @@ async fn main() -> Result<()> {
     let create_skill_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let c = c1.clone();
         Box::pin(async move {
-            let config = c.lock().unwrap().clone();
+            let config = c.lock().clone();
             handle_create_skill(args, &config)
         })
     });
@@ -509,7 +509,7 @@ async fn main() -> Result<()> {
             .and_then(|m| m.profile_name.clone())
             .unwrap_or_default();
         Box::pin(async move {
-            let config = c.lock().unwrap().clone();
+            let config = c.lock().clone();
             handle_skills_list(args, &config, &profile)
         })
     });
@@ -522,7 +522,7 @@ async fn main() -> Result<()> {
             .and_then(|m| m.profile_name.clone())
             .unwrap_or_default();
         Box::pin(async move {
-            let config = c.lock().unwrap().clone();
+            let config = c.lock().clone();
             handle_view_skill(args, &config, &profile)
         })
     });

@@ -3554,7 +3554,8 @@ fn make_error(id: u64, code: i64, message: &str) -> PluginResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use parking_lot::Mutex;
+    use std::sync::Arc;
 
     /// Deserialize a PluginConfig with only the given host (all other
     /// fields fall back to their serde defaults).
@@ -3617,7 +3618,7 @@ mod tests {
                     let head = String::from_utf8_lossy(&buf[..n]).to_string();
                     if let Some(first) = head.lines().next() {
                         if let Some(path) = first.split_whitespace().nth(1) {
-                            paths.lock().unwrap().push(path.to_string());
+                            paths.lock().push(path.to_string());
                         }
                     }
                     let reason = match status {
@@ -3650,10 +3651,7 @@ mod tests {
             "expected Ok on 200 PUT, got {:?}",
             result.err()
         );
-        assert_eq!(
-            *srv.received_paths.lock().unwrap(),
-            vec!["/secrets/mm-token"]
-        );
+        assert_eq!(*srv.received_paths.lock(), vec!["/secrets/mm-token"]);
     }
 
     #[tokio::test]
@@ -3667,7 +3665,7 @@ mod tests {
             result.err()
         );
         assert_eq!(
-            *srv.received_paths.lock().unwrap(),
+            *srv.received_paths.lock(),
             vec!["/secrets/mm-token", "/secrets"]
         );
     }
@@ -3684,10 +3682,7 @@ mod tests {
             err
         );
         // No create fallback should have been attempted
-        assert_eq!(
-            *srv.received_paths.lock().unwrap(),
-            vec!["/secrets/mm-token"]
-        );
+        assert_eq!(*srv.received_paths.lock(), vec!["/secrets/mm-token"]);
     }
 
     #[tokio::test]
