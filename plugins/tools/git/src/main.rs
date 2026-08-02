@@ -1908,7 +1908,11 @@ mod tests {
             cfg,
             "url.https://x-access-token:ghs_TESTTOKEN@github.com.insteadOf=https://github.com"
         );
-        assert!(!cfg.contains('"'), "override must not contain literal quotes: {}", cfg);
+        assert!(
+            !cfg.contains('"'),
+            "override must not contain literal quotes: {}",
+            cfg
+        );
     }
 
     #[test]
@@ -1926,8 +1930,11 @@ mod tests {
         let cfg = build_instead_of_override("ghs_TESTTOKEN", "github.com");
         // git config --list will fail loudly if the key is malformed.
         // (-c is a global option, so it must precede the subcommand.)
-        let (out, _, rc) =
-            run_git(&["-c", cfg.as_str(), "config", "--list"], Some("/opt/workspace/omniagent"), 15);
+        let (out, _, rc) = run_git(
+            &["-c", cfg.as_str(), "config", "--list"],
+            Some("/opt/workspace/omniagent"),
+            15,
+        );
         assert_eq!(rc, 0, "git must parse the override: {}", out);
     }
 }

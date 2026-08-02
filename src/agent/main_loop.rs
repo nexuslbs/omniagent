@@ -991,7 +991,8 @@ Previous plan:\n{}",
             // own compose project lives).
             let mut self_restart_block: Option<String> = None;
             if tool_name == "docker_compose" {
-                if let Ok(args_val) = serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                if let Ok(args_val) =
+                    serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
                 {
                     let cmd = args_val
                         .get("command")

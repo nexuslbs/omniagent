@@ -385,7 +385,9 @@ fn decode_column_value(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Val
         },
         "BYTEA" => match row.try_get::<Option<Vec<u8>>, _>(i) {
             Ok(Some(b)) => serde_json::Value::String(
-                b.iter().map(|byte| format!("{:02x}", byte)).collect::<String>(),
+                b.iter()
+                    .map(|byte| format!("{:02x}", byte))
+                    .collect::<String>(),
             ),
             _ => serde_json::Value::Null,
         },
@@ -429,7 +431,9 @@ fn decode_array_value(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Valu
     }
     if let Ok(Some(v)) = row.try_get::<Option<Vec<Uuid>>, _>(i) {
         return serde_json::Value::Array(
-            v.into_iter().map(|u| serde_json::Value::String(u.to_string())).collect(),
+            v.into_iter()
+                .map(|u| serde_json::Value::String(u.to_string()))
+                .collect(),
         );
     }
     if let Ok(Some(v)) = row.try_get::<Option<Vec<DateTime<Utc>>>, _>(i) {
