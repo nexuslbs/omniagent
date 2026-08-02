@@ -458,10 +458,21 @@ Previous plan:\n{}",
                 .await
             {
                 Ok(res) => {
-                    if let Ok(result) = serde_json::from_str::<serde_json::Value>(&res.content) {
+                    if res.is_error {
+                        warn!(
+                            "[context] Condense tool '{}' raised an error: {} : continuing without condensation",
+                            condense_tool, res.content
+                        );
+                    } else if let Ok(result) =
+                        serde_json::from_str::<serde_json::Value>(&res.content)
+                    {
                         // Contract: the tool returns the compacted messages array
-                        // (apply it) OR null/absent (no change). No boolean gate —
-                        // presence of a messages array is the only signal.
+                        // (apply it) OR null/absent (no change). The core is
+                        // deliberately AGNOSTIC: it applies whatever the tool
+                        // returns without verifying. The tool alone decides when
+                        // compaction happens and whether it succeeded — it may
+                        // compact by chars or by tokens (tokenizer-dependent),
+                        // so the core cannot and must not re-check correctness.
                         if let Some(condensed) = result.get("messages").and_then(|v| v.as_array()) {
                             let before = result
                                 .get("before_count")
@@ -471,17 +482,14 @@ Previous plan:\n{}",
                                 .get("after_count")
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(0);
-                            if (after as usize) < (before as usize) {
-                                messages = serde_json::from_value(serde_json::Value::Array(
-                                    condensed.clone(),
-                                ))
-                                .unwrap_or(messages);
-                                last_condense_iteration = current_iter;
-                                info!(
-                                    "[context] Condensed messages via {}: {} → {} (iteration {})",
-                                    condense_tool, before, after, current_iter,
-                                );
-                            }
+                            messages =
+                                serde_json::from_value(serde_json::Value::Array(condensed.clone()))
+                                    .unwrap_or(messages);
+                            last_condense_iteration = current_iter;
+                            info!(
+                                "[context] Condensed messages via {}: {} → {} (iteration {})",
+                                condense_tool, before, after, current_iter,
+                            );
                         }
                     }
                 }
