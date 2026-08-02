@@ -9,10 +9,10 @@
 use anyhow::{Context, Result};
 use mcp_server_util::*;
 use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use serde_json::Value;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 //  Constants
@@ -58,7 +58,7 @@ static CONFIG: Lazy<Mutex<Config>> = Lazy::new(|| Mutex::new(Config::default()))
 /// Fallback: the legacy on-disk key path for local development — only used
 /// when the config key is empty AND that legacy file actually exists.
 fn resolve_key_path() -> Result<String> {
-    let key_cfg = CONFIG.lock().unwrap().github_app_private_key.clone();
+    let key_cfg = CONFIG.lock().github_app_private_key.clone();
     if !key_cfg.is_empty() {
         let stable = "/tmp/mcp-git-gh-key.pem".to_string();
         match std::fs::write(&stable, key_cfg.as_bytes()) {
@@ -83,7 +83,7 @@ fn resolve_key_path() -> Result<String> {
             ),
         }
     }
-    let data_dir = CONFIG.lock().unwrap().omni_dir.clone();
+    let data_dir = CONFIG.lock().omni_dir.clone();
     let legacy = format!(
         "{0}/data/credentials/nexuslbs-app.2026-06-04.private-key.pem",
         data_dir
@@ -148,9 +148,7 @@ fn base64url_encode(data: &[u8]) -> String {
 /// `$env:GITHUB_APP_ID` / `$env:GITHUB_INSTALLATION_ID` in the core).
 /// No direct env-var or .env reads.
 fn load_github_creds() -> Result<(String, String)> {
-    let cfg = CONFIG
-        .lock()
-        .map_err(|e| anyhow::anyhow!("Config lock error: {}", e))?;
+    let cfg = CONFIG.lock();
     if cfg.github_app_id.is_empty() || cfg.github_installation_id.is_empty() {
         anyhow::bail!(
             "GITHUB_APP_ID and GITHUB_INSTALLATION_ID must be set in the plugin config \
@@ -218,9 +216,7 @@ fn create_jwt(app_id: &str) -> Result<String> {
 fn get_installation_token(app_id: &str, inst_id: &str) -> Result<String> {
     // Check cache first
     {
-        let cache = TOKEN_CACHE
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let cache = TOKEN_CACHE.lock();
         if let Some(cached) = cache.get_cached() {
             return Ok(cached);
         }
@@ -258,9 +254,7 @@ fn get_installation_token(app_id: &str, inst_id: &str) -> Result<String> {
         .to_string();
 
     {
-        let mut cache = TOKEN_CACHE
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let mut cache = TOKEN_CACHE.lock();
         cache.set(token.clone());
     }
     Ok(token)
@@ -277,7 +271,7 @@ fn get_installation_token(app_id: &str, inst_id: &str) -> Result<String> {
 /// `$secret:GH_APP_TOKEN`) — used directly, no JWT/private key needed.
 fn get_github_token() -> Result<String> {
     let (key_cfg, static_token) = {
-        let cfg = CONFIG.lock().unwrap();
+        let cfg = CONFIG.lock();
         (
             cfg.github_app_private_key.clone(),
             cfg.github_app_token.clone(),
@@ -438,7 +432,7 @@ fn handle_create_github_repo(args: Value) -> Result<(String, bool)> {
 /// pollutes the repo tree with clones.
 fn resolve_workspace_dir() -> String {
     let (cfg_ws, omni) = {
-        let cfg = CONFIG.lock().unwrap();
+        let cfg = CONFIG.lock();
         (cfg.workspace_dir.clone(), cfg.omni_dir.clone())
     };
     if !cfg_ws.is_empty() {
@@ -1609,42 +1603,43 @@ async fn main() -> Result<()> {
         server_info,
         tools,
         Some(move |params: Value| {
-            if let Ok(mut cfg) = CONFIG.lock() {
-                if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
-                    if !dir.is_empty() {
-                        cfg.omni_dir = dir.to_string();
-                    }
+            // parking_lot: lock() cannot fail — no poisoning, so config
+            // reloads can never be silently skipped after a panic.
+            let mut cfg = CONFIG.lock();
+            if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
+                if !dir.is_empty() {
+                    cfg.omni_dir = dir.to_string();
                 }
-                if let Some(dir) = params.get("workspace_dir").and_then(|v| v.as_str()) {
-                    if !dir.is_empty() {
-                        cfg.workspace_dir = dir.to_string();
-                    }
+            }
+            if let Some(dir) = params.get("workspace_dir").and_then(|v| v.as_str()) {
+                if !dir.is_empty() {
+                    cfg.workspace_dir = dir.to_string();
                 }
-                if let Some(v) = params.get("github_app_token").and_then(|v| v.as_str()) {
-                    if !v.is_empty() {
-                        cfg.github_app_token = v.to_string();
-                    }
+            }
+            if let Some(v) = params.get("github_app_token").and_then(|v| v.as_str()) {
+                if !v.is_empty() {
+                    cfg.github_app_token = v.to_string();
                 }
-                if let Some(v) = params
-                    .get("github_app_private_key")
-                    .and_then(|v| v.as_str())
-                {
-                    if !v.is_empty() {
-                        cfg.github_app_private_key = v.to_string();
-                    }
+            }
+            if let Some(v) = params
+                .get("github_app_private_key")
+                .and_then(|v| v.as_str())
+            {
+                if !v.is_empty() {
+                    cfg.github_app_private_key = v.to_string();
                 }
-                if let Some(v) = params.get("github_app_id").and_then(|v| v.as_str()) {
-                    if !v.is_empty() {
-                        cfg.github_app_id = v.to_string();
-                    }
+            }
+            if let Some(v) = params.get("github_app_id").and_then(|v| v.as_str()) {
+                if !v.is_empty() {
+                    cfg.github_app_id = v.to_string();
                 }
-                if let Some(v) = params
-                    .get("github_installation_id")
-                    .and_then(|v| v.as_str())
-                {
-                    if !v.is_empty() {
-                        cfg.github_installation_id = v.to_string();
-                    }
+            }
+            if let Some(v) = params
+                .get("github_installation_id")
+                .and_then(|v| v.as_str())
+            {
+                if !v.is_empty() {
+                    cfg.github_installation_id = v.to_string();
                 }
             }
             tracing::info!("Git plugin configured with omni_dir + github creds");
@@ -1667,16 +1662,12 @@ mod tests {
     /// shared mutable state, so every test that calls `set_ws` must bind the
     /// returned guard (`let _g = set_ws(...)`) to serialize against the other
     /// sandbox tests — otherwise a parallel test can flip the dir mid-assert.
-    fn set_ws(dir: &str) -> std::sync::MutexGuard<'static, ()> {
+    fn set_ws(dir: &str) -> parking_lot::MutexGuard<'static, ()> {
         static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-        // Tolerate poisoning: if one test panics while holding the guard, the
-        // others must still run and report THEIR failures — not a confusing
-        // PoisonError cascade at every lock() call.
-        let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        CONFIG
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .workspace_dir = dir.to_string();
+        // parking_lot: lock() cannot fail, so a panic in one test can never
+        // poison the lock and cascade opaque failures onto the others.
+        let guard = TEST_LOCK.lock();
+        CONFIG.lock().workspace_dir = dir.to_string();
         guard
     }
 
