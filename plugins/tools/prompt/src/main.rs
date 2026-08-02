@@ -77,8 +77,19 @@ impl PluginConfig {
 
     /// Parse config from the JSON value sent by the configure message.
     /// Unknown keys are silently ignored; missing keys keep defaults.
+    ///
+    /// The omniagent sends ALL config values as JSON strings (it builds the
+    /// configure payload from a HashMap<String,String>), so numeric fields
+    /// must be parsed leniently: accept both a real JSON number and a
+    /// numeric string ("350000"). Previously `as_i64()` was used, which
+    /// returns None for strings — silently dropping every configured budget
+    /// and forcing the plugin to run on defaults forever.
     fn from_json(json: &Value) -> Self {
         let mut cfg = Self::default();
+        let as_i64 = |v: &Value| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        };
         if let Some(obj) = json.as_object() {
             if let Some(v) = obj.get("database_url").and_then(|v| v.as_str()) {
                 cfg.database_url = v.to_string();
@@ -86,10 +97,7 @@ impl PluginConfig {
             if let Some(v) = obj.get("omni_dir").and_then(|v| v.as_str()) {
                 cfg.omni_dir = v.to_string();
             }
-            if let Some(v) = obj
-                .get("planning_complexity_max_chars")
-                .and_then(|v| v.as_i64())
-            {
+            if let Some(v) = obj.get("planning_complexity_max_chars").and_then(&as_i64) {
                 cfg.planning_complexity_max_chars = v as usize;
             }
             if let Some(v) = obj
@@ -98,34 +106,34 @@ impl PluginConfig {
             {
                 cfg.planning_complexity_keywords = v.to_string();
             }
-            if let Some(v) = obj.get("prompt_plan_max_tokens").and_then(|v| v.as_i64()) {
+            if let Some(v) = obj.get("prompt_plan_max_tokens").and_then(&as_i64) {
                 cfg.prompt_plan_max_tokens = v as usize;
             }
             if let Some(v) = obj.get("tokenizer_encoding").and_then(|v| v.as_str()) {
                 cfg.tokenizer_encoding = v.to_string();
             }
-            if let Some(v) = obj.get("char_budget_soft").and_then(|v| v.as_i64()) {
+            if let Some(v) = obj.get("char_budget_soft").and_then(&as_i64) {
                 cfg.char_budget_soft = v as usize;
             }
-            if let Some(v) = obj.get("char_budget_hard").and_then(|v| v.as_i64()) {
+            if let Some(v) = obj.get("char_budget_hard").and_then(&as_i64) {
                 cfg.char_budget_hard = v as usize;
             }
-            if let Some(v) = obj.get("token_budget_soft").and_then(|v| v.as_i64()) {
+            if let Some(v) = obj.get("token_budget_soft").and_then(&as_i64) {
                 cfg.token_budget_soft = v as usize;
             }
-            if let Some(v) = obj.get("token_budget_hard").and_then(|v| v.as_i64()) {
+            if let Some(v) = obj.get("token_budget_hard").and_then(&as_i64) {
                 cfg.token_budget_hard = v as usize;
             }
-            if let Some(v) = obj.get("old_message_char_budget").and_then(|v| v.as_i64()) {
+            if let Some(v) = obj.get("old_message_char_budget").and_then(&as_i64) {
                 cfg.old_msg_budget = v as usize;
             }
-            if let Some(v) = obj.get("condense_keep_turns").and_then(|v| v.as_i64()) {
+            if let Some(v) = obj.get("condense_keep_turns").and_then(&as_i64) {
                 cfg.condense_keep_turns = (v as usize).max(1);
             }
-            if let Some(v) = obj.get("memory_max_chars").and_then(|v| v.as_i64()) {
+            if let Some(v) = obj.get("memory_max_chars").and_then(&as_i64) {
                 cfg.memory_max_chars = v as usize;
             }
-            if let Some(v) = obj.get("soul_max_chars").and_then(|v| v.as_i64()) {
+            if let Some(v) = obj.get("soul_max_chars").and_then(&as_i64) {
                 cfg.soul_max_chars = v as usize;
             }
         }
@@ -545,21 +553,17 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
             Err(e) => return Ok((format!("Failed to parse messages: {}", e), true)),
         };
 
-    // Threshold gate: only compact when the conversation is actually large.
+    // Threshold gate: compact ONLY when the hard budget is exceeded.
     // The main loop calls this tool before EVERY LLM call, and the noop
     // test-tool-caller relies on the assistant tool_calls history to count
     // script steps and resolve ${step.field} placeholders. Compacting a tiny
     // 4-step script nulls the oldest tool_calls, corrupting the step counter
     // and causing an infinite re-emit loop (deploy Groups 13/14 regression).
-    // Use the configured budgets (same as the condense path) so real long
-    // threads are bounded but short conversations are never touched.
-    //
-    // The gate applies ONLY to automatic calls from the main loop (which pass
-    // `current_iteration`). Explicit calls — the agent or a test invoking the
-    // tool directly with `messages` + `keep_recent` — compact unconditionally:
-    // the caller explicitly asked for compaction, and the noop corruption only
-    // happens when the main loop fires the tool on every turn of a tiny script.
-    let is_auto_call = args.get("current_iteration").is_some();
+    // The hard budget protects against that: short conversations never exceed
+    // it, so they are never compacted. Real long threads do exceed it, and
+    // then compaction runs on EVERY call (no cadence) until the size drops
+    // back to the soft budget — the soft budget is the REDUCTION TARGET, not
+    // a trigger. When the tool decides not to compact, it returns null.
     let use_tokens = !cfg.tokenizer_encoding.is_empty();
     let current_size: usize = if use_tokens {
         messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
@@ -576,22 +580,27 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     } else {
         cfg.char_budget_soft
     };
-    // Also gate on iteration cadence for the soft path: once per state interval
-    // at most, so compaction doesn't fire on every single turn of a long thread
-    // (which would fight the noop step counter on longer scripts too).
-    let current_iteration = args["current_iteration"].as_i64().unwrap_or(0);
-    let last_condense_iteration = args["last_condense_iteration"].as_i64().unwrap_or(-1);
-    let state_interval: i64 = 5;
-    let needs_hard = current_size > hard_budget;
-    let needs_soft = !needs_hard
-        && current_size > soft_budget
-        && state_interval > 0
-        && (current_iteration - last_condense_iteration) >= state_interval;
-    let should_compact = !is_auto_call || needs_hard || needs_soft;
 
     let before = messages.len();
-    if should_compact {
-        crate::compact::compact_old_assistant_messages(&mut messages, keep_recent);
+    if current_size > hard_budget {
+        // Reduce to the soft budget: compact, and if still over soft, keep
+        // compacting with a progressively smaller keep_recent. Compaction
+        // stops when size <= soft or there is nothing more to compact
+        // (keep_recent would hit 0 — compact_old_assistant_messages then
+        // compacts every assistant tool-call message).
+        let mut keep = keep_recent;
+        loop {
+            crate::compact::compact_old_assistant_messages(&mut messages, keep);
+            let after_size: usize = if use_tokens {
+                messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
+            } else {
+                messages.iter().map(|m| m.content.len()).sum::<usize>()
+            };
+            if after_size <= soft_budget || keep == 0 {
+                break;
+            }
+            keep -= 1;
+        }
     }
     let after = messages.len();
 
