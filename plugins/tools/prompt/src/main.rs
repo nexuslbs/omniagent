@@ -526,7 +526,7 @@ async fn handle_generate_full(
 // Tool: prompt_compact_messages
 // ---------------------------------------------------------------------------
 
-async fn handle_compact_messages(args: &Value) -> Result<(String, bool)> {
+async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(String, bool)> {
     let messages_arr = match args["messages"].as_array() {
         Some(arr) => arr,
         None => {
@@ -545,8 +545,46 @@ async fn handle_compact_messages(args: &Value) -> Result<(String, bool)> {
             Err(e) => return Ok((format!("Failed to parse messages: {}", e), true)),
         };
 
+    // Threshold gate: only compact when the conversation is actually large.
+    // The main loop calls this tool before EVERY LLM call, and the noop
+    // test-tool-caller relies on the assistant tool_calls history to count
+    // script steps and resolve ${step.field} placeholders. Compacting a tiny
+    // 4-step script nulls the oldest tool_calls, corrupting the step counter
+    // and causing an infinite re-emit loop (deploy Groups 13/14 regression).
+    // Use the configured budgets (same as the condense path) so real long
+    // threads are bounded but short conversations are never touched.
+    let use_tokens = !cfg.tokenizer_encoding.is_empty();
+    let current_size: usize = if use_tokens {
+        messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
+    } else {
+        messages.iter().map(|m| m.content.len()).sum::<usize>()
+    };
+    let hard_budget = if use_tokens {
+        cfg.token_budget_hard.min(cfg.char_budget_hard)
+    } else {
+        cfg.char_budget_hard
+    };
+    let soft_budget = if use_tokens {
+        cfg.token_budget_soft.min(cfg.char_budget_soft)
+    } else {
+        cfg.char_budget_soft
+    };
+    // Also gate on iteration cadence for the soft path: once per state interval
+    // at most, so compaction doesn't fire on every single turn of a long thread
+    // (which would fight the noop step counter on longer scripts too).
+    let current_iteration = args["current_iteration"].as_i64().unwrap_or(0);
+    let last_condense_iteration = args["last_condense_iteration"].as_i64().unwrap_or(-1);
+    let state_interval: i64 = 5;
+    let needs_hard = current_size > hard_budget;
+    let needs_soft = !needs_hard
+        && current_size > soft_budget
+        && state_interval > 0
+        && (current_iteration - last_condense_iteration) >= state_interval;
+
     let before = messages.len();
-    crate::compact::compact_old_assistant_messages(&mut messages, keep_recent);
+    if needs_hard || needs_soft {
+        crate::compact::compact_old_assistant_messages(&mut messages, keep_recent);
+    }
     let after = messages.len();
 
     // Contract: return the compacted messages array when something changed,
@@ -708,8 +746,13 @@ async fn main() -> Result<()> {
     });
 
     // Compact messages handler
+    let cfg_compact = plugin_config.clone();
     let compact_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
-        Box::pin(async move { handle_compact_messages(&args).await })
+        let cfg = cfg_compact.clone();
+        Box::pin(async move {
+            let config = cfg.read().await.clone();
+            handle_compact_messages(&args, &config).await
+        })
     });
 
     let tools = vec![
