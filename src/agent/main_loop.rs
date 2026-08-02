@@ -983,7 +983,55 @@ Previous plan:\n{}",
             let bg_threshold = std::time::Duration::from_secs(bg_threshold_secs);
             let is_multi_tool = tool_count > 1;
 
+            // --- Phase 1.5: Self-restart guard (P2 #6) ---
+            // An agent must never restart the container it runs inside: a
+            // `docker compose restart/down/stop/rm/up` against its own stack
+            // kills its own thread (thread 488 self-kill). Block destructive
+            // verbs that target the omni stack directory (where the agent's
+            // own compose project lives).
+            let mut self_restart_block: Option<String> = None;
+            if tool_name == "docker_compose" {
+                if let Ok(args_val) = serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                {
+                    let cmd = args_val
+                        .get("command")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
+                    let verb = cmd.split_whitespace().next().unwrap_or("");
+                    if matches!(verb, "restart" | "down" | "stop" | "rm" | "kill" | "up") {
+                        let target_project = args_val
+                            .get("project_dir")
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("");
+                        // The omni stack is the agent's own runtime: its compose
+                        // project files live under an omni-stack directory.
+                        let targets_own_stack = target_project.contains("omni-stack");
+                        if targets_own_stack {
+                            self_restart_block = Some(format!(
+                                "Blocked: docker_compose '{verb}' targets the omni-stack (project_dir '{target_project}') \
+                                 you run inside. Restarting your own container kills this thread. Only Hermes may restart the stack.",
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let self_restart_block_for_task = self_restart_block.clone();
             join_set.spawn(async move {
+
+                // Phase 1.5 guard: if this docker_compose call would restart the
+                // agent's own stack, return a synthetic error result instead of
+                // executing it — the message plumbing below records it as a
+                // tool result with is_error=true so the model sees the block.
+                if let Some(block_msg) = self_restart_block_for_task {
+                    return (
+                        idx,
+                        tc_id.clone(),
+                        tool_name.clone(),
+                        block_msg,
+                        true, // is_error
+                    );
+                }
 
                 // Execute with short timeout (fast path) + background fallback
                 let tool_future = mcp_snapshot.execute(&mcp_call, tool_ctx.clone());
