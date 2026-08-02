@@ -630,14 +630,21 @@ mod tests {
 
     #[test]
     fn read_relative_path_resolves_to_workspace() {
-        // Relative reads still resolve against the workspace root.
+        // Relative reads still resolve against the workspace root. Uses a
+        // temp dir (like the other sandbox tests) so it also passes inside
+        // the Docker build context, where /opt/workspace does not exist.
+        let dir = std::env::temp_dir().join("fs-sandbox-rel-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub/file.txt"), "hello").unwrap();
         let (msg, is_error) = handle_read(
-            serde_json::json!({"path": "omniagent/Cargo.toml"}),
-            "/opt/workspace",
+            serde_json::json!({"path": "sub/file.txt"}),
+            &dir.to_string_lossy(),
         )
         .expect("relative read must succeed");
-        assert!(!is_error, "msg: {}", msg);
-        assert!(msg.contains("workspace"));
+        assert!(!is_error, "msg: {msg}");
+        assert!(msg.contains("hello"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
