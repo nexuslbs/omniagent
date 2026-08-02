@@ -1669,9 +1669,47 @@ mod tests {
     /// sandbox tests — otherwise a parallel test can flip the dir mid-assert.
     fn set_ws(dir: &str) -> std::sync::MutexGuard<'static, ()> {
         static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-        let guard = TEST_LOCK.lock().unwrap();
-        CONFIG.lock().unwrap().workspace_dir = dir.to_string();
+        // Tolerate poisoning: if one test panics while holding the guard, the
+        // others must still run and report THEIR failures — not a confusing
+        // PoisonError cascade at every lock() call.
+        let guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        CONFIG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .workspace_dir = dir.to_string();
         guard
+    }
+
+    /// Create a unique temp dir; returns (workspace_base, repo_path_inside).
+    ///
+    /// Tests must NOT hardcode host paths like `/opt/workspace/omniagent`: the
+    /// production Docker build context has no such directory, so handlers that
+    /// probe `{repo}/.git` fail with "Not a git repository", and `git` spawned
+    /// with a missing cwd fails to start (rc=-1). A temp dir keeps the sandbox
+    /// lexically valid and gives handlers a real dir to probe.
+    fn temp_ws() -> (String, String) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let base = std::env::temp_dir().join(format!(
+            "mcp-git-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).expect("create temp repo dir");
+        (
+            base.to_str().unwrap().to_string(),
+            repo.to_str().unwrap().to_string(),
+        )
+    }
+
+    /// `temp_ws()` plus a real `git init` — for handler tests that probe
+    /// `{repo}/.git` before validating arguments.
+    fn temp_git_repo() -> (String, String) {
+        let (ws, repo) = temp_ws();
+        let (_, err, rc) = run_git(&["init", "-q"], Some(&repo), 15);
+        assert_eq!(rc, 0, "git init in temp dir failed: {}", err);
+        (ws, repo)
     }
 
     #[test]
@@ -1753,11 +1791,12 @@ mod tests {
 
     // ── Argument-level sandbox: redirect flags & write destinations ──
 
-    /// Shorthand: run arg validation against a repo inside /opt/workspace.
+    /// Shorthand: run arg validation against a repo inside a temp workspace.
     fn validate_args(args: &[&str]) -> Result<()> {
-        let _g = set_ws("/opt/workspace");
+        let (ws, repo) = temp_ws();
+        let _g = set_ws(&ws);
         let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        validate_git_args_within_workspace("/opt/workspace/omniagent", &owned)
+        validate_git_args_within_workspace(&repo, &owned)
     }
 
     #[test]
@@ -1884,10 +1923,11 @@ mod tests {
 
     #[test]
     fn args_rejections_do_not_trip_handler_error() {
-        let _g = set_ws("/opt/workspace");
+        let (ws, repo) = temp_git_repo();
+        let _g = set_ws(&ws);
         // -C escape must come back as Ok((msg, true)), not Err.
         let (msg, is_error) = handle_run_command(serde_json::json!({
-            "repo_dir": "/opt/workspace/omniagent",
+            "repo_dir": repo,
             "args": ["-C", "/tmp", "init"],
         }))
         .expect("sandbox rejection must be an Ok result");
@@ -1930,11 +1970,9 @@ mod tests {
         let cfg = build_instead_of_override("ghs_TESTTOKEN", "github.com");
         // git config --list will fail loudly if the key is malformed.
         // (-c is a global option, so it must precede the subcommand.)
-        let (out, _, rc) = run_git(
-            &["-c", cfg.as_str(), "config", "--list"],
-            Some("/opt/workspace/omniagent"),
-            15,
-        );
+        // Use a temp dir as cwd — the build context has no /opt/workspace.
+        let (_ws, repo) = temp_ws();
+        let (out, _, rc) = run_git(&["-c", cfg.as_str(), "config", "--list"], Some(&repo), 15);
         assert_eq!(rc, 0, "git must parse the override: {}", out);
     }
 }
