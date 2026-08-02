@@ -225,8 +225,18 @@ pub(crate) async fn setup_plugin_handler(
     if let Some(config_map) = config.as_object() {
         for (key, value) in config_map {
             if !setup_env.contains_key(key) {
-                if let Some(raw) = value.as_str().filter(|s| !s.is_empty()) {
-                    setup_env.insert(key.clone(), raw.to_string());
+                // Forward ANY config value (string, number, bool) as its
+                // string form. Previously only `as_str()` values survived,
+                // silently dropping numeric/bool config (e.g. budget
+                // thresholds) — the plugin then always ran on defaults.
+                let raw = match value {
+                    serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+                    serde_json::Value::Number(n) => Some(n.to_string()),
+                    serde_json::Value::Bool(b) => Some(b.to_string()),
+                    _ => None,
+                };
+                if let Some(raw) = raw {
+                    setup_env.insert(key.clone(), raw);
                 }
             }
         }
