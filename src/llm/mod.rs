@@ -16,11 +16,12 @@ use crate::err_msg;
 use crate::error::{AppResult, Error, ErrorContext};
 use crate::plugins_yaml::{get_remote_plugin, PluginYamlType};
 use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::warn;
 
@@ -197,9 +198,8 @@ pub static PROVIDER_METADATA: Lazy<RwLock<HashMap<String, ProviderMetadata>>> =
 /// Call this after enabling, disabling, or installing a provider plugin.
 pub fn refresh_provider_metadata() {
     let new_map = build_provider_metadata();
-    if let Ok(mut map) = PROVIDER_METADATA.write() {
-        *map = new_map;
-    }
+    let mut map = PROVIDER_METADATA.write();
+    *map = new_map;
 }
 
 /// Build the provider metadata map by reading plugins.yml and scanning manifests.
@@ -286,7 +286,6 @@ pub fn resolve_default_base_url(provider_name: &str) -> String {
     // First try the in-memory cache
     if let Some(url) = PROVIDER_METADATA
         .read()
-        .unwrap()
         .get(provider_name)
         .filter(|m| !m.default_base_url.is_empty())
         .map(|m| m.default_base_url.clone())
@@ -314,7 +313,7 @@ pub fn resolve_default_base_url(provider_name: &str) -> String {
 /// Resolve the default model for a provider from the plugin metadata.
 /// Returns None if no default is found.
 pub fn resolve_default_model(provider_name: &str) -> Option<String> {
-    let meta = PROVIDER_METADATA.read().unwrap();
+    let meta = PROVIDER_METADATA.read();
     meta.get(provider_name).and_then(|m| {
         if m.default_model.is_empty() {
             None
@@ -328,7 +327,6 @@ pub fn resolve_default_model(provider_name: &str) -> Option<String> {
 pub fn resolve_provider_api_mode(provider_name: &str) -> String {
     PROVIDER_METADATA
         .read()
-        .unwrap()
         .get(provider_name)
         .map(|m| m.api_mode.clone())
         .unwrap_or_else(|| "chat_completions".to_string())
@@ -353,7 +351,7 @@ pub enum ApiMode {
 /// Falls back to the provider's default `api_mode`.
 fn match_model_api_mode(provider_name: &str, model_id: &str) -> Option<ApiMode> {
     let normalized = model_id.trim().to_lowercase();
-    let meta = PROVIDER_METADATA.read().unwrap();
+    let meta = PROVIDER_METADATA.read();
     let metadata = meta.get(provider_name)?;
     for (mode, patterns) in &metadata.api_modes {
         for pattern in patterns {
@@ -437,12 +435,7 @@ impl LLMConfig {
     /// Panics if `LLM_PROVIDER` contains an unrecognised value.
     pub fn from_env() -> Self {
         let provider_name = crate::agent::config::get_global()
-            .map(|g| {
-                g.read()
-                    .expect("GlobalConfig lock poisoned")
-                    .default_provider
-                    .clone()
-            })
+            .map(|g| g.read().default_provider.clone())
             .unwrap_or_default(); // Empty string → provider must be configured
 
         let provider = ProviderId::new(&provider_name);
@@ -458,7 +451,6 @@ impl LLMConfig {
 
         let supports_reasoning = PROVIDER_METADATA
             .read()
-            .unwrap()
             .get(&provider_name)
             .map(|m| m.supports_reasoning)
             .unwrap_or(false);
@@ -507,7 +499,7 @@ impl ProviderThrottle {
         let mut map = HashMap::new();
 
         // Pre-populate from known provider metadata
-        let meta = PROVIDER_METADATA.read().unwrap();
+        let meta = PROVIDER_METADATA.read();
         for name in meta.keys() {
             map.entry(name.clone())
                 .or_insert_with(|| Arc::new(Semaphore::new(max)));
@@ -811,9 +803,7 @@ impl LLMClient {
         // Try external completion: clone Arc first, drop registry guard, then call complete
         let external_result = {
             let client_opt = {
-                let registry = crate::provider::registry::PROVIDER_REGISTRY
-                    .read()
-                    .expect("PROVIDER_REGISTRY lock poisoned");
+                let registry = crate::provider::registry::PROVIDER_REGISTRY.read();
                 registry.get_cloned(provider_name)
             };
             // Registry guard is dropped here: we have an independent Arc<ExternalProviderClient>

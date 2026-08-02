@@ -43,7 +43,7 @@ pub enum CircuitState {
 /// Per-server circuit breaker.
 #[derive(Debug, Clone)]
 pub struct CircuitBreaker {
-    state: Arc<std::sync::Mutex<CircuitStateInner>>,
+    state: Arc<parking_lot::Mutex<CircuitStateInner>>,
 }
 
 #[derive(Debug)]
@@ -58,7 +58,7 @@ struct CircuitStateInner {
 impl CircuitBreaker {
     pub fn new(max_retries: u32) -> Self {
         Self {
-            state: Arc::new(std::sync::Mutex::new(CircuitStateInner {
+            state: Arc::new(parking_lot::Mutex::new(CircuitStateInner {
                 state: CircuitState::Closed,
                 consecutive_failures: 0,
                 max_retries,
@@ -71,10 +71,7 @@ impl CircuitBreaker {
     /// or half-open (allowing a test request).
     /// Automatically transitions Open → HalfOpen after a 30-second cooldown.
     pub fn is_allowed(&self) -> bool {
-        let mut inner = match self.state.lock() {
-            Ok(guard) => guard,
-            Err(_) => return false,
-        };
+        let mut inner = self.state.lock();
         match inner.state {
             CircuitState::Closed | CircuitState::HalfOpen => true,
             CircuitState::Open => {
@@ -96,34 +93,29 @@ impl CircuitBreaker {
 
     /// Record a successful request: resets failure count.
     pub fn record_success(&self) {
-        if let Ok(mut inner) = self.state.lock() {
-            inner.consecutive_failures = 0;
-            inner.state = CircuitState::Closed;
-            inner.opened_at = None;
-        }
+        let mut inner = self.state.lock();
+        inner.consecutive_failures = 0;
+        inner.state = CircuitState::Closed;
+        inner.opened_at = None;
     }
 
     /// Record a failed request. Opens the circuit if max retries exceeded.
     pub fn record_failure(&self) {
-        if let Ok(mut inner) = self.state.lock() {
-            inner.consecutive_failures += 1;
-            if inner.consecutive_failures >= inner.max_retries {
-                inner.state = CircuitState::Open;
-                inner.opened_at = Some(std::time::Instant::now());
-                tracing::warn!(
-                    "Circuit breaker opened after {} consecutive failures (will recover after 30s cooldown)",
-                    inner.consecutive_failures
-                );
-            }
+        let mut inner = self.state.lock();
+        inner.consecutive_failures += 1;
+        if inner.consecutive_failures >= inner.max_retries {
+            inner.state = CircuitState::Open;
+            inner.opened_at = Some(std::time::Instant::now());
+            tracing::warn!(
+                "Circuit breaker opened after {} consecutive failures (will recover after 30s cooldown)",
+                inner.consecutive_failures
+            );
         }
     }
 
     /// Get the current state (for diagnostics).
     pub fn state(&self) -> CircuitState {
-        self.state
-            .lock()
-            .map(|inner| inner.state.clone())
-            .unwrap_or(CircuitState::Closed)
+        self.state.lock().state.clone()
     }
 }
 
@@ -267,17 +259,12 @@ pub trait McpServerClient: Send + Sync {
 /// shared across all channels. Replaces the former per-channel `PoolManager`.
 /// Populated during startup initialization and on hot-reload.
 pub struct ExternalMcpClients {
-    clients: std::sync::RwLock<HashMap<String, Arc<dyn McpServerClient>>>,
+    clients: parking_lot::RwLock<HashMap<String, Arc<dyn McpServerClient>>>,
 }
 
 impl std::fmt::Debug for ExternalMcpClients {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let names: Vec<String> = self
-            .clients
-            .read()
-            .ok()
-            .map(|r| r.keys().cloned().collect())
-            .unwrap_or_default();
+        let names: Vec<String> = self.clients.read().keys().cloned().collect();
         f.debug_struct("ExternalMcpClients")
             .field("clients", &names)
             .finish()
@@ -294,27 +281,25 @@ impl ExternalMcpClients {
     /// Create a new empty client registry.
     pub fn new() -> Self {
         Self {
-            clients: std::sync::RwLock::new(HashMap::new()),
+            clients: parking_lot::RwLock::new(HashMap::new()),
         }
     }
 
     /// Register an MCP client for a server.
     pub fn register(&self, name: &str, client: Arc<dyn McpServerClient>) {
-        if let Ok(mut registry) = self.clients.write() {
-            registry.insert(name.to_string(), client);
-        }
+        let mut registry = self.clients.write();
+        registry.insert(name.to_string(), client);
     }
 
     /// Remove an MCP client (e.g. on disable).
     pub fn remove(&self, name: &str) {
-        if let Ok(mut registry) = self.clients.write() {
-            registry.remove(name);
-        }
+        let mut registry = self.clients.write();
+        registry.remove(name);
     }
 
     /// Get a client by server name.
     pub fn get(&self, name: &str) -> Option<Arc<dyn McpServerClient>> {
-        self.clients.read().ok().and_then(|r| r.get(name).cloned())
+        self.clients.read().get(name).cloned()
     }
 
     /// Get the tool timeout for a server.
@@ -379,7 +364,7 @@ pub struct StdioMcpClient {
     /// Non-blocking sender for writing JSON-RPC requests to stdin.
     stdin_tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
     /// Pending requests keyed by JSON-RPC request ID.
-    pending: Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<String>>>>,
+    pending: Arc<parking_lot::Mutex<HashMap<u64, oneshot::Sender<String>>>>,
     /// Background task: reads stdout and dispatches responses by ID.
     read_task: Mutex<Option<JoinHandle<()>>>,
     /// Child process handle (for lifecycle/cleanup).
@@ -397,7 +382,7 @@ impl StdioMcpClient {
             circuit: CircuitBreaker::new(config.max_retries),
             config,
             stdin_tx: Mutex::new(None),
-            pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             read_task: Mutex::new(None),
             child: Mutex::new(None),
             next_id: AtomicU64::new(1),
@@ -500,10 +485,9 @@ impl StdioMcpClient {
                                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&trimmed) {
                                     if let Some(id_val) = val.get("id") {
                                         if let Some(id) = id_val.as_u64() {
-                                            if let Ok(mut map) = pending.lock() {
-                                                if let Some(tx) = map.remove(&id) {
-                                                    let _ = tx.send(trimmed);
-                                                }
+                                            let mut map = pending.lock();
+                                            if let Some(tx) = map.remove(&id) {
+                                                let _ = tx.send(trimmed);
                                             }
                                         }
                                     }
@@ -535,7 +519,7 @@ impl StdioMcpClient {
 
         // Insert sender into pending map BEFORE sending (avoid race)
         {
-            let mut pending = self.pending.lock().unwrap();
+            let mut pending = self.pending.lock();
             pending.insert(id, tx);
         }
 
@@ -554,7 +538,7 @@ impl StdioMcpClient {
             .await
             .map_err(|_| {
                 // Clean up pending entry on timeout
-                let mut pending = self.pending.lock().unwrap();
+                let mut pending = self.pending.lock();
                 pending.remove(&id);
                 err_str!(
                     "MCP server '{}' did not respond within {}s (id={})",
@@ -723,7 +707,7 @@ impl McpServerClient for StdioMcpClient {
 
         let (tx, rx) = oneshot::channel();
         {
-            let mut pending = self.pending.lock().unwrap();
+            let mut pending = self.pending.lock();
             pending.insert(id, tx);
         }
 
@@ -741,7 +725,7 @@ impl McpServerClient for StdioMcpClient {
             .await
             .map_err(|_| {
                 self.circuit.record_failure();
-                let mut pending = self.pending.lock().unwrap();
+                let mut pending = self.pending.lock();
                 pending.remove(&id);
                 err_str!(
                     "MCP server '{}' tool '{}' timed out after {} seconds",
@@ -804,7 +788,7 @@ impl McpServerClient for StdioMcpClient {
 
         // Cancel all pending requests
         {
-            let mut pending = self.pending.lock().unwrap();
+            let mut pending = self.pending.lock();
             pending.clear();
         }
 

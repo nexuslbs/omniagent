@@ -52,20 +52,19 @@ pub fn install_from_url(url: &str, data_dir: &str) -> AppResult<PluginManifest> 
 
     // Cleanup on drop (if still present)
     let temp_path_clone = temp_path.clone();
-    let cleanup = std::sync::Mutex::new(Some(temp_path_clone));
+    let cleanup = parking_lot::Mutex::new(Some(temp_path_clone));
 
     let result = install_from_url_inner(url, &bytes, &temp_path, data_dir);
 
     // Clean up install path
-    if let Ok(mut path_opt) = cleanup.lock() {
-        if let Some(path) = path_opt.take() {
-            if let Err(e) = std::fs::remove_dir_all(&path) {
-                tracing::warn!(
-                    "[installer] Failed to clean up temp dir {:?}: {:?}",
-                    path,
-                    e
-                );
-            }
+    let mut path_opt = cleanup.lock();
+    if let Some(path) = path_opt.take() {
+        if let Err(e) = std::fs::remove_dir_all(&path) {
+            tracing::warn!(
+                "[installer] Failed to clean up temp dir {:?}: {:?}",
+                path,
+                e
+            );
         }
     }
 

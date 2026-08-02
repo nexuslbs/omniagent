@@ -24,9 +24,10 @@
 
 use anyhow::Result;
 use mcp_server_util::*;
+use parking_lot::Mutex;
 use serde_json::Value;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -516,11 +517,10 @@ async fn main() -> Result<()> {
     let on_configure = {
         let config = config.clone();
         Some(move |params: Value| {
-            if let Ok(mut cfg) = config.lock() {
-                if let Some(dir) = params.get("workspace_dir").and_then(|v| v.as_str()) {
-                    if !dir.is_empty() {
-                        cfg.workspace_dir = dir.to_string();
-                    }
+            let mut cfg = config.lock();
+            if let Some(dir) = params.get("workspace_dir").and_then(|v| v.as_str()) {
+                if !dir.is_empty() {
+                    cfg.workspace_dir = dir.to_string();
                 }
             }
         })
@@ -593,7 +593,7 @@ async fn main() -> Result<()> {
         handler: soft_error_async(move |args: Value, _meta: Option<McpMeta>| {
             let c = c1.clone();
             async move {
-                let config = c.lock().unwrap().clone();
+                let config = c.lock().clone();
                 handle_compose(args, &config).await
             }
         }),

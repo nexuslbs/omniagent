@@ -9,10 +9,11 @@
 
 use anyhow::{Context, Result};
 use mcp_server_util::*;
+use parking_lot::Mutex;
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Row for the kanban task query used when creating a thread from a task.
@@ -587,7 +588,7 @@ async fn main() -> Result<()> {
         Box::pin(async move {
             let guard = p.read().await;
             let pool = guard.as_ref().expect("Pool not initialized").clone();
-            let config = c.lock().unwrap().clone();
+            let config = c.lock().clone();
             handle_kanban_dispatcher(&pool, &args, &config).await
         })
     });
@@ -600,7 +601,7 @@ async fn main() -> Result<()> {
         Box::pin(async move {
             let guard = p.read().await;
             let pool = guard.as_ref().expect("Pool not initialized").clone();
-            let config = c.lock().unwrap().clone();
+            let config = c.lock().clone();
             handle_hindsight_populator(&pool, &args, &config).await
         })
     });
@@ -613,7 +614,7 @@ async fn main() -> Result<()> {
         Box::pin(async move {
             let guard = p.read().await;
             let pool = guard.as_ref().expect("Pool not initialized").clone();
-            let config = c.lock().unwrap().clone();
+            let config = c.lock().clone();
             handle_relevance_indexer(&pool, &args, &config).await
         })
     });
@@ -707,16 +708,15 @@ async fn main() -> Result<()> {
                         std::process::exit(1);
                     });
                 // Store config
-                if let Ok(mut cfg) = c.lock() {
-                    if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
-                        if !dir.is_empty() {
-                            cfg.omni_dir = dir.to_string();
-                        }
+                let mut cfg = c.lock();
+                if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
+                    if !dir.is_empty() {
+                        cfg.omni_dir = dir.to_string();
                     }
-                    if let Some(prov) = params.get("llm_provider").and_then(|v| v.as_str()) {
-                        if !prov.is_empty() {
-                            cfg.llm_provider = prov.to_string();
-                        }
+                }
+                if let Some(prov) = params.get("llm_provider").and_then(|v| v.as_str()) {
+                    if !prov.is_empty() {
+                        cfg.llm_provider = prov.to_string();
                     }
                 }
                 tokio::task::block_in_place(|| {

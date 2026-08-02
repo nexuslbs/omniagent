@@ -686,9 +686,7 @@ fn build_plugin_detail(
     // Populate allowed_values from dynamic enum cache for fields with refresh_url
     for field in config_schema.iter_mut() {
         if let Some(ref url) = field.refresh_url {
-            let cache = crate::plugin::DYNAMIC_ENUM_CACHE
-                .lock()
-                .expect("dynamic enum cache lock poisoned");
+            let cache = crate::plugin::DYNAMIC_ENUM_CACHE.lock();
             if let Some(entry) = cache.get(url) {
                 if entry.fetched_at.elapsed() < crate::plugin::DYNAMIC_ENUM_TTL {
                     field.allowed_values = Some(entry.values.clone());
@@ -1775,9 +1773,7 @@ pub async fn refresh_plugin_models(
         match fetch_enum_values(&refresh_url, api_key.as_deref()).await {
             Ok(values) => {
                 field.allowed_values = Some(values.clone());
-                let mut cache = crate::plugin::DYNAMIC_ENUM_CACHE
-                    .lock()
-                    .expect("dynamic enum cache lock poisoned");
+                let mut cache = crate::plugin::DYNAMIC_ENUM_CACHE.lock();
                 cache.insert(
                     refresh_url,
                     crate::plugin::DynamicEnumEntry {

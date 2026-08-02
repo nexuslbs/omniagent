@@ -5,10 +5,11 @@
 
 use anyhow::Result;
 use mcp_server_util::*;
+use parking_lot::Mutex;
 use serde_json::Value;
 use sql_forge::sql_forge;
 use sqlx::{FromRow, PgPool};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // ---------------------------------------------------------------------------
@@ -215,26 +216,25 @@ async fn main() -> Result<()> {
         let config = config.clone();
         let pool = pool.clone();
         Some(move |params: Value| {
-            if let Ok(mut cfg) = config.lock() {
-                if let Some(url) = params.get("database_url").and_then(|v| v.as_str()) {
-                    if !url.is_empty() {
-                        cfg.database_url = url.to_string();
+            let mut cfg = config.lock();
+            if let Some(url) = params.get("database_url").and_then(|v| v.as_str()) {
+                if !url.is_empty() {
+                    cfg.database_url = url.to_string();
 
-                        // Also initialize the database pool
-                        let url_clone = url.to_string();
-                        tokio::task::block_in_place(|| {
-                            let rt = tokio::runtime::Handle::current();
-                            let new_pool = rt
-                                .block_on(omniagent::db::connect(&url_clone))
-                                .expect("Failed to connect to database");
-                            *pool.blocking_write() = Some(new_pool);
-                        });
-                    }
+                    // Also initialize the database pool
+                    let url_clone = url.to_string();
+                    tokio::task::block_in_place(|| {
+                        let rt = tokio::runtime::Handle::current();
+                        let new_pool = rt
+                            .block_on(omniagent::db::connect(&url_clone))
+                            .expect("Failed to connect to database");
+                        *pool.blocking_write() = Some(new_pool);
+                    });
                 }
-                if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
-                    if !dir.is_empty() {
-                        cfg.omni_dir = dir.to_string();
-                    }
+            }
+            if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
+                if !dir.is_empty() {
+                    cfg.omni_dir = dir.to_string();
                 }
             }
             tracing::info!("Search plugin configured");
@@ -264,7 +264,7 @@ async fn main() -> Result<()> {
         let c = c1.clone();
         let d = d1.clone();
         Box::pin(async move {
-            let cfg = c.lock().unwrap_or_else(|e| e.into_inner());
+            let cfg = c.lock();
             let omni_dir = if cfg.omni_dir.is_empty() {
                 &d
             } else {

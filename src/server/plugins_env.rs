@@ -256,7 +256,6 @@ pub(crate) async fn reload_plugins(
             "provider" => {
                 let running = crate::provider::registry::PROVIDER_REGISTRY
                     .read()
-                    .expect("PROVIDER_REGISTRY lock poisoned")
                     .has_provider(name);
                 tracing::info!(
                     "Reload: provider '{}' enabled={} running={} has_entrypoint={}",
@@ -282,7 +281,6 @@ pub(crate) async fn reload_plugins(
                             Ok(()) => {
                                 crate::provider::registry::PROVIDER_REGISTRY
                                     .write()
-                                    .expect("PROVIDER_REGISTRY lock poisoned")
                                     .register_arc(name, client);
                                 started += 1;
                                 tracing::info!("Reload: provider '{}' started successfully", name);
@@ -301,7 +299,6 @@ pub(crate) async fn reload_plugins(
                 } else if !enabled && running {
                     crate::provider::registry::PROVIDER_REGISTRY
                         .write()
-                        .expect("PROVIDER_REGISTRY lock poisoned")
                         .remove(name);
                     stopped += 1;
                 }

@@ -46,8 +46,8 @@ use crate::agent::plugin_manager::PluginManager;
 use crate::db::types as queries;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient};
 use crate::mcp::{AppContext, McpToolCall};
+use parking_lot::RwLock;
 use sql_forge::sql_forge;
-use std::sync::RwLock;
 
 mod diagnostic;
 
@@ -683,12 +683,7 @@ async fn prompt_preview_handler(
             .or_else(|| prof.provider.clone().filter(|s| !s.is_empty()))
             .or_else(|| {
                 crate::agent::config::get_global()
-                    .map(|g| {
-                        g.read()
-                            .expect("GlobalConfig lock poisoned")
-                            .default_provider
-                            .clone()
-                    })
+                    .map(|g| g.read().default_provider.clone())
                     .filter(|s| !s.is_empty())
             }) {
             Some(p) => p,
@@ -767,7 +762,6 @@ evaluate: if the task was completed, call the completion tool.",
             temperature: 0.3,
             supports_reasoning: crate::llm::PROVIDER_METADATA
                 .read()
-                .unwrap()
                 .get(&provider_name)
                 .map(|m| m.supports_reasoning)
                 .unwrap_or(false),
@@ -985,12 +979,7 @@ async fn call_prompt_context(
     channel_id: i64,
 ) -> String {
     let prompt_tool_name = crate::agent::config::get_global()
-        .map(|g| {
-            g.read()
-                .expect("GlobalConfig lock poisoned")
-                .prompt_tool_name
-                .clone()
-        })
+        .map(|g| g.read().prompt_tool_name.clone())
         .unwrap_or_else(|| "prompt_generate".to_string());
 
     // Collect all available tool names (same as the executor does)

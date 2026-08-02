@@ -571,7 +571,7 @@ pub fn parse_response(line: &str) -> AppResult<PluginResponse> {
 // ---------------------------------------------------------------------------
 
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 /// Global registry of active external platform clients, keyed by platform name.
 pub static PLATFORM_CLIENT_REGISTRY: Lazy<Mutex<HashMap<String, client::ExternalPlatformClient>>> =
@@ -580,9 +580,8 @@ pub static PLATFORM_CLIENT_REGISTRY: Lazy<Mutex<HashMap<String, client::External
 /// Register an external platform client for health checks and diagnostics.
 #[allow(dead_code)]
 pub fn register_platform_client(name: &str, client: client::ExternalPlatformClient) {
-    if let Ok(mut registry) = PLATFORM_CLIENT_REGISTRY.lock() {
-        registry.insert(name.to_string(), client);
-    }
+    let mut registry = PLATFORM_CLIENT_REGISTRY.lock();
+    registry.insert(name.to_string(), client);
 }
 
 /// Decode a base64-encoded string to raw bytes.

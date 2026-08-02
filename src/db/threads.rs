@@ -304,12 +304,7 @@ pub async fn create_thread_with_cause(
         // Global config level: default_provider from settings.yml
         else {
             let prov = crate::agent::config::get_global()
-                .map(|g| {
-                    g.read()
-                        .expect("GlobalConfig lock poisoned")
-                        .default_provider
-                        .clone()
-                })
+                .map(|g| g.read().default_provider.clone())
                 .unwrap_or_default(); // Empty string hits the error path below
             if !prov.is_empty() {
                 let model = crate::llm::resolve_default_model(&prov);

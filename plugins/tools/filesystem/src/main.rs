@@ -12,11 +12,12 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use mcp_server_util::*;
+use parking_lot::Mutex;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 const DEFAULT_WORKSPACE_DIR: &str = "/opt/workspace";
 
@@ -338,11 +339,10 @@ async fn main() -> Result<()> {
     let on_configure = {
         let config = config.clone();
         Some(move |params: Value| {
-            if let Ok(mut cfg) = config.lock() {
-                if let Some(dir) = params.get("workspace_dir").and_then(|v| v.as_str()) {
-                    if !dir.is_empty() {
-                        cfg.workspace_dir = dir.to_string();
-                    }
+            let mut cfg = config.lock();
+            if let Some(dir) = params.get("workspace_dir").and_then(|v| v.as_str()) {
+                if !dir.is_empty() {
+                    cfg.workspace_dir = dir.to_string();
                 }
             }
         })
@@ -351,35 +351,35 @@ async fn main() -> Result<()> {
     // Resolve the effective workspace dir from the (possibly empty) config.
     let c1 = config.clone();
     let read_handler = soft_error(move |args: Value| {
-        let cfg = c1.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = c1.lock();
         let wd = resolve_workspace_dir(&cfg.workspace_dir);
         handle_read(args, &wd)
     });
 
     let c2 = config.clone();
     let write_handler = soft_error(move |args: Value| {
-        let cfg = c2.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = c2.lock();
         let wd = resolve_workspace_dir(&cfg.workspace_dir);
         handle_write(args, &wd)
     });
 
     let c3 = config.clone();
     let list_handler = soft_error(move |args: Value| {
-        let cfg = c3.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = c3.lock();
         let wd = resolve_workspace_dir(&cfg.workspace_dir);
         handle_list(args, &wd)
     });
 
     let c4 = config.clone();
     let search_handler = soft_error(move |args: Value| {
-        let cfg = c4.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = c4.lock();
         let wd = resolve_workspace_dir(&cfg.workspace_dir);
         handle_search(args, &wd)
     });
 
     let c5 = config.clone();
     let info_handler = soft_error(move |args: Value| {
-        let cfg = c5.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = c5.lock();
         let wd = resolve_workspace_dir(&cfg.workspace_dir);
         handle_info(args, &wd)
     });

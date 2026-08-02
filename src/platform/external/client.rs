@@ -7,7 +7,7 @@
 //! [`PlatformRegistry`] just like built-in platforms.
 
 use crate::err_str;
-use crate::error::{AppResult, Error, ErrorContext};
+use crate::error::{AppResult, ErrorContext};
 use crate::platform::external::{
     build_deliver_request, build_initialize_request, build_react_request, build_typing_request,
     parse_response, DeliverParams, DeliverResult, InitializeResult, PlatformPluginConfig,
@@ -15,11 +15,12 @@ use crate::platform::external::{
 };
 use crate::platform::{OutboundReceiver, Platform};
 use async_trait::async_trait;
+use parking_lot::{Mutex as StdMutex, RwLock};
 use sql_forge::sql_forge;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, RwLock};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::select;
@@ -156,7 +157,8 @@ impl ExternalPlatformClient {
     fn reload_config_from_disk(&self) {
         let configs = crate::platform::external::load_plugins_config(&self.data_dir);
         if let Some(new_config) = configs.into_iter().find(|c| c.name == self.name) {
-            if let Ok(mut config_guard) = self.config.write() {
+            {
+                let mut config_guard = self.config.write();
                 tracing::info!(
                     "Reloaded config for platform plugin '{}' from disk",
                     self.name
@@ -193,7 +195,7 @@ impl ExternalPlatformClient {
         // Clone config fields while holding the read lock, then release it
         // before any async work to keep the future Send.
         let (config_name, config_command, config_args, env_map) = {
-            let config = self.config.read().map_err(|_| Error::LockPoisoned)?;
+            let config = self.config.read();
             tracing::info!(
                 "Spawning platform plugin '{}': {} {}",
                 config.name,
@@ -275,9 +277,8 @@ impl ExternalPlatformClient {
                     init_result.capabilities.inbound,
                     init_result.capabilities.outbound,
                 );
-                *self.plugin_name.lock().map_err(|_| Error::LockPoisoned)? =
-                    Some(init_result.name.clone());
-                *self.capabilities.lock().map_err(|_| Error::LockPoisoned)? = Some((
+                *self.plugin_name.lock() = Some(init_result.name.clone());
+                *self.capabilities.lock() = Some((
                     init_result.capabilities.inbound,
                     init_result.capabilities.outbound,
                 ));
@@ -304,11 +305,7 @@ impl Platform for ExternalPlatformClient {
 
         // Track consecutive failures with exponential backoff for the spawn loop
         let max_spawn_retries: u32 = crate::agent::config::get_global()
-            .map(|g| {
-                g.read()
-                    .expect("GlobalConfig lock poisoned")
-                    .platform_max_spawn_retries
-            })
+            .map(|g| g.read().platform_max_spawn_retries)
             .unwrap_or(3);
         let mut spawn_failures: u32 = 0;
         let mut last_restart_count = self.restart_count.load(Ordering::SeqCst);
@@ -368,19 +365,7 @@ impl Platform for ExternalPlatformClient {
             };
 
             // Store child handle for later cleanup
-            match self.process.lock() {
-                Ok(mut guard) => {
-                    *guard = Some(child);
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "Process lock poisoned for '{}', cannot store child handle: {:?}",
-                        self.name,
-                        e
-                    );
-                    return Err(err_str!("Process lock poisoned for '{}'", self.name));
-                }
-            }
+            *self.process.lock() = Some(child);
 
             // Initialize the plugin using local handles (no locks held across await)
             let mut stdout = stdout; // make mutable
@@ -416,10 +401,7 @@ impl Platform for ExternalPlatformClient {
                     );
                 }
                 // Kill child if initialization fails
-                let child_to_kill = match self.process.lock() {
-                    Ok(mut guard) => guard.take(),
-                    Err(_) => None,
-                };
+                let child_to_kill = self.process.lock().take();
                 if let Some(mut child) = child_to_kill {
                     if let Err(e) = child.kill().await {
                         tracing::warn!(
@@ -448,7 +430,7 @@ impl Platform for ExternalPlatformClient {
                 // Clone config map while holding the read lock, then drop
                 // the guard before any async work to keep the future Send.
                 let (name, config_map) = {
-                    let config = self.config.read().map_err(|_| Error::LockPoisoned)?;
+                    let config = self.config.read();
                     (config.name.clone(), config.config.clone())
                     // RwLockReadGuard dropped here
                 };
@@ -490,8 +472,7 @@ impl Platform for ExternalPlatformClient {
             let plugin_name = self
                 .plugin_name
                 .lock()
-                .ok()
-                .and_then(|p| p.clone())
+                .clone()
                 .unwrap_or_else(|| self.name.clone());
 
             tracing::info!("Platform plugin '{}' entering main loop", plugin_name);
@@ -548,7 +529,7 @@ impl Platform for ExternalPlatformClient {
 
                         // Check circuit breaker
                         {
-                            let circuit = self.circuit.lock().map_err(|_| Error::LockPoisoned)?;
+                            let circuit = self.circuit.lock();
                             if !circuit.is_allowed() {
                                 tracing::warn!(
                                     "Circuit breaker open for plugin '{}', dropping envelope {}",
@@ -578,21 +559,21 @@ impl Platform for ExternalPlatformClient {
 
                             if let Err(e) = stdin.write_all(req.as_bytes()).await {
                                 tracing::error!("Failed to write react to plugin '{}' stdin: {:?}", plugin_name, e);
-                                if let Ok(mut circuit) = self.circuit.lock() {
+                                { let mut circuit = self.circuit.lock();
                                     circuit.record_failure();
                                 }
                                 continue;
                             }
                             if let Err(e) = stdin.write_all(b"\n").await {
                                 tracing::error!("Failed to write newline to plugin '{}' stdin: {:?}", plugin_name, e);
-                                if let Ok(mut circuit) = self.circuit.lock() {
+                                { let mut circuit = self.circuit.lock();
                                     circuit.record_failure();
                                 }
                                 continue;
                             }
                             if let Err(e) = stdin.flush().await {
                                 tracing::error!("Failed to flush plugin '{}' stdin: {:?}", plugin_name, e);
-                                if let Ok(mut circuit) = self.circuit.lock() {
+                                { let mut circuit = self.circuit.lock();
                                     circuit.record_failure();
                                 }
                                 continue;
@@ -618,21 +599,21 @@ impl Platform for ExternalPlatformClient {
 
                             if let Err(e) = stdin.write_all(req.as_bytes()).await {
                                 tracing::error!("Failed to write typing to plugin '{}' stdin: {:?}", plugin_name, e);
-                                if let Ok(mut circuit) = self.circuit.lock() {
+                                { let mut circuit = self.circuit.lock();
                                     circuit.record_failure();
                                 }
                                 continue;
                             }
                             if let Err(e) = stdin.write_all(b"\n").await {
                                 tracing::error!("Failed to write newline to plugin '{}' stdin: {:?}", plugin_name, e);
-                                if let Ok(mut circuit) = self.circuit.lock() {
+                                { let mut circuit = self.circuit.lock();
                                     circuit.record_failure();
                                 }
                                 continue;
                             }
                             if let Err(e) = stdin.flush().await {
                                 tracing::error!("Failed to flush plugin '{}' stdin: {:?}", plugin_name, e);
-                                if let Ok(mut circuit) = self.circuit.lock() {
+                                { let mut circuit = self.circuit.lock();
                                     circuit.record_failure();
                                 }
                                 continue;
@@ -676,21 +657,21 @@ impl Platform for ExternalPlatformClient {
                         // Write request (no lock held across await since stdin is local)
                         if let Err(e) = stdin.write_all(req.as_bytes()).await {
                             tracing::error!("Failed to write to plugin '{}' stdin: {:?}", plugin_name, e);
-                            if let Ok(mut circuit) = self.circuit.lock() {
+                            { let mut circuit = self.circuit.lock();
                                 circuit.record_failure();
                             }
                             continue;
                         }
                         if let Err(e) = stdin.write_all(b"\n").await {
                             tracing::error!("Failed to write newline to plugin '{}' stdin: {:?}", plugin_name, e);
-                            if let Ok(mut circuit) = self.circuit.lock() {
+                            { let mut circuit = self.circuit.lock();
                                 circuit.record_failure();
                             }
                             continue;
                         }
                         if let Err(e) = stdin.flush().await {
                             tracing::error!("Failed to flush plugin '{}' stdin: {:?}", plugin_name, e);
-                            if let Ok(mut circuit) = self.circuit.lock() {
+                            { let mut circuit = self.circuit.lock();
                                 circuit.record_failure();
                             }
                             continue;
@@ -714,7 +695,7 @@ impl Platform for ExternalPlatformClient {
                                 if let Ok(response) = parse_response(&trimmed) {
                                     match response {
                                         PluginResponse::Success { result, .. } => {
-                                            if let Ok(mut circuit) = self.circuit.lock() {
+                                            { let mut circuit = self.circuit.lock();
                                                 circuit.record_success();
                                             }
                                             // If this was a deliver response with an external_id,
@@ -764,7 +745,7 @@ impl Platform for ExternalPlatformClient {
                                                 error.code,
                                                 error.message
                                             );
-                                            if let Ok(mut circuit) = self.circuit.lock() {
+                                            { let mut circuit = self.circuit.lock();
                                                 circuit.record_failure();
                                             }
                                         }
@@ -867,7 +848,7 @@ impl Platform for ExternalPlatformClient {
 
                                                                 // Apply generic file attachment inlining (handles all platforms uniformly)
                                                                 let max_inline_file_kb = crate::agent::config::get_global()
-                                                                    .map(|g| g.read().expect("GlobalConfig lock poisoned").max_inline_file_kb)
+                                                                    .map(|g| g.read().max_inline_file_kb)
                                                                     .unwrap_or(100);
                                                                 let max_inline_bytes = max_inline_file_kb as usize * 1024;
 
@@ -1170,13 +1151,7 @@ impl Platform for ExternalPlatformClient {
             // ── Inner loop ended: clean up child process ────────────────
             // stdin/stdout are dropped when they go out of scope,
             // which closes the pipes. Kill the child process.
-            let child_to_kill = match self.process.lock() {
-                Ok(mut guard) => guard.take(),
-                Err(_) => {
-                    tracing::warn!("process lock poisoned during cleanup");
-                    None
-                }
-            };
+            let child_to_kill = self.process.lock().take();
             if let Some(mut child) = child_to_kill {
                 // Log exit status for debugging
                 match child.try_wait() {
@@ -1242,9 +1217,9 @@ impl Platform for ExternalPlatformClient {
                 // Reload config from disk (picks up new YAML/env values)
                 self.reload_config_from_disk();
                 // Reset circuit breaker for fresh start
-                if let Ok(mut circuit) = self.circuit.lock() {
-                    *circuit =
-                        CircuitBreaker::new(self.config.read().map(|c| c.max_retries).unwrap_or(3));
+                {
+                    let mut circuit = self.circuit.lock();
+                    *circuit = CircuitBreaker::new(self.config.read().max_retries);
                 }
                 // Reset next_id for fresh subprocess
                 self.next_id.store(1, Ordering::SeqCst);
@@ -1278,10 +1253,9 @@ impl Platform for ExternalPlatformClient {
                     // Reload config from disk (picks up new YAML/env values)
                     self.reload_config_from_disk();
                     // Reset circuit breaker for fresh start
-                    if let Ok(mut circuit) = self.circuit.lock() {
-                        *circuit = CircuitBreaker::new(
-                            self.config.read().map(|c| c.max_retries).unwrap_or(3),
-                        );
+                    {
+                        let mut circuit = self.circuit.lock();
+                        *circuit = CircuitBreaker::new(self.config.read().max_retries);
                     }
                     break;
                 }
@@ -1307,9 +1281,7 @@ impl Platform for ExternalPlatformClient {
 
         // Get plugin config for the binary path and config map
         let (command, args, config_map) = {
-            let config = self.config.read().map_err(|_| {
-                crate::error::Error::Message("Platform config lock poisoned".to_string())
-            })?;
+            let config = self.config.read();
             (
                 config.command.clone(),
                 config.args.clone(),
@@ -1964,7 +1936,8 @@ async fn handle_message_edited(
 
 impl Drop for ExternalPlatformClient {
     fn drop(&mut self) {
-        if let Ok(mut process_guard) = self.process.lock() {
+        {
+            let mut process_guard = self.process.lock();
             if let Some(mut child) = process_guard.take() {
                 if let Err(e) = child.start_kill() {
                     tracing::warn!("[platform] Failed to start_kill child in drop: {:?}", e);

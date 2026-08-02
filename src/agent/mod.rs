@@ -24,12 +24,12 @@ pub(crate) mod response_handler;
 pub mod summary_trigger;
 pub mod task_registry;
 
+use parking_lot::RwLock;
 use sql_forge::sql_forge;
 use sqlx::FromRow;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::RwLock;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
@@ -70,7 +70,7 @@ impl Agent {
         // Read config fields inside a scope so the borrow is dropped before
         // moving `config` into the struct.
         let (default_provider, llm_api_key, max_tokens, temperature) = {
-            let cfg_read = config.read().expect("GlobalConfig lock poisoned");
+            let cfg_read = config.read();
             (
                 if cfg_read.default_provider.is_empty() {
                     env_cfg.provider.clone()
@@ -97,7 +97,6 @@ impl Agent {
             temperature,
             supports_reasoning: crate::llm::PROVIDER_METADATA
                 .read()
-                .unwrap()
                 .get(&provider_name)
                 .map(|m| m.supports_reasoning)
                 .unwrap_or(false),

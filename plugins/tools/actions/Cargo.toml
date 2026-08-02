@@ -14,3 +14,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sqlx = { version = "0.9", features = ["postgres", "runtime-tokio", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
+parking_lot = "0.12"

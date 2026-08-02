@@ -13,9 +13,9 @@ pub mod installer;
 use crate::err_msg;
 use crate::error::{AppResult, ErrorContext};
 use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Types
