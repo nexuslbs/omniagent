@@ -1275,6 +1275,23 @@ fn handle_status(args: Value) -> Result<(String, bool)> {
     ))
 }
 
+/// Build the `-c` config override that rewrites `https://host/...` to the
+/// token-bearing URL for ONE git invocation.
+///
+/// CRITICAL: no quotes around either side. In a config FILE, quotes are
+/// syntactic and stripped by the parser; but with `git -c`, the value is used
+/// LITERALLY, so `insteadOf="https://host"` (with quote characters) never
+/// matches the real URL — git falls back to unauthenticated https and fails
+/// with `could not read Username ... terminal prompts disabled`. Unquoted, git
+/// splits `url.<base>.insteadOf` on the last dot and the rewrite works
+/// (verified with GIT_TRACE: the remote-https helper is invoked with the
+/// token URL).
+fn build_instead_of_override(token: &str, host_path: &str) -> String {
+    let token_url = format!("https://x-access-token:{}@{}", token, host_path);
+    let orig_url = format!("https://{}", host_path);
+    format!("url.{}.insteadOf={}", token_url, orig_url)
+}
+
 /// `run_command`: run an arbitrary git command in a repository.
 ///
 /// Generic escape hatch — lets the agent run ANY git command the focused
@@ -1363,12 +1380,17 @@ fn handle_run_command(args: Value) -> Result<(String, bool)> {
                 .split_once("://")
                 .map(|(_, r)| r)
                 .unwrap_or(&remote_url);
-            // git -c url."https://x-access-token:TOKEN@host/".insteadOf="https://host/"
+            // git -c url.https://x-access-token:TOKEN@host.insteadOf=https://host
+            // NOTE: no quotes around either side. In a config FILE, quotes are
+            // syntactic and stripped; but with `-c`, git treats them LITERALLY,
+            // so `insteadOf="https://host"` would never match the real URL and
+            // the push would fall back to unauthenticated https (username
+            // prompt / fatal). Unquoted, git splits url.<base>.insteadOf on the
+            // last dot and the rewrite works (verified with GIT_TRACE).
             let host_path = rest.split('/').next().unwrap_or(rest);
-            let token_url = format!("https://x-access-token:{}@{}", token, host_path);
-            let orig_url = format!("https://{}", host_path);
+            let override_cfg = build_instead_of_override(&token, host_path);
             full_args.push("-c".to_string());
-            full_args.push(format!("url.\"{}\".insteadOf=\"{}\"", token_url, orig_url));
+            full_args.push(override_cfg);
             tracing::info!(
                 "run_command: injected auth for host {} (repo {})",
                 host_path,
@@ -1871,5 +1893,41 @@ mod tests {
         .expect("sandbox rejection must be an Ok result");
         assert!(is_error);
         assert!(msg.contains("outside the git workspace sandbox"));
+    }
+
+    // ── Auth injection (use_auth) ──
+
+    #[test]
+    fn auth_override_has_no_literal_quotes() {
+        // Regression: with `git -c`, quotes are LITERAL (unlike config files
+        // where they're stripped). `insteadOf="https://host"` never matches
+        // the real URL, so the push fell back to unauthenticated https and
+        // failed with "could not read Username ... terminal prompts disabled".
+        let cfg = build_instead_of_override("ghs_TESTTOKEN", "github.com");
+        assert_eq!(
+            cfg,
+            "url.https://x-access-token:ghs_TESTTOKEN@github.com.insteadOf=https://github.com"
+        );
+        assert!(!cfg.contains('"'), "override must not contain literal quotes: {}", cfg);
+    }
+
+    #[test]
+    fn auth_override_handles_host_with_port() {
+        let cfg = build_instead_of_override("tok", "github.com:8443");
+        assert!(cfg.contains("https://x-access-token:tok@github.com:8443"));
+        assert!(cfg.ends_with(".insteadOf=https://github.com:8443"));
+        assert!(!cfg.contains('"'));
+    }
+
+    #[test]
+    fn auth_override_roundtrip_parses_as_git_config_key() {
+        // The override must be a syntactically valid `-c name=value` pair that
+        // git can parse without error (git config --list round-trips it).
+        let cfg = build_instead_of_override("ghs_TESTTOKEN", "github.com");
+        // git config --list will fail loudly if the key is malformed.
+        // (-c is a global option, so it must precede the subcommand.)
+        let (out, _, rc) =
+            run_git(&["-c", cfg.as_str(), "config", "--list"], Some("/opt/workspace/omniagent"), 15);
+        assert_eq!(rc, 0, "git must parse the override: {}", out);
     }
 }
