@@ -147,7 +147,33 @@ fn handle_read(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let safe_path = resolve_read_path(path, workspace_dir);
     let content = fs::read_to_string(&safe_path)
         .map_err(|e| anyhow::anyhow!("Failed to read file '{}': {}", safe_path, e))?;
-    Ok((truncate_content(&content, 50_000), false))
+    // Char-based paged reads: offset = starting char position (default 0),
+    // limit = max chars returned (default 50_000, the legacy truncation).
+    // The response reports the total file size and the returned slice so the
+    // agent can page through a large file deterministically.
+    let total_chars = content.chars().count();
+    let offset = args["offset"].as_u64().unwrap_or(0) as usize;
+    let limit = args["limit"].as_u64().unwrap_or(50_000) as usize;
+    let start = offset.min(total_chars);
+    let end = start.saturating_add(limit).min(total_chars);
+    let slice: String = content.chars().skip(start).take(end - start).collect();
+    let mut out = slice;
+    if start > 0 || end < total_chars {
+        let note = if end < total_chars {
+            format!(
+                "[... truncated: showing chars {}-{} of {} total chars]",
+                start, end, total_chars
+            )
+        } else {
+            format!(
+                "[showing chars {}-{} of {} total chars]",
+                start, end, total_chars
+            )
+        };
+        out.push_str("\n\n");
+        out.push_str(&note);
+    }
+    Ok((out, false))
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +438,8 @@ async fn main() -> Result<()> {
                 name: "filesystem_read".to_string(),
                 description:
                     "READ A LOCAL FILE from disk. Use this to read any file on the filesystem (markdown, text files, config files, code files, research documents). This is the ONLY tool for reading existing file content. Do NOT use search_messages for file reading. \
-                    READS ARE UNRESTRICTED: any path on the filesystem can be read (only WRITES are confined to the workspace dir)."
+                    READS ARE UNRESTRICTED: any path on the filesystem can be read (only WRITES are confined to the workspace dir). \
+                    LARGE FILES: reads are CHAR-BASED SLICES. 'offset' (default 0) is the starting char position; 'limit' (default 50000) is the max chars returned. The response always reports the total file size and which slice was returned, e.g. \"[showing chars 50000-100000 of 250000 total chars]\", so you can page deterministically: call again with offset=50000, then offset=100000, ... until the note no longer says 'truncated'. No args = legacy behavior (first 50000 chars, with a truncation note when the file is bigger)."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -420,6 +447,14 @@ async fn main() -> Result<()> {
                         "path": {
                             "type": "string",
                             "description": "Absolute path to the file to read"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Starting char position, 0-based (default 0). Use together with 'limit' to page through large files in slices."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum chars to return (default 50000)."
                         }
                     },
                     "required": ["path"]
