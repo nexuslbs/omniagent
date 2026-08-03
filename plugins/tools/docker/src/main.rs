@@ -219,6 +219,17 @@ fn build_compose_command(
         }
     }
 
+    // CRITICAL (G17b, Aug 2026): NEVER let the docker CLI child inherit this
+    // server's stdin (fd 0 = the MCP JSON-RPC pipe). A tokio::process::Command
+    // with no explicit .stdin() inherits the parent's fd 0. Under 50 concurrent
+    // `docker compose exec` calls the CLI children hold the read end of the
+    // SAME pipe the client writes requests to — they steal JSON-RPC lines and
+    // the server's reader never sees them (intermittent request loss, sparse
+    // dispatch tails). The exec-script path overrides stdin with a fresh piped
+    // fd below; every other path gets /dev/null so the CLI can never consume
+    // protocol bytes.
+    cmd.stdin(std::process::Stdio::null());
+
     Ok(cmd)
 }
 

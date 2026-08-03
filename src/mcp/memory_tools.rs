@@ -61,7 +61,7 @@ fn manage_memory_tool() -> McpTool {
             "required": ["target", "action"]
         }),
         server_name: None,
-        timeout_secs: crate::mcp::DEFAULT_TOOL_TIMEOUT_SECS,
+        timeout_secs: None,
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let target = match args["target"].as_str() {
@@ -240,7 +240,7 @@ fn promote_to_memory_tool() -> McpTool {
             "required": ["name", "content", "confidence"]
         }),
         server_name: None,
-        timeout_secs: crate::mcp::DEFAULT_TOOL_TIMEOUT_SECS,
+        timeout_secs: None,
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let name = match args["name"].as_str() {
@@ -369,7 +369,7 @@ fn list_memories_tool() -> McpTool {
             "required": []
         }),
         server_name: None,
-        timeout_secs: crate::mcp::DEFAULT_TOOL_TIMEOUT_SECS,
+        timeout_secs: None,
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let profile = resolve_profile(&ctx, &args);
@@ -469,7 +469,7 @@ fn review_memories_tool() -> McpTool {
             "required": []
         }),
         server_name: None,
-        timeout_secs: crate::mcp::DEFAULT_TOOL_TIMEOUT_SECS,
+        timeout_secs: None,
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let profile = resolve_profile(&ctx, &args);

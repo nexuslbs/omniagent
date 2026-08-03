@@ -20,9 +20,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
+use std::io::Read;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncWriteExt;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -281,21 +282,108 @@ where
             .collect(),
     );
 
-    let stdin = tokio::io::stdin();
-    let reader = BufReader::new(stdin);
-    let mut lines = reader.lines();
+    // ─────────────────────────────────────────────────────────────────────
+    // stdin reader: DEDICATED OS THREAD feeding an unbounded channel.
+    //
+    // The reader MUST NEVER be starved by the tokio runtime. If the read
+    // loop ran as a tokio task (as it did before Aug 2026), a burst of
+    // concurrent `tools/call` handlers could occupy every worker thread,
+    // the reader task would stop being polled, the OS pipe would backfill,
+    // and the client's writes would block — the server appeared to "stop
+    // reading after ~30 requests" with NO error anywhere (G17b, Aug 2026).
+    //
+    // A dedicated std::thread doing BLOCKING read_line is immune: it is
+    // scheduled by the OS, not the tokio runtime, so it drains the pipe
+    // unconditionally and forwards every line into the channel. The
+    // dispatcher below consumes the channel at whatever rate the runtime
+    // can sustain. Requests are never lost and never silently dropped.
+    //
+    // The channel is UNBOUNDED on purpose: backpressure belongs to the
+    // machine, not the protocol. If the host genuinely cannot keep up
+    // (OOM, fork failures), the OS will error loudly — a read error on the
+    // thread exits with a FATAL log instead of stalling silently.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    {
+        let tx = tx.clone();
+        let server_name = server_info.name.clone();
+        std::thread::Builder::new()
+            .name(format!("{}-stdin-reader", server_name))
+            .spawn(move || {
+                // Explicit chunked framing. We deliberately do NOT depend on
+                // read_line()'s internal buffering semantics: read(2) returns
+                // whatever bytes are currently available, which may contain
+                // zero, one, or many newline-delimited requests, or a partial
+                // request with no trailing newline yet. We split on '\n'
+                // ourselves and CARRY any partial remainder across reads, so
+                // every request is delivered to the dispatcher as exactly one
+                // independent String no matter how the kernel chunks the
+                // stream. (Aug 2026, G17b: per-request framing must not be at
+                // the mercy of a fragile read_line — each task/execution is
+                // identified solely by its own delimited frame.)
+                let mut stdin = std::io::stdin();
+                let mut buf = [0u8; 64 * 1024];
+                let mut pending: Vec<u8> = Vec::with_capacity(1024);
+                'reader: loop {
+                    match stdin.read(&mut buf) {
+                        Ok(0) => {
+                            // EOF. Deliver any final request that lacked a
+                            // trailing newline, then exit.
+                            if !pending.is_empty() {
+                                let line = String::from_utf8_lossy(&pending);
+                                let trimmed = line.trim().to_string();
+                                if !trimmed.is_empty() {
+                                    let _ = tx.send(trimmed);
+                                }
+                            }
+                            break; // EOF: client closed stdin
+                        }
+                        Ok(n) => {
+                            pending.extend_from_slice(&buf[..n]);
+                            let mut consumed = 0;
+                            while let Some(pos) =
+                                pending[consumed..].iter().position(|&b| b == b'\n')
+                            {
+                                let line =
+                                    String::from_utf8_lossy(&pending[consumed..consumed + pos]);
+                                consumed += pos + 1;
+                                let trimmed = line.trim().to_string();
+                                if trimmed.is_empty() {
+                                    continue;
+                                }
+                                if tx.send(trimmed).is_err() {
+                                    break 'reader; // receiver dropped (shutting down)
+                                }
+                            }
+                            // Keep any trailing partial request (no '\n' yet).
+                            pending.drain(..consumed);
+                        }
+                        Err(e) => {
+                            // NEVER fail silently: a machine-level read error
+                            // must be loud so the operator sees it.
+                            eprintln!(
+                                "[{}] FATAL stdin read error: {} — reader thread exiting",
+                                server_name, e
+                            );
+                            break;
+                        }
+                    }
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("failed to spawn stdin reader thread: {e}"))?;
+    }
+    drop(tx); // dispatcher holds the only remaining sender via rx ownership
 
     let stdout = tokio::io::stdout();
     let writer: SharedWriter = Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(stdout)));
 
     let mut initialized = false;
 
-    while let Some(line) = lines.next_line().await? {
-        let line = line.trim().to_string();
-        if line.is_empty() {
-            continue;
-        }
+    // Tracks every spawned tools/call task. JoinSet keeps the JoinHandles
+    // alive so a panicking handler is OBSERVED (logged) instead of silently
+    // swallowed by a discarded tokio::spawn handle.
+    let mut in_flight: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
+    while let Some(line) = rx.recv().await {
         let request: JsonRpcRequest = match serde_json::from_str(&line) {
             Ok(req) => req,
             Err(e) => {
@@ -379,16 +467,27 @@ where
                     // blocks other calls to this plugin. The shared writer lock is
                     // held only for the short JSON response write — never while a
                     // handler executes — so N calls proceed in parallel.
+                    //
+                    // The task handle is tracked in `in_flight` (JoinSet) — NOT
+                    // discarded — so a panicking handler is logged loudly rather
+                    // than failing silently.
                     let writer = writer.clone();
                     let tools = tools.clone();
                     let index = index.clone();
-                    tokio::spawn(async move {
+                    in_flight.spawn(async move {
                         if let Err(e) =
                             handle_tools_call(&writer, id, &call_params, &tools, &index).await
                         {
                             tracing::error!("tools/call '{}' error: {e:#}", call_params.name);
                         }
                     });
+                    // Reap finished tasks to surface panics promptly (and keep
+                    // the set from growing without bound on long-running servers).
+                    while let Some(res) = in_flight.try_join_next() {
+                        if let Err(e) = res {
+                            tracing::error!("tools/call task panicked: {e}");
+                        }
+                    }
                 }
             }
             _ => {
@@ -400,10 +499,29 @@ where
         }
     }
 
+    // stdin closed: drain remaining in-flight tasks so responses aren't
+    // dropped mid-flight; log any panics. A small grace timeout bounds the
+    // shutdown so a wedged handler can't hang the server forever.
     tracing::info!(
-        "{} MCP server shutting down (stdin closed)",
-        server_info.name
+        "{} MCP server shutting down (stdin closed); {} task(s) in flight",
+        server_info.name,
+        in_flight.len()
     );
+    let drain = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(res) = in_flight.join_next().await {
+            if let Err(e) = res {
+                tracing::error!("tools/call task panicked during drain: {e}");
+            }
+        }
+    })
+    .await;
+    if drain.is_err() {
+        tracing::warn!(
+            "{} MCP server shutdown: timed out draining {} in-flight task(s)",
+            server_info.name,
+            in_flight.len()
+        );
+    }
     Ok(())
 }
 
@@ -468,8 +586,6 @@ async fn handle_tools_call(
     tools: &Arc<Vec<McpToolEntry>>,
     index: &HashMap<String, usize>,
 ) -> Result<()> {
-    tracing::info!("tools/call: name='{}'", params.name);
-
     let entry_idx = match index.get(&params.name) {
         Some(i) => *i,
         None => {
@@ -509,11 +625,6 @@ async fn handle_tools_call(
 
     write_json(writer, &response).await?;
 
-    tracing::info!(
-        "tools/call '{}' completed (is_error={})",
-        params.name,
-        is_error
-    );
     Ok(())
 }
 

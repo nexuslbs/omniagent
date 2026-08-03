@@ -163,8 +163,11 @@ pub trait McpServerClient: Send + Sync {
     fn health(&self) -> ServerHealth;
 
     /// Get the server's per-tool timeout in seconds.
-    fn timeout_secs(&self) -> u64 {
-        crate::mcp::DEFAULT_TOOL_TIMEOUT_SECS
+    /// `None` = no timeout (the default): tools run until done; the agent
+    /// tracks/cancels them via background tasks. Only Some() when explicitly
+    /// configured.
+    fn timeout_secs(&self) -> Option<u64> {
+        None
     }
 
     /// Convert external tools to McpTool instances with a circuit-breaking wrapper.
@@ -304,7 +307,7 @@ impl ExternalMcpClients {
 
     /// Get the tool timeout for a server.
     pub fn get_timeout_secs(&self, server_name: &str) -> Option<u64> {
-        self.get(server_name).map(|c| c.timeout_secs())
+        self.get(server_name).and_then(|c| c.timeout_secs())
     }
 
     /// Call a tool on the specified MCP server.
@@ -367,6 +370,11 @@ pub struct StdioMcpClient {
     pending: Arc<parking_lot::Mutex<HashMap<u64, oneshot::Sender<String>>>>,
     /// Background task: reads stdout and dispatches responses by ID.
     read_task: Mutex<Option<JoinHandle<()>>>,
+    /// Background task: drains the request channel and writes stdin.
+    /// Kept separate from read_task so a burst of responses can never starve
+    /// request writes (single select! loop dropped requests under load —
+    /// G17b, Aug 2026).
+    write_task: Mutex<Option<JoinHandle<()>>>,
     /// Child process handle (for lifecycle/cleanup).
     child: Mutex<Option<tokio::process::Child>>,
     next_id: AtomicU64,
@@ -374,6 +382,41 @@ pub struct StdioMcpClient {
     circuit: CircuitBreaker,
     connected: Mutex<bool>,
     last_error: Mutex<Option<String>>,
+}
+
+/// Fail ALL pending requests with a JSON-RPC error so every waiting caller
+/// receives a concrete error instead of hanging until a timeout. Called when
+/// the connection dies (write error, read error, EOF) — the agent must KNOW
+/// an error happened and which one, never believe a call is still running.
+fn fail_all_pending(
+    pending: &Arc<parking_lot::Mutex<HashMap<u64, oneshot::Sender<String>>>>,
+    server_name: &str,
+    reason: &str,
+) {
+    let mut map = pending.lock();
+    let ids: Vec<u64> = map.keys().copied().collect();
+    if ids.is_empty() {
+        return;
+    }
+    tracing::error!(
+        "MCP server '{}' connection failed ({}): failing {} pending request(s) loudly",
+        server_name,
+        reason,
+        ids.len()
+    );
+    for id in ids {
+        if let Some(tx) = map.remove(&id) {
+            let err = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32000,
+                    "message": format!("MCP server '{}' connection failed: {}", server_name, reason),
+                },
+            });
+            let _ = tx.send(err.to_string());
+        }
+    }
 }
 
 impl StdioMcpClient {
@@ -384,6 +427,7 @@ impl StdioMcpClient {
             stdin_tx: Mutex::new(None),
             pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             read_task: Mutex::new(None),
+            write_task: Mutex::new(None),
             child: Mutex::new(None),
             next_id: AtomicU64::new(1),
             tools: Mutex::new(Vec::new()),
@@ -443,69 +487,121 @@ impl StdioMcpClient {
         let server_name = self.config.name.clone();
         let reader = BufReader::new(child_stdout);
 
-        // Spawn background reader task
-        let handle = tokio::spawn(async move {
-            // Combine stdin writes (from mpsc) with stdout reads (from reader)
-            // in a single select loop.
+        // ─────────────────────────────────────────────────────────────────
+        // TWO DEDICATED TASKS (writer + reader), never one select! loop.
+        //
+        // Before Aug 2026 a single `tokio::select!` loop handled BOTH stdin
+        // writes AND stdout reads. Under a burst of concurrent calls (50
+        // parallel docker_compose exec), the read branch was constantly
+        // awakened by streaming responses and STARVED the write branch: the
+        // loop stopped dequeuing from `stdin_rx` after ~46 of 50 requests,
+        // the rest sat in the unbounded channel forever (unbounded sends
+        // never fail — silent loss by construction), and those callers hung
+        // until their timeout. Splitting into a dedicated writer task makes
+        // starvation impossible: each task does exactly one job.
+        //
+        // On ANY connection failure (write error, read error, EOF), ALL
+        // pending requests are failed LOUDLY with a JSON-RPC error so every
+        // caller gets a concrete error — the agent KNOWS an error happened
+        // and which one, instead of thinking the call is still running.
+        // ─────────────────────────────────────────────────────────────────
+
+        // Writer task: drains the request channel → stdin (atomic line writes).
+        let writer_pending = pending.clone();
+        let writer_name = server_name.clone();
+        let writer_handle = tokio::spawn(async move {
             let mut writer = child_stdin;
+            while let Some(request) = stdin_rx.recv().await {
+                // ATOMIC LINE WRITE: `request + "\n"` in ONE buffer, one
+                // write_all (one await, one OS write). Two separate write_all
+                // calls (request, then "\n") let the runtime interleave a
+                // second request between them, producing `req1req2\n` — the
+                // server's serde parse fails and the request is dropped.
+                let mut buf = String::with_capacity(request.len() + 1);
+                buf.push_str(&request);
+                buf.push('\n');
+                if let Err(e) = writer.write_all(buf.as_bytes()).await {
+                    tracing::error!("MCP server '{}' stdin write error: {}", writer_name, e);
+                    fail_all_pending(
+                        &writer_pending,
+                        &writer_name,
+                        &format!("stdin write error: {e}"),
+                    );
+                    break;
+                }
+                if let Err(e) = writer.flush().await {
+                    tracing::error!("MCP server '{}' stdin flush error: {}", writer_name, e);
+                    fail_all_pending(
+                        &writer_pending,
+                        &writer_name,
+                        &format!("stdin flush error: {e}"),
+                    );
+                    break;
+                }
+            }
+            tracing::info!("MCP server '{}' background writer stopped", writer_name);
+        });
+
+        // Reader task: reads stdout lines and routes responses by ID.
+        let reader_pending = pending.clone();
+        let reader_name = server_name.clone();
+        let reader_handle = tokio::spawn(async move {
             let mut reader = reader;
             let mut line_buf = String::new();
-
             loop {
-                tokio::select! {
-                    // Incoming JSON-RPC request to write to stdin
-                    Some(request) = stdin_rx.recv() => {
-                        if let Err(e) = writer.write_all(request.as_bytes()).await {
-                            tracing::error!("MCP server '{}' stdin write error: {}", server_name, e);
-                            break;
-                        }
-                        if let Err(e) = writer.write_all(b"\n").await {
-                            tracing::error!("MCP server '{}' stdin newline write error: {}", server_name, e);
-                            break;
-                        }
-                        if let Err(e) = writer.flush().await {
-                            tracing::error!("MCP server '{}' stdin flush error: {}", server_name, e);
-                            break;
-                        }
+                match reader.read_line(&mut line_buf).await {
+                    Ok(0) => {
+                        // EOF: the server process is gone. Fail every pending
+                        // caller loudly — the agent must KNOW the connection
+                        // died, not wait forever.
+                        tracing::info!("MCP server '{}' closed stdout", reader_name);
+                        fail_all_pending(
+                            &reader_pending,
+                            &reader_name,
+                            "connection closed (server exited)",
+                        );
+                        break;
                     }
-                    // Response from subprocess stdout
-                    result = reader.read_line(&mut line_buf) => {
-                        match result {
-                            Ok(0) => {
-                                tracing::info!("MCP server '{}' closed stdout", server_name);
-                                break; // EOF
-                            }
-                            Ok(_) => {
-                                let line = std::mem::take(&mut line_buf);
-                                let trimmed = line.trim().to_string();
-                                if trimmed.is_empty() {
-                                    continue;
-                                }
-                                // Parse JSON-RPC response to extract ID
-                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&trimmed) {
-                                    if let Some(id_val) = val.get("id") {
-                                        if let Some(id) = id_val.as_u64() {
-                                            let mut map = pending.lock();
-                                            if let Some(tx) = map.remove(&id) {
-                                                let _ = tx.send(trimmed);
-                                            }
-                                        }
+                    Ok(_) => {
+                        let line = std::mem::take(&mut line_buf);
+                        let trimmed = line.trim().to_string();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        // Parse JSON-RPC response to extract ID
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&trimmed) {
+                            if let Some(id_val) = val.get("id") {
+                                if let Some(id) = id_val.as_u64() {
+                                    let mut map = reader_pending.lock();
+                                    if let Some(tx) = map.remove(&id) {
+                                        let _ = tx.send(trimmed);
+                                    } else {
+                                        tracing::warn!(
+                                            "MCP server '{}' response id={} NOT in pending map",
+                                            reader_name,
+                                            id
+                                        );
                                     }
                                 }
                             }
-                            Err(e) => {
-                                tracing::error!("MCP server '{}' stdout read error: {}", server_name, e);
-                                break;
-                            }
                         }
+                    }
+                    Err(e) => {
+                        tracing::error!("MCP server '{}' stdout read error: {}", reader_name, e);
+                        fail_all_pending(
+                            &reader_pending,
+                            &reader_name,
+                            &format!("stdout read error: {e}"),
+                        );
+                        break;
                     }
                 }
             }
-
-            tracing::info!("MCP server '{}' background reader stopped", server_name);
+            tracing::info!("MCP server '{}' background reader stopped", reader_name);
         });
 
-        *self.read_task.lock().await = Some(handle);
+        *self.read_task.lock().await = Some(reader_handle);
+        *self.write_task.lock().await = Some(writer_handle);
         *self.child.lock().await = Some(child);
         *self.stdin_tx.lock().await = Some(stdin_tx.clone());
 
@@ -682,20 +778,27 @@ impl McpServerClient for StdioMcpClient {
             ));
         }
 
-        // Check if background reader is still alive
+        // Check if background writer + reader tasks are still alive
         {
+            let wt = self.write_task.lock().await;
             let rt = self.read_task.lock().await;
-            if let Some(ref handle) = *rt {
-                if handle.is_finished() {
-                    return Err(err_str!(
-                        "MCP server '{}' background reader has stopped",
-                        self.config.name
-                    ));
-                }
-            } else {
+            let writer_dead = wt.as_ref().map(|h| h.is_finished()).unwrap_or(true); // None = not initialized
+            let reader_dead = rt.as_ref().map(|h| h.is_finished()).unwrap_or(true); // None = not initialized
+            if writer_dead || reader_dead {
+                // The connection is gone (or was never established). Fail fast
+                // with a concrete error instead of queueing a request that can
+                // never be answered — the agent must KNOW the server is down.
                 return Err(err_str!(
-                    "MCP server '{}' not initialized",
-                    self.config.name
+                    "MCP server '{}' connection lost (background {} stopped); \
+                     pending calls were failed with a connection error",
+                    self.config.name,
+                    if writer_dead && reader_dead {
+                        "writer and reader tasks"
+                    } else if writer_dead {
+                        "writer task"
+                    } else {
+                        "reader task"
+                    }
                 ));
             }
         }
@@ -703,7 +806,10 @@ impl McpServerClient for StdioMcpClient {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req = build_call_tool_request(id, name, arguments, meta);
 
-        let timeout_dur = Duration::from_secs(self.config.timeout_secs);
+        // Explicit timeout only if configured (`None` = wait indefinitely —
+        // the agent controls lifetime via background tasks, and a connection
+        // failure fails ALL pending calls loudly, so nothing hangs silently).
+        let timeout_dur = self.config.timeout_secs.map(Duration::from_secs);
 
         let (tx, rx) = oneshot::channel();
         {
@@ -721,26 +827,35 @@ impl McpServerClient for StdioMcpClient {
                 .map_err(|_| err_str!("MCP server '{}' stdin channel closed", self.config.name))?;
         }
 
-        let response = tokio::time::timeout(timeout_dur, rx)
-            .await
-            .map_err(|_| {
-                self.circuit.record_failure();
-                let mut pending = self.pending.lock();
-                pending.remove(&id);
-                err_str!(
-                    "MCP server '{}' tool '{}' timed out after {} seconds",
-                    self.config.name,
-                    name,
-                    self.config.timeout_secs,
-                )
-            })?
-            .map_err(|_| {
+        let response = match timeout_dur {
+            Some(dur) => tokio::time::timeout(dur, rx)
+                .await
+                .map_err(|_| {
+                    self.circuit.record_failure();
+                    let mut pending = self.pending.lock();
+                    pending.remove(&id);
+                    err_str!(
+                        "MCP server '{}' tool '{}' timed out after {} seconds",
+                        self.config.name,
+                        name,
+                        dur.as_secs(),
+                    )
+                })?
+                .map_err(|_| {
+                    self.circuit.record_failure();
+                    err_str!(
+                        "MCP server '{}' response channel cancelled",
+                        self.config.name,
+                    )
+                })?,
+            None => rx.await.map_err(|_| {
                 self.circuit.record_failure();
                 err_str!(
                     "MCP server '{}' response channel cancelled",
                     self.config.name,
                 )
-            })?;
+            })?,
+        };
 
         let result_value =
             match parse_response(&response).ctx("Failed to parse MCP tool call response")? {
@@ -768,10 +883,16 @@ impl McpServerClient for StdioMcpClient {
     }
 
     async fn shutdown(&self) -> AppResult<()> {
-        // Close stdin by dropping the sender (the reader task will stop on rx closed)
+        // Close stdin by dropping the sender (the writer task will stop on rx closed)
         *self.stdin_tx.lock().await = None;
 
-        // Abort the background reader task
+        // Abort the background writer + reader tasks
+        {
+            let mut wt = self.write_task.lock().await;
+            if let Some(handle) = wt.take() {
+                handle.abort();
+            }
+        }
         {
             let mut rt = self.read_task.lock().await;
             if let Some(handle) = rt.take() {
@@ -809,14 +930,19 @@ impl McpServerClient for StdioMcpClient {
         }
     }
 
-    fn timeout_secs(&self) -> u64 {
+    fn timeout_secs(&self) -> Option<u64> {
         self.config.timeout_secs
     }
 }
 
 impl Drop for StdioMcpClient {
     fn drop(&mut self) {
-        // Best-effort: shut down the background reader and kill the child.
+        // Best-effort: shut down the background writer + reader and kill the child.
+        if let Ok(mut wt) = self.write_task.try_lock() {
+            if let Some(handle) = wt.take() {
+                handle.abort();
+            }
+        }
         if let Ok(mut rt) = self.read_task.try_lock() {
             if let Some(handle) = rt.take() {
                 handle.abort();
@@ -848,10 +974,16 @@ pub struct HttpMcpClient {
 
 impl HttpMcpClient {
     pub fn new(config: McpServerConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(config.timeout_secs))
-            .build()
-            .unwrap_or_default();
+        // No fixed HTTP client timeout: `None` means the request runs until
+        // the server answers (agent controls lifetime via bg tasks). An
+        // explicitly configured timeout still applies.
+        let client = match config.timeout_secs {
+            Some(secs) => reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(secs))
+                .build()
+                .unwrap_or_default(),
+            None => reqwest::Client::builder().build().unwrap_or_default(),
+        };
 
         Self {
             circuit: CircuitBreaker::new(config.max_retries),
@@ -1017,7 +1149,7 @@ impl McpServerClient for HttpMcpClient {
         }
     }
 
-    fn timeout_secs(&self) -> u64 {
+    fn timeout_secs(&self) -> Option<u64> {
         self.config.timeout_secs
     }
 }

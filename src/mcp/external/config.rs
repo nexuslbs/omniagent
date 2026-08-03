@@ -45,8 +45,12 @@ pub struct McpServerConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_dir: Option<String>,
     /// Maximum time in seconds to wait for a tool call response.
-    #[serde(default = "default_timeout")]
-    pub timeout_secs: u64,
+    /// `None` = NO timeout: the server may take as long as it needs; the
+    /// caller (agent) tracks/cancels via background tasks. A timeout applies
+    /// ONLY when explicitly configured. Fixed default timeouts were removed
+    /// (Aug 2026) — a tool must never be killed by an invisible clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
     /// Maximum consecutive failures before circuit breaker opens.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
@@ -65,9 +69,6 @@ pub struct McpServerConfig {
     pub pool_size: u32,
 }
 
-fn default_timeout() -> u64 {
-    30
-}
 fn default_max_retries() -> u32 {
     3
 }
@@ -332,7 +333,7 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
             url: None,
             env: HashMap::new(),
             current_dir: None,
-            timeout_secs: default_timeout(),
+            timeout_secs: None,
             max_retries: default_max_retries(),
             allowed_tools: default_allowed_tools(),
             pool_size: default_pool_size(),
@@ -658,12 +659,12 @@ mod tests {
             url: None,
             env: HashMap::new(),
             current_dir: None,
-            timeout_secs: default_timeout(),
+            timeout_secs: None,
             max_retries: default_max_retries(),
             allowed_tools: default_allowed_tools(),
             pool_size: 1,
         };
-        assert_eq!(config.timeout_secs, 30);
+        assert_eq!(config.timeout_secs, None);
         assert_eq!(config.max_retries, 3);
         assert_eq!(config.allowed_tools, vec!["*"]);
     }

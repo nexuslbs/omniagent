@@ -310,7 +310,13 @@ fn run_git(args: &[&str], cwd: Option<&str>, timeout_secs: u64) -> (String, Stri
     // git inherits the plugin's own stdout/stderr (the MCP channel + logs),
     // every run returns empty output, and the MCP JSON-RPC stream gets
     // corrupted by leaked git output.
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // stdin MUST be /dev/null, not inherited: a spawned git child that
+    // inherits fd 0 (the MCP JSON-RPC pipe) can consume protocol bytes meant
+    // for the server reader — the same request-loss class as the docker
+    // compose CLI children (G17b, Aug 2026).
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
 
     let child = match cmd.spawn() {
         Ok(c) => c,
