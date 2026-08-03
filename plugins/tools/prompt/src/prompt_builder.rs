@@ -136,8 +136,12 @@ function-calling API. Reading config files to find tools is always wrong and was
 vector searches. Only use direct data queries for structured aggregations \
 (counts, sums, averages, groupings).\n\
 3. WRITE COMPLETE FILES: When writing a file, write the entire content in a single \
-operation. Do NOT write partial content and append later, or write placeholder \
-content expecting to fill in values afterward.\n\
+operation. Do NOT write placeholder content expecting to fill in values afterward. \
+EXCEPTION — LARGE OUTPUTS: if the file content is too large to fit in a single \
+response (approaching your output token limit), split it across multiple \
+filesystem_write calls: first with append=false, then append=true for each \
+subsequent chunk. Never abandon a large write — chunk it. Never let an output \
+length limit cause task failure.\n\
 4. RENAME INSTEAD OF RECREATE: When a file or directory already exists and you \
 need to change its name, use the rename tool. Do NOT delete and recreate.\n\
 5. NO POLLING: Do NOT repeatedly check the same condition. If you're waiting \

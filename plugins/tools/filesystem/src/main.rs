@@ -161,6 +161,7 @@ fn handle_write(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let content = args["content"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'content' argument"))?;
+    let append = args["append"].as_bool().unwrap_or(false);
 
     // Validate path is within the workspace sandbox (lexical — works for
     // files that don't exist yet).
@@ -171,16 +172,35 @@ fn handle_write(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
         fs::create_dir_all(parent)
             .map_err(|e| anyhow::anyhow!("Failed to create parent directories: {}", e))?;
     }
-    fs::write(safe_path, content)
-        .map_err(|e| anyhow::anyhow!("Failed to write file '{}': {}", safe_path_str, e))?;
-    Ok((
-        format!(
-            "Successfully wrote {} bytes to {}",
-            content.len(),
-            safe_path_str
-        ),
-        false,
-    ))
+    if append {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(safe_path)
+            .map_err(|e| anyhow::anyhow!("Failed to open file '{}' for append: {}", safe_path_str, e))?;
+        f.write_all(content.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Failed to append to file '{}': {}", safe_path_str, e))?;
+        Ok((
+            format!(
+                "Successfully appended {} bytes to {}",
+                content.len(),
+                safe_path_str
+            ),
+            false,
+        ))
+    } else {
+        fs::write(safe_path, content)
+            .map_err(|e| anyhow::anyhow!("Failed to write file '{}': {}", safe_path_str, e))?;
+        Ok((
+            format!(
+                "Successfully wrote {} bytes to {}",
+                content.len(),
+                safe_path_str
+            ),
+            false,
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -410,6 +430,7 @@ async fn main() -> Result<()> {
                 name: "filesystem_write".to_string(),
                 description:
                     "WRITE/CREATE A LOCAL FILE on disk. Use this to save content to a new or existing file. Creates parent directories automatically. This is the ONLY tool for writing file content. \
+                    For very large files that exceed your output token limit, split the content across multiple calls: first call with append=false, then subsequent calls with append=true to add the rest. \
                     SANDBOX: only paths inside the workspace dir (/opt/workspace by default) and its subdirectories can be written."
                         .to_string(),
                 input_schema: serde_json::json!({
@@ -422,6 +443,10 @@ async fn main() -> Result<()> {
                         "content": {
                             "type": "string",
                             "description": "The content to write to the file"
+                        },
+                        "append": {
+                            "type": "boolean",
+                            "description": "If true, append content to the end of the file instead of overwriting it (default: false). Use for writing very large files in chunks."
                         }
                     },
                     "required": ["path", "content"]

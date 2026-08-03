@@ -307,7 +307,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 description: "Maximum tokens per LLM response".into(),
                 options: None,
                 readonly: false,
-                default: Some("4096".into()),
+                default: Some("32768".into()),
             },
         ),
         (

@@ -89,6 +89,18 @@ pub(crate) async fn run_main_loop(
             if !prompt_parts.user.is_empty() {
                 planning_messages.push(ChatMessage::user(&prompt_parts.user));
             }
+            // Output-limit awareness for the plan phase: keep the plan itself
+            // within budget; large deliverables get chunked in the execution
+            // phase, not emitted in the plan.
+            planning_messages.push(ChatMessage::system(&format!(
+                "=== Output Limit ===\n\
+                 Keep this plan concise. Your maximum output per response is {} \
+                 tokens. If a step would produce a very large deliverable \
+                 (e.g. a big file), note in the plan that it must be written in \
+                 chunks via filesystem_write append=true — never let an output \
+                 limit cause failure.",
+                max_tokens
+            )));
             // Planning instruction as user message
             let tool_list = if tool_names.is_empty() {
                 String::new()
@@ -379,6 +391,23 @@ Previous plan:\n{}",
 
     // Add the user message (from the prompt parts: the plugin provides this)
     messages.push(ChatMessage::user(&prompt_parts.user));
+
+    // Output-limit awareness: tell the model its per-response output ceiling so
+    // it plans large deliverables (big file writes, long reports) in chunks
+    // instead of hitting finish_reason=length and failing. Chunked writes use
+    // filesystem_write with append=true for subsequent parts (see TOOL_GUIDANCE
+    // rule 3 in the prompt plugin).
+    let max_output_tokens = cfg.config_snapshot().max_tokens;
+    messages.push(ChatMessage::system(&format!(
+        "=== Output Limit ===\n\
+         Your maximum output per response is {} tokens. If a single tool call \
+         (e.g. writing a large file) or your final answer would exceed this, \
+         SPLIT the work across multiple calls: write the first chunk with \
+         filesystem_write (append=false), then append the remaining chunks with \
+         append=true. Never abandon a task because of the output limit — chunk \
+         the output instead.",
+        max_output_tokens
+    )));
 
     // 5. Build tool definitions from the profile's allowed tools
     let tools_def = cfg
@@ -1060,7 +1089,21 @@ Previous plan:\n{}",
                 // agent loops forever waiting on a task that never resolves
                 // (deploy Groups 13/14 regression). External tools get the
                 // bg-threshold switch so long operations run in background.
-                let tool_future = mcp_snapshot.execute(&mcp_call, tool_ctx.clone());
+                //
+                // The tool future is created ONCE with owned data so the bg
+                // fallback can hand the SAME in-flight request to the spawned
+                // task. Sending the call twice (as an earlier implementation
+                // did) made serial MCP plugins like docker_compose execute the
+                // command TWICE: the fast-path future was dropped but its
+                // request was already executing at the plugin, and the re-sent
+                // request queued behind it — the bg task resolved only after
+                // the second execution, or never when the agent re-dispatched
+                // repeatedly (each retry queued another duplicate).
+                let bg_mcp_call = mcp_call.clone();
+                let bg_mcp_snapshot = mcp_snapshot.clone();
+                let mut tool_future = Box::pin(async move {
+                    bg_mcp_snapshot.execute(&bg_mcp_call, tool_ctx).await
+                });
 
                 let is_builtin_task_tool = matches!(
                     tool_name.as_str(),
@@ -1073,7 +1116,7 @@ Previous plan:\n{}",
 
                 let result = if is_builtin_task_tool {
                     // Run synchronously with the tool's own registered timeout.
-                    match tokio::time::timeout(timeout_dur, tool_future).await {
+                    match tokio::time::timeout(timeout_dur, tool_future.as_mut()).await {
                         Ok(result) => result,
                         Err(_) => Ok(McpToolResult {
                             call_id: tc_id.clone(),
@@ -1086,7 +1129,7 @@ Previous plan:\n{}",
                         }),
                     }
                 } else {
-                match tokio::time::timeout(bg_threshold, tool_future).await {
+                match tokio::time::timeout(bg_threshold, tool_future.as_mut()).await {
                     Ok(result) => result,
                     Err(_elapsed) => {
                         // Short timeout exceeded : switch to background mode.
@@ -1100,15 +1143,18 @@ Previous plan:\n{}",
                             .await;
                         let task_id_bg = task_id.clone();
 
-                        // Spawn background task with the per-tool timeout
-                        let bg_mcp_call = mcp_call.clone();
-                        let bg_mcp_snapshot = mcp_snapshot.clone();
+                        // Spawn a background task that CONTINUES awaiting the
+                        // same in-flight future (with the per-tool timeout).
+                        // Do NOT execute the call again — the request was
+                        // already sent to the plugin; a serial plugin would
+                        // run the command twice (and each agent re-dispatch
+                        // would queue another duplicate behind it).
                         let bg_timeout = timeout_dur;
                         let bg_tool_name = tool_name.clone();
                         let bg_registry = registry.clone();
+                        let mut bg_future = tool_future;
 
                         tokio::spawn(async move {
-                            let bg_tool_future = bg_mcp_snapshot.execute(&bg_mcp_call, tool_ctx);
                             tokio::select! {
                                 _ = abort_rx => {
                                     bg_registry.set_status(&task_id_bg,
@@ -1116,7 +1162,7 @@ Previous plan:\n{}",
                                     bg_registry.append_log(&task_id_bg,
                                         &format!("Tool '{}' was cancelled", bg_tool_name)).await;
                                 }
-                                result = tokio::time::timeout(bg_timeout, bg_tool_future) => {
+                                result = tokio::time::timeout(bg_timeout, bg_future.as_mut()) => {
                                     match result {
                                         Ok(Ok(res)) => {
                                             let truncated = truncate_content(

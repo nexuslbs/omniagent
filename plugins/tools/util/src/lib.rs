@@ -21,6 +21,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 // ---------------------------------------------------------------------------
@@ -210,6 +211,23 @@ pub struct McpToolEntry {
 // Server loop
 // ---------------------------------------------------------------------------
 
+/// Shared stdout writer: every `tools/call` request is handled in its own
+/// spawned task, so a long-running tool (docker exec, git clone, ...) never
+/// blocks subsequent calls to the plugin. Tasks share this mutex-protected
+/// writer; the lock is held ONLY for the short JSON write — never while a tool
+/// handler runs — so concurrent tool executions proceed in parallel.
+type SharedWriter = Arc<tokio::sync::Mutex<tokio::io::BufWriter<tokio::io::Stdout>>>;
+
+/// Serialize + write a single JSON-RPC response line under the shared writer lock.
+async fn write_json(writer: &SharedWriter, value: &impl serde::Serialize) -> Result<()> {
+    let json = serde_json::to_string(value)?;
+    let mut w = writer.lock().await;
+    w.write_all(json.as_bytes()).await?;
+    w.write_all(b"\n").await?;
+    w.flush().await?;
+    Ok(())
+}
+
 /// Run the MCP stdio event loop.
 ///
 /// `server_info`: identity reported in initialize response.
@@ -254,15 +272,23 @@ where
 
     tracing::info!("{} MCP server starting", server_info.name);
 
-    let index: HashMap<String, &McpToolEntry> =
-        tools.iter().map(|t| (t.def.name.clone(), t)).collect();
+    let tools = Arc::new(tools);
+    let index: Arc<HashMap<String, usize>> = Arc::new(
+        tools
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.def.name.clone(), i))
+            .collect(),
+    );
 
     let stdin = tokio::io::stdin();
     let reader = BufReader::new(stdin);
     let mut lines = reader.lines();
 
     let stdout = tokio::io::stdout();
-    let mut writer = tokio::io::BufWriter::new(stdout);
+    let writer: SharedWriter = Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(
+        stdout,
+    )));
 
     let mut initialized = false;
 
@@ -286,7 +312,7 @@ where
         match method {
             "initialize" => {
                 if let Some(id) = req_id {
-                    handle_initialize(&mut writer, id, &server_info).await?;
+                    handle_initialize(&writer, id, &server_info).await?;
                     initialized = true;
                 }
             }
@@ -306,16 +332,13 @@ where
                         id,
                         result: serde_json::json!({"configured": true}),
                     };
-                    let json = serde_json::to_string(&response)?;
-                    writer.write_all(json.as_bytes()).await?;
-                    writer.write_all(b"\n").await?;
-                    writer.flush().await?;
+                    write_json(&writer, &response).await?;
                 }
             }
             "tools/list" => {
                 if !initialized {
                     send_error(
-                        &mut writer,
+                        &writer,
                         req_id.unwrap_or(0),
                         -32000,
                         "Server not initialized",
@@ -324,13 +347,13 @@ where
                     continue;
                 }
                 if let Some(id) = req_id {
-                    handle_tools_list(&mut writer, id, &tools).await?;
+                    handle_tools_list(&writer, id, &tools).await?;
                 }
             }
             "tools/call" => {
                 if !initialized {
                     send_error(
-                        &mut writer,
+                        &writer,
                         req_id.unwrap_or(0),
                         -32000,
                         "Server not initialized",
@@ -340,16 +363,41 @@ where
                 }
                 if let Some(id) = req_id {
                     let params = request.params.unwrap_or_default();
-                    let call_params: CallToolParams = serde_json::from_value(params)
-                        .map_err(|e| anyhow::anyhow!("Invalid tools/call params: {e}"))?;
-                    handle_tools_call(&mut writer, id, &call_params, &index).await?;
+                    let call_params: CallToolParams = match serde_json::from_value(params) {
+                        Ok(cp) => cp,
+                        Err(e) => {
+                            send_error(
+                                &writer,
+                                id,
+                                -32602,
+                                format!("Invalid tools/call params: {e}"),
+                            )
+                            .await?;
+                            continue;
+                        }
+                    };
+                    // CONCURRENT: each tools/call runs in its own spawned task so
+                    // a long-running tool (docker exec, git clone, ...) never
+                    // blocks other calls to this plugin. The shared writer lock is
+                    // held only for the short JSON response write — never while a
+                    // handler executes — so N calls proceed in parallel.
+                    let writer = writer.clone();
+                    let tools = tools.clone();
+                    let index = index.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            handle_tools_call(&writer, id, &call_params, &tools, &index).await
+                        {
+                            tracing::error!("tools/call '{}' error: {e:#}", call_params.name);
+                        }
+                    });
                 }
             }
             _ => {
                 tracing::warn!("Unknown method: {method}");
                 if let Some(id) = req_id {
                     send_error(
-                        &mut writer,
+                        &writer,
                         id,
                         -32601,
                         format!("Method not found: {method}"),
@@ -371,8 +419,8 @@ where
 // Handler implementations
 // ---------------------------------------------------------------------------
 
-async fn handle_initialize<W: AsyncWriteExt + Unpin>(
-    writer: &mut tokio::io::BufWriter<W>,
+async fn handle_initialize(
+    writer: &SharedWriter,
     req_id: u64,
     server_info: &ServerInfo,
 ) -> Result<()> {
@@ -395,19 +443,16 @@ async fn handle_initialize<W: AsyncWriteExt + Unpin>(
         result: serde_json::to_value(result)?,
     };
 
-    let json = serde_json::to_string(&response)?;
-    writer.write_all(json.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-    writer.flush().await?;
+    write_json(writer, &response).await?;
 
     tracing::info!("Initialized: {} v{}", server_info.name, server_info.version);
     Ok(())
 }
 
-async fn handle_tools_list<W: AsyncWriteExt + Unpin>(
-    writer: &mut tokio::io::BufWriter<W>,
+async fn handle_tools_list(
+    writer: &SharedWriter,
     req_id: u64,
-    tools: &[McpToolEntry],
+    tools: &Arc<Vec<McpToolEntry>>,
 ) -> Result<()> {
     let defs: Vec<McpToolDef> = tools.iter().map(|t| t.def.clone()).collect();
     let result = ListToolsResult { tools: defs };
@@ -418,25 +463,23 @@ async fn handle_tools_list<W: AsyncWriteExt + Unpin>(
         result: serde_json::to_value(result)?,
     };
 
-    let json = serde_json::to_string(&response)?;
-    writer.write_all(json.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-    writer.flush().await?;
+    write_json(writer, &response).await?;
 
     tracing::info!("tools/list returned {} tool(s)", tools.len());
     Ok(())
 }
 
-async fn handle_tools_call<W: AsyncWriteExt + Unpin>(
-    writer: &mut tokio::io::BufWriter<W>,
+async fn handle_tools_call(
+    writer: &SharedWriter,
     req_id: u64,
     params: &CallToolParams,
-    index: &HashMap<String, &McpToolEntry>,
+    tools: &Arc<Vec<McpToolEntry>>,
+    index: &HashMap<String, usize>,
 ) -> Result<()> {
     tracing::info!("tools/call: name='{}'", params.name);
 
-    let entry = match index.get(&params.name) {
-        Some(e) => e,
+    let entry_idx = match index.get(&params.name) {
+        Some(i) => *i,
         None => {
             send_error(
                 writer,
@@ -448,6 +491,7 @@ async fn handle_tools_call<W: AsyncWriteExt + Unpin>(
             return Ok(());
         }
     };
+    let entry = &tools[entry_idx];
 
     let args = params.arguments.clone().unwrap_or(serde_json::Value::Null);
     let meta = params.meta.clone();
@@ -471,10 +515,7 @@ async fn handle_tools_call<W: AsyncWriteExt + Unpin>(
         result: serde_json::to_value(result)?,
     };
 
-    let json = serde_json::to_string(&response)?;
-    writer.write_all(json.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-    writer.flush().await?;
+    write_json(writer, &response).await?;
 
     tracing::info!(
         "tools/call '{}' completed (is_error={})",
@@ -488,8 +529,8 @@ async fn handle_tools_call<W: AsyncWriteExt + Unpin>(
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn send_error<W: AsyncWriteExt + Unpin>(
-    writer: &mut tokio::io::BufWriter<W>,
+async fn send_error(
+    writer: &SharedWriter,
     req_id: u64,
     code: i64,
     message: impl Into<String>,
@@ -504,10 +545,7 @@ async fn send_error<W: AsyncWriteExt + Unpin>(
         },
     };
 
-    let json = serde_json::to_string(&response)?;
-    writer.write_all(json.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
-    writer.flush().await?;
+    write_json(writer, &response).await?;
     Ok(())
 }
 
