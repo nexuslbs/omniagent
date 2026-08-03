@@ -80,6 +80,15 @@ pub(crate) async fn run_main_loop(
             if let Some(ref err) = json_error_msg {
                 planning_messages.push(ChatMessage::system(err));
             }
+            // Include the actual user request (task body for kanban/cron tasks,
+            // original message for user threads) so the plan phase sees WHAT the
+            // task is — not just the generic planning instruction. The context
+            // block also carries the seq-0 cause message (prompt plugin), but
+            // this guarantees the request reaches the plan LLM even if context
+            // assembly drops it.
+            if !prompt_parts.user.is_empty() {
+                planning_messages.push(ChatMessage::user(&prompt_parts.user));
+            }
             // Planning instruction as user message
             let tool_list = if tool_names.is_empty() {
                 String::new()

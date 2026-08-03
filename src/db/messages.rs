@@ -58,8 +58,7 @@ pub async fn get_recent_thread_messages(
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages
         WHERE thread_id = :thread_id
-          AND role IN ('cause', 'agent')
-          AND msg_type IN ('message', 'reasoning')
+          AND (role = 'cause' OR msg_type IN ('message', 'reasoning'))
         ORDER BY created_at DESC
         LIMIT :limit
         "#,
