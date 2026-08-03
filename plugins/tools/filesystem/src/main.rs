@@ -178,7 +178,9 @@ fn handle_write(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
             .create(true)
             .append(true)
             .open(safe_path)
-            .map_err(|e| anyhow::anyhow!("Failed to open file '{}' for append: {}", safe_path_str, e))?;
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to open file '{}' for append: {}", safe_path_str, e)
+            })?;
         f.write_all(content.as_bytes())
             .map_err(|e| anyhow::anyhow!("Failed to append to file '{}': {}", safe_path_str, e))?;
         Ok((
