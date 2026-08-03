@@ -167,7 +167,7 @@ impl AgentConfig {
         Ok(Self {
             llm_api_key: String::new(),
             default_provider: get("default_provider", "openai"),
-            max_tokens: get("max_tokens", "4096").parse().unwrap_or(4096),
+            max_tokens: get("max_tokens", "32768").parse().unwrap_or(32768),
             temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
             max_iterations_plan: get("max_iterations_plan", "120").parse().unwrap_or(120),
@@ -223,7 +223,7 @@ impl AgentConfig {
         Ok(Self {
             llm_api_key: String::new(),
             default_provider: get("default_provider", "openai"),
-            max_tokens: get("max_tokens", "4096").parse().unwrap_or(4096),
+            max_tokens: get("max_tokens", "32768").parse().unwrap_or(32768),
             temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
             max_iterations_plan: get("max_iterations_plan", "120").parse().unwrap_or(120),
@@ -275,7 +275,7 @@ mod tests {
         let cfg = AgentConfig {
             llm_api_key: "".to_string(),
             default_provider: "openai".to_string(),
-            max_tokens: 4096,
+            max_tokens: 32768,
             temperature: 0.7,
             max_iterations_no_plan: 30,
             max_iterations_plan: 120,
@@ -296,7 +296,7 @@ mod tests {
             default_profile: "custom".to_string(),
         };
         assert_eq!(cfg.default_provider, "openai");
-        assert_eq!(cfg.max_tokens, 4096);
+        assert_eq!(cfg.max_tokens, 32768);
         assert_eq!(cfg.temperature, 0.7);
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 3000);
@@ -371,7 +371,7 @@ mod tests {
 
         assert_eq!(get("default_provider", "openai"), "custom");
         assert_eq!(get("nonexistent", "fallback"), "fallback");
-        assert_eq!(get("max_tokens", "4096"), "4096");
+        assert_eq!(get("max_tokens", "32768"), "32768");
     }
 
     #[test]
@@ -379,7 +379,7 @@ mod tests {
         // Test the numeric parsing pattern used in from_env().
         let parse_or_default = |val: &str, default: u32| -> u32 { val.parse().unwrap_or(default) };
 
-        assert_eq!(parse_or_default("4096", 2048), 4096);
+        assert_eq!(parse_or_default("32768", 2048), 32768);
         assert_eq!(parse_or_default("abc", 2048), 2048);
         assert_eq!(parse_or_default("0", 100), 0);
     }
