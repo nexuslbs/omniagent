@@ -183,14 +183,16 @@ pub struct McpTool {
     pub input_schema: Value,
     pub server_name: Option<String>,
     /// Maximum time in seconds to wait for this tool to complete.
-    /// Used by the executor to wrap the tool call in tokio::time::timeout().
-    /// Falls back to DEFAULT_TOOL_TIMEOUT_SECS if not set.
-    pub timeout_secs: u64,
+    /// `None` = NO timeout (tool runs until it finishes, errors, or the agent
+    /// cancels it). A timeout exists ONLY when explicitly set — either by the
+    /// tool's own declaration (e.g. builtin wait-task = 310s) or by an agent
+    /// config that opts in. There is deliberately NO default fallback: fixed
+    /// tool timeouts were removed (Aug 2026) because background tasks now give
+    /// the agent full tracking/cancel/log control — a tool must never be
+    /// killed by an invisible clock the agent didn't set.
+    pub timeout_secs: Option<u64>,
     pub handler: McpToolHandler,
 }
-
-/// Default timeout for tools that don't specify one (900 seconds = 15 min).
-pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 900;
 
 /// Registry of all available MCP tools.
 #[derive(Clone)]
@@ -272,11 +274,9 @@ impl McpRegistry {
     }
 
     /// Get the timeout in seconds for a tool by name.
-    /// Returns the tool's configured timeout, or DEFAULT_TOOL_TIMEOUT_SECS if not found.
-    pub fn get_timeout_secs(&self, name: &str) -> u64 {
-        self.get(name)
-            .map(|t| t.timeout_secs)
-            .unwrap_or(DEFAULT_TOOL_TIMEOUT_SECS)
+    /// Returns `None` when the tool has no explicit timeout (run until done).
+    pub fn get_timeout_secs(&self, name: &str) -> Option<u64> {
+        self.get(name).and_then(|t| t.timeout_secs)
     }
 
     /// Execute a tool call: directly awaits the async handler (no spawn_blocking).
@@ -403,7 +403,7 @@ fn poll_task_tool() -> McpTool {
             "required": ["task_id"]
         }),
         server_name: None,
-        timeout_secs: 10,
+        timeout_secs: Some(10),
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
             Box::pin(crate::mcp::task_tools::handle_poll_task(args, ctx))
         }),
@@ -437,7 +437,7 @@ fn wait_task_tool() -> McpTool {
             "required": ["task_id"]
         }),
         server_name: None,
-        timeout_secs: 310,
+        timeout_secs: Some(310),
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
             Box::pin(crate::mcp::task_tools::handle_wait_task(args, ctx))
         }),
@@ -461,7 +461,7 @@ fn cancel_task_tool() -> McpTool {
             "required": ["task_id"]
         }),
         server_name: None,
-        timeout_secs: 10,
+        timeout_secs: Some(10),
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
             Box::pin(crate::mcp::task_tools::handle_cancel_task(args, ctx))
         }),
@@ -493,7 +493,7 @@ fn read_task_logs_tool() -> McpTool {
             "required": ["task_id"]
         }),
         server_name: None,
-        timeout_secs: 10,
+        timeout_secs: Some(10),
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
             Box::pin(crate::mcp::task_tools::handle_read_task_logs(args, ctx))
         }),
@@ -528,7 +528,7 @@ fn read_attached_file_tool() -> McpTool {
             "required": ["file_id"]
         }),
         server_name: None,
-        timeout_secs: DEFAULT_TOOL_TIMEOUT_SECS,
+        timeout_secs: None,
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let file_id = args
@@ -683,7 +683,7 @@ fn list_tool_details_tool() -> McpTool {
             "required": ["tool_name"]
         }),
         server_name: None,
-        timeout_secs: DEFAULT_TOOL_TIMEOUT_SECS,
+        timeout_secs: None,
         handler: Arc::new(|args: Value, ctx: AppContext| {
             Box::pin(async move {
                 let tool_name = args
@@ -1022,7 +1022,7 @@ mod tests {
         })
     }
 
-    fn make_tool(name: &str, server: Option<&str>, timeout: u64) -> McpTool {
+    fn make_tool(name: &str, server: Option<&str>, timeout: Option<u64>) -> McpTool {
         let full_name = if let Some(srv) = server {
             tool_qualify(srv, name)
         } else {
@@ -1048,7 +1048,7 @@ mod tests {
     #[test]
     fn test_registry_register_and_get() {
         let mut registry = McpRegistry::new();
-        let tool = make_tool("read", None, 30);
+        let tool = make_tool("read", None, Some(30));
         let name = tool.full_name.clone();
         registry.register(tool);
         assert!(registry.get(&name).is_some());
@@ -1064,7 +1064,10 @@ mod tests {
     #[test]
     fn test_registry_register_all() {
         let mut registry = McpRegistry::new();
-        let tools = vec![make_tool("read", None, 30), make_tool("write", None, 30)];
+        let tools = vec![
+            make_tool("read", None, Some(30)),
+            make_tool("write", None, Some(30)),
+        ];
         registry.register_all(tools);
         assert_eq!(registry.all().len(), 2);
     }
@@ -1072,9 +1075,9 @@ mod tests {
     #[test]
     fn test_registry_remove_by_server() {
         let mut registry = McpRegistry::new();
-        registry.register(make_tool("read", Some("fs"), 30));
-        registry.register(make_tool("write", Some("fs"), 30));
-        registry.register(make_tool("other", Some("another"), 30));
+        registry.register(make_tool("read", Some("fs"), Some(30)));
+        registry.register(make_tool("write", Some("fs"), Some(30)));
+        registry.register(make_tool("other", Some("another"), Some(30)));
 
         let removed = registry.remove_by_server("fs");
         assert_eq!(removed.len(), 2);
@@ -1086,7 +1089,7 @@ mod tests {
     #[test]
     fn test_registry_remove_by_server_no_match() {
         let mut registry = McpRegistry::new();
-        registry.register(make_tool("read", Some("fs"), 30));
+        registry.register(make_tool("read", Some("fs"), Some(30)));
         let removed = registry.remove_by_server("nonexistent");
         assert!(removed.is_empty());
         assert_eq!(registry.all().len(), 1);
@@ -1095,16 +1098,16 @@ mod tests {
     #[test]
     fn test_registry_all() {
         let mut registry = McpRegistry::new();
-        registry.register(make_tool("read", None, 30));
-        registry.register(make_tool("write", None, 60));
+        registry.register(make_tool("read", None, Some(30)));
+        registry.register(make_tool("write", None, Some(60)));
         assert_eq!(registry.all().len(), 2);
     }
 
     #[test]
     fn test_registry_allowed() {
         let mut registry = McpRegistry::new();
-        registry.register(make_tool("read", None, 30));
-        registry.register(make_tool("write", None, 30));
+        registry.register(make_tool("read", None, Some(30)));
+        registry.register(make_tool("write", None, Some(30)));
 
         let allowed_names = vec!["read".to_string()];
         let allowed = registry.allowed(&allowed_names);
@@ -1115,7 +1118,7 @@ mod tests {
     #[test]
     fn test_registry_allowed_empty_list() {
         let mut registry = McpRegistry::new();
-        registry.register(make_tool("read", None, 30));
+        registry.register(make_tool("read", None, Some(30)));
         let allowed = registry.allowed(&[]);
         assert!(allowed.is_empty());
     }
@@ -1123,23 +1126,27 @@ mod tests {
     #[test]
     fn test_get_timeout_secs_found() {
         let mut registry = McpRegistry::new();
-        registry.register(make_tool("read", None, 42));
-        assert_eq!(registry.get_timeout_secs("read"), 42);
+        registry.register(make_tool("read", None, Some(42)));
+        assert_eq!(registry.get_timeout_secs("read"), Some(42));
     }
 
     #[test]
-    fn test_get_timeout_secs_not_found_default() {
+    fn test_get_timeout_secs_not_found_is_none() {
         let registry = McpRegistry::new();
-        assert_eq!(
-            registry.get_timeout_secs("nonexistent"),
-            DEFAULT_TOOL_TIMEOUT_SECS
-        );
+        assert_eq!(registry.get_timeout_secs("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_get_timeout_secs_none_means_no_timeout() {
+        let mut registry = McpRegistry::new();
+        registry.register(make_tool("long", None, None));
+        assert_eq!(registry.get_timeout_secs("long"), None);
     }
 
     #[test]
     fn test_to_openai_tools() {
         let mut registry = McpRegistry::new();
-        registry.register(make_tool("my_tool", None, 30));
+        registry.register(make_tool("my_tool", None, Some(30)));
         let allowed = vec!["my_tool".to_string()];
         let openai_tools = registry.to_openai_tools(&allowed);
         assert_eq!(openai_tools.len(), 1);
@@ -1153,8 +1160,8 @@ mod tests {
     #[test]
     fn test_to_openai_tools_all() {
         let mut registry = McpRegistry::new();
-        registry.register(make_tool("tool_a", None, 30));
-        registry.register(make_tool("tool_b", None, 30));
+        registry.register(make_tool("tool_a", None, Some(30)));
+        registry.register(make_tool("tool_b", None, Some(30)));
         let openai_tools = registry.to_openai_tools_all();
         assert_eq!(openai_tools.len(), 2);
     }
@@ -1176,7 +1183,7 @@ mod tests {
             description: "Read tool".to_string(),
             input_schema: json!({"type": "object", "properties": {}}),
             server_name: Some("fs".to_string()),
-            timeout_secs: 30,
+            timeout_secs: Some(30),
             handler: make_test_handler(),
         };
         registry.register(tool);

@@ -320,7 +320,7 @@ mod tests {
             description: "test".to_string(),
             input_schema: json!({"type": "object"}),
             server_name: None,
-            timeout_secs: 30,
+            timeout_secs: Some(30),
             handler: make_test_handler(),
         }
     }

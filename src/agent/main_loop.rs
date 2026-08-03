@@ -1020,9 +1020,11 @@ Previous plan:\n{}",
 
             // --- Phase 1: Read per-tool timeout from registry ---
             // Snapshot the registry outside the spawned task so we only read the lock once.
+            // `None` = NO timeout: the tool runs until it finishes, errors, or the
+            // agent cancels it (background tasks give full tracking control).
             let mcp_snapshot = pm.snapshot_registry().await;
             let timeout_secs = mcp_snapshot.get_timeout_secs(&tool_name);
-            let timeout_dur = std::time::Duration::from_secs(timeout_secs);
+            let timeout_dur = timeout_secs.map(std::time::Duration::from_secs);
 
             // Snapshot bg threshold BEFORE entering the spawned closure (cfg ref issue)
             let bg_threshold_secs = cfg.config_snapshot().tool_bg_secs;
@@ -1115,18 +1117,26 @@ Previous plan:\n{}",
                 );
 
                 let result = if is_builtin_task_tool {
-                    // Run synchronously with the tool's own registered timeout.
-                    match tokio::time::timeout(timeout_dur, tool_future.as_mut()).await {
-                        Ok(result) => result,
-                        Err(_) => Ok(McpToolResult {
-                            call_id: tc_id.clone(),
-                            content: format!(
-                                "Tool '{}' timed out after {}s",
-                                tool_name,
-                                timeout_dur.as_secs()
-                            ),
-                            is_error: true,
-                        }),
+                    // Run synchronously with the tool's own declared timeout
+                    // (wait-task declares 310s; poll/cancel/read-task-logs are
+                    // fast). If the tool declares NO timeout, await it directly
+                    // — the tool decides when it's done.
+                    match timeout_dur {
+                        Some(dur) => {
+                            match tokio::time::timeout(dur, tool_future.as_mut()).await {
+                                Ok(result) => result,
+                                Err(_) => Ok(McpToolResult {
+                                    call_id: tc_id.clone(),
+                                    content: format!(
+                                        "Tool '{}' timed out after {}s",
+                                        tool_name,
+                                        dur.as_secs()
+                                    ),
+                                    is_error: true,
+                                }),
+                            }
+                        }
+                        None => tool_future.as_mut().await,
                     }
                 } else {
                 match tokio::time::timeout(bg_threshold, tool_future.as_mut()).await {
@@ -1144,7 +1154,10 @@ Previous plan:\n{}",
                         let task_id_bg = task_id.clone();
 
                         // Spawn a background task that CONTINUES awaiting the
-                        // same in-flight future (with the per-tool timeout).
+                        // same in-flight future. The tool's declared timeout
+                        // (if any) still bounds it; with NO declared timeout
+                        // (`None`) the task runs until it completes, errors,
+                        // or the agent cancels it via cancel-task.
                         // Do NOT execute the call again — the request was
                         // already sent to the plugin; a serial plugin would
                         // run the command twice (and each agent re-dispatch
@@ -1162,7 +1175,14 @@ Previous plan:\n{}",
                                     bg_registry.append_log(&task_id_bg,
                                         &format!("Tool '{}' was cancelled", bg_tool_name)).await;
                                 }
-                                result = tokio::time::timeout(bg_timeout, bg_future.as_mut()) => {
+                                result = async {
+                                    match bg_timeout {
+                                        Some(dur) => {
+                                            tokio::time::timeout(dur, bg_future.as_mut()).await
+                                        }
+                                        None => Ok(bg_future.as_mut().await),
+                                    }
+                                } => {
                                     match result {
                                         Ok(Ok(res)) => {
                                             let truncated = truncate_content(
@@ -1180,7 +1200,7 @@ Previous plan:\n{}",
                                         Err(_) => {
                                             let err = format!(
                                                 "Tool '{}' exceeded long timeout ({}s)",
-                                                bg_tool_name, bg_timeout.as_secs());
+                                                bg_tool_name, bg_timeout.map(|d| d.as_secs()).unwrap_or(0));
                                             bg_registry.set_status(&task_id_bg,
                                                 crate::agent::task_registry::TaskStatus::Failed(
                                                     err)).await;
