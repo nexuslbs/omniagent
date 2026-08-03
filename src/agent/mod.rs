@@ -300,6 +300,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                             if let Err(e) = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
                                 tracing::warn!("[supervisor] Failed to mark thread {} failed (no-cause): {:?}", thread.id, e);
                             }
+                            // Kanban-linked task must not stay "running" when the
+                            // thread dies without a cause message.
+                            crate::agent::kanban_updater::update_kanban_status(&cfg, thread, "failed").await;
                             continue;
                         }
                         Err(e) => {
@@ -327,6 +330,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                             if let Err(e) = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
                                 tracing::warn!("[supervisor] Failed to mark thread {} failed (no-cause): {:?}", thread.id, e);
                             }
+                            crate::agent::kanban_updater::update_kanban_status(&cfg, thread, "failed").await;
                             continue;
                         }
                     };
@@ -344,6 +348,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                             if let Err(e) = queries::complete_thread(&cfg.pool, thread.id, "skipped", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
                                 tracing::warn!("[supervisor] Failed to mark thread {} skipped: {:?}", thread.id, e);
                             }
+                            crate::agent::kanban_updater::update_kanban_status(&cfg, thread, "skipped").await;
                             continue;
                         }
                         Ok(_) => {} // under limit, proceed

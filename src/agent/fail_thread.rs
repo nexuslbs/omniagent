@@ -65,6 +65,10 @@ pub(crate) async fn fail_thread(
         );
     }
 
+    // If this thread is linked to a kanban task, mark it as blocked so a
+    // validation failure can't leave the task in "running" forever.
+    crate::agent::kanban_updater::update_kanban_status(cfg, thread, "failed").await;
+
     // Deliver the error message back to the user's platform
     if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
         helpers::enqueue_delivery(
