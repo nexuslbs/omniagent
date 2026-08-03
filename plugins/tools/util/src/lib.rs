@@ -286,9 +286,7 @@ where
     let mut lines = reader.lines();
 
     let stdout = tokio::io::stdout();
-    let writer: SharedWriter = Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(
-        stdout,
-    )));
+    let writer: SharedWriter = Arc::new(tokio::sync::Mutex::new(tokio::io::BufWriter::new(stdout)));
 
     let mut initialized = false;
 
@@ -396,13 +394,7 @@ where
             _ => {
                 tracing::warn!("Unknown method: {method}");
                 if let Some(id) = req_id {
-                    send_error(
-                        &writer,
-                        id,
-                        -32601,
-                        format!("Method not found: {method}"),
-                    )
-                    .await?;
+                    send_error(&writer, id, -32601, format!("Method not found: {method}")).await?;
                 }
             }
         }
