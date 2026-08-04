@@ -17,14 +17,28 @@ use tokio::sync::RwLock;
 // Tool: create_cron_job
 // ---------------------------------------------------------------------------
 
-async fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_create(
+    pool: &PgPool,
+    args: &Value,
+    meta: Option<&McpMeta>,
+) -> Result<(String, bool)> {
     let name = args["name"].as_str().unwrap_or("");
     let schedule = args["schedule"].as_str().unwrap_or("");
     let prompt = args["prompt"].as_str();
     let display_name = args["display_name"].as_str().unwrap_or(name);
     let skills_str = args["skills"].as_str().unwrap_or("");
-    let channel_id_arg = args["channel_id"].as_i64();
-    let profile_arg = args["profile"].as_str();
+    // channel_id: explicit argument wins; else the CURRENT channel from the
+    // agent's runtime context (_meta.channel_id); else the default cron channel.
+    let channel_id_arg = args["channel_id"]
+        .as_i64()
+        .or_else(|| meta.and_then(|m| m.channel_id));
+    // profile: explicit argument wins; else the agent's ACTIVE profile from
+    // _meta.profile_name (the job runs under that profile when fired).
+    let profile_owned = args["profile"]
+        .as_str()
+        .map(|s| s.to_string())
+        .or_else(|| meta.and_then(|m| m.profile_name.clone()));
+    let profile_arg = profile_owned.as_deref();
     let mode = args["mode"].as_str().unwrap_or("agentic");
     let action_id = args["action_id"].as_str();
     let silent = args["silent"].as_bool();
@@ -291,12 +305,12 @@ async fn main() -> Result<()> {
 
     // Wrap each handler to capture a clone of the shared pool
     let p_cron = pool.clone();
-    let create_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+    let create_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let p = p_cron.clone();
         Box::pin(async move {
             let guard = p.read().await;
             let pool = guard.as_ref().expect("Pool not initialized").clone();
-            handle_create(&pool, &args).await
+            handle_create(&pool, &args, meta.as_ref()).await
         })
     });
     let p_list = pool.clone();
@@ -341,8 +355,8 @@ async fn main() -> Result<()> {
                         "schedule": { "type": "string", "description": "Cron schedule expression in 5-field Linux format (min hour day month weekday)" },
                         "prompt": { "type": "string", "description": "The prompt/message to execute when the cron job triggers" },
                         "skills": { "type": "string", "description": "Optional comma-separated list of skill names" },
-                        "channel_id": { "type": "integer", "description": "Optional channel ID" },
-                        "profile": { "type": "string", "description": "Optional profile name" },
+                        "channel_id": { "type": "integer", "description": "Optional channel ID (default: current channel)" },
+                        "profile": { "type": "string", "description": "Optional profile name (default: current profile)" },
                         "mode": { "type": "string", "description": "Job mode: 'agentic' (default) or 'action'" },
                         "action_id": { "type": "string", "description": "For mode='action': the action ID to execute" },
                         "silent": { "type": "boolean", "description": "When true and mode='action', no thread/messages on success" },

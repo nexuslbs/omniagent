@@ -17,10 +17,15 @@ use tokio::sync::RwLock;
 // Tool: add_subtask
 // ---------------------------------------------------------------------------
 
-async fn handle_add(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_add(pool: &PgPool, args: &Value, meta: Option<&McpMeta>) -> Result<(String, bool)> {
     let thread_id = args["thread_id"]
         .as_i64()
-        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'thread_id'"))?;
+        .or_else(|| meta.and_then(|m| m.thread_id))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Missing 'thread_id' (no current thread in context). Pass thread_id explicitly."
+            )
+        })?;
     let description = args["description"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'description'"))?;
@@ -74,10 +79,19 @@ async fn handle_add(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Tool: list_subtasks
 // ---------------------------------------------------------------------------
 
-async fn handle_list(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_list(
+    pool: &PgPool,
+    args: &Value,
+    meta: Option<&McpMeta>,
+) -> Result<(String, bool)> {
     let thread_id = args["thread_id"]
         .as_i64()
-        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'thread_id'"))?;
+        .or_else(|| meta.and_then(|m| m.thread_id))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Missing 'thread_id' (no current thread in context). Pass thread_id explicitly."
+            )
+        })?;
 
     let all = subtask::list_subtasks(pool, thread_id).await?;
     let counts = subtask::get_subtask_counts(pool, thread_id).await?;
@@ -119,7 +133,11 @@ async fn handle_list(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Tool: update_subtask
 // ---------------------------------------------------------------------------
 
-async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_update(
+    pool: &PgPool,
+    args: &Value,
+    meta: Option<&McpMeta>,
+) -> Result<(String, bool)> {
     let subtask_id = args["subtask_id"]
         .as_i64()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'subtask_id'"))?;
@@ -127,7 +145,12 @@ async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     // Need thread_id for counts after update
     let thread_id = args["thread_id"]
         .as_i64()
-        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'thread_id'"))?;
+        .or_else(|| meta.and_then(|m| m.thread_id))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Missing 'thread_id' (no current thread in context). Pass thread_id explicitly."
+            )
+        })?;
 
     let mut updated_any = false;
 
@@ -201,14 +224,23 @@ async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Tool: delete_subtask
 // ---------------------------------------------------------------------------
 
-async fn handle_delete(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_delete(
+    pool: &PgPool,
+    args: &Value,
+    meta: Option<&McpMeta>,
+) -> Result<(String, bool)> {
     let subtask_id = args["subtask_id"]
         .as_i64()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'subtask_id'"))?;
 
     let thread_id = args["thread_id"]
         .as_i64()
-        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'thread_id'"))?;
+        .or_else(|| meta.and_then(|m| m.thread_id))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Missing 'thread_id' (no current thread in context). Pass thread_id explicitly."
+            )
+        })?;
 
     let rows = subtask::delete_subtask(pool, subtask_id).await?;
     if rows == 0 {
@@ -256,10 +288,19 @@ async fn handle_delete(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Tool: get_subtask_counts
 // ---------------------------------------------------------------------------
 
-async fn handle_get_counts(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_get_counts(
+    pool: &PgPool,
+    args: &Value,
+    meta: Option<&McpMeta>,
+) -> Result<(String, bool)> {
     let thread_id = args["thread_id"]
         .as_i64()
-        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'thread_id'"))?;
+        .or_else(|| meta.and_then(|m| m.thread_id))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Missing 'thread_id' (no current thread in context). Pass thread_id explicitly."
+            )
+        })?;
 
     let counts = subtask::get_subtask_counts(pool, thread_id).await?;
     let current = subtask::get_current_subtask(pool, thread_id).await?;
@@ -317,58 +358,58 @@ async fn main() -> Result<()> {
 
     // Wrap each handler to capture a clone of the pool
     let p_add = pool.clone();
-    let add_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+    let add_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let p = p_add.clone();
         Box::pin(async move {
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
-            handle_add(&pool, &args).await
+            handle_add(&pool, &args, meta.as_ref()).await
         })
     });
     let p_list = pool.clone();
-    let list_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+    let list_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let p = p_list.clone();
         Box::pin(async move {
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
-            handle_list(&pool, &args).await
+            handle_list(&pool, &args, meta.as_ref()).await
         })
     });
     let p_upd = pool.clone();
-    let update_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+    let update_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let p = p_upd.clone();
         Box::pin(async move {
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
-            handle_update(&pool, &args).await
+            handle_update(&pool, &args, meta.as_ref()).await
         })
     });
     let p_del = pool.clone();
-    let delete_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+    let delete_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let p = p_del.clone();
         Box::pin(async move {
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
-            handle_delete(&pool, &args).await
+            handle_delete(&pool, &args, meta.as_ref()).await
         })
     });
     let p_cnt = pool.clone();
-    let counts_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+    let counts_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let p = p_cnt.clone();
         Box::pin(async move {
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
-            handle_get_counts(&pool, &args).await
+            handle_get_counts(&pool, &args, meta.as_ref()).await
         })
     });
 
@@ -383,11 +424,11 @@ async fn main() -> Result<()> {
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "thread_id": { "type": "integer", "description": "The thread ID to add the subtask to" },
+                        "thread_id": { "type": "integer", "description": "The thread ID to add the subtask to (default: current thread)" },
                         "description": { "type": "string", "description": "Subtask description (required)" },
                         "priority": { "type": "integer", "description": "Subtask priority (default: 0). Higher = more important." },
                     },
-                    "required": ["thread_id", "description"],
+                    "required": ["description"],
                 }),
             },
             handler: add_handler,
@@ -402,9 +443,8 @@ async fn main() -> Result<()> {
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "thread_id": { "type": "integer", "description": "The thread ID to list subtasks for" },
+                        "thread_id": { "type": "integer", "description": "The thread ID to list subtasks for (default: current thread)" },
                     },
-                    "required": ["thread_id"],
                 }),
             },
             handler: list_handler,
@@ -419,7 +459,7 @@ async fn main() -> Result<()> {
                     "type": "object",
                     "properties": {
                         "subtask_id": { "type": "integer", "description": "The subtask ID to update" },
-                        "thread_id": { "type": "integer", "description": "The thread ID the subtask belongs to" },
+                        "thread_id": { "type": "integer", "description": "The thread ID the subtask belongs to (default: current thread)" },
                         "status": {
                             "type": "string",
                             "description": "New status: pending, completed, cancelled, error",
@@ -427,7 +467,7 @@ async fn main() -> Result<()> {
                         },
                         "description": { "type": "string", "description": "New description for the subtask" },
                     },
-                    "required": ["subtask_id", "thread_id"],
+                    "required": ["subtask_id"],
                 }),
             },
             handler: update_handler,
@@ -442,9 +482,9 @@ async fn main() -> Result<()> {
                     "type": "object",
                     "properties": {
                         "subtask_id": { "type": "integer", "description": "The subtask ID to delete" },
-                        "thread_id": { "type": "integer", "description": "The thread ID the subtask belongs to" },
+                        "thread_id": { "type": "integer", "description": "The thread ID the subtask belongs to (default: current thread)" },
                     },
-                    "required": ["subtask_id", "thread_id"],
+                    "required": ["subtask_id"],
                 }),
             },
             handler: delete_handler,
@@ -458,9 +498,8 @@ async fn main() -> Result<()> {
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "thread_id": { "type": "integer", "description": "The thread ID to get counts for" },
+                        "thread_id": { "type": "integer", "description": "The thread ID to get counts for (default: current thread)" },
                     },
-                    "required": ["thread_id"],
                 }),
             },
             handler: counts_handler,

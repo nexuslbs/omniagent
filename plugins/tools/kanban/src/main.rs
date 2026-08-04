@@ -82,7 +82,11 @@ fn task_to_json(task: &db::kanban::KanbanTaskDb) -> serde_json::Value {
 // Tool: create_kanban_task
 // ---------------------------------------------------------------------------
 
-async fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_create(
+    pool: &PgPool,
+    args: &Value,
+    meta: Option<&McpMeta>,
+) -> Result<(String, bool)> {
     let title = args["title"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'title'"))?;
@@ -95,8 +99,17 @@ async fn handle_create(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let status = args["status"].as_str().unwrap_or("backlog");
     let priority = args["priority"].as_i64().unwrap_or(0) as i32;
     let assignee = args["assignee"].as_str().unwrap_or("");
-    let channel_id_arg = args["channel_id"].as_i64();
-    let profile = args["profile"].as_str().map(|s| s.to_string());
+    // channel_id: explicit argument wins; else the CURRENT channel from the
+    // agent's runtime context (_meta.channel_id); else the default cron channel.
+    let channel_id_arg = args["channel_id"]
+        .as_i64()
+        .or_else(|| meta.and_then(|m| m.channel_id));
+    // profile: explicit argument wins; else the agent's ACTIVE profile from
+    // _meta.profile_name (the task runs under that profile when dispatched).
+    let profile = args["profile"]
+        .as_str()
+        .map(|s| s.to_string())
+        .or_else(|| meta.and_then(|m| m.profile_name.clone()));
     let template = args["template"].as_str().unwrap_or("");
 
     // Validate status
@@ -604,14 +617,14 @@ async fn main() -> Result<()> {
     let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
 
     let p_create = pool.clone();
-    let create_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+    let create_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let p = p_create.clone();
         Box::pin(async move {
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
-            handle_create(&pool, &args).await
+            handle_create(&pool, &args, meta.as_ref()).await
         })
     });
 
@@ -708,11 +721,11 @@ async fn main() -> Result<()> {
                         },
                         "channel_id": {
                             "type": "integer",
-                            "description": "Optional channel ID for thread/cause creation"
+                            "description": "Optional channel ID for thread/cause creation (default: current channel)"
                         },
                         "profile": {
                             "type": "string",
-                            "description": "Optional profile name for the task"
+                            "description": "Optional profile name for the task (default: current profile)"
                         },
                         "template": {
                             "type": "string",
