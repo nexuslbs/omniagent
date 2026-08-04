@@ -870,11 +870,11 @@ mod tests {
 
     #[test]
     fn test_vector_to_string_negative() {
-        let v = vec![-1.5, 0.0, 3.14];
+        let v = vec![-1.5, 0.0, 3.25];
         let s = vector_to_string(&v);
         assert!(s.contains("-1.5"));
         assert!(s.contains("0"));
-        assert!(s.contains("3.14"));
+        assert!(s.contains("3.25"));
     }
 
     #[test]
