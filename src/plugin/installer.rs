@@ -244,7 +244,9 @@ fn find_plugin_json(dir: &Path) -> AppResult<String> {
 ///
 /// Uses a shared bare-mirror cache at `{workspace_dir}/.git-cache/<sha256(url)>/`
 /// so that multiple plugins from the same repo share a single object store.
-/// Fresh clones use `git clone --reference <cache>`: instant, zero network.
+/// Fresh clones use `git clone --reference-if-able <cache>`: instant, zero
+/// network when the cache is usable (a shallow cache — from a shallow source
+/// like a CI depth-1 checkout — is skipped gracefully instead of aborting).
 ///
 /// The type directory (mcp, platforms, providers) is determined automatically
 /// from the `type` field in the plugin's plugin.json manifest after cloning.
@@ -320,8 +322,12 @@ pub fn install_from_git(
     }
 
     // If the mirror is shallow (source was a shallow clone, e.g. CI
-    // checkout with --depth=1), unshallow it so subsequent
-    // git clone --reference can use it without "shallow" error.
+    // checkout with --depth=1), try to unshallow it so subsequent
+    // git clone --reference-if-able can still use it as a fast object
+    // store. If the SOURCE itself is shallow (nothing to deepen from),
+    // --unshallow reports success but the cache stays shallow — that's
+    // fine: --reference-if-able below then skips the cache and falls
+    // back to a direct clone from the URL.
     if cache_path.join("shallow").exists() {
         tracing::info!("Git-cache at {} is shallow, unshallowing...", cache_dir);
         let unshallow = std::process::Command::new("git")
@@ -330,7 +336,15 @@ pub fn install_from_git(
             .ctx(format!("Failed to unshallow git-cache at {}", cache_dir))?;
         if !unshallow.success() {
             tracing::warn!(
-                "Failed to unshallow git-cache at {}, fallback may fail",
+                "Failed to unshallow git-cache at {}; clone will skip the reference and use the URL directly",
+                cache_dir
+            );
+        } else if cache_path.join("shallow").exists() {
+            // Source itself is shallow (CI depth-1 checkout) — --unshallow
+            // exit 0 but could not deepen. Reference will be skipped; the
+            // clone still succeeds via --reference-if-able.
+            tracing::warn!(
+                "git-cache at {} is still shallow after unshallow (source itself is shallow); clone will skip the reference and use the URL directly",
                 cache_dir
             );
         }
@@ -491,17 +505,23 @@ pub fn install_from_git(
             git_ref
         );
 
-        // Reference clone from local cache: instant, hardlinks objects
+        // Reference clone from local cache: instant, hardlinks objects.
+        // --reference-if-able (NOT --reference): git hard-fails with
+        // "fatal: reference repository '...' is shallow" if the cache is a
+        // shallow mirror (which happens whenever the source URL is itself a
+        // shallow checkout, e.g. CI's actions/checkout --depth=1). The
+        // -if-able variant silently skips an unusable cache and clones
+        // directly from the URL, so a shallow source never breaks installs.
         let mut cmd = std::process::Command::new("git");
         cmd.arg("clone")
-            .arg("--reference")
+            .arg("--reference-if-able")
             .arg(&cache_dir)
             .arg("--depth")
             .arg("1")
             .arg(url)
             .arg(&initial_remote_dir);
         tracing::info!(
-            "Running: git clone --reference {} --depth 1 {} {}",
+            "Running: git clone --reference-if-able {} --depth 1 {} {}",
             cache_dir,
             url,
             initial_remote_dir
