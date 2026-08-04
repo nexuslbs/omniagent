@@ -16,7 +16,7 @@ use std::sync::Arc;
 // Tool: create_skill
 // ---------------------------------------------------------------------------
 
-fn handle_create_skill(args: Value, config: &Config) -> Result<(String, bool)> {
+fn handle_create_skill(args: Value, config: &Config, profile_name: &str) -> Result<(String, bool)> {
     let data_dir = &config.omni_dir;
 
     let name = args["name"]
@@ -58,8 +58,23 @@ fn handle_create_skill(args: Value, config: &Config) -> Result<(String, bool)> {
     // Normalize name
     let normalized = name.to_lowercase().replace(' ', "-");
 
-    // Build file path: <data_dir>/skills/<category>/SKILL.md
-    let skill_dir = Path::new(&data_dir).join("skills").join(category);
+    // Build file path: <data_dir>/skills/<category>/<name>.md for the global
+    // root, or <data_dir>/profiles/<profile>/skills/<category>/<name>.md when
+    // a profile is active. The PROFILE root is what the prompt plugin lists
+    // as "Available skills" in every system prompt — writing there makes the
+    // new skill immediately visible to the agent. (A global-root write would
+    // be findable via list_skills/view_skill but would NOT show up in the
+    // agent's own prompt, so the agent would never know it exists.)
+    let profile = profile_name.trim().to_string();
+    let skills_base = if profile.is_empty() {
+        Path::new(&data_dir).join("skills")
+    } else {
+        Path::new(&data_dir)
+            .join("profiles")
+            .join(&profile)
+            .join("skills")
+    };
+    let skill_dir = skills_base.join(category);
     let skill_path = skill_dir.join(format!("{}.md", normalized));
 
     // Check if already exists
@@ -493,11 +508,15 @@ async fn main() -> Result<()> {
     };
 
     let c1 = config.clone();
-    let create_skill_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+    let create_skill_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let c = c1.clone();
+        let profile = meta
+            .as_ref()
+            .and_then(|m| m.profile_name.clone())
+            .unwrap_or_default();
         Box::pin(async move {
             let config = c.lock().clone();
-            handle_create_skill(args, &config)
+            handle_create_skill(args, &config, &profile)
         })
     });
 
@@ -532,7 +551,7 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "create_skill".to_string(),
                 description:
-                    "Create a new skill (SKILL.md file) for reusable procedures. Skills allow the agent to automate recurring task patterns. The skill is saved to <data_dir>/skills/<category>/<name>.md and will be available for future sessions."
+                    "Create a new skill (SKILL.md file) for reusable procedures. Skills allow the agent to automate recurring task patterns. The skill is saved to the ACTIVE PROFILE's skills dir (<data_dir>/profiles/<profile>/skills/<category>/<name>.md) so it shows up in the agent's own 'Available skills' prompt; with no active profile it falls back to <data_dir>/skills/<category>/<name>.md. It will be available for future sessions."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",

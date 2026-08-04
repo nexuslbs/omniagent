@@ -112,7 +112,15 @@ fn handle_search_wiki(args: &Value, omni_dir: &str) -> Result<(String, bool)> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'query'"))?;
     let limit = args["limit"].as_i64().unwrap_or(10).min(30) as usize;
-    let profile = args["profile"].as_str().unwrap_or("default");
+    // Default to the ACTIVE profile (matches memory/prompt plugins), NOT a
+    // hardcoded "default" — the real profile is e.g. "omni", so a hardcoded
+    // default made every no-profile search_wiki call return
+    // "Wiki directory not found" (the agent calls without profile).
+    let profile = args["profile"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(omniagent::profile::default_profile_name);
 
     let wiki_dir = format!("{}/profiles/{}/wiki", omni_dir, profile);
     let wiki_dir_path = std::path::Path::new(&wiki_dir);
@@ -120,19 +128,35 @@ fn handle_search_wiki(args: &Value, omni_dir: &str) -> Result<(String, bool)> {
     if !wiki_dir_path.exists() {
         return Ok((
             format!(
-                "Wiki directory not found: {}. Is the profile correct?",
-                wiki_dir
+                "Wiki directory not found: {}. Is the profile correct? (active profile: {})",
+                wiki_dir,
+                omniagent::profile::default_profile_name()
             ),
             false,
         ));
     }
 
-    let mut results: Vec<(String, String)> = Vec::new();
     let query_lower = query.to_lowercase();
 
-    if let Ok(entries) = std::fs::read_dir(wiki_dir_path) {
+    // Walk the wiki tree RECURSIVELY (top-level pages AND Reference/ etc.):
+    // read_dir alone never descends into subdirectories, so the most
+    // important pages (Reference/Container-Mount-Map.md, Budget-and-Context.md,
+    // Deployment-Checklist.md, ...) were invisible to search_wiki.
+    let mut results: Vec<(String, String)> = Vec::new();
+    let mut stack: Vec<std::path::PathBuf> = vec![wiki_dir_path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
+            if results.len() >= limit {
+                break;
+            }
             let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
             if path.extension().map(|e| e == "md").unwrap_or(false) {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     let lines: Vec<&str> = content.lines().collect();
@@ -145,11 +169,10 @@ fn handle_search_wiki(args: &Value, omni_dir: &str) -> Result<(String, bool)> {
                         .map(|l| l.trim())
                         .collect();
                     if !preview_lines.is_empty() || title.to_lowercase().contains(&query_lower) {
-                        let filename = path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("")
-                            .to_string();
+                        // Relative path from the wiki root, so nested pages are
+                        // distinguishable (e.g. "Reference/Container-Mount-Map").
+                        let rel = path.strip_prefix(wiki_dir_path).unwrap_or(&path);
+                        let filename = rel.with_extension("").to_string_lossy().to_string();
                         let preview = if preview_lines.is_empty() {
                             "".to_string()
                         } else {
@@ -173,10 +196,6 @@ fn handle_search_wiki(args: &Value, omni_dir: &str) -> Result<(String, bool)> {
                         results.push((filename, preview));
                     }
                 }
-            }
-
-            if results.len() >= limit {
-                break;
             }
         }
     }
