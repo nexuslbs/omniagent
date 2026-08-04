@@ -238,10 +238,7 @@ impl AgentConfig {
             messages_vectorization_api_url: opt_str(&get("messages_vectorization_api_url", "")),
             messages_vectorization_protocol: get("messages_vectorization_protocol", "openai"),
             messages_vectorization_api_key: opt_str(&get("messages_vectorization_api_key", "")),
-            messages_vectorization_api_model: opt_str(&get(
-                "messages_vectorization_api_model",
-                "",
-            )),
+            messages_vectorization_api_model: opt_str(&get("messages_vectorization_api_model", "")),
             messages_vectorization_interval_secs: get("messages_vectorization_interval", "3600")
                 .parse()
                 .unwrap_or(3600),
@@ -326,10 +323,7 @@ impl AgentConfig {
             messages_vectorization_api_url: opt_str(&get("messages_vectorization_api_url", "")),
             messages_vectorization_protocol: get("messages_vectorization_protocol", "openai"),
             messages_vectorization_api_key: opt_str(&get("messages_vectorization_api_key", "")),
-            messages_vectorization_api_model: opt_str(&get(
-                "messages_vectorization_api_model",
-                "",
-            )),
+            messages_vectorization_api_model: opt_str(&get("messages_vectorization_api_model", "")),
             messages_vectorization_interval_secs: get("messages_vectorization_interval", "3600")
                 .parse()
                 .unwrap_or(3600),

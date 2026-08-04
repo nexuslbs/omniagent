@@ -6,6 +6,7 @@
 //! dimensions) and an external API-based vectorizer.
 
 use async_trait::async_trait;
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::hash_map::DefaultHasher;
@@ -13,7 +14,6 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use std::time::{Duration, SystemTime};
 
 use crate::err_msg;
@@ -392,9 +392,11 @@ impl MessageVectorizer {
     }
 
     async fn process_batch(&self) -> AppResult<()> {
-        let messages =
-            super::db::types::find_messages_without_embeddings(&self.pool, self.config.batch_size as i64)
-                .await?;
+        let messages = super::db::types::find_messages_without_embeddings(
+            &self.pool,
+            self.config.batch_size as i64,
+        )
+        .await?;
 
         if messages.is_empty() {
             return Ok(());
@@ -1012,12 +1014,8 @@ mod tests {
     #[test]
     fn test_embedding_protocol_unknown_defaults_to_openai() {
         let protocol = EmbeddingProtocol("unknown-protocol".to_string());
-        let (url, headers, body) = protocol.build_request(
-            "test",
-            "https://example.com",
-            &None,
-            "some-model",
-        );
+        let (url, headers, body) =
+            protocol.build_request("test", "https://example.com", &None, "some-model");
         // Unknown protocols should default to OpenAI-compatible format
         assert!(url.ends_with("/embeddings"));
         assert!(headers.is_empty());
@@ -1027,12 +1025,8 @@ mod tests {
     #[test]
     fn test_embedding_protocol_no_trailing_slash_handling() {
         let protocol = EmbeddingProtocol("openai".to_string());
-        let (url, _, _) = protocol.build_request(
-            "test",
-            "https://api.openai.com/v1/",
-            &None,
-            "model",
-        );
+        let (url, _, _) =
+            protocol.build_request("test", "https://api.openai.com/v1/", &None, "model");
         // Should strip trailing slash before appending /embeddings
         assert_eq!(url, "https://api.openai.com/v1/embeddings");
     }
