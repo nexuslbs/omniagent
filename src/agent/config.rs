@@ -122,6 +122,26 @@ pub struct AgentConfig {
     pub max_inline_file_kb: u32,
     /// Default profile name (used at login / session start).
     pub default_profile: String,
+
+    // ── Vectorization (message/wiki background embedding workers) ──
+    /// Whether the background message vectorizer runs (populates embedding_vec).
+    pub vectorize_messages: bool,
+    /// Embedding method for messages: "local" (HashVectorizer) or "api".
+    pub messages_vectorization_method: String,
+    pub messages_vectorization_api_url: Option<String>,
+    pub messages_vectorization_protocol: String,
+    pub messages_vectorization_api_key: Option<String>,
+    pub messages_vectorization_api_model: Option<String>,
+    /// Poll interval (seconds) between message vectorizer batch runs.
+    pub messages_vectorization_interval_secs: u64,
+    /// Whether the background wiki vectorizer runs (Qdrant).
+    pub vectorize_wiki: bool,
+    pub wiki_vectorization_method: String,
+    pub wiki_vectorization_api_url: Option<String>,
+    pub wiki_vectorization_protocol: String,
+    pub wiki_vectorization_api_key: Option<String>,
+    pub wiki_vectorization_api_model: Option<String>,
+    pub wiki_vectorization_interval_secs: u64,
 }
 
 /// Shared context bundle used by channel_handler and process_thread.
@@ -164,6 +184,15 @@ impl AgentConfig {
                 .unwrap_or_else(|| default.to_string())
         };
 
+        // Empty strings in settings.yml are treated as None for optional fields.
+        let opt_str = |v: &str| -> Option<String> {
+            if v.trim().is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        };
+
         Ok(Self {
             llm_api_key: String::new(),
             default_provider: get("default_provider", "openai"),
@@ -201,6 +230,30 @@ impl AgentConfig {
             platform_max_spawn_retries: get("platform_max_spawn_retries", "3").parse().unwrap_or(3),
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
             default_profile: get("default_profile", "omni"),
+
+            // Vectorization — defaults match settings.yml so the worker is
+            // active out of the box (vectorize_messages: true by default).
+            vectorize_messages: get("vectorize_messages", "true").parse().unwrap_or(true),
+            messages_vectorization_method: get("messages_vectorization_method", "local"),
+            messages_vectorization_api_url: opt_str(&get("messages_vectorization_api_url", "")),
+            messages_vectorization_protocol: get("messages_vectorization_protocol", "openai"),
+            messages_vectorization_api_key: opt_str(&get("messages_vectorization_api_key", "")),
+            messages_vectorization_api_model: opt_str(&get(
+                "messages_vectorization_api_model",
+                "",
+            )),
+            messages_vectorization_interval_secs: get("messages_vectorization_interval", "3600")
+                .parse()
+                .unwrap_or(3600),
+            vectorize_wiki: get("vectorize_wiki", "false").parse().unwrap_or(false),
+            wiki_vectorization_method: get("wiki_vectorization_method", "local"),
+            wiki_vectorization_api_url: opt_str(&get("wiki_vectorization_api_url", "")),
+            wiki_vectorization_protocol: get("wiki_vectorization_protocol", "openai"),
+            wiki_vectorization_api_key: opt_str(&get("wiki_vectorization_api_key", "")),
+            wiki_vectorization_api_model: opt_str(&get("wiki_vectorization_api_model", "")),
+            wiki_vectorization_interval_secs: get("wiki_vectorization_interval", "3600")
+                .parse()
+                .unwrap_or(3600),
         })
     }
 
@@ -218,6 +271,15 @@ impl AgentConfig {
                 .get(key)
                 .cloned()
                 .unwrap_or_else(|| default.to_string())
+        };
+
+        // Empty strings in settings.yml are treated as None for optional fields.
+        let opt_str = |v: &str| -> Option<String> {
+            if v.trim().is_empty() {
+                None
+            } else {
+                Some(v.to_string())
+            }
         };
 
         Ok(Self {
@@ -257,6 +319,29 @@ impl AgentConfig {
             platform_max_spawn_retries: get("platform_max_spawn_retries", "3").parse().unwrap_or(3),
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
             default_profile: get("default_profile", "omni"),
+
+            // Vectorization (same defaults as from_env; values come from settings.yml)
+            vectorize_messages: get("vectorize_messages", "true").parse().unwrap_or(true),
+            messages_vectorization_method: get("messages_vectorization_method", "local"),
+            messages_vectorization_api_url: opt_str(&get("messages_vectorization_api_url", "")),
+            messages_vectorization_protocol: get("messages_vectorization_protocol", "openai"),
+            messages_vectorization_api_key: opt_str(&get("messages_vectorization_api_key", "")),
+            messages_vectorization_api_model: opt_str(&get(
+                "messages_vectorization_api_model",
+                "",
+            )),
+            messages_vectorization_interval_secs: get("messages_vectorization_interval", "3600")
+                .parse()
+                .unwrap_or(3600),
+            vectorize_wiki: get("vectorize_wiki", "false").parse().unwrap_or(false),
+            wiki_vectorization_method: get("wiki_vectorization_method", "local"),
+            wiki_vectorization_api_url: opt_str(&get("wiki_vectorization_api_url", "")),
+            wiki_vectorization_protocol: get("wiki_vectorization_protocol", "openai"),
+            wiki_vectorization_api_key: opt_str(&get("wiki_vectorization_api_key", "")),
+            wiki_vectorization_api_model: opt_str(&get("wiki_vectorization_api_model", "")),
+            wiki_vectorization_interval_secs: get("wiki_vectorization_interval", "3600")
+                .parse()
+                .unwrap_or(3600),
         })
     }
 }
@@ -294,6 +379,20 @@ mod tests {
             platform_max_spawn_retries: 10,
             max_inline_file_kb: 500,
             default_profile: "custom".to_string(),
+            vectorize_messages: true,
+            messages_vectorization_method: "local".to_string(),
+            messages_vectorization_api_url: None,
+            messages_vectorization_protocol: "openai".to_string(),
+            messages_vectorization_api_key: None,
+            messages_vectorization_api_model: None,
+            messages_vectorization_interval_secs: 3600,
+            vectorize_wiki: false,
+            wiki_vectorization_method: "local".to_string(),
+            wiki_vectorization_api_url: None,
+            wiki_vectorization_protocol: "openai".to_string(),
+            wiki_vectorization_api_key: None,
+            wiki_vectorization_api_model: None,
+            wiki_vectorization_interval_secs: 3600,
         };
         assert_eq!(cfg.default_provider, "openai");
         assert_eq!(cfg.max_tokens, 32768);
@@ -312,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_agent_config_complete_field_count() {
-        // AgentConfig has 21 fields. This test verifies all are present,
+        // AgentConfig has 35 fields. This test verifies all are present,
         // by constructing a minimal config and checking all fields are accessible.
         let cfg = AgentConfig {
             llm_api_key: String::new(),
@@ -336,6 +435,20 @@ mod tests {
             platform_max_spawn_retries: 0,
             max_inline_file_kb: 0,
             default_profile: String::new(),
+            vectorize_messages: false,
+            messages_vectorization_method: String::new(),
+            messages_vectorization_api_url: None,
+            messages_vectorization_protocol: String::new(),
+            messages_vectorization_api_key: None,
+            messages_vectorization_api_model: None,
+            messages_vectorization_interval_secs: 0,
+            vectorize_wiki: false,
+            wiki_vectorization_method: String::new(),
+            wiki_vectorization_api_url: None,
+            wiki_vectorization_protocol: String::new(),
+            wiki_vectorization_api_key: None,
+            wiki_vectorization_api_model: None,
+            wiki_vectorization_interval_secs: 0,
         };
         // Verify a few key fields are accessible
         assert_eq!(cfg.database_url, "postgres://localhost:5432/omniagent");
