@@ -829,10 +829,17 @@ async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serd
 struct McpExecuteRequest {
     name: String,
     arguments: Option<serde_json::Value>,
+    /// Optional runtime context, mirroring the `_meta` the agent injects on
+    /// every tool call (keys: channel_id, thread_id, channel_name,
+    /// profile_name, platform). Accepts either `meta` or `_meta`.
+    /// Any field NOT provided defaults to the default profile, platform "cli",
+    /// and empty channel/thread.
+    #[serde(default, alias = "_meta")]
+    meta: Option<serde_json::Value>,
 }
 
 /// POST /mcp/execute: execute any registered MCP tool by name.
-/// Stateless: accepts tool name + arguments, returns tool result.
+/// Stateless: accepts tool name + arguments (+ optional context), returns tool result.
 /// Useful for testing stateless tools like compact_messages and
 /// generate_initial_prompt without needing a channel or database.
 async fn execute_mcp_tool_handler(
@@ -846,11 +853,47 @@ async fn execute_mcp_tool_handler(
         arguments: args,
     };
 
+    // Build the tool-call context the same way the agent loop does: start from
+    // the shared app context, apply the caller-provided meta fields (if any),
+    // then fill in DEFAULTS for anything still missing — the default profile,
+    // platform "cli", and empty channel/thread. This keeps every tool call
+    // consistent: plugins receive _meta with a profile/platform even when the
+    // caller did not specify one.
+    let mut ctx = state.app_context.clone();
+    if let Some(meta_obj) = body.meta.as_ref().and_then(|v| v.as_object()) {
+        if let Some(cid) = meta_obj.get("channel_id").and_then(|v| v.as_i64()) {
+            ctx.current_channel_id = Some(cid);
+        }
+        if let Some(tid) = meta_obj.get("thread_id").and_then(|v| v.as_i64()) {
+            ctx.current_thread_id = Some(tid);
+        }
+        if let Some(pn) = meta_obj.get("profile_name").and_then(|v| v.as_str()) {
+            if !pn.is_empty() {
+                ctx.current_profile_name = Some(pn.to_string());
+            }
+        }
+        if let Some(cn) = meta_obj.get("channel_name").and_then(|v| v.as_str()) {
+            if !cn.is_empty() {
+                ctx.current_channel_name = Some(cn.to_string());
+            }
+        }
+        if let Some(pl) = meta_obj.get("platform").and_then(|v| v.as_str()) {
+            if !pl.is_empty() {
+                ctx.current_platform = Some(pl.to_string());
+            }
+        }
+    }
+    // Defaults when not informed: default profile, cli platform, empty channel/thread.
+    ctx.current_profile_name
+        .get_or_insert_with(|| state.default_profile.clone());
+    ctx.current_platform
+        .get_or_insert_with(|| "cli".to_string());
+
     match state
         .plugin_manager
         .snapshot_registry()
         .await
-        .execute(&call, state.app_context.clone())
+        .execute(&call, ctx)
         .await
     {
         Ok(result) => Json(serde_json::json!({
