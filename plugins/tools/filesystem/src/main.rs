@@ -92,19 +92,6 @@ fn resolve_read_path(path: &str, workspace_dir: &str) -> String {
     }
 }
 
-/// Truncate content to max_chars with a note.
-fn truncate_content(content: &str, max_chars: usize) -> String {
-    if content.len() <= max_chars {
-        return content.to_string();
-    }
-    format!(
-        "{}\n\n[... truncated from {} to ~{} chars]",
-        &content[..max_chars],
-        content.len(),
-        max_chars
-    )
-}
-
 /// Wrap a handler so any Err(e) becomes Ok((error_msg, true)).
 /// This prevents access-denied and file-not-found errors from
 /// triggering the circuit breaker on the MCP client side.
