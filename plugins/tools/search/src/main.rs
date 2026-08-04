@@ -107,20 +107,22 @@ async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, 
 // Tool: search_wiki
 // ---------------------------------------------------------------------------
 
-fn handle_search_wiki(args: &Value, omni_dir: &str) -> Result<(String, bool)> {
+fn handle_search_wiki(args: &Value, omni_dir: &str, profile_name: &str) -> Result<(String, bool)> {
     let query = args["query"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'query'"))?;
     let limit = args["limit"].as_i64().unwrap_or(10).min(30) as usize;
-    // Default to the ACTIVE profile (matches memory/prompt plugins), NOT a
-    // hardcoded "default" — the real profile is e.g. "omni", so a hardcoded
-    // default made every no-profile search_wiki call return
-    // "Wiki directory not found" (the agent calls without profile).
-    let profile = args["profile"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .unwrap_or_else(omniagent::profile::default_profile_name);
+    // Profile comes from the AGENT's runtime context (_meta.profile_name,
+    // injected by the MCP client on every tool call) — NOT from a tool
+    // argument. The agent's profile is e.g. "omni"; a hardcoded "default"
+    // made every no-profile search_wiki call return "Wiki directory not
+    // found". Only fall back to the active profile when meta is absent
+    // (e.g. manual testing outside the agent).
+    let profile = if profile_name.trim().is_empty() {
+        omniagent::profile::default_profile_name()
+    } else {
+        profile_name.trim().to_string()
+    };
 
     let wiki_dir = format!("{}/profiles/{}/wiki", omni_dir, profile);
     let wiki_dir_path = std::path::Path::new(&wiki_dir);
@@ -279,9 +281,15 @@ async fn main() -> Result<()> {
 
     let c1 = config.clone();
     let d1 = default_omni_dir.clone();
-    let wiki_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+    let wiki_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let c = c1.clone();
         let d = d1.clone();
+        // Agent's profile from _meta (injected by the MCP client) — same
+        // pattern as the skills plugin. Never requires a profile argument.
+        let profile = meta
+            .as_ref()
+            .and_then(|m| m.profile_name.clone())
+            .unwrap_or_default();
         Box::pin(async move {
             let cfg = c.lock();
             let omni_dir = if cfg.omni_dir.is_empty() {
@@ -289,7 +297,7 @@ async fn main() -> Result<()> {
             } else {
                 &cfg.omni_dir
             };
-            handle_search_wiki(&args, omni_dir)
+            handle_search_wiki(&args, omni_dir, &profile)
         })
     });
 
@@ -323,7 +331,7 @@ async fn main() -> Result<()> {
         McpToolEntry {
             def: McpToolDef {
                 name: "search_wiki".to_string(),
-                description: "Search wiki pages for relevant documentation. Use this to find documentation, guides, and notes. Does NOT search message history: use search_messages for that.".to_string(),
+                description: "Search wiki pages for relevant documentation. Use this to find documentation, guides, and notes. Searches the ACTIVE PROFILE's wiki automatically (the profile is injected by the runtime, no profile argument needed). Does NOT search message history: use search_messages for that.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -335,10 +343,6 @@ async fn main() -> Result<()> {
                             "type": "integer",
                             "description": "Max results (max 30)",
                             "default": 10
-                        },
-                        "profile": {
-                            "type": "string",
-                            "description": "Profile name (default: default)"
                         }
                     },
                     "required": ["query"]

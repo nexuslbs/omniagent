@@ -1,13 +1,19 @@
 //! mcp-server-query: standalone MCP server for read-only database queries.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
-//! Provides a single tool `query_database` with 4 operations:
-//! - search_messages: vector-embedding semantic search
-//! - search_thread_messages: all messages from a thread
-//! - search_channel_prompts: all seq-0 (prompt) messages from a channel
-//! - query: direct SELECT SQL
+//! Tools:
+//! - query_database: free-form SELECT SQL (read-only)
+//! - query_search_messages: semantic (vector-embedding) message search
+//! - query_thread_messages: all messages from a thread
+//! - query_channel_prompts: all seq-0 (prompt) messages from a channel
+//! - query_channels: list channels (id, name, platform, cause)
 //!
-//! All operations use a read-only PostgreSQL user. Writes are blocked at the DB level.
+//! Channel/thread-scoped tools default to the CURRENT channel/thread from the
+//! agent's runtime context (_meta.channel_id / _meta.thread_id), so the agent
+//! does not need to pass them explicitly.
+//!
+//! All queries run against a read-only PostgreSQL user / read-only transaction.
+//! Writes are blocked at the DB level.
 
 use anyhow::Result;
 use mcp_server_util::*;
@@ -38,12 +44,20 @@ struct MessageResult {
 // ── Operations ─────────────────────────────────────────────────────────────
 
 /// search_messages: semantic (vector embedding) search with optional channel filter.
-async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+/// The channel defaults to the CURRENT channel from the agent's runtime context
+/// (_meta.channel_id) when the caller does not pass one explicitly.
+async fn handle_search_messages(
+    pool: &PgPool,
+    args: &Value,
+    meta: Option<&McpMeta>,
+) -> Result<(String, bool)> {
     let query_text = args["query"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("'query' is required for search_messages"))?
+        .ok_or_else(|| anyhow::anyhow!("'query' is required for query_search_messages"))?
         .to_string();
-    let channel_id = args["channel_id"].as_i64();
+    let channel_id = args["channel_id"]
+        .as_i64()
+        .or_else(|| meta.and_then(|m| m.channel_id));
     let limit = args["limit"].as_i64().unwrap_or(10).min(50);
 
     let hash_vec = HashVectorizer;
@@ -115,10 +129,22 @@ async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, 
 }
 
 /// search_thread_messages: all messages from a thread (sql_forge! validated).
-async fn handle_search_thread_messages(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+/// The thread defaults to the CURRENT thread from _meta.thread_id when the
+/// caller does not pass one explicitly.
+async fn handle_search_thread_messages(
+    pool: &PgPool,
+    args: &Value,
+    meta: Option<&McpMeta>,
+) -> Result<(String, bool)> {
     let thread_id = args["thread_id"]
         .as_i64()
-        .ok_or_else(|| anyhow::anyhow!("'thread_id' is required for search_thread_messages"))?;
+        .or_else(|| meta.and_then(|m| m.thread_id))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "'thread_id' is required for query_thread_messages (no current thread in \
+                 context). Pass thread_id explicitly."
+            )
+        })?;
     let limit = args["limit"].as_i64().unwrap_or(100).min(200);
 
     let rows: Vec<MessageResult> = {
@@ -149,10 +175,22 @@ async fn handle_search_thread_messages(pool: &PgPool, args: &Value) -> Result<(S
 }
 
 /// search_channel_prompts: all seq-0 (prompt) messages from a channel (sql_forge!).
-async fn handle_search_channel_prompts(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+/// The channel defaults to the CURRENT channel from _meta.channel_id when the
+/// caller does not pass one explicitly.
+async fn handle_search_channel_prompts(
+    pool: &PgPool,
+    args: &Value,
+    meta: Option<&McpMeta>,
+) -> Result<(String, bool)> {
     let channel_id = args["channel_id"]
         .as_i64()
-        .ok_or_else(|| anyhow::anyhow!("'channel_id' is required for search_channel_prompts"))?;
+        .or_else(|| meta.and_then(|m| m.channel_id))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "'channel_id' is required for query_channel_prompts (no current channel in \
+                 context). Pass channel_id explicitly or use query_channels to find it."
+            )
+        })?;
     let limit = args["limit"].as_i64().unwrap_or(10).min(50);
 
     let results: Vec<MessageResult> = {
@@ -525,20 +563,30 @@ async fn handle_query(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     Ok((output, false))
 }
 
-// ── Dispatch ───────────────────────────────────────────────────────────────
+/// query_channels: list channels with id, name, platform and cause.
+/// Helps the agent discover channel_id values for channel-scoped queries.
+async fn handle_query_channels(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+    let limit = args["limit"].as_i64().unwrap_or(50).min(200);
 
-async fn handle_query_database(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
-    let operation = args["operation"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Missing 'operation' argument"))?;
+    let rows: Vec<(i64, String, String, String)> =
+        sqlx::query_as("SELECT id, name, platform, cause FROM channels ORDER BY id LIMIT $1")
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list channels: {e}"))?;
 
-    match operation {
-        "search_messages" => handle_search_messages(pool, args).await,
-        "search_thread_messages" => handle_search_thread_messages(pool, args).await,
-        "search_channel_prompts" => handle_search_channel_prompts(pool, args).await,
-        "query" => handle_query(pool, args).await,
-        other => anyhow::bail!("Unknown operation: '{}'", other),
+    if rows.is_empty() {
+        return Ok(("[query_channels] No channels found.".to_string(), false));
     }
+
+    let mut lines = vec![format!("[query_channels] {} channel(s):", rows.len())];
+    for (id, name, platform, cause) in &rows {
+        lines.push(format!(
+            "#{} {} (platform: {}, cause: {})",
+            id, name, platform, cause
+        ));
+    }
+    Ok((lines.join("\n"), false))
 }
 
 // ── Formatting ─────────────────────────────────────────────────────────────
@@ -629,18 +677,90 @@ async fn main() -> Result<()> {
     // Shared pool — populated by configure callback before any tool call
     let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
 
-    let p_query = pool.clone();
-    let query_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
-        let p = p_query.clone();
+    // Helper to fetch the shared pool; returns a soft error if not configured.
+    fn pool_or_err(pool: &Arc<RwLock<Option<PgPool>>>) -> Result<PgPool, (String, bool)> {
+        let guard = pool.try_read();
+        match guard {
+            Ok(g) => match g.as_ref() {
+                Some(p) => Ok(p.clone()),
+                None => Err((
+                    "Query database pool not configured. The plugin may need a database_url in its config."
+                        .to_string(),
+                    true,
+                )),
+            },
+            Err(_) => Err((
+                "Query database pool lock poisoned or busy. Retry.".to_string(),
+                true,
+            )),
+        }
+    }
+
+    // ── query_database: free-form read-only SELECT ────────────────────────
+    let p_db = pool.clone();
+    let db_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let p = p_db.clone();
         Box::pin(async move {
-            let guard = p.read().await;
-
-            let pool = match guard.as_ref() {
-                Some(p) => p.clone(),
-                None => return Ok(("Query database pool not configured. The plugin may need a database_url in its config.".to_string(), true)),
+            let pool = match pool_or_err(&p) {
+                Ok(pool) => pool,
+                Err(e) => return Ok(e),
             };
+            handle_query(&pool, &args).await
+        })
+    });
 
-            handle_query_database(&pool, &args).await
+    // ── query_search_messages: semantic (vector) search ───────────────────
+    let p_sm = pool.clone();
+    let search_messages_handler: ToolHandler =
+        Box::new(move |args: Value, meta: Option<McpMeta>| {
+            let p = p_sm.clone();
+            Box::pin(async move {
+                let pool = match pool_or_err(&p) {
+                    Ok(pool) => pool,
+                    Err(e) => return Ok(e),
+                };
+                handle_search_messages(&pool, &args, meta.as_ref()).await
+            })
+        });
+
+    // ── query_thread_messages: full thread retrieval ──────────────────────
+    let p_tm = pool.clone();
+    let thread_messages_handler: ToolHandler =
+        Box::new(move |args: Value, meta: Option<McpMeta>| {
+            let p = p_tm.clone();
+            Box::pin(async move {
+                let pool = match pool_or_err(&p) {
+                    Ok(pool) => pool,
+                    Err(e) => return Ok(e),
+                };
+                handle_search_thread_messages(&pool, &args, meta.as_ref()).await
+            })
+        });
+
+    // ── query_channel_prompts: channel prompt history ─────────────────────
+    let p_cp = pool.clone();
+    let channel_prompts_handler: ToolHandler =
+        Box::new(move |args: Value, meta: Option<McpMeta>| {
+            let p = p_cp.clone();
+            Box::pin(async move {
+                let pool = match pool_or_err(&p) {
+                    Ok(pool) => pool,
+                    Err(e) => return Ok(e),
+                };
+                handle_search_channel_prompts(&pool, &args, meta.as_ref()).await
+            })
+        });
+
+    // ── query_channels: list channels ─────────────────────────────────────
+    let p_ch = pool.clone();
+    let channels_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let p = p_ch.clone();
+        Box::pin(async move {
+            let pool = match pool_or_err(&p) {
+                Ok(pool) => pool,
+                Err(e) => return Ok(e),
+            };
+            handle_query_channels(&pool, &args).await
         })
     });
 
@@ -648,62 +768,129 @@ async fn main() -> Result<()> {
         McpToolEntry {
             def: McpToolDef {
                 name: "query_database".to_string(),
-                description: "QUERY THE DATABASE with one of four operations. \
-All operations run against a read-only PostgreSQL user: writes are blocked at the database level.
-
-Operations:
-- **search_messages** (runtime sqlx: pgvector <=>): Semantic (vector embedding) search on message content. \
-Parameters: query (required), channel_id (optional), limit (default 10, max 50).
-
-- **search_thread_messages** (sql_forge validated): All messages from a thread, ordered by \
-thread_sequence ASC. Parameters: thread_id (required), limit (optional, default 100, max 200). \
-Returns the prompt (seq=0) + up to N-1 subsequent messages.
-
-- **search_channel_prompts** (sql_forge validated): All seq-0 (prompt) messages from \
-a channel, newest first. Parameters: channel_id (required), limit (optional, default 10, max 50).
-
-- **query** (runtime only: for any custom SELECT): Run any SELECT SQL. \
-Parameters: sql (required): must be a SELECT statement. INSERT/UPDATE/DELETE/DROP/ALTER \
-are rejected by the read-only database user. Use this for custom aggregations: \
-COUNT(*), GROUP BY, SUM, JOIN across tables. \
-You MUST include the full schema reference in your query. Available tables: \
-messages, channels, channel_stops, summaries, kanban_tasks, cron_jobs, profiles.
-
-Database schema is documented in the tool description for reference.".to_string(),
+                description: "Run any read-only SELECT SQL against the agent database. \
+This is the FREE-QUERY tool: use it for custom aggregations (COUNT(*), GROUP BY, SUM, \
+JOIN across tables) and structured lookups that the purpose-built query tools do not cover. \
+The statement MUST start with SELECT or WITH; write/DDL keywords (INSERT/UPDATE/DELETE/DROP/\
+ALTER/...) are rejected, and the query runs inside a read-only transaction, so writes are \
+blocked at the database level.\n\n\
+Available tables: messages, threads, channels, channel_stops, summaries, kanban_tasks, \
+cron_jobs, profiles. Include the full table/column names in your SQL.\n\n\
+For common lookups prefer the purpose-built tools: query_search-messages (semantic search), \
+query_thread-messages (thread contents), query_channel-prompts (channel prompt history), \
+query_channels (channel ids)."
+                    .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "operation": {
-                            "type": "string",
-                            "enum": ["search_messages", "search_thread_messages", "search_channel_prompts", "query"],
-                            "description": "Which database operation to perform"
-                        },
-                        "query": {
-                            "type": "string",
-                            "description": "Search text (for search_messages) or raw SQL (for query operation)"
-                        },
                         "sql": {
                             "type": "string",
-                            "description": "Raw SELECT SQL (only for operation='query')"
+                            "description": "Raw SELECT (or WITH) SQL statement to execute"
+                        }
+                    },
+                    "required": ["sql"]
+                }),
+            },
+            handler: db_handler,
+        },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "query_search_messages".to_string(),
+                description: "SEMANTIC (vector-embedding) search over message content — finds \
+messages by MEANING rather than exact keywords. Use when keyword search misses (e.g. \
+paraphrases, concepts) or for relevance-ranked recall. Scoped to the CURRENT channel by \
+default; pass channel_id to search a different channel. For exact-keyword search across \
+channels use search_messages instead."
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search text to find semantically similar messages"
                         },
                         "channel_id": {
                             "type": "integer",
-                            "description": "Channel ID filter"
-                        },
-                        "thread_id": {
-                            "type": "integer",
-                            "description": "Thread ID (for search_thread_messages)"
+                            "description": "Channel ID filter (default: current channel)"
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Max results (default varies by operation)",
+                            "description": "Max results (max 50)",
                             "default": 10
                         }
                     },
-                    "required": ["operation"]
+                    "required": ["query"]
                 }),
             },
-            handler: query_handler,
+            handler: search_messages_handler,
+        },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "query_thread_messages".to_string(),
+                description: "Read all messages in a conversation thread (the prompt + its \
+replies), ordered by sequence. Defaults to the CURRENT thread; pass thread_id to read a \
+different one. Use to reconstruct a past conversation or inspect what a thread contained."
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "thread_id": {
+                            "type": "integer",
+                            "description": "Thread ID (default: current thread)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max messages (max 200)",
+                            "default": 100
+                        }
+                    }
+                }),
+            },
+            handler: thread_messages_handler,
+        },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "query_channel_prompts".to_string(),
+                description: "List the first message (prompt / seq-0) of every thread in a \
+channel, newest first. Use to review what has been asked or started in a channel. Defaults \
+to the CURRENT channel; pass channel_id for a different one."
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "channel_id": {
+                            "type": "integer",
+                            "description": "Channel ID (default: current channel)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max results (max 50)",
+                            "default": 10
+                        }
+                    }
+                }),
+            },
+            handler: channel_prompts_handler,
+        },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "query_channels".to_string(),
+                description: "List all channels with their id, name, platform and cause. \
+Use to discover channel_id values needed by channel-scoped tools (query_search-messages, \
+query_channel-prompts, search_messages)."
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max channels (max 200)",
+                            "default": 50
+                        }
+                    }
+                }),
+            },
+            handler: channels_handler,
         },
     ];
 
