@@ -65,7 +65,11 @@ fn sanitize_filename(s: &str) -> String {
 // Tool: promote_to_memory
 // ---------------------------------------------------------------------------
 
-async fn handle_promote(data_dir: &str, args: &Value) -> Result<(String, bool)> {
+async fn handle_promote(
+    data_dir: &str,
+    args: &Value,
+    profile_name: &str,
+) -> Result<(String, bool)> {
     let name = args["name"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'name'"))?;
@@ -96,8 +100,14 @@ async fn handle_promote(data_dir: &str, args: &Value) -> Result<(String, bool)> 
         .unwrap_or_default();
 
     let expires_in_days = args["expires_in_days"].as_i64().unwrap_or(30).max(1);
-    let _default_profile = omniagent::profile::default_profile_name();
-    let profile = args["profile"].as_str().unwrap_or(&_default_profile);
+    // Profile comes from the AGENT's runtime context (_meta.profile_name),
+    // never from a tool argument. Fall back to the active profile only when
+    // meta is absent (manual testing outside the agent).
+    let profile = if profile_name.trim().is_empty() {
+        omniagent::profile::default_profile_name().to_string()
+    } else {
+        profile_name.trim().to_string()
+    };
 
     // Build the wiki path
     let wiki_memories_dir = format!("{}/profiles/{}/wiki/Memory/Promoted", data_dir, profile);
@@ -168,9 +178,12 @@ expires_at: {}
 // Tool: list_memories
 // ---------------------------------------------------------------------------
 
-async fn handle_list(data_dir: &str, args: &Value) -> Result<(String, bool)> {
-    let _default_profile = omniagent::profile::default_profile_name();
-    let profile = args["profile"].as_str().unwrap_or(&_default_profile);
+async fn handle_list(data_dir: &str, args: &Value, profile_name: &str) -> Result<(String, bool)> {
+    let profile = if profile_name.trim().is_empty() {
+        omniagent::profile::default_profile_name().to_string()
+    } else {
+        profile_name.trim().to_string()
+    };
     let include_expired = args["include_expired"].as_bool().unwrap_or(false);
 
     let wiki_memories_dir = format!("{}/profiles/{}/wiki/Memory/Promoted", data_dir, profile);
@@ -247,9 +260,12 @@ async fn handle_list(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 // Tool: review_memories
 // ---------------------------------------------------------------------------
 
-async fn handle_review(data_dir: &str, args: &Value) -> Result<(String, bool)> {
-    let _default_profile = omniagent::profile::default_profile_name();
-    let profile = args["profile"].as_str().unwrap_or(&_default_profile);
+async fn handle_review(data_dir: &str, args: &Value, profile_name: &str) -> Result<(String, bool)> {
+    let profile = if profile_name.trim().is_empty() {
+        omniagent::profile::default_profile_name().to_string()
+    } else {
+        profile_name.trim().to_string()
+    };
     let expiring_soon_days = args["expiring_soon_days"].as_i64().unwrap_or(7).max(1);
 
     let wiki_memories_dir = format!("{}/profiles/{}/wiki/Memory/Promoted", data_dir, profile);
@@ -383,7 +399,7 @@ async fn handle_review(data_dir: &str, args: &Value) -> Result<(String, bool)> {
 
 const ENTRY_DELIMITER: &str = "\n§\n";
 
-async fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
+async fn handle_manage(data_dir: &str, args: &Value, profile_name: &str) -> Result<(String, bool)> {
     let target = args["target"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'target'"))?;
@@ -391,8 +407,11 @@ async fn handle_manage(data_dir: &str, args: &Value) -> Result<(String, bool)> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'action'"))?;
     let content = args["content"].as_str().unwrap_or("");
-    let _default_profile = omniagent::profile::default_profile_name();
-    let profile = args["profile"].as_str().unwrap_or(&_default_profile);
+    let profile = if profile_name.trim().is_empty() {
+        omniagent::profile::default_profile_name().to_string()
+    } else {
+        profile_name.trim().to_string()
+    };
 
     let memories_dir = format!("{}/profiles/{}/memories", data_dir, profile);
     let dir_path = std::path::Path::new(&memories_dir);
@@ -823,49 +842,65 @@ async fn main() -> Result<()> {
 
     // Wrap each handler to capture shared data_dir
     let dd_promote = data_dir.clone();
-    let promote_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+    let promote_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         Box::pin({
             let dd = dd_promote.clone();
+            let profile = meta
+                .as_ref()
+                .and_then(|m| m.profile_name.clone())
+                .unwrap_or_default();
             async move {
                 let guard = dd.read().await;
                 let value = guard.as_ref().expect("data_dir not initialized").clone();
-                handle_promote(&value, &args).await
+                handle_promote(&value, &args, &profile).await
             }
         })
     });
 
     let dd_list = data_dir.clone();
-    let list_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+    let list_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         Box::pin({
             let dd = dd_list.clone();
+            let profile = meta
+                .as_ref()
+                .and_then(|m| m.profile_name.clone())
+                .unwrap_or_default();
             async move {
                 let guard = dd.read().await;
                 let value = guard.as_ref().expect("data_dir not initialized").clone();
-                handle_list(&value, &args).await
+                handle_list(&value, &args, &profile).await
             }
         })
     });
 
     let dd_review = data_dir.clone();
-    let review_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+    let review_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         Box::pin({
             let dd = dd_review.clone();
+            let profile = meta
+                .as_ref()
+                .and_then(|m| m.profile_name.clone())
+                .unwrap_or_default();
             async move {
                 let guard = dd.read().await;
                 let value = guard.as_ref().expect("data_dir not initialized").clone();
-                handle_review(&value, &args).await
+                handle_review(&value, &args, &profile).await
             }
         })
     });
 
     let dd_manage = data_dir.clone();
-    let manage_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+    let manage_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         Box::pin({
             let dd = dd_manage.clone();
+            let profile = meta
+                .as_ref()
+                .and_then(|m| m.profile_name.clone())
+                .unwrap_or_default();
             async move {
                 let guard = dd.read().await;
                 let value = guard.as_ref().expect("data_dir not initialized").clone();
-                handle_manage(&value, &args).await
+                handle_manage(&value, &args, &profile).await
             }
         })
     });
@@ -928,10 +963,6 @@ async fn main() -> Result<()> {
                         "expires_in_days": {
                             "type": "integer",
                             "description": "Days until this memory expires and needs review (default: 30)"
-                        },
-                        "profile": {
-                            "type": "string",
-                            "description": "Profile name for the wiki (default: 'default')"
                         }
                     },
                     "required": ["name", "content", "confidence"]
@@ -949,10 +980,6 @@ async fn main() -> Result<()> {
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "profile": {
-                            "type": "string",
-                            "description": "Profile name (default: 'default')"
-                        },
                         "include_expired": {
                             "type": "boolean",
                             "description": "Whether to include expired memories (default: false)"
@@ -973,10 +1000,6 @@ async fn main() -> Result<()> {
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "profile": {
-                            "type": "string",
-                            "description": "Profile name (default: 'default')"
-                        },
                         "expiring_soon_days": {
                             "type": "integer",
                             "description": "Days threshold for 'expiring soon' warning (default: 7)"
@@ -1011,10 +1034,6 @@ async fn main() -> Result<()> {
                         "content": {
                             "type": "string",
                             "description": "Content for 'add' action. For 'remove', a substring to match against entries."
-                        },
-                        "profile": {
-                            "type": "string",
-                            "description": "Profile name (default: 'default')"
                         }
                     },
                     "required": ["target", "action"]
