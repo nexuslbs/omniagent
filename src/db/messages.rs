@@ -104,6 +104,59 @@ pub async fn search_messages_text(
 }
 
 // ---------------------------------------------------------------------------
+// Vectorizer helpers: find messages without embeddings, write embedding_vec
+// ---------------------------------------------------------------------------
+
+/// Minimal message projection used by the vectorizer (only needs id + content).
+#[derive(Debug, sqlx::FromRow)]
+pub struct MessageEmbeddingRow {
+    pub id: i64,
+    pub content: String,
+}
+
+/// Find messages that have no `embedding_vec` yet, oldest first, up to `limit`.
+pub async fn find_messages_without_embeddings(
+    pool: &PgPool,
+    limit: i64,
+) -> AppResult<Vec<MessageEmbeddingRow>> {
+    let rows: Vec<MessageEmbeddingRow> = sqlx::query_as(
+        r#"
+        SELECT id, content
+        FROM messages
+        WHERE embedding_vec IS NULL
+        ORDER BY id
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Write a pgvector embedding (text form "[0.1,0.2,...]") to embedding_vec.
+/// The messages immutable trigger permits UPDATEs that only change
+/// embedding_vec (vectorizer path).
+pub async fn update_message_embedding(
+    pool: &PgPool,
+    id: i64,
+    embedding_vec_text: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE messages
+        SET embedding_vec = $2::vector(1536)
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(embedding_vec_text)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Hybrid retrieval: pgvector semantic search: two-stage recency-weighted
 // ---------------------------------------------------------------------------
 

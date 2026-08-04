@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::err_msg;
 use crate::err_str;
-use crate::error::{AppResult, Error, ErrorContext};
+use crate::error::{AppResult, ErrorContext};
 
 // ---------------------------------------------------------------------------
 // EmbeddingProtocol
@@ -393,7 +393,7 @@ impl MessageVectorizer {
 
     async fn process_batch(&self) -> AppResult<()> {
         let messages =
-            super::db::types::find_messages_without_embeddings(&self.pool, self.config.batch_size)
+            super::db::types::find_messages_without_embeddings(&self.pool, self.config.batch_size as i64)
                 .await?;
 
         if messages.is_empty() {
@@ -650,17 +650,6 @@ fn strip_frontmatter(content: &str) -> &str {
         }
     }
     content
-}
-
-// ---------------------------------------------------------------------------
-// Minimal struct for messages without embeddings
-// ---------------------------------------------------------------------------
-
-/// Minimal message projection used by the vectorizer (only needs id + content).
-#[derive(Debug, sqlx::FromRow)]
-pub struct MessageEmbeddingRow {
-    pub id: i64,
-    pub content: String,
 }
 
 // ---------------------------------------------------------------------------
