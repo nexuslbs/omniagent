@@ -109,7 +109,6 @@ RUN apt-get update -qq && \
       python3 \
       python3-pip \
       nodejs && \
-    python3 -m pip install --no-cache-dir --break-system-packages psycopg2-binary && \
     rm -rf /var/lib/apt/lists/* && \
     git config --global --add safe.directory '*'
 
