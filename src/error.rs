@@ -53,6 +53,11 @@ pub enum Error {
 
     /// MCP protocol-level error.
     McpProtocol(String),
+    /// The LLM provider returned HTTP 429 (rate limit); `retry_after` is the
+    /// `Retry-After` header value in seconds, if present and parseable.
+    RateLimited {
+        retry_after: Option<u64>,
+    },
 
     // ── Generic string message ──
     /// Catch-all for string-based error messages.
@@ -123,6 +128,17 @@ impl From<&str> for Error {
 
 // ── Display: human-readable error messages ──
 
+impl Error {
+    /// Seconds to wait before retrying after a rate-limit (HTTP 429), taken from
+    /// the `Retry-After` response header (None if absent or unparseable).
+    pub fn retry_after_secs(&self) -> Option<u64> {
+        match self {
+            Error::RateLimited { retry_after } => *retry_after,
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -147,6 +163,10 @@ impl fmt::Display for Error {
             Error::NotFound => write!(f, "Resource not found"),
             Error::LockPoisoned => write!(f, "Internal lock poisoned"),
             Error::McpProtocol(s) => write!(f, "MCP protocol error: {}", s),
+            Error::RateLimited { retry_after } => match retry_after {
+                Some(secs) => write!(f, "rate limited (HTTP 429); retry after {secs}s"),
+                None => write!(f, "rate limited (HTTP 429)"),
+            },
             Error::Message(s) => write!(f, "{}", s),
         }
     }

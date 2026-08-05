@@ -8,8 +8,23 @@ use crate::err_msg;
 use crate::error::AppResult;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
 use crate::mcp::{truncate_content, McpToolCall, McpToolResult, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
+use std::time::Duration;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
+
+/// Exponential backoff delay for LLM provider retries: base 1s, doubling each
+/// attempt (1s/2s/4s), capped at ~8s, with ~+/-30% jitter derived from the
+/// system clock (no `rand` dependency).
+async fn backoff_delay(attempt: u32) -> Duration {
+    let base_ms = 1000u64 << attempt.min(3); // 1s, 2s, 4s, 8s (cap)
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let jitter = (nanos % 600) as u64; // 0..=599 -> +/-30% around the base
+    let delay_ms = (base_ms * (700 + jitter)) / 1000;
+    Duration::from_millis(delay_ms)
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_main_loop(
@@ -635,6 +650,18 @@ Previous plan:\n{}",
                 );
                 // Don't consume from the iteration budget for provider retries.
                 current_iter -= 1;
+                if let Some(retry_after) = e.retry_after_secs() {
+                    // Rate-limited (HTTP 429): honor Retry-After, capped at 60s.
+                    let wait = Duration::from_secs(retry_after.min(60));
+                    info!(
+                        "[executor] LLM provider rate-limited (HTTP 429): sleeping {}s before retry (thread {})",
+                        wait.as_secs(), thread.id,
+                    );
+                    tokio::time::sleep(wait).await;
+                } else {
+                    // Exponential backoff with jitter so a down provider isn't hammered.
+                    tokio::time::sleep(backoff_delay(llm_error_retries).await).await;
+                }
                 continue;
             }
         };
@@ -790,6 +817,7 @@ Previous plan:\n{}",
                         )));
                         // Don't consume the iteration budget for this retry overhead.
                         current_iter -= 1;
+                        tokio::time::sleep(backoff_delay(llm_error_retries).await).await;
                         continue;
                     }
                 } else if reasoning_empty {
@@ -815,6 +843,7 @@ Previous plan:\n{}",
                         )));
                         // Don't consume the iteration budget for this retry overhead.
                         current_iter -= 1;
+                        tokio::time::sleep(backoff_delay(llm_error_retries).await).await;
                         continue;
                     }
                 } else {
@@ -860,6 +889,7 @@ Previous plan:\n{}",
                         )));
                         // Don't consume the iteration budget for this retry overhead.
                         current_iter -= 1;
+                        tokio::time::sleep(backoff_delay(llm_error_retries).await).await;
                         continue;
                     }
                     // Voluntary stop: terminal. Empty final_content triggers
