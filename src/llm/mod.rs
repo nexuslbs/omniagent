@@ -913,9 +913,17 @@ impl LLMClient {
             .await
             .ctx("Failed to send OpenAI-compatible completion request")?;
 
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
         let status = resp.status();
         let resp_text = resp.text().await.ctx("Failed to read response body")?;
 
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(Error::RateLimited { retry_after });
+        }
         if !status.is_success() {
             err_msg!("OpenAI-compatible API returned {status}: {resp_text}");
         }
@@ -1123,12 +1131,20 @@ impl LLMClient {
             .await
             .ctx("Failed to send Anthropic completion request")?;
 
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
         let status = resp.status();
         let resp_text = resp
             .text()
             .await
             .ctx("Failed to read Anthropic response body")?;
 
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(Error::RateLimited { retry_after });
+        }
         if !status.is_success() {
             err_msg!("Anthropic API returned {status}: {resp_text}");
         }
