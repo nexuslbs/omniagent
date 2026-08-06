@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO threads (status, cause, channel_id, profile, provider, model,\n                                  task_id, parent_id, workflow_id, workflow_step)\n             VALUES ('pending', $1, $2, $3, $4, $5,\n                     $6, $7, $8, $9)\n             RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7c17bb4b3d3a6e539eee7a78c9fa8a62421a132d2a4f40a4c9083e15e1560cb0"
+}
