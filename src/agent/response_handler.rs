@@ -26,6 +26,25 @@ pub(crate) async fn handle_response(
     evidence_metadata: serde_json::Value,
     enable_subtasks: bool,
 ) -> AppResult<Message> {
+    // ── Fail-thread tool outcome (Phase 2) ──────────────────────────────────
+    // If the builtin fail-thread tool already ended this thread as FAILED
+    // (Error-type message created, thread completed, kanban transition
+    // applied), its outcome is authoritative: return without re-finalizing so
+    // the Error-type message stays the thread's last message and the kanban
+    // transition is not overwritten.
+    if let Some(current_status) = queries::get_thread_status(&cfg.pool, thread.id).await? {
+        if current_status == "failed" {
+            info!(
+                "thread {} already ended as FAILED by the fail-thread tool — skipping finalization",
+                thread.id
+            );
+            let saved = queries::get_last_message(&cfg.pool, thread.id)
+                .await?
+                .unwrap_or_else(|| cause_msg.clone());
+            return Ok(saved);
+        }
+    }
+
     let agent_elapsed_ms = start_time.elapsed().as_millis() as i32;
     let is_empty_response = final_content.trim().is_empty();
 
