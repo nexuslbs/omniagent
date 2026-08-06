@@ -217,6 +217,23 @@ pub fn build_initialized_notification() -> String {
     serde_json::to_string(&notif).unwrap_or_default()
 }
 
+/// Build an MCP `notifications/cancelled` notification JSON string.
+///
+/// Sent by the client when an in-flight request is abandoned (thread ended,
+/// /stop-thread, channel close, client-side timeout). The shared server
+/// framework (mcp-server-util) aborts the matching `tools/call` handler;
+/// plugins that wrap subprocesses in kill-on-drop guards (docker compose) then
+/// kill the underlying OS process, so no stale tool-spawned subprocess
+/// survives the thread that issued it (thread 73, Aug 2026).
+pub fn build_cancel_notification(id: u64) -> String {
+    let notif = JsonRpcNotification {
+        jsonrpc: "2.0".to_string(),
+        method: "notifications/cancelled".to_string(),
+        params: Some(serde_json::json!({ "requestId": id })),
+    };
+    serde_json::to_string(&notif).unwrap_or_default()
+}
+
 /// Build a tools/list request JSON string.
 pub fn build_list_tools_request(id: u64) -> String {
     let req = JsonRpcRequest {
@@ -323,6 +340,18 @@ mod tests {
         assert_eq!(v["method"], "notifications/initialized");
         assert!(v.get("id").is_none());
         assert!(v.get("params").is_none() || v["params"].is_null());
+    }
+
+    // ── build_cancel_notification ───────────────────────────────────────────
+
+    #[test]
+    fn test_build_cancel_notification() {
+        let s = build_cancel_notification(42);
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["jsonrpc"], "2.0");
+        assert_eq!(v["method"], "notifications/cancelled");
+        assert!(v.get("id").is_none(), "notifications must have no id");
+        assert_eq!(v["params"]["requestId"], 42);
     }
 
     // ── build_list_tools_request ────────────────────────────────────────────
