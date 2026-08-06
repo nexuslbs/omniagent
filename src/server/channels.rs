@@ -49,6 +49,7 @@ pub struct ChannelEntry {
     pub current_model: Option<String>,
     pub readonly: bool,
     pub plan: bool,
+    pub planning_mode: Option<String>,
     pub template: Option<String>,
 }
 
@@ -68,6 +69,7 @@ struct ChannelRow {
     current_model: Option<String>,
     readonly: bool,
     plan: bool,
+    planning_mode: Option<String>,
     template: Option<String>,
 }
 
@@ -113,6 +115,7 @@ async fn list_channels_handler(State(state): State<Arc<AppState>>) -> impl IntoR
             current_model,
             readonly,
             plan,
+            planning_mode,
             template
         FROM channels
         ORDER BY name
@@ -134,6 +137,7 @@ async fn list_channels_handler(State(state): State<Arc<AppState>>) -> impl IntoR
                 current_model: r.current_model,
                 readonly: r.readonly,
                 plan: r.plan,
+                planning_mode: r.planning_mode,
                 template: r.template,
             })
             .collect::<Vec<_>>(),
@@ -168,6 +172,7 @@ async fn get_channel_handler(
             current_model,
             readonly,
             plan,
+            planning_mode,
             template
         FROM channels
         WHERE id = :id
@@ -188,6 +193,7 @@ async fn get_channel_handler(
             current_model: r.current_model,
             readonly: r.readonly,
             plan: r.plan,
+            planning_mode: r.planning_mode,
             template: r.template,
         },
         Ok(None) => {
@@ -323,6 +329,7 @@ async fn update_channel_handler(
             current_model,
             readonly,
             plan,
+            planning_mode,
             template
         FROM channels
         WHERE id = :id
@@ -343,6 +350,7 @@ async fn update_channel_handler(
             current_model: r.current_model,
             readonly: r.readonly,
             plan: r.plan,
+            planning_mode: r.planning_mode,
             template: r.template,
         },
         Ok(None) => {

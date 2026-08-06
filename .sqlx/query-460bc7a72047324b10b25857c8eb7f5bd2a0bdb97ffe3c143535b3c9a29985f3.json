@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id, title, body, status, priority, position, assignee,\n            channel_id, profile, archived, template, plan,\n            created_at, updated_at\n        FROM kanban_tasks\n        WHERE ($1 OR archived = false)\n           OR (NOT $2 AND archived = false)\n        ORDER BY position ASC, created_at DESC\n        ",
+  "query": "\n        SELECT\n            id, title, body, status, priority, position, assignee,\n            channel_id, profile, archived, template, plan, planning_mode,\n            created_at, updated_at\n        FROM kanban_tasks\n        WHERE ($1 OR archived = false)\n           OR (NOT $2 AND archived = false)\n        ORDER BY position ASC, created_at DESC\n        ",
   "describe": {
     "columns": [
       {
@@ -137,6 +137,17 @@
       },
       {
         "ordinal": 12,
+        "name": "planning_mode",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "planning_mode"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -147,7 +158,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -178,8 +189,9 @@
       true,
       false,
       true,
+      true,
       true
     ]
   },
-  "hash": "cf97cdb3050797d128db8518385c9c46057bc48421921453b88a682662175ab7"
+  "hash": "460bc7a72047324b10b25857c8eb7f5bd2a0bdb97ffe3c143535b3c9a29985f3"
 }
