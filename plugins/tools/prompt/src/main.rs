@@ -324,7 +324,7 @@ struct ThreadTaskRef {
 struct PriorThreadRow {
     id: i64,
     status: String,
-    cause: Option<String>,
+    workflow_step: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -332,6 +332,7 @@ struct KanbanHistoryRow {
     action: String,
     initial_board: Option<String>,
     final_board: Option<String>,
+    comment: Option<String>,
     created_at: Option<String>,
 }
 
@@ -341,27 +342,25 @@ struct KanbanBodyRow {
 }
 
 #[derive(Debug, FromRow)]
-struct ExcerptRow {
+struct LastMessageRow {
     content: String,
+    msg_type: Option<String>,
 }
 
-/// Best excerpt for a prior thread: its latest summary message if one exists,
-/// otherwise its most recent non-empty message.
-async fn get_thread_excerpt(
-    pool: &PgPool,
-    thread_id: i64,
-    max_chars: usize,
-) -> Result<Option<String>> {
-    let row = sqlx::query_as::<_, ExcerptRow>(
-        "SELECT content FROM messages \
-         WHERE thread_id = $1 AND content <> '' \
-         ORDER BY (msg_type = 'summary') DESC, id DESC LIMIT 1",
+/// Last message of a thread (spec: last_message = LAST message in thread; type =
+/// messages.msg_type). For a successful step-thread this is normally the thread
+/// summary; for a failed one it is the fail message (Error type).
+async fn last_message_info(pool: &PgPool, thread_id: i64) -> anyhow::Result<LastMessageRow> {
+    Ok(sqlx::query_as::<_, LastMessageRow>(
+        "SELECT content, msg_type FROM messages WHERE thread_id = $1 ORDER BY id DESC LIMIT 1",
     )
     .bind(thread_id)
     .fetch_optional(pool)
-    .await
-    .context("Failed to fetch thread excerpt")?;
-    Ok(row.map(|r| truncate_str(&r.content, max_chars)))
+    .await?
+    .unwrap_or(LastMessageRow {
+        content: "<no messages>".to_string(),
+        msg_type: None,
+    }))
 }
 
 /// Pull a resume-ledger path (e.g. /opt/omni/data/tasks/<name>.md) out of a
@@ -389,120 +388,258 @@ fn extract_tracking_path(body: &str) -> Option<String> {
 /// Build the continuation self-orientation block for a thread. Returns None
 /// (no-op) for threads without a task linkage; a failing sub-query degrades
 /// gracefully by simply omitting that sub-part — never fails the prompt.
-async fn build_continuation_block(pool: &PgPool, thread_id: i64) -> Result<Option<String>> {
-    let task_ref = sqlx::query_as::<_, ThreadTaskRef>(
+async fn build_continuation_block(pool: &PgPool, thread_id: i64) -> anyhow::Result<Option<String>> {
+    let thread_ref: Option<ThreadTaskRef> = sqlx::query_as::<_, ThreadTaskRef>(
         "SELECT task_id, schedule_task_id FROM threads WHERE id = $1",
     )
     .bind(thread_id)
     .fetch_optional(pool)
-    .await
-    .context("Failed to fetch thread task linkage")?;
-
-    let Some(task_ref) = task_ref else {
+    .await?;
+    let Some(thread_ref) = thread_ref else {
         return Ok(None);
     };
-    let kanban_task = task_ref.task_id.filter(|s| !s.is_empty());
-    let cron_task = task_ref.schedule_task_id.filter(|s| !s.is_empty());
-    if kanban_task.is_none() && cron_task.is_none() {
-        return Ok(None); // plain thread — nothing to orient a continuation against
+
+    let mut blocks: Vec<String> = Vec::new();
+
+    // Role instructions for the CURRENT thread's workflow step (executor /
+    // tester / reviewer) plus thread-access rules (R11).
+    let step_row: Option<WorkflowStepRow> = sqlx::query_as::<_, WorkflowStepRow>(
+        "SELECT workflow_id, workflow_step FROM threads WHERE id = $1",
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(step) = step_row.and_then(|r| r.workflow_step) {
+        if let Some(role_block) = build_role_block(&step) {
+            blocks.push(role_block);
+        }
     }
 
-    let mut parts: Vec<String> = Vec::new();
-
-    // Prior threads of the SAME task (newest first, max 5), excluding this one.
-    let prior: Vec<PriorThreadRow> = if let Some(task) = &kanban_task {
-        sqlx::query_as(
-            "SELECT id, status, cause FROM threads WHERE task_id = $1 AND id != $2 ORDER BY id DESC LIMIT 5",
+    // Prior step-threads of this task (chronological): thread, workflow_step,
+    // terminal status, last message + its type. Legacy threads created before
+    // the task_type backfill are treated as kanban (task_type IS NULL).
+    let mut prior_threads: Vec<PriorThreadRow> = Vec::new();
+    if let Some(task_id) = &thread_ref.task_id {
+        let rows = sqlx::query_as::<_, PriorThreadRow>(
+            "SELECT id, status, workflow_step FROM threads WHERE task_id = $1 AND (task_type = 'kanban' OR task_type IS NULL) AND id != $2 ORDER BY id DESC LIMIT 8",
         )
-        .bind(task)
+        .bind(task_id)
         .bind(thread_id)
         .fetch_all(pool)
-        .await
-        .context("Failed to fetch prior threads of task")?
-    } else {
-        let task = cron_task.as_deref().expect("cron task present");
-        sqlx::query_as(
-            "SELECT id, status, cause FROM threads WHERE schedule_task_id = $1 AND id != $2 ORDER BY id DESC LIMIT 5",
+        .await?;
+        prior_threads.extend(rows);
+    }
+    if let Some(schedule_task_id) = &thread_ref.schedule_task_id {
+        // Legacy cron threads carry the schedule id in schedule_task_id.
+        let rows = sqlx::query_as::<_, PriorThreadRow>(
+            "SELECT id, status, workflow_step FROM threads WHERE schedule_task_id = $1 AND id != $2 ORDER BY id DESC LIMIT 8",
         )
-        .bind(task)
+        .bind(schedule_task_id)
         .bind(thread_id)
         .fetch_all(pool)
-        .await
-        .context("Failed to fetch prior threads of task")?
-    };
-
-    if !prior.is_empty() {
-        let mut lines = vec!["[Prior attempts of this task (threads)]:".to_string()];
-        for t in &prior {
-            let excerpt = match get_thread_excerpt(pool, t.id, 160).await {
-                Ok(Some(e)) => format!(" — {}", e),
-                _ => String::new(),
+        .await?;
+        prior_threads.extend(rows);
+        // Cron threads created after the migration carry task_id + task_type='cron'.
+        let rows = sqlx::query_as::<_, PriorThreadRow>(
+            "SELECT id, status, workflow_step FROM threads WHERE task_id = $1 AND task_type = 'cron' AND id != $2 ORDER BY id DESC LIMIT 8",
+        )
+        .bind(schedule_task_id)
+        .bind(thread_id)
+        .fetch_all(pool)
+        .await?;
+        prior_threads.extend(rows);
+    }
+    prior_threads.sort_by_key(|t| t.id);
+    if !prior_threads.is_empty() {
+        let mut parts = vec![format!(
+            "Prior step-threads of this task (thread, step, terminal status, last message) - resume from where the previous attempt ended; do not re-do completed work or repeat its mistakes:"
+        )];
+        for t in &prior_threads {
+            let step = t.workflow_step.as_deref().unwrap_or("-");
+            let (content, msg_type) = match last_message_info(pool, t.id).await {
+                Ok(last) => (last.content, last.msg_type),
+                Err(e) => {
+                    tracing::warn!(thread_id = t.id, "last-message lookup failed: {}", e);
+                    ("<unavailable>".to_string(), None)
+                }
             };
-            lines.push(format!(
-                "- thread {}: {}{}",
+            parts.push(format!(
+                "thread {} [step {}] status {} | last message ({}): {}",
                 t.id,
-                t.status.as_str(),
-                excerpt
+                step,
+                t.status,
+                msg_type.as_deref().unwrap_or("text"),
+                truncate_str(&content, 180)
             ));
         }
-        parts.push(lines.join("\n"));
+        blocks.push(parts.join("\n"));
     }
 
-    // Kanban audit trail — why the task keeps being (re)run (flapping, retries).
-    if let Some(task) = &kanban_task {
-        let history: Vec<KanbanHistoryRow> = sqlx::query_as(
-            "SELECT action, initial_board, final_board, \
-                    TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI') AS created_at \
-             FROM kanban_history WHERE kanban_task_id = $1 ORDER BY id DESC LIMIT 5",
+    // Recent kanban history: last status changes + comments (why this task is
+    // being run again).
+    if let Some(task_id) = &thread_ref.task_id {
+        let history = sqlx::query_as::<_, KanbanHistoryRow>(
+            "SELECT action, initial_board, final_board, comment, TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI') AS created_at FROM kanban_history WHERE kanban_task_id = $1 ORDER BY id DESC LIMIT 5",
         )
-        .bind(task)
+        .bind(task_id)
         .fetch_all(pool)
-        .await
-        .context("Failed to fetch kanban history")?;
+        .await?;
         if !history.is_empty() {
-            let mut lines = vec![format!("[Kanban history for {}]:", task)];
+            let mut parts =
+                vec!["Recent kanban history (why this task is being run again):".to_string()];
             for h in &history {
-                let mut seg = h.action.clone();
-                match (&h.initial_board, &h.final_board) {
-                    (Some(from), Some(to)) if !from.is_empty() && !to.is_empty() => {
-                        seg.push_str(&format!(": {} -> {}", from, to));
-                    }
-                    (_, Some(to)) if !to.is_empty() => seg.push_str(&format!(": {}", to)),
-                    (Some(from), _) if !from.is_empty() => seg.push_str(&format!(": {}", from)),
-                    _ => {}
-                }
-
-                if let Some(ts) = &h.created_at {
-                    if !ts.is_empty() {
-                        seg.push_str(&format!(" ({})", ts));
-                    }
-                }
-                lines.push(format!("- {}", seg));
-            }
-            parts.push(lines.join("\n"));
-        }
-
-        // Resume-ledger pointer from the task body.
-        let body_row =
-            sqlx::query_as::<_, KanbanBodyRow>("SELECT body FROM kanban_tasks WHERE id = $1")
-                .bind(task)
-                .fetch_optional(pool)
-                .await
-                .context("Failed to fetch kanban task body")?;
-        if let Some(row) = body_row {
-            if let Some(path) = row.body.as_deref().and_then(extract_tracking_path) {
+                let comment = h
+                    .comment
+                    .as_deref()
+                    .map(|c| format!(" - \"{}\"", truncate_str(c, 120)))
+                    .unwrap_or_default();
                 parts.push(format!(
-                    "[Resume ledger: {} — read it first; it records what prior threads did and what remains.]",
-                    path
+                    "{} -> {}: {} ({}){}",
+                    h.initial_board.as_deref().unwrap_or("?"),
+                    h.final_board.as_deref().unwrap_or("?"),
+                    h.action,
+                    h.created_at.as_deref().unwrap_or("?"),
+                    comment
+                ));
+            }
+            blocks.push(parts.join("\n"));
+        }
+    }
+
+    // Resume ledger: tracking file referenced by the task body.
+    if let Some(task_id) = &thread_ref.task_id {
+        let body: Option<KanbanBodyRow> =
+            sqlx::query_as::<_, KanbanBodyRow>("SELECT body FROM kanban_tasks WHERE id = $1")
+                .bind(task_id)
+                .fetch_optional(pool)
+                .await?;
+        if let Some(b) = body {
+            if let Some(ledger) = b.body.as_deref().and_then(extract_tracking_path) {
+                blocks.push(format!(
+                    "Task tracking file (resume ledger): read {} first - it records what has been done, verified, or failed across attempts of this task.",
+                    ledger
                 ));
             }
         }
     }
 
-    if parts.is_empty() {
-        return Ok(None);
+    if blocks.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(blocks.join("\n\n")))
     }
-    Ok(Some(parts.join("\n\n")))
+}
+
+#[derive(Debug, FromRow)]
+struct WorkflowStepRow {
+    workflow_id: Option<String>,
+    workflow_step: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WorkflowsYaml {
+    #[serde(default)]
+    workflows: std::collections::HashMap<String, WorkflowYamlEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WorkflowYamlEntry {
+    #[serde(default)]
+    roles: std::collections::HashMap<String, WorkflowRoleYaml>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WorkflowRoleYaml {
+    #[serde(default)]
+    template: Option<String>,
+}
+
+/// Map a workflow step key to its role key (workflows.yml role names):
+/// running -> executor, testing -> tester, review -> reviewer.
+fn step_to_role(workflow_step: &str) -> Option<&'static str> {
+    match workflow_step {
+        "running" => Some("executor"),
+        "testing" => Some("tester"),
+        "review" => Some("reviewer"),
+        _ => None,
+    }
+}
+
+/// Role instructions for the current thread's workflow step (R11). Both tester
+/// and reviewer must NOT implement the task; thread-access rules are included.
+fn build_role_block(workflow_step: &str) -> Option<String> {
+    match workflow_step {
+        "running" => Some(
+            "You are the EXECUTOR of this workflow step: implement/execute the task described in the task description. Before acting, read the prior step-threads of this task listed below - resume from where the previous attempt ended, avoid repeating work that already succeeded, and fix the work if the last testing/review step failed or requested changes."
+                .to_string(),
+        ),
+        "testing" => Some(
+            "You are the TESTER of this workflow step: run the tests for the executed task (you may create automated tests), but you must NOT implement the task itself. Read the executor's thread and all recent threads of this task before testing."
+                .to_string(),
+        ),
+        "review" => Some(
+            "You are the REVIEWER of this workflow step: perform a comprehensive review of the execution AND the tests. You must NOT implement the task. Read the executor and tester threads plus all recent threads of this task. If everything passes: report a successful status with a normal summary. If you find issues: call the fail tool with workflow_step 'running', 'testing', or 'blocked' (never 'review') so the right role re-runs."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+/// Load the role template for a workflow from <omni_dir>/workflows.yml.
+fn load_role_template(data_dir: &str, workflow_id: &str, role: &str) -> Option<String> {
+    let path = std::path::Path::new(data_dir).join("workflows.yml");
+    let text = std::fs::read_to_string(path).ok()?;
+    let file: WorkflowsYaml = serde_yaml::from_str(&text).ok()?;
+    file.workflows
+        .get(workflow_id)?
+        .roles
+        .get(role)?
+        .template
+        .clone()
+}
+
+/// Inverse prompt mapping for workflow steps (Phase 3b):
+/// - executor: task description = USER prompt (unchanged); template (optional) = SYSTEM message.
+/// - tester/reviewer: INVERSE - template = USER prompt (drives the role); task description = SYSTEM prompt.
+fn apply_workflow_mapping(
+    system: &mut String,
+    user: &mut String,
+    user_message: &str,
+    workflow_step: &str,
+    template: Option<&str>,
+) {
+    let Some(role) = step_to_role(workflow_step) else {
+        return;
+    };
+    let Some(template) = template else {
+        if workflow_step == "testing" || workflow_step == "review" {
+            tracing::warn!(
+                workflow_step,
+                role,
+                "workflow template required for this step but missing in workflows.yml"
+            );
+        }
+        return;
+    };
+    match workflow_step {
+        "running" => {
+            system.push_str(&format!(
+                "\n\n## Workflow instructions ({})\n{}",
+                role, template
+            ));
+        }
+        "testing" | "review" => {
+            *user = template.to_string();
+            let description = user_message.trim();
+            if !description.is_empty() {
+                system.push_str(&format!(
+                    "\n\n## Task under {} - context only, do not implement\n{}",
+                    role, description
+                ));
+            }
+        }
+        _ => {}
+    }
 }
 fn get_skills(data_dir: &str, profile_name: &str) -> Vec<String> {
     let skills_dir = format!("{}/profiles/{}/skills", data_dir, profile_name);
@@ -592,7 +729,7 @@ async fn handle_generate_full(
         }
     }
 
-    let system = system_parts.join("\n\n");
+    let mut system = system_parts.join("\n\n");
     let memory = memory_text.trim().to_string();
     let soul = if soul_text.is_empty() {
         String::new()
@@ -692,7 +829,36 @@ async fn handle_generate_full(
     }
 
     let context = context_blocks.join("\n\n---\n\n");
-    let user = user_message.to_string();
+    let mut user = user_message.to_string();
+
+    // 2f. Workflow step prompt mapping (inverse for tester/reviewer):
+    // executor = task description as USER prompt + template as SYSTEM message
+    // (template optional); tester/reviewer = template as USER prompt + task
+    // description as SYSTEM prompt (template required).
+    if let Some(tid) = thread_id {
+        match sqlx::query_as::<_, WorkflowStepRow>(
+            "SELECT workflow_id, workflow_step FROM threads WHERE id = $1",
+        )
+        .bind(tid)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some(wf)) => {
+                if let (Some(wf_id), Some(step)) = (&wf.workflow_id, &wf.workflow_step) {
+                    let template = load_role_template(data_dir, wf_id, step);
+                    apply_workflow_mapping(
+                        &mut system,
+                        &mut user,
+                        user_message,
+                        step,
+                        template.as_deref(),
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("workflow step lookup unavailable: {}", e),
+        }
+    }
 
     // ── Plan resolution ──
     // Plan input: true=plan, false=no plan, null/absent=let plugin config decide
@@ -1169,39 +1335,111 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires a live DATABASE_URL"]
-    async fn continuation_block_lists_prior_threads_for_kanban_task() {
+    async fn continuation_block_lists_prior_step_threads_for_kanban_task() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
         let pool = connect_db(&url).await.expect("connect_db");
         // task_18c909688609da2f: thread 72 is the newest attempt;
-        // 71/70 skipped, 69 interrupted.
+        // 71/70 skipped, 69 interrupted (legacy rows, task_type IS NULL).
         let block = build_continuation_block(&pool, 72)
             .await
             .expect("build_continuation_block")
             .expect("a block is produced for a task thread");
         println!("=== CONTINUATION BLOCK ===\n{}\n=== END ===", block);
         assert!(
-            block.contains("[Prior attempts of this task (threads)]:"),
+            block.contains("Prior step-threads of this task"),
             "prior-threads header missing:\n{block}"
         );
         assert!(
-            block.contains("thread 71: skipped"),
+            block.contains("thread 71 [step -] status skipped | last message"),
             "thread 71 entry missing:\n{block}"
         );
         assert!(
-            block.contains("thread 70: skipped"),
+            block.contains("thread 70 [step -] status skipped | last message"),
             "thread 70 entry missing:\n{block}"
         );
         assert!(
-            block.contains("thread 69: interrupted"),
+            block.contains("thread 69 [step -] status interrupted | last message"),
             "thread 69 entry missing:\n{block}"
         );
         assert!(
-            block.contains("[Kanban history for task_18c909688609da2f]:"),
+            block.contains("Recent kanban history (why this task is being run again):"),
             "kanban history header missing:\n{block}"
         );
         assert!(
-            block.contains("Resume ledger:"),
+            block.contains("Task tracking file (resume ledger):"),
             "resume ledger line missing:\n{block}"
         );
+    }
+
+    #[test]
+    fn role_block_matches_step() {
+        let executor = build_role_block("running").unwrap();
+        assert!(executor.contains("EXECUTOR"));
+        let tester = build_role_block("testing").unwrap();
+        assert!(tester.contains("TESTER"));
+        assert!(tester.contains("must NOT implement"));
+        let reviewer = build_role_block("review").unwrap();
+        assert!(reviewer.contains("REVIEWER"));
+        assert!(reviewer.contains("never 'review'"));
+        assert!(build_role_block("bogus").is_none());
+    }
+
+    #[test]
+    fn workflow_mapping_executor_keeps_task_description_as_user() {
+        let mut system = String::new();
+        let mut user = "implement the weekly report".to_string();
+        apply_workflow_mapping(
+            &mut system,
+            &mut user,
+            "implement the weekly report",
+            "running",
+            Some("You are the executor for this workflow."),
+        );
+        assert_eq!(user, "implement the weekly report");
+        assert!(system.contains("Workflow instructions (executor)"));
+        assert!(system.contains("You are the executor for this workflow."));
+    }
+
+    #[test]
+    fn workflow_mapping_tester_reviewer_is_inverse() {
+        let mut system = String::new();
+        let mut user = "implement the weekly report".to_string();
+        apply_workflow_mapping(
+            &mut system,
+            &mut user,
+            "implement the weekly report",
+            "testing",
+            Some("Run the test suite against the implementation."),
+        );
+        assert_eq!(user, "Run the test suite against the implementation.");
+        assert!(system.contains("Task under tester"));
+        assert!(system.contains("implement the weekly report"));
+
+        let mut system = String::new();
+        let mut user = "x".to_string();
+        apply_workflow_mapping(
+            &mut system,
+            &mut user,
+            "implement the weekly report",
+            "review",
+            Some("Review the implementation and the tests."),
+        );
+        assert_eq!(user, "Review the implementation and the tests.");
+        assert!(system.contains("Task under reviewer"));
+    }
+
+    #[test]
+    fn workflow_mapping_missing_template_falls_back_for_testing() {
+        let mut system = String::new();
+        let mut user = "implement the weekly report".to_string();
+        apply_workflow_mapping(
+            &mut system,
+            &mut user,
+            "implement the weekly report",
+            "testing",
+            None,
+        );
+        assert_eq!(user, "implement the weekly report");
+        assert!(!system.contains("Task under tester"));
     }
 }
