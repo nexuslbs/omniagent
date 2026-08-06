@@ -869,6 +869,37 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     prev[b_len]
 }
 
+/// Builder for the builtin `fail-thread` tool (Phase 2): ends the current
+/// thread as FAILED with an Error-type last message and applies the
+/// metadata.workflow_step kanban transition (spec §8 N1, §3 F0-F4).
+fn fail_thread_tool() -> McpTool {
+    McpTool {
+        name: "builtin_fail-thread".to_string(),
+        full_name: tool_qualify("builtin", "fail_thread"),
+        description: "End the current thread as FAILED with an Error-type last message and apply the metadata.workflow_step kanban transition. workflow_step accepts STEP keys only: \"running\", \"testing\", \"blocked\" (empty string = executor default). Any other value (e.g. \"review\" or role names) is invalid and blocks the task.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "workflow_step": {
+                    "type": "string",
+                    "enum": ["", "running", "testing", "blocked"],
+                    "description": "Target workflow step for the failing thread: empty = executor default (F0); running = executor rework (F1); testing = re-test (F2); blocked = block the task (F3). Invalid values (incl. review / role names) block the task (F4)."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional reason text stored in the Error-type final message."
+                }
+            },
+            "required": ["workflow_step"]
+        }),
+        server_name: None,
+        timeout_secs: None,
+        handler: Arc::new(|args: Value, ctx: AppContext| {
+            Box::pin(crate::mcp::task_tools::handle_fail_thread(args, ctx))
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1196,37 +1227,5 @@ mod tests {
         // Allowed with non-matching name
         let allowed = registry.allowed(&["read".to_string()]);
         assert!(allowed.is_empty());
-    }
-}
-
-
-/// Builder for the builtin `fail-thread` tool (Phase 2): ends the current
-/// thread as FAILED with an Error-type last message and applies the
-/// metadata.workflow_step kanban transition (spec §8 N1, §3 F0-F4).
-fn fail_thread_tool() -> McpTool {
-    McpTool {
-        name: "builtin_fail-thread".to_string(),
-        full_name: tool_qualify("builtin", "fail_thread"),
-        description: "End the current thread as FAILED with an Error-type last message and apply the metadata.workflow_step kanban transition. workflow_step accepts STEP keys only: \"running\", \"testing\", \"blocked\" (empty string = executor default). Any other value (e.g. \"review\" or role names) is invalid and blocks the task.".to_string(),
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "workflow_step": {
-                    "type": "string",
-                    "enum": ["", "running", "testing", "blocked"],
-                    "description": "Target workflow step for the failing thread: empty = executor default (F0); running = executor rework (F1); testing = re-test (F2); blocked = block the task (F3). Invalid values (incl. review / role names) block the task (F4)."
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "Optional reason text stored in the Error-type final message."
-                }
-            },
-            "required": ["workflow_step"]
-        }),
-        server_name: None,
-        timeout_secs: None,
-        handler: Arc::new(|args: Value, ctx: AppContext| {
-            Box::pin(crate::mcp::task_tools::handle_fail_thread(args, ctx))
-        }),
     }
 }
