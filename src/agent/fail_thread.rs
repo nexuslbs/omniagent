@@ -258,7 +258,7 @@ pub async fn manual_review_decision(
     };
 
     // R4: terminal tasks are a no-op (same semantics as engine_transition).
-    if matches!(task.status.as_str(), "done" | "blocked") {
+    if is_terminal_status(&task.status) {
         let status = task.status.clone();
         return Ok(ReviewOutcome {
             task_id: task_id.to_string(),
@@ -393,6 +393,13 @@ pub async fn manual_review_decision(
         thread_id: new_thread_id,
         comment: auto_comment,
     })
+}
+
+/// R4 terminal kanban statuses: a workflow task in one of these states never
+/// spawns a new thread and never transitions again (no-op guards in
+/// engine_transition and manual_review_decision).
+pub(crate) fn is_terminal_status(status: &str) -> bool {
+    matches!(status, "blocked" | "done")
 }
 
 /// Normalize the tool's `workflow_step` argument to the F-matrix outcome.
@@ -724,7 +731,7 @@ pub(crate) async fn engine_transition(
     };
 
     // R4: blocked/done tasks never transition.
-    if task.status == "blocked" || task.status == "done" {
+    if is_terminal_status(&task.status) {
         return Ok(None);
     }
 
@@ -1153,6 +1160,26 @@ mod tests {
         assert_eq!(role_for_step("testing"), "tester");
         assert_eq!(role_for_step("review"), "reviewer");
         assert_eq!(role_for_step("other"), "executor");
+    }
+}
+
+#[test]
+fn is_terminal_status_blocks_terminal_statuses() {
+    assert!(is_terminal_status("blocked"));
+    assert!(is_terminal_status("done"));
+}
+
+#[test]
+fn is_terminal_status_allows_active_and_retired_statuses() {
+    // 'ready' is retired: it must never be treated as terminal (and, after
+    // Phase 7, no production code defaults a status to it either).
+    for s in [
+        "backlog", "todo", "running", "testing", "review", "ready", "",
+    ] {
+        assert!(
+            !is_terminal_status(s),
+            "status {s:?} must never be terminal"
+        );
     }
 }
 

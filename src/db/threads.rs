@@ -252,7 +252,7 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
             match skip_recovery(t.task_id.as_deref(), task_status.as_deref()) {
                 SkipRecovery::Reschedule { .. } => {
                     let task_id = t.task_id.as_deref().unwrap_or("");
-                    let status = task_status.as_deref().unwrap_or("ready");
+                    let status = task_status.as_deref().unwrap_or("todo");
                     let reason = "channel closed";
                     #[derive(sqlx::FromRow)]
                     struct IdRow {
@@ -807,7 +807,7 @@ pub async fn skip_all_pending_threads(pool: &PgPool) -> AppResult<u64> {
         match skip_recovery(t.task_id.as_deref(), task_status.as_deref()) {
             SkipRecovery::Reschedule { .. } => {
                 let task_id = t.task_id.as_deref().unwrap_or("");
-                let status = task_status.as_deref().unwrap_or("ready");
+                let status = task_status.as_deref().unwrap_or("todo");
                 let reason = "startup recovery";
                 #[derive(sqlx::FromRow)]
                 struct IdRow {
@@ -1090,9 +1090,9 @@ mod tests {
     fn channel_closed_with_scheduled_thread_reschedules() {
         // thread_status='scheduled', never started: re-schedule (fresh thread,
         // thread_status back to 'scheduled', kanban status unchanged, no retry).
-        match skip_recovery(Some("task-1"), Some("ready")) {
+        match skip_recovery(Some("task-1"), Some("todo")) {
             SkipRecovery::Reschedule { task_status } => {
-                assert_eq!(task_status, "ready", "status must stay unchanged");
+                assert_eq!(task_status, "todo", "status must stay unchanged");
             }
             other => panic!("expected Reschedule, got {:?}", other),
         }
@@ -1115,7 +1115,7 @@ mod tests {
     fn skip_never_moves_to_todo_and_never_consumes_retry() {
         // R3: pre-start/external skips never consume retry and never move to
         // todo — the recovery plan has no todo variant and touches no counters.
-        for status in ["ready", "running", "testing", "review"] {
+        for status in ["todo", "running", "testing", "review"] {
             match skip_recovery(Some("task-1"), Some(status)) {
                 SkipRecovery::Reschedule { task_status } => {
                     assert_eq!(task_status, status, "status must stay unchanged");
@@ -1130,7 +1130,7 @@ mod tests {
         // Same rule at omniagent start: scheduled or running task threads are
         // re-scheduled (fresh thread, thread_status='scheduled', status
         // unchanged) — never moved to todo.
-        for status in ["ready", "running"] {
+        for status in ["todo", "running"] {
             assert!(
                 matches!(
                     skip_recovery(Some("t1"), Some(status)),
@@ -1153,7 +1153,7 @@ mod tests {
 
     #[test]
     fn non_task_threads_are_only_skipped() {
-        assert_eq!(skip_recovery(None, Some("ready")), SkipRecovery::SkipOnly);
+        assert_eq!(skip_recovery(None, Some("todo")), SkipRecovery::SkipOnly);
         assert_eq!(skip_recovery(None, None), SkipRecovery::SkipOnly);
         assert_eq!(skip_recovery(Some("t1"), None), SkipRecovery::SkipOnly);
     }
