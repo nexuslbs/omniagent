@@ -1456,6 +1456,5 @@ mod tests {
             pending.lock().get(&7).is_none(),
             "pending entry must be removed on drop"
         );
-        let _ = tx;
     }
 }
