@@ -114,11 +114,11 @@ async fn handle_create(
 
     // Validate status
     let valid_statuses = [
-        "backlog", "todo", "ready", "running", "review", "done", "blocked",
+        "backlog", "todo", "running", "testing", "review", "blocked", "done",
     ];
     if !valid_statuses.contains(&status) {
         return Err(anyhow::anyhow!(
-            "Invalid status '{}'. Must be one of: backlog, todo, ready, running, review, done, blocked",
+            "Invalid status '{}'. Must be one of: backlog, todo, running, testing, review, blocked, done",
             status
         ));
     }
@@ -304,7 +304,7 @@ async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     }
     if let Some(status) = args["status"].as_str() {
         let valid_statuses = [
-            "backlog", "todo", "ready", "running", "review", "done", "blocked",
+            "backlog", "todo", "running", "testing", "review", "blocked", "done",
         ];
         if !valid_statuses.contains(&status) {
             anyhow::bail!("Invalid status '{status}'");
@@ -708,8 +708,8 @@ async fn main() -> Result<()> {
                         },
                         "status": {
                             "type": "string",
-                            "description": "Optional status (default: 'backlog'). One of: backlog, todo, ready, running, review, done, blocked",
-                            "enum": ["backlog", "todo", "ready", "running", "review", "done", "blocked"]
+                            "description": "Optional status (default: 'backlog'). One of: backlog, todo, running, testing, review, blocked, done",
+                            "enum": ["backlog", "todo", "running", "testing", "review", "blocked", "done"]
                         },
                         "priority": {
                             "type": "integer",
@@ -746,7 +746,7 @@ async fn main() -> Result<()> {
                     "properties": {
                         "status": {
                             "type": "string",
-                            "description": "Optional status filter. One of: backlog, todo, ready, running, review, done, blocked"
+                            "description": "Optional status filter. One of: backlog, todo, running, testing, review, blocked, done"
                         }
                     }
                 }),
@@ -774,8 +774,8 @@ async fn main() -> Result<()> {
                         },
                         "status": {
                             "type": "string",
-                            "description": "New status. One of: backlog, todo, ready, running, review, done, blocked",
-                            "enum": ["backlog", "todo", "ready", "running", "review", "done", "blocked"]
+                            "description": "New status. One of: backlog, todo, running, testing, review, blocked, done",
+                            "enum": ["backlog", "todo", "running", "testing", "review", "blocked", "done"]
                         },
                         "priority": {
                             "type": "integer",
