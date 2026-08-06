@@ -258,7 +258,6 @@ mod tests {
     }
 }
 
-
 /// Handle the builtin `fail-thread` tool (Phase 2): ends the current thread
 /// as FAILED with an Error-type last message and applies the
 /// metadata.workflow_step kanban transition (spec §3 F0-F4, §8 N1/N6).
@@ -318,7 +317,6 @@ pub async fn handle_fail_thread(args: Value, ctx: AppContext) -> AppResult<McpTo
 
 #[cfg(test)]
 mod fail_thread_tests {
-
 
     #[test]
     fn normalize_workflow_step_accepts_only_step_keys() {

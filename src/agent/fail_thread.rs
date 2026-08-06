@@ -3,6 +3,7 @@ use crate::agent::helpers;
 use crate::db::types as queries;
 use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
 use crate::error::AppResult;
+use sql_forge::sql_forge;
 
 /// Create an error message, mark the thread as failed, deliver the error
 /// back to the user's platform, and return the saved message.
@@ -93,12 +94,9 @@ pub(crate) async fn fail_thread(
     Ok(saved)
 }
 
-
 // ─────────────────────────────────────────────────────────────────────────────
 
-
 // ─────────────────────────────────────────────────────────────────────────────
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 2 — builtin fail-thread tool (spec §8 N1 + §3 F0-F4 matrix)
@@ -184,9 +182,8 @@ pub(crate) async fn fail_thread_tool(
 
     // 2. Build + persist the Error-type last message.
     let next_seq = crate::db::threads::get_max_thread_sequence(&ctx.pool, thread.id).await? + 1;
-    let content = reason.unwrap_or_else(|| {
-        "The thread was ended as FAILED by the fail-thread tool.".to_string()
-    });
+    let content = reason
+        .unwrap_or_else(|| "The thread was ended as FAILED by the fail-thread tool.".to_string());
     let err_msg = MessageNew {
         thread_id: thread.id,
         role: "system".to_string(),
@@ -262,14 +259,9 @@ pub(crate) async fn fail_thread_tool(
         if let (Some(ref platform), Some(ref resource)) =
             (channel.platform, channel.resource_identifier)
         {
-            let _ = crate::agent::helpers::enqueue_reaction(
-                ctx,
-                platform,
-                resource,
-                &cause_ext,
-                ":x:",
-            )
-            .await;
+            let _ =
+                crate::agent::helpers::enqueue_reaction(ctx, platform, resource, &cause_ext, ":x:")
+                    .await;
         }
     }
 
@@ -281,251 +273,490 @@ pub(crate) async fn fail_thread_tool(
     );
 
     Ok(saved)
+} // ===========================================================================
+  // Phase 3: atomic engine transitions (R8) + retry guards (D1/R2/R3) + I1 reruns
+  // ===========================================================================
+
+/// What kind of transition is being requested.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RerunKind {
+    /// fail-task tool routing (F0-F4) — decided by the tool's metadata `workflow_step`.
+    FailTool {
+        /// The `workflow_step` metadata value the tool was called with.
+        step: String,
+    },
+    /// Executor thread ended as FAILED — re-run the executor step (transition table row 2 / F0).
+    Failed,
+    /// Thread interrupted by the LLM-call iteration limit — re-run the SAME step (I1).
+    Interrupted,
+    /// Thread skipped before starting (channel closure/deletion) — re-schedule the
+    /// same step (R3: no retry consumed, kanban status unchanged).
+    Skipped,
 }
 
-/// Apply the workflow_step kanban transition for a failing thread (F0-F4).
-/// Returns a short description for logs / tool result.
+/// Map a workflow step key to the role key used for retry limits (workflows.yml).
+fn role_for_step(step: &str) -> &'static str {
+    match step {
+        "testing" => "tester",
+        "review" => "reviewer",
+        _ => "executor",
+    }
+}
+
+/// Pure routing for the fail-task tool matrix (F0-F4) — no I/O.
 ///
-/// Uses runtime sqlx (not sql_forge!) for the same reason as db/threads.rs:
-/// these queries are not part of the SQLX_OFFLINE query cache.
+/// Returns `(target_step, target_status)`:
+/// - `target_step == None` → blocked, no re-run thread (F3/F4, absent role,
+///   invalid caller, non-workflow task).
+/// - `Some("running")` → new executor thread, kanban status `running` (F0/F1).
+/// - `Some("testing")` → new tester thread, kanban status `testing` (F2).
+fn route_fail_tool(
+    normalized: &str,
+    caller_step: Option<&str>,
+    has_wf: bool,
+    has_executor_role: bool,
+    has_tester_role: bool,
+) -> (Option<&'static str>, &'static str) {
+    match normalized {
+        // F0 — executor default (no metadata workflow_step): re-run the executor step.
+        "executor" => {
+            if has_wf {
+                (Some("running"), "running")
+            } else {
+                (None, "blocked")
+            }
+        }
+        // F1 — a tester or reviewer thread requests executor rework.
+        "running" => {
+            let valid_caller = matches!(caller_step, Some("testing") | Some("review"));
+            if !has_wf || !valid_caller || !has_executor_role {
+                (None, "blocked")
+            } else {
+                (Some("running"), "running")
+            }
+        }
+        // F2 — a reviewer thread requests a re-test.
+        "testing" => {
+            let valid_caller = matches!(caller_step, Some("review"));
+            if !has_wf || !valid_caller || !has_tester_role {
+                (None, "blocked")
+            } else {
+                (Some("testing"), "testing")
+            }
+        }
+        // F3 — explicit blocked target: blocked, no thread.
+        "blocked" => (None, "blocked"),
+        // F4 — any invalid value (incl. 'review', N6): blocked, no thread.
+        _ => (None, "blocked"),
+    }
+}
+
+/// Apply one atomic engine transition (R8): in a SINGLE DB transaction, optionally
+/// create a re-run thread + its seq-0 cause message, update the kanban task's
+/// status / thread_status / workflow_state (executions), and record a
+/// kanban-history comment. Retry guards (limit = retries + 1) are enforced
+/// INSIDE the transaction, so a guard hit never leaves a dangling thread and
+/// the whole transition commits or rolls back atomically.
+///
+/// Returns `Ok(Some(new_thread_id))` when a re-run thread was created,
+/// `Ok(None)` when the transition was a blocked/no-thread outcome, and
+/// `Err(msg)` when the transition failed and nothing was committed.
+pub(crate) async fn engine_transition(
+    pool: &sqlx::PgPool,
+    data_dir: &str,
+    thread: &crate::db::types::Thread,
+    kind: RerunKind,
+) -> Result<Option<i64>, String> {
+    let Some(task_id) = thread.task_id.as_deref() else {
+        return Ok(None); // thread not linked to a kanban task
+    };
+
+    let mut tx = pool.begin().await.map_err(|e| format!("begin: {e}"))?;
+
+    #[derive(sqlx::FromRow)]
+    struct TaskRow {
+        status: String,
+        workflow_id: Option<String>,
+        workflow_state: Option<serde_json::Value>,
+        caller_step: Option<String>,
+    }
+
+    let task = sql_forge!(
+        TaskRow,
+        "SELECT kt.status, kt.workflow_id, kt.workflow_state,
+                t.workflow_step AS caller_step
+         FROM kanban_tasks kt
+         LEFT JOIN threads t ON t.id = :thread_id
+         WHERE kt.id = :task_id
+         FOR UPDATE OF kt",
+        ( :thread_id = thread.id, :task_id = task_id )
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("select task: {e}"))?;
+
+    let Some(task) = task else {
+        return Ok(None); // task disappeared — nothing to transition
+    };
+
+    // R4: blocked/done tasks never transition.
+    if task.status == "blocked" || task.status == "done" {
+        return Ok(None);
+    }
+
+    let wf_id = task.workflow_id.as_deref();
+    let has_wf = wf_id.is_some();
+    let caller_step = task.caller_step.as_deref();
+    let mut executions = task.workflow_state.unwrap_or_else(|| serde_json::json!({}));
+
+    // Load the workflow definition (retry limits / roles).
+    let workflow = if let Some(id) = wf_id {
+        let path = std::path::Path::new(data_dir).join("workflows.yml");
+        match crate::workflows::WorkflowsFile::load(&path) {
+            Ok(file) => file.workflows.get(id).cloned(),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    let has_executor_role = workflow
+        .as_ref()
+        .is_some_and(|w| w.roles.contains_key("executor"));
+    let has_tester_role = workflow
+        .as_ref()
+        .is_some_and(|w| w.roles.contains_key("tester"));
+    let limit_for = |step: &str| -> u64 {
+        match &workflow {
+            Some(w) => retry_limit(w, role_for_step(step)),
+            // No config for this workflow: treat as retries = 0 (limit = 1).
+            None => 1,
+        }
+    };
+
+    // ---- Decide the transition (inside the locked transaction) --------------
+    let mut rerun_step: Option<String> = None;
+    let mut final_status = task.status.clone();
+    let mut increment = true;
+    // Reason used in the kanban-history comment when the outcome is "blocked".
+    let mut block_reason: &'static str = "blocked";
+
+    match &kind {
+        RerunKind::FailTool { step } => {
+            let normalized = normalize_workflow_step(Some(step.as_str()));
+            let (target, status) = route_fail_tool(
+                normalized,
+                caller_step,
+                has_wf,
+                has_executor_role,
+                has_tester_role,
+            );
+            rerun_step = target.map(|s| s.to_string());
+            final_status = status.to_string();
+            block_reason = match normalized {
+                "executor" => "no workflow",
+                "running" if !matches!(caller_step, Some("testing") | Some("review")) => {
+                    "invalid caller for workflow_step 'running'"
+                }
+                "running" if !has_executor_role => "no executor role in workflow",
+                "testing" if caller_step != Some("review") => {
+                    "invalid caller for workflow_step 'testing'"
+                }
+                "testing" if !has_tester_role => "no tester role in workflow",
+                "blocked" => "workflow_step 'blocked'",
+                _ => "invalid workflow_step",
+            };
+        }
+        RerunKind::Failed => {
+            // Row 2: executor non-success terminal → re-run the executor step (F0).
+            if has_wf {
+                rerun_step = Some("running".to_string());
+                final_status = "running".to_string();
+            } else {
+                block_reason = "no workflow";
+            }
+        }
+        RerunKind::Interrupted => {
+            // I1: re-run the SAME step; kanban status unchanged.
+            if has_wf
+                && matches!(
+                    caller_step,
+                    Some("running") | Some("testing") | Some("review")
+                )
+            {
+                rerun_step = caller_step.map(|s| s.to_string());
+            } else {
+                block_reason = "no workflow";
+            }
+        }
+        RerunKind::Skipped => {
+            // R3: channel closure/deletion — re-schedule the same step with NO
+            // retry consumed and the kanban status UNCHANGED (workflow or not).
+            if matches!(
+                caller_step,
+                Some("running") | Some("testing") | Some("review")
+            ) {
+                rerun_step = caller_step.map(|s| s.to_string());
+                increment = false;
+            } else if has_wf {
+                // Workflow executor thread without an explicit step: re-run the
+                // executor step, status unchanged.
+                rerun_step = Some("running".to_string());
+                increment = false;
+            } else {
+                // Non-workflow kanban-linked thread: re-schedule (status unchanged).
+                rerun_step = Some("running".to_string());
+                increment = false;
+            }
+        }
+    }
+
+    // Retry guard (D1/R2): limit = retries + 1; a re-entry that would exceed the
+    // limit is converted to "blocked" BEFORE any thread is created.
+    if increment {
+        if let Some(step) = rerun_step.as_deref() {
+            if execution_count(&executions, step) >= limit_for(step) {
+                rerun_step = None;
+                final_status = "blocked".to_string();
+                block_reason = "retry limit reached";
+            }
+        }
+    }
+
+    // ---- Execute (one transaction) ------------------------------------------
+    let initial_status = task.status.clone();
+    let new_thread_id: Option<i64> = if let Some(step) = rerun_step.as_deref() {
+        #[derive(sqlx::FromRow)]
+        struct IdRow {
+            id: i64,
+        }
+        let new_id = sql_forge!(
+            IdRow,
+            "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
+                                  task_id, parent_id, workflow_id, workflow_step)
+             VALUES ('pending', :cause, :channel_id, :profile, :provider, :model,
+                     :task_id, :parent_id, :workflow_id, :workflow_step)
+             RETURNING id",
+            (
+                :cause = thread.cause.as_str(),
+                :channel_id = thread.channel_id,
+                :profile = thread.profile.as_str(),
+                :provider = thread.provider.as_deref().unwrap_or(""),
+                :model = thread.model.as_deref().unwrap_or(""),
+                :task_id = task_id,
+                :parent_id = thread.id,
+                :workflow_id = wf_id.unwrap_or(""),
+                :workflow_step = step
+            )
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| format!("insert rerun thread: {e}"))?;
+
+        // seq-0 cause message for the re-run thread (same task context).
+        let cause = if thread.cause.is_empty() {
+            "re-run".to_string()
+        } else {
+            thread.cause.clone()
+        };
+        sql_forge!(
+            "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
+             VALUES (:tid, 'cause', :content, 0, 'cause')",
+            ( :tid = new_id.id, :content = cause )
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("insert rerun cause message: {e}"))?;
+
+        // Count the completed run of this step (R8: same transaction).
+        if increment {
+            increment_execution(&mut executions, step);
+        }
+        Some(new_id.id)
+    } else {
+        None
+    };
+
+    let comment = match new_thread_id {
+        Some(new_id) => match &kind {
+            RerunKind::Interrupted => format!(
+                "Task interrupted due to LLM calls iteration limit reached in thread #{}. Creating thread #{}",
+                thread.id, new_id
+            ),
+            RerunKind::Skipped => format!(
+                "Thread #{} skipped before start. Creating thread #{}",
+                thread.id, new_id
+            ),
+            _ => format!("Task failed in thread #{}. Creating thread #{}", thread.id, new_id),
+        },
+        None => format!(
+            "Task failed in thread #{}. Moving kanban task to \"blocked\" status due to {} for status {}",
+            thread.id, block_reason, initial_status
+        ),
+    };
+
+    let thread_status: Option<&str> = if new_thread_id.is_some() {
+        Some("scheduled")
+    } else {
+        None
+    };
+    sql_forge!(
+        "UPDATE kanban_tasks
+         SET status = :status, thread_status = NULLIF(:tstatus, '')::text,
+             workflow_state = CAST(:state AS jsonb)
+         WHERE id = :task_id",
+        (
+            :status = final_status.as_str(),
+            :tstatus = thread_status.unwrap_or(""),
+            :state = executions,
+            :task_id = task_id
+        )
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("update kanban task: {e}"))?;
+
+    sql_forge!(
+        "INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
+         VALUES (:task_id, 'workflow', :initial, :to_status, :comment)",
+        (
+            :task_id = task_id,
+            :initial = initial_status.as_str(),
+            :to_status = final_status.as_str(),
+            :comment = comment.as_str()
+        )
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("insert kanban history: {e}"))?;
+
+    tx.commit().await.map_err(|e| format!("commit: {e}"))?;
+    Ok(new_thread_id)
+}
+
+/// Entry point for the fail-task tool (F0-F4). Wraps [`engine_transition`] and
+/// returns a short summary string for the tool result / logs.
 async fn apply_fail_step_transition(
     ctx: &crate::mcp::AppContext,
     thread: &crate::db::types::Thread,
     step: &str,
 ) -> String {
-    let task_id = match thread.task_id.as_deref() {
-        Some(id) if !id.is_empty() => id.to_string(),
-        _ => return "no_kanban_task".to_string(),
-    };
-
-    // Read the task's workflow columns + the calling thread's workflow_step.
-    #[derive(sqlx::FromRow)]
-    struct FailStepRow {
-        workflow_id: Option<String>,
-        thread_status: Option<String>,
-        workflow_state: Option<serde_json::Value>,
-        caller_step: Option<String>,
-    }
-    let row: Option<FailStepRow> = match sqlx::query_as::<_, FailStepRow>(
-        r#"
-        SELECT kt.workflow_id, kt.thread_status, kt.workflow_state, t.workflow_step AS "caller_step"
-        FROM kanban_tasks kt
-        JOIN threads t ON t.id = $2
-        WHERE kt.id = $1
-        "#,
-    )
-    .bind(&task_id)
-    .bind(thread.id)
-    .fetch_optional(&ctx.pool)
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("[fail-thread] workflow columns read failed: {:?}", e);
-            return "task_read_error".to_string();
-        }
-    };
-    let Some(row) = row else {
-        return "task_not_found".to_string();
-    };
-
-    let workflow_id = row.workflow_id.clone().unwrap_or_default();
-    let caller_step = row.caller_step.clone().unwrap_or_default();
-    let mut executions = row.workflow_state.clone().unwrap_or_else(|| {
-        serde_json::json!({ "executions": {} })
-    });
-
-    // Load the workflow definition (roles / retries) for the F1/F2 guards.
-    let workflow = if workflow_id.is_empty() {
-        None
-    } else {
-        let wf_path = format!("{}/workflows.yml", ctx.data_dir);
-        crate::workflows::WorkflowsFile::load(std::path::Path::new(&wf_path))
-            .ok()
-            .and_then(|wf| wf.workflows.get(&workflow_id).cloned())
-    };
-
-    // F-matrix outcome computation.
-    let mut final_status: Option<&str> = None; // None = leave status unchanged (F0)
-    let comment; // assigned in every match arm below
-
-    match step {
-        "executor" => {
-            // F0 — executor default. With a workflow: task rests at its current
-            // status, thread_status = NULL (thread re-creation is Phase 3).
-            // Without a workflow: mirror normal failure semantics → blocked.
-            if workflow_id.is_empty() {
-                final_status = Some("blocked");
-                comment =
-                    "fail-thread: executor thread ended as FAILED (no workflow → blocked)."
-                        .to_string();
-            } else {
-                comment =
-                    "fail-thread: executor step failed — step re-run pending (Phase 3)."
-                        .to_string();
-            }
-        }
-        "running" => {
-            // F1 — a tester/reviewer thread requests executor rework.
-            if caller_step == "testing" || caller_step == "review" {
-                match &workflow {
-                    Some(wf) if wf.roles.contains_key("executor") => {
-                        let limit = retry_limit(wf, "executor");
-                        let count = execution_count(&executions, "running");
-                        if count < limit {
-                            increment_execution(&mut executions, "running");
-                            final_status = Some("running");
-                            comment = format!(
-                                "fail-thread: tester/reviewer failure → executor rework (execution {}/{}).",
-                                count + 1,
-                                limit
-                            );
-                        } else {
-                            comment = format!(
-                                "fail-thread: executor retry limit reached ({}/{} → blocked).",
-                                count, limit
-                            );
-                        }
-                    }
-                    Some(_) => {
-                        comment =
-                            "fail-thread: executor role absent from workflow → blocked.".to_string();
-                    }
-                    None => {
-                        comment =
-                            "fail-thread: workflow not found / not loadable → blocked.".to_string();
-                    }
-                }
-            } else {
-                comment = "fail-thread: invalid caller for step 'running' (caller must be tester/reviewer) → blocked.".to_string();
-            }
-        }
-        "testing" => {
-            // F2 — a reviewer thread requests re-test.
-            if caller_step == "review" {
-                match &workflow {
-                    Some(wf) if wf.roles.contains_key("tester") => {
-                        let limit = retry_limit(wf, "tester");
-                        let count = execution_count(&executions, "testing");
-                        if count < limit {
-                            increment_execution(&mut executions, "testing");
-                            final_status = Some("testing");
-                            comment = format!(
-                                "fail-thread: reviewer failure → re-test (execution {}/{}).",
-                                count + 1,
-                                limit
-                            );
-                        } else {
-                            comment = format!(
-                                "fail-thread: tester retry limit reached ({}/{} → blocked).",
-                                count, limit
-                            );
-                        }
-                    }
-                    Some(_) => {
-                        comment =
-                            "fail-thread: tester role absent from workflow → blocked.".to_string();
-                    }
-                    None => {
-                        comment =
-                            "fail-thread: workflow not found / not loadable → blocked.".to_string();
-                    }
-                }
-            } else {
-                comment = "fail-thread: invalid caller for step 'testing' (caller must be reviewer) → blocked.".to_string();
-            }
-        }
-        "blocked" => {
-            // F3 — any role may block the task.
-            final_status = Some("blocked");
-            comment = "fail-thread: task blocked via fail-thread.".to_string();
-        }
-        _ => {
-            // F4 — invalid workflow_step (incl. review / role names) → blocked + auto comment.
-            final_status = Some("blocked");
-            comment = "fail-thread: invalid workflow_step → task blocked.".to_string();
-        }
-    }
-
-    // Persist the transition atomically (R8): status + thread_status +
-    // workflow_state + kanban_history comment in one transaction.
-    let mut tx = match ctx.pool.begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            tracing::warn!("[fail-thread] begin tx failed: {:?}", e);
-            return "tx_error".to_string();
-        }
-    };
-
-    let initial_status: String = match sqlx::query_scalar::<_, String>(
-        "SELECT status FROM kanban_tasks WHERE id = $1 FOR UPDATE",
-    )
-    .bind(&task_id)
-    .fetch_one(&mut *tx)
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("[fail-thread] task status read failed: {:?}", e);
-            let _ = tx.rollback().await;
-            return "task_read_error".to_string();
-        }
-    };
-
-    let status_sql = match final_status {
-        Some(status) => sqlx::query(
-            "UPDATE kanban_tasks SET status = $1, thread_status = NULL, workflow_state = CAST($2 AS jsonb), updated_at = NOW() WHERE id = $3",
-        )
-        .bind(status)
-        .bind(executions.to_string())
-        .bind(&task_id)
-        .execute(&mut *tx)
-        .await,
-        None => sqlx::query(
-            "UPDATE kanban_tasks SET thread_status = NULL, workflow_state = CAST($1 AS jsonb), updated_at = NOW() WHERE id = $2",
-        )
-        .bind(executions.to_string())
-        .bind(&task_id)
-        .execute(&mut *tx)
-        .await,
-    };
-    if let Err(e) = status_sql {
-        tracing::warn!("[fail-thread] task update failed: {:?}", e);
-        let _ = tx.rollback().await;
-        return "update_error".to_string();
-    }
-
-    let final_board = final_status.unwrap_or(&initial_status);
-    if let Err(e) = sqlx::query(
-        r#"
-        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
-        VALUES ($1, 'workflow', $2, $3, $4)
-        "#,
-    )
-    .bind(&task_id)
-    .bind(&initial_status)
-    .bind(final_board)
-    .bind(&comment)
-    .execute(&mut *tx)
-    .await
-    {
-        tracing::warn!("[fail-thread] kanban_history insert failed: {:?}", e);
-        let _ = tx.rollback().await;
-        return "history_error".to_string();
-    }
-
-    if let Err(e) = tx.commit().await {
-        tracing::warn!("[fail-thread] tx commit failed: {:?}", e);
-        return "commit_error".to_string();
-    }
-
-    format!(
-        "task {} {} (thread_status=NULL, comment='{}')",
-        task_id,
-        match final_status {
-            Some(s) => format!("→ {}", s),
-            None => format!("resting at {}", initial_status),
+    match engine_transition(
+        &ctx.pool,
+        &ctx.data_dir,
+        thread,
+        RerunKind::FailTool {
+            step: step.to_string(),
         },
-        comment
     )
+    .await
+    {
+        Ok(Some(new_id)) => format!("created re-run thread #{new_id}"),
+        Ok(None) => "no re-run thread (blocked or non-workflow task)".to_string(),
+        Err(e) => format!("transition failed: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_workflow_step_maps_values() {
+        assert_eq!(normalize_workflow_step(None), "executor");
+        assert_eq!(normalize_workflow_step(Some("")), "executor");
+        assert_eq!(normalize_workflow_step(Some("running")), "running");
+        assert_eq!(normalize_workflow_step(Some("testing")), "testing");
+        assert_eq!(normalize_workflow_step(Some("blocked")), "blocked");
+        // 'review' is not a valid fail target (N6) — routed to blocked (F4).
+        assert_eq!(normalize_workflow_step(Some("review")), "invalid");
+        assert_eq!(normalize_workflow_step(Some("bogus")), "invalid");
+    }
+
+    #[test]
+    fn route_fail_tool_f0_executor() {
+        // F0 with workflow → re-run executor step.
+        let (step, status) = route_fail_tool("executor", Some("running"), true, true, true);
+        assert_eq!(step, Some("running"));
+        assert_eq!(status, "running");
+        // F0 without workflow → blocked.
+        let (step, status) = route_fail_tool("executor", Some("running"), false, false, false);
+        assert_eq!(step, None);
+        assert_eq!(status, "blocked");
+    }
+
+    #[test]
+    fn route_fail_tool_f1_tester_reviewer_rework() {
+        // Tester requests executor rework.
+        let (step, status) = route_fail_tool("running", Some("testing"), true, true, true);
+        assert_eq!(step, Some("running"));
+        assert_eq!(status, "running");
+        // Reviewer requests executor rework.
+        let (step, _) = route_fail_tool("running", Some("review"), true, true, true);
+        assert_eq!(step, Some("running"));
+        // Executor itself cannot request "running" rework (invalid caller).
+        let (step, _) = route_fail_tool("running", Some("running"), true, true, true);
+        assert_eq!(step, None);
+        // No executor role in workflow → blocked.
+        let (step, _) = route_fail_tool("running", Some("testing"), true, false, true);
+        assert_eq!(step, None);
+        // Non-workflow task → blocked.
+        let (step, _) = route_fail_tool("running", Some("testing"), false, false, false);
+        assert_eq!(step, None);
+    }
+
+    #[test]
+    fn route_fail_tool_f2_reviewer_retest() {
+        let (step, status) = route_fail_tool("testing", Some("review"), true, true, true);
+        assert_eq!(step, Some("testing"));
+        assert_eq!(status, "testing");
+        // Tester cannot request its own step.
+        let (step, _) = route_fail_tool("testing", Some("testing"), true, true, true);
+        assert_eq!(step, None);
+        // No tester role → blocked.
+        let (step, _) = route_fail_tool("testing", Some("review"), true, true, false);
+        assert_eq!(step, None);
+    }
+
+    #[test]
+    fn route_fail_tool_f3_f4_blocked() {
+        let (step, status) = route_fail_tool("blocked", Some("review"), true, true, true);
+        assert_eq!(step, None);
+        assert_eq!(status, "blocked");
+        let (step, status) = route_fail_tool("invalid", Some("review"), true, true, true);
+        assert_eq!(step, None);
+        assert_eq!(status, "blocked");
+    }
+
+    #[test]
+    fn execution_count_and_increment_roundtrip() {
+        let mut state = serde_json::json!({});
+        assert_eq!(execution_count(&state, "running"), 0);
+        increment_execution(&mut state, "running");
+        increment_execution(&mut state, "running");
+        increment_execution(&mut state, "testing");
+        assert_eq!(execution_count(&state, "running"), 2);
+        assert_eq!(execution_count(&state, "testing"), 1);
+        assert_eq!(execution_count(&state, "review"), 0);
+    }
+
+    #[test]
+    fn retry_limit_is_retries_plus_one() {
+        let file = crate::workflows::WorkflowsFile::from_yaml(
+            "workflows:\n  wf:\n    defaults:\n      profile: executor\n      retries: 0\n    roles:\n      executor: {}\n      tester:\n        template: t\n        retries: 2\n",
+        )
+        .expect("parse workflows yaml");
+        let wf = file.workflows.get("wf").unwrap();
+        // retries = 0 → limit = 1; per-role override retries = 2 → limit = 3.
+        assert_eq!(retry_limit(wf, "executor"), 1);
+        assert_eq!(retry_limit(wf, "tester"), 3);
+        assert_eq!(retry_limit(wf, "reviewer"), 1);
+    }
+
+    #[test]
+    fn role_for_step_maps_keys() {
+        assert_eq!(role_for_step("running"), "executor");
+        assert_eq!(role_for_step("testing"), "tester");
+        assert_eq!(role_for_step("review"), "reviewer");
+        assert_eq!(role_for_step("other"), "executor");
+    }
 }

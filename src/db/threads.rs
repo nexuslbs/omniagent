@@ -31,8 +31,8 @@ pub async fn create_thread(
     let row: ThreadDb = sql_forge!(
         ThreadDb,
         r#"
-        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id, plan, parent_id)
-        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :plan, NULLIF(:parent_id, -1::bigint)::bigint)
+        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id, plan, parent_id, workflow_step)
+        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :plan, NULLIF(:parent_id, -1::bigint)::bigint, NULLIF(:workflow_step, '')::text)
         RETURNING
             id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
             input_tokens, cached_tokens, output_tokens, duration_ms,
@@ -42,9 +42,10 @@ pub async fn create_thread(
             terminal,
             plan,
             parent_id,
-            iterations
+            iterations,
+            workflow_step
         "#,
-        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :plan = p.plan, :parent_id = p.parent_id.unwrap_or(-1i64) )
+        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :plan = p.plan, :parent_id = p.parent_id.unwrap_or(-1i64), :workflow_step = "" )
     )
     .fetch_one(pool)
     .await?;
@@ -415,7 +416,8 @@ pub async fn find_pending_threads_by_channel(
             terminal,
             plan,
             parent_id,
-            iterations
+            iterations,
+            workflow_step
         FROM threads
         WHERE channel_id = :channel_id AND status = 'pending'
         ORDER BY created_at ASC
@@ -480,91 +482,117 @@ pub async fn complete_thread(
 }
 
 /// Set all pending/processing threads for a channel to 'skipped'.
-pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u64> {
-    // Mark all pending/processing threads as skipped
-    let result = sql_forge!(
-        "UPDATE threads SET status = 'skipped', ended_at = NOW(), terminal = true, iterations = COALESCE((SELECT MAX(iteration_number) FROM messages WHERE thread_id = threads.id), 0) WHERE channel_id = :channel_id AND status IN ('pending', 'processing') AND NOT terminal",
+pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<usize> {
+    // Phase 3 (R3): channel closure/deletion re-schedules instead of dropping work.
+    // Every pending/processing thread linked to a kanban task is marked skipped and a
+    // re-run thread (thread_status='scheduled') is created in the SAME transaction,
+    // with the kanban task status UNCHANGED and NO retry consumed. Threads that are
+    // not linked to a kanban task are simply marked skipped. Blocked/done tasks never
+    // get a re-run thread (R4).
+    #[derive(sqlx::FromRow)]
+    struct SkipRow {
+        id: i64,
+        cause: Option<String>,
+        channel_id: i64,
+        profile: Option<String>,
+        provider: Option<String>,
+        model: Option<String>,
+        task_id: Option<String>,
+        workflow_id: Option<String>,
+        workflow_step: Option<String>,
+    }
+    let threads: Vec<SkipRow> = sql_forge!(
+        SkipRow,
+        "SELECT id, cause, channel_id, profile, provider, model, task_id,
+                workflow_id, workflow_step
+         FROM threads
+         WHERE channel_id = :channel_id AND status IN ('pending', 'processing')
+         ORDER BY id",
         ( :channel_id = channel_id )
     )
-    .execute(pool)
+    .fetch_all(pool)
     .await?;
 
-    // Update associated kanban tasks:
-    // - pending (never started) → todo (can be retried)
-    // - processing (was started) → blocked (needs investigation)
-    // Record transitions in history before updating status
-    if let Err(e) = sql_forge!(
-        r#"
-        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board)
-        SELECT kt.id, 'moved', kt.status, 'todo'
-        FROM kanban_tasks kt
-        JOIN threads t ON t.task_id = kt.id
-        WHERE t.channel_id = :ch AND t.status = 'pending' AND kt.status = 'ready'
-        "#,
-        ( :ch = channel_id )
-    )
-    .execute(pool)
-    .await
-    {
-        tracing::warn!(
-            "[delete_channel] Failed to record kanban ready→todo history: {:?}",
-            e
-        );
-    }
+    for t in &threads {
+        let mut tx = pool.begin().await?;
+        sql_forge!(
+            "UPDATE threads SET status = 'skipped' WHERE id = :id",
+            ( :id = t.id )
+        )
+        .execute(&mut *tx)
+        .await?;
 
-    if let Err(e) = sql_forge!(
-        r#"
-        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board)
-        SELECT kt.id, 'moved', kt.status, 'blocked'
-        FROM kanban_tasks kt
-        JOIN threads t ON t.task_id = kt.id
-        WHERE t.channel_id = :ch AND t.status = 'processing' AND kt.status = 'running'
-        "#,
-        ( :ch = channel_id )
-    )
-    .execute(pool)
-    .await
-    {
-        tracing::warn!(
-            "[delete_channel] Failed to record kanban running→blocked history: {:?}",
-            e
-        );
+        if let Some(ref task_id) = t.task_id {
+            #[derive(sqlx::FromRow)]
+            struct IdRow {
+                id: i64,
+            }
+            let task_status: Option<String> = sql_forge!(
+                scalar String,
+                "SELECT status FROM kanban_tasks WHERE id = :task_id FOR UPDATE",
+                ( :task_id = task_id )
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some(status) = task_status {
+                if status != "blocked" && status != "done" {
+                    let new_id = sql_forge!(
+                        IdRow,
+                        "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
+                                              task_id, parent_id, workflow_id, workflow_step)
+                         VALUES ('pending', :cause, :channel_id, :profile, :provider, :model,
+                                 :task_id, :parent_id, :workflow_id, :workflow_step)
+                         RETURNING id",
+                        (
+                            :cause = t.cause.as_deref().unwrap_or(""),
+                            :channel_id = t.channel_id,
+                            :profile = t.profile.as_deref().unwrap_or(""),
+                            :provider = t.provider.as_deref().unwrap_or(""),
+                            :model = t.model.as_deref().unwrap_or(""),
+                            :task_id = task_id.as_str(),
+                            :parent_id = t.id,
+                            :workflow_id = t.workflow_id.as_deref().unwrap_or(""),
+                            :workflow_step = t.workflow_step.as_deref().unwrap_or("")
+                        )
+                    )
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    let cause = t.cause.clone().unwrap_or_else(|| "re-run".to_string());
+                    sql_forge!(
+                        "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
+                         VALUES (:tid, 'cause', :content, 0, 'cause')",
+                        ( :tid = new_id.id, :content = cause )
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                    sql_forge!(
+                        "UPDATE kanban_tasks SET thread_status = 'scheduled' WHERE id = :task_id",
+                        ( :task_id = task_id.as_str() )
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                    let comment = format!(
+                        "Thread #{} skipped (channel closed). Creating thread #{}",
+                        t.id, new_id.id
+                    );
+                    sql_forge!(
+                        "INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
+                         VALUES (:task_id, 'workflow', :initial, :to_status, :comment)",
+                        (
+                            :task_id = task_id.as_str(),
+                            :initial = status.as_str(),
+                            :to_status = status.as_str(),
+                            :comment = comment.as_str()
+                        )
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+        }
+        tx.commit().await?;
     }
-
-    // Now perform the status updates
-    if let Err(e) = sql_forge!(
-        "UPDATE kanban_tasks SET status = 'todo', updated_at = NOW() WHERE id IN (
-            SELECT task_id FROM threads
-            WHERE channel_id = :ch AND task_id IS NOT NULL AND status = 'pending'
-        ) AND status = 'ready'",
-        ( :ch = channel_id )
-    )
-    .execute(pool)
-    .await
-    {
-        tracing::warn!(
-            "[delete_channel] Failed to reset kanban tasks to todo: {:?}",
-            e
-        );
-    }
-
-    if let Err(e) = sql_forge!(
-        "UPDATE kanban_tasks SET status = 'blocked', updated_at = NOW() WHERE id IN (
-            SELECT task_id FROM threads
-            WHERE channel_id = :ch AND task_id IS NOT NULL AND status = 'processing'
-        ) AND status = 'running'",
-        ( :ch = channel_id )
-    )
-    .execute(pool)
-    .await
-    {
-        tracing::warn!(
-            "[delete_channel] Failed to set kanban tasks to blocked: {:?}",
-            e
-        );
-    }
-
-    Ok(result.rows_affected())
+    Ok(threads.len())
 }
 
 /// Skip a single pending/processing thread by setting its status to 'skipped'.
@@ -676,7 +704,8 @@ pub async fn get_completed_seq0_threads_since(
                     terminal,
                     plan,
                     parent_id,
-                    iterations
+                    iterations,
+                    workflow_step
                 FROM threads
                 WHERE channel_id = :channel_id
                   AND status = 'completed'
@@ -704,7 +733,8 @@ pub async fn get_completed_seq0_threads_since(
                     terminal,
                     plan,
                     parent_id,
-                    iterations
+                    iterations,
+                    workflow_step
                 FROM threads
                 WHERE channel_id = :channel_id
                   AND status = 'completed'
@@ -732,7 +762,8 @@ pub async fn get_completed_seq0_threads_since(
                     terminal,
                     plan,
                     parent_id,
-                    iterations
+                    iterations,
+                    workflow_step
                 FROM threads
                 WHERE channel_id = :channel_id
                   AND status = 'completed'
@@ -750,9 +781,7 @@ pub async fn get_completed_seq0_threads_since(
     Ok(rows)
 }
 
-
 // ─────────────────────────────────────────────────────────────────────────────
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 2 — getters used by the builtin fail-thread tool / finalization guard
