@@ -145,6 +145,113 @@ impl WorkflowsFile {
         }
         Ok(())
     }
+
+    /// Serialize this document back to YAML text.
+    pub fn to_yaml(&self) -> Result<String, WorkflowConfigError> {
+        serde_yaml::to_string(self).map_err(WorkflowConfigError::Yaml)
+    }
+
+    /// Atomically persist this document to `path` (write a temp file, then rename).
+    pub fn save(&self, path: &Path) -> Result<(), WorkflowConfigError> {
+        let yaml = self.to_yaml()?;
+        let dir = path.parent().ok_or_else(|| {
+            WorkflowConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "workflows path has no parent directory",
+            ))
+        })?;
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "workflows.yml".to_string());
+        let tmp_path = dir.join(format!(".{file_name}.tmp-{}", std::process::id()));
+        std::fs::write(&tmp_path, yaml.as_bytes()).map_err(WorkflowConfigError::Io)?;
+        std::fs::rename(&tmp_path, path).map_err(WorkflowConfigError::Io)?;
+        Ok(())
+    }
+
+    /// Insert or replace a workflow, then validate the whole document.
+    pub fn upsert(&mut self, key: &str, workflow: Workflow) -> Result<(), WorkflowConfigError> {
+        self.workflows.insert(key.to_string(), workflow);
+        self.validate()
+    }
+
+    /// Remove a workflow by key; returns the removed definition, if any.
+    pub fn remove(&mut self, key: &str) -> Option<Workflow> {
+        self.workflows.remove(key)
+    }
+
+    /// Resolve every workflow's effective per-role settings
+    /// (workflow_role > workflow_field).
+    pub fn resolve_all(&self) -> Vec<(String, Workflow, BTreeMap<String, ResolvedWorkflowRole>)> {
+        self.workflows
+            .iter()
+            .map(|(key, workflow)| {
+                let roles = workflow
+                    .roles
+                    .keys()
+                    .filter_map(|role_key| {
+                        workflow
+                            .resolve_role(role_key)
+                            .map(|resolved| (role_key.clone(), resolved))
+                    })
+                    .collect();
+                (key.clone(), workflow.clone(), roles)
+            })
+            .collect()
+    }
+}
+
+/// Effective per-role settings after precedence resolution.
+///
+/// Precedence is: workflow_role > workflow_field > task_field >
+/// channel_field > global_setting. This struct captures the top two tiers
+/// (role-level overrides and workflow-level defaults); the remaining tiers
+/// are resolved at runtime by the executor when a task is dispatched.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ResolvedWorkflowRole {
+    pub template: Option<String>,
+    pub profile: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub plan_mode: Option<String>,
+    pub retries: Option<u32>,
+}
+
+impl Workflow {
+    /// Resolve the effective settings for one role.
+    ///
+    /// Role-level overrides take precedence over workflow-level defaults
+    /// (workflow_role > workflow_field). Returns `None` when the role is not
+    /// defined on the workflow.
+    pub fn resolve_role(&self, role_key: &str) -> Option<ResolvedWorkflowRole> {
+        let role = self.roles.get(role_key)?;
+        Some(ResolvedWorkflowRole {
+            template: role.template.clone(),
+            profile: role
+                .overrides
+                .profile
+                .clone()
+                .or_else(|| self.defaults.profile.clone()),
+            provider: role
+                .overrides
+                .provider
+                .clone()
+                .or_else(|| self.defaults.provider.clone()),
+            model: role
+                .overrides
+                .model
+                .clone()
+                .or_else(|| self.defaults.model.clone()),
+            plan_mode: role
+                .overrides
+                .plan_mode
+                .clone()
+                .or_else(|| self.defaults.plan_mode.clone()),
+            retries: role.overrides.retries.or(self.defaults.retries),
+        })
+    }
 }
 
 /// Errors produced while loading/parsing/validating `workflows.yml`.
@@ -200,6 +307,136 @@ impl From<std::io::Error> for WorkflowConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_defaults() -> WorkflowDefaults {
+        WorkflowDefaults {
+            profile: None,
+            provider: None,
+            model: None,
+            plan_mode: None,
+            retries: None,
+        }
+    }
+
+    #[test]
+    fn test_save_and_reload_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workflows.yml");
+        let file = WorkflowsFile::from_yaml(VALID_YAML).expect("valid yaml");
+        file.save(&path).expect("save");
+        assert!(path.exists(), "file should exist after save");
+        let loaded = WorkflowsFile::load(&path).expect("reload");
+        assert_eq!(loaded, file);
+    }
+
+    #[test]
+    fn test_save_is_atomic_and_leaves_no_temp_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workflows.yml");
+        let file = WorkflowsFile::from_yaml(VALID_YAML).expect("valid yaml");
+        file.save(&path).expect("save");
+        let entries: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(entries, vec!["workflows.yml".to_string()]);
+    }
+
+    #[test]
+    fn test_upsert_rejects_missing_executor_role() {
+        let mut file = WorkflowsFile::default();
+        let wf = Workflow {
+            defaults: empty_defaults(),
+            roles: BTreeMap::new(),
+        };
+        let err = file.upsert("no-executor", wf).expect_err("must fail");
+        assert!(
+            err.to_string().contains("executor"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_upsert_rejects_tester_without_template() {
+        let mut file = WorkflowsFile::default();
+        let mut wf = Workflow {
+            defaults: empty_defaults(),
+            roles: BTreeMap::new(),
+        };
+        wf.roles.insert(
+            TESTER_ROLE.to_string(),
+            WorkflowRole {
+                template: None,
+                overrides: empty_defaults(),
+            },
+        );
+        let err = file.upsert("no-template", wf).expect_err("must fail");
+        assert!(
+            err.to_string().contains("template"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_remove_key() {
+        let mut file = WorkflowsFile::from_yaml(VALID_YAML).expect("valid yaml");
+        assert!(file.remove("weekly-report").is_some());
+        assert!(file.remove("weekly-report").is_none());
+        assert!(file.workflows.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_role_precedence() {
+        let mut wf = Workflow {
+            defaults: empty_defaults(),
+            roles: BTreeMap::new(),
+        };
+        wf.defaults.profile = Some("wf-profile".to_string());
+        wf.defaults.provider = Some("wf-provider".to_string());
+        wf.defaults.retries = Some(3);
+        wf.roles.insert(
+            EXECUTOR_ROLE.to_string(),
+            WorkflowRole {
+                template: Some("executor-template".to_string()),
+                overrides: WorkflowDefaults {
+                    profile: Some("role-profile".to_string()),
+                    ..empty_defaults()
+                },
+            },
+        );
+        let resolved = wf
+            .resolve_role(EXECUTOR_ROLE)
+            .expect("executor role present");
+        // role-level override wins over the workflow-level default
+        assert_eq!(resolved.profile.as_deref(), Some("role-profile"));
+        // workflow-level defaults fill in when the role has no override
+        assert_eq!(resolved.provider.as_deref(), Some("wf-provider"));
+        assert_eq!(resolved.retries, Some(3));
+        assert_eq!(resolved.template.as_deref(), Some("executor-template"));
+        // absent roles resolve to None
+        assert!(wf.resolve_role(TESTER_ROLE).is_none());
+    }
+
+    #[test]
+    fn test_resolve_all_includes_resolution() {
+        let file = WorkflowsFile::from_yaml(VALID_YAML).expect("valid yaml");
+        let resolved = file.resolve_all();
+        assert_eq!(resolved.len(), 1);
+        let (key, _, roles) = &resolved[0];
+        assert_eq!(key, "weekly-report");
+        assert_eq!(roles.len(), 3);
+        let executor = &roles[EXECUTOR_ROLE];
+        assert!(executor.template.is_some(), "executor template present");
+        // workflow-level defaults apply to roles without an override
+        assert_eq!(executor.profile.as_deref(), Some("research-profile"));
+        assert_eq!(executor.provider.as_deref(), Some("anthropic"));
+    }
 
     const VALID_YAML: &str = r#"
 workflows:
