@@ -257,3 +257,82 @@ mod tests {
         assert_eq!(get_task_id(&args), None);
     }
 }
+
+
+/// Handle the builtin `fail-thread` tool (Phase 2): ends the current thread
+/// as FAILED with an Error-type last message and applies the
+/// metadata.workflow_step kanban transition (spec §3 F0-F4, §8 N1/N6).
+pub async fn handle_fail_thread(args: Value, ctx: AppContext) -> AppResult<McpToolResult> {
+    let thread_id = match ctx.current_thread_id {
+        Some(id) => id,
+        None => {
+            return Ok(McpToolResult {
+                call_id: String::new(),
+                content: "Error: builtin_fail-thread requires an active thread (current_thread_id is None). It can only be called from inside a thread execution.".to_string(),
+                is_error: true,
+            });
+        }
+    };
+
+    let workflow_step = args
+        .get("workflow_step")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let reason = args
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let thread = match crate::db::threads::get_thread_by_id(&ctx.pool, thread_id).await? {
+        Some(t) => t,
+        None => {
+            return Ok(McpToolResult {
+                call_id: String::new(),
+                content: format!("Error: thread {} not found", thread_id),
+                is_error: true,
+            });
+        }
+    };
+
+    let saved = crate::agent::fail_thread::fail_thread_tool(
+        &ctx,
+        &thread,
+        workflow_step.as_deref(),
+        reason,
+    )
+    .await?;
+
+    Ok(McpToolResult {
+        call_id: String::new(),
+        content: serde_json::json!({
+            "ok": true,
+            "thread_id": thread_id,
+            "status": "failed",
+            "error_message_id": saved.id,
+            "workflow_step": workflow_step.unwrap_or_default(),
+        })
+        .to_string(),
+        is_error: false,
+    })
+}
+
+#[cfg(test)]
+mod fail_thread_tests {
+
+
+    #[test]
+    fn normalize_workflow_step_accepts_only_step_keys() {
+        use crate::agent::fail_thread::normalize_workflow_step;
+        assert_eq!(normalize_workflow_step(None), "executor");
+        assert_eq!(normalize_workflow_step(Some("")), "executor");
+        assert_eq!(normalize_workflow_step(Some("running")), "running");
+        assert_eq!(normalize_workflow_step(Some("testing")), "testing");
+        assert_eq!(normalize_workflow_step(Some("blocked")), "blocked");
+        // N6: review and role names are NOT valid step keys → F4 (invalid).
+        assert_eq!(normalize_workflow_step(Some("review")), "invalid");
+        assert_eq!(normalize_workflow_step(Some("executor")), "invalid");
+        assert_eq!(normalize_workflow_step(Some("tester")), "invalid");
+        assert_eq!(normalize_workflow_step(Some("reviewer")), "invalid");
+        assert_eq!(normalize_workflow_step(Some("bogus")), "invalid");
+    }
+}
