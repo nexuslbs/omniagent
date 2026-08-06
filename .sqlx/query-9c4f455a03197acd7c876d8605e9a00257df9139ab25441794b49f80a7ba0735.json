@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id,\n            name,\n            platform,\n            resource_identifier,\n            closed,\n            current_profile,\n            current_provider,\n            current_model,\n            readonly,\n            plan,\n            template\n        FROM channels\n        ORDER BY name\n        ",
+  "query": "\n        SELECT\n            id,\n            name,\n            platform,\n            resource_identifier,\n            closed,\n            current_profile,\n            current_provider,\n            current_model,\n            readonly,\n            plan,\n            planning_mode,\n            template\n        FROM channels\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -115,6 +115,17 @@
       },
       {
         "ordinal": 10,
+        "name": "planning_mode",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "planning_mode"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
         "name": "template",
         "type_info": "Text",
         "origin": {
@@ -126,7 +137,9 @@
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Int8"
+      ]
     },
     "nullable": [
       false,
@@ -139,8 +152,9 @@
       true,
       false,
       false,
+      false,
       true
     ]
   },
-  "hash": "14e8a5388efb5c9956325ef47e353e9d0d06ba9dd8fa6463cd90251d8994792d"
+  "hash": "9c4f455a03197acd7c876d8605e9a00257df9139ab25441794b49f80a7ba0735"
 }
