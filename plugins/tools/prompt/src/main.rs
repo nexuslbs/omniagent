@@ -308,6 +308,202 @@ async fn get_subtasks(pool: &PgPool, thread_id: i64) -> Result<Vec<SubtaskRow>> 
     Ok(rows)
 }
 
+// ---------------------------------------------------------------------------
+// Continuation self-orientation: prior threads of the same task, kanban
+// history, and resume-ledger pointer. Built only for threads linked to a
+// kanban task (task_id) or cron schedule (schedule_task_id).
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, FromRow)]
+struct ThreadTaskRef {
+    task_id: Option<String>,
+    schedule_task_id: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct PriorThreadRow {
+    id: i64,
+    status: String,
+    cause: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct KanbanHistoryRow {
+    action: String,
+    initial_board: Option<String>,
+    final_board: Option<String>,
+    created_at: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct KanbanBodyRow {
+    body: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct ExcerptRow {
+    content: String,
+}
+
+/// Best excerpt for a prior thread: its latest summary message if one exists,
+/// otherwise its most recent non-empty message.
+async fn get_thread_excerpt(
+    pool: &PgPool,
+    thread_id: i64,
+    max_chars: usize,
+) -> Result<Option<String>> {
+    let row = sqlx::query_as::<_, ExcerptRow>(
+        "SELECT content FROM messages \
+         WHERE thread_id = $1 AND content <> '' \
+         ORDER BY (msg_type = 'summary') DESC, id DESC LIMIT 1",
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to fetch thread excerpt")?;
+    Ok(row.map(|r| truncate_str(&r.content, max_chars)))
+}
+
+/// Pull a resume-ledger path (e.g. /opt/omni/data/tasks/<name>.md) out of a
+/// task body if one is referenced.
+fn extract_tracking_path(body: &str) -> Option<String> {
+    let pos = body.find("data/tasks/")?;
+    let start = body[..pos]
+        .rfind(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | '[' | ','))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let after = &body[pos + "data/tasks/".len()..];
+    let end = after
+        .find(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | ')' | ']' | ','))
+        .unwrap_or(after.len());
+    if end == 0 {
+        return None;
+    }
+    Some(format!(
+        "{}{}",
+        &body[start..pos + "data/tasks/".len()],
+        &after[..end]
+    ))
+}
+
+/// Build the continuation self-orientation block for a thread. Returns None
+/// (no-op) for threads without a task linkage; a failing sub-query degrades
+/// gracefully by simply omitting that sub-part — never fails the prompt.
+async fn build_continuation_block(pool: &PgPool, thread_id: i64) -> Result<Option<String>> {
+    let task_ref = sqlx::query_as::<_, ThreadTaskRef>(
+        "SELECT task_id, schedule_task_id FROM threads WHERE id = $1",
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to fetch thread task linkage")?;
+
+    let Some(task_ref) = task_ref else {
+        return Ok(None);
+    };
+    let kanban_task = task_ref.task_id.filter(|s| !s.is_empty());
+    let cron_task = task_ref.schedule_task_id.filter(|s| !s.is_empty());
+    if kanban_task.is_none() && cron_task.is_none() {
+        return Ok(None); // plain thread — nothing to orient a continuation against
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    // Prior threads of the SAME task (newest first, max 5), excluding this one.
+    let prior: Vec<PriorThreadRow> = if let Some(task) = &kanban_task {
+        sqlx::query_as(
+            "SELECT id, status, cause FROM threads WHERE task_id = $1 AND id != $2 ORDER BY id DESC LIMIT 5",
+        )
+        .bind(task)
+        .bind(thread_id)
+        .fetch_all(pool)
+        .await
+        .context("Failed to fetch prior threads of task")?
+    } else {
+        let task = cron_task.as_deref().expect("cron task present");
+        sqlx::query_as(
+            "SELECT id, status, cause FROM threads WHERE schedule_task_id = $1 AND id != $2 ORDER BY id DESC LIMIT 5",
+        )
+        .bind(task)
+        .bind(thread_id)
+        .fetch_all(pool)
+        .await
+        .context("Failed to fetch prior threads of task")?
+    };
+
+    if !prior.is_empty() {
+        let mut lines = vec!["[Prior attempts of this task (threads)]:".to_string()];
+        for t in &prior {
+            let excerpt = match get_thread_excerpt(pool, t.id, 160).await {
+                Ok(Some(e)) => format!(" — {}", e),
+                _ => String::new(),
+            };
+            lines.push(format!(
+                "- thread {}: {}{}",
+                t.id,
+                t.status.as_str(),
+                excerpt
+            ));
+        }
+        parts.push(lines.join("\n"));
+    }
+
+    // Kanban audit trail — why the task keeps being (re)run (flapping, retries).
+    if let Some(task) = &kanban_task {
+        let history: Vec<KanbanHistoryRow> = sqlx::query_as(
+            "SELECT action, initial_board, final_board, \
+                    TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI') AS created_at \
+             FROM kanban_history WHERE kanban_task_id = $1 ORDER BY id DESC LIMIT 5",
+        )
+        .bind(task)
+        .fetch_all(pool)
+        .await
+        .context("Failed to fetch kanban history")?;
+        if !history.is_empty() {
+            let mut lines = vec![format!("[Kanban history for {}]:", task)];
+            for h in &history {
+                let mut seg = h.action.clone();
+                match (&h.initial_board, &h.final_board) {
+                    (Some(from), Some(to)) if !from.is_empty() && !to.is_empty() => {
+                        seg.push_str(&format!(": {} -> {}", from, to));
+                    }
+                    (_, Some(to)) if !to.is_empty() => seg.push_str(&format!(": {}", to)),
+                    (Some(from), _) if !from.is_empty() => seg.push_str(&format!(": {}", from)),
+                    _ => {}
+                }
+
+                if let Some(ts) = &h.created_at {
+                    if !ts.is_empty() {
+                        seg.push_str(&format!(" ({})", ts));
+                    }
+                }
+                lines.push(format!("- {}", seg));
+            }
+            parts.push(lines.join("\n"));
+        }
+
+        // Resume-ledger pointer from the task body.
+        let body_row =
+            sqlx::query_as::<_, KanbanBodyRow>("SELECT body FROM kanban_tasks WHERE id = $1")
+                .bind(task)
+                .fetch_optional(pool)
+                .await
+                .context("Failed to fetch kanban task body")?;
+        if let Some(row) = body_row {
+            if let Some(path) = row.body.as_deref().and_then(extract_tracking_path) {
+                parts.push(format!(
+                    "[Resume ledger: {} — read it first; it records what prior threads did and what remains.]",
+                    path
+                ));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(parts.join("\n\n")))
+}
 fn get_skills(data_dir: &str, profile_name: &str) -> Vec<String> {
     let skills_dir = format!("{}/profiles/{}/skills", data_dir, profile_name);
     let mut skills = Vec::new();
@@ -481,6 +677,17 @@ async fn handle_generate_full(
                 context_blocks.push(lines.join("\n"));
             }
             _ => {}
+        }
+    }
+
+    // 2e. Continuation self-orientation — prior threads of the same task,
+    // kanban history, and resume-ledger pointer. Skipped entirely for plain
+    // (non-task) threads; never fails the prompt.
+    if let Some(tid) = thread_id {
+        match build_continuation_block(pool, tid).await {
+            Ok(Some(block)) => context_blocks.push(block),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("continuation context unavailable: {}", e),
         }
     }
 
@@ -922,4 +1129,79 @@ async fn main() -> Result<()> {
     };
 
     run_server_with_config(server_info, tools, on_configure).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_tracking_path_parses_resume_ledger() {
+        let body =
+            "Run me. Resume ledger: /opt/omni/data/tasks/WorkflowImplementation.md — append, don't overwrite.";
+        assert_eq!(
+            extract_tracking_path(body).as_deref(),
+            Some("/opt/omni/data/tasks/WorkflowImplementation.md")
+        );
+        assert_eq!(extract_tracking_path("no tracking path here"), None);
+        assert_eq!(extract_tracking_path("see data/tasks/"), None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn continuation_block_skipped_for_plain_thread() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = connect_db(&url).await.expect("connect_db");
+        let row: (i64,) = sqlx::query_as(
+            "SELECT id FROM threads WHERE task_id IS NULL AND schedule_task_id IS NULL ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("a plain thread exists");
+        assert!(
+            build_continuation_block(&pool, row.0)
+                .await
+                .expect("build_continuation_block")
+                .is_none(),
+            "plain thread must not get a continuation block"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn continuation_block_lists_prior_threads_for_kanban_task() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = connect_db(&url).await.expect("connect_db");
+        // task_18c909688609da2f: thread 72 is the newest attempt;
+        // 71/70 skipped, 69 interrupted.
+        let block = build_continuation_block(&pool, 72)
+            .await
+            .expect("build_continuation_block")
+            .expect("a block is produced for a task thread");
+        println!("=== CONTINUATION BLOCK ===\n{}\n=== END ===", block);
+        assert!(
+            block.contains("[Prior attempts of this task (threads)]:"),
+            "prior-threads header missing:\n{block}"
+        );
+        assert!(
+            block.contains("thread 71: skipped"),
+            "thread 71 entry missing:\n{block}"
+        );
+        assert!(
+            block.contains("thread 70: skipped"),
+            "thread 70 entry missing:\n{block}"
+        );
+        assert!(
+            block.contains("thread 69: interrupted"),
+            "thread 69 entry missing:\n{block}"
+        );
+        assert!(
+            block.contains("[Kanban history for task_18c909688609da2f]:"),
+            "kanban history header missing:\n{block}"
+        );
+        assert!(
+            block.contains("Resume ledger:"),
+            "resume ledger line missing:\n{block}"
+        );
+    }
 }
