@@ -77,6 +77,10 @@ pub struct WorkflowRole {
 pub struct Workflow {
     #[serde(flatten)]
     pub defaults: WorkflowDefaults,
+
+    /// If true, execution counters (`workflow_state.executions`) are cleared
+    /// when the task moves to review. Default: false.
+    pub clear_executions_on_review: bool,
     pub roles: BTreeMap<String, WorkflowRole>,
 }
 
@@ -353,6 +357,7 @@ mod tests {
         let mut file = WorkflowsFile::default();
         let wf = Workflow {
             defaults: empty_defaults(),
+            clear_executions_on_review: false,
             roles: BTreeMap::new(),
         };
         let err = file.upsert("no-executor", wf).expect_err("must fail");
@@ -367,6 +372,7 @@ mod tests {
         let mut file = WorkflowsFile::default();
         let mut wf = Workflow {
             defaults: empty_defaults(),
+            clear_executions_on_review: false,
             roles: BTreeMap::new(),
         };
         wf.roles.insert(
@@ -395,6 +401,7 @@ mod tests {
     fn test_resolve_role_precedence() {
         let mut wf = Workflow {
             defaults: empty_defaults(),
+            clear_executions_on_review: false,
             roles: BTreeMap::new(),
         };
         wf.defaults.profile = Some("wf-profile".to_string());
@@ -604,6 +611,24 @@ workflows:
         let file = WorkflowsFile::from_yaml(VALID_YAML).unwrap();
         let round_trip = serde_yaml::to_string(&file).expect("serialize");
         let reparsed = WorkflowsFile::from_yaml(&round_trip).expect("reparse");
+        assert_eq!(reparsed, file);
+    }
+
+    #[test]
+    fn clear_executions_on_review_defaults_false() {
+        let yaml = "workflows:\n  default:\n    roles:\n      executor:\n        template: t\n";
+        let file = WorkflowsFile::from_yaml(yaml).expect("parse");
+        assert!(!file.workflows["default"].clear_executions_on_review);
+    }
+
+    #[test]
+    fn clear_executions_on_review_round_trips() {
+        let yaml = "workflows:\n  default:\n    clear_executions_on_review: true\n    roles:\n      executor:\n        template: t\n";
+        let file = WorkflowsFile::from_yaml(yaml).expect("parse");
+        assert!(file.workflows["default"].clear_executions_on_review);
+        let out = serde_yaml::to_string(&file).expect("serialize");
+        assert!(out.contains("clear_executions_on_review"));
+        let reparsed = WorkflowsFile::from_yaml(&out).expect("reparse");
         assert_eq!(reparsed, file);
     }
 }
