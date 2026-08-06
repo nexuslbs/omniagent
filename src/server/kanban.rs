@@ -97,6 +97,7 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
         .route("/kanban/tasks/{id}/history", get(list_history_handler))
         // 12b. History (by query param task_id, for frontend kanban-history page)
         .route("/kanban/history", get(list_all_history_handler))
+        .route("/review", post(review_handler))
         // 13. Subtasks
         .route("/kanban/tasks/{id}/subtasks", get(list_subtasks_handler))
 }
@@ -267,6 +268,7 @@ struct HistoryRow {
     initial_board: Option<String>,
     final_board: Option<String>,
     previous_values: Option<serde_json::Value>,
+    comment: Option<String>,
     created_at: Option<String>,
 }
 
@@ -353,6 +355,7 @@ struct HistoryEntry {
     initial_board: Option<String>,
     final_board: Option<String>,
     previous_values: Option<serde_json::Value>,
+    comment: Option<String>,
     created_at: Option<String>,
 }
 
@@ -422,6 +425,7 @@ fn history_row_to_entry(r: HistoryRow) -> HistoryEntry {
         initial_board: r.initial_board,
         final_board: r.final_board,
         previous_values: r.previous_values,
+        comment: r.comment,
         created_at: r.created_at,
     }
 }
@@ -1553,22 +1557,21 @@ async fn list_history_handler(
     let limit = params.limit.unwrap_or(200).clamp(1, 500);
     let offset = params.offset.unwrap_or(0).max(0);
 
-    let rows = match sql_forge!(
-        HistoryRow,
+    let rows = match sqlx::query_as::<_, HistoryRow>(
         r#"
         SELECT id, kanban_task_id, action, initial_board, final_board,
-               previous_values, created_at::text AS created_at
+               previous_values, comment, created_at::text AS created_at
         FROM kanban_history
-        WHERE kanban_task_id = :task_id
-          AND (:action = '' OR action = :action)
+        WHERE kanban_task_id = $1
+          AND ($2 = '' OR action = $2)
         ORDER BY id DESC
-        LIMIT :limit_val OFFSET :offset_val
+        LIMIT $3 OFFSET $4
         "#,
-        ( :task_id = &id,
-          :action = action_filter,
-          :limit_val = limit,
-          :offset_val = offset )
     )
+    .bind(id.as_str())
+    .bind(action_filter)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.pool)
     .await
     {
@@ -1594,22 +1597,21 @@ async fn list_all_history_handler(
     let limit = params.limit.unwrap_or(200).clamp(1, 500);
     let offset = params.offset.unwrap_or(0).max(0);
 
-    let rows = match sql_forge!(
-        HistoryRow,
+    let rows = match sqlx::query_as::<_, HistoryRow>(
         r#"
         SELECT id, kanban_task_id, action, initial_board, final_board,
-               previous_values, created_at::text AS created_at
+               previous_values, comment, created_at::text AS created_at
         FROM kanban_history
-        WHERE (:task_id = '' OR kanban_task_id = :task_id)
-          AND (:action = '' OR action = :action)
+        WHERE ($1 = '' OR kanban_task_id = $1)
+          AND ($2 = '' OR action = $2)
         ORDER BY id DESC
-        LIMIT :limit_val OFFSET :offset_val
+        LIMIT $3 OFFSET $4
         "#,
-        ( :task_id = task_filter,
-          :action = action_filter,
-          :limit_val = limit,
-          :offset_val = offset )
     )
+    .bind(task_filter)
+    .bind(action_filter)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.pool)
     .await
     {
@@ -1669,6 +1671,47 @@ async fn list_subtasks_handler(
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
+
+// ---------------------------------------------------------------------------
+// POST /review: manual/API-only review decision (spec §8 R12)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct ReviewRequest {
+    task_id: String,
+    decision: String,
+    comment: Option<String>,
+}
+
+/// Manual/API-only review decision. The reviewer AGENT does not call this
+/// endpoint (R12): it signals approve via normal thread completion and issues
+/// via fail-thread with `workflow_step` = running/testing/blocked (N6).
+/// Decisions: approve | rework | retest | block (+ optional comment).
+/// Server-side target validation (R5) + retry guards (D1/R2) live in
+/// `crate::agent::manual_review_decision`.
+async fn review_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ReviewRequest>,
+) -> impl IntoResponse {
+    match crate::agent::manual_review_decision(
+        &state.pool,
+        &state.data_dir,
+        &body.task_id,
+        &body.decision,
+        body.comment.as_deref(),
+    )
+    .await
+    {
+        Ok(outcome) => ok_json(serde_json::json!({
+            "success": true,
+            "task_id": outcome.task_id,
+            "status": outcome.status,
+            "thread_id": outcome.thread_id,
+            "comment": outcome.comment,
+        })),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1788,12 +1831,14 @@ mod tests {
             final_board: Some("done".to_string()),
             previous_values: None,
             created_at: Some("2026-01-15T10:30:00Z".to_string()),
+            comment: Some("moved from todo to done".to_string()),
         };
         let entry = history_row_to_entry(row);
         assert_eq!(entry.id, 1);
         assert_eq!(entry.action, "status_change");
         assert_eq!(entry.initial_board, Some("todo".to_string()));
         assert_eq!(entry.created_at, Some("2026-01-15T10:30:00Z".to_string()));
+        assert_eq!(entry.comment, Some("moved from todo to done".to_string()));
     }
 
     #[test]

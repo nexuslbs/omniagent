@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use mcp_server_util::*;
+use omniagent::agent::{manual_review_decision, validate_review_decision};
 use omniagent::db;
 use serde_json::Value;
 use sql_forge::sql_forge;
@@ -608,6 +609,46 @@ impl PluginConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Tool: kanban_review_task (MANUAL/API only — spec §8 R12)
+// ---------------------------------------------------------------------------
+
+/// Manual/API-only review decision with the same validation as POST /review:
+/// decision whitelist (approve | rework | retest | block) + R5 target
+/// validation + retry guards — all enforced by
+/// `omniagent::agent::manual_review_decision`.
+async fn handle_review(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+    let task_id = args["task_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'task_id'"))?;
+    let decision = args["decision"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'decision'"))?;
+    let comment = args["comment"].as_str();
+
+    validate_review_decision(decision).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let data_dir = std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/omni".to_string());
+
+    match manual_review_decision(pool, &data_dir, task_id, decision, comment).await {
+        Ok(outcome) => Ok((
+            serde_json::json!({
+                "success": true,
+                "task_id": outcome.task_id,
+                "status": outcome.status,
+                "thread_id": outcome.thread_id,
+                "comment": outcome.comment,
+            })
+            .to_string(),
+            false,
+        )),
+        Err(e) => Ok((
+            serde_json::json!({ "success": false, "error": e }).to_string(),
+            true,
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -685,6 +726,18 @@ async fn main() -> Result<()> {
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
             handle_remove_dependency(&pool, &args).await
+        })
+    });
+
+    let p_review = pool.clone();
+    let review_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let p = p_review.clone();
+        Box::pin(async move {
+            let guard = p.read().await;
+
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+
+            handle_review(&pool, &args).await
         })
     });
 
@@ -862,6 +915,34 @@ async fn main() -> Result<()> {
             },
             handler: rm_dep_handler,
         },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "kanban_review_task".to_string(),
+                description:
+                    "MANUAL/API-only review decision for a kanban task. Decision: approve (task done), rework (back to running with a new executor thread), retest (back to testing with a new tester thread), block (task blocked). Invalid decisions and invalid targets (e.g. retest without a tester role in the workflow) are rejected. The reviewer AGENT never calls this tool — it signals approve via normal completion and issues via fail-thread."
+                        .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": "Task ID to review"
+                        },
+                        "decision": {
+                            "type": "string",
+                            "description": "Review decision. One of: approve, rework, retest, block",
+                            "enum": ["approve", "rework", "retest", "block"]
+                        },
+                        "comment": {
+                            "type": "string",
+                            "description": "Optional comment recorded in the task history"
+                        }
+                    },
+                    "required": ["task_id", "decision"]
+                }),
+            },
+            handler: review_handler,
+        },
     ];
 
     // Start the MCP server
@@ -885,4 +966,23 @@ async fn main() -> Result<()> {
         })
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_decision_whitelist_matches_server() {
+        // Same whitelist as POST /review (spec §8 R12).
+        for d in ["approve", "rework", "retest", "block"] {
+            assert!(validate_review_decision(d).is_ok(), "'{d}' should be valid");
+        }
+        for d in ["", "approved", "reject", "REWORK", "done"] {
+            assert!(
+                validate_review_decision(d).is_err(),
+                "'{d}' should be invalid"
+            );
+        }
+    }
 }
