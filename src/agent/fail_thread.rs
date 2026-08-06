@@ -409,6 +409,51 @@ pub(crate) fn normalize_workflow_step(workflow_step: Option<&str>) -> &'static s
 }
 
 /// Read the execution counter for a step from workflow_state.executions.
+/// Outcome of the D7-aware retry guard when a step re-entry would exceed the
+/// workflow's retry limit.
+#[derive(Debug, PartialEq, Eq)]
+struct RetryGuard {
+    /// Final kanban status for the task: "review" (D7, executor/tester step
+    /// with `clear_executions_on_review`) or "blocked" (default / reviewer).
+    final_status: &'static str,
+    /// Zero the per-step `running`/`testing` execution counters (D7).
+    clear: bool,
+    /// Create a `review` thread (D7, only when the workflow has a reviewer
+    /// role; otherwise the task lands in `review` as a manual state).
+    review_thread: bool,
+}
+
+/// D7 retry-guard decision. The reviewer step is NEVER overridden and NEVER
+/// cleared — that is the boundedness guarantee (max total executions =
+/// [(executor + tester + 1) * reviewer]).
+fn guard_at_retry_limit(step: &str, clear_on_review: bool, has_reviewer_role: bool) -> RetryGuard {
+    if clear_on_review && matches!(step, "running" | "testing") {
+        RetryGuard {
+            final_status: "review",
+            clear: true,
+            review_thread: has_reviewer_role,
+        }
+    } else {
+        RetryGuard {
+            final_status: "blocked",
+            clear: false,
+            review_thread: false,
+        }
+    }
+}
+
+/// D7: zero the per-step `running`/`testing` execution counters. The reviewer
+/// counter (`review`) is NEVER cleared.
+fn clear_running_testing(workflow_state: &mut serde_json::Value) {
+    if let Some(exec) = workflow_state
+        .get_mut("executions")
+        .and_then(|e| e.as_object_mut())
+    {
+        exec.insert("running".to_string(), serde_json::json!(0u64));
+        exec.insert("testing".to_string(), serde_json::json!(0u64));
+    }
+}
+
 fn execution_count(workflow_state: &serde_json::Value, step_key: &str) -> u64 {
     workflow_state
         .get("executions")
@@ -704,6 +749,9 @@ pub(crate) async fn engine_transition(
     let has_tester_role = workflow
         .as_ref()
         .is_some_and(|w| w.roles.contains_key("tester"));
+    let has_reviewer_role = workflow
+        .as_ref()
+        .is_some_and(|w| w.roles.contains_key("reviewer"));
     let limit_for = |step: &str| -> u64 {
         match &workflow {
             Some(w) => retry_limit(w, role_for_step(step)),
@@ -789,14 +837,28 @@ pub(crate) async fn engine_transition(
         }
     }
 
-    // Retry guard (D1/R2): limit = retries + 1; a re-entry that would exceed the
-    // limit is converted to "blocked" BEFORE any thread is created.
+    // Retry guard (D1/R2 + D7): limit = retries + 1; a re-entry that would
+    // exceed the limit is converted BEFORE any thread is created. With
+    // `clear_executions_on_review` (D7) an executor/tester limit sends the
+    // task to `review` instead of `blocked` and zeroes the running/testing
+    // counters; the reviewer step is ALWAYS blocked (boundedness guarantee).
+    let mut review_thread = false;
     if increment {
         if let Some(step) = rerun_step.as_deref() {
             if execution_count(&executions, step) >= limit_for(step) {
+                let clear_on_review = workflow
+                    .as_ref()
+                    .is_some_and(|w| w.clear_executions_on_review);
+                let outcome = guard_at_retry_limit(step, clear_on_review, has_reviewer_role);
                 rerun_step = None;
-                final_status = "blocked".to_string();
+                final_status = outcome.final_status.to_string();
                 block_reason = "retry limit reached";
+                review_thread = outcome.review_thread;
+                if outcome.clear {
+                    // D7: zero the per-step running/testing counters; the
+                    // reviewer counter (`review`) is NEVER cleared.
+                    clear_running_testing(&mut executions);
+                }
             }
         }
     }
@@ -851,11 +913,65 @@ pub(crate) async fn engine_transition(
             increment_execution(&mut executions, step);
         }
         Some(new_id.id)
+    } else if review_thread {
+        // D7: retry-limit → review with a reviewer role creates a review
+        // thread (same shape as the normal-completion review path, row 7);
+        // without a reviewer role the task lands in `review` as a manual
+        // state (no thread) — handled by the None arm below.
+        #[derive(sqlx::FromRow)]
+        struct IdRow {
+            id: i64,
+        }
+        let new_id = sql_forge!(
+            IdRow,
+            "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
+                                  task_id, parent_id, workflow_id, workflow_step)
+             VALUES ('pending', :cause, :channel_id, :profile, :provider, :model,
+                     :task_id, :parent_id, :workflow_id, :workflow_step)
+             RETURNING id",
+            (
+                :cause = thread.cause.as_str(),
+                :channel_id = thread.channel_id,
+                :profile = thread.profile.as_str(),
+                :provider = thread.provider.as_deref().unwrap_or(""),
+                :model = thread.model.as_deref().unwrap_or(""),
+                :task_id = task_id,
+                :parent_id = thread.id,
+                :workflow_id = wf_id.unwrap_or(""),
+                :workflow_step = "review",
+            )
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| format!("insert review thread: {e}"))?;
+
+        // seq-0 cause message for the review thread (same task context).
+        let cause = if thread.cause.is_empty() {
+            "retry limit reached; review".to_string()
+        } else {
+            thread.cause.clone()
+        };
+        sql_forge!(
+            "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
+             VALUES (:tid, 'cause', :content, 0, 'cause')",
+            ( :tid = new_id.id, :content = cause )
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("insert review cause message: {e}"))?;
+
+        // NOTE: the review execution counter is NOT incremented here — the
+        // reviewer has not run yet; it increments when a review thread runs.
+        Some(new_id.id)
     } else {
         None
     };
 
     let comment = match new_thread_id {
+        Some(new_id) if review_thread => format!(
+            "Task failed in thread #{}. Retry limit reached; creating review thread #{}.",
+            thread.id, new_id
+        ),
         Some(new_id) => match &kind {
             RerunKind::Interrupted => format!(
                 "Task interrupted due to LLM calls iteration limit reached in thread #{}. Creating thread #{}",
@@ -868,8 +984,8 @@ pub(crate) async fn engine_transition(
             _ => format!("Task failed in thread #{}. Creating thread #{}", thread.id, new_id),
         },
         None => format!(
-            "Task failed in thread #{}. Moving kanban task to \"blocked\" status due to {} for status {}",
-            thread.id, block_reason, initial_status
+            "Task failed in thread #{}. Moving kanban task to \"{}\" status due to {} for status {}",
+            thread.id, final_status, block_reason, initial_status
         ),
     };
 
@@ -1115,5 +1231,91 @@ mod tests_review {
         let (s, _, reason) = route_manual_review("retest", true, true, true, false);
         assert_eq!(s, "blocked");
         assert_eq!(reason.as_deref(), Some("tester retry limit reached"));
+    }
+
+    // ---- Phase 4b (D7): clear_executions_on_review -------------------------
+    // The workflows.yml parse round-trip for the field lives in workflows.rs
+    // (test `parse_round_trip_clear_executions_on_review`, commit fda5849).
+    // These tests cover the retry-guard behavior in engine_transition.
+
+    #[test]
+    fn guard_d7_executor_limit_reviews() {
+        // (b) executor (running) at limit + flag true → review (NOT blocked),
+        // running/testing cleared, review counter untouched.
+        let outcome = guard_at_retry_limit("running", true, true);
+        assert_eq!(outcome.final_status, "review");
+        assert!(outcome.clear);
+        assert!(outcome.review_thread);
+        let mut executions = serde_json::json!({
+            "executions": {"running": 3, "testing": 2, "review": 5}
+        });
+        clear_running_testing(&mut executions);
+        let exec = &executions["executions"];
+        assert_eq!(exec["running"], 0);
+        assert_eq!(exec["testing"], 0);
+        assert_eq!(exec["review"], 5);
+    }
+
+    #[test]
+    fn guard_d7_tester_limit_reviews() {
+        // (c) tester (testing) at limit + flag true → review, counters cleared.
+        let outcome = guard_at_retry_limit("testing", true, true);
+        assert_eq!(outcome.final_status, "review");
+        assert!(outcome.clear);
+        assert!(outcome.review_thread);
+        let mut executions = serde_json::json!({
+            "executions": {"running": 1, "testing": 2, "review": 0}
+        });
+        clear_running_testing(&mut executions);
+        let exec = &executions["executions"];
+        assert_eq!(exec["running"], 0);
+        assert_eq!(exec["testing"], 0);
+        assert_eq!(exec["review"], 0);
+    }
+
+    #[test]
+    fn guard_d7_flag_false_blocks() {
+        // (d) flag false/absent → exactly today's behavior: blocked, and the
+        // counters are never cleared.
+        for step in ["running", "testing"] {
+            let outcome = guard_at_retry_limit(step, false, true);
+            assert_eq!(outcome.final_status, "blocked");
+            assert!(!outcome.clear);
+            assert!(!outcome.review_thread);
+        }
+        let outcome = guard_at_retry_limit("running", false, false);
+        assert_eq!(outcome.final_status, "blocked");
+        assert!(!outcome.clear);
+        assert!(!outcome.review_thread);
+    }
+
+    #[test]
+    fn guard_d7_review_step_never_overridden() {
+        // (e) reviewer (review) at limit + flag true → STILL blocked, never
+        // overridden, and the review counter is never cleared.
+        let outcome = guard_at_retry_limit("review", true, true);
+        assert_eq!(outcome.final_status, "blocked");
+        assert!(!outcome.clear);
+        assert!(!outcome.review_thread);
+        let mut executions = serde_json::json!({
+            "executions": {"running": 0, "testing": 0, "review": 7}
+        });
+        clear_running_testing(&mut executions);
+        assert_eq!(executions["executions"]["review"], 7);
+    }
+
+    #[test]
+    fn guard_d7_no_reviewer_role_manual_review() {
+        // (f) flag true but no reviewer role → the task lands in `review`
+        // with NO thread (manual review state): status review, no review
+        // thread, counters still cleared.
+        let outcome = guard_at_retry_limit("running", true, false);
+        assert_eq!(outcome.final_status, "review");
+        assert!(outcome.clear);
+        assert!(!outcome.review_thread);
+        let outcome = guard_at_retry_limit("testing", true, false);
+        assert_eq!(outcome.final_status, "review");
+        assert!(outcome.clear);
+        assert!(!outcome.review_thread);
     }
 }
