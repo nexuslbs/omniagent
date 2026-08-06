@@ -524,7 +524,7 @@ where
                         // `docker compose exec …` chain outlives its thread.
                         let call_fut =
                             handle_tools_call(&writer, id, &call_params, &tools, &index);
-                        std::pin::pin!(call_fut);
+                        tokio::pin!(call_fut);
                         tokio::select! {
                             res = &mut call_fut => {
                                 if let Err(e) = res {

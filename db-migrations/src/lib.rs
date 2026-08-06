@@ -144,6 +144,87 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     tracing::info!(
         "[migration] Schema v5: messages.channel_id + seq-0 external_id dedup index added"
     );
+
+    // ── Workflow implementation (Phase 0): schema additions ────────────────
+    // kanban_tasks: workflow_id = workflow key (NO FK — workflows are
+    // file-defined, decision N4), thread_status = lifecycle state of the
+    // workflow-managed thread (NULL | scheduled | running), workflow_state =
+    // execution JSONB, e.g. {"executions": {"running": N, "testing": M, "review": K}}.
+    sqlx::query("ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS workflow_id TEXT")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS thread_status TEXT")
+        .execute(pool)
+        .await
+        .ok();
+    // thread_status CHECK (idempotent DO block, matching the chk_thread_cause pattern).
+    sqlx::query(
+        "DO $$ BEGIN \
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint \
+                        WHERE conname = 'chk_kanban_tasks_thread_status') \
+         THEN ALTER TABLE kanban_tasks ADD CONSTRAINT chk_kanban_tasks_thread_status \
+              CHECK (thread_status IS NULL OR thread_status IN ('scheduled', 'running')); \
+         END IF; END $$;",
+    )
+    .execute(pool)
+    .await
+    .ok();
+    sqlx::query("ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS workflow_state JSONB")
+        .execute(pool)
+        .await
+        .ok();
+
+    // threads: workflow_id + workflow_step (STEP keys only — running/testing/review,
+    // NEVER role names; roles are role/display names only, N5) + task_type
+    // ('kanban' | 'cron'). task_id already exists — no task_type backfill (N7).
+    sqlx::query("ALTER TABLE threads ADD COLUMN IF NOT EXISTS workflow_id TEXT")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE threads ADD COLUMN IF NOT EXISTS workflow_step TEXT")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE threads ADD COLUMN IF NOT EXISTS task_type TEXT")
+        .execute(pool)
+        .await
+        .ok();
+
+    // kanban_history: free-text comment on history entries.
+    sqlx::query("ALTER TABLE kanban_history ADD COLUMN IF NOT EXISTS comment TEXT")
+        .execute(pool)
+        .await
+        .ok();
+
+    // ── R4: retire the legacy 'ready' status ───────────────────────────────
+    // Pre-existing 'ready' tasks become 'running' (workflow semantics):
+    // - with a pending thread -> thread_status = 'scheduled' (the thread is a
+    //   scheduled workflow execution)
+    // - without one -> thread_status stays NULL
+    // Future 'ready' writes are rejected at validation (src/server/kanban.rs).
+    sqlx::query(
+        "UPDATE kanban_tasks SET status = 'running', thread_status = 'scheduled' \
+         WHERE status = 'ready' \
+           AND EXISTS (SELECT 1 FROM threads t WHERE t.task_id = kanban_tasks.id \
+                       AND t.status = 'pending')",
+    )
+    .execute(pool)
+    .await
+    .ok();
+    sqlx::query(
+        "UPDATE kanban_tasks SET status = 'running', thread_status = NULL \
+         WHERE status = 'ready' \
+           AND NOT EXISTS (SELECT 1 FROM threads t WHERE t.task_id = kanban_tasks.id \
+                           AND t.status = 'pending')",
+    )
+    .execute(pool)
+    .await
+    .ok();
+
+    tracing::info!(
+        "[migration] Schema v6: workflow columns (kanban_tasks.workflow_id/thread_status/workflow_state, threads.workflow_id/workflow_step/task_type, kanban_history.comment) + R4 'ready' retirement"
+    );
     Ok(())
 }
 

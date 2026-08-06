@@ -38,9 +38,7 @@ use super::{err_json, ok_json, AppState};
 // Constants
 // ---------------------------------------------------------------------------
 
-const VALID_STATUSES: &[&str] = &[
-    "backlog", "todo", "ready", "running", "review", "blocked", "done",
-];
+const VALID_STATUSES: &[&str] = &["backlog", "todo", "running", "review", "blocked", "done"];
 
 /// Sentinel used for optional integer fields (channel_id, priority) to
 /// signal "keep existing value" inside a static UPDATE statement.
@@ -1678,7 +1676,7 @@ mod tests {
     fn test_validate_status_valid() {
         assert!(validate_status("backlog"));
         assert!(validate_status("todo"));
-        assert!(validate_status("ready"));
+        assert!(!validate_status("ready"));
         assert!(validate_status("running"));
         assert!(validate_status("review"));
         assert!(validate_status("blocked"));
