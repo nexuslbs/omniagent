@@ -23,7 +23,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,7 @@ use std::sync::Arc;
 use tracing::error;
 
 use super::{err_json, ok_json, AppState};
+use crate::workflows::{Workflow, WorkflowConfigError, WorkflowsFile};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -100,6 +101,16 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
         .route("/review", post(review_handler))
         // 13. Subtasks
         .route("/kanban/tasks/{id}/subtasks", get(list_subtasks_handler))
+        // 14. Workflows CRUD
+        .route("/workflows", get(list_workflows_handler))
+        .route("/workflows/{key}", put(upsert_workflow_handler))
+        .route("/workflows/{key}", post(upsert_workflow_handler))
+        .route("/workflows/{key}", delete(delete_workflow_handler))
+        // 15. Reset workflow executions
+        .route(
+            "/kanban/tasks/{id}/workflow/executions/reset",
+            post(reset_workflow_executions_handler),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -1713,9 +1724,258 @@ async fn review_handler(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Workflows CRUD (Phase 5)
+// ---------------------------------------------------------------------------
+
+/// Absolute path to the deployment's `workflows.yml` (under the data dir).
+fn workflows_file_path(state: &AppState) -> std::path::PathBuf {
+    std::path::Path::new(&state.data_dir).join("workflows.yml")
+}
+
+/// Load the workflows file; a missing file counts as an empty document.
+fn load_workflows_file(state: &AppState) -> Result<WorkflowsFile, WorkflowConfigError> {
+    let path = workflows_file_path(state);
+    match WorkflowsFile::load(&path) {
+        Ok(file) => Ok(file),
+        Err(WorkflowConfigError::NotFound { .. }) => Ok(WorkflowsFile::default()),
+        Err(err) => Err(err),
+    }
+}
+
+/// Serialize a workflows file (with effective per-role resolution) for the API.
+fn workflows_response(file: &WorkflowsFile) -> serde_json::Value {
+    let workflows: Vec<serde_json::Value> = file
+        .resolve_all()
+        .into_iter()
+        .map(|(key, workflow, resolved)| {
+            let resolved_map: serde_json::Map<String, serde_json::Value> = resolved
+                .into_iter()
+                .map(|(role_key, role)| {
+                    (
+                        role_key,
+                        serde_json::json!({
+                            "template": role.template,
+                            "profile": role.profile,
+                            "provider": role.provider,
+                            "model": role.model,
+                            "plan_mode": role.plan_mode,
+                            "retries": role.retries,
+                        }),
+                    )
+                })
+                .collect();
+            serde_json::json!({
+                "key": key,
+                "workflow": workflow,
+                "resolved": resolved_map,
+            })
+        })
+        .collect();
+    serde_json::json!({ "workflows": workflows })
+}
+
+async fn list_workflows_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match load_workflows_file(&state) {
+        Ok(file) => ok_json(workflows_response(&file)),
+        Err(err) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("failed to load workflows.yml: {err}"),
+        ),
+    }
+}
+
+async fn upsert_workflow_handler(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(body): Json<Workflow>,
+) -> impl IntoResponse {
+    let key = key.trim().to_string();
+    // Validate the payload on its own first (executor role required;
+    // tester/reviewer templates required when the role is present).
+    let mut candidate = WorkflowsFile::default();
+    candidate.workflows.insert(key.clone(), body.clone());
+    if let Err(err) = candidate.validate() {
+        return err_json(StatusCode::BAD_REQUEST, &format!("invalid workflow: {err}"));
+    }
+    let mut file = match load_workflows_file(&state) {
+        Ok(file) => file,
+        Err(err) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to load workflows.yml: {err}"),
+            );
+        }
+    };
+    if let Err(err) = file.upsert(&key, body) {
+        return err_json(StatusCode::BAD_REQUEST, &format!("invalid workflow: {err}"));
+    }
+    if let Err(err) = file.save(&workflows_file_path(&state)) {
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("failed to write workflows.yml: {err}"),
+        );
+    }
+    ok_json(workflows_response(&file))
+}
+
+async fn delete_workflow_handler(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> impl IntoResponse {
+    let mut file = match load_workflows_file(&state) {
+        Ok(file) => file,
+        Err(err) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to load workflows.yml: {err}"),
+            );
+        }
+    };
+    if file.remove(&key).is_none() {
+        return err_json(
+            StatusCode::NOT_FOUND,
+            &format!("workflow '{key}' not found"),
+        );
+    }
+    if let Err(err) = file.save(&workflows_file_path(&state)) {
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("failed to write workflows.yml: {err}"),
+        );
+    }
+    ok_json(workflows_response(&file))
+}
+
+// ---------------------------------------------------------------------------
+// Reset workflow executions (Phase 5)
+// ---------------------------------------------------------------------------
+
+/// Strip the `executions` key from a `workflow_state` document.
+/// Returns `None` when the state is absent or not a JSON object.
+fn reset_executions_json(state: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let value = state?;
+    let mut obj = value.as_object()?.clone();
+    obj.remove("executions");
+    Some(serde_json::Value::Object(obj))
+}
+
+/// Decide whether a reset is meaningful and compute the cleared state.
+/// A task without a `workflow_id` is a no-op (idempotent reset).
+fn resolve_workflow_reset(
+    workflow_id: &Option<String>,
+    state: &Option<serde_json::Value>,
+) -> (bool, Option<serde_json::Value>) {
+    match workflow_id {
+        None => (false, None),
+        Some(_) => (true, reset_executions_json(state.as_ref())),
+    }
+}
+
+#[derive(FromRow)]
+struct WorkflowResetRow {
+    id: String,
+    workflow_id: Option<String>,
+    workflow_state: Option<serde_json::Value>,
+}
+
+#[derive(FromRow)]
+struct WorkflowResetUpdateRow {
+    id: String,
+}
+
+async fn reset_workflow_executions_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let row = match sql_forge!(
+        WorkflowResetRow,
+        r#"SELECT id, workflow_id, workflow_state
+           FROM kanban_tasks
+           WHERE id = :id"#,
+        ( :id = &id )
+    )
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(err) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to load task: {err}"),
+            );
+        }
+    };
+    let row = match row {
+        Some(row) => row,
+        None => return err_json(StatusCode::NOT_FOUND, "task not found"),
+    };
+    let (should_reset, cleared) = resolve_workflow_reset(&row.workflow_id, &row.workflow_state);
+    if !should_reset {
+        return ok_json(serde_json::json!({
+            "reset": false,
+            "message": "task has no workflow assigned; nothing to reset",
+        }));
+    }
+    let cleared = cleared.unwrap_or_else(|| serde_json::json!({}));
+    if let Err(err) = sql_forge!(
+        WorkflowResetUpdateRow,
+        r#"UPDATE kanban_tasks
+           SET workflow_state = :state
+           WHERE id = :id
+           RETURNING id"#,
+        ( :state = &cleared, :id = &id )
+    )
+    .fetch_optional(&state.pool)
+    .await
+    {
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("failed to reset workflow executions: {err}"),
+        );
+    }
+    ok_json(serde_json::json!({ "reset": true }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_reset_executions_cleared() {
+        let state = serde_json::json!({
+            "executions": [{"step": "research", "ok": true}],
+            "step_index": 2,
+        });
+        let cleared = reset_executions_json(Some(&state)).expect("object in, object out");
+        assert!(
+            cleared.get("executions").is_none(),
+            "executions must be cleared"
+        );
+        assert_eq!(cleared["step_index"], 2, "other state must be preserved");
+    }
+
+    #[test]
+    fn test_reset_executions_idempotent() {
+        let state = serde_json::json!({"executions": [1, 2, 3]});
+        let once = reset_executions_json(Some(&state)).expect("cleared once");
+        let twice = reset_executions_json(Some(&once)).expect("cleared twice");
+        assert_eq!(once, twice);
+        assert!(twice.get("executions").is_none());
+    }
+
+    #[test]
+    fn test_resolve_workflow_reset_noop_without_workflow_id() {
+        let state = serde_json::json!({"executions": [1]});
+        let (should, cleared) = resolve_workflow_reset(&None, &Some(state));
+        assert!(!should, "no workflow_id -> no reset");
+        assert!(cleared.is_none());
+
+        // A workflow_id makes the reset meaningful even with absent state.
+        let (should, cleared) = resolve_workflow_reset(&Some("wf-1".to_string()), &None);
+        assert!(should);
+        assert!(cleared.is_none());
+    }
 
     #[test]
     fn test_validate_status_valid() {
