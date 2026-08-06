@@ -16,6 +16,7 @@ pub mod config;
 pub(crate) mod context_builder;
 pub mod executor;
 pub(crate) mod fail_thread;
+pub use fail_thread::{manual_review_decision, validate_review_decision, ReviewOutcome};
 pub mod helpers;
 pub mod kanban_updater;
 pub(crate) mod main_loop;

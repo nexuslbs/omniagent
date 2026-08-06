@@ -116,6 +116,285 @@ pub(crate) async fn fail_thread(
 //                 and role names — N6).
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── Phase 4: manual/API review decisions (spec §8 R12) ──────────────────────
+
+/// Outcome of a manual/API review decision (POST /review, kanban_review_task).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReviewOutcome {
+    pub task_id: String,
+    pub status: String,
+    pub thread_id: Option<i64>,
+    pub comment: String,
+}
+
+/// Validate a manual review `decision` value (whitelist, spec §8).
+pub fn validate_review_decision(decision: &str) -> Result<(), String> {
+    match decision {
+        "approve" | "rework" | "retest" | "block" => Ok(()),
+        _ => Err(format!(
+            "invalid decision '{decision}': must be one of 'approve', 'rework', 'retest', 'block'"
+        )),
+    }
+}
+
+/// Pure routing for a manual review decision — no DB access (unit-tested).
+///
+/// Returns `(final_status, rerun_step, block_reason)`.
+/// - R5: `review` is valid without a reviewer role (manual state); `testing`
+///   without a tester role is INVALID → `blocked` + auto comment.
+/// - D1/R2: rework/retest consume the target step's retry budget; at the
+///   limit the decision is a no-op → `blocked` (retry guard).
+pub fn route_manual_review(
+    decision: &str,
+    has_wf: bool,
+    has_executor_role: bool,
+    has_tester_role: bool,
+    under_budget: bool,
+) -> (String, Option<String>, Option<String>) {
+    match decision {
+        "approve" => ("done".to_string(), None, None),
+        "block" => ("blocked".to_string(), None, None),
+        "rework" => {
+            if !has_wf {
+                (
+                    "blocked".to_string(),
+                    None,
+                    Some("task has no workflow".to_string()),
+                )
+            } else if !has_executor_role {
+                (
+                    "blocked".to_string(),
+                    None,
+                    Some("no executor role in workflow".to_string()),
+                )
+            } else if !under_budget {
+                (
+                    "blocked".to_string(),
+                    None,
+                    Some("executor retry limit reached".to_string()),
+                )
+            } else {
+                ("running".to_string(), Some("running".to_string()), None)
+            }
+        }
+        "retest" => {
+            if !has_wf {
+                (
+                    "blocked".to_string(),
+                    None,
+                    Some("task has no workflow".to_string()),
+                )
+            } else if !has_tester_role {
+                (
+                    "blocked".to_string(),
+                    None,
+                    Some("no tester role in workflow".to_string()),
+                )
+            } else if !under_budget {
+                (
+                    "blocked".to_string(),
+                    None,
+                    Some("tester retry limit reached".to_string()),
+                )
+            } else {
+                ("testing".to_string(), Some("testing".to_string()), None)
+            }
+        }
+        _ => ("".to_string(), None, Some("invalid decision".to_string())),
+    }
+}
+
+/// Row used by [`manual_review_decision`].
+#[derive(sqlx::FromRow)]
+struct ReviewTaskRow {
+    status: String,
+    workflow_id: Option<String>,
+    workflow_state: Option<String>,
+    channel_id: Option<i64>,
+    profile: Option<String>,
+}
+
+/// Apply a MANUAL/API review decision to a kanban task. This is the shared
+/// implementation behind `POST /review` and the `kanban_review_task` MCP tool
+/// (spec §8, R12) — the reviewer AGENT does not call it: it signals approve
+/// via normal thread completion and issues via fail-thread with
+/// `workflow_step` = running/testing/blocked (N6).
+///
+/// Decisions:
+/// - `approve` → task `done` (manual state — valid without a reviewer role, R5)
+/// - `rework`  → task `running` + scheduled executor thread (retry-guarded)
+/// - `retest`  → task `testing` + scheduled tester thread (R5: no tester role
+///   → `blocked` + auto comment; retry-guarded)
+/// - `block`   → task `blocked` (no thread)
+///
+/// R4: a no-op when the task is already terminal (`done`/`blocked`).
+/// Convert any error into a String (for API error surfaces).
+fn err_str<E: std::fmt::Display>(e: E) -> String {
+    e.to_string()
+}
+
+pub async fn manual_review_decision(
+    pool: &sqlx::PgPool,
+    data_dir: &str,
+    task_id: &str,
+    decision: &str,
+    comment: Option<&str>,
+) -> Result<ReviewOutcome, String> {
+    validate_review_decision(decision)?;
+
+    let mut tx = pool.begin().await.map_err(err_str)?;
+
+    let task: Option<ReviewTaskRow> = sqlx::query_as::<_, ReviewTaskRow>(
+        "SELECT status, workflow_id, workflow_state, channel_id, profile
+         FROM kanban_tasks WHERE id = $1 FOR UPDATE",
+    )
+    .bind(task_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(err_str)?;
+
+    let Some(task) = task else {
+        return Err(format!("kanban task {task_id} not found"));
+    };
+
+    // R4: terminal tasks are a no-op (same semantics as engine_transition).
+    if matches!(task.status.as_str(), "done" | "blocked") {
+        let status = task.status.clone();
+        return Ok(ReviewOutcome {
+            task_id: task_id.to_string(),
+            status,
+            thread_id: None,
+            comment: format!("no-op: task already {} ({decision})", task.status),
+        });
+    }
+
+    // Workflow config: role presence + retry budgets (workflows.yml).
+    let wfs = crate::workflows::WorkflowsFile::load(std::path::Path::new(&format!(
+        "{data_dir}/workflows.yml"
+    )))
+    .map_err(err_str)?;
+    let wf = task
+        .workflow_id
+        .as_deref()
+        .and_then(|id| wfs.workflows.get(id))
+        .cloned()
+        .unwrap_or_default();
+    let has_wf = task.workflow_id.is_some();
+    let has_executor_role = wf.roles.contains_key("executor");
+    let has_tester_role = wf.roles.contains_key("tester");
+
+    // workflow_state JSON — executions live under the "executions" key.
+    let mut state: serde_json::Value = task
+        .workflow_state
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let budget_ok = match decision {
+        "rework" => execution_count(&state, "running") < retry_limit(&wf, "executor"),
+        "retest" => execution_count(&state, "testing") < retry_limit(&wf, "tester"),
+        _ => true,
+    };
+
+    let (to_status, rerun_step, block_reason) = route_manual_review(
+        decision,
+        has_wf,
+        has_executor_role,
+        has_tester_role,
+        budget_ok,
+    );
+    if let Some(step) = rerun_step.as_deref() {
+        increment_execution(&mut state, step);
+    }
+
+    // Create the scheduled re-run thread for rework/retest (same pattern as
+    // engine_transition: pending thread + seq-0 cause message).
+    let new_thread_id: Option<i64> = if let Some(step) = rerun_step.as_deref() {
+        #[derive(sqlx::FromRow)]
+        struct IdRow {
+            id: i64,
+        }
+        let cause = format!("Manual review decision: {decision}. Task: {task_id}");
+        let new_id = sqlx::query_as::<_, IdRow>(
+            "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
+             task_id, parent_id, workflow_id, workflow_step)
+             VALUES ('pending', $1, $2, $3, '', '',
+             $4, NULL, $5, $6) RETURNING id",
+        )
+        .bind(cause.as_str())
+        .bind(task.channel_id)
+        .bind(task.profile.as_deref().unwrap_or(""))
+        .bind(task_id)
+        .bind(task.workflow_id.clone().unwrap_or_default())
+        .bind(step)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| format!("insert manual review thread: {e}"))?;
+
+        sql_forge!(
+            "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
+             VALUES (:tid, 'cause', :content, 0, 'cause')",
+            ( :tid = new_id.id, :content = cause )
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("insert manual review cause message: {e}"))?;
+
+        Some(new_id.id)
+    } else {
+        None
+    };
+
+    let auto_comment = if let Some(reason) = block_reason {
+        format!(
+            "Task blocked: {reason}. Manual review decision: {decision}.{}",
+            comment.map(|c| format!(" {c}")).unwrap_or_default()
+        )
+    } else if let Some(tid) = new_thread_id {
+        format!(
+            "Manual review decision: {decision}. Creating thread #{tid}.{}",
+            comment.map(|c| format!(" {c}")).unwrap_or_default()
+        )
+    } else {
+        format!(
+            "Manual review decision: {decision}.{}",
+            comment.map(|c| format!(" {c}")).unwrap_or_default()
+        )
+    };
+
+    let thread_status = new_thread_id.map(|_| "scheduled".to_string());
+    sqlx::query(
+        "UPDATE kanban_tasks SET status = $1, thread_status = $2,
+                workflow_state = CAST($3 AS jsonb)
+         WHERE id = $4",
+    )
+    .bind(to_status.as_str())
+    .bind(thread_status)
+    .bind(state.to_string())
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(err_str)?;
+
+    sql_forge!(
+        "INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
+         VALUES (:id, 'workflow', :from, :to, :comment)",
+        (:id = task_id, :from = task.status, :to = to_status.clone(), :comment = auto_comment.clone())
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(err_str)?;
+
+    tx.commit().await.map_err(err_str)?;
+
+    Ok(ReviewOutcome {
+        task_id: task_id.to_string(),
+        status: to_status,
+        thread_id: new_thread_id,
+        comment: auto_comment,
+    })
+}
+
 /// Normalize the tool's `workflow_step` argument to the F-matrix outcome.
 /// STEP keys only: "" | "running" | "testing" | "blocked". Everything else
 /// (incl. `review` and role names) is INVALID → F4.
@@ -758,5 +1037,83 @@ mod tests {
         assert_eq!(role_for_step("testing"), "tester");
         assert_eq!(role_for_step("review"), "reviewer");
         assert_eq!(role_for_step("other"), "executor");
+    }
+}
+
+#[cfg(test)]
+mod tests_review {
+    use super::*;
+
+    #[test]
+    fn validate_review_decision_accepts_all_four_decisions() {
+        for d in ["approve", "rework", "retest", "block"] {
+            assert!(validate_review_decision(d).is_ok(), "'{d}' should be valid");
+        }
+    }
+
+    #[test]
+    fn validate_review_decision_rejects_invalid() {
+        for d in ["", "approve2", "reject", "APPROVE", "done"] {
+            assert!(
+                validate_review_decision(d).is_err(),
+                "'{d}' should be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn route_manual_review_approve_and_block() {
+        // approve → done (manual state — valid without reviewer, R5)
+        let (s, step, reason) = route_manual_review("approve", true, false, false, true);
+        assert_eq!(s, "done");
+        assert_eq!(step, None);
+        assert_eq!(reason, None);
+        let (s, _, _) = route_manual_review("approve", false, false, false, true);
+        assert_eq!(s, "done");
+        // block → blocked, never a thread
+        let (s, step, reason) = route_manual_review("block", true, false, false, true);
+        assert_eq!(s, "blocked");
+        assert_eq!(step, None);
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn route_manual_review_rework() {
+        // rework → running + executor thread when the executor role exists
+        let (s, step, reason) = route_manual_review("rework", true, true, false, true);
+        assert_eq!(s, "running");
+        assert_eq!(step.as_deref(), Some("running"));
+        assert_eq!(reason, None);
+        // no executor role → blocked (R5 analog)
+        let (s, step, reason) = route_manual_review("rework", true, false, false, true);
+        assert_eq!(s, "blocked");
+        assert_eq!(step, None);
+        assert_eq!(reason.as_deref(), Some("no executor role in workflow"));
+        // no workflow → blocked
+        let (s, _, reason) = route_manual_review("rework", false, false, false, true);
+        assert_eq!(s, "blocked");
+        assert_eq!(reason.as_deref(), Some("task has no workflow"));
+        // retry guard (D1/R2): at the limit → blocked
+        let (s, _, reason) = route_manual_review("rework", true, true, false, false);
+        assert_eq!(s, "blocked");
+        assert_eq!(reason.as_deref(), Some("executor retry limit reached"));
+    }
+
+    #[test]
+    fn route_manual_review_retest_without_tester_blocks() {
+        // R5: testing without a tester role is INVALID → blocked + auto comment
+        let (s, step, reason) = route_manual_review("retest", true, true, false, true);
+        assert_eq!(s, "blocked");
+        assert_eq!(step, None);
+        assert_eq!(reason.as_deref(), Some("no tester role in workflow"));
+        // with tester role + budget → testing + tester thread
+        let (s, step, reason) = route_manual_review("retest", true, true, true, true);
+        assert_eq!(s, "testing");
+        assert_eq!(step.as_deref(), Some("testing"));
+        assert_eq!(reason, None);
+        // tester budget exhausted → blocked
+        let (s, _, reason) = route_manual_review("retest", true, true, true, false);
+        assert_eq!(s, "blocked");
+        assert_eq!(reason.as_deref(), Some("tester retry limit reached"));
     }
 }
