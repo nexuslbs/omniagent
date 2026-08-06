@@ -383,6 +383,15 @@ where
     // swallowed by a discarded tokio::spawn handle.
     let mut in_flight: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
+    // In-flight tools/call request ids → their cancel signal. When the client
+    // sends `notifications/cancelled` (thread ended, /stop-thread, channel
+    // close, client-side timeout), the matching task is signalled and DROPS
+    // its handler future — plugins that wrap subprocesses in kill-on-drop
+    // guards (docker compose) then kill the child, so no stale process
+    // survives the thread that spawned it (thread 73, Aug 2026).
+    let cancel_map: Arc<std::sync::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<()>>>> =
+        Arc::default();
+
     while let Some(line) = rx.recv().await {
         let request: JsonRpcRequest = match serde_json::from_str(&line) {
             Ok(req) => req,
@@ -404,6 +413,34 @@ where
             }
             "notifications/initialized" => {
                 tracing::info!("Client initialized notification received");
+            }
+            "notifications/cancelled" => {
+                // Client aborted an in-flight request (thread-end, /stop-thread,
+                // channel close, client-side timeout, ...). Signal the
+                // tools/call task so its handler future is DROPPED mid-await;
+                // plugins owning OS subprocesses behind KillOnDrop guards then
+                // kill those children. Notifications have no request id — do
+                // NOT respond.
+                let request_id = request
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("requestId"))
+                    .and_then(|v| v.as_u64());
+                match request_id {
+                    Some(request_id) => {
+                        if let Some(tx) = cancel_map.lock().unwrap().remove(&request_id) {
+                            tracing::info!(
+                                "notifications/cancelled: aborting tools/call {request_id}"
+                            );
+                            let _ = tx.send(());
+                        } else {
+                            tracing::debug!(
+                                "notifications/cancelled: unknown or finished request {request_id}"
+                            );
+                        }
+                    }
+                    None => tracing::warn!("notifications/cancelled without requestId"),
+                }
             }
             "configure" => {
                 if let Some(ref cb) = on_configure {
@@ -474,12 +511,36 @@ where
                     let writer = writer.clone();
                     let tools = tools.clone();
                     let index = index.clone();
+                    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+                    cancel_map.lock().unwrap().insert(id, cancel_tx);
+                    let cancel_map = cancel_map.clone();
                     in_flight.spawn(async move {
-                        if let Err(e) =
-                            handle_tools_call(&writer, id, &call_params, &tools, &index).await
-                        {
-                            tracing::error!("tools/call '{}' error: {e:#}", call_params.name);
+                        // Run the handler under a cancel signal. If the client
+                        // sends `notifications/cancelled` for this request id
+                        // (thread ended, /stop-thread, channel close, client-side
+                        // timeout), the handler future is DROPPED mid-await —
+                        // plugins with kill-on-drop subprocess guards (docker)
+                        // then kill the underlying OS process, so no stale
+                        // `docker compose exec …` chain outlives its thread.
+                        let call_fut =
+                            handle_tools_call(&writer, id, &call_params, &tools, &index);
+                        std::pin::pin!(call_fut);
+                        tokio::select! {
+                            res = &mut call_fut => {
+                                if let Err(e) = res {
+                                    tracing::error!("tools/call '{}' error: {e:#}", call_params.name);
+                                }
+                            }
+                            _ = cancel_rx => {
+                                tracing::info!("tools/call {id} cancelled by client");
+                                // Respond with the JSON-RPC "Request cancelled"
+                                // error so the client's pending oneshot resolves
+                                // instead of leaking.
+                                let _ = send_error(&writer, id, -32800, "Request cancelled").await;
+                            }
                         }
+                        // Drop the cancel entry so a late duplicate cancel is a no-op.
+                        cancel_map.lock().unwrap().remove(&id);
                     });
                     // Reap finished tasks to surface panics promptly (and keep
                     // the set from growing without bound on long-running servers).
@@ -501,7 +562,11 @@ where
 
     // stdin closed: drain remaining in-flight tasks so responses aren't
     // dropped mid-flight; log any panics. A small grace timeout bounds the
-    // shutdown so a wedged handler can't hang the server forever.
+    // shutdown so a wedged handler can't hang the server forever. Tasks still
+    // running past the grace period are aborted when `in_flight` is dropped at
+    // the end of this function — dropping the handler futures is what triggers
+    // the plugins' kill-on-drop guards, so tracked subprocesses die with the
+    // server (detached ops like `up -d` intentionally survive).
     tracing::info!(
         "{} MCP server shutting down (stdin closed); {} task(s) in flight",
         server_info.name,

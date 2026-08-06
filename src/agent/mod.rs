@@ -207,6 +207,48 @@ impl Agent {
     }
 }
 
+/// Cancel every in-flight task for all threads of a channel.
+///
+/// When a channel is stopped/closed (`/stop`, `/stop-thread`, `/close`) or the
+/// supervisor cancels a channel handler, the handler's futures are dropped —
+/// that already kills FOREGROUND tool calls via the MCP client's drop-cancel
+/// guard. But the agent's BACKGROUND tool tasks are detached `tokio::spawn`ed
+/// tasks that only stop when the task registry abort fires; without this
+/// cleanup they keep the plugin request alive and the `docker compose exec …`
+/// child keeps running with no consumer (thread 73, Aug 2026: cargo chain
+/// still alive 6+ min after thread end).
+async fn cancel_in_flight_for_channel(cfg: &AgentContext, channel_id: i64) {
+    let registry = crate::agent::task_registry::TASK_REGISTRY.get().cloned();
+    let Some(registry) = registry else {
+        return; // registry not initialized — nothing to cancel
+    };
+    let thread_ids: Vec<i64> =
+        match sqlx::query_scalar("SELECT id FROM threads WHERE channel_id = $1")
+            .bind(channel_id)
+            .fetch_all(&cfg.pool)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(
+                    "[supervisor] Failed to list threads for channel {} cleanup: {:?}",
+                    channel_id,
+                    e
+                );
+                return;
+            }
+        };
+    for tid in thread_ids {
+        let n = registry.cancel_all_for_thread(tid).await;
+        if n > 0 {
+            info!(
+                "Channel {} cancelled {n} in-flight task(s) for thread {tid}",
+                channel_id
+            );
+        }
+    }
+}
+
 /// Per-channel thread processing loop.
 ///
 /// This function runs as a separate tokio task for each channel. It:
@@ -227,6 +269,14 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
         tokio::select! {
             _ = cancel.cancelled() => {
                 info!("Channel {} handler cancelled", channel_id);
+                // Kill any tool-spawned subprocesses still running for this
+                // channel's threads: the agent's BACKGROUND tool tasks are
+                // detached and only stop when the registry abort fires —
+                // without this, /stop-thread and /close would strand
+                // `docker compose exec …` children (thread 73, Aug 2026).
+                // (Foreground calls are already killed by dropping the
+                // handler futures below.)
+                cancel_in_flight_for_channel(&cfg, channel_id).await;
                 // Don't skip pending threads here: stop_thread_handler already marked the
                 // specific thread as skipped before cancelling. Remaining pending threads
                 // should survive and be picked up when the supervisor respawns this handler.
@@ -239,6 +289,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                     if let Err(e) = queries::skip_channel_threads(&cfg.pool, channel_id).await {
                         tracing::warn!("[supervisor] Failed to skip threads for channel {}: {:?}", channel_id, e);
                     }
+                    cancel_in_flight_for_channel(&cfg, channel_id).await;
                     return;
                 }
 
@@ -254,6 +305,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                 for thread in &threads {
                     // Best-effort cancellation check before each thread
                     if cancel.is_cancelled() {
+                        cancel_in_flight_for_channel(&cfg, channel_id).await;
                         // Don't skip pending threads: stop_thread_handler already handled
                         // the target thread. The supervisor will respawn the handler.
                         return;
@@ -265,6 +317,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                         if let Err(e) = queries::skip_channel_threads(&cfg.pool, channel_id).await {
                             tracing::warn!("[supervisor] Failed to skip threads for channel {}: {:?}", channel_id, e);
                         }
+                        cancel_in_flight_for_channel(&cfg, channel_id).await;
                         return;
                     }
 

@@ -384,6 +384,65 @@ pub struct StdioMcpClient {
     last_error: Mutex<Option<String>>,
 }
 
+/// Drop guard for an in-flight `tools/call` request (stdio transport).
+///
+/// When the future awaiting the response is dropped BEFORE the response
+/// arrives (thread ended, /stop-thread, channel close, client-side timeout,
+/// executor cancellation), the guard sends an MCP `notifications/cancelled`
+/// for the request id and drops the pending entry. The shared server framework
+/// (mcp-server-util) then aborts the handler task, and plugins that wrap
+/// subprocesses in kill-on-drop guards (docker compose) kill the underlying
+/// OS process — so no tool-spawned subprocess survives the thread that issued
+/// it (thread 73, Aug 2026: `docker compose exec … cargo` chain still alive
+/// 6+ minutes after the thread ended).
+///
+/// On a NORMAL completion the guard is disarmed and Drop is a no-op.
+struct InFlightCallGuard {
+    id: u64,
+    stdin: Option<mpsc::UnboundedSender<String>>,
+    pending: Arc<parking_lot::Mutex<HashMap<u64, oneshot::Sender<String>>>>,
+    armed: bool,
+}
+
+impl InFlightCallGuard {
+    fn new(
+        id: u64,
+        stdin: Option<mpsc::UnboundedSender<String>>,
+        pending: Arc<parking_lot::Mutex<HashMap<u64, oneshot::Sender<String>>>>,
+    ) -> Self {
+        Self {
+            id,
+            stdin,
+            pending,
+            armed: true,
+        }
+    }
+
+    /// Disarm the guard: the response arrived, do not cancel.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InFlightCallGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Drop the pending entry so a late response can't dispatch to a dead
+        // oneshot (and so the map doesn't accumulate entries if the server is
+        // wedged and never answers).
+        self.pending.lock().remove(&self.id);
+        // Best-effort notify: the server aborts the handler and kills the
+        // underlying subprocess (docker KillOnDrop). The unbounded channel
+        // send never blocks; a closed channel (server gone) is a silent no-op.
+        if let Some(sender) = &self.stdin {
+            let notif = build_cancel_notification(self.id);
+            let _ = sender.send(notif);
+        }
+    }
+}
+
 /// Fail ALL pending requests with a JSON-RPC error so every waiting caller
 /// receives a concrete error instead of hanging until a timeout. Called when
 /// the connection dies (write error, read error, EOF) — the agent must KNOW
@@ -817,7 +876,7 @@ impl McpServerClient for StdioMcpClient {
             pending.insert(id, tx);
         }
 
-        {
+        let stdin_clone = {
             let tx_guard = self.stdin_tx.lock().await;
             let sender = tx_guard
                 .as_ref()
@@ -825,37 +884,48 @@ impl McpServerClient for StdioMcpClient {
             sender
                 .send(req)
                 .map_err(|_| err_str!("MCP server '{}' stdin channel closed", self.config.name))?;
-        }
+            sender.clone()
+        };
+
+        // If this future is dropped before the response arrives (thread ended,
+        // /stop-thread, channel close, client-side timeout), the guard sends
+        // `notifications/cancelled` to the server so it aborts the handler and
+        // kills the underlying subprocess (docker KillOnDrop) — no stale
+        // tool-spawned process survives its thread (thread 73, Aug 2026).
+        let mut cancel_guard = InFlightCallGuard::new(id, Some(stdin_clone), self.pending.clone());
 
         let response = match timeout_dur {
-            Some(dur) => tokio::time::timeout(dur, rx)
-                .await
-                .map_err(|_| {
+            Some(dur) => match tokio::time::timeout(dur, rx).await {
+                Ok(Ok(resp)) => resp,
+                Ok(Err(_)) => {
                     self.circuit.record_failure();
-                    let mut pending = self.pending.lock();
-                    pending.remove(&id);
-                    err_str!(
+                    return Err(err_str!(
+                        "MCP server '{}' response channel cancelled",
+                        self.config.name,
+                    ));
+                }
+                Err(_elapsed) => {
+                    self.circuit.record_failure();
+                    return Err(err_str!(
                         "MCP server '{}' tool '{}' timed out after {} seconds",
                         self.config.name,
                         name,
                         dur.as_secs(),
-                    )
-                })?
-                .map_err(|_| {
+                    ));
+                }
+            },
+            None => match rx.await {
+                Ok(resp) => resp,
+                Err(_) => {
                     self.circuit.record_failure();
-                    err_str!(
+                    return Err(err_str!(
                         "MCP server '{}' response channel cancelled",
                         self.config.name,
-                    )
-                })?,
-            None => rx.await.map_err(|_| {
-                self.circuit.record_failure();
-                err_str!(
-                    "MCP server '{}' response channel cancelled",
-                    self.config.name,
-                )
-            })?,
+                    ));
+                }
+            },
         };
+        cancel_guard.disarm();
 
         let result_value =
             match parse_response(&response).ctx("Failed to parse MCP tool call response")? {
@@ -1155,10 +1225,6 @@ impl McpServerClient for HttpMcpClient {
 }
 
 // ---------------------------------------------------------------------------
-// Per-channel connection pool for stdio MCP servers
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Factory: create the right client type from config
 // ---------------------------------------------------------------------------
 
@@ -1336,5 +1402,60 @@ mod tests {
         });
         let converted = convert_input_schema(&schema);
         assert_eq!(converted["type"], "object");
+    }
+
+    #[tokio::test]
+    async fn inflight_guard_cancels_on_drop() {
+        // Dropping the guard before completion must (a) remove the pending
+        // entry and (b) emit a `notifications/cancelled` frame on the wire.
+        let pending = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+        let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
+
+        {
+            let guard = InFlightCallGuard::new(42, Some(stdin_tx.clone()), pending.clone());
+            assert_eq!(pending.lock().len(), 0);
+            drop(guard);
+        }
+
+        let frame = stdin_rx.recv().await.expect("cancel frame emitted");
+        assert!(
+            frame.contains("notifications/cancelled"),
+            "frame should be a cancel notification: {frame}"
+        );
+        assert!(
+            frame.contains("\"requestId\":42"),
+            "frame should name id 42: {frame}"
+        );
+
+        // Disarmed guard must NOT emit anything.
+        {
+            let mut guard = InFlightCallGuard::new(43, Some(stdin_tx.clone()), pending.clone());
+            guard.disarm();
+            drop(guard);
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), stdin_rx.recv())
+                .await
+                .is_err(),
+            "no frame should be emitted after disarm"
+        );
+    }
+
+    #[tokio::test]
+    async fn inflight_guard_drops_pending_entry() {
+        let pending = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+        let (tx, _rx) = oneshot::channel::<String>();
+        pending.lock().insert(7u64, tx);
+        let (_stdin_tx, stdin_rx) = mpsc::unbounded_channel::<String>();
+        drop(stdin_rx); // closed channel: send is a no-op
+
+        let guard = InFlightCallGuard::new(7, None, pending.clone());
+        drop(guard);
+
+        assert!(
+            pending.lock().get(&7).is_none(),
+            "pending entry must be removed on drop"
+        );
+        let _ = tx;
     }
 }

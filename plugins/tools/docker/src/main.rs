@@ -325,6 +325,137 @@ fn build_failure_message(rc: i32, stdout: &str, stderr: &str, cmd_display: &str)
 }
 
 // ---------------------------------------------------------------------------
+// Kill-on-drop guard for foreground subprocesses
+// ---------------------------------------------------------------------------
+
+/// A spawned child process that is killed when the guard is dropped.
+///
+/// The docker CLI child (`docker compose …`) runs the agent's command. When
+/// the thread that requested the tool call ends (interrupted / failed /
+/// completed / stopped / `/stop-thread` / channel close), the omniagent client
+/// sends an MCP `notifications/cancelled` for the in-flight request; the shared
+/// server framework then DROPS this handler's future, which drops this guard,
+/// which kills the child. Without this, a `docker compose exec … cargo build`
+/// chain keeps burning CPU/RAM detached after its thread died (thread 73,
+/// Aug 2026 — PIDs alive 6+ min after thread end).
+///
+/// The child is spawned in its own process group (`process_group(0)`), and the
+/// kill also signals the whole group, so the `docker compose → docker` local
+/// chain is reaped too — killing only the direct child would orphan the
+/// grandchildren.
+///
+/// Explicit DETACHED operations (`up -d`, `run -d`, `start`, …) are the
+/// exception: they must survive thread end (user rule). For those the guard is
+/// created with `detach: true` and Drop is a no-op — the docker CLI child exits
+/// on its own right after handing the containers to the daemon, and the
+/// containers themselves are managed by the daemon, not by this process.
+struct KillOnDrop {
+    child: Option<tokio::process::Child>,
+    detach: bool,
+}
+
+impl KillOnDrop {
+    fn new(child: tokio::process::Child, detach: bool) -> Self {
+        Self {
+            child: Some(child),
+            detach,
+        }
+    }
+
+    /// Take the child's stdin, e.g. to pipe a script into the process.
+    fn take_stdin(&mut self) -> Option<tokio::process::ChildStdin> {
+        self.child.as_mut().and_then(|c| c.stdin.take())
+    }
+
+    /// Wait for the child to exit and collect its output.
+    ///
+    /// The child stays owned by the guard for the whole wait, so if THIS future
+    /// is dropped mid-wait (cancel notification, timeout, plugin shutdown), the
+    /// Drop impl still kills the child — a bare `Child::wait_with_output` would
+    /// lose the handle and leak the process.
+    async fn wait_with_output(&mut self) -> std::io::Result<std::process::Output> {
+        let child = self.child.as_mut().expect("wait_with_output called twice");
+        let mut stdout_data = Vec::new();
+        let mut stderr_data = Vec::new();
+        let mut stdout_pipe = child.stdout.take();
+        let mut stderr_pipe = child.stderr.take();
+
+        let read_stdout = async {
+            if let Some(pipe) = stdout_pipe.as_mut() {
+                let _ = tokio::io::AsyncReadExt::read_to_end(pipe, &mut stdout_data).await;
+            }
+        };
+        let read_stderr = async {
+            if let Some(pipe) = stderr_pipe.as_mut() {
+                let _ = tokio::io::AsyncReadExt::read_to_end(pipe, &mut stderr_data).await;
+            }
+        };
+        tokio::join!(read_stdout, read_stderr);
+
+        let status = child.wait().await?;
+        Ok(std::process::Output {
+            status,
+            stdout: stdout_data,
+            stderr: stderr_data,
+        })
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        // Detached ops (`up -d`, `run -d`, `start`) survive thread end.
+        if self.detach {
+            return;
+        }
+        if let Some(mut child) = self.child.take() {
+            // `Child::kill`/`Child::wait` are async — spawn a fire-and-forget
+            // kill+reap task. If no runtime is active (process teardown on a
+            // non-async thread), there is nothing safe we can do; the child is
+            // orphaned and will be reaped by the OS eventually.
+            #[cfg(unix)]
+            {
+                let pid = child.id();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        // Reap the whole process group (`docker compose → docker`
+                        // chain); the child was spawned with process_group(0), so
+                        // its pgid == its pid. Negative pid signals the group.
+                        if let Some(pid) = pid {
+                            let _ = tokio::process::Command::new("kill")
+                                .args(["-KILL", "--", &format!("-{pid}")])
+                                .status()
+                                .await;
+                        }
+                    });
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// A compose command is DETACHED (must survive thread-end) when it carries an
+/// explicit detach flag (`-d` / `--detach`) or is `start`. Everything else is a
+/// foreground/tracked command whose subprocess must be killed when the thread
+/// that issued it ends.
+fn is_detached_command(command: &str) -> bool {
+    let mut words = command.split_whitespace();
+    let verb = words.next().unwrap_or("");
+    let has_detach_flag = words.any(|w| w == "-d" || w == "--detach");
+    verb == "start" || has_detach_flag
+}
+
+// ---------------------------------------------------------------------------
 // Tool: compose (async handler)
 // ---------------------------------------------------------------------------
 
@@ -410,16 +541,24 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
         cmd_repr.clone()
     };
 
+    // Whether this command is an explicit detached op that must survive
+    // thread-end (`up -d`, `run -d`, `start`) — everything else is tracked and
+    // its subprocess must be killed when the thread ends.
+    let detach = is_detached_command(&command);
+
     // If script is provided, pipe it via stdin
     if verb == "exec" && !raw_script.is_empty() {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         cmd.stdin(std::process::Stdio::piped());
+        // Own process group so kill-on-drop can reap the whole local chain.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
-        let mut child = cmd.spawn()?;
+        let mut child = KillOnDrop::new(cmd.spawn()?, detach);
 
         // Write script to stdin
-        if let Some(mut stdin) = child.stdin.take() {
+        if let Some(mut stdin) = child.take_stdin() {
             stdin.write_all(raw_script.as_bytes()).await?;
             // Close stdin so the remote python process knows to stop reading
             drop(stdin);
@@ -457,8 +596,19 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
         return Ok((content, false));
     }
 
-    // Standard execution (no script piped via stdin)
-    let result = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output()).await;
+    // Standard execution (no script piped via stdin). Spawn explicitly so the
+    // child is wrapped in KillOnDrop: a plain `cmd.output()` would spawn
+    // internally and give us no handle to kill when the request is cancelled
+    // or the thread ends.
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    // Own process group so kill-on-drop can reap the whole local chain.
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let mut child = KillOnDrop::new(cmd.spawn()?, detach);
+    let result =
+        tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await;
 
     match result {
         Ok(Ok(output)) => {
@@ -671,5 +821,90 @@ mod tests {
         let msg = build_failure_message(1, "", stderr, "docker compose up -d");
         assert!(!msg.contains("HOST PORT CONFLICT"));
         assert!(msg.contains("service \"db\" is undefined"));
+    }
+
+    #[test]
+    fn detach_detection() {
+        // Explicit detached ops survive thread end.
+        assert!(is_detached_command("up -d"));
+        assert!(is_detached_command("up --detach"));
+        assert!(is_detached_command("run -d backend sleep 300"));
+        assert!(is_detached_command("start"));
+        // Foreground/tracked commands must be killed on thread end.
+        assert!(!is_detached_command("up"));
+        assert!(!is_detached_command("build"));
+        assert!(!is_detached_command("exec -T backend cargo build"));
+        assert!(!is_detached_command("logs --tail=50"));
+        assert!(!is_detached_command("ps"));
+        assert!(!is_detached_command("down"));
+    }
+
+    /// Is a PID still alive? (Linux: /proc/<pid> exists while the task lives.)
+    fn is_process_alive(pid: u32) -> bool {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    }
+
+    /// Poll up to `timeout` for the process to exit.
+    async fn wait_for_exit(pid: u32, timeout: Duration) -> bool {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if !is_process_alive(pid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn kill_on_drop_kills_child() {
+        // Tracked (foreground) child: dropping the guard must kill the process
+        // tree so no stale `docker compose exec …` survives the thread.
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id().expect("child pid");
+        assert!(is_process_alive(pid), "child should be alive before drop");
+
+        let guard = KillOnDrop::new(child, false);
+        drop(guard);
+
+        assert!(
+            wait_for_exit(pid, Duration::from_secs(5)).await,
+            "tracked child must be dead after guard drop (pid {pid} still alive)"
+        );
+    }
+
+    #[tokio::test]
+    async fn kill_on_drop_preserves_detached() {
+        // Detached op (`up -d`, `run -d`, `start`): dropping the guard must NOT
+        // kill the child — it is an explicit background operation.
+        let child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id().expect("child pid");
+        assert!(is_process_alive(pid), "child should be alive before drop");
+
+        let guard = KillOnDrop::new(child, true);
+        drop(guard);
+
+        // Give a hypothetical kill task time to run; the detached child must
+        // still be alive.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            is_process_alive(pid),
+            "detached child must survive guard drop (pid {pid})"
+        );
+
+        // Cleanup so the test leaves no stray process.
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
     }
 }
