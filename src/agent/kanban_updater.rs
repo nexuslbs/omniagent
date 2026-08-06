@@ -1,4 +1,5 @@
 use crate::agent::config::AgentContext;
+use crate::agent::fail_thread::{engine_transition, RerunKind};
 use crate::db::types as queries;
 use crate::db::types::Thread;
 use sql_forge::sql_forge;
@@ -14,6 +15,50 @@ use sql_forge::sql_forge;
 /// Any other terminal status (`failed`, `interrupted`, `skipped`) → `blocked`.
 pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_status: &str) {
     if let Some(ref task_id) = thread.task_id {
+        // Phase 3: failed / interrupted / skipped terminals go through the
+        // atomic engine transition (re-run with retry guard, or blocked).
+        if matches!(final_status, "failed" | "interrupted" | "skipped") {
+            let kind = match final_status {
+                "interrupted" => RerunKind::Interrupted,
+                "skipped" => RerunKind::Skipped,
+                _ => RerunKind::Failed,
+            };
+            match engine_transition(&cfg.pool, &cfg.ctx.data_dir, thread, kind).await {
+                Ok(Some(new_id)) => {
+                    tracing::info!(
+                        "[workflow] thread #{} terminal '{}': created re-run thread #{}",
+                        thread.id,
+                        final_status,
+                        new_id
+                    );
+                }
+                Ok(None) => {
+                    tracing::info!(
+                        "[workflow] thread #{} terminal '{}': blocked or no transition",
+                        thread.id,
+                        final_status
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[workflow] thread #{} terminal '{}': engine transition failed ({e}); falling back to blocked",
+                        thread.id,
+                        final_status
+                    );
+                    if let Err(e2) =
+                        queries::update_kanban_task_status(&cfg.pool, task_id, "blocked").await
+                    {
+                        tracing::warn!(
+                            "[workflow] failed to block kanban task {}: {:?}",
+                            task_id,
+                            e2
+                        );
+                    }
+                }
+            }
+            return;
+        }
+
         let kanban_status = if final_status == "completed" {
             // A thread can end "completed" even when its final tool call
             // errored (the agent reports the failure in its summary but the

@@ -36,6 +36,8 @@ pub struct ThreadDb {
     pub plan: bool,
     pub parent_id: Option<i64>,
     pub iterations: i32,
+    #[sqlx(default)]
+    pub workflow_step: Option<String>,
 }
 
 impl TryFrom<ThreadDb> for Thread {
@@ -94,6 +96,7 @@ impl TryFrom<ThreadDb> for Thread {
             plan: db.plan,
             parent_id: db.parent_id,
             iterations: db.iterations,
+            workflow_step: db.workflow_step,
         })
     }
 }
@@ -475,6 +478,8 @@ pub struct Thread {
     pub plan: bool,
     pub parent_id: Option<i64>,
     pub iterations: i32,
+    #[sqlx(default)]
+    pub workflow_step: Option<String>,
 }
 
 #[allow(dead_code)]

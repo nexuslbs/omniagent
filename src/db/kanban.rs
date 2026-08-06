@@ -169,3 +169,21 @@ pub async fn list_kanban_history(
     .await?;
     Ok(rows)
 }
+
+/// Update a kanban task's `thread_status` (NULL | 'scheduled' | 'running').
+/// This is the thread-status lifecycle side of the workflow engine: a re-run
+/// thread is picked up by the omniagent loop only while the task's
+/// thread_status is 'scheduled'; it flips to 'running' on pickup.
+pub async fn update_kanban_task_thread_status(
+    pool: &PgPool,
+    task_id: &str,
+    thread_status: &str,
+) -> AppResult<()> {
+    sql_forge!(
+        "UPDATE kanban_tasks SET thread_status = :thread_status WHERE id = :task_id",
+        ( :thread_status = thread_status, :task_id = task_id )
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}

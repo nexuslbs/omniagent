@@ -422,11 +422,33 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                     }
 
                     // If this thread is linked to a kanban task, mark it as running
-                    if let Some(ref task_id) = thread.task_id {
-                        if let Err(e) = queries::update_kanban_task_status(&cfg.pool, task_id, "running").await {
-                            tracing::warn!("[supervisor] Failed to set kanban task {} running: {:?}", task_id, e);
+                                        if let Some(ref task_id) = thread.task_id {
+                        // Map the thread's workflow step to the kanban status on pickup; the
+                        // task status is already correct for re-run threads, and legacy
+                        // (non-workflow) threads are plain "running". thread_status flips
+                        // 'scheduled' -> 'running' (thread_status lifecycle, spec §5).
+                        let target = match thread.workflow_step.as_deref() {
+                        Some("testing") => "testing",
+                        Some("review") => "review",
+                        _ => "running",
+                        };
+                        if let Err(e) = queries::update_kanban_task_status(&cfg.pool, task_id, target).await {
+                        tracing::warn!(
+                        "[workflow] Failed to set kanban task {} to {}: {:?}",
+                        task_id,
+                        target,
+                        e
+                        );
                         }
-                    }
+                        if let Err(e) = queries::update_kanban_task_thread_status(&cfg.pool, task_id, "running").await
+                        {
+                        tracing::warn!(
+                        "[workflow] Failed to set kanban task {} thread_status=running: {:?}",
+                        task_id,
+                        e
+                        );
+                        }
+                        }
 
                     if let Err(e) = process_thread(&cfg, thread, &cause_msg).await {
                         error!("Failed to process thread {}: {:?}", thread.id, e);
