@@ -566,66 +566,18 @@ pub async fn skip_on_startup(pool: &PgPool) -> crate::error::AppResult<u64> {
         c
     };
 
-    // ── Reset kanban tasks on startup ──
-    // Move "ready" tasks back to "todo" so they get re-processed
-    // Record history before the update
-    if let Err(e) = sql_forge!(
-        r#"
-        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board)
-        SELECT id, 'moved', 'ready', 'todo' FROM kanban_tasks WHERE status = 'ready'
-        "#,
-    )
-    .execute(pool)
-    .await
-    {
-        tracing::warn!(
-            "[startup] Failed to record kanban ready→todo history: {:?}",
-            e
-        );
-    }
-
-    let ready_result = sql_forge!(
-        r#"UPDATE kanban_tasks SET status = 'todo', updated_at = NOW() WHERE status = 'ready'"#,
-    )
-    .execute(pool)
-    .await?;
-    let ready_count = ready_result.rows_affected();
-    if ready_count > 0 {
+    // ── Phase 6 (R3): re-schedule instead of resetting ──
+    // skip_all_pending_threads above already re-scheduled every kanban-linked
+    // thread: a fresh thread was created, thread_status = 'scheduled', kanban
+    // status UNCHANGED, NO retry consumed. Tasks are never moved back to
+    // todo/blocked here (completed workflow steps are never re-run).
+    if count > 0 {
         info!(
-            "[startup] Reset {} kanban tasks from ready → todo",
-            ready_count
+            "[startup] Skipped {} pending/processing threads on startup; \
+             kanban-linked tasks were re-scheduled (fresh thread, \
+             thread_status='scheduled', status unchanged)",
+            count
         );
-    }
-
-    // Move "running" tasks to "blocked" since the agent restarted mid-execution
-    // Record history before the update
-    if let Err(e) = sql_forge!(
-        r#"
-        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board)
-        SELECT id, 'moved', 'running', 'blocked' FROM kanban_tasks WHERE status = 'running'
-        "#,
-    )
-    .execute(pool)
-    .await
-    {
-        tracing::warn!("[agent] Failed to record kanban history: {:?}", e);
-    }
-
-    let running_result = sql_forge!(
-        r#"UPDATE kanban_tasks SET status = 'blocked', updated_at = NOW() WHERE status = 'running'"#,
-    )
-    .execute(pool)
-    .await?;
-    let running_count = running_result.rows_affected();
-    if running_count > 0 {
-        info!(
-            "[startup] Reset {} kanban tasks from running → blocked",
-            running_count
-        );
-    }
-
-    if ready_count + running_count == 0 {
-        info!("[startup] No kanban tasks to reset");
     }
 
     Ok(count)
