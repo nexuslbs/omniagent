@@ -110,6 +110,39 @@ pub fn max_iterations_for_plan(config: &AgentConfig, plan: bool) -> u32 {
 }
 
 /// Create the seq-0 (cause) message and set the thread to pending in a single transaction.
+/// Phase 6 (R3): what a skipped thread (channel closure/deletion, or startup
+/// recovery) means for its kanban task.
+///
+/// The rule is the same on every path: a skipped thread NEVER consumes retry
+/// and NEVER moves the task back to todo (the old "return to prior status"
+/// behavior is gone). The step is RE-SCHEDULED — a fresh thread is created
+/// carrying the same cause, thread_status is set back to 'scheduled', and the
+/// kanban status is left unchanged (completed workflow steps are never re-run
+/// and never lost).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SkipRecovery {
+    /// Thread is not linked to a kanban task: mark it skipped, nothing else.
+    SkipOnly,
+    /// Task is still active (any status except blocked/done): re-schedule it.
+    /// `task_status` is preserved unchanged.
+    Reschedule { task_status: String },
+    /// Task is blocked or done: leave it untouched (no re-schedule, no move).
+    Noop,
+}
+
+/// Pure decision for the skip → re-schedule rule (R3). There is deliberately
+/// NO "move to todo" outcome.
+pub(crate) fn skip_recovery(task_id: Option<&str>, task_status: Option<&str>) -> SkipRecovery {
+    match (task_id, task_status) {
+        (None, _) => SkipRecovery::SkipOnly,
+        (Some(_), None) => SkipRecovery::SkipOnly,
+        (Some(_), Some(status)) if status == "blocked" || status == "done" => SkipRecovery::Noop,
+        (Some(_), Some(status)) => SkipRecovery::Reschedule {
+            task_status: status.to_string(),
+        },
+    }
+}
+
 pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> AppResult<Message> {
     let mut tx = pool.begin().await?;
     let metadata_val: serde_json::Value =
@@ -170,38 +203,124 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
     .execute(&mut *tx)
     .await?;
 
-    // If the thread was skipped because the channel is closed, move the
-    // associated kanban task back to 'todo' so it can be retried later.
+    // R3 (Phase 6): channel closure/deletion is a pre-start/external skip — it
+    // NEVER consumes retry and NEVER moves the task back to 'todo' (the old
+    // "return to prior status" behavior is replaced by re-scheduling, so
+    // completed workflow steps are never re-run). A fresh thread carrying the
+    // same cause is created, thread_status is set back to 'scheduled', and the
+    // kanban status is left unchanged.
     if thread_status == "skipped" {
-        if let Err(e) = sql_forge!(
-            "UPDATE kanban_tasks SET status = 'todo', updated_at = NOW() WHERE id = (
-                SELECT task_id FROM threads WHERE id = :tid AND task_id IS NOT NULL
-            )",
-            ( :tid = msg.thread_id )
-        )
-        .execute(&mut *tx)
-        .await
-        {
-            tracing::warn!(
-                "[complete_thread] Failed to reset kanban task to todo for skipped thread {}: {:?}",
-                msg.thread_id,
-                e
-            );
+        #[derive(sqlx::FromRow)]
+        struct SkipRow {
+            id: i64,
+            cause: Option<String>,
+            channel_id: i64,
+            profile: Option<String>,
+            provider: Option<String>,
+            model: Option<String>,
+            task_id: Option<String>,
+            workflow_id: Option<String>,
+            workflow_step: Option<String>,
         }
 
-        // Record the transition in history
-        if let Err(e) = sql_forge!(
+        let t: Option<SkipRow> = sql_forge!(
+            SkipRow,
             r#"
-            INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board)
-            SELECT task_id, 'moved', 'running', 'todo'
-            FROM threads WHERE id = :tid AND task_id IS NOT NULL
+            SELECT id, cause, channel_id, profile, provider, model, task_id, workflow_id, workflow_step
+            FROM threads
+            WHERE id = :id
             "#,
-            ( :tid = msg.thread_id )
+            ( :id = msg.thread_id )
         )
-        .execute(&mut *tx)
-        .await
-        {
-            tracing::warn!("[complete_thread] Failed to record kanban running→todo history for skipped thread {}: {:?}", msg.thread_id, e);
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if let Some(t) = t {
+            let task_status: Option<String> = match t.task_id.as_deref() {
+                Some(tid) => {
+                    sql_forge!(
+                        scalar String,
+                        "SELECT status FROM kanban_tasks WHERE id = :task_id FOR UPDATE",
+                        ( :task_id = tid )
+                    )
+                    .fetch_optional(&mut *tx)
+                    .await?
+                }
+                None => None,
+            };
+
+            match skip_recovery(t.task_id.as_deref(), task_status.as_deref()) {
+                SkipRecovery::Reschedule { .. } => {
+                    let task_id = t.task_id.as_deref().unwrap_or("");
+                    let status = task_status.as_deref().unwrap_or("ready");
+                    let reason = "channel closed";
+                    #[derive(sqlx::FromRow)]
+                    struct IdRow {
+                        id: i64,
+                    }
+                    let new_id = sql_forge!(
+                        IdRow,
+                        r#"
+                        INSERT INTO threads
+                            (status, cause, channel_id, profile, provider, model, task_id, parent_id, workflow_id, workflow_step)
+                        VALUES
+                            ('pending', :cause, :channel_id, :profile, :provider, :model, :task_id, :parent_id, :workflow_id, :workflow_step)
+                        RETURNING id
+                        "#,
+                        (
+                            :cause = t.cause.clone().unwrap_or_else(|| "re-run".to_string()),
+                            :channel_id = t.channel_id,
+                            :profile = t.profile.clone().unwrap_or_else(|| "default".to_string()),
+                            :provider = t.provider.clone().unwrap_or_else(|| "openai".to_string()),
+                            :model = t.model.clone().unwrap_or_else(|| "gpt-4o-mini".to_string()),
+                            :task_id = task_id,
+                            :parent_id = t.id,
+                            :workflow_id = t.workflow_id.clone().unwrap_or_default(),
+                            :workflow_step = t.workflow_step.clone().unwrap_or_default()
+                        )
+                    )
+                    .fetch_one(&mut *tx)
+                    .await?;
+
+                    let cause = t.cause.clone().unwrap_or_else(|| "re-run".to_string());
+                    sql_forge!(
+                        r#"
+                        INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
+                        VALUES (:tid, 'cause', :content, 0, 'cause')
+                        "#,
+                        ( :tid = new_id.id, :content = cause )
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+
+                    sql_forge!(
+                        "UPDATE kanban_tasks SET thread_status = 'scheduled' WHERE id = :task_id",
+                        ( :task_id = task_id )
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+
+                    let comment = format!(
+                        "Thread #{} skipped ({}). Creating thread #{}",
+                        t.id, reason, new_id.id
+                    );
+                    sql_forge!(
+                        r#"
+                        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
+                        VALUES (:task_id, 'workflow', :initial, :to_status, :comment)
+                        "#,
+                        (
+                            :task_id = task_id,
+                            :initial = status,
+                            :to_status = status,
+                            :comment = comment.as_str()
+                        )
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                SkipRecovery::SkipOnly | SkipRecovery::Noop => {}
+            }
         }
     }
 
@@ -636,17 +755,130 @@ pub async fn get_max_thread_sequence(pool: &PgPool, thread_id: i64) -> AppResult
 
 /// Skip all pending/processing threads on startup.
 pub async fn skip_all_pending_threads(pool: &PgPool) -> AppResult<u64> {
-    let result = sql_forge!(
+    #[derive(sqlx::FromRow)]
+    struct SkipRow {
+        id: i64,
+        cause: Option<String>,
+        channel_id: i64,
+        profile: Option<String>,
+        provider: Option<String>,
+        model: Option<String>,
+        task_id: Option<String>,
+        workflow_id: Option<String>,
+        workflow_step: Option<String>,
+    }
+
+    let threads: Vec<SkipRow> = sql_forge!(
+        SkipRow,
         r#"
-        UPDATE threads
-        SET status = 'skipped', ended_at = NOW(), terminal = true
-        WHERE status IN ('pending', 'processing') AND NOT terminal
-        "#
+        SELECT id, cause, channel_id, profile, provider, model, task_id, workflow_id, workflow_step
+        FROM threads
+        WHERE status IN ('pending', 'processing')
+        "#,
     )
-    .execute(pool)
+    .fetch_all(pool)
     .await?;
 
-    Ok(result.rows_affected())
+    let mut tx = pool.begin().await?;
+    for t in &threads {
+        sql_forge!(
+            "UPDATE threads SET status = 'skipped', ended_at = now() WHERE id = :id",
+            ( :id = t.id )
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        // Phase 6 (R3): re-schedule kanban-linked threads at startup — same rule
+        // as channel closure: fresh thread, thread_status = 'scheduled', kanban
+        // status unchanged, NO retry consumed, NEVER moved back to todo.
+        let task_status: Option<String> = match t.task_id.as_deref() {
+            Some(tid) => {
+                sql_forge!(
+                    scalar String,
+                    "SELECT status FROM kanban_tasks WHERE id = :task_id FOR UPDATE",
+                    ( :task_id = tid )
+                )
+                .fetch_optional(&mut *tx)
+                .await?
+            }
+            None => None,
+        };
+
+        match skip_recovery(t.task_id.as_deref(), task_status.as_deref()) {
+            SkipRecovery::Reschedule { .. } => {
+                let task_id = t.task_id.as_deref().unwrap_or("");
+                let status = task_status.as_deref().unwrap_or("ready");
+                let reason = "startup recovery";
+                #[derive(sqlx::FromRow)]
+                struct IdRow {
+                    id: i64,
+                }
+                let new_id = sql_forge!(
+                        IdRow,
+                        r#"
+                        INSERT INTO threads
+                            (status, cause, channel_id, profile, provider, model, task_id, parent_id, workflow_id, workflow_step)
+                        VALUES
+                            ('pending', :cause, :channel_id, :profile, :provider, :model, :task_id, :parent_id, :workflow_id, :workflow_step)
+                        RETURNING id
+                        "#,
+                        (
+                            :cause = t.cause.clone().unwrap_or_else(|| "re-run".to_string()),
+                            :channel_id = t.channel_id,
+                            :profile = t.profile.clone().unwrap_or_else(|| "default".to_string()),
+                            :provider = t.provider.clone().unwrap_or_else(|| "openai".to_string()),
+                            :model = t.model.clone().unwrap_or_else(|| "gpt-4o-mini".to_string()),
+                            :task_id = task_id,
+                            :parent_id = t.id,
+                            :workflow_id = t.workflow_id.clone().unwrap_or_default(),
+                            :workflow_step = t.workflow_step.clone().unwrap_or_default()
+                        )
+                    )
+                    .fetch_one(&mut *tx)
+                    .await?;
+
+                let cause = t.cause.clone().unwrap_or_else(|| "re-run".to_string());
+                sql_forge!(
+                    r#"
+                        INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
+                        VALUES (:tid, 'cause', :content, 0, 'cause')
+                        "#,
+                    ( :tid = new_id.id, :content = cause )
+                )
+                .execute(&mut *tx)
+                .await?;
+
+                sql_forge!(
+                    "UPDATE kanban_tasks SET thread_status = 'scheduled' WHERE id = :task_id",
+                    ( :task_id = task_id )
+                )
+                .execute(&mut *tx)
+                .await?;
+
+                let comment = format!(
+                    "Thread #{} skipped ({}). Creating thread #{}",
+                    t.id, reason, new_id.id
+                );
+                sql_forge!(
+                        r#"
+                        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
+                        VALUES (:task_id, 'workflow', :initial, :to_status, :comment)
+                        "#,
+                        (
+                            :task_id = task_id,
+                            :initial = status,
+                            :to_status = status,
+                            :comment = comment.as_str()
+                        )
+                    )
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            SkipRecovery::SkipOnly | SkipRecovery::Noop => {}
+        }
+    }
+    tx.commit().await?;
+    Ok(threads.len() as u64)
 }
 
 /// Get the cause message (first message, role='cause') for a thread.
@@ -848,4 +1080,81 @@ pub async fn get_last_message(pool: &PgPool, thread_id: i64) -> AppResult<Option
     .await?;
 
     row.map(|r| r.try_into()).transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_closed_with_scheduled_thread_reschedules() {
+        // thread_status='scheduled', never started: re-schedule (fresh thread,
+        // thread_status back to 'scheduled', kanban status unchanged, no retry).
+        match skip_recovery(Some("task-1"), Some("ready")) {
+            SkipRecovery::Reschedule { task_status } => {
+                assert_eq!(task_status, "ready", "status must stay unchanged");
+            }
+            other => panic!("expected Reschedule, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn channel_closed_with_running_thread_reschedules() {
+        // thread_status='running', interrupted by channel closure: thread is
+        // skipped and the task re-scheduled the same way — no retry consumed,
+        // no re-run, never moved to todo.
+        match skip_recovery(Some("task-1"), Some("running")) {
+            SkipRecovery::Reschedule { task_status } => {
+                assert_eq!(task_status, "running", "status must stay unchanged");
+            }
+            other => panic!("expected Reschedule, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn skip_never_moves_to_todo_and_never_consumes_retry() {
+        // R3: pre-start/external skips never consume retry and never move to
+        // todo — the recovery plan has no todo variant and touches no counters.
+        for status in ["ready", "running", "testing", "review"] {
+            match skip_recovery(Some("task-1"), Some(status)) {
+                SkipRecovery::Reschedule { task_status } => {
+                    assert_eq!(task_status, status, "status must stay unchanged");
+                }
+                other => panic!("status {}: expected Reschedule, got {:?}", status, other),
+            }
+        }
+    }
+
+    #[test]
+    fn startup_skip_reschedules_instead_of_moving_to_todo() {
+        // Same rule at omniagent start: scheduled or running task threads are
+        // re-scheduled (fresh thread, thread_status='scheduled', status
+        // unchanged) — never moved to todo.
+        for status in ["ready", "running"] {
+            assert!(
+                matches!(
+                    skip_recovery(Some("t1"), Some(status)),
+                    SkipRecovery::Reschedule { .. }
+                ),
+                "startup skip of status {} must re-schedule, not move to todo",
+                status
+            );
+        }
+    }
+
+    #[test]
+    fn blocked_or_done_tasks_are_not_rescheduled() {
+        assert_eq!(
+            skip_recovery(Some("t1"), Some("blocked")),
+            SkipRecovery::Noop
+        );
+        assert_eq!(skip_recovery(Some("t1"), Some("done")), SkipRecovery::Noop);
+    }
+
+    #[test]
+    fn non_task_threads_are_only_skipped() {
+        assert_eq!(skip_recovery(None, Some("ready")), SkipRecovery::SkipOnly);
+        assert_eq!(skip_recovery(None, None), SkipRecovery::SkipOnly);
+        assert_eq!(skip_recovery(Some("t1"), None), SkipRecovery::SkipOnly);
+    }
 }
