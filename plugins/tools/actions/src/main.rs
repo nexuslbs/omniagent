@@ -57,6 +57,16 @@ fn default_profile_name() -> String {
 // Tool: kanban_dispatcher
 // ---------------------------------------------------------------------------
 
+/// D9: does this dependency block dispatch? Archived deps never block;
+/// non-archived deps block unless status == "done"; missing dep row blocks.
+fn dep_blocks_dispatch(dep_status: Option<(String, Option<bool>)>) -> bool {
+    match dep_status {
+        Some((_, Some(true))) => false,        // archived — ignored
+        Some((status, _)) => status != "done", // non-archived must be done
+        None => true,                          // missing row blocks
+    }
+}
+
 async fn handle_kanban_dispatcher(
     pool: &PgPool,
     _args: &Value,
@@ -91,8 +101,8 @@ async fn handle_kanban_dispatcher(
             } else {
                 let mut ok = true;
                 for (dep_id,) in &deps {
-                    let dep_status: Option<(String,)> =
-                        sqlx::query_as("SELECT status FROM kanban_tasks WHERE id = $1")
+                    let dep_status: Option<(String, Option<bool>)> =
+                        sqlx::query_as("SELECT status, archived FROM kanban_tasks WHERE id = $1")
                             .bind(dep_id)
                             .fetch_optional(pool)
                             .await
@@ -100,17 +110,9 @@ async fn handle_kanban_dispatcher(
                                 anyhow::anyhow!("Failed to query dependency status: {}", e)
                             })?;
 
-                    match dep_status {
-                        Some((status,)) => {
-                            if status != "review" && status != "done" {
-                                ok = false;
-                                break;
-                            }
-                        }
-                        None => {
-                            ok = false;
-                            break;
-                        }
+                    if dep_blocks_dispatch(dep_status) {
+                        ok = false;
+                        break;
                     }
                 }
                 ok
@@ -738,4 +740,61 @@ async fn main() -> Result<()> {
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dep_blocks_dispatch;
+
+    #[test]
+    fn done_not_archived_does_not_block() {
+        assert!(!dep_blocks_dispatch(Some((
+            "done".to_string(),
+            Some(false)
+        ))));
+    }
+
+    #[test]
+    fn review_not_archived_blocks() {
+        assert!(dep_blocks_dispatch(Some((
+            "review".to_string(),
+            Some(false)
+        ))));
+    }
+
+    #[test]
+    fn non_terminal_statuses_block() {
+        for status in ["running", "testing", "blocked", "backlog", "todo"] {
+            assert!(
+                dep_blocks_dispatch(Some((status.to_string(), Some(false)))),
+                "status '{}' should block dispatch",
+                status
+            );
+        }
+    }
+
+    #[test]
+    fn done_archived_does_not_block() {
+        assert!(!dep_blocks_dispatch(Some(("done".to_string(), Some(true)))));
+    }
+
+    #[test]
+    fn review_archived_does_not_block() {
+        assert!(!dep_blocks_dispatch(Some((
+            "review".to_string(),
+            Some(true)
+        ))));
+    }
+
+    #[test]
+    fn null_archived_treated_as_not_archived() {
+        // Legacy rows have archived NULL → treated as NOT archived; must be done.
+        assert!(dep_blocks_dispatch(Some(("review".to_string(), None))));
+        assert!(!dep_blocks_dispatch(Some(("done".to_string(), None))));
+    }
+
+    #[test]
+    fn missing_dep_row_blocks() {
+        assert!(dep_blocks_dispatch(None));
+    }
 }
