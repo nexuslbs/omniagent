@@ -972,6 +972,7 @@ impl Platform for ExternalPlatformClient {
                                                                     // keywords). This is the documented intent of the plan field
                                                                     // (see resolve_thread_plan: None = plugin decides).
                                                                     task_plan: None,
+                                                                    template: channel.template.clone().filter(|t| !t.is_empty()),
                                                                 },
                                                             ).await {
                                                                 // success: message and thread created

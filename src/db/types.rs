@@ -38,6 +38,8 @@ pub struct ThreadDb {
     pub iterations: i32,
     #[sqlx(default)]
     pub workflow_step: Option<String>,
+    #[sqlx(default)]
+    pub template: Option<String>,
 }
 
 impl TryFrom<ThreadDb> for Thread {
@@ -97,6 +99,7 @@ impl TryFrom<ThreadDb> for Thread {
             parent_id: db.parent_id,
             iterations: db.iterations,
             workflow_step: db.workflow_step,
+            template: db.template.filter(|t| !t.is_empty()),
         })
     }
 }
@@ -290,6 +293,7 @@ pub struct CreateThreadParams {
     pub parent_id: Option<i64>,
     pub workflow_id: Option<String>,
     pub workflow_step: Option<String>,
+    pub template: Option<String>,
 }
 
 /// Stats for completing a thread.
@@ -320,6 +324,7 @@ pub struct ThreadCauseParams {
     pub msg_type: String,
     pub msg_subtype: Option<String>,
     pub task_plan: Option<bool>,
+    pub template: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -482,6 +487,8 @@ pub struct Thread {
     pub iterations: i32,
     #[sqlx(default)]
     pub workflow_step: Option<String>,
+    #[sqlx(default)]
+    pub template: Option<String>,
 }
 
 #[allow(dead_code)]

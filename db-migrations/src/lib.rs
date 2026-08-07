@@ -225,6 +225,21 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     tracing::info!(
         "[migration] Schema v6: workflow columns (kanban_tasks.workflow_id/thread_status/workflow_state, threads.workflow_id/workflow_step/task_type, kanban_history.comment) + R4 'ready' retirement"
     );
+
+    // ── R7: task template as a first-class thread field ────────────────────
+    // threads.template: the task template resolved at thread-creation time by
+    // the creator (kanban dispatcher / scheduler / platform user-message path).
+    // The execution loop reads it uniformly from the threads table (or the
+    // seq-0 cause metadata) for ALL agent executions — no task-type-specific
+    // template lookups (owner architecture rule).
+    sqlx::query("ALTER TABLE threads ADD COLUMN IF NOT EXISTS template TEXT DEFAULT ''")
+        .execute(pool)
+        .await
+        .ok();
+
+    tracing::info!(
+        "[migration] Schema v7: threads.template (task template as a first-class thread field)"
+    );
     Ok(())
 }
 
