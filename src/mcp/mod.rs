@@ -425,7 +425,7 @@ fn wait_task_tool() -> McpTool {
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Maximum seconds to wait (default: 30, max: 300)",
+                    "description": "Maximum seconds to wait (default: 30). Use a GENEROUS value for long operations: a Rust cargo build or a full dev-stack setup takes 5-15+ minutes, so use 900-1800 and the tool will return as soon as the task finishes. There is NO hard cap; the handler self-bounds by this argument.",
                     "default": 30
                 },
                 "tail": {
@@ -437,7 +437,11 @@ fn wait_task_tool() -> McpTool {
             "required": ["task_id"]
         }),
         server_name: None,
-        timeout_secs: Some(310),
+        // No declared timeout: the handler bounds itself by its own
+        // `timeout_secs` argument and returns a timeout STATUS (not an error)
+        // when exceeded — an external kill clock would cut a legitimately
+        // long wait short and force the agent into extra wait calls.
+        timeout_secs: None,
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
             Box::pin(crate::mcp::task_tools::handle_wait_task(args, ctx))
         }),
