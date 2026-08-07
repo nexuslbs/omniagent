@@ -31,8 +31,8 @@ pub async fn create_thread(
     let row: ThreadDb = sql_forge!(
         ThreadDb,
         r#"
-        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id, plan, parent_id, workflow_id, workflow_step)
-        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :plan, NULLIF(:parent_id, -1::bigint)::bigint, NULLIF(:workflow_id, '')::text, NULLIF(:workflow_step, '')::text)
+        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id, plan, parent_id, workflow_id, workflow_step, template)
+        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :plan, NULLIF(:parent_id, -1::bigint)::bigint, NULLIF(:workflow_id, '')::text, NULLIF(:workflow_step, '')::text, NULLIF(:template, '')::text)
         RETURNING
             id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
             input_tokens, cached_tokens, output_tokens, duration_ms,
@@ -43,9 +43,10 @@ pub async fn create_thread(
             plan,
             parent_id,
             iterations,
-            workflow_step
+            workflow_step,
+            template
         "#,
-        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :plan = p.plan, :parent_id = p.parent_id.unwrap_or(-1i64), :workflow_id = p.workflow_id.as_deref().unwrap_or(""), :workflow_step = p.workflow_step.as_deref().unwrap_or("") )
+        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :plan = p.plan, :parent_id = p.parent_id.unwrap_or(-1i64), :workflow_id = p.workflow_id.as_deref().unwrap_or(""), :workflow_step = p.workflow_step.as_deref().unwrap_or(""), :template = p.template.as_deref().unwrap_or("") )
     )
     .fetch_one(pool)
     .await?;
@@ -532,6 +533,7 @@ pub async fn create_thread_with_cause(
             schedule_task_id: p.schedule_task_id.clone(),
             plan,
             parent_id: resolved_parent_id,
+            template: p.template.clone(),
             workflow_id: None,
             workflow_step: None,
         },
@@ -579,7 +581,8 @@ pub async fn find_pending_threads_by_channel(
             plan,
             parent_id,
             iterations,
-            workflow_step
+            workflow_step,
+            template
         FROM threads
         WHERE channel_id = :channel_id AND status = 'pending'
         ORDER BY created_at ASC
@@ -980,7 +983,8 @@ pub async fn get_completed_seq0_threads_since(
                     plan,
                     parent_id,
                     iterations,
-                    workflow_step
+                    workflow_step,
+                    template
                 FROM threads
                 WHERE channel_id = :channel_id
                   AND status = 'completed'
@@ -1009,7 +1013,8 @@ pub async fn get_completed_seq0_threads_since(
                     plan,
                     parent_id,
                     iterations,
-                    workflow_step
+                    workflow_step,
+                    template
                 FROM threads
                 WHERE channel_id = :channel_id
                   AND status = 'completed'
@@ -1038,7 +1043,8 @@ pub async fn get_completed_seq0_threads_since(
                     plan,
                     parent_id,
                     iterations,
-                    workflow_step
+                    workflow_step,
+                    template
                 FROM threads
                 WHERE channel_id = :channel_id
                   AND status = 'completed'

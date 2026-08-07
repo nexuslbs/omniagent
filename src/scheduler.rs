@@ -253,6 +253,7 @@ async fn tick(
                 msg_type: "cron".to_string(),
                 msg_subtype: Some(subtype),
                 task_plan: job.plan,
+                template: job.template.clone(),
                 parent_external_id: None,
             },
         )
@@ -626,6 +627,7 @@ async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
                 "profile": profile_name,
                 "template": ctx.job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()).unwrap_or_default(),
             }),
+            template: ctx.job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()),
             msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
             task_plan: ctx.job.plan,
@@ -933,6 +935,7 @@ pub async fn fire_cron_job_by_id(
                 "profile": profile_name,
                 "template": job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()).unwrap_or_default(),
             }),
+            template: job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()),
             msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
             task_plan: job.plan,
