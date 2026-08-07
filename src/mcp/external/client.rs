@@ -905,7 +905,12 @@ impl McpServerClient for StdioMcpClient {
                     ));
                 }
                 Err(_elapsed) => {
-                    self.circuit.record_failure();
+                    // A timeout is NOT a plugin failure — it can be caused by
+                    // many legitimate reasons (long build, slow network, busy
+                    // server). Never count it toward the circuit breaker; the
+                    // agent gets the timeout error and can retry or wait
+                    // longer. (Aug 2026: fixed tool timeouts were removed; a
+                    // timeout here only exists when explicitly configured.)
                     return Err(err_str!(
                         "MCP server '{}' tool '{}' timed out after {} seconds",
                         self.config.name,
@@ -931,7 +936,11 @@ impl McpServerClient for StdioMcpClient {
             match parse_response(&response).ctx("Failed to parse MCP tool call response")? {
                 JsonRpcResponse::Success { result, .. } => result,
                 JsonRpcResponse::Error { error, .. } => {
-                    self.circuit.record_failure();
+                    // A JSON-RPC error response means the plugin is ALIVE and
+                    // answered — the tool itself failed (e.g. a compose
+                    // command returned non-zero). This is a normal tool
+                    // outcome the agent must see, not a transport failure.
+                    // Do NOT count it toward the circuit breaker.
                     return Err(err_str!(
                         "MCP tool call error ({}): {}",
                         error.code,
