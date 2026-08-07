@@ -365,6 +365,188 @@ async fn last_message_info(pool: &PgPool, thread_id: i64) -> anyhow::Result<Last
 
 /// Pull a resume-ledger path (e.g. /opt/omni/data/tasks/<name>.md) out of a
 /// task body if one is referenced.
+// ---------------------------------------------------------------------------
+// Cross-task channel context (Phase 3b-ext): the most recent TERMINAL threads
+// of OTHER tasks that ran on the SAME channel as the current thread.
+// Automates the manual ORIENT step 4 of the dev template - a multi-phase
+// project implements each phase as its own kanban task on the same channel,
+// and a prior phase's thread often already solved the exact problem being
+// investigated (canonical build commands, error signatures, root causes,
+// what changed where). This block lets the agent trust those results instead
+// of re-deriving them. Task-linked threads only; omitted when nothing
+// qualifies.
+//
+// SELECTION RULE (documented; kept simple and testable):
+//   - same channel_id as the current thread
+//   - exclude the current thread and every thread whose task_id equals the
+//     current thread's own task_id OR schedule_task_id (own-task history is
+//     already covered by the Phase 3b continuation block)
+//   - terminal statuses only: completed / review / failed / interrupted /
+//     skipped, final message = highest thread_sequence row
+//   - recency ordering (most recent thread first), hard cap of 3 entries,
+//     400-char cap on the final-message excerpt, 60-char cap on task titles
+// ---------------------------------------------------------------------------
+const CROSS_TASK_MAX_ENTRIES: usize = 3;
+const CROSS_TASK_MAX_MESSAGE_CHARS: usize = 400;
+const CROSS_TASK_MAX_TITLE_CHARS: usize = 60;
+
+/// The current thread's own task linkage (kanban `task_id` and/or cron
+/// `schedule_task_id`) - used to exclude own-task threads from the block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnTaskLink {
+    task_id: Option<String>,
+    schedule_task_id: Option<String>,
+}
+
+impl OwnTaskLink {
+    /// A thread is task-linked when it belongs to a kanban task or a cron
+    /// schedule. Plain threads get no cross-task block (existing behavior).
+    fn is_task_linked(&self) -> bool {
+        self.task_id.is_some() || self.schedule_task_id.is_some()
+    }
+
+    /// True when `other_task_id` identifies the current thread's own task.
+    fn excludes(&self, other_task_id: &str) -> bool {
+        self.task_id.as_deref() == Some(other_task_id)
+            || self.schedule_task_id.as_deref() == Some(other_task_id)
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct CrossTaskThreadRef {
+    task_id: Option<String>,
+    schedule_task_id: Option<String>,
+    channel_id: Option<i64>,
+}
+
+#[derive(Debug, FromRow)]
+struct CrossTaskThreadRow {
+    id: i64,
+    task_id: Option<String>,
+    task_title: Option<String>,
+    workflow_step: Option<String>,
+    status: String,
+    last_content: Option<String>,
+    last_msg_type: Option<String>,
+}
+
+/// Pure renderer for the cross-task block: drops own-task threads, orders by
+/// most recent thread first, caps the entry count, truncates titles and
+/// messages, and emits the labeled section. Returns `None` when nothing
+/// qualifies. Kept free of I/O so the selection logic is unit-testable
+/// in-process (tests a-e below).
+fn render_cross_task_block(own: &OwnTaskLink, rows: Vec<CrossTaskThreadRow>) -> Option<String> {
+    let mut entries: Vec<CrossTaskThreadRow> = rows
+        .into_iter()
+        .filter(|r| {
+            r.task_id
+                .as_deref()
+                .map(|tid| !own.excludes(tid))
+                .unwrap_or(false)
+        })
+        .collect();
+    entries.sort_by_key(|r| std::cmp::Reverse(r.id));
+    entries.truncate(CROSS_TASK_MAX_ENTRIES);
+    if entries.is_empty() {
+        return None;
+    }
+    let mut lines = vec![
+        "Recent threads from other tasks on this channel (background context from sibling tasks, not your own history): a prior phase on this channel often already solved the exact problem you are investigating - trust its final result instead of re-deriving it."
+            .to_string(),
+    ];
+    for r in &entries {
+        let task = match (&r.task_id, &r.task_title) {
+            (Some(tid), Some(title)) => format!(
+                "task {} \"{}\"",
+                tid,
+                truncate_str(title, CROSS_TASK_MAX_TITLE_CHARS)
+            ),
+            (Some(tid), None) => format!("task {}", tid),
+            (None, _) => "plain thread".to_string(),
+        };
+        let step = r.workflow_step.as_deref().unwrap_or("-");
+        let msg_type = r.last_msg_type.as_deref().unwrap_or("text");
+        let content = r.last_content.as_deref().unwrap_or("<no messages>");
+        lines.push(format!(
+            "- thread {} | {} | step {} | status {} | last message ({}): {}",
+            r.id,
+            task,
+            step,
+            r.status,
+            msg_type,
+            truncate_str(content, CROSS_TASK_MAX_MESSAGE_CHARS)
+        ));
+    }
+    Some(lines.join("\n"))
+}
+
+/// Build the cross-task channel context block for the given thread. Returns
+/// `None` for plain (non-task) threads and when the channel has no other
+/// terminal task threads. One bounded query; never fails the prompt.
+async fn build_cross_task_block(pool: &PgPool, thread_id: i64) -> anyhow::Result<Option<String>> {
+    let thread_ref: Option<CrossTaskThreadRef> = sqlx::query_as::<_, CrossTaskThreadRef>(
+        "SELECT task_id, schedule_task_id, channel_id FROM threads WHERE id = $1",
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await?;
+    let thread_ref = match thread_ref {
+        Some(tr) => tr,
+        None => return Ok(None),
+    };
+    let own = OwnTaskLink {
+        task_id: thread_ref.task_id,
+        schedule_task_id: thread_ref.schedule_task_id,
+    };
+    if !own.is_task_linked() {
+        return Ok(None); // plain thread - cross-task context does not apply
+    }
+    let channel_id = match thread_ref.channel_id {
+        Some(cid) => cid,
+        None => return Ok(None),
+    };
+
+    let rows: Vec<CrossTaskThreadRow> = sqlx::query_as::<_, CrossTaskThreadRow>(
+        r#"
+        SELECT t.id,
+               t.task_id,
+               k.title        AS task_title,
+               t.workflow_step,
+               t.status,
+               m.content      AS last_content,
+               m.msg_type     AS last_msg_type
+        FROM threads t
+        LEFT JOIN kanban_tasks k ON k.id = t.task_id
+        LEFT JOIN LATERAL (
+            SELECT content, msg_type
+            FROM messages
+            WHERE thread_id = t.id
+            ORDER BY thread_sequence DESC NULLS LAST,
+                     iteration_number DESC NULLS LAST,
+                     id DESC
+            LIMIT 1
+        ) m ON true
+        WHERE t.channel_id = $1
+          AND t.id != $2
+          AND t.task_id IS NOT NULL
+          AND ($3::text IS NULL OR t.task_id != $3)
+          AND ($4::text IS NULL OR t.task_id != $4)
+          AND t.status IN ('completed', 'review', 'failed', 'interrupted', 'skipped')
+        ORDER BY t.id DESC
+        LIMIT $5
+        "#,
+    )
+    .bind(channel_id)
+    .bind(thread_id)
+    .bind(own.task_id.as_deref())
+    .bind(own.schedule_task_id.as_deref())
+    .bind(CROSS_TASK_MAX_ENTRIES as i64)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(render_cross_task_block(&own, rows))
+}
+
 fn extract_tracking_path(body: &str) -> Option<String> {
     let pos = body.find("data/tasks/")?;
     let start = body[..pos]
@@ -825,6 +1007,20 @@ async fn handle_generate_full(
             Ok(Some(block)) => context_blocks.push(block),
             Ok(None) => {}
             Err(e) => tracing::warn!("continuation context unavailable: {}", e),
+        }
+    }
+
+    // 2e-ext. Cross-task channel context - recent terminal threads of OTHER
+    // tasks on this same channel (Phase 3b-ext). Automates the manual ORIENT
+    // step 4 of the dev template: prior phases on this channel often solved
+    // the exact problem being investigated; trust their documented results
+    // instead of re-deriving them. Task-linked threads only; omitted when no
+    // other terminal task threads exist on the channel.
+    if let Some(tid) = thread_id {
+        match build_cross_task_block(pool, tid).await {
+            Ok(Some(block)) => context_blocks.push(block),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("cross-task context unavailable: {}", e),
         }
     }
 
@@ -1441,5 +1637,262 @@ mod tests {
         );
         assert_eq!(user, "implement the weekly report");
         assert!(!system.contains("Task under tester"));
+    }
+}
+
+#[cfg(test)]
+mod cross_task_tests {
+    use super::*;
+
+    fn ct_row(
+        id: i64,
+        task_id: Option<&str>,
+        title: Option<&str>,
+        step: Option<&str>,
+        status: &str,
+        content: Option<&str>,
+        msg_type: Option<&str>,
+    ) -> CrossTaskThreadRow {
+        CrossTaskThreadRow {
+            id,
+            task_id: task_id.map(str::to_string),
+            task_title: title.map(str::to_string),
+            workflow_step: step.map(str::to_string),
+            status: status.to_string(),
+            last_content: content.map(str::to_string),
+            last_msg_type: msg_type.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn cross_task_block_lists_other_tasks_terminal_threads_most_recent_first_capped() {
+        // (a) task-linked thread on a channel with other tasks' terminal
+        // threads -> block lists them with id/step/status/final-message/type,
+        // most recent first, capped at CROSS_TASK_MAX_ENTRIES.
+        let own = OwnTaskLink {
+            task_id: Some("task-own".to_string()),
+            schedule_task_id: None,
+        };
+        let rows = vec![
+            ct_row(
+                90,
+                Some("task-a"),
+                Some("Phase A"),
+                Some("build"),
+                "completed",
+                Some("build done"),
+                Some("thread_summary"),
+            ),
+            ct_row(
+                92,
+                Some("task-b"),
+                Some("Phase B"),
+                Some("test"),
+                "failed",
+                Some("clippy errors here"),
+                Some("text"),
+            ),
+            ct_row(
+                91,
+                Some("task-c"),
+                Some("Phase C"),
+                Some("review"),
+                "interrupted",
+                Some("flaky test"),
+                Some("text"),
+            ),
+            ct_row(
+                93,
+                Some("task-d"),
+                Some("Phase D"),
+                Some("deploy"),
+                "skipped",
+                Some("not needed"),
+                Some("thread_summary"),
+            ),
+            ct_row(
+                94,
+                Some("task-own"),
+                Some("Own Phase"),
+                Some("build"),
+                "completed",
+                Some("own history"),
+                Some("text"),
+            ),
+        ];
+        let block = render_cross_task_block(&own, rows).expect("block present");
+        assert!(block.starts_with("Recent threads from other tasks on this channel"));
+        let lines: Vec<&str> = block.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1 + CROSS_TASK_MAX_ENTRIES,
+            "entry cap: {block}"
+        );
+        // most recent first (thread 94 is own task -> excluded, then 93, 92, 91)
+        assert!(lines[1].contains("thread 93"));
+        assert!(lines[2].contains("thread 92"));
+        assert!(lines[3].contains("thread 91"));
+        assert!(
+            !block.contains("thread 90"),
+            "oldest entry dropped by cap: {block}"
+        );
+        // per-entry fields: id, task id/title, step, status, final message, type
+        assert!(lines[1].contains("task task-d \"Phase D\""));
+        assert!(lines[1].contains("step deploy"));
+        assert!(lines[1].contains("status skipped"));
+        assert!(lines[1].contains("last message (thread_summary): not needed"));
+        assert!(
+            !block.contains("task-own"),
+            "own task must not appear: {block}"
+        );
+    }
+
+    #[test]
+    fn cross_task_block_excludes_own_task_threads() {
+        // (b) the current task's own threads are NOT duplicated in the
+        // cross-task block (same-task history stays in the Phase 3b block).
+        let own = OwnTaskLink {
+            task_id: Some("task-own".to_string()),
+            schedule_task_id: Some("cron-own".to_string()),
+        };
+        let rows = vec![
+            ct_row(
+                80,
+                Some("task-own"),
+                Some("Own"),
+                Some("build"),
+                "completed",
+                Some("own msg"),
+                Some("text"),
+            ),
+            ct_row(
+                81,
+                Some("cron-own"),
+                Some("Own cron"),
+                Some("run"),
+                "completed",
+                Some("cron msg"),
+                Some("text"),
+            ),
+            ct_row(
+                82,
+                Some("task-x"),
+                Some("Other"),
+                Some("test"),
+                "completed",
+                Some("other msg"),
+                Some("text"),
+            ),
+        ];
+        let block = render_cross_task_block(&own, rows).expect("block present");
+        assert!(
+            !block.contains("task-own"),
+            "own kanban task must be excluded: {block}"
+        );
+        assert!(
+            !block.contains("cron-own"),
+            "own cron schedule must be excluded: {block}"
+        );
+        assert!(block.contains("task-x"), "other task must remain: {block}");
+    }
+
+    #[test]
+    fn cross_task_block_respects_entry_and_char_caps() {
+        // (c) cap on entry count and on title/message length.
+        let own = OwnTaskLink {
+            task_id: Some("task-own".to_string()),
+            schedule_task_id: None,
+        };
+        let long_msg = "x".repeat(600);
+        let long_title = "y".repeat(80);
+        let rows: Vec<CrossTaskThreadRow> = (1..=6i64)
+            .map(|i| {
+                ct_row(
+                    100 + i,
+                    Some(format!("task-{i}").as_str()),
+                    Some(long_title.as_str()),
+                    Some("build"),
+                    "completed",
+                    Some(long_msg.as_str()),
+                    Some("text"),
+                )
+            })
+            .collect();
+        let block = render_cross_task_block(&own, rows).expect("block present");
+        let lines: Vec<&str> = block.lines().collect();
+        assert_eq!(lines.len(), 1 + CROSS_TASK_MAX_ENTRIES);
+        for line in &lines[1..] {
+            assert!(
+                line.contains(&format!("{}...", "y".repeat(CROSS_TASK_MAX_TITLE_CHARS))),
+                "title truncated to {} chars: {line}",
+                CROSS_TASK_MAX_TITLE_CHARS
+            );
+            assert!(
+                line.contains(&format!("{}...", "x".repeat(CROSS_TASK_MAX_MESSAGE_CHARS))),
+                "message truncated to {} chars: {line}",
+                CROSS_TASK_MAX_MESSAGE_CHARS
+            );
+            assert!(!line.contains(&"x".repeat(CROSS_TASK_MAX_MESSAGE_CHARS + 1)));
+        }
+    }
+
+    #[test]
+    fn cross_task_block_omitted_when_no_other_terminal_threads() {
+        // (d) channel with no other terminal task threads -> section omitted
+        // (no empty placeholder noise).
+        let own = OwnTaskLink {
+            task_id: Some("task-own".to_string()),
+            schedule_task_id: None,
+        };
+        assert_eq!(render_cross_task_block(&own, vec![]), None);
+        let own_only = vec![ct_row(
+            70,
+            Some("task-own"),
+            Some("Own"),
+            Some("build"),
+            "completed",
+            Some("m"),
+            Some("text"),
+        )];
+        assert_eq!(render_cross_task_block(&own, own_only), None);
+    }
+
+    #[test]
+    fn cross_task_block_skipped_for_plain_threads() {
+        // (e) plain thread (no task_id / schedule_task_id) -> no cross-task
+        // block (existing behavior preserved). build_cross_task_block gates on
+        // is_task_linked() before any query; the renderer also drops rows
+        // that are not task-linked.
+        let plain = OwnTaskLink {
+            task_id: None,
+            schedule_task_id: None,
+        };
+        assert!(!plain.is_task_linked(), "plain thread is not task-linked");
+        let kanban = OwnTaskLink {
+            task_id: Some("task-1".to_string()),
+            schedule_task_id: None,
+        };
+        assert!(kanban.is_task_linked());
+        let cron = OwnTaskLink {
+            task_id: None,
+            schedule_task_id: Some("cron-1".to_string()),
+        };
+        assert!(cron.is_task_linked());
+        // a plain-thread row is never task-linked -> renderer drops it
+        assert_eq!(
+            render_cross_task_block(
+                &plain,
+                vec![ct_row(
+                    60,
+                    None,
+                    Some("A"),
+                    None,
+                    "completed",
+                    Some("m"),
+                    Some("text")
+                )]
+            ),
+            None
+        );
     }
 }
