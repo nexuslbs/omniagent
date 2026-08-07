@@ -24,6 +24,7 @@ type KanbanTaskRow = (
     Option<String>,
     Option<String>,
     String,
+    Option<String>,
 );
 
 // ---------------------------------------------------------------------------
@@ -54,6 +55,13 @@ fn default_profile_name() -> String {
 }
 
 // ---------------------------------------------------------------------------
+/// Workflow fields for a thread spawned from a kanban task.
+/// Executor-step threads always carry `workflow_step = 'running'` (spec §5);
+/// the task's `workflow_id` is copied through (None when the task has none).
+fn thread_workflow_fields(task_workflow_id: Option<String>) -> (Option<String>, String) {
+    (task_workflow_id, "running".to_string())
+}
+
 // Tool: kanban_dispatcher
 // ---------------------------------------------------------------------------
 
@@ -126,7 +134,7 @@ async fn handle_kanban_dispatcher(
         // ── All deps satisfied — create thread for this kanban task ──
         // 1. Get full task data
         let task_data: Option<KanbanTaskRow> = sqlx::query_as(
-            "SELECT id, title, channel_id, profile, template, planning_mode FROM kanban_tasks WHERE id = $1"
+            "SELECT id, title, channel_id, profile, template, planning_mode, workflow_id FROM kanban_tasks WHERE id = $1"
         )
         .bind(id)
         .fetch_optional(pool)
@@ -140,6 +148,7 @@ async fn handle_kanban_dispatcher(
             task_profile,
             _task_template,
             task_planning_mode,
+            task_workflow_id,
         ) = match task_data {
             Some(r) => r,
             None => continue,
@@ -197,7 +206,8 @@ async fn handle_kanban_dispatcher(
         let task_id_inner = id.clone();
         let planning_mode = task_planning_mode.clone();
 
-        // Resolve provider and model for the thread
+                let (workflow_id, workflow_step) = thread_workflow_fields(task_workflow_id);
+// Resolve provider and model for the thread
         // Chain: channel.current_provider → config llm_provider (from $env:LLM_PROVIDER)
         let (resolved_provider, resolved_model): (String, Option<String>) = {
             let chan_prov: Option<(Option<String>, Option<String>)> = sqlx::query_as(
@@ -225,8 +235,8 @@ async fn handle_kanban_dispatcher(
 
         let result = sqlx::query_as::<_, (i64,)>(
             r#"
-            INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, planning_mode)
-            VALUES ('created', 'system', $1, $2, NULLIF($3, '')::text, NULLIF($4, '')::text, NULLIF($5, '')::text, $6)
+            INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, planning_mode, workflow_id, workflow_step, task_type)
+            VALUES ('created', 'system', $1, $2, NULLIF($3, '')::text, NULLIF($4, '')::text, NULLIF($5, '')::text, $6, $7, $8, 'kanban')
             RETURNING id
             "#,
         )
@@ -236,6 +246,8 @@ async fn handle_kanban_dispatcher(
         .bind(&resolved_model)
         .bind(&task_id_inner)
         .bind(&planning_mode)
+        .bind(&workflow_id)
+        .bind(&workflow_step)
         .fetch_optional(pool)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to create thread: {}", e))?;
@@ -744,7 +756,7 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::dep_blocks_dispatch;
+    use super::{dep_blocks_dispatch, thread_workflow_fields};
 
     #[test]
     fn done_not_archived_does_not_block() {
@@ -797,4 +809,19 @@ mod tests {
     fn missing_dep_row_blocks() {
         assert!(dep_blocks_dispatch(None));
     }
+
+    #[test]
+    fn thread_workflow_fields_some_id_running_step() {
+        let (wf, step) = thread_workflow_fields(Some("wf-alpha".to_string()));
+        assert_eq!(wf.as_deref(), Some("wf-alpha"));
+        assert_eq!(step, "running");
+    }
+
+    #[test]
+    fn thread_workflow_fields_none_id_running_step() {
+        let (wf, step) = thread_workflow_fields(None);
+        assert!(wf.is_none());
+        assert_eq!(step, "running");
+    }
+
 }
