@@ -112,6 +112,7 @@ async fn handle_create(
         .map(|s| s.to_string())
         .or_else(|| meta.and_then(|m| m.profile_name.clone()));
     let template = args["template"].as_str().unwrap_or("");
+    let workflow_id = args["workflow_id"].as_str().map(|s| s.to_string());
 
     // Validate status
     let valid_statuses = [
@@ -162,10 +163,10 @@ async fn handle_create(
 
     sql_forge!(
         r#"
-        INSERT INTO kanban_tasks (id, title, body, status, priority, assignee, channel_id, profile, template)
-        VALUES (:id, :title, :body, :status, :priority, :assignee, :channel_id, NULLIF(:profile, '')::text, :template)
+        INSERT INTO kanban_tasks (id, title, body, status, priority, assignee, channel_id, profile, template, workflow_id)
+        VALUES (:id, :title, :body, :status, :priority, :assignee, :channel_id, NULLIF(:profile, '')::text, :template, NULLIF(:workflow_id, '')::text)
         "#,
-        ( :id = &id, :title = title, :body = body, :status = status, :priority = priority, :assignee = assignee, :channel_id = resolved_channel_id, :profile = profile.as_deref().unwrap_or(""), :template = template )
+        ( :id = &id, :title = title, :body = body, :status = status, :priority = priority, :assignee = assignee, :channel_id = resolved_channel_id, :profile = profile.as_deref().unwrap_or(""), :template = template, :workflow_id = workflow_id.as_deref().unwrap_or("") )
     )
     .execute(pool)
     .await
@@ -373,6 +374,18 @@ async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
         .execute(pool)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to update archived: {e}"))?;
+    }
+
+    if args.get("workflow_id").is_some() {
+        let workflow_id = args["workflow_id"].as_str().unwrap_or("");
+        has_field_changes = true;
+        sql_forge!(
+            "UPDATE kanban_tasks SET workflow_id = NULLIF(:val, '')::text, updated_at = NOW() WHERE id = :id",
+            ( :val = workflow_id, :id = &id_clone )
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update workflow_id: {e}"))?;
     }
 
     // ── Kanban history ──
@@ -783,6 +796,10 @@ async fn main() -> Result<()> {
                         "template": {
                             "type": "string",
                             "description": "Optional template file name (without .md) to use for execution context"
+                        },
+                        "workflow_id": {
+                            "type": "string",
+                            "description": "Optional workflow key (e.g. exec-test-review) this task belongs to"
                         }
                     },
                     "required": ["title"]
@@ -849,6 +866,10 @@ async fn main() -> Result<()> {
                         "archived": {
                             "type": "boolean",
                             "description": "Set to true to archive, false to unarchive"
+                        },
+                        "workflow_id": {
+                            "type": "string",
+                            "description": "Set the task workflow key (e.g. exec-test-review)"
                         }
                     },
                     "required": ["id"]

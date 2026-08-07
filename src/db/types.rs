@@ -288,6 +288,8 @@ pub struct CreateThreadParams {
     pub schedule_task_id: Option<String>,
     pub plan: bool,
     pub parent_id: Option<i64>,
+    pub workflow_id: Option<String>,
+    pub workflow_step: Option<String>,
 }
 
 /// Stats for completing a thread.
