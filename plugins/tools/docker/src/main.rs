@@ -42,16 +42,6 @@ const FORBIDDEN_CHARS: &[char] = &[
     '|', ';', '&', '`', '$', '>', '<', '?', '[', ']', '{', '}', '!', '~',
 ];
 
-/// Default timeouts per command verb (seconds).
-fn default_timeout(verb: &str) -> u64 {
-    match verb {
-        "build" | "pull" => 600,
-        "up" | "restart" => 300,
-        "exec" | "run" => 600,
-        _ => 300, // ps, logs, down, stop
-    }
-}
-
 /// Validate that a string contains no forbidden shell-metacharacters.
 fn contains_forbidden_chars(s: &str) -> bool {
     s.chars().any(|c| FORBIDDEN_CHARS.contains(&c))
@@ -87,38 +77,48 @@ fn resolve_project_dir(project_dir: &str, configured_workspace: &str) -> Result<
     Ok(resolved.display().to_string())
 }
 
-/// Resolve a relative file (compose_file or env_file) against the project
-/// directory. The file must stay inside the project directory (or a
-/// subdirectory of it).
-fn resolve_project_file(file: &str, project_dir: &str, what: &str) -> Result<String> {
+/// Resolve a file (compose_file or env_file). The file may be:
+/// - relative to project_dir (stays inside project_dir), or
+/// - an absolute path ANYWHERE inside the configured workspace_dir
+///   (e.g. `/opt/workspace/omni-deployer/omnidev.env` while the compose
+///   project lives in `/opt/workspace/omni-stack`).
+/// The workspace root is the sandbox boundary: files outside it are rejected.
+fn resolve_project_file(
+    file: &str,
+    project_dir: &str,
+    configured_workspace: &str,
+    what: &str,
+) -> Result<String> {
     if contains_forbidden_chars(file) {
         anyhow::bail!("Forbidden characters in {} argument", what);
     }
+    let workspace = Path::new(configured_workspace)
+        .canonicalize()
+        .unwrap_or_else(|_| Path::new(configured_workspace).to_path_buf());
     let project = Path::new(project_dir)
         .canonicalize()
         .unwrap_or_else(|_| Path::new(project_dir).to_path_buf());
 
-    // Files are relative to project_dir by design. Reject absolute paths —
-    // the whole point is that the file lives inside the project directory.
     let candidate = Path::new(file);
-    if candidate.is_absolute() {
-        anyhow::bail!(
-            "{} must be relative to project_dir, got absolute path: {}",
-            what,
-            file
-        );
-    }
+    let resolved = if candidate.is_absolute() {
+        // Absolute path: allowed anywhere inside the configured workspace.
+        candidate
+            .canonicalize()
+            .map_err(|e| anyhow::anyhow!("Invalid {} '{}': {}", what, file, e))?
+    } else {
+        // Relative path: resolved against project_dir (backwards compatible).
+        project
+            .join(candidate)
+            .canonicalize()
+            .map_err(|e| anyhow::anyhow!("Invalid {} '{}': {}", what, file, e))?
+    };
 
-    let resolved = project
-        .join(candidate)
-        .canonicalize()
-        .map_err(|e| anyhow::anyhow!("Invalid {} '{}': {}", what, file, e))?;
-    if !resolved.starts_with(&project) {
+    if !resolved.starts_with(&workspace) {
         anyhow::bail!(
-            "{} must be inside project_dir ({}), got: {}",
+            "{} must be inside workspace ({}), got: {}",
             what,
-            project_dir,
-            file
+            configured_workspace,
+            resolved.display()
         );
     }
     if !resolved.is_file() {
@@ -496,17 +496,22 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
     } else {
         compose_file_arg.clone()
     };
-    let resolved_compose_file = resolve_project_file(&compose_file, &project_dir, "compose_file")?;
+    let resolved_compose_file =
+        resolve_project_file(&compose_file, &project_dir, configured_workspace, "compose_file")?;
 
-    // Resolve env_file: relative to project_dir, optional.
+    // Resolve env_file: relative to project_dir or absolute inside workspace, optional.
     let resolved_env_file = if env_file_arg.is_empty() {
         String::new()
     } else {
-        resolve_project_file(&env_file_arg, &project_dir, "env_file")?
+        resolve_project_file(&env_file_arg, &project_dir, configured_workspace, "env_file")?
     };
 
     let verb = command.split_whitespace().next().unwrap_or("");
-    let timeout_secs = timeout_override.unwrap_or_else(|| default_timeout(verb));
+    // NO default timeout (Aug 2026 rule: fixed tool timeouts were removed —
+    // background tasks + wait-task give the agent full tracking/cancel/log
+    // control; a tool must never be killed by an invisible clock the agent
+    // didn't set). Only an EXPLICIT `timeout` param bounds the command.
+    let timeout_secs = timeout_override;
 
     // Validate the verb is allowed (build_compose_command will also check)
     if verb.is_empty() || !ALLOWED_VERBS.contains(&verb) {
@@ -607,8 +612,19 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
     cmd.process_group(0);
 
     let mut child = KillOnDrop::new(cmd.spawn()?, detach);
-    let result =
-        tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await;
+    let result = match timeout_secs {
+        Some(secs) => {
+            match tokio::time::timeout(Duration::from_secs(secs), child.wait_with_output()).await {
+                Ok(Ok(output)) => Ok(Ok(output)),
+                Ok(Err(e)) => Ok(Err(e)),
+                Err(_elapsed) => Err(secs),
+            }
+        }
+        None => match child.wait_with_output().await {
+            Ok(output) => Ok(Ok(output)),
+            Err(e) => Ok(Err(e)),
+        },
+    };
 
     match result {
         Ok(Ok(output)) => {
@@ -640,10 +656,10 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
             Ok((content, false))
         }
         Ok(Err(e)) => Ok((format!("docker command failed: {}\n\nCommand:\n{}", e, cmd_display), true)),
-        Err(_elapsed) => Ok((
+        Err(secs) => Ok((
             format!(
-                "docker compose command timed out after {}s (use 'timeout' param to override)\n\nCommand:\n{}",
-                timeout_secs, cmd_display,
+                "docker compose command timed out after {}s (explicit 'timeout' param was set)\n\nCommand:\n{}",
+                secs, cmd_display,
             ),
             true,
         )),
@@ -694,10 +710,10 @@ async fn main() -> Result<()> {
             description:
                 "Run docker compose commands on a compose project inside the workspace. \
                  'project_dir' (required) is the compose project directory — the workspace dir or a subdirectory of it. \
-                 'compose_file' (optional) is the compose file relative to project_dir (default docker-compose.yml, \
-                 may include subdirectories, must stay inside project_dir). \
-                 'env_file' (optional) is a .env-style file relative to project_dir, passed via --env-file \
-                 (must stay inside project_dir). \
+                 'compose_file' (optional) is the compose file: a path RELATIVE to project_dir (default docker-compose.yml, \
+                 may include subdirectories), or an ABSOLUTE path anywhere inside the workspace (e.g. a shared overlay). \
+                 'env_file' (optional) is a .env-style file: relative to project_dir, or an ABSOLUTE path anywhere inside \
+                 the workspace (e.g. /opt/workspace/<project>/<name>.env for a shared env file) — passed via --env-file. \
                  Use 'command' for the compose verb + flags (e.g. 'up -d', 'ps', 'build', 'logs --tail=50'). \
                  For exec/run: use 'service' (container name) and 'args' (command to run inside container). \
                  USAGE EXAMPLES: \
@@ -708,7 +724,7 @@ async fn main() -> Result<()> {
                  so use shell operators (&&, ||, |, quotes) exactly as on a host terminal. \
                  For exec with 'script': pass Python code as the 'script' parameter and it will be piped \
                  to python3 inside the container via stdin (no character restrictions -- ideal for complex scripts). \
-                 Optional 'timeout' parameter overrides the default timeout for long-running commands. \
+                 Optional 'timeout' parameter sets an explicit timeout for long-running commands; \
                  NOTE: if a command fails with a host port conflict, pick a different host port or omit \
                  the host 'ports:' mapping (services reach each other by service name inside the docker network)."
                     .to_string(),
@@ -721,11 +737,11 @@ async fn main() -> Result<()> {
                     },
                     "compose_file": {
                         "type": "string",
-                        "description": "Compose file relative to project_dir (default docker-compose.yml). May include subdirectories; must stay inside project_dir."
+                        "description": "Compose file: relative to project_dir (default docker-compose.yml), or an absolute path anywhere inside the workspace."
                     },
                     "env_file": {
                         "type": "string",
-                        "description": ".env-style file relative to project_dir, passed via --env-file. Must stay inside project_dir."
+                        "description": ".env-style file: relative to project_dir, or an absolute path anywhere inside the workspace. Passed via --env-file."
                     },
                     "command": {
                         "type": "string",
@@ -745,7 +761,7 @@ async fn main() -> Result<()> {
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Optional -- override default timeout in seconds. Defaults: build/pull=600, up/restart=300, exec/run=600, ps/logs/down/stop=300"
+                        "description": "Optional — explicit timeout in seconds for this command. When omitted there is NO timeout: the command runs until it finishes, errors, or the agent cancels it (use the background task system: poll-task/wait-task/cancel-task)."
                     }
                 },
                 "required": ["project_dir", "command"]
