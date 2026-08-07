@@ -152,6 +152,7 @@ struct CreateTaskRequest {
     template: Option<String>,
     plan: Option<bool>,
     planning_mode: Option<String>,
+    workflow_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,6 +179,7 @@ struct UpdateTaskRequest {
     template: Option<String>,
     plan: Option<bool>,
     planning_mode: Option<String>,
+    workflow_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -204,6 +206,7 @@ struct KanbanTaskRow {
     template: Option<String>,
     plan: Option<bool>,
     planning_mode: Option<String>,
+    workflow_id: Option<String>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -319,6 +322,7 @@ struct KanbanTaskEntry {
     template: Option<String>,
     plan: Option<bool>,
     planning_mode: Option<String>,
+    workflow_id: Option<String>,
     created_at: Option<String>,
     updated_at: Option<String>,
 }
@@ -407,6 +411,7 @@ fn task_row_to_entry(r: KanbanTaskRow) -> KanbanTaskEntry {
         template: r.template,
         plan: r.plan,
         planning_mode: r.planning_mode,
+        workflow_id: r.workflow_id,
         created_at: r
             .created_at
             .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
@@ -499,7 +504,7 @@ async fn list_tasks_handler(
         r#"
         SELECT
             id, title, body, status, priority, position, assignee,
-            channel_id, profile, archived, template, plan, planning_mode,
+            channel_id, profile, archived, template, plan, planning_mode, workflow_id,
             created_at, updated_at
         FROM kanban_tasks
         WHERE (:show_archived_bool OR archived = false)
@@ -538,7 +543,7 @@ async fn get_task_handler(
         r#"
         SELECT
             id, title, body, status, priority, position, assignee,
-            channel_id, profile, archived, template, plan, planning_mode,
+            channel_id, profile, archived, template, plan, planning_mode, workflow_id,
             created_at, updated_at
         FROM kanban_tasks
         WHERE id = :id
@@ -648,10 +653,10 @@ async fn create_task_handler(
     if let Err(e) = sql_forge!(
         r#"
         INSERT INTO kanban_tasks
-            (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode)
+            (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
         VALUES
             (:id, :title, :body, :status, :priority, NULLIF(:channel_id, 0::bigint), NULLIF(:profile, '')::text,
-             :position, NULLIF(:template, '')::text, :plan::boolean, NULLIF(:planning_mode, '')::text)
+             :position, NULLIF(:template, '')::text, :plan::boolean, NULLIF(:planning_mode, '')::text, NULLIF(:workflow_id, '')::text)
         "#,
         ( :id = id.as_str(),
           :title = &title,
@@ -663,7 +668,9 @@ async fn create_task_handler(
           :position = next_pos,
           :template = body.template.as_deref().unwrap_or(""),
           :plan = body.plan.unwrap_or(false),
-          :planning_mode = body.planning_mode.as_deref().unwrap_or(""), )
+          :planning_mode = body.planning_mode.as_deref().unwrap_or(""),
+            :workflow_id = body.workflow_id.as_deref().unwrap_or(""),
+    )
     )
     .execute(&state.pool)
     .await
@@ -1040,7 +1047,8 @@ async fn update_task_handler(
         || body.archived.is_some()
         || body.template.is_some()
         || body.plan.is_some()
-        || body.planning_mode.is_some();
+        || body.planning_mode.is_some()
+        || body.workflow_id.is_some();
 
     if !has_fields {
         return err_json(StatusCode::BAD_REQUEST, "No fields to update");
@@ -1061,6 +1069,7 @@ async fn update_task_handler(
             template = CASE WHEN :template = '' THEN template ELSE NULLIF(:template, '')::text END,
             plan = :plan,
             planning_mode = CASE WHEN :planning_mode = '' THEN planning_mode ELSE NULLIF(:planning_mode, '')::text END,
+            workflow_id = CASE WHEN :workflow_id = '' THEN workflow_id ELSE NULLIF(:workflow_id, '')::text END,
             updated_at = NOW()
         WHERE id = :id
         "#,
@@ -1075,7 +1084,9 @@ async fn update_task_handler(
           :archived = body.archived.unwrap_or(before.archived.unwrap_or(false)),
           :template = body.template.as_deref().unwrap_or(""),
           :plan = body.plan.or(before.plan).unwrap_or(false),
-          :planning_mode = body.planning_mode.as_deref().unwrap_or(""), )
+          :planning_mode = body.planning_mode.as_deref().unwrap_or(""),
+          :workflow_id = body.workflow_id.as_deref().unwrap_or(""),
+    )
     )
     .execute(&state.pool)
     .await
@@ -1965,6 +1976,41 @@ mod tests {
     }
 
     #[test]
+    fn test_create_task_request_deserializes_workflow_id() {
+        let json = r#"{"title": "T", "workflow_id": "wf-x"}"#;
+        let req: CreateTaskRequest =
+            serde_json::from_str(json).expect("deserialize CreateTaskRequest");
+        assert_eq!(req.workflow_id.as_deref(), Some("wf-x"));
+        let empty: CreateTaskRequest =
+            serde_json::from_str(r#"{"title": "T"}"#).expect("deserialize w/o wf");
+        assert!(empty.workflow_id.is_none());
+    }
+
+    #[test]
+    fn test_task_row_to_entry_preserves_workflow_id() {
+        let row = KanbanTaskRow {
+            id: "task-1".to_string(),
+            title: "Test Task".to_string(),
+            body: Some("A body".to_string()),
+            status: "todo".to_string(),
+            priority: Some(3),
+            position: Some(1),
+            assignee: Some("alice".to_string()),
+            channel_id: Some(42),
+            profile: Some("default".to_string()),
+            archived: Some(false),
+            template: None,
+            plan: None,
+            planning_mode: None,
+            workflow_id: Some("wf-x".to_string()),
+            created_at: None,
+            updated_at: None,
+        };
+        let entry = task_row_to_entry(row);
+        assert_eq!(entry.workflow_id.as_deref(), Some("wf-x"));
+    }
+
+    #[test]
     fn test_resolve_workflow_reset_noop_without_workflow_id() {
         let state = serde_json::json!({"executions": [1]});
         let (should, cleared) = resolve_workflow_reset(&None, &Some(state));
@@ -2012,6 +2058,7 @@ mod tests {
             template: None,
             plan: None,
             planning_mode: None,
+            workflow_id: None,
             created_at: None,
             updated_at: None,
         };
@@ -2038,6 +2085,7 @@ mod tests {
             template: None,
             plan: None,
             planning_mode: None,
+            workflow_id: None,
             created_at: None,
             updated_at: None,
         };

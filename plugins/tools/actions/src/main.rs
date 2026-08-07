@@ -206,8 +206,8 @@ async fn handle_kanban_dispatcher(
         let task_id_inner = id.clone();
         let planning_mode = task_planning_mode.clone();
 
-                let (workflow_id, workflow_step) = thread_workflow_fields(task_workflow_id);
-// Resolve provider and model for the thread
+        let (workflow_id, workflow_step) = thread_workflow_fields(task_workflow_id);
+        // Resolve provider and model for the thread
         // Chain: channel.current_provider → config llm_provider (from $env:LLM_PROVIDER)
         let (resolved_provider, resolved_model): (String, Option<String>) = {
             let chan_prov: Option<(Option<String>, Option<String>)> = sqlx::query_as(
@@ -823,5 +823,4 @@ mod tests {
         assert!(wf.is_none());
         assert_eq!(step, "running");
     }
-
 }
