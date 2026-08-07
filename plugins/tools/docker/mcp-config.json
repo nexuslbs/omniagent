@@ -4,8 +4,7 @@
       "name": "docker",
       "transport": "stdio",
       "args": [],
-      "timeout_secs": 910,
-      "max_retries": 1,
+      "max_retries": 3,
       "allowed_tools": [
         "*"
       ]
