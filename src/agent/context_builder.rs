@@ -2,7 +2,6 @@ use crate::error::AppResult;
 use tracing::info;
 
 use crate::agent::config::AgentContext;
-use crate::agent::helpers;
 use crate::db::types::{Channel, Message, Thread};
 use crate::mcp::McpToolCall;
 use sql_forge::sql_forge;
@@ -81,49 +80,56 @@ pub(crate) async fn build_prompt_context(
     };
 
     let template_section: Option<String> = {
-        let msg_type = cause_msg.msg_type.as_str();
-        if helpers::is_structured_msg_type(msg_type) {
-            let template_name = cause_msg
-                .metadata
-                .get("template")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty());
-            if let Some(template) = template_name {
-                let template_path = if template.ends_with(".md") || template.contains('.') {
-                    std::path::PathBuf::from(&cfg.ctx.data_dir)
-                        .join("profiles")
-                        .join(profile_name)
-                        .join("templates")
-                        .join(template)
-                } else {
-                    std::path::PathBuf::from(&cfg.ctx.data_dir)
-                        .join("profiles")
-                        .join(profile_name)
-                        .join("templates")
-                        .join(format!("{}.md", template))
-                };
-                let content = if template_path.exists() {
-                    std::fs::read_to_string(&template_path)
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                } else {
-                    None
-                };
-                if let Some(ref tmpl) = content {
-                    info!(
-                        "Loaded template '{}' for thread {} ({} chars)",
-                        template,
-                        thread.id,
-                        tmpl.len()
-                    );
-                    Some(format!(
-                        "=== Task Template ===\nThe following template provides structured guidance for this task type:\n\n{}",
-                        tmpl
-                    ))
-                } else {
-                    None
-                }
+        // Uniform template resolution (R7): the thread record is the single
+        // source of truth (threads.template, populated by the kanban
+        // dispatcher, cron scheduler, and message handler alike). The seq-0
+        // cause message metadata is the fallback for threads created before
+        // the column existed or where the creator did not set a template.
+        let template_name = thread
+            .template
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                cause_msg
+                    .metadata
+                    .get("template")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+            });
+
+        if let Some(template) = template_name {
+            let template_path = if template.ends_with(".md") || template.contains('.') {
+                std::path::PathBuf::from(&cfg.ctx.data_dir)
+                    .join("profiles")
+                    .join(profile_name)
+                    .join("templates")
+                    .join(template)
+            } else {
+                std::path::PathBuf::from(&cfg.ctx.data_dir)
+                    .join("profiles")
+                    .join(profile_name)
+                    .join("templates")
+                    .join(format!("{}.md", template))
+            };
+            let content = if template_path.exists() {
+                std::fs::read_to_string(&template_path)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            };
+            if let Some(ref tmpl) = content {
+                info!(
+                    "Loaded template '{}' for thread {} ({} chars)",
+                    template,
+                    thread.id,
+                    tmpl.len()
+                );
+                Some(format!(
+                    "=== Task Template ===\nThe following template provides structured guidance for this task type:\n\n{}",
+                    tmpl
+                ))
             } else {
                 None
             }
