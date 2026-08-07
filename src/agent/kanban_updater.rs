@@ -251,7 +251,7 @@ pub(crate) fn route_completed_thread(
 
 /// Move the task to `to` and record a workflow history entry with `comment`
 /// (D3: transitions persist a comment).
-async fn transition_with_comment(
+pub(crate) async fn transition_with_comment(
     pool: &sqlx::PgPool,
     task_id: &str,
     to: &str,

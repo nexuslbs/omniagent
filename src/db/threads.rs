@@ -142,6 +142,47 @@ pub(crate) fn skip_recovery(task_id: Option<&str>, task_status: Option<&str>) ->
         },
     }
 }
+/// Phase 6b: outcome of an explicit operator stop (stop-thread / stop / close)
+/// for a kanban-linked thread. Unlike failure/startup recovery (which
+/// re-schedules), an explicit stop BLOCKS the task and clears its
+/// thread_status - no retry is consumed, no re-run thread is created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopRecovery {
+    /// Move the kanban task to `blocked` and clear its thread_status.
+    Block {
+        new_status: &'static str,
+        clear_thread_status: bool,
+    },
+    /// No kanban transition: non-kanban thread, terminal status, or manual
+    /// review (thread_status NULL). The thread itself is still skipped.
+    Noop,
+}
+
+/// Decide what happens to a kanban task when its thread is stopped explicitly
+/// (operator stop-thread / stop / close).
+///
+/// Rules (Phase 6b):
+/// - task `running` (11) or `testing` (11a)                  -> Block
+/// - task `review` + thread_status scheduled/running (11b)   -> Block
+/// - task `review` + thread_status NULL, manual review (11c) -> Noop
+/// - task backlog/todo/done/blocked                          -> Noop
+/// - no task (task_id NULL, non-kanban thread)               -> Noop (skip only)
+pub(crate) fn stop_thread_recovery(
+    task_status: Option<&str>,
+    thread_status: Option<&str>,
+) -> StopRecovery {
+    match (task_status, thread_status) {
+        (Some("running"), _) | (Some("testing"), _) => StopRecovery::Block {
+            new_status: "blocked",
+            clear_thread_status: true,
+        },
+        (Some("review"), Some("scheduled" | "running")) => StopRecovery::Block {
+            new_status: "blocked",
+            clear_thread_status: true,
+        },
+        _ => StopRecovery::Noop,
+    }
+}
 
 pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> AppResult<Message> {
     let mut tx = pool.begin().await?;
@@ -1156,5 +1197,120 @@ mod tests {
         assert_eq!(skip_recovery(None, Some("todo")), SkipRecovery::SkipOnly);
         assert_eq!(skip_recovery(None, None), SkipRecovery::SkipOnly);
         assert_eq!(skip_recovery(Some("t1"), None), SkipRecovery::SkipOnly);
+    }
+
+    // ---------- Phase 6b: explicit stop/close blocks kanban tasks ----------
+
+    #[test]
+    fn stop_running_task_blocks_it() {
+        // (11) task `running` -> blocked, thread_status cleared.
+        assert_eq!(
+            stop_thread_recovery(Some("running"), Some("running")),
+            StopRecovery::Block {
+                new_status: "blocked",
+                clear_thread_status: true,
+            }
+        );
+    }
+
+    #[test]
+    fn stop_testing_task_blocks_it() {
+        // (11a) task `testing` -> blocked.
+        assert_eq!(
+            stop_thread_recovery(Some("testing"), Some("scheduled")),
+            StopRecovery::Block {
+                new_status: "blocked",
+                clear_thread_status: true,
+            }
+        );
+    }
+
+    #[test]
+    fn stop_review_task_with_active_thread_blocks_it() {
+        // (11b) `review` + thread_status scheduled/running -> blocked.
+        for ts in ["scheduled", "running"] {
+            assert_eq!(
+                stop_thread_recovery(Some("review"), Some(ts)),
+                StopRecovery::Block {
+                    new_status: "blocked",
+                    clear_thread_status: true,
+                },
+                "review + thread_status {:?} must block",
+                ts
+            );
+        }
+    }
+
+    #[test]
+    fn stop_review_task_without_thread_status_is_noop() {
+        // (11c) `review` + thread_status NULL (manual review) -> no-op.
+        assert_eq!(
+            stop_thread_recovery(Some("review"), None),
+            StopRecovery::Noop
+        );
+    }
+
+    #[test]
+    fn stop_terminal_tasks_is_noop() {
+        // backlog/todo/done/blocked -> no-op.
+        for status in ["backlog", "todo", "done", "blocked"] {
+            assert_eq!(
+                stop_thread_recovery(Some(status), Some("running")),
+                StopRecovery::Noop,
+                "task {:?} must not be blocked by an explicit stop",
+                status
+            );
+        }
+    }
+
+    #[test]
+    fn stop_non_kanban_thread_skips_only() {
+        // task_id NULL / missing task -> skip only, no task transition.
+        assert_eq!(
+            stop_thread_recovery(None, Some("running")),
+            StopRecovery::Noop
+        );
+        assert_eq!(stop_thread_recovery(None, None), StopRecovery::Noop);
+    }
+
+    #[test]
+    fn stop_channel_with_mixed_threads_applies_per_thread() {
+        // Channel-level stop: every pending/processing thread is evaluated
+        // independently - a mixed channel ends with the running/testing/
+        // review-active tasks blocked and the rest untouched.
+        let threads: Vec<(Option<&str>, Option<&str>)> = vec![
+            (Some("running"), Some("running")),   // running -> blocked
+            (Some("testing"), Some("scheduled")), // testing -> blocked
+            (Some("review"), Some("scheduled")),  // review-active -> blocked
+            (Some("review"), None),               // manual review -> no-op
+            (Some("todo"), Some("running")),      // todo -> no-op
+            (None, Some("processing")),           // non-kanban -> skip only
+        ];
+        let expected: Vec<StopRecovery> = vec![
+            StopRecovery::Block {
+                new_status: "blocked",
+                clear_thread_status: true,
+            },
+            StopRecovery::Block {
+                new_status: "blocked",
+                clear_thread_status: true,
+            },
+            StopRecovery::Block {
+                new_status: "blocked",
+                clear_thread_status: true,
+            },
+            StopRecovery::Noop,
+            StopRecovery::Noop,
+            StopRecovery::Noop,
+        ];
+        for ((task_status, thread_status), exp) in threads.iter().zip(expected.iter()) {
+            assert_eq!(
+                &stop_thread_recovery(*task_status, *thread_status),
+                exp,
+                "stop recovery for task {:?} / thread {:?}",
+                task_status,
+                thread_status
+            );
+        }
     }
 }

@@ -42,12 +42,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::agent::config::AgentConfig;
+use crate::agent::kanban_updater::transition_with_comment;
 use crate::agent::plugin_manager::PluginManager;
 use crate::db::types as queries;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient};
 use crate::mcp::{AppContext, McpToolCall};
 use parking_lot::RwLock;
-use sql_forge::sql_forge;
 
 mod diagnostic;
 
@@ -231,32 +231,137 @@ async fn health_handler() -> &'static str {
 
 /// Stop: mark all pending/processing threads as skipped and cancel
 /// the channel's executor so it restarts fresh.
+/// Phase 6b: apply the explicit-stop outcome for one kanban-linked thread.
+///
+/// The thread has already been (or will be) skipped; this only decides whether
+/// its kanban task should move to `blocked` (with thread_status cleared).
+/// Non-kanban threads (task_id NULL) and terminal/manual-review tasks are left
+/// untouched - no retry is consumed and no re-run thread is created. Returns
+/// true when the task was moved to blocked.
+async fn apply_stop_recovery(
+    pool: &PgPool,
+    thread_id: i64,
+    task_id: Option<&str>,
+    operator: &str,
+) -> Result<bool, String> {
+    // Non-kanban thread (task_id NULL): skip only, no task transition.
+    let Some(task_id) = task_id else {
+        return Ok(false);
+    };
+
+    // Fetch the task's current status + thread_status to decide the outcome.
+    let task = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT status, thread_status FROM kanban_tasks WHERE id = $1",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // Task gone: nothing to transition.
+    let Some((task_status, thread_status)) = task else {
+        return Ok(false);
+    };
+
+    match queries::stop_thread_recovery(task_status.as_deref(), thread_status.as_deref()) {
+        queries::StopRecovery::Block { .. } => {
+            let comment = format!(
+                "Task blocked: thread #{} stopped explicitly (operator {})",
+                thread_id, operator
+            );
+            transition_with_comment(pool, task_id, "blocked", None, &comment)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        queries::StopRecovery::Noop => Ok(false),
+    }
+}
+
+/// Stop: explicitly stop all pending/processing threads for a channel.
+///
+/// Phase 6b: unlike a failure (which re-schedules), an explicit stop BLOCKS the
+/// kanban tasks of the skipped threads and clears their thread_status - no
+/// retry is consumed and no re-run thread is created. The channel stays open.
 async fn stop_handler(
     Path(channel_id): Path<i64>,
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    let skipped = match queries::skip_channel_threads(&state.pool, channel_id).await {
-        Ok(count) => {
+    // 1. Collect pending/processing threads (id + kanban task) BEFORE skipping
+    let threads = match sqlx::query_as::<_, (i64, Option<String>)>(
+        "SELECT id, task_id FROM threads WHERE channel_id = $1 AND status IN ('pending', 'processing')",
+    )
+    .bind(channel_id)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!(
+                "Stop: failed to list threads for channel {}: {:?}",
+                channel_id, e
+            );
+            return Json(serde_json::json!({
+                "status": "error",
+                "error": e.to_string(),
+                "channel_id": channel_id,
+            }));
+        }
+    };
+
+    // 2. Mark them all as skipped (plain skip - no reschedule, no re-run thread)
+    let skipped = match sqlx::query(
+        "UPDATE threads SET status = 'skipped' WHERE channel_id = $1 AND status IN ('pending', 'processing')",
+    )
+    .bind(channel_id)
+    .execute(&state.pool)
+    .await
+    {
+        Ok(res) => {
             info!(
                 "Stop: skipped {} pending/processing threads for channel {}",
-                count, channel_id
+                res.rows_affected(),
+                channel_id
             );
-            count
+            res.rows_affected()
         }
         Err(e) => {
             error!(
                 "Stop: failed to skip threads for channel {}: {:?}",
                 channel_id, e
             );
-            0
+            return Json(serde_json::json!({
+                "status": "error",
+                "error": e.to_string(),
+                "channel_id": channel_id,
+            }));
         }
     };
 
-    // Cancel the channel's executor so it restarts fresh
+    // 3. Phase 6b: block the kanban tasks of the skipped threads
+    let mut blocked = 0u32;
+    for (thread_id, task_id) in &threads {
+        match apply_stop_recovery(&state.pool, *thread_id, task_id.as_deref(), "stop").await {
+            Ok(true) => blocked += 1,
+            Ok(false) => {}
+            Err(e) => error!(
+                "Stop: failed to apply recovery for thread {}: {}",
+                thread_id, e
+            ),
+        }
+    }
+    if blocked > 0 {
+        info!(
+            "Stop: blocked {} kanban task(s) for channel {}",
+            blocked, channel_id
+        );
+    }
+
+    // 4. Cancel the channel's processing task (if running)
     let mut tokens = state.cancel_tokens.lock().await;
-    let handler_cancelled = if let Some(token) = tokens.remove(&channel_id) {
+    let has_handler = if let Some(token) = tokens.remove(&channel_id) {
         token.cancel();
-        info!("Stop: cancelled executor for channel {}", channel_id);
+        info!("Stop: cancelled processing task for channel {}", channel_id);
         true
     } else {
         false
@@ -266,107 +371,200 @@ async fn stop_handler(
         "action": "stop",
         "channel_id": channel_id,
         "skipped_threads": skipped,
-        "handler_cancelled": handler_cancelled,
+        "blocked_tasks": blocked,
+        "handler_cancelled": has_handler,
     }))
 }
 
-/// Stop-thread: mark a single pending/processing thread as skipped and
-/// cancel the channel's executor so it restarts and picks up remaining
-/// pending threads.
+/// Stop-thread: explicitly stop a single thread.
+///
+/// Phase 6b: the thread is skipped (no retry consumed) and, if it is
+/// kanban-linked with an active status, its task moves to blocked with
+/// thread_status cleared.
 async fn stop_thread_handler(
     Path(thread_id): Path<i64>,
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    // 1. Find the channel this thread belongs to
-    let channel_id: Option<i64> = sql_forge!(
-        scalar Option<i64>,
-        "SELECT channel_id FROM threads WHERE id = :id",
-        ( :id = thread_id )
+    // 1. Look up the thread's channel id + kanban task id
+    let (channel_id, task_id) = match sqlx::query_as::<_, (i64, Option<String>)>(
+        "SELECT channel_id, task_id FROM threads WHERE id = $1",
     )
-    .fetch_one(&state.pool)
+    .bind(thread_id)
+    .fetch_optional(&state.pool)
     .await
-    .ok()
-    .flatten();
-
-    let channel_id = match channel_id {
-        Some(id) => id,
-        None => {
+    {
+        Ok(Some((cid, tid))) => (cid, tid),
+        Ok(None) => {
             return Json(serde_json::json!({
-                "action": "stop-thread",
-                "thread_id": thread_id,
                 "status": "error",
-                "error": "Thread not found",
+                "error": format!("thread {} not found", thread_id),
+            }))
+        }
+        Err(e) => {
+            error!(
+                "Stop-thread: failed to look up thread {}: {:?}",
+                thread_id, e
+            );
+            return Json(serde_json::json!({
+                "status": "error",
+                "error": e.to_string(),
+                "thread_id": thread_id,
             }));
         }
     };
 
-    // 2. Skip the thread
+    // 2. Skip the thread (plain skip - no retry consumed, no re-run)
     let skipped = match queries::skip_thread(&state.pool, thread_id).await {
-        Ok(count) => {
-            info!(
-                "Stop-thread: skipped thread {} ({} rows affected)",
-                thread_id, count
-            );
-            count
-        }
+        Ok(count) => count,
         Err(e) => {
             error!("Stop-thread: failed to skip thread {}: {:?}", thread_id, e);
-            0
+            return Json(serde_json::json!({
+                "status": "error",
+                "error": e.to_string(),
+                "thread_id": thread_id,
+                "channel_id": channel_id,
+            }));
+        }
+    };
+    info!("Stop-thread: skipped thread {}", thread_id);
+
+    // 3. Platform reaction handling is done by the platforms themselves when
+    //    they see the thread skipped; fetching the cause message preserves the
+    //    original behavior.
+    if skipped > 0 {
+        let _ = crate::db::threads::get_cause_message(&state.pool, thread_id).await;
+    }
+
+    // 4. Phase 6b: block the thread's kanban task (if any)
+    let blocked = match apply_stop_recovery(
+        &state.pool,
+        thread_id,
+        task_id.as_deref(),
+        "stop-thread",
+    )
+    .await
+    {
+        Ok(true) => {
+            info!(
+                "Stop-thread: blocked kanban task {} for thread {}",
+                task_id.as_deref().unwrap_or(""),
+                thread_id
+            );
+            true
+        }
+        Ok(false) => false,
+        Err(e) => {
+            error!(
+                "Stop-thread: failed to apply recovery for thread {}: {}",
+                thread_id, e
+            );
+            false
         }
     };
 
-    // 3. Cancel the channel's executor so it restarts fresh (channel stays open)
+    // 5. Cancel the channel's processing task (if running)
     let mut tokens = state.cancel_tokens.lock().await;
-    let handler_cancelled = if let Some(token) = tokens.remove(&channel_id) {
+    let has_handler = if let Some(token) = tokens.remove(&channel_id) {
         token.cancel();
         info!(
-            "Stop-thread: cancelled executor for channel {} (thread {})",
-            channel_id, thread_id
+            "Stop-thread: cancelled processing task for channel {}",
+            channel_id
         );
         true
     } else {
         false
     };
 
-    // 4. Send reaction to the platform is handled by platforms themselves
-    if skipped > 0 {
-        let _ = crate::db::threads::get_cause_message(&state.pool, thread_id).await;
-    }
-
     Json(serde_json::json!({
         "action": "stop-thread",
         "thread_id": thread_id,
         "channel_id": channel_id,
         "skipped": skipped,
-        "handler_cancelled": handler_cancelled,
+        "task_blocked": blocked,
+        "handler_cancelled": has_handler,
     }))
 }
 
-/// Close: close the channel (skips threads, cancels handler).
-/// The supervisor will not spawn a new handler until the channel is opened again.
+/// Close: explicitly stop all pending/processing threads for a channel and
+/// mark the channel closed.
+///
+/// Phase 6b: like stop, the kanban tasks of the skipped threads move to blocked
+/// (thread_status cleared) - no retry consumed, no re-run thread.
 async fn close_handler(
     Path(channel_id): Path<i64>,
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    // 1. Mark all pending/processing threads as skipped
-    let skipped = match queries::skip_channel_threads(&state.pool, channel_id).await {
-        Ok(count) => {
+    // 1. Collect pending/processing threads (id + kanban task) BEFORE skipping
+    let threads = match sqlx::query_as::<_, (i64, Option<String>)>(
+        "SELECT id, task_id FROM threads WHERE channel_id = $1 AND status IN ('pending', 'processing')",
+    )
+    .bind(channel_id)
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!(
+                "Close: failed to list threads for channel {}: {:?}",
+                channel_id, e
+            );
+            return Json(serde_json::json!({
+                "status": "error",
+                "error": e.to_string(),
+                "channel_id": channel_id,
+            }));
+        }
+    };
+
+    // 2. Mark them all as skipped (plain skip - no reschedule, no re-run thread)
+    let skipped = match sqlx::query(
+        "UPDATE threads SET status = 'skipped' WHERE channel_id = $1 AND status IN ('pending', 'processing')",
+    )
+    .bind(channel_id)
+    .execute(&state.pool)
+    .await
+    {
+        Ok(res) => {
             info!(
                 "Close: skipped {} pending/processing threads for channel {}",
-                count, channel_id
+                res.rows_affected(),
+                channel_id
             );
-            count
+            res.rows_affected()
         }
         Err(e) => {
             error!(
                 "Close: failed to skip threads for channel {}: {:?}",
                 channel_id, e
             );
-            0
+            return Json(serde_json::json!({
+                "status": "error",
+                "error": e.to_string(),
+                "channel_id": channel_id,
+            }));
         }
     };
 
-    // 2. Set channel as closed
+    // 3. Phase 6b: block the kanban tasks of the skipped threads
+    let mut blocked = 0u32;
+    for (thread_id, task_id) in &threads {
+        match apply_stop_recovery(&state.pool, *thread_id, task_id.as_deref(), "close").await {
+            Ok(true) => blocked += 1,
+            Ok(false) => {}
+            Err(e) => error!(
+                "Close: failed to apply recovery for thread {}: {}",
+                thread_id, e
+            ),
+        }
+    }
+    if blocked > 0 {
+        info!(
+            "Close: blocked {} kanban task(s) for channel {}",
+            blocked, channel_id
+        );
+    }
+
+    // 4. Set channel as closed
     if let Err(e) = queries::close_channel(&state.pool, channel_id).await {
         error!("Close: failed to close channel {}: {:?}", channel_id, e);
         return Json(serde_json::json!({
@@ -376,7 +574,7 @@ async fn close_handler(
         }));
     }
 
-    // 3. Cancel the channel's processing task (if running)
+    // 5. Cancel the channel's processing task (if running)
     let mut tokens = state.cancel_tokens.lock().await;
     let has_handler = if let Some(token) = tokens.remove(&channel_id) {
         token.cancel();
@@ -394,6 +592,7 @@ async fn close_handler(
         "channel_id": channel_id,
         "closed": true,
         "skipped_threads": skipped,
+        "blocked_tasks": blocked,
         "handler_cancelled": has_handler,
     }))
 }
