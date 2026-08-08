@@ -146,7 +146,7 @@ async fn handle_kanban_dispatcher(
             task_title,
             maybe_channel_id,
             task_profile,
-            _task_template,
+            task_template,
             task_planning_mode,
             task_workflow_id,
         ) = match task_data {
@@ -235,8 +235,8 @@ async fn handle_kanban_dispatcher(
 
         let result = sqlx::query_as::<_, (i64,)>(
             r#"
-            INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, planning_mode, workflow_id, workflow_step, task_type)
-            VALUES ('created', 'system', $1, $2, NULLIF($3, '')::text, NULLIF($4, '')::text, NULLIF($5, '')::text, $6, $7, $8, 'kanban')
+            INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, planning_mode, workflow_id, workflow_step, task_type, template)
+            VALUES ('created', 'system', $1, $2, NULLIF($3, '')::text, NULLIF($4, '')::text, NULLIF($5, '')::text, $6, $7, $8, 'kanban', $9)
             RETURNING id
             "#,
         )
@@ -248,9 +248,10 @@ async fn handle_kanban_dispatcher(
         .bind(&planning_mode)
         .bind(&workflow_id)
         .bind(&workflow_step)
+        .bind(&task_template)
         .fetch_optional(pool)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to create thread: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create thread: {e}"))?;
 
         let thread_id = match result {
             Some((tid,)) => tid,
