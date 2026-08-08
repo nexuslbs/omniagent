@@ -35,6 +35,14 @@
       "type": "string",
       "required": false,
       "description": "Default LLM provider used for kanban-dispatched threads when the channel has no provider set."
+    },
+    {
+      "key": "omniagent_url",
+      "default": "$env:OMNIAGENT_URL",
+      "label": "Omniagent Url",
+      "type": "string",
+      "required": false,
+      "description": "Base URL of the omniagent core HTTP API for POST /kanban/dispatch. Falls back to http://localhost:8080 when unset."
     }
   ],
   "label": "actions"
