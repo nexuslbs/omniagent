@@ -496,14 +496,23 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
     } else {
         compose_file_arg.clone()
     };
-    let resolved_compose_file =
-        resolve_project_file(&compose_file, &project_dir, configured_workspace, "compose_file")?;
+    let resolved_compose_file = resolve_project_file(
+        &compose_file,
+        &project_dir,
+        configured_workspace,
+        "compose_file",
+    )?;
 
     // Resolve env_file: relative to project_dir or absolute inside workspace, optional.
     let resolved_env_file = if env_file_arg.is_empty() {
         String::new()
     } else {
-        resolve_project_file(&env_file_arg, &project_dir, configured_workspace, "env_file")?
+        resolve_project_file(
+            &env_file_arg,
+            &project_dir,
+            configured_workspace,
+            "env_file",
+        )?
     };
 
     let verb = command.split_whitespace().next().unwrap_or("");
