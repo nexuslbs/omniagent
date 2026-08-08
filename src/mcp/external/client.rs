@@ -67,28 +67,19 @@ impl CircuitBreaker {
         }
     }
 
-    /// Check if a request is allowed. Returns true if the circuit is closed
-    /// or half-open (allowing a test request).
-    /// Automatically transitions Open → HalfOpen after a 30-second cooldown.
+    /// Check if a request is allowed.
+    ///
+    /// Aug 2026: ALWAYS returns true. A circuit breaker must never make a
+    /// plugin "stop working": a counted failure (timeout, tool error, or even
+    /// a transport hiccup) does not mean the plugin is broken — it can be a
+    /// long build, a slow network, or a busy server. The agent decides what is
+    /// wrong: it sees the error, and if a task takes too long it cancels it
+    /// with cancel-task. On a genuine transport failure the client fails the
+    /// call loudly AND respawns the plugin process (see call_tool), so the
+    /// next call works — the agent picks it up later. Blocking tool calls is
+    /// never the right behavior.
     pub fn is_allowed(&self) -> bool {
-        let mut inner = self.state.lock();
-        match inner.state {
-            CircuitState::Closed | CircuitState::HalfOpen => true,
-            CircuitState::Open => {
-                // Auto-recover after cooldown: transition to HalfOpen
-                if let Some(opened) = inner.opened_at {
-                    if opened.elapsed() >= std::time::Duration::from_secs(30) {
-                        inner.state = CircuitState::HalfOpen;
-                        tracing::info!(
-                            "Circuit breaker transitioning Open → HalfOpen after {}s cooldown",
-                            opened.elapsed().as_secs()
-                        );
-                        return true;
-                    }
-                }
-                false
-            }
-        }
+        true
     }
 
     /// Record a successful request: resets failure count.
@@ -799,6 +790,58 @@ impl StdioMcpClient {
 
         Ok(tools)
     }
+
+    /// Respawn the plugin subprocess after a connection loss.
+    ///
+    /// Kills the old child (if any), aborts the dead writer/reader tasks,
+    /// clears transport state, re-spawns the process, and re-runs the full MCP
+    /// handshake (configure → initialize → tools/list). On success the client
+    /// is ready for the next tool call. The current (failed) call still
+    /// returns an error to the agent — the respawn benefits the NEXT call.
+    async fn respawn(&self) -> AppResult<()> {
+        let server_name = self.config.name.clone();
+
+        // Kill the old child process if still around.
+        {
+            let mut guard = self.child.lock().await;
+            if let Some(mut child) = guard.take() {
+                child.kill().await.ok();
+                let _ = child.wait().await;
+            }
+        }
+        // Abort any dead writer/reader tasks and clear the stdin sender.
+        {
+            let mut wt = self.write_task.lock().await;
+            if let Some(h) = wt.take() {
+                h.abort();
+            }
+        }
+        {
+            let mut rt = self.read_task.lock().await;
+            if let Some(h) = rt.take() {
+                h.abort();
+            }
+        }
+        *self.stdin_tx.lock().await = None;
+        *self.connected.lock().await = false;
+        // Clear cached tools so initialize() re-lists them after respawn.
+        *self.tools.lock().await = Vec::new();
+        // Any leftover pending requests are already failed by fail_all_pending.
+
+        // Re-spawn and re-handshake.
+        let _stdin_tx = self.spawn_process().await?;
+        let config_env: HashMap<String, String> = self.config.env.clone();
+        let result = self.initialize_handshake(&config_env).await?;
+        *self.tools.lock().await = result.tools.clone();
+        *self.connected.lock().await = true;
+
+        tracing::info!(
+            "MCP server '{}' respawned successfully ({} tools)",
+            server_name,
+            result.tools.len()
+        );
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -844,21 +887,43 @@ impl McpServerClient for StdioMcpClient {
             let writer_dead = wt.as_ref().map(|h| h.is_finished()).unwrap_or(true); // None = not initialized
             let reader_dead = rt.as_ref().map(|h| h.is_finished()).unwrap_or(true); // None = not initialized
             if writer_dead || reader_dead {
-                // The connection is gone (or was never established). Fail fast
-                // with a concrete error instead of queueing a request that can
-                // never be answered — the agent must KNOW the server is down.
-                return Err(err_str!(
-                    "MCP server '{}' connection lost (background {} stopped); \
-                     pending calls were failed with a connection error",
-                    self.config.name,
-                    if writer_dead && reader_dead {
-                        "writer and reader tasks"
-                    } else if writer_dead {
-                        "writer task"
-                    } else {
-                        "reader task"
+                // The connection is gone. Fail the call loudly AND respawn the
+                // plugin process so the NEXT call can succeed — the agent sees
+                // this error and retries (it picks the plugin back up later).
+                // A dead plugin must restart, never stay blocked.
+                drop(wt);
+                drop(rt);
+                match self.respawn().await {
+                    Ok(()) => {
+                        return Err(err_str!(
+                            "MCP server '{}' connection lost (background {} stopped); \
+                             plugin respawned — retry the call",
+                            self.config.name,
+                            if writer_dead && reader_dead {
+                                "writer and reader tasks"
+                            } else if writer_dead {
+                                "writer task"
+                            } else {
+                                "reader task"
+                            }
+                        ));
                     }
-                ));
+                    Err(e) => {
+                        return Err(err_str!(
+                            "MCP server '{}' connection lost (background {} stopped); \
+                             respawn failed: {}",
+                            self.config.name,
+                            if writer_dead && reader_dead {
+                                "writer and reader tasks"
+                            } else if writer_dead {
+                                "writer task"
+                            } else {
+                                "reader task"
+                            },
+                            e
+                        ));
+                    }
+                }
             }
         }
 
@@ -898,9 +963,12 @@ impl McpServerClient for StdioMcpClient {
             Some(dur) => match tokio::time::timeout(dur, rx).await {
                 Ok(Ok(resp)) => resp,
                 Ok(Err(_)) => {
-                    self.circuit.record_failure();
+                    // Response channel cancelled = the connection died while
+                    // awaiting. fail_all_pending already errored every caller
+                    // loudly; the next call will detect the dead reader/writer
+                    // and respawn the plugin. No failure counting.
                     return Err(err_str!(
-                        "MCP server '{}' response channel cancelled",
+                        "MCP server '{}' response channel cancelled (connection died)",
                         self.config.name,
                     ));
                 }
@@ -922,9 +990,9 @@ impl McpServerClient for StdioMcpClient {
             None => match rx.await {
                 Ok(resp) => resp,
                 Err(_) => {
-                    self.circuit.record_failure();
+                    // Same as above: channel cancelled = connection died.
                     return Err(err_str!(
-                        "MCP server '{}' response channel cancelled",
+                        "MCP server '{}' response channel cancelled (connection died)",
                         self.config.name,
                     ));
                 }
@@ -1371,14 +1439,19 @@ mod tests {
     }
 
     #[test]
-    fn test_circuit_breaker_opens_after_failures() {
+    fn test_circuit_breaker_never_blocks_tool_calls() {
+        // Aug 2026 design: a circuit breaker must NEVER make a plugin "stop
+        // working". Even after many recorded failures (state = Open), tool
+        // calls remain allowed — the agent sees errors and decides, and the
+        // client respawns the plugin on genuine transport failure. The breaker
+        // state is retained purely as a diagnostic.
         let cb = CircuitBreaker::new(3);
         cb.record_failure();
         assert!(cb.is_allowed());
         cb.record_failure();
         assert!(cb.is_allowed());
         cb.record_failure();
-        assert!(!cb.is_allowed());
+        assert!(cb.is_allowed());
         assert_eq!(cb.state(), CircuitState::Open);
     }
 
