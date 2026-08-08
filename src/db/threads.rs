@@ -534,8 +534,8 @@ pub async fn create_thread_with_cause(
             plan,
             parent_id: resolved_parent_id,
             template: p.template.clone(),
-            workflow_id: None,
-            workflow_step: None,
+            workflow_id: p.workflow_id.clone(),
+            workflow_step: p.workflow_step.clone(),
         },
     )
     .await?;
