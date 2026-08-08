@@ -979,6 +979,46 @@ async fn handle_generate_full(
         ));
     }
 
+    // 2c-ext. Kanban task template — load the thread's template file and
+    // inject it as authoritative guidance (e.g. dev-development.md). The
+    // dispatcher copies the kanban task's `template` field onto the thread;
+    // this block makes the agent actually SEE it. Without this the agent
+    // improvises (thread 109: used a stale scratch compose instead of the
+    // real dev stack because the template was never injected).
+    if let Some(tid) = thread_id {
+        match sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT template FROM threads WHERE id = $1",
+        )
+        .bind(tid)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(Some((template_opt,))) => {
+                let template_name = template_opt.unwrap_or_default();
+                if !template_name.trim().is_empty() {
+                    let tname = template_name.trim().to_string();
+                    match crate::memory_store::load_template(data_dir, &profile_name, &tname) {
+                        Some(content) => {
+                            context_blocks.push(format!(
+                                "=== Task Template: {tname} (MANDATORY — follow this workflow) ===\n{content}"
+                            ));
+                        }
+                        None => {
+                            tracing::warn!(
+                                "thread {} template '{}' not found under profiles/{}/templates",
+                                tid,
+                                tname,
+                                profile_name
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!("Failed to load thread {} template: {}", tid, e),
+        }
+    }
+
     // 2d. Subtasks
     if let Some(tid) = thread_id {
         match get_subtasks(pool, tid).await {
