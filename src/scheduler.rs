@@ -253,7 +253,7 @@ async fn tick(
                 msg_type: "cron".to_string(),
                 msg_subtype: Some(subtype),
                 task_plan: job.plan,
-                template: job.template.clone(),
+                template: job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()),
                 parent_external_id: None,
             },
         )
