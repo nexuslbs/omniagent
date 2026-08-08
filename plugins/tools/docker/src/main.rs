@@ -15,12 +15,12 @@
 //! **Tool API**:
 //! - `project_dir` (required): the compose project directory. Must be the
 //!   workspace dir or a subdirectory of it.
-//! - `compose_file` (optional, default `docker-compose.yml`): the compose file
-//!   relative to `project_dir` (may include subdirectories). Must stay inside
-//!   `project_dir`.
-//! - `env_file` (optional): a `.env`-style file relative to `project_dir`
-//!   (may include subdirectories). Must stay inside `project_dir`. Passed to
-//!   `docker compose --env-file`.
+//! - `compose_file` (optional, default `docker-compose.yml`): the compose file,
+//!   relative to `project_dir` or an absolute path. Must stay inside the
+//!   configured `workspace_dir`.
+//! - `env_file` (optional): a `.env`-style file relative to `project_dir` or
+//!   an absolute path. Must stay inside the configured `workspace_dir`. Passed
+//!   to `docker compose --env-file`.
 
 use anyhow::Result;
 use mcp_server_util::*;
@@ -932,5 +932,121 @@ mod tests {
         let _ = std::process::Command::new("kill")
             .args(["-KILL", &pid.to_string()])
             .status();
+    }
+    // -----------------------------------------------------------------------
+    // resolve_project_file sandbox (R8): compose/env files may live anywhere
+    // inside the configured workspace_dir, not only inside project_dir.
+    // -----------------------------------------------------------------------
+
+    use std::path::PathBuf;
+
+    struct TempDir(PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Throwaway layout: <tmp>/r8_<tag>_<pid>/ containing
+    /// workspace/{proj/docker-compose.yml, proj/sub/compose.yml, proj.env},
+    /// workspace/envs/omnidev.env, and an `outside/evil.env` sibling that
+    /// escapes the workspace. Returns (guard, workspace_root, project_dir).
+    fn make_layout(tag: &str) -> (TempDir, String, String) {
+        let root = std::env::temp_dir().join(format!("r8_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = root.join("workspace");
+        let project = workspace.join("proj");
+        std::fs::create_dir_all(project.join("sub")).unwrap();
+        std::fs::create_dir_all(workspace.join("envs")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::write(project.join("docker-compose.yml"), "services: {}\n").unwrap();
+        std::fs::write(project.join("sub").join("compose.yml"), "services: {}\n").unwrap();
+        std::fs::write(workspace.join("envs").join("omnidev.env"), "A=1\n").unwrap();
+        std::fs::write(workspace.join("proj.env"), "A=1\n").unwrap();
+        std::fs::write(root.join("outside").join("evil.env"), "A=1\n").unwrap();
+        let ws = workspace
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let proj = project
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        (TempDir(root), ws, proj)
+    }
+
+    #[test]
+    fn env_file_inside_workspace_but_outside_project_dir_is_accepted() {
+        // Use case: project_dir=omni-stack, env_file=/opt/workspace/omni-deployer/omnidev.env
+        let (_tmp, ws, proj) = make_layout("env_outside_proj");
+        let env_file = format!("{ws}/envs/omnidev.env");
+        let resolved = resolve_project_file(&env_file, &proj, &ws, "env_file").unwrap();
+        assert_eq!(
+            Path::new(&resolved),
+            Path::new(&env_file).canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn absolute_path_inside_workspace_is_accepted() {
+        let (_tmp, ws, proj) = make_layout("abs_inside");
+        let compose = format!("{proj}/docker-compose.yml");
+        let resolved = resolve_project_file(&compose, &proj, &ws, "compose_file").unwrap();
+        assert_eq!(
+            Path::new(&resolved),
+            Path::new(&compose).canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn file_outside_workspace_is_rejected() {
+        let (_tmp, ws, proj) = make_layout("outside_ws");
+        let outside = Path::new(&ws)
+            .parent()
+            .unwrap()
+            .join("outside")
+            .join("evil.env");
+        let err =
+            resolve_project_file(outside.to_str().unwrap(), &proj, &ws, "env_file").unwrap_err();
+        assert!(
+            err.to_string().contains("workspace"),
+            "expected workspace sandbox error, got: {err}"
+        );
+        // `..` traversal from inside the project must be rejected too.
+        let err =
+            resolve_project_file("../../outside/evil.env", &proj, &ws, "env_file").unwrap_err();
+        assert!(
+            err.to_string().contains("workspace"),
+            "expected workspace sandbox error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn relative_compose_file_inside_project_dir_still_works() {
+        let (_tmp, ws, proj) = make_layout("rel_backcompat");
+        let resolved =
+            resolve_project_file("docker-compose.yml", &proj, &ws, "compose_file").unwrap();
+        assert_eq!(
+            Path::new(&resolved),
+            Path::new(&proj)
+                .join("docker-compose.yml")
+                .canonicalize()
+                .unwrap()
+        );
+        // Subdirectory-relative paths keep working.
+        let resolved = resolve_project_file("sub/compose.yml", &proj, &ws, "compose_file").unwrap();
+        assert_eq!(
+            Path::new(&resolved),
+            Path::new(&proj)
+                .join("sub")
+                .join("compose.yml")
+                .canonicalize()
+                .unwrap()
+        );
     }
 }
