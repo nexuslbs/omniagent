@@ -54,7 +54,13 @@ impl CircuitBreaker {
     }
 
     fn is_allowed(&self) -> bool {
-        !self.open
+        // Aug 2026: ALWAYS true. A circuit breaker must never make a plugin
+        // silently stop working (dropping envelopes) — a counted failure does
+        // not prove the plugin is broken. Real platform failures are handled
+        // by the restart mechanism (restart_count / reload_platform_plugin),
+        // and the supervisor restarts the subprocess. This flag is kept only
+        // for diagnostic symmetry; it never gates delivery.
+        true
     }
 
     fn record_success(&mut self) {
