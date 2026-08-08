@@ -430,6 +430,129 @@ async fn build_prior_attempts_block(pool: &PgPool, thread_id: i64) -> Result<Opt
     }
     Ok(render_prior_attempts_block(rows, &summaries))
 }
+// ---------------------------------------------------------------------------
+// R8-K: learned knowledge - read side of the learning loop. Write side:
+// memory_promote-to-memory writes <data_dir>/profiles/<profile>/wiki/Memory/
+// Promoted/*.md; WITHOUT this read-back the loop is write-only and every
+// successor thread re-derives the same knowledge (6 threads died doing that).
+
+const LEARNED_KNOWLEDGE_MAX_ENTRY_CHARS: usize = 600;
+const LEARNED_KNOWLEDGE_MAX_TOTAL_CHARS: usize = 3000;
+
+/// A single promoted memory: title (filename minus .md) + body (frontmatter
+/// stripped, truncated).
+struct LearnedMemory {
+    title: String,
+    body: String,
+    mtime: Option<std::time::SystemTime>,
+}
+
+/// Strip YAML frontmatter: everything between a leading `---` line and the
+/// closing `---` line is metadata; the durable body is what follows.
+fn strip_frontmatter(content: &str) -> &str {
+    let trimmed = content.trim_start();
+    if let Some(after_open) = trimmed.strip_prefix("---") {
+        if let Some(idx) = after_open.find("\n---") {
+            return after_open[idx + 4..].trim_start();
+        }
+        return trimmed; // unterminated fence - treat whole doc as body
+    }
+    trimmed
+}
+
+/// Read promoted memories from <data_dir>/profiles/<profile>/wiki/Memory/
+/// Promoted/*.md, newest first by mtime. Missing dir / unreadable files are
+/// skipped silently - the learning loop must never fail the prompt.
+fn load_promoted_memories(data_dir: &str, profile_name: &str) -> Vec<LearnedMemory> {
+    let dir = std::path::Path::new(data_dir)
+        .join("profiles")
+        .join(profile_name)
+        .join("wiki")
+        .join("Memory")
+        .join("Promoted");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut memories = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        let title = name.strip_suffix(".md").unwrap_or(&name).to_string();
+        let body = truncate_str(
+            strip_frontmatter(&content).trim(),
+            LEARNED_KNOWLEDGE_MAX_ENTRY_CHARS,
+        );
+        let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        memories.push(LearnedMemory { title, body, mtime });
+    }
+    memories.sort_by_key(|b| std::cmp::Reverse(b.mtime));
+    memories
+}
+
+/// Render the Learned Knowledge context block. Total body chars capped at
+/// LEARNED_KNOWLEDGE_MAX_TOTAL_CHARS; entries beyond the cap are dropped.
+fn render_learned_knowledge_block(memories: &[LearnedMemory]) -> String {
+    let header = "=== Learned Knowledge (promoted memories from prior threads - READ before acting; these are validated facts, do not re-derive them) ===";
+    let mut parts = vec![header.to_string()];
+    let mut total = 0usize;
+    for m in memories {
+        let entry = format!("- **{}**: {}", m.title, m.body);
+        if total + entry.len() > LEARNED_KNOWLEDGE_MAX_TOTAL_CHARS && total > 0 {
+            break;
+        }
+        total += entry.len();
+        parts.push(entry);
+    }
+    parts.join("\n")
+}
+
+/// Build the Learned Knowledge block for this profile. When no promoted
+/// memories exist yet, emit a short hint that teaches the agent the loop
+/// exists (write side: memory_promote-to-memory). Never fails the prompt.
+fn build_learned_knowledge_block(data_dir: &str, profile_name: &str) -> Option<String> {
+    let memories = load_promoted_memories(data_dir, profile_name);
+    if memories.is_empty() {
+        return Some(
+            "=== Learned Knowledge === (none yet - after completing this task, promote what you learned via memory_promote-to-memory so future threads benefit)"
+                .to_string(),
+        );
+    }
+    Some(render_learned_knowledge_block(&memories))
+}
+
+/// Count prior threads of THIS task that ended 'interrupted'. Returns None
+/// for non-task threads (no task_id) or when the lookups fail.
+async fn count_interrupted_attempts(
+    pool: &PgPool,
+    thread_id: i64,
+) -> Result<Option<i64>, anyhow::Error> {
+    let task_id =
+        sqlx::query_scalar::<_, Option<String>>("SELECT task_id FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .fetch_optional(pool)
+            .await?;
+    let task_id = match task_id {
+        Some(Some(t)) => t,
+        _ => return Ok(None),
+    };
+    let count: i64 = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM threads WHERE task_id = $1 AND status = 'interrupted'",
+    )
+    .bind(task_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(Some(count))
+}
+
+// ---------------------------------------------------------------------------
 async fn get_subtasks(pool: &PgPool, thread_id: i64) -> Result<Vec<SubtaskRow>> {
     let rows = sqlx::query_as::<_, SubtaskRow>(
         r#"
@@ -1134,7 +1257,7 @@ async fn handle_generate_full(
                 let template_name = template_opt.unwrap_or_default();
                 if !template_name.trim().is_empty() {
                     let tname = template_name.trim().to_string();
-                    match crate::memory_store::load_template(data_dir, &profile_name, &tname) {
+                    match crate::memory_store::load_template(data_dir, profile_name, &tname) {
                         Some(content) => {
                             context_blocks.push(format!(
                                 "=== Task Template: {tname} (MANDATORY — follow this workflow) ===\n{content}"
@@ -1171,6 +1294,17 @@ async fn handle_generate_full(
         }
     }
 
+    // 2c-ext3. Learned Knowledge (R8-K) - promoted memories written by prior
+    // threads via memory_promote-to-memory live under
+    // <data_dir>/profiles/<profile>/wiki/Memory/Promoted/*.md. Without this
+    // read-back the learning loop is write-only: facts get promoted but never
+    // reach future prompts, so every successor re-derives the same knowledge.
+    // Inject newest-first, truncated; when none exist yet, the block itself
+    // teaches the agent that the loop exists.
+    if let Some(block) = build_learned_knowledge_block(data_dir, profile_name) {
+        context_blocks.push(block);
+    }
+
     // 2d. Subtasks
     if let Some(tid) = thread_id {
         match get_subtasks(pool, tid).await {
@@ -1199,6 +1333,19 @@ async fn handle_generate_full(
             Ok(Some(block)) => context_blocks.push(block),
             Ok(None) => {}
             Err(e) => tracing::warn!("continuation context unavailable: {}", e),
+        }
+    }
+
+    // 2e-ext0. Interrupted-attempt warning (R8-K) - if prior attempts of
+    // this task died at the iteration limit, say so loudly right next to the
+    // continuation block so a successor does not walk into the same trap.
+    if let Some(tid) = thread_id {
+        match count_interrupted_attempts(pool, tid).await {
+            Ok(Some(n)) if n > 0 => context_blocks.push(format!(
+                "WARNING: {} prior attempt(s) of this task were INTERRUPTED (iteration limit). Read their summaries above. If you are about to do what they did, you are repeating a mistake.",
+                n
+            )),
+            _ => {}
         }
     }
 
@@ -2147,10 +2294,10 @@ mod prior_attempts_tests {
     fn prior_attempts_block_truncates_summary_and_caps_entries() {
         let long = "x".repeat(1200);
         let rows: Vec<PriorAttemptRow> = (1..=7i64)
-            .map(|i| pa_row(200 + i, "failed", Some(i), None))
+            .map(|i| pa_row(200 + i, "failed", Some(i as i32), None))
             .collect();
         let mut summaries = std::collections::HashMap::new();
-        summaries.insert(201, Some(long.clone()));
+        summaries.insert(207, Some(long.clone()));
         let block = render_prior_attempts_block(rows, &summaries).expect("block present");
         let block_lines: Vec<&str> = block.lines().collect();
         assert_eq!(block_lines.len(), 1 + PRIOR_ATTEMPTS_MAX_ENTRIES);
@@ -2188,5 +2335,76 @@ mod prior_attempts_tests {
             statuses.contains(&"interrupted"),
             "prior threads must include interrupted ones: {rows:?}"
         );
+    }
+
+    // --- R8-K: learned knowledge ---
+
+    #[test]
+    fn strip_frontmatter_removes_yaml_metadata() {
+        let raw = "---\ntype: memory\nconfidence: high\nexpires_at: 2026-09-08\n---\nThe dev-stack build command is `cd /app && cargo build --release -p mcp-server-prompt`.";
+        let body = strip_frontmatter(raw);
+        assert!(!body.contains("type: memory"), "frontmatter leaked: {body}");
+        assert!(!body.contains("confidence"), "frontmatter leaked: {body}");
+        assert!(body.contains("cargo build"), "body missing: {body}");
+        assert_eq!(strip_frontmatter("plain body"), "plain body");
+        let unterminated = strip_frontmatter("---\ntype: memory\nno closing fence");
+        assert!(unterminated.contains("no closing fence"));
+    }
+
+    #[test]
+    fn learned_knowledge_block_lists_memories_and_orders_newest_first() {
+        let mut mems = vec![
+            LearnedMemory {
+                title: "older".into(),
+                body: "older validated fact".into(),
+                mtime: Some(std::time::SystemTime::UNIX_EPOCH),
+            },
+            LearnedMemory {
+                title: "newer".into(),
+                body: "newer validated fact".into(),
+                mtime: Some(
+                    std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(3600),
+                ),
+            },
+        ];
+        mems.sort_by_key(|b| std::cmp::Reverse(b.mtime));
+        let block = render_learned_knowledge_block(&mems);
+        assert!(block.starts_with("=== Learned Knowledge"));
+        let newer_pos = block.find("**newer**").expect("newer memory missing");
+        let older_pos = block.find("**older**").expect("older memory missing");
+        assert!(newer_pos < older_pos, "newest memory must be listed first");
+        assert!(block.contains("newer validated fact"));
+        assert!(block.contains("older validated fact"));
+    }
+
+    #[test]
+    fn learned_knowledge_block_caps_total_chars() {
+        let mems: Vec<LearnedMemory> = (1..=20i64)
+            .map(|i| LearnedMemory {
+                title: format!("m{i}"),
+                body: "y".repeat(400),
+                mtime: None,
+            })
+            .collect();
+        let block = render_learned_knowledge_block(&mems);
+        assert!(
+            block.len() <= LEARNED_KNOWLEDGE_MAX_TOTAL_CHARS + 600,
+            "block too big: {}",
+            block.len()
+        );
+        assert!(block.contains("**m1**"), "first memory missing from block");
+        assert!(
+            block.len() >= LEARNED_KNOWLEDGE_MAX_TOTAL_CHARS / 2,
+            "cap logic dropped everything: {}",
+            block.len()
+        );
+    }
+
+    #[test]
+    fn learned_knowledge_block_emits_hint_when_no_memories() {
+        let block = build_learned_knowledge_block("/nonexistent/data_dir", "omni")
+            .expect("hint block must be emitted even with no memories");
+        assert!(block.contains("none yet"));
+        assert!(block.contains("memory_promote-to-memory"));
     }
 }
