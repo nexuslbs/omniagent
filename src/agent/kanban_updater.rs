@@ -184,9 +184,27 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
                     ),
                 }
             }
+            Err(e) => {
+                tracing::warn!(
+                    "[workflow] executor done (thread #{}) but tester thread creation FAILED: {}; task {} in review (manual)",
+                    thread.id, e, task_id
+                );
+                let comment = format!(
+                    "Executor done (thread #{}). Task in review — tester thread creation failed: {}. Manual review required.",
+                    thread.id, e
+                );
+                match transition_with_comment(&cfg.pool, task_id, "review", None, &comment).await {
+                    Ok(()) => {}
+                    Err(e2) => tracing::warn!(
+                        "[workflow] failed to move task {} to review: {}",
+                        task_id,
+                        e2
+                    ),
+                }
+            }
             _ => {
                 let comment = format!(
-                    "Executor done (thread #{}). Task in review — tester thread creation failed, manual review required.",
+                    "Executor done (thread #{}). Task in review — tester step skipped (no task_id). Manual review required.",
                     thread.id
                 );
                 match transition_with_comment(&cfg.pool, task_id, "review", None, &comment).await {
@@ -381,6 +399,15 @@ async fn create_review_thread(pool: &sqlx::PgPool, thread: &Thread) -> Result<Op
     Ok(Some(new_id.id))
 }
 
+/// R7-D4: cause used for the testing step thread INSERT. `threads.cause` has
+/// CHECK chk_thread_cause (cause IN ('user','system')); kanban executor threads
+/// carry cause='system', so reusing the parent's cause keeps the INSERT valid.
+/// (Pre-fix code used a free-text description that always violated the CHECK
+/// and silently broke the testing step-thread chain.)
+fn testing_step_cause(parent_cause: &str) -> String {
+    parent_cause.to_string()
+}
+
 /// Create a scheduled `testing` step thread for a completed executor thread (R7-D4,
 /// spec §5). Mirrors `create_review_thread` with workflow_step='testing' and
 /// task_type='kanban' so the workflow test harness can find it.
@@ -396,7 +423,8 @@ async fn create_testing_thread(
         Some(t) if !t.is_empty() => t,
         _ => return Ok(None),
     };
-    let cause = format!("Workflow step: testing. Task: {task_id}");
+    let cause = testing_step_cause(&thread.cause);
+    let cause_msg = format!("Workflow step: testing. Task: {task_id}");
     let wf_id = thread_workflow_id(pool, thread.id)
         .await
         .unwrap_or_default();
@@ -423,7 +451,7 @@ async fn create_testing_thread(
          VALUES ($1, 'cause', $2, 0, 'cause')",
     )
     .bind(new_id.id)
-    .bind(cause)
+    .bind(cause_msg)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -562,5 +590,23 @@ mod tests {
             route_completed_thread("running", false, false, false),
             CompletedRoute::ReviewManual
         );
+    }
+    #[test]
+    fn testing_thread_cause_is_check_valid() {
+        // R7-D4 regression: create_testing_thread binds threads.cause, which has
+        // CHECK chk_thread_cause (cause IN ('user','system')). The pre-fix
+        // free-text cause ("Workflow step: testing. Task: {id}") always violated
+        // the constraint, silently breaking the testing step-thread chain. The
+        // cause must be inherited from the parent thread ('system' for
+        // kanban-dispatched executor threads).
+        for parent in ["user", "system"] {
+            let cause = testing_step_cause(parent);
+            assert_eq!(cause, parent);
+            assert!(
+                cause == "user" || cause == "system",
+                "testing thread cause must satisfy chk_thread_cause, got {:?}",
+                cause
+            );
+        }
     }
 }

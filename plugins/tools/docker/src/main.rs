@@ -82,6 +82,7 @@ fn resolve_project_dir(project_dir: &str, configured_workspace: &str) -> Result<
 /// - an absolute path ANYWHERE inside the configured workspace_dir
 ///   (e.g. `/opt/workspace/omni-deployer/omnidev.env` while the compose
 ///   project lives in `/opt/workspace/omni-stack`).
+///
 /// The workspace root is the sandbox boundary: files outside it are rejected.
 fn resolve_project_file(
     file: &str,

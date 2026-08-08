@@ -84,7 +84,10 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
             patch(change_position_handler),
         )
         // 7. Update task fields
-        .route("/kanban/tasks/{id}", patch(update_task_handler))
+        .route(
+            "/kanban/tasks/{id}",
+            patch(update_task_handler).put(update_task_handler),
+        )
         // 8. Delete task
         .route("/kanban/tasks/{id}", delete(delete_task_handler))
         // 9. Threads

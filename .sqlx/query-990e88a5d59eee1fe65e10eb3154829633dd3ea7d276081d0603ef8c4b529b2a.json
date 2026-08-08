@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO kanban_tasks\n            (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)\n        VALUES\n            ($1, $2, $3, $4, $5, NULLIF($6, 0::bigint), NULLIF($7, '')::text,\n             $8, NULLIF($9, '')::text, $10::boolean, NULLIF($11, '')::text, NULLIF($12, '')::text)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Int8",
+        "Text",
+        "Int4",
+        "Text",
+        "Bool",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "990e88a5d59eee1fe65e10eb3154829633dd3ea7d276081d0603ef8c4b529b2a"
+}
