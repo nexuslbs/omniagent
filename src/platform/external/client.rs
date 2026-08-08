@@ -115,6 +115,11 @@ pub struct ExternalPlatformClient {
     stopped: Arc<AtomicBool>,
     /// Notifier for waking up the inner loop on restart/stop.
     restart_notify: Arc<Notify>,
+    /// DB pool for resolving $secret: refs directly. read_file must NOT make
+    /// re-entrant HTTP calls back into omniagent's own server: the child's
+    /// callback would need a tokio worker while the parent blocks one in
+    /// std::io read_line — with few workers that deadlocks the whole runtime.
+    pool: Arc<StdMutex<Option<PgPool>>>,
 }
 
 impl ExternalPlatformClient {
@@ -156,6 +161,7 @@ impl ExternalPlatformClient {
             restart_count,
             stopped,
             restart_notify,
+            pool: Arc::new(StdMutex::new(None)),
         }
     }
 
@@ -307,6 +313,9 @@ impl Platform for ExternalPlatformClient {
     }
 
     async fn start(&self, pool: PgPool, mut receiver: OutboundReceiver) -> AppResult<()> {
+        // Store the pool so read_file can resolve $secret: refs directly
+        // (no re-entrant HTTP call into the omniagent server).
+        *self.pool.lock() = Some(pool.clone());
         tracing::info!("Starting external platform plugin '{}'", self.name);
 
         // Track consecutive failures with exponential backoff for the spawn loop
@@ -1297,16 +1306,38 @@ impl Platform for ExternalPlatformClient {
                 config.config.clone(),
             )
         };
-        // The plugin needs its access_token_name to resolve its own token.
-        // Pass it via the request — no env vars, no OMNI_DIR.
         let access_token_name = config_map
             .get("access_token_name")
             .map(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
-        // Spawn the plugin with "read-file" argument (one-shot mode)
-        let mut child = std::process::Command::new(&command)
+        // Resolve the access token VALUE directly via the DB pool. Passing the
+        // value (not just the name) means the child never needs to call back
+        // into omniagent's HTTP server — a re-entrant callback while the
+        // parent blocks a tokio worker in std I/O deadlocks the runtime with
+        // few workers (observed: 2-CPU deploy, HTTP server wedged, all tests
+        // timing out after G12).
+        let access_token_value = if access_token_name.is_empty() {
+            String::new()
+        } else {
+            let pool_opt = self.pool.lock().clone();
+            match pool_opt {
+                Some(pool) => {
+                    crate::plugins_yaml::resolve_config_ref_value(
+                        &format!("$secret:{}", access_token_name),
+                        &pool,
+                    )
+                    .await
+                }
+                None => String::new(),
+            }
+        };
+
+        // Spawn the plugin with "read-file" argument (one-shot mode).
+        // Use tokio::process so the parent never blocks a runtime worker on
+        // synchronous pipe I/O.
+        let mut child = tokio::process::Command::new(&command)
             .arg("read-file")
             .args(&args)
             .env_clear()
@@ -1335,20 +1366,16 @@ impl Platform for ExternalPlatformClient {
             ))
         })?;
 
-        // Send file_id, server_url, and access_token_name via stdin, then close
-        // stdin (EOF signals start)
-        use std::io::Write;
+        // Send file_id, server_url, access_token_name, and the resolved token
+        // value via stdin, then close stdin (EOF signals start).
         let request = serde_json::json!({
             "file_id": file_id,
             "server_url": server_url,
             "access_token_name": access_token_name,
+            "access_token": access_token_value,
         });
-        writeln!(
-            stdin,
-            "{}",
-            serde_json::to_string(&request).unwrap_or_default()
-        )
-        .map_err(|e| {
+        let req_line = format!("{}\n", serde_json::to_string(&request).unwrap_or_default());
+        stdin.write_all(req_line.as_bytes()).await.map_err(|e| {
             crate::error::Error::Message(format!(
                 "Failed to send read-file request to '{}': {}",
                 plugin_name, e
@@ -1356,20 +1383,35 @@ impl Platform for ExternalPlatformClient {
         })?;
         drop(stdin); // Close stdin — signals plugin to process and exit
 
-        // Read response from stdout
-        let mut reader = std::io::BufReader::new(stdout);
+        // Read response from stdout with a hard timeout. NEVER block a tokio
+        // worker synchronously: the child may take time, but the runtime must
+        // keep serving other requests (HTTP, other channels) meanwhile.
+        let mut reader = tokio::io::BufReader::new(stdout);
         let mut line = String::new();
-        use std::io::BufRead;
-        reader.read_line(&mut line).map_err(|e| {
-            crate::error::Error::Message(format!(
-                "Failed to read read-file response from '{}': {}",
-                plugin_name, e
-            ))
-        })?;
+        let read_timeout = std::time::Duration::from_secs(60);
+        let read_res = tokio::time::timeout(read_timeout, reader.read_line(&mut line)).await;
+        match read_res {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                let _ = child.kill().await;
+                return Err(crate::error::Error::Message(format!(
+                    "Failed to read read-file response from '{}': {}",
+                    plugin_name, e
+                )));
+            }
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err(crate::error::Error::Message(format!(
+                    "Plugin '{}' read-file timed out after {}s",
+                    plugin_name,
+                    read_timeout.as_secs()
+                )));
+            }
+        }
 
-        // Wait for child to exit (with timeout)
+        // Wait for child to exit (bounded; kill if it lingers).
         let start = std::time::Instant::now();
-        let max_wait = std::time::Duration::from_secs(30);
+        let max_wait = std::time::Duration::from_secs(10);
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -1384,13 +1426,14 @@ impl Platform for ExternalPlatformClient {
                 }
                 Ok(None) => {
                     if start.elapsed() >= max_wait {
-                        let _ = child.kill();
-                        return Err(crate::error::Error::Message(format!(
-                            "Plugin '{}' read-file timed out",
+                        let _ = child.kill().await;
+                        tracing::warn!(
+                            "Plugin '{}' read-file lingered after response; killed",
                             plugin_name
-                        )));
+                        );
+                        break;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(e) => {
                     return Err(crate::error::Error::Message(format!(

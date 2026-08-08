@@ -2221,26 +2221,36 @@ async fn handle_read_file() -> Result<()> {
     // plugin's config). No env vars, no plugins.yml reads.
     let access_token_name = request["access_token_name"].as_str().unwrap_or("");
 
-    let access_token = if access_token_name.is_empty() {
-        None
-    } else {
-        // Resolve the secret via omniagent secrets API. Read-file mode has no
-        // configure message, so use the default agent API base (localhost:8080
-        // — the plugin is co-located with omniagent).
-        let client = reqwest::Client::new();
-        let secret_url = format!("http://localhost:8080/secrets/{}", access_token_name);
-        match client.get(&secret_url).send().await {
-            Ok(resp) => {
-                if let Ok(body) = resp.json::<serde_json::Value>().await {
-                    body.get("data")
-                        .and_then(|d| d.get("current_value"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                } else {
-                    None
+    // The core now resolves the token VALUE and sends it directly — the
+    // one-shot read-file process must NOT call back into omniagent's HTTP
+    // server (re-entrant callback + parent blocking on the pipe = deadlock).
+    // Fall back to the secrets API only when no value was provided.
+    let access_token = {
+        let passed = request["access_token"].as_str().unwrap_or("");
+        if !passed.is_empty() {
+            Some(passed.to_string())
+        } else if access_token_name.is_empty() {
+            None
+        } else {
+            // Legacy fallback: resolve via omniagent secrets API.
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
+            let secret_url = format!("http://localhost:8080/secrets/{}", access_token_name);
+            match client.get(&secret_url).send().await {
+                Ok(resp) => {
+                    if let Ok(body) = resp.json::<serde_json::Value>().await {
+                        body.get("data")
+                            .and_then(|d| d.get("current_value"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    } else {
+                        None
+                    }
                 }
+                Err(_) => None,
             }
-            Err(_) => None,
         }
     };
 
