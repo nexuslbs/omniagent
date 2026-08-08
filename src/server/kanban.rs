@@ -1975,6 +1975,7 @@ struct DispatchTaskDetailRow {
     channel_id: Option<i64>,
     profile: Option<String>,
     template: Option<String>,
+    workflow_id: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -2139,7 +2140,7 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
     let detail = match sql_forge!(
         DispatchTaskDetailRow,
         r#"
-        SELECT id, title, body, channel_id, profile, template
+        SELECT id, title, body, channel_id, profile, template, workflow_id
         FROM kanban_tasks
         WHERE id = :id
         "#,
@@ -2228,6 +2229,8 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         msg_subtype: Some(detail.id.clone()),
         task_plan: None,
         template: resolved_template,
+        workflow_id: detail.workflow_id.clone(),
+        workflow_step: Some("running".to_string()),
     };
 
     let (thread, _message) = match create_thread_with_cause(

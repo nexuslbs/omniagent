@@ -325,6 +325,8 @@ pub struct ThreadCauseParams {
     pub msg_subtype: Option<String>,
     pub task_plan: Option<bool>,
     pub template: Option<String>,
+    pub workflow_id: Option<String>,
+    pub workflow_step: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

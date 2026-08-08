@@ -255,6 +255,8 @@ async fn tick(
                 task_plan: job.plan,
                 template: job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()),
                 parent_external_id: None,
+            workflow_id: None,
+            workflow_step: None,
             },
         )
         .await
@@ -632,6 +634,8 @@ async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
             msg_subtype: Some(subtype),
             task_plan: ctx.job.plan,
             parent_external_id: None,
+        workflow_id: None,
+        workflow_step: None,
         },
     )
     .await?;
@@ -940,6 +944,8 @@ pub async fn fire_cron_job_by_id(
             msg_subtype: Some(subtype),
             task_plan: job.plan,
             parent_external_id: None,
+        workflow_id: None,
+        workflow_step: None,
         },
     )
     .await?;
