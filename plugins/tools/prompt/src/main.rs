@@ -291,6 +291,145 @@ async fn get_threads_since(
     Ok(rows)
 }
 
+// ---------------------------------------------------------------------------
+// R8-J: prior attempts of the SAME task — the prompt must pass past context.
+// Earlier threads of this kanban task (ALL statuses, not just completed)
+// with their final summaries, so a successor knows what prior attempts did
+// and why they died. Threads 113/138/140/155 each burned 100-120 calls
+// re-deriving the same harness knowledge because this context never reached
+// them — 6 budget-deaths total.
+// ---------------------------------------------------------------------------
+
+const PRIOR_ATTEMPTS_MAX_ENTRIES: usize = 5;
+const PRIOR_ATTEMPTS_MAX_SUMMARY_CHARS: usize = 800;
+
+#[derive(Debug, FromRow)]
+struct PriorAttemptRow {
+    id: i64,
+    status: String,
+    iterations: Option<i32>,
+    ended_at: Option<String>,
+}
+
+/// Prior threads of the SAME kanban task (R8-J): ALL statuses (completed /
+/// interrupted / failed / ...), newest first, capped at `limit`. Earlier
+/// attempts hold exactly the knowledge a successor needs — what was done,
+/// what died, why — but `get_threads_since` filters status='completed' and
+/// is therefore deliberately NOT reused here.
+async fn get_prior_threads_by_task(
+    pool: &PgPool,
+    task_id: &str,
+    current_thread_id: i64,
+    limit: i64,
+) -> Result<Vec<PriorAttemptRow>> {
+    let rows = sqlx::query_as::<_, PriorAttemptRow>(
+        r#"
+        SELECT id, status, iterations,
+               TO_CHAR(ended_at, 'YYYY-MM-DD HH24:MI') AS ended_at
+        FROM threads
+        WHERE task_id = $1
+          AND (task_type = 'kanban' OR task_type IS NULL)
+          AND id < $2
+        ORDER BY id DESC
+        LIMIT $3
+        "#,
+    )
+    .bind(task_id)
+    .bind(current_thread_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch prior threads of task")?;
+
+    Ok(rows)
+}
+
+/// The thread's final summary message (msg_type='summary') if it produced
+/// one — this is the report a thread leaves behind for its successor.
+async fn get_thread_summary(pool: &PgPool, thread_id: i64) -> Result<Option<String>> {
+    let row = sqlx::query_as::<_, (String,)>(
+        "SELECT content FROM messages WHERE thread_id = $1 AND msg_type = 'summary' ORDER BY id DESC LIMIT 1",
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to fetch thread summary")?;
+
+    Ok(row.map(|(content,)| content))
+}
+
+/// Pure renderer for the prior-attempts block (R8-J). Every prior thread is
+/// listed with id/status/iterations/ended_at plus its summary excerpt when
+/// one exists — a thread with NO summary is still listed (its very existence
+/// warns the successor). Returns None when there are no prior threads.
+fn render_prior_attempts_block(
+    rows: Vec<PriorAttemptRow>,
+    summaries: &std::collections::HashMap<i64, Option<String>>,
+) -> Option<String> {
+    let mut rows = rows;
+    rows.sort_by_key(|r| std::cmp::Reverse(r.id));
+    rows.truncate(PRIOR_ATTEMPTS_MAX_ENTRIES);
+    if rows.is_empty() {
+        return None;
+    }
+    let mut lines = vec![
+        "=== Previous attempts of this task (READ — do NOT repeat what they did) ===".to_string(),
+    ];
+    for r in &rows {
+        let iterations = r
+            .iterations
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        let ended_at = r.ended_at.as_deref().unwrap_or("?");
+        let summary = summaries.get(&r.id).and_then(|s| s.as_deref());
+        match summary {
+            Some(s) => lines.push(format!(
+                "- thread {} | status {} | iterations {} | ended_at {} | summary: {}",
+                r.id,
+                r.status,
+                iterations,
+                ended_at,
+                truncate_str(s, PRIOR_ATTEMPTS_MAX_SUMMARY_CHARS)
+            )),
+            None => lines.push(format!(
+                "- thread {} | status {} | iterations {} | ended_at {} | (no summary message)",
+                r.id, r.status, iterations, ended_at
+            )),
+        }
+    }
+    Some(lines.join("\n"))
+}
+
+/// Build the prior-attempts block for the current thread (R8-J): earlier
+/// threads of the SAME kanban task, all statuses, with their summaries.
+/// Plain (non-task) threads get no block; any failure degrades gracefully
+/// to no block (the prompt must never fail because history is unavailable).
+async fn build_prior_attempts_block(pool: &PgPool, thread_id: i64) -> Result<Option<String>> {
+    let task_id =
+        sqlx::query_as::<_, (Option<String>,)>("SELECT task_id FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .fetch_optional(pool)
+            .await
+            .context("Failed to fetch thread task_id")?;
+    let Some((Some(task_id),)) = task_id else {
+        return Ok(None); // plain thread — no same-task history
+    };
+
+    let rows =
+        get_prior_threads_by_task(pool, &task_id, thread_id, PRIOR_ATTEMPTS_MAX_ENTRIES as i64)
+            .await?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut summaries = std::collections::HashMap::new();
+    for r in &rows {
+        summaries.insert(
+            r.id,
+            get_thread_summary(pool, r.id).await.unwrap_or_default(),
+        );
+    }
+    Ok(render_prior_attempts_block(rows, &summaries))
+}
 async fn get_subtasks(pool: &PgPool, thread_id: i64) -> Result<Vec<SubtaskRow>> {
     let rows = sqlx::query_as::<_, SubtaskRow>(
         r#"
@@ -1014,6 +1153,21 @@ async fn handle_generate_full(
             }
             Ok(None) => {}
             Err(e) => tracing::warn!("Failed to load thread {} template: {}", tid, e),
+        }
+    }
+
+    // 2c-ext2. Previous attempts of the SAME task (R8-J) — earlier threads
+    // of this kanban task, ALL statuses, with their final summaries. Placed
+    // right after the template so the agent reads "what to do" and "what was
+    // already tried (and died)" together — a successor must never re-derive
+    // harness knowledge a prior thread already documented (6 budget-deaths:
+    // threads 113/138/140/155 burned 100-120 calls each re-exploring the
+    // same ground because this context never reached them).
+    if let Some(tid) = thread_id {
+        match build_prior_attempts_block(pool, tid).await {
+            Ok(Some(block)) => context_blocks.push(block),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("Prior attempts context unavailable: {}", e),
         }
     }
 
@@ -1931,6 +2085,108 @@ mod cross_task_tests {
                 )]
             ),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod prior_attempts_tests {
+    use super::*;
+
+    fn pa_row(
+        id: i64,
+        status: &str,
+        iterations: Option<i32>,
+        ended_at: Option<&str>,
+    ) -> PriorAttemptRow {
+        PriorAttemptRow {
+            id,
+            status: status.to_string(),
+            iterations,
+            ended_at: ended_at.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn prior_attempts_block_lists_all_statuses_with_summaries() {
+        // (a) ALL statuses are listed (not just completed) — interrupted
+        // threads hold the "what died and why" knowledge.
+        let rows = vec![
+            pa_row(140, "interrupted", Some(120), Some("2026-08-08 03:10")),
+            pa_row(155, "interrupted", Some(100), Some("2026-08-08 04:40")),
+            pa_row(156, "completed", Some(45), Some("2026-08-08 04:43")),
+        ];
+        let mut summaries = std::collections::HashMap::new();
+        summaries.insert(
+            140,
+            Some("The harness is the dev stack under /opt/workspace/omniagent".to_string()),
+        );
+        // thread 155 left NO summary -> still listed with status + iterations
+        summaries.insert(155, None);
+        summaries.insert(
+            156,
+            Some("R8-H COMPLETE: commit 3abfca6 pushed to main".to_string()),
+        );
+        let block = render_prior_attempts_block(rows, &summaries).expect("block present");
+        assert!(block.starts_with(
+            "=== Previous attempts of this task (READ — do NOT repeat what they did) ==="
+        ));
+        // newest first
+        assert!(block.contains(
+            "thread 156 | status completed | iterations 45 | ended_at 2026-08-08 04:43 | summary: R8-H COMPLETE"
+        ));
+        assert!(block.contains(
+            "thread 155 | status interrupted | iterations 100 | ended_at 2026-08-08 04:40 | (no summary message)"
+        ));
+        assert!(block.contains(
+            "thread 140 | status interrupted | iterations 120 | ended_at 2026-08-08 03:10 | summary: The harness is the dev stack"
+        ));
+    }
+
+    #[test]
+    fn prior_attempts_block_truncates_summary_and_caps_entries() {
+        let long = "x".repeat(1200);
+        let rows: Vec<PriorAttemptRow> = (1..=7i64)
+            .map(|i| pa_row(200 + i, "failed", Some(i), None))
+            .collect();
+        let mut summaries = std::collections::HashMap::new();
+        summaries.insert(201, Some(long.clone()));
+        let block = render_prior_attempts_block(rows, &summaries).expect("block present");
+        let block_lines: Vec<&str> = block.lines().collect();
+        assert_eq!(block_lines.len(), 1 + PRIOR_ATTEMPTS_MAX_ENTRIES);
+        assert!(block_lines[1].contains(&format!(
+            "{}...",
+            "x".repeat(PRIOR_ATTEMPTS_MAX_SUMMARY_CHARS)
+        )));
+        assert!(!block_lines[1].contains(&"x".repeat(PRIOR_ATTEMPTS_MAX_SUMMARY_CHARS + 1)));
+        // newest first
+        assert!(block_lines[1].contains("thread 207"));
+    }
+
+    #[test]
+    fn prior_attempts_block_omitted_when_no_prior_threads() {
+        assert_eq!(
+            render_prior_attempts_block(vec![], &std::collections::HashMap::new()),
+            None
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn get_prior_threads_by_task_returns_interrupted_threads() {
+        // task_18c9b88db4f55f65 (R7-D4): thread 155 interrupted, 156
+        // completed. The query must return BOTH — completed-only filtering
+        // is exactly the bug this change fixes.
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let pool = connect_db(&url).await.expect("connect_db");
+        let rows = get_prior_threads_by_task(&pool, "task_18c9b88db4f55f65", 999999, 10)
+            .await
+            .expect("query ok");
+        assert!(!rows.is_empty(), "expected prior threads for task");
+        let statuses: Vec<&str> = rows.iter().map(|r| r.status.as_str()).collect();
+        assert!(
+            statuses.contains(&"interrupted"),
+            "prior threads must include interrupted ones: {rows:?}"
         );
     }
 }

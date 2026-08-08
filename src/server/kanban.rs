@@ -2023,6 +2023,20 @@ fn resolve_template(task_template: Option<&str>, channel_template: Option<&str>)
         .or_else(|| channel_template.filter(|t| !t.is_empty()))
         .map(str::to_string)
 }
+/// Resolve the template for a DISPATCHED thread (R8-J): task.template ->
+/// channel.template -> "dev-development" (NEVER None). The dev kanban
+/// channel dispatches dev tasks, so dev-development is the safe general
+/// default; guaranteeing a non-empty template means the prompt builder
+/// always injects the workflow guidance instead of silently skipping it
+/// (an empty threads.template was the root cause of 6 budget-deaths:
+/// threads 113/138/140/155 never saw the dev-development template).
+fn resolve_dispatch_template(
+    task_template: Option<&str>,
+    channel_template: Option<&str>,
+) -> String {
+    resolve_template(task_template, channel_template)
+        .unwrap_or_else(|| "dev-development".to_string())
+}
 
 /// Resolve the effective profile: task.profile -> channel.current_profile -> default.
 fn resolve_profile(
@@ -2208,8 +2222,13 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         .filter(|m| !m.is_empty())
         .unwrap_or("gpt-4o")
         .to_string();
+    // R8-J: a dispatched thread must ALWAYS carry a template — an empty
+    // threads.template meant the prompt builder never injected the workflow
+    // guidance and agents improvised instead of following the dev template
+    // (root cause of 6 budget-deaths). Default to "dev-development" when
+    // neither the task nor the channel specifies one.
     let resolved_template =
-        resolve_template(detail.template.as_deref(), channel.template.as_deref());
+        resolve_dispatch_template(detail.template.as_deref(), channel.template.as_deref());
 
     // 5. Build the thread-cause params and start the thread.
     let params = ThreadCauseParams {
@@ -2228,7 +2247,7 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         msg_type: "kanban".to_string(),
         msg_subtype: Some(detail.id.clone()),
         task_plan: None,
-        template: resolved_template,
+        template: Some(resolved_template),
         workflow_id: detail.workflow_id.clone(),
         workflow_step: Some("running".to_string()),
     };
@@ -2329,6 +2348,25 @@ mod tests {
         // Empty templates resolve to None.
         assert_eq!(resolve_template(Some(""), Some("")), None);
         assert_eq!(resolve_template(None, None), None);
+        // R8-J: dispatched threads must NEVER get an empty template — the
+        // dispatch default fills in dev-development so the prompt builder
+        // always injects the workflow guidance.
+        assert_eq!(
+            resolve_dispatch_template(Some("task-tpl"), Some("channel-tpl")),
+            "task-tpl".to_string()
+        );
+        assert_eq!(
+            resolve_dispatch_template(None, Some("channel-tpl")),
+            "channel-tpl".to_string()
+        );
+        assert_eq!(
+            resolve_dispatch_template(Some(""), Some("")),
+            "dev-development".to_string()
+        );
+        assert_eq!(
+            resolve_dispatch_template(None, None),
+            "dev-development".to_string()
+        );
 
         // Profile chain: task -> channel -> default.
         assert_eq!(
