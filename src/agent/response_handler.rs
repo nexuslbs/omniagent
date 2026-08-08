@@ -66,6 +66,14 @@ pub(crate) async fn handle_response(
                 cloned
             })
             .collect();
+        // Include a compact digest of tool activity so the summarizer can see
+        // what the agent actually did (file writes, git commits, test results).
+        if let Some(digest) = build_tool_evidence_digest(messages) {
+            summary_msgs.push(ChatMessage::system(&format!(
+                "Tool activity evidence from this thread (tool results, newest first):\n{}",
+                digest
+            )));
+        }
         let iter_summary = format!(
             "The iteration limit ({}/{}) was reached so the task may be incomplete. \
              Summarize what was accomplished (including what the agent did and found) and what remains to be done. \
@@ -150,7 +158,86 @@ pub(crate) async fn handle_response(
         .await;
         summary_saved
     } else if is_empty_response {
-        let agent_content = format!(
+        if let Some(digest) = build_tool_evidence_digest(messages) {
+            // The agent returned no final message but did perform tool activity:
+            // summarize what was accomplished from the tool evidence instead of
+            // reporting a bare "empty response" error.
+            let mut summary_msgs = strip_tool_messages(messages);
+            summary_msgs.push(ChatMessage::system(&format!(
+                "The agent returned an empty final message, but the following tool activity \
+                 was recorded (tool results, newest first):\n{}",
+                digest
+            )));
+            let iter_summary = "The agent produced no final message, but tool activity was \
+                 recorded. Summarize what was accomplished (including what the agent did \
+                 and found) and what remains to be done.";
+            summary_msgs.push(ChatMessage::system(iter_summary));
+            let summary_request = CompletionRequest {
+                messages: summary_msgs,
+                max_tokens: cfg.config_snapshot().thread_summary_tokens,
+                temperature: 0.3,
+                stream: false,
+                tools: None,
+            };
+            let (summary_text, _summary_token_usage) =
+                match per_thread_llm.completion(summary_request).await {
+                    Ok(resp) => {
+                        let tokens = resp
+                            .usage
+                            .as_ref()
+                            .map(|u| u.prompt_tokens + u.completion_tokens);
+                        info!(
+                            "[summary] Empty-final summary generated for thread {} ({} tokens)",
+                            thread.id,
+                            tokens.unwrap_or(0),
+                        );
+                        let text = if resp.content.trim().is_empty() {
+                            resp.reasoning.clone().unwrap_or_default()
+                        } else {
+                            resp.content
+                        };
+                        (text, tokens)
+                    }
+                    Err(e) => {
+                        warn!(
+                            "[summary] Failed to generate empty-final summary for thread {}: {:?}",
+                            thread.id, e
+                        );
+                        (format!("Summary generation failed: {}", e), None)
+                    }
+                };
+            let summary_msg = MessageNew {
+                thread_id: thread.id,
+                role: "agent".to_string(),
+                content: summary_text,
+                thread_sequence: next_seq,
+                external_id: None,
+                metadata: serde_json::json!({}),
+                embedding: None,
+                summary_text: None,
+                is_summary: true,
+                msg_type: "summary".to_string(),
+                msg_subtype: Some("activity_summary".to_string()),
+                iteration_number: current_iter,
+                duration_ms: 0,
+                token_usage: serde_json::json!({}),
+            };
+            let summary_saved = queries::create_message(&cfg.pool, &summary_msg).await?;
+            info!(
+                "[summary] Saved empty-final summary message for thread {}",
+                thread.id
+            );
+            helpers::enqueue_delivery(
+                &cfg.ctx,
+                &summary_saved,
+                channel,
+                thread,
+                cause_msg.external_id.clone(),
+            )
+            .await;
+            summary_saved
+        } else {
+            let agent_content = format!(
             "The LLM returned an empty response. The task failed.\n\
              Possible causes: token explosion (context too large), provider error, or LLM output limits.\n\
              Prompt tokens used in this turn: {}",
@@ -160,35 +247,36 @@ pub(crate) async fn handle_response(
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "unknown".to_string())
         );
-        let agent_msg = MessageNew {
-            thread_id: thread.id,
-            role: "agent".to_string(),
-            content: agent_content,
-            thread_sequence: next_seq,
-            external_id: None,
-            metadata: serde_json::json!({
-                "context": evidence_metadata["context"],
-                "grounding": evidence_metadata["grounding"],
-            }),
-            embedding: None,
-            summary_text: None,
-            is_summary: false,
-            msg_type: "error".to_string(),
-            msg_subtype: Some("empty_response".to_string()),
-            iteration_number: current_iter,
-            duration_ms: 0,
-            token_usage: serde_json::json!({}),
-        };
-        let saved = queries::create_message(&cfg.pool, &agent_msg).await?;
-        helpers::enqueue_delivery(
-            &cfg.ctx,
-            &saved,
-            channel,
-            thread,
-            cause_msg.external_id.clone(),
-        )
-        .await;
-        saved
+            let agent_msg = MessageNew {
+                thread_id: thread.id,
+                role: "agent".to_string(),
+                content: agent_content,
+                thread_sequence: next_seq,
+                external_id: None,
+                metadata: serde_json::json!({
+                    "context": evidence_metadata["context"],
+                    "grounding": evidence_metadata["grounding"],
+                }),
+                embedding: None,
+                summary_text: None,
+                is_summary: false,
+                msg_type: "error".to_string(),
+                msg_subtype: Some("empty_response".to_string()),
+                iteration_number: current_iter,
+                duration_ms: 0,
+                token_usage: serde_json::json!({}),
+            };
+            let saved = queries::create_message(&cfg.pool, &agent_msg).await?;
+            helpers::enqueue_delivery(
+                &cfg.ctx,
+                &saved,
+                channel,
+                thread,
+                cause_msg.external_id.clone(),
+            )
+            .await;
+            saved
+        }
     } else {
         // Normal completion: the agent's final message IS the summary
         let agent_msg = MessageNew {
@@ -318,4 +406,134 @@ pub(crate) async fn handle_response(
     crate::agent::summary_trigger::trigger_summary_and_cleanup(cfg, thread).await;
 
     Ok(saved)
+}
+
+/// Maximum number of tool messages included in the tool-evidence digest.
+const MAX_DIGEST_TOOL_MSGS: usize = 30;
+/// Maximum number of characters kept from each tool message's output.
+const MAX_DIGEST_TOOL_CHARS: usize = 300;
+
+/// Build a compact, bounded digest of tool activity from the thread's tool
+/// messages (newest first). Returns `None` when the thread has no tool
+/// messages. Each entry is `[tool] <name> <truncated output>` — enough for
+/// the summarizer to see file writes, git commits, and test results without
+/// blowing the summary token budget. Plain text in a `system` message, so the
+/// DeepSeek tool_call/tool-result chain requirement is never reintroduced.
+fn build_tool_evidence_digest(messages: &[ChatMessage]) -> Option<String> {
+    let tool_msgs: Vec<&ChatMessage> = messages
+        .iter()
+        .filter(|m| m.role == "tool")
+        .rev()
+        .take(MAX_DIGEST_TOOL_MSGS)
+        .collect();
+    if tool_msgs.is_empty() {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(tool_msgs.len());
+    for m in tool_msgs {
+        let name = m.name.clone().unwrap_or_else(|| "tool".to_string());
+        let preview: String = m.content.chars().take(MAX_DIGEST_TOOL_CHARS).collect();
+        let truncated = preview.chars().count() < m.content.chars().count();
+        let output = if truncated {
+            format!("{}…", preview)
+        } else {
+            preview
+        };
+        entries.push(format!("[tool] {} {}", name, output));
+    }
+    Some(entries.join("\n"))
+}
+
+/// Clone the conversation without tool-result messages, stripping assistant
+/// `tool_calls` so the tool_call/tool-result chain requirement is not
+/// violated when raw tool messages are not passed back to the model.
+fn strip_tool_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    messages
+        .iter()
+        .filter(|m| m.role != "tool")
+        .map(|m| {
+            let mut cloned = m.clone();
+            if cloned.role == "assistant" && cloned.tool_calls.is_some() {
+                cloned.tool_calls = None;
+            }
+            cloned
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_msg(name: &str, content: &str) -> ChatMessage {
+        ChatMessage::tool_result("call_1", name, content)
+    }
+
+    #[test]
+    fn digest_includes_tool_names_and_truncated_output() {
+        let long = "x".repeat(1000);
+        let msgs = vec![
+            ChatMessage::user("hi"),
+            tool_msg("filesystem_write", &format!("wrote file /tmp/a {}", long)),
+            tool_msg("git_commit-and-push", "pushed commit abc123"),
+        ];
+        let digest = build_tool_evidence_digest(&msgs).expect("digest should exist");
+        assert!(digest.contains("[tool] filesystem_write"));
+        assert!(digest.contains("[tool] git_commit-and-push"));
+        assert!(digest.contains("wrote file /tmp/a"));
+        // The long output is truncated, so the digest is far smaller than raw.
+        assert!(digest.contains('…'));
+        assert!(digest.len() < 500);
+    }
+
+    #[test]
+    fn digest_is_bounded() {
+        let msgs: Vec<ChatMessage> = (0..50)
+            .map(|i| tool_msg(&format!("tool_{}", i), &"y".repeat(500)))
+            .collect();
+        let digest = build_tool_evidence_digest(&msgs).expect("digest should exist");
+        // Only the last MAX_DIGEST_TOOL_MSGS are included, newest first.
+        assert_eq!(digest.lines().count(), MAX_DIGEST_TOOL_MSGS);
+        assert!(digest.contains("[tool] tool_49"));
+        assert!(!digest.contains("[tool] tool_0"));
+        // Each entry's output portion is bounded to MAX_DIGEST_TOOL_CHARS + 1 (ellipsis).
+        for entry in digest.lines() {
+            let body = entry.strip_prefix("[tool] ").unwrap_or(entry);
+            let name_end = body.find(' ').unwrap_or(0);
+            let output = &body[name_end + 1..];
+            assert!(output.chars().count() <= MAX_DIGEST_TOOL_CHARS + 1);
+        }
+    }
+
+    #[test]
+    fn digest_none_without_tool_messages() {
+        let msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("hi"),
+            ChatMessage::assistant("hello"),
+        ];
+        assert!(build_tool_evidence_digest(&msgs).is_none());
+    }
+
+    #[test]
+    fn empty_final_routing_depends_on_tool_activity() {
+        // (c) empty final + tool activity => digest Some => summary path.
+        let with_activity = vec![tool_msg("filesystem_write", "wrote x")];
+        assert!(build_tool_evidence_digest(&with_activity).is_some());
+        // (d) empty final + no tool activity => digest None => error path.
+        let no_activity: Vec<ChatMessage> = vec![ChatMessage::user("hi")];
+        assert!(build_tool_evidence_digest(&no_activity).is_none());
+    }
+
+    #[test]
+    fn strip_tool_messages_removes_tools_and_assistant_calls() {
+        let msgs = vec![
+            ChatMessage::user("hi"),
+            ChatMessage::assistant("let me check"),
+            ChatMessage::tool_result("call_1", "filesystem_read", "content"),
+        ];
+        let stripped = strip_tool_messages(&msgs);
+        assert_eq!(stripped.len(), 2);
+        assert!(stripped.iter().all(|m| m.role != "tool"));
+    }
 }
