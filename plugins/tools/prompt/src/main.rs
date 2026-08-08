@@ -986,12 +986,10 @@ async fn handle_generate_full(
     // improvises (thread 109: used a stale scratch compose instead of the
     // real dev stack because the template was never injected).
     if let Some(tid) = thread_id {
-        match sqlx::query_as::<_, (Option<String>,)>(
-            "SELECT template FROM threads WHERE id = $1",
-        )
-        .bind(tid)
-        .fetch_optional(pool)
-        .await
+        match sqlx::query_as::<_, (Option<String>,)>("SELECT template FROM threads WHERE id = $1")
+            .bind(tid)
+            .fetch_optional(pool)
+            .await
         {
             Ok(Some((template_opt,))) => {
                 let template_name = template_opt.unwrap_or_default();

@@ -33,6 +33,11 @@ use std::sync::Arc;
 use tracing::error;
 
 use super::{err_json, ok_json, AppState};
+use crate::db::channels::get_channel_by_id;
+use crate::db::kanban::update_kanban_task_status;
+use crate::db::threads::create_thread_with_cause;
+use crate::db::types::ThreadCauseParams;
+
 use crate::workflows::{Workflow, WorkflowConfigError, WorkflowsFile};
 
 // ---------------------------------------------------------------------------
@@ -111,6 +116,8 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
             "/kanban/tasks/{id}/workflow/executions/reset",
             post(reset_workflow_executions_handler),
         )
+        // 16. Dispatch: promote the highest-priority eligible 'todo' task to 'ready'
+        .route("/kanban/dispatch", post(dispatch_handler))
 }
 
 // ---------------------------------------------------------------------------
@@ -1948,8 +1955,397 @@ async fn reset_workflow_executions_handler(
     ok_json(serde_json::json!({ "reset": true }))
 }
 
+// ---------------------------------------------------------------------------
+// Dispatch (POST /kanban/dispatch)
+// ---------------------------------------------------------------------------
+
+/// Minimal row for the eligible-task scan.
+#[derive(Clone, FromRow)]
+struct DispatchTaskRow {
+    id: String,
+    title: String,
+}
+
+/// Full row needed to actually dispatch the picked task.
+#[derive(FromRow)]
+struct DispatchTaskDetailRow {
+    id: String,
+    title: String,
+    body: Option<String>,
+    channel_id: Option<i64>,
+    profile: Option<String>,
+    template: Option<String>,
+}
+
+#[derive(FromRow)]
+struct DispatchDependencyRow {
+    depends_on_id: String,
+}
+
+#[derive(FromRow)]
+struct DispatchDepStatusRow {
+    status: String,
+    archived: Option<bool>,
+}
+
+/// A dependency's dispatch-relevant state: `None` when the dependency row is
+/// missing (which blocks dispatch). Otherwise `(status, archived)`.
+type DepState = Option<(String, Option<bool>)>;
+
+/// Eligibility gate: every dependency must be archived or `done`.
+/// Mirrors the dispatcher semantics: archived -> ok, missing row -> blocks,
+/// status != "done" -> blocks.
+fn deps_satisfied(deps: &[DepState]) -> bool {
+    deps.iter().all(|dep| match dep {
+        None => false,
+        Some((status, archived)) => *archived == Some(true) || status == "done",
+    })
+}
+
+/// Index of the first task whose dependencies are all satisfied.
+fn first_eligible_index(task_deps: &[Vec<DepState>]) -> Option<usize> {
+    task_deps.iter().position(|deps| deps_satisfied(deps))
+}
+
+/// Build the thread body from a task's title and body (body may be empty).
+fn dispatch_content(title: &str, body: Option<&str>) -> String {
+    match body.map(str::trim).filter(|b| !b.is_empty()) {
+        Some(body) => format!("{title}\n\n{body}"),
+        None => title.to_string(),
+    }
+}
+
+/// Resolve the template to apply: task.template -> channel.template -> none.
+fn resolve_template(task_template: Option<&str>, channel_template: Option<&str>) -> Option<String> {
+    task_template
+        .filter(|t| !t.is_empty())
+        .or_else(|| channel_template.filter(|t| !t.is_empty()))
+        .map(str::to_string)
+}
+
+/// Resolve the effective profile: task.profile -> channel.current_profile -> default.
+fn resolve_profile(
+    task_profile: Option<&str>,
+    channel_profile: &str,
+    default_profile: &str,
+) -> String {
+    task_profile
+        .filter(|p| !p.is_empty())
+        .or_else(|| (!channel_profile.is_empty()).then_some(channel_profile))
+        .unwrap_or(default_profile)
+        .to_string()
+}
+
+/// POST /kanban/dispatch
+///
+/// Promote the highest-priority eligible `todo` task to `ready` and start a
+/// thread for it. A task is eligible when every non-archived dependency is
+/// `done`. Returns `{"dispatched": false}` when nothing is eligible.
+async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // 1. Scan 'todo' tasks in priority order.
+    let tasks = match sql_forge!(
+        DispatchTaskRow,
+        r#"
+        SELECT id, title
+        FROM kanban_tasks
+        WHERE status = :status
+        ORDER BY priority ASC, position ASC
+        "#,
+        ( :status = "todo" )
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("[kanban/dispatch] failed to list todo tasks: {:?}", e);
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to list todo tasks: {e}"),
+            );
+        }
+    };
+
+    // 2. Resolve dependency state for each candidate; pick the first eligible.
+    let mut all_deps: Vec<Vec<DepState>> = Vec::with_capacity(tasks.len());
+    for task in &tasks {
+        let dep_ids = match sql_forge!(
+            DispatchDependencyRow,
+            r#"
+            SELECT depends_on_id
+            FROM kanban_task_dependencies
+            WHERE task_id = :task_id
+            "#,
+            ( :task_id = task.id.as_str() )
+        )
+        .fetch_all(&state.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                error!(
+                    "[kanban/dispatch] failed to load dependencies for {}: {:?}",
+                    task.id, e
+                );
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to load dependencies for task {}: {e}", task.id),
+                );
+            }
+        };
+
+        let mut dep_states: Vec<DepState> = Vec::with_capacity(dep_ids.len());
+        for dep in &dep_ids {
+            let row = match sql_forge!(
+                DispatchDepStatusRow,
+                r#"
+                SELECT status, archived
+                FROM kanban_tasks
+                WHERE id = :id
+                "#,
+                ( :id = dep.depends_on_id.as_str() )
+            )
+            .fetch_optional(&state.pool)
+            .await
+            {
+                Ok(row) => row,
+                Err(e) => {
+                    error!(
+                        "[kanban/dispatch] failed to resolve dependency {}: {:?}",
+                        dep.depends_on_id, e
+                    );
+                    return err_json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to resolve dependency {}: {e}", dep.depends_on_id),
+                    );
+                }
+            };
+            dep_states.push(row.map(|r| (r.status, r.archived)));
+        }
+        all_deps.push(dep_states);
+    }
+
+    let picked = match first_eligible_index(&all_deps).and_then(|i| tasks.get(i)) {
+        Some(task) => task,
+        None => {
+            return ok_json(serde_json::json!({
+                "dispatched": false,
+                "message": "No eligible kanban tasks",
+            }));
+        }
+    };
+
+    // 3. Load the full task row.
+    let detail = match sql_forge!(
+        DispatchTaskDetailRow,
+        r#"
+        SELECT id, title, body, channel_id, profile, template
+        FROM kanban_tasks
+        WHERE id = :id
+        "#,
+        ( :id = picked.id.as_str() )
+    )
+    .fetch_one(&state.pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            error!(
+                "[kanban/dispatch] failed to load task {}: {:?}",
+                picked.id, e
+            );
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to load task {}: {e}", picked.id),
+            );
+        }
+    };
+
+    let channel_id = match detail.channel_id {
+        Some(id) => id,
+        None => {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Task has no channel_id");
+        }
+    };
+
+    // 4. Resolve channel, profile, provider/model and template.
+    let channel = match get_channel_by_id(&state.pool, channel_id).await {
+        Ok(Some(channel)) => channel,
+        Ok(None) => {
+            error!(
+                "[kanban/dispatch] channel {} not found for task {}",
+                channel_id, detail.id
+            );
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Channel not found");
+        }
+        Err(e) => {
+            error!(
+                "[kanban/dispatch] failed to load channel {}: {:?}",
+                channel_id, e
+            );
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to load channel: {e}"),
+            );
+        }
+    };
+
+    let effective_profile = resolve_profile(
+        detail.profile.as_deref(),
+        &channel.current_profile,
+        &state.default_profile,
+    );
+    let provider = channel
+        .current_provider
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .unwrap_or("openai")
+        .to_string();
+    let model = channel
+        .current_model
+        .as_deref()
+        .filter(|m| !m.is_empty())
+        .unwrap_or("gpt-4o")
+        .to_string();
+    let resolved_template =
+        resolve_template(detail.template.as_deref(), channel.template.as_deref());
+
+    // 5. Build the thread-cause params and start the thread.
+    let params = ThreadCauseParams {
+        provider: Some(provider),
+        model: Some(model),
+        task_id: Some(detail.id.clone()),
+        schedule_task_id: None,
+        content: dispatch_content(&detail.title, detail.body.as_deref()),
+        external_id: None,
+        parent_external_id: None,
+        metadata: serde_json::json!({
+            "kanban_task_id": detail.id,
+            "kanban_task_title": detail.title,
+            "template": resolved_template.clone(),
+        }),
+        msg_type: "kanban".to_string(),
+        msg_subtype: Some(detail.id.clone()),
+        task_plan: None,
+        template: resolved_template,
+    };
+
+    let (thread, _message) = match create_thread_with_cause(
+        &state.pool,
+        &state.data_dir,
+        "system",
+        channel_id,
+        &effective_profile,
+        params,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            error!(
+                "[kanban/dispatch] failed to create thread for {}: {:?}",
+                detail.id, e
+            );
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to create thread: {e}"),
+            );
+        }
+    };
+
+    // 6. Mark the task ready.
+    if let Err(e) = update_kanban_task_status(&state.pool, &detail.id, "ready").await {
+        error!(
+            "[kanban/dispatch] failed to mark task {} ready: {:?}",
+            detail.id, e
+        );
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to update task status: {e}"),
+        );
+    }
+
+    ok_json(serde_json::json!({
+        "dispatched": true,
+        "task_id": detail.id,
+        "thread_id": thread.id,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
+    // ---- dispatch eligibility helpers ----
+
+    #[test]
+    fn dispatch_no_eligible_tasks() {
+        // A task whose dependency is still 'todo' is not eligible -> no dispatch.
+        let blocked = vec![Some(("todo".to_string(), Some(false)))];
+        assert!(!deps_satisfied(&blocked));
+        assert_eq!(first_eligible_index(&[blocked]), None);
+
+        // Missing dependency rows also block.
+        assert!(!deps_satisfied(&[None]));
+        assert_eq!(first_eligible_index(&[vec![None]]), None);
+    }
+
+    #[test]
+    fn dispatch_deps_gate_skips_unsatisfied() {
+        // Task 0 has a non-done dep (blocked); task 1 has a done dep (eligible);
+        // task 2 has no deps (eligible). The first eligible is task 1.
+        let task_deps = vec![
+            vec![Some(("todo".to_string(), Some(false)))],
+            vec![Some(("done".to_string(), Some(false)))],
+            vec![],
+        ];
+        assert_eq!(first_eligible_index(&task_deps), Some(1));
+
+        // All blocked -> None (dispatched: false).
+        let all_blocked = vec![vec![Some(("todo".to_string(), Some(false)))], vec![None]];
+        assert_eq!(first_eligible_index(&all_blocked), None);
+
+        // Archived dependencies never block, regardless of status.
+        let archived = vec![
+            Some(("todo".to_string(), Some(true))),
+            Some(("backlog".to_string(), Some(true))),
+        ];
+        assert!(deps_satisfied(&archived));
+    }
+
+    #[test]
+    fn dispatch_template_and_profile_resolution() {
+        // Task template wins over channel template.
+        assert_eq!(
+            resolve_template(Some("task-tpl"), Some("channel-tpl")),
+            Some("task-tpl".to_string())
+        );
+        // Channel template is the fallback.
+        assert_eq!(
+            resolve_template(None, Some("channel-tpl")),
+            Some("channel-tpl".to_string())
+        );
+        // Empty templates resolve to None.
+        assert_eq!(resolve_template(Some(""), Some("")), None);
+        assert_eq!(resolve_template(None, None), None);
+
+        // Profile chain: task -> channel -> default.
+        assert_eq!(
+            resolve_profile(Some("task-prof"), "channel-prof", "default-prof"),
+            "task-prof".to_string()
+        );
+        assert_eq!(
+            resolve_profile(None, "channel-prof", "default-prof"),
+            "channel-prof".to_string()
+        );
+        assert_eq!(
+            resolve_profile(Some(""), "", "default-prof"),
+            "default-prof".to_string()
+        );
+
+        // Content: title only when body is empty/missing.
+        assert_eq!(dispatch_content("Title", None), "Title");
+        assert_eq!(dispatch_content("Title", Some("")), "Title");
+        assert_eq!(dispatch_content("Title", Some("Body")), "Title\n\nBody");
+    }
     use super::*;
 
     #[test]
