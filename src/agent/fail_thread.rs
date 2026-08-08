@@ -658,8 +658,11 @@ fn route_fail_tool(
             }
         }
         // F1 — a tester or reviewer thread requests executor rework.
+        // F1 — tester/reviewer requests executor rework, or the executor
+        // itself fails with an explicit 'running' target (R7 row-2: rerun it).
         "running" => {
-            let valid_caller = matches!(caller_step, Some("testing") | Some("review"));
+            let valid_caller =
+                matches!(caller_step, Some("testing") | Some("review") | Some("running"));
             if !has_wf || !valid_caller || !has_executor_role {
                 (None, "blocked")
             } else {
@@ -788,7 +791,7 @@ pub(crate) async fn engine_transition(
             final_status = status.to_string();
             block_reason = match normalized {
                 "executor" => "no workflow",
-                "running" if !matches!(caller_step, Some("testing") | Some("review")) => {
+                "running" if !matches!(caller_step, Some("testing") | Some("review") | Some("running")) => {
                     "invalid caller for workflow_step 'running'"
                 }
                 "running" if !has_executor_role => "no executor role in workflow",
@@ -1095,9 +1098,10 @@ mod tests {
         // Reviewer requests executor rework.
         let (step, _) = route_fail_tool("running", Some("review"), true, true, true);
         assert_eq!(step, Some("running"));
-        // Executor itself cannot request "running" rework (invalid caller).
-        let (step, _) = route_fail_tool("running", Some("running"), true, true, true);
-        assert_eq!(step, None);
+        // Executor itself can request its own rework (R7 row-2 semantics).
+        let (step, status) = route_fail_tool("running", Some("running"), true, true, true);
+        assert_eq!(step, Some("running"));
+        assert_eq!(status, "running");
         // No executor role in workflow → blocked.
         let (step, _) = route_fail_tool("running", Some("testing"), true, false, true);
         assert_eq!(step, None);
