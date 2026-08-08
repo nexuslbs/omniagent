@@ -317,9 +317,9 @@ pub async fn manual_review_decision(
         let cause = format!("Manual review decision: {decision}. Task: {task_id}");
         let new_id = sqlx::query_as::<_, IdRow>(
             "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
-             task_id, parent_id, workflow_id, workflow_step)
+             task_id, parent_id, workflow_id, workflow_step, task_type)
              VALUES ('pending', $1, $2, $3, '', '',
-             $4, NULL, $5, $6) RETURNING id",
+             $4, NULL, $5, $6, 'kanban') RETURNING id",
         )
         .bind(cause.as_str())
         .bind(task.channel_id)
@@ -880,9 +880,9 @@ pub(crate) async fn engine_transition(
         let new_id = sql_forge!(
             IdRow,
             "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
-                                  task_id, parent_id, workflow_id, workflow_step)
+                                  task_id, parent_id, workflow_id, workflow_step, task_type)
              VALUES ('pending', :cause, :channel_id, :profile, :provider, :model,
-                     :task_id, :parent_id, :workflow_id, :workflow_step)
+                     :task_id, :parent_id, :workflow_id, :workflow_step, 'kanban')
              RETURNING id",
             (
                 :cause = thread.cause.as_str(),
@@ -932,9 +932,9 @@ pub(crate) async fn engine_transition(
         let new_id = sql_forge!(
             IdRow,
             "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
-                                  task_id, parent_id, workflow_id, workflow_step)
+                                  task_id, parent_id, workflow_id, workflow_step, task_type)
              VALUES ('pending', :cause, :channel_id, :profile, :provider, :model,
-                     :task_id, :parent_id, :workflow_id, :workflow_step)
+                     :task_id, :parent_id, :workflow_id, :workflow_step, 'kanban')
              RETURNING id",
             (
                 :cause = thread.cause.as_str(),
