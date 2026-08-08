@@ -661,8 +661,10 @@ fn route_fail_tool(
         // F1 — tester/reviewer requests executor rework, or the executor
         // itself fails with an explicit 'running' target (R7 row-2: rerun it).
         "running" => {
-            let valid_caller =
-                matches!(caller_step, Some("testing") | Some("review") | Some("running"));
+            let valid_caller = matches!(
+                caller_step,
+                Some("testing") | Some("review") | Some("running")
+            );
             if !has_wf || !valid_caller || !has_executor_role {
                 (None, "blocked")
             } else {
@@ -791,7 +793,12 @@ pub(crate) async fn engine_transition(
             final_status = status.to_string();
             block_reason = match normalized {
                 "executor" => "no workflow",
-                "running" if !matches!(caller_step, Some("testing") | Some("review") | Some("running")) => {
+                "running"
+                    if !matches!(
+                        caller_step,
+                        Some("testing") | Some("review") | Some("running")
+                    ) =>
+                {
                     "invalid caller for workflow_step 'running'"
                 }
                 "running" if !has_executor_role => "no executor role in workflow",
@@ -903,16 +910,37 @@ pub(crate) async fn engine_transition(
         .await
         .map_err(|e| format!("insert rerun thread: {e}"))?;
 
-        // seq-0 cause message for the re-run thread (same task context).
-        let cause = if thread.cause.is_empty() {
-            "re-run".to_string()
-        } else {
-            thread.cause.clone()
-        };
+        // seq-0 cause message for the re-run thread — copy the PARENT's
+        // msg_type='kanban' message content (the actual script), NOT
+        // threads.cause (which is the CHECK-enum 'system'/'user', not content).
+        // Without the script the noop provider echoes and the rerun "completes"
+        // vacuously → task routes to review instead of re-failing (GROUP 22 T4/T6/T7).
+        #[derive(sqlx::FromRow)]
+        struct KanbanMsgRow {
+            content: String,
+        }
+        let script_content = sql_forge!(
+            KanbanMsgRow,
+            "SELECT content FROM messages WHERE thread_id = :parent AND msg_type = 'kanban'
+             ORDER BY id LIMIT 1",
+            ( :parent = thread.id )
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| format!("select parent kanban message: {e}"))?
+        .map(|r| r.content)
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| {
+            if thread.cause.is_empty() {
+                "re-run".to_string()
+            } else {
+                thread.cause.clone()
+            }
+        });
         sql_forge!(
             "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
-             VALUES (:tid, 'cause', :content, 0, 'cause')",
-            ( :tid = new_id.id, :content = cause )
+             VALUES (:tid, 'cause', :content, 0, 'kanban')",
+            ( :tid = new_id.id, :content = script_content )
         )
         .execute(&mut *tx)
         .await
@@ -1348,5 +1376,164 @@ mod tests_review {
         assert_eq!(outcome.final_status, "review");
         assert!(outcome.clear);
         assert!(!outcome.review_thread);
+    }
+}
+
+#[cfg(test)]
+mod tests_rerun_script {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn rerun_thread_copies_kanban_script_message() {
+        // Bug B regression (GROUP 22 T4/T6/T7): a rerun thread's seq-0 cause
+        // message must copy the PARENT's msg_type='kanban' message content
+        // (the actual workflow script). The old code inserted threads.cause
+        // (CHECK-enum 'system'/'user', not content) — the noop provider then
+        // had no script and the rerun "completed" vacuously, routing the task
+        // to review instead of re-failing. This test fails against the old
+        // code (content == 'user', no "builtin_fail-thread" marker).
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+
+        // throwaway data_dir with a minimal workflow (executor/tester/reviewer roles)
+        let data_dir =
+            std::env::temp_dir().join(format!("rerun-script-test-{}", std::process::id()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(
+            data_dir.join("workflows.yml"),
+            "workflows:\n  test-wf:\n    profile: test\n    provider: noop\n    model: noop\n    plan_mode: manual\n    retries: 0\n    clear_executions_on_review: false\n    roles:\n      executor:\n        template: \"executor system prompt\"\n        provider: noop\n        model: noop\n      tester:\n        template: \"tester system prompt\"\n        provider: noop\n        model: noop\n      reviewer:\n        template: \"reviewer system prompt\"\n        provider: noop\n        model: noop\n",
+        )
+        .unwrap();
+
+        let task_id = format!("rerun-script-test-{}", std::process::id());
+        let script = r#"{"title":"RerunScriptTest","body":"run","tools":[{"name":"builtin_fail-thread","arguments":{"step":"running"}}]}"#;
+
+        // clean leftovers from any previous crashed run, then set up parent rows
+        let _ = sqlx::query(
+            "DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE task_id = $1)",
+        )
+        .bind(&task_id)
+        .execute(&pool)
+        .await;
+        let _ = sqlx::query("DELETE FROM threads WHERE task_id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM kanban_history WHERE kanban_task_id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM kanban_tasks WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await;
+
+        sqlx::query(
+            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
+             VALUES ($1, 'RerunScriptTest', '', 'running', 1, 1, 'test', 0, NULL, false, 'manual', 'test-wf')",
+        )
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .expect("insert kanban task");
+
+        let parent_id: i64 = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, parent_id, workflow_id, workflow_step, task_type)
+             VALUES ('running', 'user', 1, 'test', 'noop', 'noop', $1, NULL, 'test-wf', 'running', 'kanban')
+             RETURNING id",
+        )
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert parent thread");
+
+        sqlx::query(
+            "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
+             VALUES ($1, 'user', $2, 0, 'kanban')",
+        )
+        .bind(parent_id)
+        .bind(script)
+        .execute(&pool)
+        .await
+        .expect("insert parent kanban message");
+
+        let parent = crate::db::types::Thread {
+            id: parent_id,
+            status: "running".to_string(),
+            cause: "user".to_string(),
+            channel_id: 1,
+            profile: "test".to_string(),
+            provider: Some("noop".to_string()),
+            model: Some("noop".to_string()),
+            input_tokens: 0,
+            cached_tokens: 0,
+            output_tokens: 0,
+            duration_ms: 0,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            ended_at: None,
+            terminal: false,
+            task_id: Some(task_id.clone()),
+            schedule_task_id: None,
+            plan: false,
+            parent_id: None,
+            iterations: 0,
+            workflow_step: Some("running".to_string()),
+            template: None,
+        };
+
+        let new_id = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent,
+            RerunKind::FailTool {
+                step: "running".to_string(),
+            },
+        )
+        .await
+        .expect("engine_transition should create a rerun thread")
+        .expect("rerun thread id");
+
+        let content: String = sqlx::query_scalar::<_, String>(
+            "SELECT content FROM messages WHERE thread_id = $1 AND msg_type = 'kanban' ORDER BY id LIMIT 1",
+        )
+        .bind(new_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch rerun cause message");
+
+        // old code inserted threads.cause ('user') here -> this assertion fails
+        assert!(
+            content.contains("builtin_fail-thread"),
+            "rerun cause message must copy the parent's kanban script, got: {content}"
+        );
+
+        // cleanup (new thread first — it references the parent)
+        let _ = sqlx::query("DELETE FROM messages WHERE thread_id IN ($1, $2)")
+            .bind(new_id)
+            .bind(parent_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM threads WHERE id IN ($1, $2)")
+            .bind(new_id)
+            .bind(parent_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM kanban_history WHERE kanban_task_id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM kanban_tasks WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await;
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 }
