@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                        INSERT INTO threads\n                            (status, cause, channel_id, profile, provider, model, task_id, parent_id, workflow_id, workflow_step)\n                        VALUES\n                            ('pending', $1, $2, $3, $4, $5, $6, $7, $8, $9)\n                        RETURNING id\n                        ",
+  "query": "\n                        INSERT INTO threads\n                            (status, cause, channel_id, profile, provider, model, task_id, parent_id, workflow_id, workflow_step, task_type)\n                        VALUES\n                            ('pending', $1, $2, $3, $4, $5, $6, $7, $8, $9, 'kanban')\n                        RETURNING id\n                        ",
   "describe": {
     "columns": [
       {
@@ -32,5 +32,5 @@
       false
     ]
   },
-  "hash": "895303642151b12d6ab65fca5af69915a6a41751c4a6d82d8949f43cf7302aa4"
+  "hash": "6d88a67493386e810d7cf37ba9bb39b1d357f850e37eef2c7af0ffa027146ace"
 }
