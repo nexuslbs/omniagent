@@ -97,6 +97,9 @@ FROM debian:trixie-slim
 #   - pkg-config, libssl-dev: required by openssl-sys
 #   - ca-certificates, curl, git: for cloning remote plugin repos
 #   - python3, python3-pip: for Python plugins
+#   - python3-psycopg2: for integration tests (tests.py) that read DB rows
+#     directly (workflow tests GROUP 22) — Debian package because PEP 668
+#     blocks bare pip on python3.13
 #   - nodejs: for JavaScript/Node.js MCP servers
 RUN apt-get update -qq && \
     apt-get install -y -qq \
@@ -108,6 +111,7 @@ RUN apt-get update -qq && \
       libssl-dev \
       python3 \
       python3-pip \
+      python3-psycopg2 \
       nodejs && \
     rm -rf /var/lib/apt/lists/* && \
     git config --global --add safe.directory '*'
