@@ -155,6 +155,7 @@ struct HistoryQuery {
 struct CreateTaskRequest {
     title: String,
     body: Option<String>,
+    assignee: Option<String>,
     channel_id: Option<i64>,
     profile: Option<String>,
     priority: Option<i32>,
@@ -181,6 +182,7 @@ struct ChangePositionRequest {
 struct UpdateTaskRequest {
     title: Option<String>,
     body: Option<String>,
+    assignee: Option<String>,
     channel_id: Option<i64>,
     profile: Option<String>,
     priority: Option<i32>,
@@ -663,14 +665,15 @@ async fn create_task_handler(
     if let Err(e) = sql_forge!(
         r#"
         INSERT INTO kanban_tasks
-            (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
+            (id, title, body, assignee, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
         VALUES
-            (:id, :title, :body, :status, :priority, NULLIF(:channel_id, 0::bigint), NULLIF(:profile, '')::text,
+            (:id, :title, :body, NULLIF(:assignee, '')::text, :status, :priority, NULLIF(:channel_id, 0::bigint), NULLIF(:profile, '')::text,
              :position, NULLIF(:template, '')::text, :plan::boolean, NULLIF(:planning_mode, '')::text, NULLIF(:workflow_id, '')::text)
         "#,
         ( :id = id.as_str(),
           :title = &title,
           :body = body.body.as_deref().unwrap_or(""),
+          :assignee = body.assignee.as_deref().unwrap_or(""),
           :status = &task_status,
           :priority = task_priority,
           :channel_id = body.channel_id.unwrap_or(0),
@@ -1058,7 +1061,8 @@ async fn update_task_handler(
         || body.template.is_some()
         || body.plan.is_some()
         || body.planning_mode.is_some()
-        || body.workflow_id.is_some();
+        || body.workflow_id.is_some()
+        || body.assignee.is_some();
 
     if !has_fields {
         return err_json(StatusCode::BAD_REQUEST, "No fields to update");
@@ -1071,6 +1075,7 @@ async fn update_task_handler(
         UPDATE kanban_tasks SET
             title = CASE WHEN :title = '' THEN title ELSE NULLIF(:title, '')::text END,
             body = CASE WHEN :body = :ign_str THEN body ELSE :body END,
+            assignee = CASE WHEN :assignee = '' THEN assignee ELSE NULLIF(:assignee, '')::text END,
             channel_id = CASE WHEN :channel_id = -999999::bigint THEN channel_id ELSE :channel_id END,
             profile = CASE WHEN :profile = '' THEN profile ELSE NULLIF(:profile, '')::text END,
             priority = CASE WHEN :priority = -999999::bigint THEN priority::bigint ELSE :priority END,
@@ -1086,6 +1091,7 @@ async fn update_task_handler(
         ( :id = id.as_str(),
           :title = body.title.as_deref().unwrap_or(""),
           :body = body.body.as_deref().unwrap_or(IGNORE_STR),
+          :assignee = body.assignee.as_deref().unwrap_or(""),
           :ign_str = IGNORE_STR,
           :channel_id = body.channel_id.unwrap_or(IGNORE_INT),
           :profile = body.profile.as_deref().unwrap_or(""),

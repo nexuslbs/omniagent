@@ -1383,14 +1383,13 @@ dependencies = [
  "chrono",
  "mcp-server-util",
  "omniagent",
+ "reqwest",
  "serde",
  "serde_json",
- "sql-forge",
  "sqlx",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "unicode-normalization",
 ]
 
 [[package]]
