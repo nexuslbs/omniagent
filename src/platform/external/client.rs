@@ -206,7 +206,7 @@ impl ExternalPlatformClient {
     ) -> AppResult<(Child, ChildStdin, tokio::process::ChildStdout)> {
         // Clone config fields while holding the read lock, then release it
         // before any async work to keep the future Send.
-        let (config_name, config_command, config_args, env_map) = {
+        let (config_name, config_command, config_args, env_map, config_current_dir) = {
             let config = self.config.read();
             tracing::info!(
                 "Spawning platform plugin '{}': {} {}",
@@ -219,6 +219,7 @@ impl ExternalPlatformClient {
                 config.command.clone(),
                 config.args.clone(),
                 config.env.clone(),
+                config.current_dir.clone(),
             )
         };
 
@@ -227,6 +228,12 @@ impl ExternalPlatformClient {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit());
+
+        // Run the subprocess from the plugin directory so relative entrypoint
+        // args (e.g. "platform.py", "./target/release/...") resolve correctly.
+        if let Some(dir) = &config_current_dir {
+            cmd.current_dir(dir);
+        }
 
         // Resolve $env: and $secret: references in env values.
         // ${VAR} is never interpolated — treated as a literal.

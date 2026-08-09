@@ -47,6 +47,10 @@ pub struct PlatformPluginConfig {
     /// Maximum consecutive failures before circuit breaker opens.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    /// Working directory for the subprocess (the plugin directory).
+    /// Relative entrypoint args (e.g. "platform.py") resolve against this.
+    #[serde(default)]
+    pub current_dir: Option<String>,
 }
 
 fn default_enabled() -> bool {
@@ -145,26 +149,55 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
                 }
             };
 
+            // Resolve relative entrypoint args (e.g. "platform.py", "server.js")
+            // against the plugin directory so the spawned process cmdline is
+            // self-describing (full path) and resolves regardless of CWD.
+            // Args that are flags (start with '-'), absolute, or not present in
+            // the plugin dir are passed through unchanged.
+            let plugin_dir_str = path.to_string_lossy().to_string();
+            let resolved_args: Vec<String> = entrypoint
+                .args
+                .clone()
+                .into_iter()
+                .map(|arg| {
+                    if arg.starts_with('-') || std::path::Path::new(&arg).is_absolute() {
+                        return arg;
+                    }
+                    let candidate = std::path::Path::new(&plugin_dir_str).join(&arg);
+                    if candidate.exists() {
+                        candidate.to_string_lossy().to_string()
+                    } else {
+                        arg
+                    }
+                })
+                .collect();
+
             let config = PlatformPluginConfig {
                 name: manifest.name.clone(),
                 enabled: true,
                 command: resolved_command,
-                args: entrypoint.args.clone(),
+                args: resolved_args,
                 env: manifest.env,
                 config: std::collections::HashMap::new(),
                 max_retries: 3,
+                current_dir: Some(plugin_dir_str),
             };
 
             // Validate that the entrypoint binary exists (for file-path commands).
             // Commands that look like PATH lookups (no slash) are assumed to exist.
+            // Relative paths (e.g. "./target/release/...") resolve against the
+            // plugin directory (config.current_dir), not the process CWD.
             let command = &config.command;
             let has_binary = if command.contains('/') {
                 let path = std::path::Path::new(command);
                 if path.is_relative() {
-                    std::env::current_dir()
-                        .ok()
-                        .map(|cwd| cwd.join(path).exists())
-                        .unwrap_or(false)
+                    match &config.current_dir {
+                        Some(dir) => std::path::Path::new(dir).join(path).exists(),
+                        None => std::env::current_dir()
+                            .ok()
+                            .map(|cwd| cwd.join(path).exists())
+                            .unwrap_or(false),
+                    }
                 } else {
                     path.exists()
                 }
@@ -175,10 +208,10 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
 
             if !has_binary {
                 tracing::warn!(
-                "Skipping platform plugin '{}': entrypoint binary not found at '{}' (resolved relative to CWD: {:?})",
+                "Skipping platform plugin '{}': entrypoint binary not found at '{}' (resolved relative to plugin dir: {:?})",
                 manifest.name,
                 command,
-                std::env::current_dir().ok().map(|cwd| cwd.join(command)),
+                config.current_dir.as_deref().map(|dir| std::path::Path::new(dir).join(command)),
             );
                 continue;
             }

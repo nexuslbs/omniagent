@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, title, body, channel_id, profile, template\n        FROM kanban_tasks\n        WHERE id = $1\n        ",
+  "query": "\n        SELECT id, title, body, channel_id, profile, template, workflow_id\n        FROM kanban_tasks\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -68,6 +68,17 @@
             "name": "template"
           }
         }
+      },
+      {
+        "ordinal": 6,
+        "name": "workflow_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "workflow_id"
+          }
+        }
       }
     ],
     "parameters": {
@@ -81,8 +92,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "a366a17cbacce1d24d9e230370efb0d046b370f715e9ec029b4b07b61307235a"
+  "hash": "45f258d7d51fccfdf4f973ea34023622407d38c9efba5b8d19a8ad152b27f0ad"
 }
