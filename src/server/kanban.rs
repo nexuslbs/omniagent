@@ -2284,10 +2284,11 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         }
     };
 
-    // 6. Mark the task ready.
-    if let Err(e) = update_kanban_task_status(&state.pool, &detail.id, "ready").await {
+    // 6. Mark the task running ("ready" was retired — see VALID_STATUSES; the
+    //    executor would flip it to "running" on pickup anyway).
+    if let Err(e) = update_kanban_task_status(&state.pool, &detail.id, "running").await {
         error!(
-            "[kanban/dispatch] failed to mark task {} ready: {:?}",
+            "[kanban/dispatch] failed to mark task {} running: {:?}",
             detail.id, e
         );
         return err_json(
