@@ -80,7 +80,7 @@ fn mark_dump_read(thread_id: i64, name: &str) {
     let mut guard = READ_DUMPS.lock().unwrap_or_else(|p| p.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
     map.entry(thread_id)
-        .or_insert_with(HashSet::new)
+        .or_default()
         .insert(name.to_string());
 }
 

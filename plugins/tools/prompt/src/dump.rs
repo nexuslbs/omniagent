@@ -41,7 +41,7 @@ pub fn append_dump(dir: &Path, iter: u32, tool: &str, args: &str, content: &str)
     let dedupe_key = (file_key.clone(), hash_of(&format!("{tool}\u{0}{args}")));
     {
         let mut guard = APPENDED.lock().unwrap_or_else(|p| p.into_inner());
-        let set = guard.get_or_insert_with(HashSet::new);
+        let set = guard.get_or_insert_default();
         if set.contains(&dedupe_key) {
             return false;
         }
@@ -91,7 +91,7 @@ pub fn append_dump(dir: &Path, iter: u32, tool: &str, args: &str, content: &str)
     }
     {
         let mut guard = APPENDED.lock().unwrap_or_else(|p| p.into_inner());
-        guard.get_or_insert_with(HashSet::new).insert(dedupe_key);
+        guard.get_or_insert_default().insert(dedupe_key);
     }
     enforce_caps(dir, iter);
     true
