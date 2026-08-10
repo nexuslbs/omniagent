@@ -99,6 +99,7 @@ pub(crate) async fn llm_chat_handler(
             tool_call_id: None,
             tool_calls: None,
             name: None,
+            reasoning_content: None,
         })
         .collect();
 

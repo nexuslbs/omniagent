@@ -100,8 +100,7 @@ fn restrict_write_path(path: &str, cfg: &Config) -> Result<String, String> {
     let allowed = roots.iter().any(|root| {
         let root = normalize_path(std::path::Path::new(root));
         normalized == root
-            || normalized
-                .starts_with(std::path::Path::new(&format!("{}/", root.display())))
+            || normalized.starts_with(std::path::Path::new(&format!("{}/", root.display())))
     });
     if allowed {
         Ok(normalized.to_string_lossy().to_string())
@@ -728,7 +727,10 @@ mod tests {
         cfg.write_plugins = false;
         assert!(restrict_write_path("/opt/workspace/a", &cfg).is_ok());
         let err = restrict_write_path("/opt/omni/data/a", &cfg).unwrap_err();
-        assert!(err.contains("/opt/workspace"), "error must list allowed roots: {err}");
+        assert!(
+            err.contains("/opt/workspace"),
+            "error must list allowed roots: {err}"
+        );
     }
 
     #[test]
@@ -746,16 +748,22 @@ mod tests {
             },
         )
         .expect_err("write outside sandbox must be rejected");
-        assert!(err
-            .to_string()
-            .contains("outside allowed write roots"));
+        assert!(err.to_string().contains("outside allowed write roots"));
     }
 
     #[tokio::test]
     async fn write_outside_sandbox_soft_error_does_not_trip() {
         // Through soft_error the rejection arrives as Ok((msg, true)) — NOT a
         // handler Err — so the MCP circuit breaker stays closed.
-        let (msg, is_error) = soft_error(|args: Value| handle_write(args, &Config { workspace_dir: "/opt/workspace".to_string(), ..Config::default() }))(
+        let (msg, is_error) = soft_error(|args: Value| {
+            handle_write(
+                args,
+                &Config {
+                    workspace_dir: "/opt/workspace".to_string(),
+                    ..Config::default()
+                },
+            )
+        })(
             serde_json::json!({
                 "path": "/opt/omni/evil.txt",
                 "content": "boom",

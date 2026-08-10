@@ -1425,16 +1425,22 @@ mod tests_rerun_script {
         std::fs::create_dir_all(data_dir.join("data/threads/111")).unwrap();
         std::fs::create_dir_all(data_dir.join("data/threads/222")).unwrap();
         std::fs::write(data_dir.join("data/threads/111/notes.md"), "learned fact").unwrap();
-        assert!(super::copy_thread_notes(data_dir.to_str().unwrap(), 111, 222));
-        let copied =
-            std::fs::read_to_string(data_dir.join("data/threads/222/notes.md")).unwrap();
+        assert!(super::copy_thread_notes(
+            data_dir.to_str().unwrap(),
+            111,
+            222
+        ));
+        let copied = std::fs::read_to_string(data_dir.join("data/threads/222/notes.md")).unwrap();
         assert_eq!(copied, "learned fact");
         // parent with no notes -> false, and no file is created for the child
-        assert!(!super::copy_thread_notes(data_dir.to_str().unwrap(), 999, 444));
+        assert!(!super::copy_thread_notes(
+            data_dir.to_str().unwrap(),
+            999,
+            444
+        ));
         assert!(!data_dir.join("data/threads/444/notes.md").exists());
         let _ = std::fs::remove_dir_all(&data_dir);
     }
-
 
     use super::*;
 

@@ -495,14 +495,14 @@ Previous plan:\n{}",
         // its own thresholds (configurable via plugin config). The agent
         // is agnostic to condensation logic : it passes messages and
         // iteration info and applies whatever the tool returns.
-            // WS-2/WS-3: durable thread dir (notes + context dumps).
-            let thread_dir = std::path::Path::new(&cfg.ctx.data_dir)
-                .join("data")
-                .join("threads")
-                .join(thread.id.to_string());
-            let mut was_compacted = false;
-            let mut dump_file: Option<String> = None;
-            let mut dump_entries = 0usize;
+        // WS-2/WS-3: durable thread dir (notes + context dumps).
+        let thread_dir = std::path::Path::new(&cfg.ctx.data_dir)
+            .join("data")
+            .join("threads")
+            .join(thread.id.to_string());
+        let mut was_compacted = false;
+        let mut dump_file: Option<String> = None;
+        let mut dump_entries = 0usize;
         let cfg_snapshot = cfg.config_snapshot();
         let condense_tool = cfg_snapshot.compact_messages_tool_name.clone();
         if !condense_tool.is_empty() {
@@ -556,10 +556,9 @@ Previous plan:\n{}",
                                 .get("dump_file")
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string());
-                            dump_entries = result
-                                .get("entries")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0) as usize;
+                            dump_entries =
+                                result.get("entries").and_then(|v| v.as_u64()).unwrap_or(0)
+                                    as usize;
                             messages =
                                 serde_json::from_value(serde_json::Value::Array(condensed.clone()))
                                     .unwrap_or(messages);
@@ -582,8 +581,8 @@ Previous plan:\n{}",
 
         // Layer 3: iteration-aware tool result pruning
         helpers::prune_old_tool_results(&mut messages, current_iter as u32, Some(&thread_dir));
-            // WS-4c: budget hint every iteration (anti-death-spiral backstop).
-            helpers::upsert_system_message(
+        // WS-4c: budget hint every iteration (anti-death-spiral backstop).
+        helpers::upsert_system_message(
                 &mut messages,
                 "=== Budget ===",
                 format!(
@@ -593,29 +592,29 @@ Previous plan:\n{}",
                     (iter_limit - current_iter).max(0)
                 ),
             );
-            // WS-3: durable working notes survive compaction — injected every
-            // iteration AFTER condense+prune so notes are always in context.
-            if let Ok(notes_content) = std::fs::read_to_string(thread_dir.join("notes.md")) {
-                let notes_total = notes_content.chars().count();
-                let notes_content = if notes_total > 8192 {
-                    let head: String = notes_content.chars().take(8192).collect();
-                    format!(
-                        "{head}\n[note truncated: showing chars 0-8192 of {notes_total} total chars]"
-                    )
-                } else {
-                    notes_content
-                };
-                if !notes_content.trim().is_empty() {
-                    helpers::upsert_system_message(
-                        &mut messages,
-                        "=== Working Notes (durable) ===",
-                        format!("=== Working Notes (durable) ===\n{notes_content}"),
-                    );
-                }
-            }
-            // WS-3: compaction notice — never re-read the dump (rule 12).
-            if was_compacted {
+        // WS-3: durable working notes survive compaction — injected every
+        // iteration AFTER condense+prune so notes are always in context.
+        if let Ok(notes_content) = std::fs::read_to_string(thread_dir.join("notes.md")) {
+            let notes_total = notes_content.chars().count();
+            let notes_content = if notes_total > 8192 {
+                let head: String = notes_content.chars().take(8192).collect();
+                format!(
+                    "{head}\n[note truncated: showing chars 0-8192 of {notes_total} total chars]"
+                )
+            } else {
+                notes_content
+            };
+            if !notes_content.trim().is_empty() {
                 helpers::upsert_system_message(
+                    &mut messages,
+                    "=== Working Notes (durable) ===",
+                    format!("=== Working Notes (durable) ===\n{notes_content}"),
+                );
+            }
+        }
+        // WS-3: compaction notice — never re-read the dump (rule 12).
+        if was_compacted {
+            helpers::upsert_system_message(
                     &mut messages,
                     "=== Context Compacted",
                     format!(
@@ -624,7 +623,7 @@ Previous plan:\n{}",
                         dump_entries
                     ),
                 );
-            }
+        }
 
         // ── Optional: insert prompt message before LLM call ──
         // Subtypes: "first" (first normal LLM call), "compaction" (after context
@@ -1001,6 +1000,9 @@ Previous plan:\n{}",
         final_tool_call = true;
         let mut assistant_msg = ChatMessage::assistant("");
         assistant_msg.tool_calls = Some(response.tool_calls.clone());
+        // Echo reasoning back to providers that require the round-trip
+        // (e.g. opencode-go / DeepSeek in thinking mode).
+        assistant_msg.reasoning_content = response.reasoning.clone();
         messages.push(assistant_msg);
 
         // Persist a message showing what tool(s) the agent called

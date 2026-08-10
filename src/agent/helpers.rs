@@ -191,8 +191,13 @@ pub fn count_tokens(
 pub fn is_guarded_read_only(tool: &str) -> bool {
     matches!(
         tool,
-        "filesystem_read" | "filesystem_info" | "filesystem_list" | "filesystem_search"
-            | "search_messages" | "search_wiki" | "note_read"
+        "filesystem_read"
+            | "filesystem_info"
+            | "filesystem_list"
+            | "filesystem_search"
+            | "search_messages"
+            | "search_wiki"
+            | "note_read"
     ) || (tool.starts_with("git_")
         && !matches!(
             tool,
@@ -791,6 +796,7 @@ mod tests {
                 tool_call_id: None,
                 tool_calls: Some(vec![]),
                 name: None,
+                reasoning_content: None,
             },
         ];
         super::prune_old_tool_results(&mut messages, 7, Some(&tmp));
@@ -810,7 +816,6 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&tmp);
     }
-
 
     use crate::llm::{ChatMessage, ToolCallData, ToolCallFunction, Usage};
     use serde_json::json;
@@ -966,6 +971,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: Some(vec![tool_call]),
             name: None,
+            reasoning_content: None,
         };
         let msgs = vec![msg];
         // content.len() = 22
@@ -1006,6 +1012,7 @@ mod tests {
             tool_call_id: None,
             tool_calls: Some(calls),
             name: None,
+            reasoning_content: None,
         }
     }
 

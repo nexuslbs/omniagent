@@ -158,11 +158,29 @@ mod tests {
     #[test]
     fn appends_jsonl_and_dedupes() {
         let dir = tmp_dir("dedupe");
-        assert!(append_dump(&dir, 5, "filesystem_read", r#"{"path":"/a"}"#, "alpha"));
+        assert!(append_dump(
+            &dir,
+            5,
+            "filesystem_read",
+            r#"{"path":"/a"}"#,
+            "alpha"
+        ));
         // same tool+args → dedupe
-        assert!(!append_dump(&dir, 5, "filesystem_read", r#"{"path":"/a"}"#, "alpha"));
+        assert!(!append_dump(
+            &dir,
+            5,
+            "filesystem_read",
+            r#"{"path":"/a"}"#,
+            "alpha"
+        ));
         // different args → new entry
-        assert!(append_dump(&dir, 5, "filesystem_read", r#"{"path":"/b"}"#, "beta"));
+        assert!(append_dump(
+            &dir,
+            5,
+            "filesystem_read",
+            r#"{"path":"/b"}"#,
+            "beta"
+        ));
         let content = std::fs::read_to_string(dir.join("context-5.json")).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 2);
@@ -205,7 +223,10 @@ mod tests {
             .filter(|n| n.starts_with("context-"))
             .collect();
         names.sort();
-        assert_eq!(names, vec!["context-3.json", "context-4.json", "context-5.json"]);
+        assert_eq!(
+            names,
+            vec!["context-3.json", "context-4.json", "context-5.json"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

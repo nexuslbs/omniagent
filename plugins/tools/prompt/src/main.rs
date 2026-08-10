@@ -17,8 +17,8 @@ use anyhow::{Context, Result};
 mod chat_message;
 mod compact;
 mod dump;
-mod notes;
 mod memory_store;
+mod notes;
 mod prompt_builder;
 
 use mcp_server_util::*;
@@ -1497,9 +1497,7 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
 
     let before = messages.len();
     // WS-2/WS-3: durable context dump + compaction event plumbing.
-    let thread_dir = args["thread_dir"]
-        .as_str()
-        .map(std::path::PathBuf::from);
+    let thread_dir = args["thread_dir"].as_str().map(std::path::PathBuf::from);
     let current_iteration = args["current_iteration"].as_u64().unwrap_or(0) as u32;
     let mut entries = 0usize;
     let mut dump_file: Option<String> = None;
@@ -1515,9 +1513,9 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
         // 3 progressively more aggressive compactions and there is material
         // left to compact (keep_recent has not yet reached 0), raise an
         // error instead of looping forever.
-                let mut keep = keep_recent;
+        let mut keep = keep_recent;
         for pass in 0..3 {
-                        let outcome = crate::compact::compact_old_assistant_messages(
+            let outcome = crate::compact::compact_old_assistant_messages(
                 &mut messages,
                 keep,
                 thread_dir.as_deref(),
@@ -1631,7 +1629,12 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
 
     let was_condensed = if needs_hard || needs_soft {
         let condense_keep_turns = cfg.condense_keep_turns;
-        crate::compact::compact_old_assistant_messages(&mut messages, condense_keep_turns, None, current_iteration as u32);
+        crate::compact::compact_old_assistant_messages(
+            &mut messages,
+            condense_keep_turns,
+            None,
+            current_iteration as u32,
+        );
 
         let after_size: usize = if use_tokens {
             messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
@@ -1641,7 +1644,12 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
 
         if after_size > target_budget {
             let aggressive_keep = condense_keep_turns.saturating_sub(1);
-            crate::compact::compact_old_assistant_messages(&mut messages, aggressive_keep, None, current_iteration as u32);
+            crate::compact::compact_old_assistant_messages(
+                &mut messages,
+                aggressive_keep,
+                None,
+                current_iteration as u32,
+            );
         }
         true
     } else {
@@ -1732,12 +1740,7 @@ async fn main() -> Result<()> {
                 let omni_dir = crate::notes::omni_dir_from(&config.omni_dir);
                 let thread_id = match extract_i64(&args, &meta, "thread_id") {
                     Some(t) => t,
-                    None => {
-                        return Ok((
-                            "note tools require thread_id in _meta".to_string(),
-                            true,
-                        ))
-                    }
+                    None => return Ok(("note tools require thread_id in _meta".to_string(), true)),
                 };
                 let dir = crate::notes::thread_dir(&omni_dir, thread_id);
                 let name = args["name"].as_str().unwrap_or("").to_string();

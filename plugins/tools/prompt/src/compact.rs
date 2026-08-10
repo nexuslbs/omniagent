@@ -52,10 +52,8 @@ pub fn compact_old_assistant_messages(
 
         for &idx in tool_indices.iter().take(compact_up_to).rev() {
             if let Some(ref calls) = messages[idx].tool_calls {
-                let summary: Vec<String> = calls
-                    .iter()
-                    .map(|tc| tc.function.name.clone())
-                    .collect();
+                let summary: Vec<String> =
+                    calls.iter().map(|tc| tc.function.name.clone()).collect();
 
                 let mut tool_end = idx + 1;
                 while tool_end < messages.len() && messages[tool_end].role == "tool" {
@@ -93,7 +91,8 @@ pub fn compact_old_assistant_messages(
                 let mut excerpt = String::new();
                 let mut total_excerpt = 0;
                 for m in messages[idx + 1..tool_end].iter() {
-                    let content_preview: String = m.content.chars().take(TOOL_EXCERPT_CHARS).collect();
+                    let content_preview: String =
+                        m.content.chars().take(TOOL_EXCERPT_CHARS).collect();
                     let chunk_len = content_preview.len();
                     if total_excerpt + chunk_len > TOTAL_EXCERPT_CAP {
                         break;

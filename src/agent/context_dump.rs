@@ -52,7 +52,10 @@ pub fn append(dir: &std::path::Path, iter: u32, tool: &str, args: &str, content:
     // When the caller has no args (e.g. the pruner), key the digest on the
     // content hash so distinct results still get distinct entries.
     let args_s = if args.trim().is_empty() {
-        format!("[content:{}]", crate::agent::helpers::hash_tool_args(content))
+        format!(
+            "[content:{}]",
+            crate::agent::helpers::hash_tool_args(content)
+        )
     } else {
         args.to_string()
     };
@@ -83,7 +86,9 @@ pub fn append(dir: &std::path::Path, iter: u32, tool: &str, args: &str, content:
     }
     {
         let mut guard = APPENDED.lock().unwrap_or_else(|p| p.into_inner());
-        guard.get_or_insert_with(std::collections::HashSet::new).insert(dedupe_key);
+        guard
+            .get_or_insert_with(std::collections::HashSet::new)
+            .insert(dedupe_key);
     }
     enforce_caps(dir, iter);
     true
@@ -150,12 +155,31 @@ mod tests {
     #[test]
     fn appends_jsonl_and_dedupes() {
         let dir = tmp_dir("dedupe");
-        assert!(append(&dir, 3, "filesystem_read", r#"{"path":"/a"}"#, "alpha"));
-        assert!(!append(&dir, 3, "filesystem_read", r#"{"path":"/a"}"#, "alpha"));
-        assert!(append(&dir, 3, "filesystem_read", r#"{"path":"/b"}"#, "beta"));
+        assert!(append(
+            &dir,
+            3,
+            "filesystem_read",
+            r#"{"path":"/a"}"#,
+            "alpha"
+        ));
+        assert!(!append(
+            &dir,
+            3,
+            "filesystem_read",
+            r#"{"path":"/a"}"#,
+            "alpha"
+        ));
+        assert!(append(
+            &dir,
+            3,
+            "filesystem_read",
+            r#"{"path":"/b"}"#,
+            "beta"
+        ));
         let content = std::fs::read_to_string(dir.join("context-3.json")).unwrap();
         assert_eq!(content.lines().count(), 2);
-        let entry: serde_json::Value = serde_json::from_str(content.lines().next().unwrap()).unwrap();
+        let entry: serde_json::Value =
+            serde_json::from_str(content.lines().next().unwrap()).unwrap();
         assert_eq!(entry["tool"], "filesystem_read");
         assert_eq!(entry["chars"], 5);
         let _ = std::fs::remove_dir_all(&dir);

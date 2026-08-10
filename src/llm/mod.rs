@@ -559,6 +559,10 @@ pub struct ChatMessage {
     /// Name field for tool result messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Reasoning/thinking content, echoed back to providers that require the
+    /// round-trip (e.g. opencode-go / DeepSeek in thinking mode).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
@@ -569,6 +573,7 @@ impl ChatMessage {
             tool_call_id: None,
             tool_calls: None,
             name: None,
+            reasoning_content: None,
         }
     }
 
@@ -579,6 +584,7 @@ impl ChatMessage {
             tool_call_id: None,
             tool_calls: None,
             name: None,
+            reasoning_content: None,
         }
     }
 
@@ -589,6 +595,7 @@ impl ChatMessage {
             tool_call_id: None,
             tool_calls: None,
             name: None,
+            reasoning_content: None,
         }
     }
 
@@ -599,6 +606,7 @@ impl ChatMessage {
             tool_call_id: Some(tool_call_id.to_string()),
             tool_calls: None,
             name: Some(name.to_string()),
+            reasoning_content: None,
         }
     }
 }
@@ -810,10 +818,19 @@ impl LLMClient {
 
             client_opt.map(|client| {
                 let messages: Vec<serde_json::Value> = request.messages.iter()
-                    .map(|m| serde_json::json!({
-                        "role": m.role,
-                        "content": m.content,
-                    }))
+                    .map(|m| {
+                        let mut msg = serde_json::json!({
+                            "role": m.role,
+                            "content": m.content,
+                        });
+                        if let Some(ref r) = m.reasoning_content {
+                            msg["reasoning_content"] = serde_json::Value::String(r.clone());
+                        }
+                        if let Some(ref tc) = m.tool_calls {
+                            msg["tool_calls"] = serde_json::to_value(tc).unwrap_or_default();
+                        }
+                        msg
+                    })
                     .collect();
 
                 let params = crate::provider::external::CompleteParams {
@@ -1393,5 +1410,38 @@ mod tests {
         assert_eq!(msg.content, "Sunny, 72°F");
         assert_eq!(msg.tool_call_id.as_deref(), Some("call_123"));
         assert_eq!(msg.name.as_deref(), Some("get_weather"));
+    }
+
+    #[test]
+    fn test_chat_message_reasoning_content_roundtrip() {
+        // Constructors default reasoning_content to None.
+        let msg = ChatMessage::assistant("hello");
+        assert!(msg.reasoning_content.is_none());
+
+        // Serialization must OMIT the field when None (serde skip_serializing_if).
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            !json.contains("reasoning_content"),
+            "None must not serialize: {json}"
+        );
+
+        // Deserialization of a message without the field defaults to None.
+        let parsed: ChatMessage = serde_json::from_str(&json).unwrap();
+        assert!(parsed.reasoning_content.is_none());
+
+        // When set, the field MUST round-trip through serde (this is the
+        // contract opencode-go / DeepSeek thinking mode requires).
+        let mut with_reasoning = ChatMessage::assistant("final answer");
+        with_reasoning.reasoning_content = Some("thinking step by step".to_string());
+        let json2 = serde_json::to_string(&with_reasoning).unwrap();
+        assert!(
+            json2.contains("reasoning_content"),
+            "set reasoning_content must serialize: {json2}"
+        );
+        let parsed2: ChatMessage = serde_json::from_str(&json2).unwrap();
+        assert_eq!(
+            parsed2.reasoning_content.as_deref(),
+            Some("thinking step by step")
+        );
     }
 }

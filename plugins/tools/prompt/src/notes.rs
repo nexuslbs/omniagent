@@ -79,9 +79,7 @@ fn dump_was_read(thread_id: i64, name: &str) -> bool {
 fn mark_dump_read(thread_id: i64, name: &str) {
     let mut guard = READ_DUMPS.lock().unwrap_or_else(|p| p.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
-    map.entry(thread_id)
-        .or_default()
-        .insert(name.to_string());
+    map.entry(thread_id).or_default().insert(name.to_string());
 }
 
 fn truncate_to(mut content: String, cap: usize) -> String {
@@ -139,7 +137,11 @@ pub fn note_append(dir: &Path, name: &str, content: &str) -> (String, bool) {
         out.push_str(content.trim_end());
         out.push('\n');
     }
-    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         Ok(mut f) => match f.write_all(out.as_bytes()) {
             Ok(_) => (format!("appended to {name}"), false),
             Err(e) => (format!("error appending to '{name}': {e}"), true),
