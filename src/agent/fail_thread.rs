@@ -817,6 +817,9 @@ pub(crate) async fn engine_transition(
                 final_status = "running".to_string();
             } else {
                 block_reason = "no workflow";
+                // R8-N: plain task (no workflow) — a failed thread must land
+                // on 'blocked' (visible fail), not stay a zombie 'running'.
+                final_status = "blocked".to_string();
             }
         }
         RerunKind::Interrupted => {
@@ -830,6 +833,12 @@ pub(crate) async fn engine_transition(
                 rerun_step = caller_step.map(|s| s.to_string());
             } else {
                 block_reason = "no workflow";
+                if !has_wf {
+                    // R8-N: plain task (no workflow) — an interrupted thread
+                    // must land on 'blocked' (visible fail), not stay a zombie
+                    // 'running'.
+                    final_status = "blocked".to_string();
+                }
             }
         }
         RerunKind::Skipped => {
@@ -1534,6 +1543,326 @@ mod tests_rerun_script {
             .bind(&task_id)
             .execute(&pool)
             .await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+}
+
+#[cfg(test)]
+mod tests_r8n_no_workflow_blocked {
+    use super::*;
+
+    /// Throwaway data_dir; when `wf` is Some, write workflows.yml containing
+    /// that workflow (executor role, retries 0 → retry limit 1).
+    fn temp_data_dir(tag: &str, wf: Option<&str>) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("r8n-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(name) = wf {
+            std::fs::write(
+                dir.join("workflows.yml"),
+                format!(
+                    "workflows:\n  {name}:\n    profile: test\n    provider: noop\n    model: noop\n    plan_mode: manual\n    retries: 0\n    clear_executions_on_review: false\n    roles:\n      executor:\n        template: \"executor system prompt\"\n        provider: noop\n        model: noop\n"
+                ),
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    /// Insert a kanban task (status 'running') + its parent thread; return the
+    /// parent thread id. `workflow_id == None` → plain (no-workflow) task.
+    async fn setup(
+        pool: &sqlx::PgPool,
+        task_id: &str,
+        workflow_id: Option<&str>,
+        thread_step: Option<&str>,
+    ) -> i64 {
+        let _ = sqlx::query(
+            "DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE task_id = $1)",
+        )
+        .bind(task_id)
+        .execute(pool)
+        .await;
+        let _ = sqlx::query("DELETE FROM threads WHERE task_id = $1")
+            .bind(task_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM kanban_history WHERE kanban_task_id = $1")
+            .bind(task_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM kanban_tasks WHERE id = $1")
+            .bind(task_id)
+            .execute(pool)
+            .await;
+
+        sqlx::query(
+            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
+             VALUES ($1, 'R8N', '', 'running', 1, 1, 'test', 0, NULL, false, 'manual', $2)",
+        )
+        .bind(task_id)
+        .bind(workflow_id)
+        .execute(pool)
+        .await
+        .expect("insert kanban task");
+
+        sqlx::query_scalar::<_, i64>(
+            "INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, parent_id, workflow_id, workflow_step, task_type)
+             VALUES ('running', 'user', 1, 'test', 'noop', 'noop', $1, NULL, $2, $3, 'kanban')
+             RETURNING id",
+        )
+        .bind(task_id)
+        .bind(workflow_id.unwrap_or(""))
+        .bind(thread_step)
+        .fetch_one(pool)
+        .await
+        .expect("insert parent thread")
+    }
+
+    fn parent_thread(
+        thread_id: i64,
+        task_id: String,
+        step: Option<String>,
+    ) -> crate::db::types::Thread {
+        crate::db::types::Thread {
+            id: thread_id,
+            status: "running".to_string(),
+            cause: "user".to_string(),
+            channel_id: 1,
+            profile: "test".to_string(),
+            provider: Some("noop".to_string()),
+            model: Some("noop".to_string()),
+            input_tokens: 0,
+            cached_tokens: 0,
+            output_tokens: 0,
+            duration_ms: 0,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            ended_at: None,
+            terminal: false,
+            task_id: Some(task_id.clone()),
+            schedule_task_id: None,
+            plan: false,
+            parent_id: None,
+            iterations: 0,
+            workflow_step: step,
+            template: None,
+        }
+    }
+
+    async fn task_status(pool: &sqlx::PgPool, task_id: &str) -> String {
+        sqlx::query_scalar::<_, String>("SELECT status FROM kanban_tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_one(pool)
+            .await
+            .expect("fetch task status")
+    }
+
+    async fn latest_history_comment(pool: &sqlx::PgPool, task_id: &str) -> String {
+        sqlx::query_scalar::<_, String>(
+            "SELECT comment FROM kanban_history WHERE kanban_task_id = $1 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .expect("fetch kanban history comment")
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, task_id: &str, thread_ids: &[i64]) {
+        for tid in thread_ids {
+            let _ = sqlx::query("DELETE FROM messages WHERE thread_id = $1")
+                .bind(tid)
+                .execute(pool)
+                .await;
+        }
+        let _ = sqlx::query("DELETE FROM threads WHERE task_id = $1")
+            .bind(task_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM kanban_history WHERE kanban_task_id = $1")
+            .bind(task_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM kanban_tasks WHERE id = $1")
+            .bind(task_id)
+            .execute(pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn no_workflow_interrupted_lands_blocked() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+        let data_dir = temp_data_dir("interrupted", None);
+        let task_id = format!("r8n-int-{}", std::process::id());
+        let parent = parent_thread(
+            setup(&pool, &task_id, None, Some("running")).await,
+            task_id.clone(),
+            Some("running".to_string()),
+        );
+
+        let result = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent,
+            RerunKind::Interrupted,
+        )
+        .await
+        .expect("engine_transition should succeed");
+
+        assert_eq!(
+            result, None,
+            "a no-workflow interrupted task must NOT create a re-run thread"
+        );
+        assert_eq!(task_status(&pool, &task_id).await, "blocked");
+        let comment = latest_history_comment(&pool, &task_id).await;
+        assert!(
+            comment.contains("Moving kanban task to \"blocked\" status due to no workflow"),
+            "unexpected kanban_history comment: {comment}"
+        );
+
+        cleanup(&pool, &task_id, &[parent.id]).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn no_workflow_failed_lands_blocked() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+        let data_dir = temp_data_dir("failed", None);
+        let task_id = format!("r8n-fail-{}", std::process::id());
+        let parent = parent_thread(
+            setup(&pool, &task_id, None, Some("running")).await,
+            task_id.clone(),
+            Some("running".to_string()),
+        );
+
+        let result = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent,
+            RerunKind::Failed,
+        )
+        .await
+        .expect("engine_transition should succeed");
+
+        assert_eq!(
+            result, None,
+            "a no-workflow failed task must NOT create a re-run thread"
+        );
+        assert_eq!(task_status(&pool, &task_id).await, "blocked");
+        let comment = latest_history_comment(&pool, &task_id).await;
+        assert!(
+            comment.contains("Moving kanban task to \"blocked\" status due to no workflow"),
+            "unexpected kanban_history comment: {comment}"
+        );
+
+        cleanup(&pool, &task_id, &[parent.id]).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn workflow_interrupted_reruns_same_step() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+        let data_dir = temp_data_dir("wf-int", Some("test-wf"));
+        let task_id = format!("r8n-wfint-{}", std::process::id());
+        let parent = parent_thread(
+            setup(&pool, &task_id, Some("test-wf"), Some("running")).await,
+            task_id.clone(),
+            Some("running".to_string()),
+        );
+
+        let new_id = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent,
+            RerunKind::Interrupted,
+        )
+        .await
+        .expect("engine_transition should succeed")
+        .expect("workflow interrupted must create a re-run thread");
+
+        let step: String =
+            sqlx::query_scalar::<_, String>("SELECT workflow_step FROM threads WHERE id = $1")
+                .bind(new_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch rerun thread step");
+        assert_eq!(step, "running", "I1: re-run the SAME step");
+
+        // kanban status unchanged (task stays 'running', not 'blocked')
+        assert_eq!(task_status(&pool, &task_id).await, "running");
+
+        cleanup(&pool, &task_id, &[parent.id, new_id]).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn workflow_failed_reruns_executor() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+        let data_dir = temp_data_dir("wf-fail", Some("test-wf"));
+        let task_id = format!("r8n-wffail-{}", std::process::id());
+        let parent = parent_thread(
+            setup(&pool, &task_id, Some("test-wf"), Some("running")).await,
+            task_id.clone(),
+            Some("running".to_string()),
+        );
+
+        let new_id = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent,
+            RerunKind::Failed,
+        )
+        .await
+        .expect("engine_transition should succeed")
+        .expect("workflow failed must create a re-run thread");
+
+        let step: String =
+            sqlx::query_scalar::<_, String>("SELECT workflow_step FROM threads WHERE id = $1")
+                .bind(new_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch rerun thread step");
+        assert_eq!(
+            step, "running",
+            "F0: failed executor re-runs the executor step"
+        );
+
+        // kanban status reflects the re-run ('running', not 'blocked')
+        assert_eq!(task_status(&pool, &task_id).await, "running");
+
+        cleanup(&pool, &task_id, &[parent.id, new_id]).await;
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 }
