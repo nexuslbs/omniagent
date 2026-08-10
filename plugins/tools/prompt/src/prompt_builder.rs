@@ -156,7 +156,7 @@ present what you will do and wait for confirmation.\n\
 try once more with a different approach, then move on. Do NOT retry the same \
 failing call more than once. There is no hidden state that changes between retries.\n\
 10. TAKE NOTES: maintain a durable working memory with the note_* tools \
-(note_write/note_append/note_read/note_list/note_rm) after every non-trivial \
+(notes_note-write/notes_note-append/notes_note-read/notes_note-list/notes_note-rm) after every non-trivial \
 discovery (paths, line numbers, commands, root causes, decisions). Notes \
 survive compaction and thread death — the retry thread starts with them.\n\
 11. VERIFY-ONCE: read a file ONCE with `filesystem_read` (offset/limit paging — ONE

@@ -579,8 +579,18 @@ Previous plan:\n{}",
             }
         }
 
-        // Layer 3: iteration-aware tool result pruning
-        helpers::prune_old_tool_results(&mut messages, current_iter as u32, Some(&thread_dir));
+        // Layer 3: budget-driven tool result pruning. Runs every iteration
+        // but only prunes when the hard threshold is exceeded, compacting
+        // until the size drops below the soft threshold. Read-type results
+        // (filesystem_read etc.) are preserved + auto-noted so the agent
+        // never loses what it read (thread 700 re-read death spiral fix).
+        helpers::prune_old_tool_results(
+            &mut messages,
+            current_iter as u32,
+            Some(&thread_dir),
+            cfg_snapshot.prune_hard_budget,
+            cfg_snapshot.prune_soft_budget,
+        );
         // WS-4c: budget hint every iteration (anti-death-spiral backstop).
         helpers::upsert_system_message(
                 &mut messages,
@@ -609,6 +619,30 @@ Previous plan:\n{}",
                     &mut messages,
                     "=== Working Notes (durable) ===",
                     format!("=== Working Notes (durable) ===\n{notes_content}"),
+                );
+            }
+        }
+        // WS-5: ENGINE auto-notes — read-type tool results are auto-saved to
+        // auto-notes.md by prune/compact before their context copy is
+        // destroyed. Inject the TAIL (most recent reads first) so the agent
+        // always remembers what it read, even if it never wrote a note
+        // itself (thread 700: zero notes + 117 re-reads of the same ranges).
+        if let Ok(auto_notes_content) = std::fs::read_to_string(thread_dir.join("auto-notes.md")) {
+            let auto_total = auto_notes_content.chars().count();
+            let auto_notes_content = if auto_total > 12000 {
+                let tail_start = auto_total.saturating_sub(12000);
+                let tail: String = auto_notes_content.chars().skip(tail_start).collect();
+                format!(
+                    "{tail}\n[auto-notes truncated: showing last 12000 of {auto_total} total chars]"
+                )
+            } else {
+                auto_notes_content
+            };
+            if !auto_notes_content.trim().is_empty() {
+                helpers::upsert_system_message(
+                    &mut messages,
+                    "=== Auto-Saved Reads (engine) ===",
+                    format!("=== Auto-Saved Reads (engine) ===\n{auto_notes_content}"),
                 );
             }
         }

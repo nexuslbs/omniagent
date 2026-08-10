@@ -9,6 +9,25 @@ pub const TOOL_EXCERPT_CHARS: usize = 800;
 /// Overall cap for the concatenated tool-result excerpt (prevents a single
 /// compacted message from blowing the context).
 pub const TOTAL_EXCERPT_CAP: usize = 4000;
+/// Tools whose results ARE the agent's working memory (file contents,
+/// listings, search hits). When compaction must drain them, keep a much
+/// larger excerpt than the generic cap — zeroing them forces the agent to
+/// re-read the same files (thread 700 death spiral: 117 sed windows).
+fn is_read_type_tool(name: &str) -> bool {
+    name.starts_with("filesystem_read")
+        || name.starts_with("filesystem_list")
+        || name.starts_with("filesystem_search")
+        || name.starts_with("filesystem_info")
+        || name.starts_with("query_database")
+        || name.starts_with("search_messages")
+        || name.starts_with("search_wiki")
+        || name.starts_with("skills_view")
+        || name.starts_with("git_status")
+        || name.starts_with("git_run-command")
+}
+/// Per-result excerpt for read-type tools: generous head+tail so the agent
+/// still sees what it learned.
+pub const READ_EXCERPT_CHARS: usize = 2000;
 
 /// Outcome of a compaction pass (WS-2/WS-3): how many tool messages were
 /// drained, and whether a durable `context-<iter>.json` digest was written.
@@ -81,6 +100,27 @@ pub fn compact_old_assistant_messages(
                             ) {
                                 outcome.dump_entries += 1;
                             }
+                            // Auto-note read-type results into the durable
+                            // auto-notes.md (re-injected every iteration).
+                            // Dumps are forbidden to re-read (rule 12), so
+                            // this is the ONLY recovery channel for drained
+                            // read content — otherwise the agent forgets
+                            // what it read and re-reads the same files
+                            // (thread 700: 117 sed windows of the same
+                            // ranges, zero commits).
+                            if is_read_type_tool(tool_name) {
+                                crate::notes::note_append(
+                                    dir,
+                                    "auto-notes.md",
+                                    &format!(
+                                        "## [engine:auto-note {tool_name}]\n{}\n",
+                                        m.content
+                                            .chars()
+                                            .take(READ_EXCERPT_CHARS)
+                                            .collect::<String>()
+                                    ),
+                                );
+                            }
                         }
                     }
                     if tool_count > 0 {
@@ -91,8 +131,14 @@ pub fn compact_old_assistant_messages(
                 let mut excerpt = String::new();
                 let mut total_excerpt = 0;
                 for m in messages[idx + 1..tool_end].iter() {
-                    let content_preview: String =
-                        m.content.chars().take(TOOL_EXCERPT_CHARS).collect();
+                    let tool_name = m.name.as_deref().unwrap_or("");
+                    let is_read = is_read_type_tool(tool_name);
+                    let excerpt_chars = if is_read {
+                        READ_EXCERPT_CHARS
+                    } else {
+                        TOOL_EXCERPT_CHARS
+                    };
+                    let content_preview: String = m.content.chars().take(excerpt_chars).collect();
                     let chunk_len = content_preview.len();
                     if total_excerpt + chunk_len > TOTAL_EXCERPT_CAP {
                         break;

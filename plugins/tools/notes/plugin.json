@@ -1,0 +1,22 @@
+{
+  "name": "Notes MCP Server",
+  "id": "mcp-server-notes",
+  "version": "0.1.0",
+  "description": "Durable working-memory notes: write/append/read/list/rm notes in the thread's notes dir (data/threads/<thread_id>/). Notes survive compaction and thread death — the retry thread starts with them. This is a SEPARATE plugin from the prompt plugin so notes remain available regardless of which prompt plugin (builtin or remote) is enabled.",
+  "type": "mcp",
+  "entrypoint": {
+    "command": "mcp-server-notes",
+    "args": [],
+    "transport": "stdio"
+  },
+  "config_schema": [
+    {
+      "key": "omni_dir",
+      "default": "$env:OMNI_DIR",
+      "label": "Omni Dir",
+      "type": "string",
+      "description": "Root omni data dir; thread notes live under {omni_dir}/data/threads/<thread_id>/"
+    }
+  ],
+  "label": "notes"
+}

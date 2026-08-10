@@ -1429,6 +1429,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcp-server-notes"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mcp-server-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "mcp-server-plugin-manager"
 version = "0.1.0"
 dependencies = [

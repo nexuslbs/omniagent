@@ -97,6 +97,14 @@ pub struct AgentConfig {
     /// Default: "prompt_compact-messages".
     pub compact_messages_tool_name: String,
 
+    /// Hard context budget (chars): engine-level pruning runs ONLY when the
+    /// total context size exceeds this threshold. Mirrors the prompt plugin's
+    /// `char_budget_hard` so the two layers agree (default 500000).
+    pub prune_hard_budget: usize,
+    /// Soft context budget (chars): pruning compacts until the total size
+    /// drops below this (default 350000).
+    pub prune_soft_budget: usize,
+
     // When to insert prompts as messages (msg_type: "prompt") into the messages table.
     /// - "off": never insert
     /// - "first": insert the first LLM call's prompt only (default)
@@ -211,6 +219,8 @@ impl AgentConfig {
                 "prompt_compact_messages_tool",
                 "prompt_compact-messages",
             ),
+            prune_hard_budget: get("prune_hard_budget", "500000").parse().unwrap_or(500000),
+            prune_soft_budget: get("prune_soft_budget", "350000").parse().unwrap_or(350000),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
@@ -297,6 +307,8 @@ impl AgentConfig {
                 "prompt_compact_messages_tool",
                 "prompt_compact-messages",
             ),
+            prune_hard_budget: get("prune_hard_budget", "500000").parse().unwrap_or(500000),
+            prune_soft_budget: get("prune_soft_budget", "350000").parse().unwrap_or(350000),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
@@ -364,6 +376,8 @@ mod tests {
             delete_after_days: 30,
             prompt_tool_name: "prompt_generate".to_string(),
             compact_messages_tool_name: "prompt_compact-messages".to_string(),
+            prune_hard_budget: 500000,
+            prune_soft_budget: 350000,
             prompt_log_level: "first".to_string(),
             tool_bg_secs: 30,
             database_url: "postgres://localhost:***@host:5432/db".to_string(),
@@ -405,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_agent_config_complete_field_count() {
-        // AgentConfig has 35 fields. This test verifies all are present,
+        // AgentConfig has 37 fields. This test verifies all are present,
         // by constructing a minimal config and checking all fields are accessible.
         let cfg = AgentConfig {
             llm_api_key: String::new(),
@@ -420,6 +434,8 @@ mod tests {
             delete_after_days: 0,
             prompt_tool_name: String::new(),
             compact_messages_tool_name: String::new(),
+            prune_hard_budget: 0,
+            prune_soft_budget: 0,
             prompt_log_level: String::new(),
             tool_bg_secs: 0,
             database_url: "postgres://localhost:5432/omniagent".to_string(),

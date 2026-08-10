@@ -23,7 +23,7 @@ scripts/*
 !scripts/prepare.py
 !scripts/build.py
 docs/
-notes/
+/notes/
 
 # ── Runtime test artifacts (created by tests.py) ──
 plugins/tools/test-python-tool/

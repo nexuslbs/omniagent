@@ -1730,41 +1730,6 @@ async fn main() -> Result<()> {
         })
     });
 
-    // WS-1: durable working-memory notes toolset (thread-dir sandboxed).
-    let note_handler = |tool: &'static str| -> ToolHandler {
-        let note_cfg = plugin_config.clone();
-        Box::new(move |args: Value, meta: Option<McpMeta>| {
-            let cfg = note_cfg.clone();
-            Box::pin(async move {
-                let config = cfg.read().await.clone();
-                let omni_dir = crate::notes::omni_dir_from(&config.omni_dir);
-                let thread_id = match extract_i64(&args, &meta, "thread_id") {
-                    Some(t) => t,
-                    None => return Ok(("note tools require thread_id in _meta".to_string(), true)),
-                };
-                let dir = crate::notes::thread_dir(&omni_dir, thread_id);
-                let name = args["name"].as_str().unwrap_or("").to_string();
-                let (content, is_error) = match tool {
-                    "note_append" => crate::notes::note_append(
-                        &dir,
-                        &name,
-                        args["content"].as_str().unwrap_or(""),
-                    ),
-                    "note_read" => crate::notes::note_read(&dir, &name, thread_id),
-                    "note_write" => crate::notes::note_write(
-                        &dir,
-                        &name,
-                        args["content"].as_str().unwrap_or(""),
-                    ),
-                    "note_list" => crate::notes::note_list(&dir),
-                    "note_rm" => crate::notes::note_rm(&dir, &name),
-                    _ => (format!("unknown note tool {tool}"), true),
-                };
-                Ok((content, is_error))
-            })
-        })
-    };
-
     let tools = vec![
         McpToolEntry {
             def: McpToolDef {
@@ -1844,87 +1809,7 @@ async fn main() -> Result<()> {
             },
             handler: compact_handler,
         },
-        McpToolEntry {
-            def: McpToolDef {
-                name: "note_append".to_string(),
-                description:
-                    "Append a line to a durable working-memory note file in this thread's notes dir                      (data/threads/<thread_id>/). Notes survive compaction and thread death — the retry                      thread starts with them. Use for facts, paths, line numbers, commands, root causes,                      and decisions."
-                    .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "Note file name (plain filename, e.g. notes.md)"},
-                        "content": {"type": "string", "description": "Content to append"}
-                    },
-                    "required": ["name", "content"]
-                }),
-            },
-            handler: note_handler("note_append"),
-        },
-        McpToolEntry {
-            def: McpToolDef {
-                name: "note_read".to_string(),
-                description:
-                    "Read a note file from this thread's notes dir. Output is capped at ~8KB. context-*.json                      dump files are READ-ONCE per thread: a second read returns a '[duplicate read ...]' marker                      (rule 12) instead of content."
-                    .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "Note file name (plain filename)"}
-                    },
-                    "required": ["name"]
-                }),
-            },
-            handler: note_handler("note_read"),
-        },
-        McpToolEntry {
-            def: McpToolDef {
-                name: "note_write".to_string(),
-                description:
-                    "Overwrite a note file in this thread's notes dir (creating it if needed). Use for the                      canonical notes.md working memory of this thread."
-                    .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "Note file name (plain filename)"},
-                        "content": {"type": "string", "description": "Full content to write"}
-                    },
-                    "required": ["name", "content"]
-                }),
-            },
-            handler: note_handler("note_write"),
-        },
-        McpToolEntry {
-            def: McpToolDef {
-                name: "note_list".to_string(),
-                description:
-                    "List the note files in this thread's notes dir."
-                    .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {}
-                }),
-            },
-            handler: note_handler("note_list"),
-        },
-        McpToolEntry {
-            def: McpToolDef {
-                name: "note_rm".to_string(),
-                description:
-                    "Remove a note file from this thread's notes dir."
-                    .to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "Note file name (plain filename)"}
-                    },
-                    "required": ["name"]
-                }),
-            },
-            handler: note_handler("note_rm"),
-        },
     ];
-
     let server_info = ServerInfo {
         name: "mcp-server-prompt".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
