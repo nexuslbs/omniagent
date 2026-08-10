@@ -473,6 +473,10 @@ Previous plan:\n{}",
     // the last condense just happened.
     let mut last_condense_iteration: i32 = 0;
 
+    // WS-4b: engine-level read guard — (tool, args-hash) -> (iteration, len)
+    // for read-only tools. Cleared whenever a state-changing tool runs.
+    let mut read_guard: std::collections::HashMap<(String, u64), (u32, usize)> =
+        std::collections::HashMap::new();
     for _turn in 0..max_llm_calls {
         current_iter += 1; // increment before each LLM call
 
@@ -491,6 +495,14 @@ Previous plan:\n{}",
         // its own thresholds (configurable via plugin config). The agent
         // is agnostic to condensation logic : it passes messages and
         // iteration info and applies whatever the tool returns.
+            // WS-2/WS-3: durable thread dir (notes + context dumps).
+            let thread_dir = std::path::Path::new(&cfg.ctx.data_dir)
+                .join("data")
+                .join("threads")
+                .join(thread.id.to_string());
+            let mut was_compacted = false;
+            let mut dump_file: Option<String> = None;
+            let mut dump_entries = 0usize;
         let cfg_snapshot = cfg.config_snapshot();
         let condense_tool = cfg_snapshot.compact_messages_tool_name.clone();
         if !condense_tool.is_empty() {
@@ -500,6 +512,7 @@ Previous plan:\n{}",
                     "messages": messages,
                     "current_iteration": current_iter,
                     "last_condense_iteration": last_condense_iteration,
+                    "thread_dir": thread_dir,
                 }),
                 id: String::new(),
             };
@@ -535,6 +548,18 @@ Previous plan:\n{}",
                                 .get("after_count")
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(0);
+                            was_compacted = result
+                                .get("was_compacted")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(after < before);
+                            dump_file = result
+                                .get("dump_file")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            dump_entries = result
+                                .get("entries")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0) as usize;
                             messages =
                                 serde_json::from_value(serde_json::Value::Array(condensed.clone()))
                                     .unwrap_or(messages);
@@ -556,7 +581,50 @@ Previous plan:\n{}",
         }
 
         // Layer 3: iteration-aware tool result pruning
-        helpers::prune_old_tool_results(&mut messages, current_iter as u32);
+        helpers::prune_old_tool_results(&mut messages, current_iter as u32, Some(&thread_dir));
+            // WS-4c: budget hint every iteration (anti-death-spiral backstop).
+            helpers::upsert_system_message(
+                &mut messages,
+                "=== Budget ===",
+                format!(
+                    "=== Budget ===\nIteration {}/{}.\nRemaining: {}.\nIf remaining < 20, stop exploring and start producing.",
+                    current_iter,
+                    iter_limit,
+                    (iter_limit - current_iter).max(0)
+                ),
+            );
+            // WS-3: durable working notes survive compaction — injected every
+            // iteration AFTER condense+prune so notes are always in context.
+            if let Ok(notes_content) = std::fs::read_to_string(thread_dir.join("notes.md")) {
+                let notes_total = notes_content.chars().count();
+                let notes_content = if notes_total > 8192 {
+                    let head: String = notes_content.chars().take(8192).collect();
+                    format!(
+                        "{head}\n[note truncated: showing chars 0-8192 of {notes_total} total chars]"
+                    )
+                } else {
+                    notes_content
+                };
+                if !notes_content.trim().is_empty() {
+                    helpers::upsert_system_message(
+                        &mut messages,
+                        "=== Working Notes (durable) ===",
+                        format!("=== Working Notes (durable) ===\n{notes_content}"),
+                    );
+                }
+            }
+            // WS-3: compaction notice — never re-read the dump (rule 12).
+            if was_compacted {
+                helpers::upsert_system_message(
+                    &mut messages,
+                    "=== Context Compacted",
+                    format!(
+                        "=== Context Compacted (iteration {current_iter}) ===\nDump: {} ({} entries).\nNever re-read context-{current_iter}.json — rule 12.",
+                        dump_file.as_deref().unwrap_or("context dump"),
+                        dump_entries
+                    ),
+                );
+            }
 
         // ── Optional: insert prompt message before LLM call ──
         // Subtypes: "first" (first normal LLM call), "compaction" (after context
@@ -1021,10 +1089,31 @@ Previous plan:\n{}",
         // mcp_registry removed - use cfg.plugin_manager instead
         let mut join_set = JoinSet::new();
 
+        let mut tool_results: Vec<Option<(String, String, String)>> =
+            vec![None; response.tool_calls.len()];
         for (idx, tc) in response.tool_calls.iter().enumerate() {
             let tool_name = tc.function.name.clone();
             let tool_args = tc.function.arguments.clone();
             let tc_id = tc.id.clone();
+
+            // WS-4b: exact-repeat read guard for read-only tools.
+            let args_hash = helpers::hash_tool_args(&tool_args);
+            let guard_key = (tool_name.clone(), args_hash);
+            if helpers::is_guarded_read_only(&tool_name) {
+                if let Some((guard_iter, _len)) = read_guard.get(&guard_key) {
+                    tool_results[idx] = Some((
+                        tc_id.clone(),
+                        tool_name.clone(),
+                        format!(
+                            "[duplicate of {tool_name} at iteration {guard_iter} — see your notes; re-reading the same input is forbidden by rule 11]"
+                        ),
+                    ));
+                    continue;
+                }
+                read_guard.insert(guard_key, (current_iter as u32, 0));
+            } else {
+                read_guard.clear();
+            }
             let qualified_name = tool_name.clone(); // qualified_name is identity, no registry needed
 
             let mcp_call = McpToolCall {
@@ -1325,6 +1414,21 @@ Previous plan:\n{}",
                 }
                 Err(e) => {
                     error!("Tool execution task panicked: {:?}", e);
+                }
+            }
+        }
+
+        // WS-4b: record output length for executed read-only tools.
+        for (idx, tc) in response.tool_calls.iter().enumerate() {
+            if helpers::is_guarded_read_only(&tc.function.name) {
+                if let Some(Some((_, _, output))) = tool_results.get(idx) {
+                    read_guard.insert(
+                        (
+                            tc.function.name.clone(),
+                            helpers::hash_tool_args(&tc.function.arguments),
+                        ),
+                        (current_iter as u32, output.len()),
+                    );
                 }
             }
         }

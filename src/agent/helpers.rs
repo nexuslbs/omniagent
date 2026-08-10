@@ -184,7 +184,61 @@ pub fn count_tokens(
 ///   6–10:   truncate bodies >1,000 chars to 200-char preview
 ///   11–15:  truncate bodies >300 chars to 100-char preview
 ///   16+:    replace entire body with metadata-only label
-pub fn prune_old_tool_results(messages: &mut [ChatMessage], current_iter: u32) {
+/// WS-4b: which tools are read-only and therefore subject to the
+/// exact-repeat read guard. State-changing tools (writes, commits, clones)
+/// are excluded; executing one clears the guard map (reads after a mutation
+/// are always fresh).
+pub fn is_guarded_read_only(tool: &str) -> bool {
+    matches!(
+        tool,
+        "filesystem_read" | "filesystem_info" | "filesystem_list" | "filesystem_search"
+            | "search_messages" | "search_wiki" | "note_read"
+    ) || (tool.starts_with("git_")
+        && !matches!(
+            tool,
+            "git_commit-and-push" | "git_clone-repo" | "git_create-github-repo"
+        ))
+}
+
+/// WS-4b: FNV-1a hash of a tool call's raw argument JSON — stable within the
+/// process, no imports needed.
+pub fn hash_tool_args(args: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in args.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// WS-3/WS-4c: replace-or-append a marker-prefixed system message (budget
+/// hint, working notes, compaction notice). Keeps the message list bounded
+/// while making the latest value always visible to the LLM.
+pub fn upsert_system_message(messages: &mut Vec<ChatMessage>, marker: &str, content: String) {
+    messages.retain(|m| m.role != "system" || !m.content.starts_with(marker));
+    messages.push(ChatMessage::system(&content));
+}
+
+pub fn prune_old_tool_results(
+    messages: &mut [ChatMessage],
+    current_iter: u32,
+    thread_dir: Option<&std::path::Path>,
+) {
+    // WS-2: durable context dump — before this pass destroys/truncates any
+    // tool result bodies, append digests of the prune-window candidates.
+    if let Some(dir) = thread_dir {
+        let keep_from = messages
+            .iter()
+            .rposition(|m| m.role == "assistant" && m.tool_calls.is_some())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        for msg in messages.iter().take(keep_from) {
+            if msg.role == "tool" && !msg.content.is_empty() {
+                let tool = msg.name.clone().unwrap_or_default();
+                crate::agent::context_dump::append(dir, current_iter, &tool, "", &msg.content);
+            }
+        }
+    }
     // Find the index of the last assistant message with tool_calls: this
     // marks the most recent turn boundary. Tool results after it are kept.
     let last_tool_turn_idx = messages
@@ -724,6 +778,40 @@ pub async fn enqueue_typing(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prune_dumps_digest_before_destroy() {
+        let tmp = std::env::temp_dir().join(format!("prune-dump-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut messages = vec![
+            ChatMessage::tool_result("call-1", "filesystem_read", &"x".repeat(20000)),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "[tool calls]".to_string(),
+                tool_call_id: None,
+                tool_calls: Some(vec![]),
+                name: None,
+            },
+        ];
+        super::prune_old_tool_results(&mut messages, 7, Some(&tmp));
+        let dump_path = tmp.join("context-7.json");
+        let content = std::fs::read_to_string(&dump_path).unwrap_or_default();
+        assert!(
+            content.contains("filesystem_read"),
+            "dump missing tool name; content: {:?}",
+            &content[..content.len().min(200)]
+        );
+        for line in content.lines() {
+            let v: serde_json::Value =
+                serde_json::from_str(line).expect("dump line must be valid JSON");
+            assert!(v["tool"].as_str().is_some());
+            assert!(v["head"].as_str().is_some());
+            assert!(v["tail"].as_str().is_some());
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+
     use crate::llm::{ChatMessage, ToolCallData, ToolCallFunction, Usage};
     use serde_json::json;
 
@@ -931,7 +1019,7 @@ mod tests {
         ];
         let original_len = msgs.len();
         let original_contents: Vec<String> = msgs.iter().map(|m| m.content.clone()).collect();
-        prune_old_tool_results(&mut msgs, 3);
+        prune_old_tool_results(&mut msgs, 3, None);
         // Same length and content unchanged
         assert_eq!(msgs.len(), original_len);
         for (i, m) in msgs.iter().enumerate() {
@@ -950,7 +1038,7 @@ mod tests {
             make_tool_result("tool_b", "short"),
             ChatMessage::assistant("Done."),
         ];
-        prune_old_tool_results(&mut msgs, 8);
+        prune_old_tool_results(&mut msgs, 8, None);
 
         // The first tool result (tool_a) should be pruned (it's before the last tool-calling assistant)
         // The second tool result (tool_b) is after the last tool-calling assistant? No, it's at index 4,
@@ -972,7 +1060,7 @@ mod tests {
             ChatMessage::system("beep"),
         ];
         let original_len = msgs.len();
-        prune_old_tool_results(&mut msgs, 10);
+        prune_old_tool_results(&mut msgs, 10, None);
         assert_eq!(msgs.len(), original_len);
     }
 
@@ -984,7 +1072,7 @@ mod tests {
             ChatMessage::assistant("Done."),
         ];
         let original_len = msgs.len();
-        prune_old_tool_results(&mut msgs, 10);
+        prune_old_tool_results(&mut msgs, 10, None);
         // No assistant with tool_calls, so last_tool_turn_idx is None, keep_from = 0
         // Nothing is before index 0, so nothing happens
         assert_eq!(msgs.len(), original_len);
