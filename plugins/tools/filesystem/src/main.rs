@@ -45,36 +45,73 @@ fn normalize_path(p: &Path) -> std::path::PathBuf {
     out
 }
 
-/// Validate that a WRITE path is INSIDE the workspace sandbox.
-///
-/// Only write operations are confined to `workspace_dir` (default
-/// `/opt/workspace`) and its subdirectories. The workspace root itself is
-/// allowed. Absolute paths outside the sandbox are rejected; `.`/`..`
-/// components are normalized so traversal cannot escape.
-///
-/// For paths that don't exist yet (new files being written), the check is
-/// purely lexical — the parent chain must stay inside the sandbox.
-fn restrict_to_workspace(path: &str, workspace_dir: &str) -> Result<String> {
-    let ws = Path::new(workspace_dir);
-    let requested = Path::new(path);
-
-    let ws_norm = normalize_path(ws);
-    let req_norm = if requested.is_absolute() {
-        normalize_path(requested)
+/// WS-6: resolve the OMNI_DIR root (config value -> env OMNI_DIR -> /opt/omni).
+fn resolve_omni_dir(cfg_omni: &str) -> String {
+    if !cfg_omni.is_empty() {
+        cfg_omni.to_string()
     } else {
-        // Relative paths resolve against the workspace root.
-        normalize_path(&ws.join(requested))
-    };
-
-    if !req_norm.starts_with(&ws_norm) {
-        anyhow::bail!(
-            "Access denied: path '{}' is outside the filesystem workspace sandbox '{}'. \
-             Writes are only allowed in the workspace dir and its subdirectories.",
-            path,
-            workspace_dir
-        );
+        std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/omni".to_string())
     }
-    Ok(req_norm.to_string_lossy().to_string())
+}
+
+/// WS-6: allowed write roots — the workspace dir (always) plus the OMNI_DIR
+/// subdirs enabled by config. `write_omni_all` supersedes the three subdir
+/// toggles.
+fn allowed_write_roots(cfg: &Config) -> Vec<String> {
+    let mut roots = vec![resolve_workspace_dir(&cfg.workspace_dir)];
+    let omni = resolve_omni_dir(&cfg.omni_dir);
+    if cfg.write_omni_all {
+        roots.push(omni);
+    } else {
+        if cfg.write_profiles {
+            roots.push(format!("{omni}/profiles"));
+        }
+        if cfg.write_data {
+            roots.push(format!("{omni}/data"));
+        }
+        if cfg.write_plugins {
+            roots.push(format!("{omni}/plugins"));
+        }
+    }
+    roots
+}
+
+/// WS-6: replaces the single-root `restrict_to_workspace` for writes. A write
+/// path must normalize INSIDE at least one allowed root (workspace dir always;
+/// OMNI_DIR or its profiles/data/plugins subdirs per config). Relative paths
+/// resolve against the workspace root; `..` traversal that escapes every root
+/// is rejected.
+fn restrict_write_path(path: &str, cfg: &Config) -> Result<String, String> {
+    if path.trim().is_empty() {
+        return Err("path must not be empty".to_string());
+    }
+    let ws = resolve_workspace_dir(&cfg.workspace_dir);
+    let candidate = if path.trim_start().starts_with('/') {
+        path.to_string()
+    } else {
+        format!(
+            "{}/{}",
+            ws.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        )
+    };
+    let normalized = normalize_path(std::path::Path::new(&candidate));
+    let roots = allowed_write_roots(cfg);
+    let allowed = roots.iter().any(|root| {
+        let root = normalize_path(std::path::Path::new(root));
+        normalized == root
+            || normalized
+                .starts_with(std::path::Path::new(&format!("{}/", root.display())))
+    });
+    if allowed {
+        Ok(normalized.to_string_lossy().to_string())
+    } else {
+        Err(format!(
+            "path outside allowed write roots; allowed roots: {} (got {})",
+            roots.join(", "),
+            normalized.display()
+        ))
+    }
 }
 
 /// Resolve a READ path: reads are unrestricted (anywhere on the filesystem),
@@ -167,7 +204,7 @@ fn handle_read(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
 // Tool: filesystem_write
 // ---------------------------------------------------------------------------
 
-fn handle_write(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
+fn handle_write(args: Value, cfg: &Config) -> Result<(String, bool)> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
@@ -178,7 +215,7 @@ fn handle_write(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
 
     // Validate path is within the workspace sandbox (lexical — works for
     // files that don't exist yet).
-    let safe_path_str = restrict_to_workspace(path, workspace_dir)?;
+    let safe_path_str = restrict_write_path(path, cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
     let safe_path = Path::new(&safe_path_str);
 
     if let Some(parent) = safe_path.parent() {
@@ -357,9 +394,27 @@ fn handle_info(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
 // Plugin config — received via MCP configure message, not from env vars
 // ---------------------------------------------------------------------------
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 struct Config {
     workspace_dir: String,
+    omni_dir: String,
+    write_profiles: bool,
+    write_data: bool,
+    write_plugins: bool,
+    write_omni_all: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            workspace_dir: String::new(),
+            omni_dir: String::new(),
+            write_profiles: true,
+            write_data: true,
+            write_plugins: true,
+            write_omni_all: false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -380,6 +435,23 @@ async fn main() -> Result<()> {
                     cfg.workspace_dir = dir.to_string();
                 }
             }
+            if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
+                if !dir.is_empty() {
+                    cfg.omni_dir = dir.to_string();
+                }
+            }
+            if let Some(v) = params.get("write_profiles").and_then(|v| v.as_bool()) {
+                cfg.write_profiles = v;
+            }
+            if let Some(v) = params.get("write_data").and_then(|v| v.as_bool()) {
+                cfg.write_data = v;
+            }
+            if let Some(v) = params.get("write_plugins").and_then(|v| v.as_bool()) {
+                cfg.write_plugins = v;
+            }
+            if let Some(v) = params.get("write_omni_all").and_then(|v| v.as_bool()) {
+                cfg.write_omni_all = v;
+            }
         })
     };
 
@@ -394,8 +466,15 @@ async fn main() -> Result<()> {
     let c2 = config.clone();
     let write_handler = soft_error(move |args: Value| {
         let cfg = c2.lock();
-        let wd = resolve_workspace_dir(&cfg.workspace_dir);
-        handle_write(args, &wd)
+        let write_cfg = Config {
+            workspace_dir: cfg.workspace_dir.clone(),
+            omni_dir: cfg.omni_dir.clone(),
+            write_profiles: cfg.write_profiles,
+            write_data: cfg.write_data,
+            write_plugins: cfg.write_plugins,
+            write_omni_all: cfg.write_omni_all,
+        };
+        handle_write(args, &write_cfg)
     });
 
     let c3 = config.clone();
@@ -455,7 +534,7 @@ async fn main() -> Result<()> {
                 description:
                     "WRITE/CREATE A LOCAL FILE on disk. Use this to save content to a new or existing file. Creates parent directories automatically. This is the ONLY tool for writing file content. \
                     For very large files that exceed your output token limit, split the content across multiple calls: first call with append=false, then subsequent calls with append=true to add the rest. \
-                    SANDBOX: only paths inside the workspace dir (/opt/workspace by default) and its subdirectories can be written."
+                    SANDBOX: writes are allowed inside the workspace dir (/opt/workspace by default) AND inside OMNI_DIR subdirectories per plugin config: omni_dir/profiles (write_profiles), omni_dir/data (write_data), omni_dir/plugins (write_plugins); write_omni_all=true allows the entire OMNI_DIR. Writes anywhere else are rejected."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -561,55 +640,95 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sandbox_accepts_workspace_root() {
-        assert!(restrict_to_workspace("/opt/workspace", "/opt/workspace").is_ok());
+    fn write_policy_workspace_always_allowed() {
+        let cfg = Config {
+            workspace_dir: "/opt/workspace".into(),
+            ..Config::default()
+        };
+        assert!(restrict_write_path("/opt/workspace/a.txt", &cfg).is_ok());
+        assert!(restrict_write_path("/opt/workspace", &cfg).is_ok());
+        assert!(restrict_write_path("/opt/workspace/sub/dir/f.txt", &cfg).is_ok());
+        // relative paths resolve against the workspace root
+        assert!(restrict_write_path("a.txt", &cfg).is_ok());
+        let err = restrict_write_path("/etc/passwd", &cfg).unwrap_err();
+        assert!(err.contains("allowed write roots"), "err: {err}");
     }
 
     #[test]
-    fn sandbox_accepts_subdirectory() {
-        assert!(
-            restrict_to_workspace("/opt/workspace/playground/movie-db", "/opt/workspace").is_ok()
-        );
-        assert!(restrict_to_workspace("/opt/workspace/omniagent", "/opt/workspace").is_ok());
+    fn write_policy_rejects_traversal() {
+        let cfg = Config {
+            workspace_dir: "/opt/workspace".into(),
+            ..Config::default()
+        };
+        assert!(restrict_write_path("/opt/workspace/../etc/passwd", &cfg).is_err());
+        assert!(restrict_write_path("../../etc/passwd", &cfg).is_err());
+        assert!(restrict_write_path("/opt/workspace/../../etc/passwd", &cfg).is_err());
     }
 
     #[test]
-    fn sandbox_rejects_outside_path() {
-        let err = restrict_to_workspace("/opt/omni/plugins", "/opt/workspace").unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("outside the filesystem workspace sandbox"));
-        assert!(restrict_to_workspace("/etc", "/opt/workspace").is_err());
-        assert!(restrict_to_workspace("/tmp", "/opt/workspace").is_err());
-        assert!(restrict_to_workspace("/", "/opt/workspace").is_err());
+    fn write_policy_omni_subdir_toggles() {
+        let cfg = Config {
+            workspace_dir: "/opt/workspace".into(),
+            omni_dir: "/opt/omni".into(),
+            ..Config::default()
+        };
+        // defaults: all three subdir toggles on
+        assert!(restrict_write_path("/opt/omni/data/threads/5/notes.md", &cfg).is_ok());
+        assert!(restrict_write_path("/opt/omni/profiles/omni/wiki/a.md", &cfg).is_ok());
+        assert!(restrict_write_path("/opt/omni/plugins/x/main.rs", &cfg).is_ok());
+        // but the omni root itself is NOT allowed without write_omni_all
+        assert!(restrict_write_path("/opt/omni/other.txt", &cfg).is_err());
+        // write_data off
+        let mut c2 = cfg.clone();
+        c2.write_data = false;
+        assert!(restrict_write_path("/opt/omni/data/x", &c2).is_err());
+        assert!(restrict_write_path("/opt/omni/profiles/x", &c2).is_ok());
+        assert!(restrict_write_path("/opt/omni/plugins/x", &c2).is_ok());
+        // write_profiles off
+        let mut c3 = cfg.clone();
+        c3.write_profiles = false;
+        assert!(restrict_write_path("/opt/omni/profiles/x", &c3).is_err());
+        assert!(restrict_write_path("/opt/omni/data/x", &c3).is_ok());
+        // write_plugins off
+        let mut c4 = cfg.clone();
+        c4.write_plugins = false;
+        assert!(restrict_write_path("/opt/omni/plugins/x", &c4).is_err());
+        assert!(restrict_write_path("/opt/omni/data/x", &c4).is_ok());
     }
 
     #[test]
-    fn sandbox_rejects_traversal_escape() {
-        // /opt/workspace/../etc → /opt/etc — outside the sandbox.
-        assert!(restrict_to_workspace("/opt/workspace/../etc", "/opt/workspace").is_err());
-        // Traversal that stays inside is fine.
-        assert!(restrict_to_workspace("/opt/workspace/sub/../omniagent", "/opt/workspace").is_ok());
+    fn write_policy_omni_all_overrides_subdir_toggles() {
+        let mut cfg = Config {
+            workspace_dir: "/opt/workspace".into(),
+            omni_dir: "/opt/omni".into(),
+            ..Config::default()
+        };
+        cfg.write_omni_all = true;
+        cfg.write_data = false;
+        cfg.write_profiles = false;
+        cfg.write_plugins = false;
+        assert!(restrict_write_path("/opt/omni/anywhere.txt", &cfg).is_ok());
+        assert!(restrict_write_path("/opt/omni/data/x", &cfg).is_ok());
+        // .. traversal still rejected even with omni_all
+        assert!(restrict_write_path("/opt/omni/../etc/passwd", &cfg).is_err());
+        assert!(restrict_write_path("/etc/passwd", &cfg).is_err());
+        // workspace always allowed
+        assert!(restrict_write_path("/opt/workspace/f.rs", &cfg).is_ok());
     }
 
     #[test]
-    fn sandbox_accepts_relative_path() {
-        // Relative paths resolve against the workspace root.
-        assert!(restrict_to_workspace("omniagent", "/opt/workspace").is_ok());
-        assert!(restrict_to_workspace("", "/opt/workspace").is_ok());
-        assert!(restrict_to_workspace("playground/movie-db", "/opt/workspace").is_ok());
-    }
-
-    #[test]
-    fn sandbox_respects_custom_workspace_dir() {
-        assert!(restrict_to_workspace("/tmp/custom-ws/project", "/tmp/custom-ws").is_ok());
-        assert!(restrict_to_workspace("/opt/workspace/project", "/tmp/custom-ws").is_err());
-    }
-
-    #[test]
-    fn default_workspace_is_opt_workspace() {
-        assert_eq!(resolve_workspace_dir(""), "/opt/workspace");
-        assert_eq!(resolve_workspace_dir("/tmp/ws"), "/tmp/ws");
+    fn write_policy_all_disabled_still_allows_workspace() {
+        let mut cfg = Config {
+            workspace_dir: "/opt/workspace".into(),
+            omni_dir: "/opt/omni".into(),
+            ..Config::default()
+        };
+        cfg.write_data = false;
+        cfg.write_profiles = false;
+        cfg.write_plugins = false;
+        assert!(restrict_write_path("/opt/workspace/a", &cfg).is_ok());
+        let err = restrict_write_path("/opt/omni/data/a", &cfg).unwrap_err();
+        assert!(err.contains("/opt/workspace"), "error must list allowed roots: {err}");
     }
 
     #[test]
@@ -621,19 +740,22 @@ mod tests {
                 "path": "/opt/omni/evil.txt",
                 "content": "boom",
             }),
-            "/opt/workspace",
+            &Config {
+                workspace_dir: "/opt/workspace".to_string(),
+                ..Config::default()
+            },
         )
         .expect_err("write outside sandbox must be rejected");
         assert!(err
             .to_string()
-            .contains("outside the filesystem workspace sandbox"));
+            .contains("outside allowed write roots"));
     }
 
     #[tokio::test]
     async fn write_outside_sandbox_soft_error_does_not_trip() {
         // Through soft_error the rejection arrives as Ok((msg, true)) — NOT a
         // handler Err — so the MCP circuit breaker stays closed.
-        let (msg, is_error) = soft_error(|args: Value| handle_write(args, "/opt/workspace"))(
+        let (msg, is_error) = soft_error(|args: Value| handle_write(args, &Config { workspace_dir: "/opt/workspace".to_string(), ..Config::default() }))(
             serde_json::json!({
                 "path": "/opt/omni/evil.txt",
                 "content": "boom",
@@ -643,7 +765,7 @@ mod tests {
         .await
         .expect("soft_error always returns Ok");
         assert!(is_error);
-        assert!(msg.contains("outside the filesystem workspace sandbox"));
+        assert!(msg.contains("outside allowed write roots"));
     }
 
     #[test]
@@ -655,7 +777,10 @@ mod tests {
                 "path": dir.join("sub/deep/file.txt").to_string_lossy(),
                 "content": "hello",
             }),
-            &dir.to_string_lossy(),
+            &Config {
+                workspace_dir: dir.to_string_lossy().to_string(),
+                ..Config::default()
+            },
         )
         .expect("write inside sandbox succeeds");
         assert!(!is_error, "msg: {}", msg);

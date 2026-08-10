@@ -1,22 +1,50 @@
 {
-  "id": "mcp-server-filesystem",
-  "name": "Filesystem MCP Server",
-  "label": "filesystem",
-  "version": "0.1.0",
-  "description": "Filesystem tools: read, write, list, search, info on local files (writes sandboxed to workspace_dir; reads unrestricted)",
-  "type": "mcp",
-  "entrypoint": {
-    "command": "mcp-server-filesystem",
-    "args": [],
-    "transport": "stdio"
-  },
+  "id": "filesystem",
+  "name": "Filesystem",
+  "version": "1.1.0",
+  "description": "Filesystem tools: read, list, search, info are unrestricted; WRITES are sandboxed to the workspace dir (always) plus OMNI_DIR subdirectories enabled by config (profiles/data/plugins toggles, or the whole OMNI_DIR with write_omni_all).",
   "config_schema": [
     {
       "key": "workspace_dir",
-      "default": "/opt/workspace",
-      "label": "Workspace Dir (write sandbox — file WRITES only allowed here and in subdirectories; reads are unrestricted)",
+      "label": "Workspace Dir — file WRITES are always allowed here and in its subdirectories (reads are unrestricted)",
       "type": "string",
+      "default": "/opt/workspace",
       "required": true
+    },
+    {
+      "key": "omni_dir",
+      "label": "OMNI_DIR root — subdirectories enabled by the write_* toggles below",
+      "type": "string",
+      "default": "$env:OMNI_DIR",
+      "required": false
+    },
+    {
+      "key": "write_profiles",
+      "label": "Allow file WRITES inside OMNI_DIR/profiles",
+      "type": "boolean",
+      "default": true,
+      "required": false
+    },
+    {
+      "key": "write_data",
+      "label": "Allow file WRITES inside OMNI_DIR/data",
+      "type": "boolean",
+      "default": true,
+      "required": false
+    },
+    {
+      "key": "write_plugins",
+      "label": "Allow file WRITES inside OMNI_DIR/plugins",
+      "type": "boolean",
+      "default": true,
+      "required": false
+    },
+    {
+      "key": "write_omni_all",
+      "label": "Allow file WRITES in the ENTIRE OMNI_DIR — supersedes the write_profiles / write_data / write_plugins toggles",
+      "type": "boolean",
+      "default": false,
+      "required": false
     }
   ]
 }
