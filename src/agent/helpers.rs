@@ -226,13 +226,11 @@ pub fn upsert_system_message(messages: &mut Vec<ChatMessage>, marker: &str, cont
 
 /// Tools whose results ARE the agent's working memory (file contents, listings,
 /// search hits, query rows). These are preserved aggressively: the last
-/// `READ_KEEP_LAST` are kept in full and older ones keep a generous excerpt.
-/// Zeroing them forces the agent to re-read the same files — the #1 budget
-/// killer (observed: thread 700 burned 117 docker_compose+sed windows of the
-/// SAME line ranges because prune zeroed every earlier read from context).
-const READ_KEEP_LAST: usize = 3;
-const READ_EXCERPT_CHARS: usize = 2000;
-
+/// `read_keep_last` (PruneConfig) are kept in full and older ones keep a
+/// generous excerpt (`read_excerpt_chars`). Zeroing them forces the agent to
+/// re-read the same files — the #1 budget killer (observed: thread 700 burned
+/// 117 docker_compose+sed windows of the SAME line ranges because prune zeroed
+/// every earlier read from context). All limits come from settings.yml.
 fn is_read_type_tool(name: &str) -> bool {
     name.starts_with("filesystem_read")
         || name.starts_with("filesystem_list")
@@ -256,11 +254,14 @@ fn is_read_type_tool(name: &str) -> bool {
 /// live in a separate file so they never crowd out hand-written notes.
 ///
 /// Entries are appended with a `[engine:auto-note]` prefix and the file is
-/// capped at `AUTO_NOTE_MAX_CHARS` (oldest entries dropped).
-const AUTO_NOTE_MAX_CHARS: usize = 24_000;
-const AUTO_NOTE_ENTRY_CHARS: usize = 3000;
-
-fn auto_note_read(dir: &std::path::Path, tool: &str, content: &str) {
+/// capped at `auto_note_max_chars` (oldest entries dropped).
+fn auto_note_read(
+    dir: &std::path::Path,
+    tool: &str,
+    content: &str,
+    entry_chars: usize,
+    max_chars: usize,
+) {
     if content.trim().is_empty() {
         return;
     }
@@ -272,7 +273,7 @@ fn auto_note_read(dir: &std::path::Path, tool: &str, content: &str) {
         "## [engine:auto-note {tool}]\n{}\n",
         content
             .chars()
-            .take(AUTO_NOTE_ENTRY_CHARS)
+            .take(entry_chars)
             .collect::<String>()
     );
     let existing = std::fs::read_to_string(&file).unwrap_or_default();
@@ -280,7 +281,7 @@ fn auto_note_read(dir: &std::path::Path, tool: &str, content: &str) {
     // Cap: drop oldest auto-note blocks (only entries carrying the
     // [engine:auto-note] marker are candidates — hand-written notes live in
     // notes.md, a different file, so they are never touched here).
-    while merged.chars().count() > AUTO_NOTE_MAX_CHARS {
+    while merged.chars().count() > max_chars {
         match merged.find("## [engine:auto-note") {
             Some(idx) => {
                 let after = &merged[idx..];
@@ -289,7 +290,7 @@ fn auto_note_read(dir: &std::path::Path, tool: &str, content: &str) {
                     Some(end) => merged = format!("{}{}", &merged[..idx], &after[end..]),
                     None => {
                         // Only one auto-note block left and still over: trim its tail.
-                        let keep: String = after.chars().take(AUTO_NOTE_ENTRY_CHARS).collect();
+                        let keep: String = after.chars().take(entry_chars).collect();
                         merged = format!("{}{}", &merged[..idx], keep);
                         break;
                     }
@@ -301,12 +302,27 @@ fn auto_note_read(dir: &std::path::Path, tool: &str, content: &str) {
     let _ = std::fs::write(&file, merged);
 }
 
+/// Pruning limits, all sourced from settings.yml — no hardcoded limits in
+/// code. `hard_budget` triggers a pruning pass; `soft_budget` is the target
+/// size compaction stops at. Read-type tool results (the agent's working
+/// memory) keep the last `read_keep_last` in full; older ones are excerpted
+/// to `read_excerpt_chars` and auto-noted into the thread's `auto-notes.md`
+/// (capped at `auto_note_max_chars`).
+#[derive(Debug, Clone, Copy)]
+pub struct PruneConfig {
+    pub hard_budget: usize,
+    pub soft_budget: usize,
+    pub read_keep_last: usize,
+    pub read_excerpt_chars: usize,
+    pub auto_note_max_chars: usize,
+    pub auto_note_entry_chars: usize,
+}
+
 pub fn prune_old_tool_results(
     messages: &mut [ChatMessage],
     current_iter: u32,
     thread_dir: Option<&std::path::Path>,
-    hard_budget: usize,
-    soft_budget: usize,
+    cfg: PruneConfig,
 ) {
     // Budget gate: prune ONLY when the hard threshold is exceeded, then
     // compact until the size drops below the soft threshold — keeping as
@@ -315,7 +331,7 @@ pub fn prune_old_tool_results(
     // had read and caused the re-read death spiral: thread 700 burned 117
     // docker_compose+sed windows of the SAME line ranges, zero commits.)
     let current_size: usize = messages.iter().map(|m| m.content.len()).sum();
-    if current_size <= hard_budget {
+    if current_size <= cfg.hard_budget {
         return;
     }
 
@@ -342,7 +358,7 @@ pub fn prune_old_tool_results(
 
     let keep_from = last_tool_turn_idx.unwrap_or(0);
 
-    // Pass 1 (NEW → OLD): mark the LAST READ_KEEP_LAST read-type tool results
+    // Pass 1 (NEW → OLD): mark the LAST cfg.read_keep_last read-type tool results
     // as "keep full" so the most recent reads always survive pruning.
     let mut read_kept = 0usize;
     let mut keep_read: Vec<usize> = Vec::new();
@@ -353,7 +369,7 @@ pub fn prune_old_tool_results(
         if is_read_type_tool(&messages[idx].name.clone().unwrap_or_default()) {
             keep_read.push(idx);
             read_kept += 1;
-            if read_kept >= READ_KEEP_LAST {
+            if read_kept >= cfg.read_keep_last {
                 break;
             }
         }
@@ -374,11 +390,17 @@ pub fn prune_old_tool_results(
         // durable auto-notes.md even after context pruning removes it.
         if is_read {
             if let Some(dir) = thread_dir {
-                auto_note_read(dir, &tool_name, &messages[idx].content);
+                auto_note_read(
+                    dir,
+                    &tool_name,
+                    &messages[idx].content,
+                    cfg.auto_note_entry_chars,
+                    cfg.auto_note_max_chars,
+                );
             }
             let total = messages[idx].content.chars().count();
-            if total > READ_EXCERPT_CHARS {
-                let half = READ_EXCERPT_CHARS / 2;
+            if total > cfg.read_excerpt_chars {
+                let half = cfg.read_excerpt_chars / 2;
                 let head: String = messages[idx].content.chars().take(half).collect();
                 let tail: String = messages[idx]
                     .content
@@ -400,7 +422,7 @@ pub fn prune_old_tool_results(
             );
         }
         let after_size: usize = messages.iter().map(|m| m.content.len()).sum();
-        if after_size <= soft_budget {
+        if after_size <= cfg.soft_budget {
             break;
         }
     }
@@ -908,6 +930,19 @@ pub async fn enqueue_typing(
 
 #[cfg(test)]
 mod tests {
+    /// Test-only prune config builder (hardcoded values are fine in tests;
+    /// production limits come from settings.yml).
+    fn test_prune_cfg(hard: usize, soft: usize) -> super::PruneConfig {
+        super::PruneConfig {
+            hard_budget: hard,
+            soft_budget: soft,
+            read_keep_last: 3,
+            read_excerpt_chars: 2000,
+            auto_note_max_chars: 24_000,
+            auto_note_entry_chars: 3000,
+        }
+    }
+
     #[test]
     fn prune_dumps_digest_before_destroy() {
         let tmp = std::env::temp_dir().join(format!("prune-dump-test-{}", std::process::id()));
@@ -924,7 +959,7 @@ mod tests {
                 reasoning_content: None,
             },
         ];
-        super::prune_old_tool_results(&mut messages, 7, Some(&tmp), 10_000, 5_000);
+        super::prune_old_tool_results(&mut messages, 7, Some(&tmp), test_prune_cfg(10_000, 5_000));
         let dump_path = tmp.join("context-7.json");
         let content = std::fs::read_to_string(&dump_path).unwrap_or_default();
         assert!(
@@ -1153,7 +1188,7 @@ mod tests {
         ];
         let original_len = msgs.len();
         let original_contents: Vec<String> = msgs.iter().map(|m| m.content.clone()).collect();
-        prune_old_tool_results(&mut msgs, 100, None, 1_000_000, 500_000);
+        prune_old_tool_results(&mut msgs, 100, None, test_prune_cfg(1_000_000, 500_000));
         // Same length and content unchanged (total size is well under hard)
         assert_eq!(msgs.len(), original_len);
         for (i, m) in msgs.iter().enumerate() {
@@ -1174,7 +1209,7 @@ mod tests {
             make_tool_result("tool_b", "short"),
             ChatMessage::assistant("Done."),
         ];
-        prune_old_tool_results(&mut msgs, 8, None, 1000, 500);
+        prune_old_tool_results(&mut msgs, 8, None, test_prune_cfg(1000, 500));
 
         // tool_a result at index 2 is before keep_from (3) and over budget,
         // so it gets truncated to a stub.
@@ -1194,7 +1229,7 @@ mod tests {
             ChatMessage::system("beep"),
         ];
         let original_len = msgs.len();
-        prune_old_tool_results(&mut msgs, 10, None, 10, 5);
+        prune_old_tool_results(&mut msgs, 10, None, test_prune_cfg(10, 5));
         assert_eq!(msgs.len(), original_len);
     }
 
@@ -1206,7 +1241,7 @@ mod tests {
             ChatMessage::assistant("Done."),
         ];
         let original_len = msgs.len();
-        prune_old_tool_results(&mut msgs, 10, None, 10, 5);
+        prune_old_tool_results(&mut msgs, 10, None, test_prune_cfg(10, 5));
         // No assistant with tool_calls, so last_tool_turn_idx is None, keep_from = 0
         // Nothing is before index 0, so nothing happens
         assert_eq!(msgs.len(), original_len);
@@ -1230,7 +1265,7 @@ mod tests {
         ];
         // Tiny budgets force pruning of everything before the last turn,
         // but the three recent reads must be preserved in full.
-        prune_old_tool_results(&mut msgs, 30, None, 10, 5);
+        prune_old_tool_results(&mut msgs, 30, None, test_prune_cfg(10, 5));
         let contents: Vec<String> = msgs
             .iter()
             .filter(|m| m.role == "tool")
@@ -1263,7 +1298,7 @@ mod tests {
             make_tool_result("filesystem_read", "recent read 4"),
             ChatMessage::assistant("Done."),
         ];
-        prune_old_tool_results(&mut msgs, 30, None, 100, 50);
+        prune_old_tool_results(&mut msgs, 30, None, test_prune_cfg(100, 50));
         // keep_from = index of last assistant with calls = 9. The oldest read
         // at index 2 is pruned to an excerpt; the 3 most recent reads in the
         // window (4, 6, 8) are kept intact, as is the current-turn read at 10.
@@ -1292,7 +1327,7 @@ mod tests {
             make_tool_result("git_status", "short"),
             ChatMessage::assistant("Done."),
         ];
-        prune_old_tool_results(&mut msgs, 30, None, 100, 50);
+        prune_old_tool_results(&mut msgs, 30, None, test_prune_cfg(100, 50));
         // docker_compose is NOT a read-type tool (in the conservative list),
         // so over budget it is zeroed to the stub label.
         assert!(msgs[2]

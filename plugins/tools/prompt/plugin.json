@@ -105,6 +105,18 @@
       "default": "$env:OMNI_DIR",
       "label": "Omni Dir",
       "type": "string"
+    },
+    {
+      "key": "tool_excerpt_chars",
+      "default": "800"
+    },
+    {
+      "key": "total_excerpt_cap",
+      "default": "4000"
+    },
+    {
+      "key": "read_excerpt_chars",
+      "default": "2000"
     }
   ],
   "label": "prompt"

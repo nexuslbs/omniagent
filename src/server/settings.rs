@@ -182,6 +182,10 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "temperature",
                 "thread_summary_tokens",
                 "tokenizer_encoding",
+                "read_keep_last",
+                "read_excerpt_chars",
+                "auto_note_max_chars",
+                "auto_note_entry_chars",
             ],
         ),
         (
@@ -205,6 +209,9 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "prompt_token_budget_hard",
                 "prompt_token_budget_soft",
                 "prompt_token_safety_factor",
+                "prompt_tool_excerpt_chars",
+                "prompt_total_excerpt_cap",
+                "prompt_read_excerpt_chars",
             ],
         ),
         (

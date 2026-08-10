@@ -98,12 +98,24 @@ pub struct AgentConfig {
     pub compact_messages_tool_name: String,
 
     /// Hard context budget (chars): engine-level pruning runs ONLY when the
-    /// total context size exceeds this threshold. Mirrors the prompt plugin's
-    /// `char_budget_hard` so the two layers agree (default 500000).
-    pub prune_hard_budget: usize,
+    /// total context size exceeds this threshold. Sourced from the SAME
+    /// settings key as the prompt plugin (`prompt_char_budget_hard`) so the
+    /// two layers always agree — no hardcoded limits in code.
+    pub char_budget_hard: usize,
     /// Soft context budget (chars): pruning compacts until the total size
-    /// drops below this (default 350000).
-    pub prune_soft_budget: usize,
+    /// drops below this (`prompt_char_budget_soft`).
+    pub char_budget_soft: usize,
+    /// How many of the most recent read-type tool results are kept in full
+    /// by pruning (settings `read_keep_last`).
+    pub read_keep_last: usize,
+    /// Excerpt size (chars) kept for older read-type results (settings
+    /// `read_excerpt_chars`).
+    pub read_excerpt_chars: usize,
+    /// Cap for the thread's durable `auto-notes.md` (settings
+    /// `auto_note_max_chars`).
+    pub auto_note_max_chars: usize,
+    /// Per-entry cap for engine auto-notes (settings `auto_note_entry_chars`).
+    pub auto_note_entry_chars: usize,
 
     // When to insert prompts as messages (msg_type: "prompt") into the messages table.
     /// - "off": never insert
@@ -219,8 +231,12 @@ impl AgentConfig {
                 "prompt_compact_messages_tool",
                 "prompt_compact-messages",
             ),
-            prune_hard_budget: get("prune_hard_budget", "500000").parse().unwrap_or(500000),
-            prune_soft_budget: get("prune_soft_budget", "350000").parse().unwrap_or(350000),
+            char_budget_hard: get("prompt_char_budget_hard", "500000").parse().unwrap_or(500000),
+            char_budget_soft: get("prompt_char_budget_soft", "350000").parse().unwrap_or(350000),
+            read_keep_last: get("read_keep_last", "3").parse().unwrap_or(3),
+            read_excerpt_chars: get("read_excerpt_chars", "2000").parse().unwrap_or(2000),
+            auto_note_max_chars: get("auto_note_max_chars", "24000").parse().unwrap_or(24000),
+            auto_note_entry_chars: get("auto_note_entry_chars", "3000").parse().unwrap_or(3000),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
@@ -307,8 +323,12 @@ impl AgentConfig {
                 "prompt_compact_messages_tool",
                 "prompt_compact-messages",
             ),
-            prune_hard_budget: get("prune_hard_budget", "500000").parse().unwrap_or(500000),
-            prune_soft_budget: get("prune_soft_budget", "350000").parse().unwrap_or(350000),
+            char_budget_hard: get("prompt_char_budget_hard", "500000").parse().unwrap_or(500000),
+            char_budget_soft: get("prompt_char_budget_soft", "350000").parse().unwrap_or(350000),
+            read_keep_last: get("read_keep_last", "3").parse().unwrap_or(3),
+            read_excerpt_chars: get("read_excerpt_chars", "2000").parse().unwrap_or(2000),
+            auto_note_max_chars: get("auto_note_max_chars", "24000").parse().unwrap_or(24000),
+            auto_note_entry_chars: get("auto_note_entry_chars", "3000").parse().unwrap_or(3000),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
@@ -376,8 +396,12 @@ mod tests {
             delete_after_days: 30,
             prompt_tool_name: "prompt_generate".to_string(),
             compact_messages_tool_name: "prompt_compact-messages".to_string(),
-            prune_hard_budget: 500000,
-            prune_soft_budget: 350000,
+            char_budget_hard: 500000,
+            char_budget_soft: 350000,
+            read_keep_last: 3,
+            read_excerpt_chars: 2000,
+            auto_note_max_chars: 24000,
+            auto_note_entry_chars: 3000,
             prompt_log_level: "first".to_string(),
             tool_bg_secs: 30,
             database_url: "postgres://localhost:***@host:5432/db".to_string(),
@@ -434,8 +458,12 @@ mod tests {
             delete_after_days: 0,
             prompt_tool_name: String::new(),
             compact_messages_tool_name: String::new(),
-            prune_hard_budget: 0,
-            prune_soft_budget: 0,
+            char_budget_hard: 0,
+            char_budget_soft: 0,
+            read_keep_last: 0,
+            read_excerpt_chars: 0,
+            auto_note_max_chars: 0,
+            auto_note_entry_chars: 0,
             prompt_log_level: String::new(),
             tool_bg_secs: 0,
             database_url: "postgres://localhost:5432/omniagent".to_string(),

@@ -48,6 +48,10 @@ pub struct PluginConfig {
     pub token_budget_hard: usize,
     pub old_msg_budget: usize,
     pub condense_keep_turns: usize,
+    // Compact excerpts (plugin config, no hardcoded limits)
+    pub tool_excerpt_chars: usize,
+    pub total_excerpt_cap: usize,
+    pub read_excerpt_chars: usize,
     // Prompt builder
     pub memory_max_chars: usize,
     pub soul_max_chars: usize,
@@ -72,6 +76,9 @@ impl PluginConfig {
             token_budget_hard: 350000,
             old_msg_budget: 100000,
             condense_keep_turns: 4,
+            tool_excerpt_chars: 800,
+            total_excerpt_cap: 4000,
+            read_excerpt_chars: 2000,
             memory_max_chars: 5000,
             soul_max_chars: 1000,
         }
@@ -119,6 +126,15 @@ impl PluginConfig {
             }
             if let Some(v) = obj.get("char_budget_hard").and_then(&as_i64) {
                 cfg.char_budget_hard = v as usize;
+            }
+            if let Some(v) = obj.get("tool_excerpt_chars").and_then(&as_i64) {
+                cfg.tool_excerpt_chars = v as usize;
+            }
+            if let Some(v) = obj.get("total_excerpt_cap").and_then(&as_i64) {
+                cfg.total_excerpt_cap = v as usize;
+            }
+            if let Some(v) = obj.get("read_excerpt_chars").and_then(&as_i64) {
+                cfg.read_excerpt_chars = v as usize;
             }
             if let Some(v) = obj.get("token_budget_soft").and_then(&as_i64) {
                 cfg.token_budget_soft = v as usize;
@@ -1520,6 +1536,11 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
                 keep,
                 thread_dir.as_deref(),
                 current_iteration,
+                &crate::compact::CompactSettings {
+                    tool_excerpt_chars: cfg.tool_excerpt_chars,
+                    total_excerpt_cap: cfg.total_excerpt_cap,
+                    read_excerpt_chars: cfg.read_excerpt_chars,
+                },
             );
             if let Some(df) = outcome.dump_file {
                 dump_file = Some(df);
@@ -1634,6 +1655,11 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
             condense_keep_turns,
             None,
             current_iteration as u32,
+            &crate::compact::CompactSettings {
+                tool_excerpt_chars: cfg.tool_excerpt_chars,
+                total_excerpt_cap: cfg.total_excerpt_cap,
+                read_excerpt_chars: cfg.read_excerpt_chars,
+            },
         );
 
         let after_size: usize = if use_tokens {
@@ -1649,6 +1675,11 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
                 aggressive_keep,
                 None,
                 current_iteration as u32,
+                &crate::compact::CompactSettings {
+                    tool_excerpt_chars: cfg.tool_excerpt_chars,
+                    total_excerpt_cap: cfg.total_excerpt_cap,
+                    read_excerpt_chars: cfg.read_excerpt_chars,
+                },
             );
         }
         true

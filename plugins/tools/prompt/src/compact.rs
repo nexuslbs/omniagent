@@ -3,12 +3,20 @@ use std::path::Path;
 use crate::chat_message::ChatMessage;
 use crate::dump;
 
-/// Characters of each individual tool result excerpt kept when a tool-call
-/// turn is compacted.
-pub const TOOL_EXCERPT_CHARS: usize = 800;
-/// Overall cap for the concatenated tool-result excerpt (prevents a single
-/// compacted message from blowing the context).
-pub const TOTAL_EXCERPT_CAP: usize = 4000;
+/// Excerpt/size limits for compaction, sourced from plugin config
+/// (plugin.json config_schema + settings.yml) — no hardcoded limits in code.
+#[derive(Debug, Clone, Copy)]
+pub struct CompactSettings {
+    /// Characters of each individual tool result excerpt kept when a
+    /// tool-call turn is compacted.
+    pub tool_excerpt_chars: usize,
+    /// Overall cap for the concatenated tool-result excerpt (prevents a
+    /// single compacted message from blowing the context).
+    pub total_excerpt_cap: usize,
+    /// Per-result excerpt for read-type tools: generous head+tail so the
+    /// agent still sees what it learned.
+    pub read_excerpt_chars: usize,
+}
 /// Tools whose results ARE the agent's working memory (file contents,
 /// listings, search hits). When compaction must drain them, keep a much
 /// larger excerpt than the generic cap — zeroing them forces the agent to
@@ -25,9 +33,6 @@ fn is_read_type_tool(name: &str) -> bool {
         || name.starts_with("git_status")
         || name.starts_with("git_run-command")
 }
-/// Per-result excerpt for read-type tools: generous head+tail so the agent
-/// still sees what it learned.
-pub const READ_EXCERPT_CHARS: usize = 2000;
 
 /// Outcome of a compaction pass (WS-2/WS-3): how many tool messages were
 /// drained, and whether a durable `context-<iter>.json` digest was written.
@@ -53,6 +58,7 @@ pub fn compact_old_assistant_messages(
     keep_recent: usize,
     thread_dir: Option<&Path>,
     current_iteration: u32,
+    settings: &CompactSettings,
 ) -> CompactOutcome {
     let mut outcome = CompactOutcome::default();
     loop {
@@ -116,7 +122,7 @@ pub fn compact_old_assistant_messages(
                                         "## [engine:auto-note {tool_name}]\n{}\n",
                                         m.content
                                             .chars()
-                                            .take(READ_EXCERPT_CHARS)
+                                            .take(settings.read_excerpt_chars)
                                             .collect::<String>()
                                     ),
                                 );
@@ -134,13 +140,13 @@ pub fn compact_old_assistant_messages(
                     let tool_name = m.name.as_deref().unwrap_or("");
                     let is_read = is_read_type_tool(tool_name);
                     let excerpt_chars = if is_read {
-                        READ_EXCERPT_CHARS
+                        settings.read_excerpt_chars
                     } else {
-                        TOOL_EXCERPT_CHARS
+                        settings.tool_excerpt_chars
                     };
                     let content_preview: String = m.content.chars().take(excerpt_chars).collect();
                     let chunk_len = content_preview.len();
-                    if total_excerpt + chunk_len > TOTAL_EXCERPT_CAP {
+                    if total_excerpt + chunk_len > settings.total_excerpt_cap {
                         break;
                     }
                     total_excerpt += chunk_len;

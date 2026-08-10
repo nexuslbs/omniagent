@@ -588,8 +588,14 @@ Previous plan:\n{}",
             &mut messages,
             current_iter as u32,
             Some(&thread_dir),
-            cfg_snapshot.prune_hard_budget,
-            cfg_snapshot.prune_soft_budget,
+            helpers::PruneConfig {
+                hard_budget: cfg_snapshot.char_budget_hard,
+                soft_budget: cfg_snapshot.char_budget_soft,
+                read_keep_last: cfg_snapshot.read_keep_last,
+                read_excerpt_chars: cfg_snapshot.read_excerpt_chars,
+                auto_note_max_chars: cfg_snapshot.auto_note_max_chars,
+                auto_note_entry_chars: cfg_snapshot.auto_note_entry_chars,
+            },
         );
         // WS-4c: budget hint every iteration (anti-death-spiral backstop).
         helpers::upsert_system_message(
