@@ -102,15 +102,17 @@ async fn handle_kanban_dispatcher(
     } else {
         config.omniagent_url.clone()
     };
-    let client = reqwest::blocking::Client::new();
+    let client = reqwest::Client::new();
     let resp = client
         .post(format!("{}/kanban/dispatch", base))
         .json(&serde_json::json!({}))
         .send()
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to call core dispatch API: {}", e))?;
     let status = resp.status();
     let body: serde_json::Value = resp
         .json()
+        .await
         .map_err(|e| anyhow::anyhow!("Bad response ({}): {}", status, e))?;
     Ok(format_dispatch_summary(&body))
 }
