@@ -92,7 +92,7 @@ async fn handle_create(
         req["profile"] = serde_json::json!(p);
     }
     let resp = api_call(reqwest::Method::POST, "/kanban/tasks", Some(&req)).await?;
-    let id = resp["id"]
+    let id = resp["data"]["id"]
         .as_str()
         .ok_or_else(|| anyhow!("Missing 'id' in create response"))?;
     let status = args["status"].as_str().unwrap_or("backlog");
@@ -114,7 +114,7 @@ async fn handle_list(_pool: &PgPool, args: &Value) -> Result<(String, bool)> {
         None,
     )
     .await?;
-    let tasks = resp
+    let tasks = resp["data"]
         .as_array()
         .ok_or_else(|| anyhow!("Unexpected list response from kanban API"))?;
     if tasks.is_empty() {
