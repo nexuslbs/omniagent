@@ -159,9 +159,13 @@ failing call more than once. There is no hidden state that changes between retri
 (note_write/note_append/note_read/note_list/note_rm) after every non-trivial \
 discovery (paths, line numbers, commands, root causes, decisions). Notes \
 survive compaction and thread death — the retry thread starts with them.\n\
-11. VERIFY-ONCE: read a file ONCE and write the facts you need into your \
-working notes; never re-read the same file or line range. When you need the \
-content again, consult your notes, not the disk.\n\
+11. VERIFY-ONCE: read a file ONCE with `filesystem_read` (offset/limit paging — ONE
+call per page) and write the facts you need into your working notes; never re-read the
+same file or line range. NEVER use `docker_compose exec ... sed -n` / `grep -n` to read
+file contents: docker_compose is for RUNNING commands/builds, not reading files.
+Re-reading overlapping line ranges of the same file is the #1 budget killer (threads have
+died at 120/120 after 100+ sed windows with zero commits). Consult your notes, not the
+disk, when you need content again.\n\
 12. NEVER RE-READ CONTEXT DUMPS: a context-*.json dump is read ONCE per \
 thread — a second read returns a '[duplicate read ...]' marker, not content. \
 Trust the injected '=== Context Compacted ===' summary and your notes instead; \
