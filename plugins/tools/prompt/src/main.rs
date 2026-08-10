@@ -16,6 +16,8 @@
 use anyhow::{Context, Result};
 mod chat_message;
 mod compact;
+mod dump;
+mod notes;
 mod memory_store;
 mod prompt_builder;
 
@@ -1494,6 +1496,14 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     };
 
     let before = messages.len();
+    // WS-2/WS-3: durable context dump + compaction event plumbing.
+    let thread_dir = args["thread_dir"]
+        .as_str()
+        .map(std::path::PathBuf::from);
+    let current_iteration = args["current_iteration"].as_u64().unwrap_or(0) as u32;
+    let mut entries = 0usize;
+    let mut dump_file: Option<String> = None;
+
     if current_size > hard_budget {
         // Reduce to the soft budget: compact, and if still over soft, keep
         // compacting with a progressively smaller keep_recent. Compaction
@@ -1505,9 +1515,18 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
         // 3 progressively more aggressive compactions and there is material
         // left to compact (keep_recent has not yet reached 0), raise an
         // error instead of looping forever.
-        let mut keep = keep_recent;
+                let mut keep = keep_recent;
         for pass in 0..3 {
-            crate::compact::compact_old_assistant_messages(&mut messages, keep);
+                        let outcome = crate::compact::compact_old_assistant_messages(
+                &mut messages,
+                keep,
+                thread_dir.as_deref(),
+                current_iteration,
+            );
+            if let Some(df) = outcome.dump_file {
+                dump_file = Some(df);
+            }
+            entries += outcome.dump_entries;
             let after_size: usize = if use_tokens {
                 messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
             } else {
@@ -1544,6 +1563,9 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
             serde_json::Value::Null
         },
         "was_compacted": before != after,
+        "iteration": current_iteration,
+        "dump_file": dump_file,
+        "entries": entries,
         "before_count": before,
         "after_count": after,
     });
@@ -1609,7 +1631,7 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
 
     let was_condensed = if needs_hard || needs_soft {
         let condense_keep_turns = cfg.condense_keep_turns;
-        crate::compact::compact_old_assistant_messages(&mut messages, condense_keep_turns);
+        crate::compact::compact_old_assistant_messages(&mut messages, condense_keep_turns, None, current_iteration as u32);
 
         let after_size: usize = if use_tokens {
             messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
@@ -1619,7 +1641,7 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
 
         if after_size > target_budget {
             let aggressive_keep = condense_keep_turns.saturating_sub(1);
-            crate::compact::compact_old_assistant_messages(&mut messages, aggressive_keep);
+            crate::compact::compact_old_assistant_messages(&mut messages, aggressive_keep, None, current_iteration as u32);
         }
         true
     } else {
@@ -1700,6 +1722,46 @@ async fn main() -> Result<()> {
         })
     });
 
+    // WS-1: durable working-memory notes toolset (thread-dir sandboxed).
+    let note_handler = |tool: &'static str| -> ToolHandler {
+        let note_cfg = plugin_config.clone();
+        Box::new(move |args: Value, meta: Option<McpMeta>| {
+            let cfg = note_cfg.clone();
+            Box::pin(async move {
+                let config = cfg.read().await.clone();
+                let omni_dir = crate::notes::omni_dir_from(&config.omni_dir);
+                let thread_id = match extract_i64(&args, &meta, "thread_id") {
+                    Some(t) => t,
+                    None => {
+                        return Ok((
+                            "note tools require thread_id in _meta".to_string(),
+                            true,
+                        ))
+                    }
+                };
+                let dir = crate::notes::thread_dir(&omni_dir, thread_id);
+                let name = args["name"].as_str().unwrap_or("").to_string();
+                let (content, is_error) = match tool {
+                    "note_append" => crate::notes::note_append(
+                        &dir,
+                        &name,
+                        args["content"].as_str().unwrap_or(""),
+                    ),
+                    "note_read" => crate::notes::note_read(&dir, &name, thread_id),
+                    "note_write" => crate::notes::note_write(
+                        &dir,
+                        &name,
+                        args["content"].as_str().unwrap_or(""),
+                    ),
+                    "note_list" => crate::notes::note_list(&dir),
+                    "note_rm" => crate::notes::note_rm(&dir, &name),
+                    _ => (format!("unknown note tool {tool}"), true),
+                };
+                Ok((content, is_error))
+            })
+        })
+    };
+
     let tools = vec![
         McpToolEntry {
             def: McpToolDef {
@@ -1778,6 +1840,85 @@ async fn main() -> Result<()> {
                 }),
             },
             handler: compact_handler,
+        },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "note_append".to_string(),
+                description:
+                    "Append a line to a durable working-memory note file in this thread's notes dir                      (data/threads/<thread_id>/). Notes survive compaction and thread death — the retry                      thread starts with them. Use for facts, paths, line numbers, commands, root causes,                      and decisions."
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Note file name (plain filename, e.g. notes.md)"},
+                        "content": {"type": "string", "description": "Content to append"}
+                    },
+                    "required": ["name", "content"]
+                }),
+            },
+            handler: note_handler("note_append"),
+        },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "note_read".to_string(),
+                description:
+                    "Read a note file from this thread's notes dir. Output is capped at ~8KB. context-*.json                      dump files are READ-ONCE per thread: a second read returns a '[duplicate read ...]' marker                      (rule 12) instead of content."
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Note file name (plain filename)"}
+                    },
+                    "required": ["name"]
+                }),
+            },
+            handler: note_handler("note_read"),
+        },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "note_write".to_string(),
+                description:
+                    "Overwrite a note file in this thread's notes dir (creating it if needed). Use for the                      canonical notes.md working memory of this thread."
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Note file name (plain filename)"},
+                        "content": {"type": "string", "description": "Full content to write"}
+                    },
+                    "required": ["name", "content"]
+                }),
+            },
+            handler: note_handler("note_write"),
+        },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "note_list".to_string(),
+                description:
+                    "List the note files in this thread's notes dir."
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            handler: note_handler("note_list"),
+        },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "note_rm".to_string(),
+                description:
+                    "Remove a note file from this thread's notes dir."
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Note file name (plain filename)"}
+                    },
+                    "required": ["name"]
+                }),
+            },
+            handler: note_handler("note_rm"),
         },
     ];
 

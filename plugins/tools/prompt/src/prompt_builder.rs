@@ -154,7 +154,18 @@ your work to show intermediate progress unless asked.\n\
 present what you will do and wait for confirmation.\n\
 9. SKIP ON FAILURE: If an operation fails (network error, not found, bad request), \
 try once more with a different approach, then move on. Do NOT retry the same \
-failing call more than once. There is no hidden state that changes between retries.";
+failing call more than once. There is no hidden state that changes between retries.\n\
+10. TAKE NOTES: maintain a durable working memory with the note_* tools \
+(note_write/note_append/note_read/note_list/note_rm) after every non-trivial \
+discovery (paths, line numbers, commands, root causes, decisions). Notes \
+survive compaction and thread death — the retry thread starts with them.\n\
+11. VERIFY-ONCE: read a file ONCE and write the facts you need into your \
+working notes; never re-read the same file or line range. When you need the \
+content again, consult your notes, not the disk.\n\
+12. NEVER RE-READ CONTEXT DUMPS: a context-*.json dump is read ONCE per \
+thread — a second read returns a '[duplicate read ...]' marker, not content. \
+Trust the injected '=== Context Compacted ===' summary and your notes instead; \
+re-reading dumps is a forbidden anti-loop that wastes iterations.";
 
 fn build_active_profile_hint(profile_name: &str) -> String {
     format!("Active profile: {profile_name}.")

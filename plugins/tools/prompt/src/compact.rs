@@ -1,21 +1,41 @@
-use crate::chat_message::ChatMessage;
+use std::path::Path;
 
-/// Max chars of a single tool-result excerpt embedded in the compact marker.
-const TOOL_EXCERPT_CHARS: usize = 800;
-/// Overall cap for the concatenated tool-result excerpts.
-const TOTAL_EXCERPT_CAP: usize = 4000;
+use crate::chat_message::ChatMessage;
+use crate::dump;
+
+/// Characters of each individual tool result excerpt kept when a tool-call
+/// turn is compacted.
+pub const TOOL_EXCERPT_CHARS: usize = 800;
+/// Overall cap for the concatenated tool-result excerpt (prevents a single
+/// compacted message from blowing the context).
+pub const TOTAL_EXCERPT_CAP: usize = 4000;
+
+/// Outcome of a compaction pass (WS-2/WS-3): how many tool messages were
+/// drained, and whether a durable `context-<iter>.json` digest was written.
+#[derive(Debug, Default, Clone)]
+pub struct CompactOutcome {
+    pub removed: usize,
+    pub dump_file: Option<String>,
+    pub dump_entries: usize,
+}
 
 /// Compact old assistant messages that contain tool_calls JSON.
 ///
-/// Replaces the full function arguments with a condensed reference
-/// like `tool_a(), tool_b()` AND appends a truncated excerpt of each
-/// compacted tool-role result (`Result excerpt: <first ~800 chars of
-/// each tool message content, joined, capped>`) so the agent keeps the
-/// call graph, the tool names AND what it actually learned from the
-/// tool results (e.g. file contents) after compaction. Tool-role
-/// messages are still drained so the count-reduction budget contract
-/// (and the existing `[compact: ...]` marker tests) hold.
-pub fn compact_old_assistant_messages(messages: &mut Vec<ChatMessage>, keep_recent: usize) {
+/// Removes tool-call turns (assistant message + following tool messages)
+/// from the oldest side of the history and replaces the assistant message
+/// with a compact summary of the tool calls.
+///
+/// WS-2: before tool-role messages are drained, a JSON-lines digest of each
+/// destroyed tool result is appended to `context-<current_iteration>.json`
+/// in the thread dir (deduped, 200KB cap, keep last 3 dump files) so the
+/// agent can recover what it learned after compaction.
+pub fn compact_old_assistant_messages(
+    messages: &mut Vec<ChatMessage>,
+    keep_recent: usize,
+    thread_dir: Option<&Path>,
+    current_iteration: u32,
+) -> CompactOutcome {
+    let mut outcome = CompactOutcome::default();
     loop {
         let tool_indices: Vec<usize> = messages
             .iter()
@@ -25,15 +45,16 @@ pub fn compact_old_assistant_messages(messages: &mut Vec<ChatMessage>, keep_rece
             .collect();
 
         if tool_indices.len() <= keep_recent {
-            return;
+            return outcome;
         }
 
         let compact_up_to = tool_indices.len() - keep_recent;
+
         for &idx in tool_indices.iter().take(compact_up_to).rev() {
             if let Some(ref calls) = messages[idx].tool_calls {
                 let summary: Vec<String> = calls
                     .iter()
-                    .map(|tc| format!("{}()", tc.function.name))
+                    .map(|tc| tc.function.name.clone())
                     .collect();
 
                 let mut tool_end = idx + 1;
@@ -42,62 +63,55 @@ pub fn compact_old_assistant_messages(messages: &mut Vec<ChatMessage>, keep_rece
                 }
 
                 let tool_count = tool_end - idx - 1;
-                let tool_info = if tool_count > 0 {
-                    let tool_names: Vec<&str> = messages[idx + 1..tool_end]
-                        .iter()
-                        .filter_map(|m| m.name.as_deref())
-                        .collect();
-                    if !tool_names.is_empty() {
-                        format!(". Results from: {}", tool_names.join(", "))
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                };
 
-                // Condensed but content-bearing digest of the drained tool
-                // results: the first ~800 chars of each tool message, joined
-                // and capped overall, so the agent retains what it learned
-                // (e.g. file contents) even after the tool messages drain.
+                // WS-2: durable dump of the tool results about to be drained.
+                if let Some(dir) = thread_dir {
+                    for m in &messages[idx + 1..tool_end] {
+                        if m.role == "tool" && !m.content.is_empty() {
+                            let tool_name = m.name.as_deref().unwrap_or("");
+                            let args = calls
+                                .iter()
+                                .find(|tc| tc.function.name == tool_name)
+                                .map(|tc| tc.function.arguments.to_string())
+                                .unwrap_or_default();
+                            if dump::append_dump(
+                                dir,
+                                current_iteration,
+                                tool_name,
+                                &args,
+                                &m.content,
+                            ) {
+                                outcome.dump_entries += 1;
+                            }
+                        }
+                    }
+                    if tool_count > 0 {
+                        outcome.dump_file = Some(format!("context-{current_iteration}.json"));
+                    }
+                }
+
                 let mut excerpt = String::new();
-                let mut excerpt_chars = 0usize;
-                for m in &messages[idx + 1..tool_end] {
-                    if excerpt_chars >= TOTAL_EXCERPT_CAP {
+                let mut total_excerpt = 0;
+                for m in messages[idx + 1..tool_end].iter() {
+                    let content_preview: String = m.content.chars().take(TOOL_EXCERPT_CHARS).collect();
+                    let chunk_len = content_preview.len();
+                    if total_excerpt + chunk_len > TOTAL_EXCERPT_CAP {
                         break;
                     }
-                    if m.content.is_empty() {
-                        continue;
-                    }
-                    let head: String = m.content.chars().take(TOOL_EXCERPT_CHARS).collect();
-                    let head_chars = head.chars().count();
-                    let more = m.content.chars().count() - head_chars;
-                    let mut piece = match m.name.as_deref() {
-                        Some(n) if !n.is_empty() => format!("--- {}:\n{}", n, head),
-                        _ => head,
-                    };
-                    if more > 0 {
-                        piece.push_str(&format!("[... +{} more chars]", more));
-                    }
-                    excerpt_chars += piece.chars().count();
-                    excerpt.push_str(&piece);
+                    total_excerpt += chunk_len;
+                    excerpt.push_str(&content_preview);
                     excerpt.push('\n');
                 }
 
-                let content = if excerpt.is_empty() {
-                    if summary.is_empty() {
-                        "[compact]".to_string()
-                    } else {
-                        format!("[compact: {}{}]", summary.join(", "), tool_info)
-                    }
-                } else if summary.is_empty() {
-                    format!("[compact]. Result excerpt: {}", excerpt.trim_end())
+                let content = if summary.is_empty() {
+                    "[context compacted: tool calls were removed]".to_string()
+                } else if excerpt.is_empty() {
+                    format!("[context compacted: {}]", summary.join(", "))
                 } else {
                     format!(
-                        "[compact: {}{}. Result excerpt: {}]",
+                        "[context compacted: {} — results excerpt:]\n{}",
                         summary.join(", "),
-                        tool_info,
-                        excerpt.trim_end()
+                        excerpt
                     )
                 };
 
@@ -106,6 +120,7 @@ pub fn compact_old_assistant_messages(messages: &mut Vec<ChatMessage>, keep_rece
 
                 if tool_count > 0 {
                     messages.drain(idx + 1..tool_end);
+                    outcome.removed += tool_count;
                 }
             }
         }
