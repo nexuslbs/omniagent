@@ -697,6 +697,26 @@ fn route_fail_tool(
 /// Returns `Ok(Some(new_thread_id))` when a re-run thread was created,
 /// `Ok(None)` when the transition was a blocked/no-thread outcome, and
 /// `Err(msg)` when the transition failed and nothing was committed.
+/// WS-5: retry inheritance — copy the parent thread's notes.md into the
+/// child thread's dir so a re-run/review thread starts with everything the
+/// interrupted parent learned. Best-effort file copy; returns false when the
+/// parent has no notes.
+fn copy_thread_notes(data_dir: &str, parent_id: i64, child_id: i64) -> bool {
+    let root = std::path::Path::new(data_dir).join("data").join("threads");
+    let src = root.join(parent_id.to_string()).join("notes.md");
+    let Ok(content) = std::fs::read_to_string(&src) else {
+        return false; // parent had no notes — nothing to inherit
+    };
+    if content.trim().is_empty() {
+        return false;
+    }
+    let dst_dir = root.join(child_id.to_string());
+    if std::fs::create_dir_all(&dst_dir).is_err() {
+        return false;
+    }
+    std::fs::write(dst_dir.join("notes.md"), content).is_ok()
+}
+
 pub(crate) async fn engine_transition(
     pool: &sqlx::PgPool,
     data_dir: &str,
@@ -1072,6 +1092,13 @@ pub(crate) async fn engine_transition(
     .map_err(|e| format!("insert kanban history: {e}"))?;
 
     tx.commit().await.map_err(|e| format!("commit: {e}"))?;
+
+    // WS-5: retry inheritance — the re-run/review thread starts with the
+    // interrupted parent's durable notes (best-effort file copy).
+    if let Some(child_id) = new_thread_id {
+        copy_thread_notes(data_dir, thread.id, child_id);
+    }
+
     Ok(new_thread_id)
 }
 
@@ -1390,6 +1417,25 @@ mod tests_review {
 
 #[cfg(test)]
 mod tests_rerun_script {
+    #[test]
+    fn copy_thread_notes_copies_parent_notes_to_child() {
+        let data_dir =
+            std::env::temp_dir().join(format!("retry-notes-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(data_dir.join("data/threads/111")).unwrap();
+        std::fs::create_dir_all(data_dir.join("data/threads/222")).unwrap();
+        std::fs::write(data_dir.join("data/threads/111/notes.md"), "learned fact").unwrap();
+        assert!(super::copy_thread_notes(data_dir.to_str().unwrap(), 111, 222));
+        let copied =
+            std::fs::read_to_string(data_dir.join("data/threads/222/notes.md")).unwrap();
+        assert_eq!(copied, "learned fact");
+        // parent with no notes -> false, and no file is created for the child
+        assert!(!super::copy_thread_notes(data_dir.to_str().unwrap(), 999, 444));
+        assert!(!data_dir.join("data/threads/444/notes.md").exists());
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+
     use super::*;
 
     #[tokio::test]
