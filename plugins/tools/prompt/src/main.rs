@@ -114,7 +114,7 @@ impl PluginConfig {
                 cfg.omni_dir = v.to_string();
             }
             if let Some(v) = obj.get("planning_complexity_max_chars").and_then(&as_usize) {
-                cfg.planning_complexity_max_chars = v as usize;
+                cfg.planning_complexity_max_chars = v;
             }
             if let Some(v) = obj
                 .get("planning_complexity_keywords")
@@ -123,52 +123,52 @@ impl PluginConfig {
                 cfg.planning_complexity_keywords = v.to_string();
             }
             if let Some(v) = obj.get("prompt_plan_max_tokens").and_then(&as_usize) {
-                cfg.prompt_plan_max_tokens = v as usize;
+                cfg.prompt_plan_max_tokens = v;
             }
             if let Some(v) = obj.get("tokenizer_encoding").and_then(|v| v.as_str()) {
                 cfg.tokenizer_encoding = v.to_string();
             }
             if let Some(v) = obj.get("char_budget_soft").and_then(&as_usize) {
-                cfg.char_budget_soft = v as usize;
+                cfg.char_budget_soft = v;
             }
             if let Some(v) = obj.get("char_budget_hard").and_then(&as_usize) {
-                cfg.char_budget_hard = v as usize;
+                cfg.char_budget_hard = v;
             }
             if let Some(v) = obj.get("tool_excerpt_chars").and_then(&as_usize) {
-                cfg.tool_excerpt_chars = v as usize;
+                cfg.tool_excerpt_chars = v;
             }
             if let Some(v) = obj.get("total_excerpt_cap").and_then(&as_usize) {
-                cfg.total_excerpt_cap = v as usize;
+                cfg.total_excerpt_cap = v;
             }
             if let Some(v) = obj.get("read_excerpt_chars").and_then(&as_usize) {
-                cfg.read_excerpt_chars = v as usize;
+                cfg.read_excerpt_chars = v;
             }
             if let Some(v) = obj.get("compact_keep_recent").and_then(&as_usize) {
-                cfg.compact_keep_recent = v.max(0) as usize;
+                cfg.compact_keep_recent = v;
             }
             if let Some(v) = obj.get("compact_max_passes").and_then(&as_usize) {
-                cfg.compact_max_passes = v.max(1) as usize;
+                cfg.compact_max_passes = v.max(1);
             }
             if let Some(v) = obj.get("compact_keep_step").and_then(&as_usize) {
-                cfg.compact_keep_step = v.max(1) as usize;
+                cfg.compact_keep_step = v.max(1);
             }
             if let Some(v) = obj.get("token_budget_soft").and_then(&as_usize) {
-                cfg.token_budget_soft = v as usize;
+                cfg.token_budget_soft = v;
             }
             if let Some(v) = obj.get("token_budget_hard").and_then(&as_usize) {
-                cfg.token_budget_hard = v as usize;
+                cfg.token_budget_hard = v;
             }
             if let Some(v) = obj.get("old_message_char_budget").and_then(&as_usize) {
-                cfg.old_msg_budget = v as usize;
+                cfg.old_msg_budget = v;
             }
             if let Some(v) = obj.get("condense_keep_turns").and_then(&as_usize) {
-                cfg.condense_keep_turns = (v as usize).max(1);
+                cfg.condense_keep_turns = v.max(1);
             }
             if let Some(v) = obj.get("memory_max_chars").and_then(&as_usize) {
-                cfg.memory_max_chars = v as usize;
+                cfg.memory_max_chars = v;
             }
             if let Some(v) = obj.get("soul_max_chars").and_then(&as_usize) {
-                cfg.soul_max_chars = v as usize;
+                cfg.soul_max_chars = v;
             }
         }
         cfg
