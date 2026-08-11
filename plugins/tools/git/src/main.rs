@@ -2006,7 +2006,6 @@ mod tests {
 
     /// Run `f` and report whether it panicked. Simulates a hypothetical
     /// handler bug that panics mid-critical-section while holding a lock.
-    /// handler bug that panics mid-critical-section while holding a lock.
     fn caught_panic<F: FnOnce()>(f: F) -> bool {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err()
     }
@@ -2028,6 +2027,7 @@ mod tests {
 
         // The plugin must still be fully operational.
         assert_eq!(resolve_workspace_dir(), "/tmp/poison-test-ws");
+        drop(_g);
 
         // A git call that ERRORS (sandbox rejection) must come back as a
         // clean tool error — not panic on a poisoned lock.
@@ -2061,6 +2061,7 @@ mod tests {
         // A git call that fails must not corrupt the shared config: the
         // next call sees the same workspace and behaves identically.
         let _g = set_ws("/tmp/err-test-ws");
+        drop(_g);
 
         let (msg, is_error) = handle_run_command(serde_json::json!({
             "repo_dir": "/etc",
