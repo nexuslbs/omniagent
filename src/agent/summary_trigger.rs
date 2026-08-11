@@ -1,34 +1,9 @@
 use crate::agent::config::AgentContext;
 use crate::db::types::Thread;
-use crate::mcp::McpToolCall;
 
-/// Trigger a cross-thread summary check via the memory plugin and cancel
-/// any remaining background tasks for this thread.
-pub async fn trigger_summary_and_cleanup(cfg: &AgentContext, thread: &Thread) {
-    // Trigger cross-thread summary check
-    let mcp_call = McpToolCall {
-        name: "prompt_summarize".to_string(),
-        arguments: serde_json::json!({
-            "thread_id": thread.id,
-        }),
-        id: String::new(),
-    };
-    match cfg
-        .plugin_manager
-        .snapshot_registry()
-        .await
-        .execute(&mcp_call, cfg.ctx.clone())
-        .await
-    {
-        Ok(_) => {}
-        Err(e) => {
-            tracing::debug!(
-                "[executor] Post-thread summary failed (non-critical): {:?}",
-                e
-            );
-        }
-    }
-
+/// Cancel any remaining background tasks for this thread; summary generation is
+/// handled by the core response handler and is not a plugin contract.
+pub async fn trigger_summary_and_cleanup(_cfg: &AgentContext, thread: &Thread) {
     // Cancel any remaining background tasks for this thread
     let registry = crate::agent::task_registry::TASK_REGISTRY.get().cloned();
     if let Some(reg) = registry {

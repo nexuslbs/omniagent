@@ -194,12 +194,25 @@ and they will be sent as native photos."),
 
 // ── Memory / profile readings ───────────────────────────────────
 
-fn read_memory_section(memory_store: &MemoryStore) -> String {
+fn read_memory_section(memory_store: &MemoryStore, memory_max_chars: usize) -> String {
     let raw = memory_store.get_memory_raw();
     if raw.is_empty() {
         return String::new();
     }
-    format!("## MEMORY (your personal notes)\n{}", raw)
+    let truncated = truncate_content(raw, memory_max_chars);
+    let header = if raw.chars().count() > memory_max_chars {
+        format!(
+            "## MEMORY (your personal notes) [TRUNCATED: showing first {} of {} chars]",
+            memory_max_chars,
+            raw.chars().count()
+        )
+    } else {
+        format!(
+            "## MEMORY (your personal notes) [{} chars]",
+            raw.chars().count()
+        )
+    };
+    format!("{header}\n{truncated}")
 }
 
 fn read_user_profile_section(memory_store: &MemoryStore, soul_max_chars: usize) -> String {
@@ -221,7 +234,7 @@ fn read_user_profile_section(memory_store: &MemoryStore, soul_max_chars: usize) 
 }
 
 fn truncate_content(content: &str, max_chars: usize) -> String {
-    if content.len() <= max_chars {
+    if content.chars().count() <= max_chars {
         return content.to_string();
     }
     let truncate_at = content
@@ -232,12 +245,12 @@ fn truncate_content(content: &str, max_chars: usize) -> String {
     format!(
         "{}...\n\n[... truncated from {} to ~{} chars]",
         &content[..truncate_at],
-        content.len(),
+        content.chars().count(),
         max_chars
     )
 }
 
-/// Truncate content to `max_chars` bytes (safe UTF-8 boundary).
+/// Truncate content to `max_chars` Unicode scalar values (safe UTF-8 boundary).
 pub fn truncate_content_pub(content: &str, max_chars: usize) -> String {
     truncate_content(content, max_chars)
 }
@@ -294,7 +307,7 @@ pub fn build_system_prompt_parts(
         parts.push(hint.to_string());
     }
 
-    let memory_section = read_memory_section(memory_store);
+    let memory_section = read_memory_section(memory_store, config.memory_max_chars);
     if !memory_section.is_empty() {
         parts.push(memory_section);
     }

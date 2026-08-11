@@ -108,15 +108,45 @@
     },
     {
       "key": "tool_excerpt_chars",
-      "default": "800"
+      "label": "Tool Excerpt Chars",
+      "type": "integer",
+      "default": 800,
+      "description": "Maximum characters retained per older tool result during compaction"
     },
     {
       "key": "total_excerpt_cap",
-      "default": "4000"
+      "label": "Total Excerpt Cap",
+      "type": "integer",
+      "default": 4000,
+      "description": "Maximum total excerpt characters retained during compaction"
     },
     {
       "key": "read_excerpt_chars",
-      "default": "2000"
+      "label": "Read Excerpt Chars",
+      "type": "integer",
+      "default": 2000,
+      "description": "Maximum characters retained for older read-only results during compaction"
+    },
+    {
+      "key": "compact_keep_recent",
+      "label": "Compact Keep Recent",
+      "type": "integer",
+      "default": 3,
+      "description": "Number of recent assistant tool-call turns preserved during compaction"
+    },
+    {
+      "key": "compact_max_passes",
+      "label": "Compact Max Passes",
+      "type": "integer",
+      "default": 3,
+      "description": "Maximum progressive compaction passes per invocation"
+    },
+    {
+      "key": "compact_keep_step",
+      "label": "Compact Keep Step",
+      "type": "integer",
+      "default": 1,
+      "description": "Amount to reduce preserved recent turns between compaction passes"
     }
   ],
   "label": "prompt"

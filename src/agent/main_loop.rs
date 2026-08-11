@@ -58,17 +58,19 @@ pub(crate) async fn run_main_loop(
     // (the plugin echoes the explicit value back).
     let should_plan = prompt_parts.plan;
 
+    // Snapshot config once for consistency across planning and main loop.
+    let cfg_snapshot = cfg.config_snapshot();
+
     // Whether subtask tools are enabled for the main loop
     let enable_subtasks = should_plan;
-
     // Pre-read prompt log level for consistency across planning and main loop
-    let prompt_log_level = cfg.config_snapshot().prompt_log_level;
+    let prompt_log_level = cfg_snapshot.prompt_log_level.clone();
     let prompt_log_level = prompt_log_level.as_str();
     let mut has_logged_first_prompt = false;
 
     let plan_content: Option<String> = if should_plan {
         let max_iter = 0; // one-shot, no refinement iterations
-        let max_tokens = 2048u32; // planning token limit: previously from config
+        let max_tokens = cfg_snapshot.thread_summary_tokens; // configurable planning/summary token limit
         let mut last_plan: Option<String> = None;
         let mut json_failure_count: u32 = 0;
         let mut json_error_msg: Option<String> = None;
@@ -504,7 +506,6 @@ Previous plan:\n{}",
         let mut was_compacted = false;
         let mut dump_file: Option<String> = None;
         let mut dump_entries = 0usize;
-        let cfg_snapshot = cfg.config_snapshot();
         let condense_tool = cfg_snapshot.compact_messages_tool_name.clone();
         if !condense_tool.is_empty() {
             let condense_call = McpToolCall {

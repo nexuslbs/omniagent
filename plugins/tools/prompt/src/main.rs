@@ -52,6 +52,9 @@ pub struct PluginConfig {
     pub tool_excerpt_chars: usize,
     pub total_excerpt_cap: usize,
     pub read_excerpt_chars: usize,
+    pub compact_keep_recent: usize,
+    pub compact_max_passes: usize,
+    pub compact_keep_step: usize,
     // Prompt builder
     pub memory_max_chars: usize,
     pub soul_max_chars: usize,
@@ -79,6 +82,9 @@ impl PluginConfig {
             tool_excerpt_chars: 800,
             total_excerpt_cap: 4000,
             read_excerpt_chars: 2000,
+            compact_keep_recent: 3,
+            compact_max_passes: 3,
+            compact_keep_step: 1,
             memory_max_chars: 5000,
             soul_max_chars: 1000,
         }
@@ -95,9 +101,10 @@ impl PluginConfig {
     /// and forcing the plugin to run on defaults forever.
     fn from_json(json: &Value) -> Self {
         let mut cfg = Self::default();
-        let as_i64 = |v: &Value| {
-            v.as_i64()
-                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        let as_usize = |v: &Value| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                .map(|n| n as usize)
         };
         if let Some(obj) = json.as_object() {
             if let Some(v) = obj.get("database_url").and_then(|v| v.as_str()) {
@@ -106,7 +113,7 @@ impl PluginConfig {
             if let Some(v) = obj.get("omni_dir").and_then(|v| v.as_str()) {
                 cfg.omni_dir = v.to_string();
             }
-            if let Some(v) = obj.get("planning_complexity_max_chars").and_then(&as_i64) {
+            if let Some(v) = obj.get("planning_complexity_max_chars").and_then(&as_usize) {
                 cfg.planning_complexity_max_chars = v as usize;
             }
             if let Some(v) = obj
@@ -115,43 +122,52 @@ impl PluginConfig {
             {
                 cfg.planning_complexity_keywords = v.to_string();
             }
-            if let Some(v) = obj.get("prompt_plan_max_tokens").and_then(&as_i64) {
+            if let Some(v) = obj.get("prompt_plan_max_tokens").and_then(&as_usize) {
                 cfg.prompt_plan_max_tokens = v as usize;
             }
             if let Some(v) = obj.get("tokenizer_encoding").and_then(|v| v.as_str()) {
                 cfg.tokenizer_encoding = v.to_string();
             }
-            if let Some(v) = obj.get("char_budget_soft").and_then(&as_i64) {
+            if let Some(v) = obj.get("char_budget_soft").and_then(&as_usize) {
                 cfg.char_budget_soft = v as usize;
             }
-            if let Some(v) = obj.get("char_budget_hard").and_then(&as_i64) {
+            if let Some(v) = obj.get("char_budget_hard").and_then(&as_usize) {
                 cfg.char_budget_hard = v as usize;
             }
-            if let Some(v) = obj.get("tool_excerpt_chars").and_then(&as_i64) {
+            if let Some(v) = obj.get("tool_excerpt_chars").and_then(&as_usize) {
                 cfg.tool_excerpt_chars = v as usize;
             }
-            if let Some(v) = obj.get("total_excerpt_cap").and_then(&as_i64) {
+            if let Some(v) = obj.get("total_excerpt_cap").and_then(&as_usize) {
                 cfg.total_excerpt_cap = v as usize;
             }
-            if let Some(v) = obj.get("read_excerpt_chars").and_then(&as_i64) {
+            if let Some(v) = obj.get("read_excerpt_chars").and_then(&as_usize) {
                 cfg.read_excerpt_chars = v as usize;
             }
-            if let Some(v) = obj.get("token_budget_soft").and_then(&as_i64) {
+            if let Some(v) = obj.get("compact_keep_recent").and_then(&as_usize) {
+                cfg.compact_keep_recent = v.max(0) as usize;
+            }
+            if let Some(v) = obj.get("compact_max_passes").and_then(&as_usize) {
+                cfg.compact_max_passes = v.max(1) as usize;
+            }
+            if let Some(v) = obj.get("compact_keep_step").and_then(&as_usize) {
+                cfg.compact_keep_step = v.max(1) as usize;
+            }
+            if let Some(v) = obj.get("token_budget_soft").and_then(&as_usize) {
                 cfg.token_budget_soft = v as usize;
             }
-            if let Some(v) = obj.get("token_budget_hard").and_then(&as_i64) {
+            if let Some(v) = obj.get("token_budget_hard").and_then(&as_usize) {
                 cfg.token_budget_hard = v as usize;
             }
-            if let Some(v) = obj.get("old_message_char_budget").and_then(&as_i64) {
+            if let Some(v) = obj.get("old_message_char_budget").and_then(&as_usize) {
                 cfg.old_msg_budget = v as usize;
             }
-            if let Some(v) = obj.get("condense_keep_turns").and_then(&as_i64) {
+            if let Some(v) = obj.get("condense_keep_turns").and_then(&as_usize) {
                 cfg.condense_keep_turns = (v as usize).max(1);
             }
-            if let Some(v) = obj.get("memory_max_chars").and_then(&as_i64) {
+            if let Some(v) = obj.get("memory_max_chars").and_then(&as_usize) {
                 cfg.memory_max_chars = v as usize;
             }
-            if let Some(v) = obj.get("soul_max_chars").and_then(&as_i64) {
+            if let Some(v) = obj.get("soul_max_chars").and_then(&as_usize) {
                 cfg.soul_max_chars = v as usize;
             }
         }
@@ -1259,44 +1275,6 @@ async fn handle_generate_full(
         ));
     }
 
-    // 2c-ext. Kanban task template — load the thread's template file and
-    // inject it as authoritative guidance (e.g. dev-development.md). The
-    // dispatcher copies the kanban task's `template` field onto the thread;
-    // this block makes the agent actually SEE it. Without this the agent
-    // improvises (thread 109: used a stale scratch compose instead of the
-    // real dev stack because the template was never injected).
-    if let Some(tid) = thread_id {
-        match sqlx::query_as::<_, (Option<String>,)>("SELECT template FROM threads WHERE id = $1")
-            .bind(tid)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(Some((template_opt,))) => {
-                let template_name = template_opt.unwrap_or_default();
-                if !template_name.trim().is_empty() {
-                    let tname = template_name.trim().to_string();
-                    match crate::memory_store::load_template(data_dir, profile_name, &tname) {
-                        Some(content) => {
-                            context_blocks.push(format!(
-                                "=== Task Template: {tname} (MANDATORY — follow this workflow) ===\n{content}"
-                            ));
-                        }
-                        None => {
-                            tracing::warn!(
-                                "thread {} template '{}' not found under profiles/{}/templates",
-                                tid,
-                                tname,
-                                profile_name
-                            );
-                        }
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(e) => tracing::warn!("Failed to load thread {} template: {}", tid, e),
-        }
-    }
-
     // 2c-ext2. Previous attempts of the SAME task (R8-J) — earlier threads
     // of this kanban task, ALL statuses, with their final summaries. Placed
     // right after the template so the agent reads "what to do" and "what was
@@ -1382,7 +1360,8 @@ async fn handle_generate_full(
     }
 
     let context = context_blocks.join("\n\n---\n\n");
-    let mut user = user_message.to_string();
+    let original_user = user_message.to_string();
+    let mut user = original_user.clone();
 
     // 2f. Workflow step prompt mapping (inverse for tester/reviewer):
     // executor = task description as USER prompt + template as SYSTEM message
@@ -1398,7 +1377,8 @@ async fn handle_generate_full(
         {
             Ok(Some(wf)) => {
                 if let (Some(wf_id), Some(step)) = (&wf.workflow_id, &wf.workflow_step) {
-                    let template = load_role_template(data_dir, wf_id, step);
+                    let template = step_to_role(step)
+                        .and_then(|role| load_role_template(data_dir, wf_id, role));
                     apply_workflow_mapping(
                         &mut system,
                         &mut user,
@@ -1433,10 +1413,10 @@ async fn handle_generate_full(
             let has_keyword = if keywords.is_empty() {
                 false
             } else {
-                let lower = user.to_lowercase();
+                let lower = original_user.to_lowercase();
                 keywords.iter().any(|k| lower.contains(k))
             };
-            user.len() > max_chars || has_keyword
+            original_user.chars().count() > max_chars || has_keyword
         }
     };
 
@@ -1470,7 +1450,10 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
         }
     };
 
-    let keep_recent = args["keep_recent"].as_u64().unwrap_or(3) as usize;
+    let keep_recent = args["keep_recent"]
+        .as_u64()
+        .map(|v| v as usize)
+        .unwrap_or(cfg.compact_keep_recent);
 
     let mut messages: Vec<crate::chat_message::ChatMessage> =
         match serde_json::from_value(serde_json::Value::Array(messages_arr.clone())) {
@@ -1495,18 +1478,40 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // material remains to compact, the tool raises an error (is_error=true)
     // instead of looping forever.
     let use_tokens = !cfg.tokenizer_encoding.is_empty();
-    let current_size: usize = if use_tokens {
-        messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
-    } else {
-        messages.iter().map(|m| m.content.len()).sum::<usize>()
+    let measure_size = |items: &[crate::chat_message::ChatMessage]| -> usize {
+        let chars: usize = items
+            .iter()
+            .map(|m| {
+                let calls = m
+                    .tool_calls
+                    .as_ref()
+                    .map(|calls| {
+                        calls
+                            .iter()
+                            .map(|call| {
+                                call.function.name.chars().count()
+                                    + call.function.arguments.chars().count()
+                            })
+                            .sum::<usize>()
+                    })
+                    .unwrap_or(0);
+                m.content.chars().count() + calls
+            })
+            .sum();
+        if use_tokens {
+            chars / 4
+        } else {
+            chars
+        }
     };
+    let current_size = measure_size(&messages);
     let hard_budget = if use_tokens {
-        cfg.token_budget_hard.min(cfg.char_budget_hard)
+        cfg.token_budget_hard
     } else {
         cfg.char_budget_hard
     };
     let soft_budget = if use_tokens {
-        cfg.token_budget_soft.min(cfg.char_budget_soft)
+        cfg.token_budget_soft
     } else {
         cfg.char_budget_soft
     };
@@ -1530,7 +1535,7 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
         // left to compact (keep_recent has not yet reached 0), raise an
         // error instead of looping forever.
         let mut keep = keep_recent;
-        for pass in 0..3 {
+        for pass in 0..cfg.compact_max_passes {
             let outcome = crate::compact::compact_old_assistant_messages(
                 &mut messages,
                 keep,
@@ -1546,26 +1551,17 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
                 dump_file = Some(df);
             }
             entries += outcome.dump_entries;
-            let after_size: usize = if use_tokens {
-                messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
-            } else {
-                messages.iter().map(|m| m.content.len()).sum::<usize>()
-            };
+            let after_size = measure_size(&messages);
             if after_size <= soft_budget || keep == 0 {
                 break;
             }
-            if pass == 2 {
-                // 3 passes done, still over soft, and keep > 0 means more
-                // material could still be compacted but we are capped.
-                return Ok((
-                    format!(
-                        "Compaction failed: after 3 passes, size {} still exceeds soft budget {} (stopped at keep_recent={}, would need to compact further to reach the soft budget)",
-                        after_size, soft_budget, keep
-                    ),
-                    true,
-                ));
+            if pass + 1 == cfg.compact_max_passes {
+                // Maximum configured passes reached. Return the partial result;
+                // discarding it would make every later iteration repeat the same
+                // failed compaction forever.
+                break;
             }
-            keep -= 1;
+            keep = keep.saturating_sub(cfg.compact_keep_step);
         }
     }
     let after = messages.len();
@@ -1621,21 +1617,42 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
     // Read config from shared plugin config (set by configure message)
     let use_tokens = !cfg.tokenizer_encoding.is_empty();
     let soft_budget = if use_tokens {
-        cfg.token_budget_soft.min(cfg.char_budget_soft)
+        cfg.token_budget_soft
     } else {
         cfg.char_budget_soft
     };
     let hard_budget = if use_tokens {
-        cfg.token_budget_hard.min(cfg.char_budget_hard)
+        cfg.token_budget_hard
     } else {
         cfg.char_budget_hard
     };
     let target_budget = soft_budget.min(hard_budget);
 
-    let current_size: usize = if use_tokens {
-        messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
-    } else {
-        messages.iter().map(|m| m.content.len()).sum::<usize>()
+    let current_size: usize = {
+        let chars: usize = messages
+            .iter()
+            .map(|m| {
+                let calls = m
+                    .tool_calls
+                    .as_ref()
+                    .map(|calls| {
+                        calls
+                            .iter()
+                            .map(|call| {
+                                call.function.name.chars().count()
+                                    + call.function.arguments.chars().count()
+                            })
+                            .sum::<usize>()
+                    })
+                    .unwrap_or(0);
+                m.content.chars().count() + calls
+            })
+            .sum();
+        if use_tokens {
+            chars / 4
+        } else {
+            chars
+        }
     };
 
     let current_iteration = args["current_iteration"].as_i64().unwrap_or(0);
@@ -1706,7 +1723,7 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
 // ---------------------------------------------------------------------------
 
 fn truncate_str(s: &str, max_chars: usize) -> String {
-    if s.len() <= max_chars {
+    if s.chars().count() <= max_chars {
         return s.to_string();
     }
     let trunc_at = s
@@ -1745,7 +1762,16 @@ async fn main() -> Result<()> {
                 rx.changed().await.ok();
             }
             let guard = p.read().await;
-            let pool = guard.as_ref().expect("Pool not initialized").clone();
+            let pool = match guard.as_ref() {
+                Some(pool) => pool.clone(),
+                None => {
+                    return Ok((
+                        "Prompt database is unavailable; prompt generation cannot load context"
+                            .to_string(),
+                        true,
+                    ));
+                }
+            };
             let config = cfg.read().await.clone();
             handle_generate_full(&pool, &args, meta, &config).await
         })

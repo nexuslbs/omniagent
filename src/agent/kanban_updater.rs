@@ -108,13 +108,14 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
             }
         }
         // Row 7: tester pass → review step, with a scheduled review thread.
-        CompletedRoute::ReviewWithThread => match create_review_thread(&cfg.pool, thread).await {
-            Ok(Some(new_id)) => {
-                let comment = format!(
-                    "Tester passed (thread #{}). Task in review — review thread #{new_id}.",
-                    thread.id
-                );
-                match transition_with_comment(
+        CompletedRoute::ReviewWithThread => {
+            match create_review_thread(&cfg.pool, &cfg.ctx.data_dir, thread).await {
+                Ok(Some(new_id)) => {
+                    let comment = format!(
+                        "Tester passed (thread #{}). Task in review — review thread #{new_id}.",
+                        thread.id
+                    );
+                    match transition_with_comment(
                     &cfg.pool,
                     task_id,
                     "review",
@@ -135,13 +136,13 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
                         e
                     ),
                 }
-            }
-            _ => {
-                let comment = format!(
+                }
+                _ => {
+                    let comment = format!(
                     "Tester passed (thread #{}). Task in review — review thread creation failed, manual review required.",
                     thread.id
                 );
-                match transition_with_comment(&cfg.pool, task_id, "review", None, &comment).await {
+                    match transition_with_comment(&cfg.pool, task_id, "review", None, &comment).await {
                     Ok(()) => tracing::warn!(
                         "[workflow] tester passed (thread #{}) but review thread creation failed; task {} in review (manual)",
                         thread.id,
@@ -153,16 +154,18 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
                         e
                     ),
                 }
+                }
             }
-        },
+        }
         // R7-D4: executor success with a tester role → testing step thread, task → 'testing'.
-        CompletedRoute::TestingWithThread => match create_testing_thread(&cfg.pool, thread).await {
-            Ok(Some(new_id)) => {
-                let comment = format!(
+        CompletedRoute::TestingWithThread => {
+            match create_testing_thread(&cfg.pool, &cfg.ctx.data_dir, thread).await {
+                Ok(Some(new_id)) => {
+                    let comment = format!(
                     "Executor done (thread #{}). Task in testing — tester step thread #{new_id}.",
                     thread.id
                 );
-                match transition_with_comment(
+                    match transition_with_comment(
                     &cfg.pool,
                     task_id,
                     "testing",
@@ -183,31 +186,33 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
                         e
                     ),
                 }
-            }
-            Err(e) => {
-                tracing::warn!(
+                }
+                Err(e) => {
+                    tracing::warn!(
                     "[workflow] executor done (thread #{}) but tester thread creation FAILED: {}; task {} in review (manual)",
                     thread.id, e, task_id
                 );
-                let comment = format!(
+                    let comment = format!(
                     "Executor done (thread #{}). Task in review — tester thread creation failed: {}. Manual review required.",
                     thread.id, e
                 );
-                match transition_with_comment(&cfg.pool, task_id, "review", None, &comment).await {
-                    Ok(()) => {}
-                    Err(e2) => tracing::warn!(
-                        "[workflow] failed to move task {} to review: {}",
-                        task_id,
-                        e2
-                    ),
+                    match transition_with_comment(&cfg.pool, task_id, "review", None, &comment)
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(e2) => tracing::warn!(
+                            "[workflow] failed to move task {} to review: {}",
+                            task_id,
+                            e2
+                        ),
+                    }
                 }
-            }
-            _ => {
-                let comment = format!(
+                _ => {
+                    let comment = format!(
                     "Executor done (thread #{}). Task in review — tester step skipped (no task_id). Manual review required.",
                     thread.id
                 );
-                match transition_with_comment(&cfg.pool, task_id, "review", None, &comment).await {
+                    match transition_with_comment(&cfg.pool, task_id, "review", None, &comment).await {
                     Ok(()) => tracing::warn!(
                         "[workflow] executor done (thread #{}) but tester thread creation failed; task {} in review (manual)",
                         thread.id,
@@ -219,8 +224,9 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
                         e
                     ),
                 }
+                }
             }
-        },
+        }
         // Row 7: tester pass, no reviewer role → manual review (no thread).
         CompletedRoute::ReviewManual => {
             let comment = format!(
@@ -357,9 +363,58 @@ pub(crate) async fn transition_with_comment(
     Ok(())
 }
 
+/// Resolve the execution identity for a newly-created workflow step.
+async fn resolve_step_identity(
+    pool: &sqlx::PgPool,
+    data_dir: &str,
+    thread: &Thread,
+    step: &str,
+) -> Result<(String, String, String), String> {
+    let workflow_id = thread_workflow_id(pool, thread.id)
+        .await
+        .unwrap_or_default();
+    let role = match step {
+        "running" => "executor",
+        "testing" => "tester",
+        "review" => "reviewer",
+        _ => "",
+    };
+    let role_cfg = if workflow_id.is_empty() || role.is_empty() {
+        None
+    } else {
+        let path = std::path::Path::new(data_dir).join("workflows.yml");
+        crate::workflows::WorkflowsFile::load(&path)
+            .ok()
+            .and_then(|f| {
+                f.workflows
+                    .get(&workflow_id)
+                    .and_then(|w| w.resolve_role(role))
+            })
+    };
+    let profile = role_cfg
+        .as_ref()
+        .and_then(|r| r.profile.clone())
+        .unwrap_or_else(|| thread.profile.clone());
+    let provider = role_cfg
+        .as_ref()
+        .and_then(|r| r.provider.clone())
+        .or_else(|| thread.provider.clone())
+        .ok_or_else(|| format!("workflow step {step} has no provider"))?;
+    let model = role_cfg
+        .as_ref()
+        .and_then(|r| r.model.clone())
+        .or_else(|| thread.model.clone())
+        .ok_or_else(|| format!("workflow step {step} has no model"))?;
+    Ok((profile, provider, model))
+}
+
 /// Create a scheduled `review` thread for a passed tester thread (row 7).
 /// Mirrors the thread creation in `engine_transition` (cause message seq-0).
-async fn create_review_thread(pool: &sqlx::PgPool, thread: &Thread) -> Result<Option<i64>, String> {
+async fn create_review_thread(
+    pool: &sqlx::PgPool,
+    data_dir: &str,
+    thread: &Thread,
+) -> Result<Option<i64>, String> {
     #[derive(sqlx::FromRow)]
     struct IdRow {
         id: i64,
@@ -368,6 +423,7 @@ async fn create_review_thread(pool: &sqlx::PgPool, thread: &Thread) -> Result<Op
     let wf_id = thread_workflow_id(pool, thread.id)
         .await
         .unwrap_or_default();
+    let identity = resolve_step_identity(pool, data_dir, thread, "review").await?;
     let new_id = sqlx::query_as::<_, IdRow>(
         "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
          task_id, parent_id, workflow_id, workflow_step, task_type)
@@ -376,9 +432,9 @@ async fn create_review_thread(pool: &sqlx::PgPool, thread: &Thread) -> Result<Op
     )
     .bind(cause.as_str())
     .bind(thread.channel_id)
-    .bind(thread.profile.as_str())
-    .bind(thread.provider.clone().unwrap_or_default())
-    .bind(thread.model.clone().unwrap_or_default())
+    .bind(identity.0)
+    .bind(identity.1)
+    .bind(identity.2)
     .bind(thread.task_id.clone().unwrap_or_default())
     .bind(thread.id)
     .bind(wf_id)
@@ -413,6 +469,7 @@ fn testing_step_cause(parent_cause: &str) -> String {
 /// task_type='kanban' so the workflow test harness can find it.
 async fn create_testing_thread(
     pool: &sqlx::PgPool,
+    data_dir: &str,
     thread: &Thread,
 ) -> Result<Option<i64>, String> {
     #[derive(sqlx::FromRow)]
@@ -428,6 +485,7 @@ async fn create_testing_thread(
     let wf_id = thread_workflow_id(pool, thread.id)
         .await
         .unwrap_or_default();
+    let identity = resolve_step_identity(pool, data_dir, thread, "testing").await?;
     let new_id = sqlx::query_as::<_, IdRow>(
         "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
          task_id, parent_id, workflow_id, workflow_step, task_type)
@@ -436,9 +494,9 @@ async fn create_testing_thread(
     )
     .bind(cause.as_str())
     .bind(thread.channel_id)
-    .bind(thread.profile.as_str())
-    .bind(thread.provider.clone().unwrap_or_default())
-    .bind(thread.model.clone().unwrap_or_default())
+    .bind(identity.0.clone())
+    .bind(identity.1.clone())
+    .bind(identity.2.clone())
     .bind(task_id)
     .bind(thread.id)
     .bind(wf_id)

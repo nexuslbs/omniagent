@@ -28,6 +28,17 @@ pub async fn create_thread(
             cause
         );
     }
+    // Identity invariant: a thread MUST carry a valid persisted
+    // profile/provider/model — creation fails instead of inserting empties.
+    if profile.trim().is_empty() {
+        err_msg!("Cannot create thread: profile is empty");
+    }
+    if p.provider.as_deref().is_none_or(|s| s.trim().is_empty()) {
+        err_msg!("Cannot create thread: provider is empty");
+    }
+    if p.model.as_deref().is_none_or(|s| s.trim().is_empty()) {
+        err_msg!("Cannot create thread: model is empty");
+    }
     let row: ThreadDb = sql_forge!(
         ThreadDb,
         r#"
@@ -141,6 +152,26 @@ pub(crate) fn skip_recovery(task_id: Option<&str>, task_status: Option<&str>) ->
         (Some(_), Some(status)) => SkipRecovery::Reschedule {
             task_status: status.to_string(),
         },
+    }
+}
+
+/// Copy a skipped thread's PERSISTED identity onto its re-scheduled
+/// replacement (R3/startup recovery). Re-scheduled threads never re-resolve
+/// provider/model/profile at runtime — they inherit the parent's creation-time
+/// identity. Returns `Err` when the parent lacks any part of the identity:
+/// the re-schedule fails instead of fabricating defaults or inserting empties.
+pub(crate) fn copied_thread_identity(
+    profile: Option<&str>,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Result<(String, String, String), String> {
+    let clean = |s: Option<&str>| s.filter(|v| !v.trim().is_empty()).map(str::to_string);
+    match (clean(profile), clean(provider), clean(model)) {
+        (Some(p), Some(prov), Some(m)) => Ok((p, prov, m)),
+        _ => Err(
+            "parent thread has no persisted profile/provider/model; refusing to re-schedule with an empty identity"
+                .to_string(),
+        ),
     }
 }
 /// Phase 6b: outcome of an explicit operator stop (stop-thread / stop / close)
@@ -296,6 +327,14 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
                     let task_id = t.task_id.as_deref().unwrap_or("");
                     let status = task_status.as_deref().unwrap_or("todo");
                     let reason = "channel closed";
+                    // Identity invariant: copy the parent's persisted identity;
+                    // fail the re-schedule if it is missing (never fabricate).
+                    let (profile, provider, model) = copied_thread_identity(
+                        t.profile.as_deref(),
+                        t.provider.as_deref(),
+                        t.model.as_deref(),
+                    )
+                    .map_err(|e| Error::Message(format!("Thread #{}: {e}", t.id)))?;
                     #[derive(sqlx::FromRow)]
                     struct IdRow {
                         id: i64,
@@ -312,9 +351,9 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
                         (
                             :cause = t.cause.clone().unwrap_or_else(|| "re-run".to_string()),
                             :channel_id = t.channel_id,
-                            :profile = t.profile.clone().unwrap_or_else(|| "default".to_string()),
-                            :provider = t.provider.clone().unwrap_or_else(|| "openai".to_string()),
-                            :model = t.model.clone().unwrap_or_else(|| "gpt-4o-mini".to_string()),
+                            :profile = profile.as_str(),
+                            :provider = provider.as_str(),
+                            :model = model.as_str(),
                             :task_id = task_id,
                             :parent_id = t.id,
                             :workflow_id = t.workflow_id.clone().unwrap_or_default(),
@@ -370,6 +409,149 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
     saved.try_into()
 }
 
+/// Execution identity resolved once at thread creation and persisted on the
+/// thread row. Running threads never re-resolve it — the executor consumes
+/// the persisted profile/provider/model and fails when they are absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedThreadIdentity {
+    pub profile: String,
+    pub provider: String,
+    pub model: String,
+}
+
+/// Resolve the execution identity (profile/provider/model) for a NEW thread.
+///
+/// Called ONLY at thread creation (never at runtime): the result is persisted
+/// and every thread creator shares exactly the same precedence.
+///
+/// Precedence (highest first):
+/// - profile:  workflow role → workflow defaults → caller base profile →
+///             channel.current_profile → global default profile
+/// - provider: workflow role → workflow defaults → explicit caller →
+///             resolved profile's provider → channel.current_provider →
+///             global default provider
+/// - model:    resolved at the same tier as the provider (explicit model,
+///             profile model, channel model, or the provider's default model)
+///
+/// Returns `Err` when no profile/provider/model can be resolved — creation
+/// must fail rather than persist an empty/invalid identity.
+pub fn resolve_thread_identity(
+    data_dir: &str,
+    base_profile: &str,
+    channel: Option<&crate::db::types::Channel>,
+    workflow: Option<&crate::workflows::Workflow>,
+    step: Option<&str>,
+    explicit_provider: Option<&str>,
+    explicit_model: Option<&str>,
+) -> Result<ResolvedThreadIdentity, String> {
+    let role_cfg = step
+        .and_then(crate::workflows::role_for_step)
+        .and_then(|role| workflow.and_then(|wf| wf.resolve_role(role)));
+
+    // --- Profile ----------------------------------------------------------
+    let profile = role_cfg
+        .as_ref()
+        .and_then(|r| r.profile.as_deref())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            workflow
+                .and_then(|wf| wf.defaults.profile.as_deref())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| (!base_profile.is_empty()).then_some(base_profile))
+        .or_else(|| {
+            channel
+                .and_then(|c| (!c.current_profile.is_empty()).then_some(c.current_profile.as_str()))
+        })
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "no LLM profile configured: set a profile on the task, channel, or workflow"
+                .to_string()
+        })?;
+
+    // --- Provider (model resolved at the same tier as the provider) -------
+    let registry = crate::profile::ProfileRegistry::new(data_dir);
+    let profile_data = registry.get(&profile).cloned();
+
+    let (provider, model) = if let Some(prov) = role_cfg
+        .as_ref()
+        .and_then(|r| r.provider.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        let model = role_cfg
+            .as_ref()
+            .and_then(|r| r.model.as_deref())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| crate::llm::resolve_default_model(prov));
+        (prov.to_string(), model)
+    } else if let Some(prov) = workflow
+        .and_then(|wf| wf.defaults.provider.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        let model = workflow
+            .and_then(|wf| wf.defaults.model.as_deref())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| crate::llm::resolve_default_model(prov));
+        (prov.to_string(), model)
+    } else if let Some(prov) = explicit_provider.filter(|s| !s.is_empty()) {
+        let model = explicit_model
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| crate::llm::resolve_default_model(prov));
+        (prov.to_string(), model)
+    } else if let Some(prov) = profile_data
+        .as_ref()
+        .and_then(|p| p.provider.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        let model = profile_data
+            .as_ref()
+            .and_then(|p| p.model.as_deref())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| crate::llm::resolve_default_model(prov));
+        (prov.to_string(), model)
+    } else if let Some(prov) = channel
+        .and_then(|c| c.current_provider.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        let model = channel
+            .and_then(|c| c.current_model.as_deref())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| crate::llm::resolve_default_model(prov));
+        (prov.to_string(), model)
+    } else {
+        // Global config level: default_provider from settings.yml / env.
+        let prov = crate::agent::config::get_global()
+            .map(|g| g.read().default_provider.clone())
+            .unwrap_or_default();
+        if prov.is_empty() {
+            return Err(
+                "No LLM provider configured. Set LLM_PROVIDER env var, or configure a provider in the channel or profile.".to_string(),
+            );
+        }
+        let model = crate::llm::resolve_default_model(&prov);
+        (prov, model)
+    };
+
+    let model = model.ok_or_else(|| {
+        format!(
+            "No model configured for provider '{}'. Set a default_model in the provider plugin config, or specify a model in the channel or profile.",
+            provider
+        )
+    })?;
+
+    Ok(ResolvedThreadIdentity {
+        profile,
+        provider,
+        model,
+    })
+}
+
 /// Create a thread and its seq-0 cause message in a single operation.
 ///
 /// Resolves the planning mode internally using the prompt content for
@@ -412,80 +594,35 @@ pub async fn create_thread_with_cause(
     let channel_plan = channel_plan_from_column.or(channel_plan_from_metadata);
     let plan = resolve_thread_plan(channel_plan, p.task_plan).unwrap_or(false); // false = placeholder, plugin may override at runtime
 
-    // 4. Resolve provider and model
-    //
-    // Provider chain:  channel.current_provider → profile.provider → LLM_PROVIDER env
-    // Model depends on which level the provider came from:
-    //   - Channel level:   use channel.current_model, or provider default_model
-    //   - Profile level:   use profile.model,         or provider default_model
-    //   - Env var level:   always use provider default_model
-    //   - Not set:         error: no model to use
-    //
-    // When explicit p.provider is passed (e.g. from platform client or scheduler),
-    // it represents an already-resolved value and takes precedence over the chain.
-    // Its accompanying model follows the same rule: p.model or provider default.
-    let registry = crate::profile::ProfileRegistry::new(data_dir);
-    let profile_data = registry.get(profile);
-
-    let (resolved_provider, resolved_model) = {
-        // If the caller already resolved provider+model (cron, platform), use those
-        if let Some(prov) = p.provider.as_deref().filter(|s| !s.is_empty()) {
-            let model = p
-                .model
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .or_else(|| crate::llm::resolve_default_model(prov));
-            (prov.to_string(), model)
-        }
-        // Channel level: provider in channel → use model from channel or provider default
-        else if let Some(prov) = channel
-            .current_provider
-            .as_deref()
-            .filter(|s| !s.is_empty())
-        {
-            let model = channel
-                .current_model
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .or_else(|| crate::llm::resolve_default_model(prov));
-            (prov.to_string(), model)
-        }
-        // Profile level: provider in profile → use model from profile or provider default
-        else if let Some(prov) =
-            profile_data.and_then(|p| p.provider.as_deref().filter(|s| !s.is_empty()))
-        {
-            let model = profile_data
-                .and_then(|p| p.model.as_deref())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .or_else(|| crate::llm::resolve_default_model(prov));
-            (prov.to_string(), model)
-        }
-        // Global config level: default_provider from settings.yml
-        else {
-            let prov = crate::agent::config::get_global()
-                .map(|g| g.read().default_provider.clone())
-                .unwrap_or_default(); // Empty string hits the error path below
-            if !prov.is_empty() {
-                let model = crate::llm::resolve_default_model(&prov);
-                (prov, model)
-            } else {
-                return Err(Error::Message(
-                    "No LLM provider configured. Set LLM_PROVIDER env var, or configure a provider in the channel or profile.".to_string()
-                ));
+    // 4. Resolve provider/model/profile once, at thread creation.
+    // Workflow role overrides are applied here so every thread creator shares
+    // exactly the same precedence and running threads never re-resolve them.
+    // A missing workflows.yml simply means "no workflow"; a parse/validation
+    // error is propagated (never silently swallowed).
+    let workflow = match p.workflow_id.as_deref() {
+        Some(id) => {
+            let path = std::path::Path::new(data_dir).join("workflows.yml");
+            match crate::workflows::WorkflowsFile::load(&path) {
+                Ok(file) => file.workflows.get(id).cloned(),
+                Err(crate::workflows::WorkflowConfigError::NotFound { .. }) => None,
+                Err(e) => return Err(Error::Message(format!("failed to load workflows.yml: {e}"))),
             }
         }
+        None => None,
     };
-
-    // If model was not resolved at any level, that's an error
-    let resolved_model = resolved_model.ok_or_else(|| {
-        Error::Message(format!(
-            "No model configured for provider '{}'. Set a default_model in the provider plugin config, or specify a model in the channel or profile.",
-            resolved_provider
-        ))
-    })?;
+    let identity = resolve_thread_identity(
+        data_dir,
+        profile,
+        Some(&channel),
+        workflow.as_ref(),
+        p.workflow_step.as_deref(),
+        p.provider.as_deref(),
+        p.model.as_deref(),
+    )
+    .map_err(Error::Message)?;
+    let resolved_profile = identity.profile;
+    let resolved_provider = identity.provider;
+    let resolved_model = identity.model;
 
     // 5. Resolve parent_id from parent_external_id
     // If parent_external_id is provided and different from the message's own external_id,
@@ -525,10 +662,10 @@ pub async fn create_thread_with_cause(
         pool,
         cause,
         channel_id,
-        profile,
+        &resolved_profile,
         CreateThreadParams {
-            provider: p.provider.clone().or(Some(resolved_provider.clone())),
-            model: p.model.clone().or(Some(resolved_model.clone())),
+            provider: Some(resolved_provider.clone()),
+            model: Some(resolved_model.clone()),
             task_id: p.task_id.clone(),
             schedule_task_id: p.schedule_task_id.clone(),
             plan,

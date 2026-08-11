@@ -50,6 +50,18 @@ pub const ROLE_KEYS: [&str; 3] = [EXECUTOR_ROLE, TESTER_ROLE, REVIEWER_ROLE];
 /// Step keys only — NEVER role names (N5).
 pub const STEP_KEYS: [&str; 3] = ["running", "testing", "review"];
 
+/// Map a thread step key (`running`/`testing`/`review`) to its workflow role
+/// key. Step keys and role keys are intentionally distinct (N5); returns
+/// `None` for anything that is not a workflow step.
+pub fn role_for_step(step: &str) -> Option<&'static str> {
+    match step {
+        "running" => Some(EXECUTOR_ROLE),
+        "testing" => Some(TESTER_ROLE),
+        "review" => Some(REVIEWER_ROLE),
+        _ => None,
+    }
+}
+
 /// Workflow-level (or per-role override) execution defaults.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", default)]
@@ -107,6 +119,23 @@ impl WorkflowsFile {
             });
         }
         Self::from_yaml(&std::fs::read_to_string(path)?)
+    }
+
+    /// Load a single workflow definition by id from `<data_dir>/workflows.yml`.
+    ///
+    /// A missing file or an unknown workflow id yields `Ok(None)` (treated as
+    /// "no workflow"); parse/validation errors are returned — never silently
+    /// swallowed, so callers can decide whether to degrade or fail.
+    pub fn load_workflow(data_dir: &str, id: &str) -> Result<Option<Workflow>, WorkflowConfigError> {
+        if id.trim().is_empty() {
+            return Ok(None);
+        }
+        let path = Path::new(data_dir).join("workflows.yml");
+        match Self::load(&path) {
+            Ok(file) => Ok(file.workflows.get(id).cloned()),
+            Err(WorkflowConfigError::NotFound { .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     /// Validate structural constraints. See module docs for the rules.
@@ -443,6 +472,58 @@ mod tests {
         // workflow-level defaults apply to roles without an override
         assert_eq!(executor.profile.as_deref(), Some("research-profile"));
         assert_eq!(executor.provider.as_deref(), Some("anthropic"));
+    }
+
+    #[test]
+    fn role_for_step_maps_step_keys_to_role_keys() {
+        assert_eq!(role_for_step("running"), Some(EXECUTOR_ROLE));
+        assert_eq!(role_for_step("testing"), Some(TESTER_ROLE));
+        assert_eq!(role_for_step("review"), Some(REVIEWER_ROLE));
+        // Step keys only — role names and anything else are not valid steps.
+        assert_eq!(role_for_step("executor"), None);
+        assert_eq!(role_for_step("blocked"), None);
+        assert_eq!(role_for_step(""), None);
+        assert_eq!(role_for_step("bogus"), None);
+    }
+
+    #[test]
+    fn load_workflow_missing_file_and_unknown_id_yield_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No workflows.yml on disk: Ok(None), not an error.
+        assert!(WorkflowsFile::load_workflow(dir.path().to_str().unwrap(), "wf").unwrap().is_none());
+        // Empty id: Ok(None) without touching the filesystem.
+        assert!(WorkflowsFile::load_workflow(dir.path().to_str().unwrap(), "").unwrap().is_none());
+    }
+
+    #[test]
+    fn load_workflow_propagates_parse_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workflows.yml");
+        std::fs::write(&path, "workflows: [not-a-map").expect("write broken yaml");
+        let err = WorkflowsFile::load_workflow(dir.path().to_str().unwrap(), "wf")
+            .expect_err("broken yaml must not be swallowed");
+        assert!(
+            err.to_string().contains("invalid workflows.yml"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_workflow_returns_workflow_for_known_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workflows.yml");
+        WorkflowsFile::from_yaml(VALID_YAML)
+            .expect("valid yaml")
+            .save(&path)
+            .expect("save");
+        let wf = WorkflowsFile::load_workflow(dir.path().to_str().unwrap(), "weekly-report")
+            .expect("load workflow")
+            .expect("workflow exists");
+        assert_eq!(wf.defaults.provider.as_deref(), Some("anthropic"));
+        // Unknown id -> Ok(None).
+        assert!(WorkflowsFile::load_workflow(dir.path().to_str().unwrap(), "nope")
+            .unwrap()
+            .is_none());
     }
 
     const VALID_YAML: &str = r#"

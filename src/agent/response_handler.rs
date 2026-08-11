@@ -402,7 +402,7 @@ pub(crate) async fn handle_response(
     // If this thread is linked to a kanban task, update its status
     crate::agent::kanban_updater::update_kanban_status(cfg, thread, final_status).await;
 
-    // 11. Trigger cross-thread summary check via memory plugin + cancel bg tasks
+    // 11. Cancel remaining background tasks after completion
     crate::agent::summary_trigger::trigger_summary_and_cleanup(cfg, thread).await;
 
     Ok(saved)

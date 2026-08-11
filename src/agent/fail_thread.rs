@@ -233,6 +233,15 @@ fn err_str<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
+fn workflow_role_for_step(step: &str) -> Option<&'static str> {
+    match step {
+        "running" => Some("executor"),
+        "testing" => Some("tester"),
+        "review" => Some("reviewer"),
+        _ => None,
+    }
+}
+
 pub async fn manual_review_decision(
     pool: &sqlx::PgPool,
     data_dir: &str,
@@ -318,7 +327,7 @@ pub async fn manual_review_decision(
         let new_id = sqlx::query_as::<_, IdRow>(
             "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
              task_id, parent_id, workflow_id, workflow_step, task_type)
-             VALUES ('pending', $1, $2, $3, '', '',
+             VALUES ('pending', $1, $2, $3, $7, $8,
              $4, NULL, $5, $6, 'kanban') RETURNING id",
         )
         .bind(cause.as_str())
@@ -327,6 +336,18 @@ pub async fn manual_review_decision(
         .bind(task_id)
         .bind(task.workflow_id.clone().unwrap_or_default())
         .bind(step)
+        .bind(
+            workflow_role_for_step(&step)
+                .and_then(|role| wf.resolve_role(role))
+                .and_then(|r| r.provider)
+                .unwrap_or_default(),
+        )
+        .bind(
+            workflow_role_for_step(&step)
+                .and_then(|role| wf.resolve_role(role))
+                .and_then(|r| r.model)
+                .unwrap_or_default(),
+        )
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| format!("insert manual review thread: {e}"))?;
@@ -909,6 +930,34 @@ pub(crate) async fn engine_transition(
         }
     }
 
+    // Resolve the next step's execution identity before inserting it. The
+    // executor must never inherit stale parent settings when a workflow role
+    // defines its own identity.
+    let resolve_step_identity = |step: &str| {
+        let role = role_for_step(step);
+        let role_cfg = workflow.as_ref().and_then(|wf| wf.resolve_role(role));
+        (
+            role_cfg
+                .as_ref()
+                .and_then(|r| r.profile.clone())
+                .unwrap_or_else(|| thread.profile.clone()),
+            role_cfg
+                .as_ref()
+                .and_then(|r| r.provider.clone())
+                .or_else(|| {
+                    workflow
+                        .as_ref()
+                        .and_then(|wf| wf.defaults.provider.clone())
+                })
+                .or_else(|| thread.provider.clone()),
+            role_cfg
+                .as_ref()
+                .and_then(|r| r.model.clone())
+                .or_else(|| workflow.as_ref().and_then(|wf| wf.defaults.model.clone()))
+                .or_else(|| thread.model.clone()),
+        )
+    };
+
     // ---- Execute (one transaction) ------------------------------------------
     let initial_status = task.status.clone();
     let new_thread_id: Option<i64> = if let Some(step) = rerun_step.as_deref() {
@@ -926,9 +975,9 @@ pub(crate) async fn engine_transition(
             (
                 :cause = thread.cause.as_str(),
                 :channel_id = thread.channel_id,
-                :profile = thread.profile.as_str(),
-                :provider = thread.provider.as_deref().unwrap_or(""),
-                :model = thread.model.as_deref().unwrap_or(""),
+                :profile = resolve_step_identity(step).0.as_str(),
+                :provider = resolve_step_identity(step).1.as_deref().unwrap_or(""),
+                :model = resolve_step_identity(step).2.as_deref().unwrap_or(""),
                 :task_id = task_id,
                 :parent_id = thread.id,
                 :workflow_id = wf_id.unwrap_or(""),
@@ -999,9 +1048,9 @@ pub(crate) async fn engine_transition(
             (
                 :cause = thread.cause.as_str(),
                 :channel_id = thread.channel_id,
-                :profile = thread.profile.as_str(),
-                :provider = thread.provider.as_deref().unwrap_or(""),
-                :model = thread.model.as_deref().unwrap_or(""),
+                :profile = resolve_step_identity("review").0.as_str(),
+                :provider = resolve_step_identity("review").1.as_deref().unwrap_or(""),
+                :model = resolve_step_identity("review").2.as_deref().unwrap_or(""),
                 :task_id = task_id,
                 :parent_id = thread.id,
                 :workflow_id = wf_id.unwrap_or(""),

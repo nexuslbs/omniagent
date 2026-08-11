@@ -52,8 +52,15 @@ pub(crate) async fn build_prompt_context(
             .await
             .execute(&mcp_call, cfg.ctx.clone())
             .await?;
-        let parsed: serde_json::Value =
-            serde_json::from_str(&result.content).unwrap_or(serde_json::json!({}));
+        if result.is_error {
+            return Err(crate::error::Error::Message(format!(
+                "prompt generation tool failed: {}",
+                result.content
+            )));
+        }
+        let parsed: serde_json::Value = serde_json::from_str(&result.content).map_err(|e| {
+            crate::error::Error::Message(format!("prompt generation returned invalid JSON: {e}"))
+        })?;
 
         // If the plugin returned a plan decision, persist it to the thread
         if parsed.get("plan").is_some() {

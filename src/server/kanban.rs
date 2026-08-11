@@ -37,7 +37,6 @@ use crate::db::channels::get_channel_by_id;
 use crate::db::kanban::update_kanban_task_status;
 use crate::db::threads::create_thread_with_cause;
 use crate::db::types::ThreadCauseParams;
-
 use crate::workflows::{Workflow, WorkflowConfigError, WorkflowsFile};
 
 // ---------------------------------------------------------------------------
@@ -243,6 +242,7 @@ struct DeleteIdRow {
     template: Option<String>,
     plan: Option<bool>,
     planning_mode: Option<String>,
+    workflow_id: Option<String>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -735,7 +735,7 @@ async fn change_status_handler(
         r#"
         SELECT id, title, body, status, priority, position, assignee,
                channel_id, profile, archived, template, plan, planning_mode,
-               created_at, updated_at
+               workflow_id, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
         ( :id = &id )
@@ -878,7 +878,7 @@ async fn change_position_handler(
         r#"
         SELECT id, title, body, status, priority, position, assignee,
                channel_id, profile, archived, template, plan, planning_mode,
-               created_at, updated_at
+               workflow_id, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
         ( :id = &id )
@@ -1017,7 +1017,7 @@ async fn update_task_handler(
         r#"
         SELECT id, title, body, status, priority, position, assignee,
                channel_id, profile, archived, template, plan, planning_mode,
-               created_at, updated_at
+               workflow_id, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
         ( :id = &id )
@@ -1032,6 +1032,20 @@ async fn update_task_handler(
             return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to check task");
         }
     };
+
+    // Workflow definitions are immutable while an execution is active.
+    if body.workflow_id.is_some()
+        && matches!(
+            before.status.as_deref(),
+            Some("running" | "testing" | "review")
+        )
+        && body.workflow_id.as_deref() != before.workflow_id.as_deref()
+    {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            "workflow_id cannot be changed while the task is active",
+        );
+    }
 
     // 2. Validate title if provided
     if let Some(ref title) = body.title {
@@ -1206,7 +1220,7 @@ async fn delete_task_handler(
         r#"
         SELECT id, title, body, status, priority, position, assignee,
                channel_id, profile, archived, template, plan, planning_mode,
-               created_at, updated_at
+               workflow_id, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
         ( :id = &id )
@@ -1985,6 +1999,8 @@ struct DispatchTaskDetailRow {
     profile: Option<String>,
     template: Option<String>,
     workflow_id: Option<String>,
+    plan: Option<bool>,
+    planning_mode: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -2163,7 +2179,7 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
     let detail = match sql_forge!(
         DispatchTaskDetailRow,
         r#"
-        SELECT id, title, body, channel_id, profile, template, workflow_id
+        SELECT id, title, body, channel_id, profile, template, workflow_id, plan, planning_mode
         FROM kanban_tasks
         WHERE id = :id
         "#,
@@ -2214,30 +2230,60 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         }
     };
 
-    let effective_profile = resolve_profile(
-        detail.profile.as_deref(),
-        &channel.current_profile,
-        &state.default_profile,
-    );
-    let provider = channel
-        .current_provider
+    let workflow = detail
+        .workflow_id
         .as_deref()
-        .filter(|p| !p.is_empty())
-        .unwrap_or("openai")
-        .to_string();
-    let model = channel
-        .current_model
-        .as_deref()
-        .filter(|m| !m.is_empty())
-        .unwrap_or("gpt-4o")
-        .to_string();
+        .and_then(|id| load_workflows_file(&state).ok()?.workflows.get(id).cloned());
+    let executor = workflow.as_ref().and_then(|wf| wf.resolve_role("executor"));
+    let effective_profile = executor
+        .as_ref()
+        .and_then(|r| r.profile.clone())
+        .or_else(|| workflow.as_ref().and_then(|wf| wf.defaults.profile.clone()))
+        .or_else(|| detail.profile.clone())
+        .or_else(|| (!channel.current_profile.is_empty()).then(|| channel.current_profile.clone()))
+        .unwrap_or_else(|| state.default_profile.clone());
+    let provider = executor
+        .as_ref()
+        .and_then(|r| r.provider.clone())
+        .or_else(|| {
+            workflow
+                .as_ref()
+                .and_then(|wf| wf.defaults.provider.clone())
+        })
+        .or_else(|| channel.current_provider.clone())
+        .or_else(|| {
+            let provider = state.shared_config.read().default_provider.clone();
+            (!provider.is_empty()).then_some(provider)
+        })
+        .unwrap_or_else(|| "openai".to_string());
+    let model = executor
+        .as_ref()
+        .and_then(|r| r.model.clone())
+        .or_else(|| workflow.as_ref().and_then(|wf| wf.defaults.model.clone()))
+        .or_else(|| channel.current_model.clone())
+        .unwrap_or_else(|| "gpt-4o".to_string());
+    let plan = executor
+        .as_ref()
+        .and_then(|r| r.plan_mode.as_deref())
+        .or_else(|| {
+            workflow
+                .as_ref()
+                .and_then(|wf| wf.defaults.plan_mode.as_deref())
+        })
+        .map(|mode| matches!(mode, "auto_plan" | "auto_subtasks" | "always"))
+        .or(detail.plan)
+        .or_else(|| Some(detail.planning_mode.as_deref() == Some("auto_plan")));
     // R8-J: a dispatched thread must ALWAYS carry a template — an empty
     // threads.template meant the prompt builder never injected the workflow
     // guidance and agents improvised instead of following the dev template
     // (root cause of 6 budget-deaths). Default to "dev-development" when
     // neither the task nor the channel specifies one.
-    let resolved_template =
-        resolve_dispatch_template(detail.template.as_deref(), channel.template.as_deref());
+    let resolved_template = executor
+        .as_ref()
+        .and_then(|r| r.template.clone())
+        .unwrap_or_else(|| {
+            resolve_dispatch_template(detail.template.as_deref(), channel.template.as_deref())
+        });
 
     // 5. Build the thread-cause params and start the thread.
     let params = ThreadCauseParams {
@@ -2255,7 +2301,7 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         }),
         msg_type: "kanban".to_string(),
         msg_subtype: Some(detail.id.clone()),
-        task_plan: None,
+        task_plan: plan,
         template: Some(resolved_template),
         workflow_id: detail.workflow_id.clone(),
         workflow_step: Some("running".to_string()),
