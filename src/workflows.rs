@@ -14,7 +14,7 @@
 //!     profile: report-profile   # optional workflow-level defaults
 //!     provider: anthropic
 //!     model: claude-sonnet-4-5
-//!     plan_mode: auto_plan
+//!     plan_mode: on
 //!     retries: 2
 //!     roles:
 //!       executor:               # REQUIRED role; template OPTIONAL
@@ -545,7 +545,7 @@ workflows:
     profile: research-profile
     provider: anthropic
     model: claude-sonnet-4-5
-    plan_mode: auto_plan
+    plan_mode: on
     retries: 2
     roles:
       executor:
@@ -568,7 +568,7 @@ workflows:
         assert_eq!(wf.defaults.profile.as_deref(), Some("research-profile"));
         assert_eq!(wf.defaults.provider.as_deref(), Some("anthropic"));
         assert_eq!(wf.defaults.model.as_deref(), Some("claude-sonnet-4-5"));
-        assert_eq!(wf.defaults.plan_mode.as_deref(), Some("auto_plan"));
+        assert_eq!(wf.defaults.plan_mode.as_deref(), Some("on"));
         assert_eq!(wf.defaults.retries, Some(2));
 
         assert_eq!(wf.roles.len(), 3);

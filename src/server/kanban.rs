@@ -2251,9 +2251,9 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
                 .as_ref()
                 .and_then(|wf| wf.defaults.plan_mode.as_deref())
         })
-        .map(|mode| matches!(mode, "auto_plan" | "auto_subtasks" | "always"))
+        .map(|mode| matches!(mode, "on"))
         .or(detail.plan)
-        .or_else(|| Some(detail.planning_mode.as_deref() == Some("auto_plan")));
+        .or_else(|| Some(detail.planning_mode.as_deref() == Some("on")));
     // R8-J: a dispatched thread must ALWAYS carry a template — an empty
     // threads.template meant the prompt builder never injected the workflow
     // guidance and agents improvised instead of following the dev template
