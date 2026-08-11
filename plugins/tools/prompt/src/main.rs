@@ -1063,17 +1063,45 @@ fn build_role_block(workflow_step: &str) -> Option<String> {
     }
 }
 
-/// Load the role template for a workflow from <omni_dir>/workflows.yml.
-fn load_role_template(data_dir: &str, workflow_id: &str, role: &str) -> Option<String> {
+/// Load the role template CONTENT for a workflow.
+///
+/// The role's `template` field in workflows.yml is a FILE NAME (e.g.
+/// `dev-development`), NOT the template text itself. The content is loaded
+/// from `<omni_dir>/profiles/<profile>/templates/<name>.md` (with `.md`
+/// appended when the name has no extension) and returned. Returns None when
+/// the workflow/role is absent, the template field is empty, or the template
+/// file is missing — callers decide whether to degrade (executor) or fall
+/// back (tester/reviewer).
+fn load_role_template(
+    data_dir: &str,
+    profile_name: &str,
+    workflow_id: &str,
+    role: &str,
+) -> Option<String> {
     let path = std::path::Path::new(data_dir).join("workflows.yml");
     let text = std::fs::read_to_string(path).ok()?;
     let file: WorkflowsYaml = serde_yaml::from_str(&text).ok()?;
-    file.workflows
+    let template_name = file
+        .workflows
         .get(workflow_id)?
         .roles
         .get(role)?
         .template
-        .clone()
+        .clone()?;
+    if template_name.trim().is_empty() {
+        return None;
+    }
+    let loaded = crate::memory_store::load_template(data_dir, profile_name, &template_name);
+    if loaded.is_none() {
+        tracing::warn!(
+            workflow_id,
+            role,
+            profile_name,
+            template_name,
+            "workflow role template file not found in profiles/<profile>/templates — no template applied"
+        );
+    }
+    loaded
 }
 
 /// Inverse prompt mapping for workflow steps (Phase 3b):
@@ -1378,7 +1406,7 @@ async fn handle_generate_full(
             Ok(Some(wf)) => {
                 if let (Some(wf_id), Some(step)) = (&wf.workflow_id, &wf.workflow_step) {
                     let template = step_to_role(step)
-                        .and_then(|role| load_role_template(data_dir, wf_id, role));
+                        .and_then(|role| load_role_template(data_dir, profile_name, wf_id, role));
                     apply_workflow_mapping(
                         &mut system,
                         &mut user,
@@ -2062,6 +2090,62 @@ mod tests {
         );
         assert_eq!(user, "implement the weekly report");
         assert!(!system.contains("Task under tester"));
+    }
+
+    #[test]
+    fn role_template_loads_content_from_profile_templates_dir() {
+        // The workflow role `template` field is a FILE NAME resolved against
+        // <data_dir>/profiles/<profile>/templates/<name>.md — the content is
+        // loaded, never the raw name.
+        let dir = tempdir_uniq("role-template-test");
+        let data_dir = dir.as_path().to_str().unwrap();
+        let templates_dir = dir
+            .as_path()
+            .join("profiles")
+            .join("omni")
+            .join("templates");
+        std::fs::create_dir_all(&templates_dir).expect("create templates dir");
+        std::fs::write(
+            templates_dir.join("dev-executor.md"),
+            "EXECUTOR CONTENT FROM FILE",
+        )
+        .expect("write template file");
+        std::fs::write(
+            dir.as_path().join("workflows.yml"),
+            "workflows:\n  wf:\n    roles:\n      executor:\n        template: dev-executor\n      tester:\n        template: missing-template\n",
+        )
+        .expect("write workflows.yml");
+
+        // File name -> content loaded from the profile templates directory.
+        let content = load_role_template(data_dir, "omni", "wf", "executor")
+            .expect("template should load from file");
+        assert_eq!(content, "EXECUTOR CONTENT FROM FILE");
+
+        // Missing template file -> None (never the raw name).
+        assert!(
+            load_role_template(data_dir, "omni", "wf", "tester").is_none(),
+            "missing template file must yield None, not the raw name"
+        );
+        // Unknown role -> None.
+        assert!(load_role_template(data_dir, "omni", "wf", "nope").is_none());
+        // Unknown workflow -> None.
+        assert!(load_role_template(data_dir, "omni", "nope", "executor").is_none());
+    }
+
+    /// Unique temp dir under the system temp dir (no tempfile dev-dep).
+    fn tempdir_uniq(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "prompt-plugin-{}-{}-{}",
+            tag,
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&path).expect("create temp dir");
+        path
     }
 }
 
