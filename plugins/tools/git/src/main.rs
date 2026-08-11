@@ -1777,6 +1777,7 @@ mod tests {
     #[tokio::test]
     async fn sandbox_clone_destination_enforced() {
         let _g = set_ws("/opt/workspace");
+        drop(_g);
         // Clone with an absolute dir outside the workspace must be rejected
         // as a tool error (is_error=true), before any network access.
         let args = serde_json::json!({
@@ -1793,6 +1794,7 @@ mod tests {
     #[tokio::test]
     async fn sandbox_rejections_do_not_trip_handler_error() {
         let _g = set_ws("/opt/workspace");
+        drop(_g);
         // A sandbox rejection must come back as Ok((msg, true)) — NOT as an
         // Err — so the MCP circuit breaker doesn't count it as a server
         // failure and open the circuit after a few legitimate blocks.
@@ -1941,6 +1943,7 @@ mod tests {
     async fn args_rejections_do_not_trip_handler_error() {
         let (ws, repo) = temp_git_repo().await;
         let _g = set_ws(&ws);
+        drop(_g);
         // -C escape must come back as Ok((msg, true)), not Err.
         let (msg, is_error) = handle_run_command(serde_json::json!({
             "repo_dir": repo,
