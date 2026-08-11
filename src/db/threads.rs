@@ -466,8 +466,7 @@ pub fn resolve_thread_identity(
         .map(str::to_string)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            "no LLM profile configured: set a profile on the task, channel, or workflow"
-                .to_string()
+            "no LLM profile configured: set a profile on the task, channel, or workflow".to_string()
         })?;
 
     // --- Provider (model resolved at the same tier as the provider) -------

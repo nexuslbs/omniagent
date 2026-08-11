@@ -126,7 +126,10 @@ impl WorkflowsFile {
     /// A missing file or an unknown workflow id yields `Ok(None)` (treated as
     /// "no workflow"); parse/validation errors are returned — never silently
     /// swallowed, so callers can decide whether to degrade or fail.
-    pub fn load_workflow(data_dir: &str, id: &str) -> Result<Option<Workflow>, WorkflowConfigError> {
+    pub fn load_workflow(
+        data_dir: &str,
+        id: &str,
+    ) -> Result<Option<Workflow>, WorkflowConfigError> {
         if id.trim().is_empty() {
             return Ok(None);
         }
@@ -490,9 +493,17 @@ mod tests {
     fn load_workflow_missing_file_and_unknown_id_yield_none() {
         let dir = tempfile::tempdir().expect("tempdir");
         // No workflows.yml on disk: Ok(None), not an error.
-        assert!(WorkflowsFile::load_workflow(dir.path().to_str().unwrap(), "wf").unwrap().is_none());
+        assert!(
+            WorkflowsFile::load_workflow(dir.path().to_str().unwrap(), "wf")
+                .unwrap()
+                .is_none()
+        );
         // Empty id: Ok(None) without touching the filesystem.
-        assert!(WorkflowsFile::load_workflow(dir.path().to_str().unwrap(), "").unwrap().is_none());
+        assert!(
+            WorkflowsFile::load_workflow(dir.path().to_str().unwrap(), "")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -521,9 +532,11 @@ mod tests {
             .expect("workflow exists");
         assert_eq!(wf.defaults.provider.as_deref(), Some("anthropic"));
         // Unknown id -> Ok(None).
-        assert!(WorkflowsFile::load_workflow(dir.path().to_str().unwrap(), "nope")
-            .unwrap()
-            .is_none());
+        assert!(
+            WorkflowsFile::load_workflow(dir.path().to_str().unwrap(), "nope")
+                .unwrap()
+                .is_none()
+        );
     }
 
     const VALID_YAML: &str = r#"

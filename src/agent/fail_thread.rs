@@ -965,6 +965,13 @@ pub(crate) async fn engine_transition(
         struct IdRow {
             id: i64,
         }
+        let (profile, provider, model) = resolve_step_identity(step);
+        let provider =
+            provider.ok_or_else(|| format!("no provider configured for workflow step {step}"))?;
+        let model = model.ok_or_else(|| format!("no model configured for workflow step {step}"))?;
+        if profile.trim().is_empty() {
+            return Err(format!("no profile configured for workflow step {step}"));
+        }
         let new_id = sql_forge!(
             IdRow,
             "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
@@ -975,9 +982,9 @@ pub(crate) async fn engine_transition(
             (
                 :cause = thread.cause.as_str(),
                 :channel_id = thread.channel_id,
-                :profile = resolve_step_identity(step).0.as_str(),
-                :provider = resolve_step_identity(step).1.as_deref().unwrap_or(""),
-                :model = resolve_step_identity(step).2.as_deref().unwrap_or(""),
+                :profile = profile.as_str(),
+                :provider = provider.as_str(),
+                :model = model.as_str(),
                 :task_id = task_id,
                 :parent_id = thread.id,
                 :workflow_id = wf_id.unwrap_or(""),
@@ -1038,6 +1045,14 @@ pub(crate) async fn engine_transition(
         struct IdRow {
             id: i64,
         }
+        let (profile, provider, model) = resolve_step_identity("review");
+        let provider = provider
+            .ok_or_else(|| "no provider configured for workflow step review".to_string())?;
+        let model =
+            model.ok_or_else(|| "no model configured for workflow step review".to_string())?;
+        if profile.trim().is_empty() {
+            return Err("no profile configured for workflow step review".to_string());
+        }
         let new_id = sql_forge!(
             IdRow,
             "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
@@ -1048,9 +1063,9 @@ pub(crate) async fn engine_transition(
             (
                 :cause = thread.cause.as_str(),
                 :channel_id = thread.channel_id,
-                :profile = resolve_step_identity("review").0.as_str(),
-                :provider = resolve_step_identity("review").1.as_deref().unwrap_or(""),
-                :model = resolve_step_identity("review").2.as_deref().unwrap_or(""),
+                :profile = profile.as_str(),
+                :provider = provider.as_str(),
+                :model = model.as_str(),
                 :task_id = task_id,
                 :parent_id = thread.id,
                 :workflow_id = wf_id.unwrap_or(""),

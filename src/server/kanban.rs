@@ -2235,33 +2235,14 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         .as_deref()
         .and_then(|id| load_workflows_file(&state).ok()?.workflows.get(id).cloned());
     let executor = workflow.as_ref().and_then(|wf| wf.resolve_role("executor"));
-    let effective_profile = executor
-        .as_ref()
-        .and_then(|r| r.profile.clone())
-        .or_else(|| workflow.as_ref().and_then(|wf| wf.defaults.profile.clone()))
-        .or_else(|| detail.profile.clone())
-        .or_else(|| (!channel.current_profile.is_empty()).then(|| channel.current_profile.clone()))
+    let effective_profile = detail
+        .profile
+        .clone()
+        .filter(|profile| !profile.trim().is_empty())
+        .or_else(|| {
+            (!channel.current_profile.trim().is_empty()).then(|| channel.current_profile.clone())
+        })
         .unwrap_or_else(|| state.default_profile.clone());
-    let provider = executor
-        .as_ref()
-        .and_then(|r| r.provider.clone())
-        .or_else(|| {
-            workflow
-                .as_ref()
-                .and_then(|wf| wf.defaults.provider.clone())
-        })
-        .or_else(|| channel.current_provider.clone())
-        .or_else(|| {
-            let provider = state.shared_config.read().default_provider.clone();
-            (!provider.is_empty()).then_some(provider)
-        })
-        .unwrap_or_else(|| "openai".to_string());
-    let model = executor
-        .as_ref()
-        .and_then(|r| r.model.clone())
-        .or_else(|| workflow.as_ref().and_then(|wf| wf.defaults.model.clone()))
-        .or_else(|| channel.current_model.clone())
-        .unwrap_or_else(|| "gpt-4o".to_string());
     let plan = executor
         .as_ref()
         .and_then(|r| r.plan_mode.as_deref())
@@ -2287,8 +2268,8 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
 
     // 5. Build the thread-cause params and start the thread.
     let params = ThreadCauseParams {
-        provider: Some(provider),
-        model: Some(model),
+        provider: None,
+        model: None,
         task_id: Some(detail.id.clone()),
         schedule_task_id: None,
         content: dispatch_content(&detail.title, detail.body.as_deref()),
