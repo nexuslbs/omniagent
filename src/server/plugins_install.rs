@@ -266,8 +266,8 @@ pub(crate) async fn install_url_handler(
 ) -> impl IntoResponse {
     info!("Installing plugin from URL: {}", body.url);
 
-    // Download and extract
-    let manifest = match plugin::installer::install_from_url(&body.url, &state.data_dir) {
+    // Download and extract (async — never blocks the core's runtime)
+    let manifest = match plugin::installer::install_from_url(&body.url, &state.data_dir).await {
         Ok(m) => m,
         Err(e) => {
             error!("Failed to install plugin from {}: {:?}", body.url, e);

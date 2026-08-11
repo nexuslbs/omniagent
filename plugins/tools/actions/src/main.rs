@@ -102,7 +102,17 @@ async fn handle_kanban_dispatcher(
     } else {
         config.omniagent_url.clone()
     };
-    let client = reqwest::Client::new();
+    // Bounded outbound I/O: the dispatch call must NEVER hang indefinitely.
+    // A wedged core would otherwise leak this handler task forever (and with
+    // a blocking client, permanently block a runtime worker — the Aug 2026
+    // wedge). Connect timeout catches an unreachable core quickly; the total
+    // timeout bounds the whole call; the dispatcher cron then surfaces the
+    // error loudly instead of silently piling up hung calls.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {}", e))?;
     let resp = client
         .post(format!("{}/kanban/dispatch", base))
         .json(&serde_json::json!({}))

@@ -179,6 +179,41 @@ pub type ToolHandler = Box<
         + Sync,
 >;
 
+/// Wrap a SYNC handler so its work runs on tokio's blocking pool instead of
+/// an async worker thread.
+///
+/// CRITICAL (Aug 2026, kanban dispatcher wedge): a handler that performs
+/// blocking work — `std::process::Command::wait_with_output`,
+/// `reqwest::blocking`, `std::fs` scans — MUST NOT run inline on an async
+/// worker thread. A blocking call that hangs (e.g. an upstream HTTP endpoint
+/// that never answers, with no client timeout) holds the worker thread
+/// hostage; the runtime cannot be interrupted by dropping the handler future
+/// (client cancellation), and with enough concurrent hangs every worker
+/// saturates — the WHOLE plugin wedges (all MCP calls time out, process
+/// appears alive but idle: the actions-plugin incident, 19:21–23:16).
+///
+/// Running the sync body on the blocking pool guarantees the async runtime
+/// stays responsive: a hung blocking call ties up at most one blocking-pool
+/// thread (bounded by the handler's own internal timeouts), never a worker.
+///
+/// All built-in plugins were converted to TRULY async handlers (tokio::process,
+/// async reqwest) in Aug 2026 — the preferred state. This helper remains as
+/// the SAFE pattern for any future sync handler that cannot be made async:
+/// route it through here instead of inlining blocking work.
+pub fn sync_handler<F>(handler: F) -> ToolHandler
+where
+    F: Fn(Value) -> Result<(String, bool)> + Send + Sync + Clone + 'static,
+{
+    Box::new(move |args: Value, _meta: Option<McpMeta>| {
+        let h = handler.clone();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || h(args))
+                .await
+                .map_err(|e| anyhow::anyhow!("sync handler panicked: {e}"))?
+        })
+    })
+}
+
 /// Wrap an ASYNC handler so any Err(e) becomes Ok((error_msg, true)).
 ///
 /// Same contract as `soft_error` but for async handlers: an expected failure
@@ -669,12 +704,66 @@ async fn handle_tools_call(
     let args = params.arguments.clone().unwrap_or(serde_json::Value::Null);
     let meta = params.meta.clone();
 
-    let (text, is_error) = match (entry.handler)(args, meta).await {
-        Ok(result) => result,
-        Err(e) => {
-            send_error(writer, req_id, -32603, format!("Handler error: {e}")).await?;
-            return Ok(());
+    // HANG BACKSTOP (Aug 2026, actions-plugin wedge): every handler runs
+    // under an optional wall-clock timeout. This is NOT a tool-execution
+    // timeout — it is a leak guard for pathological hangs that no amount of
+    // client-side cancellation can reap (e.g. a sqlx query against a silently
+    // dead connection, or an upstream HTTP endpoint that never answers AND
+    // the caller forgot a client timeout). Disabled by default (0): long
+    // legitimate operations (docker exec, git clone, ...) are NEVER cut
+    // short. Set MCP_HANDLER_TIMEOUT_SECS in the plugin process env when the
+    // server hosts only short-lived tools (e.g. the actions plugin, whose
+    // cron tools must always answer within seconds). On timeout the handler
+    // future is DROPPED — clean for async handlers — and a JSON-RPC error is
+    // returned so the client's pending call resolves instead of leaking.
+    let handler_timeout: Option<std::time::Duration> =
+        std::env::var("MCP_HANDLER_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|s| *s > 0)
+            .map(std::time::Duration::from_secs);
+
+    let (text, is_error) = match handler_timeout {
+        Some(dur) => {
+            let handler_fut = (entry.handler)(args, meta);
+            tokio::pin!(handler_fut);
+            match tokio::time::timeout(dur, handler_fut).await {
+                Ok(result) => match result {
+                    Ok(result) => result,
+                    Err(e) => {
+                        send_error(writer, req_id, -32603, format!("Handler error: {e}"))
+                            .await?;
+                        return Ok(());
+                    }
+                },
+                Err(_) => {
+                    tracing::error!(
+                        "Handler '{}' timed out after {}s — future dropped (hang backstop)",
+                        params.name,
+                        dur.as_secs()
+                    );
+                    send_error(
+                        writer,
+                        req_id,
+                        -32001,
+                        format!(
+                            "Handler '{}' timed out after {}s (hang backstop)",
+                            params.name,
+                            dur.as_secs()
+                        ),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
         }
+        None => match (entry.handler)(args, meta).await {
+            Ok(result) => result,
+            Err(e) => {
+                send_error(writer, req_id, -32603, format!("Handler error: {e}")).await?;
+                return Ok(());
+            }
+        },
     };
 
     let result = CallToolResult {
@@ -805,12 +894,51 @@ mod tests {
     async fn soft_error_async_passes_through_existing_tool_error() {
         // Handlers that ALREADY return (msg, true) keep their shape.
         let handler = soft_error_async(|_args: Value, _meta: Option<McpMeta>| async move {
-            Ok(("already an error".to_string(), true))
+            Ok((format!("already an error"), true))
         });
         let (msg, is_error) = handler(serde_json::json!({}), None)
             .await
             .expect("soft_error_async always returns Ok");
         assert!(is_error);
         assert_eq!(msg, "already an error");
+    }
+
+    #[tokio::test]
+    async fn sync_handler_runs_sync_fn_and_returns_result() {
+        // A plain sync handler routed through sync_handler behaves identically
+        // to a direct call — but runs on the blocking pool.
+        let handler = sync_handler(|args: Value| {
+            let name = args["name"].as_str().unwrap_or("world");
+            Ok((format!("hello {name}"), false))
+        });
+        let (msg, is_error) = handler(serde_json::json!({"name": "omni"}), None)
+            .await
+            .expect("sync_handler returns Ok");
+        assert!(!is_error);
+        assert_eq!(msg, "hello omni");
+    }
+
+    #[tokio::test]
+    async fn sync_handler_propagates_sync_err_as_handler_err() {
+        // A sync handler that errors must surface the error (Err path), so
+        // callers see "Handler error: ..." rather than a silent success.
+        let handler = sync_handler(|_args: Value| {
+            anyhow::bail!("boom")
+        });
+        let res = handler(serde_json::json!({}), None).await;
+        let err = res.expect_err("sync failure must propagate as Err");
+        assert!(err.to_string().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn sync_handler_surfaces_panic_loudly() {
+        // A panicking sync handler must not be swallowed: the JoinError
+        // surfaces as an Err so the caller sees a concrete failure.
+        let handler = sync_handler(|_args: Value| -> Result<(String, bool)> {
+            panic!("sync handler panicked")
+        });
+        let res = handler(serde_json::json!({}), None).await;
+        let err = res.expect_err("panic must propagate as Err");
+        assert!(err.to_string().contains("panicked"));
     }
 }

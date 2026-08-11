@@ -11,22 +11,29 @@ use serde_json::Value;
 // Tool: fetch
 // ---------------------------------------------------------------------------
 
-fn handle_fetch(args: Value) -> Result<(String, bool)> {
+/// Fetch a URL over HTTP(S).
+///
+/// Fully async (reqwest async client) with connect + total timeouts — a hung
+/// upstream can NEVER block an async worker thread or wedge the plugin
+/// runtime (Aug 2026 all-plugins-async push).
+async fn handle_fetch(args: Value) -> Result<(String, bool)> {
     let url = args["url"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'url'"))?;
 
-    let client = reqwest::blocking::Client::builder()
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
     let response = client
         .get(url)
         .header("User-Agent", "OmniAgent/1.0")
-        .send()?;
+        .send()
+        .await?;
 
     let status = response.status();
-    let body = response.text()?;
+    let body = response.text().await?;
 
     // Truncate to ~50K chars
     let max_chars: usize = 50_000;
@@ -57,7 +64,7 @@ fn handle_fetch(args: Value) -> Result<(String, bool)> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let fetch_handler: ToolHandler =
-        Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_fetch(args) }));
+        Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_fetch(args).await }));
 
     let tools = vec![McpToolEntry {
         def: McpToolDef {

@@ -1773,8 +1773,13 @@ async fn main() -> Result<()> {
     };
 
     //  Main request-response loop
-    // Cache bot_user_id for the react handler
-    let bot_user_id: Option<&str> = bot_user.as_ref().map(|u| u.id.as_str());
+    // Cache bot_user_id for the react handler. Mutable + lazily refreshed so
+    // a transient startup auth failure self-heals: handle_react re-runs
+    // get_me() when the cache is empty and stores the id here (Aug 2026).
+    let bot_user_id_cache: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(
+            bot_user.as_ref().map(|u| u.id.clone()),
+        ));
 
     loop {
         let line = match lines.next_line().await {
@@ -1846,7 +1851,7 @@ async fn main() -> Result<()> {
             "react" => {
                 if let Some(params) = request.params {
                     match serde_json::from_value::<ReactParams>(params) {
-                        Ok(p) => handle_react(req_id, &client, bot_user_id, &p).await,
+                        Ok(p) => handle_react(req_id, &client, &bot_user_id_cache, &p).await,
                         Err(e) => make_error(req_id, -1, &format!("Invalid react params: {}", e)),
                     }
                 } else {
@@ -2050,22 +2055,48 @@ async fn handle_typing(
 async fn handle_react(
     id: u64,
     client: &MattermostClient,
-    bot_user_id: Option<&str>,
+    bot_user_id_cache: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
     params: &ReactParams,
 ) -> PluginResponse {
-    let bot_user_id = match bot_user_id {
-        Some(id) => id,
-        None => {
-            return make_error(
-                id,
-                -1,
-                "Cannot react: no authenticated Mattermost user (run setup first)",
-            )
+    // Self-healing bot identity (Aug 2026): bot_user was previously captured
+    // ONCE at startup — a transient get_me() failure (Mattermost briefly
+    // unreachable, token rotation racing plugin start) permanently crippled
+    // reactions with "Cannot react: no authenticated Mattermost user" even
+    // when the token was actually valid. Now the id is cached in a shared
+    // Mutex and lazily refreshed: if the cache is empty, we re-auth on the
+    // spot (get_me) and cache the result, so reactions self-heal without a
+    // plugin restart.
+    let bot_user_id: String = {
+        let cached = bot_user_id_cache.lock().unwrap().clone();
+        match cached {
+            Some(id) => id,
+            None => match client.get_me().await {
+                Ok(user) => {
+                    tracing::info!(
+                        "React: lazily re-authenticated as Mattermost user {} ({})",
+                        user.username,
+                        user.id
+                    );
+                    *bot_user_id_cache.lock().unwrap() = Some(user.id.clone());
+                    user.id
+                }
+                Err(e) => {
+                    return make_error(
+                        id,
+                        -1,
+                        &format!(
+                            "Cannot react: Mattermost authentication unavailable ({}). \
+                             Run setup so the platform has a valid access token.",
+                            e
+                        ),
+                    )
+                }
+            },
         }
     };
     let emoji = params.emoji.trim_matches(':').to_string();
     match client
-        .create_reaction(&params.external_id, bot_user_id, &emoji)
+        .create_reaction(&params.external_id, &bot_user_id, &emoji)
         .await
     {
         Ok(_) => make_success(id, serde_json::json!({"reacted": true})),

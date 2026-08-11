@@ -18,11 +18,24 @@ use crate::plugin::{load_manifest, PluginManifest, PluginType};
 
 /// Download a tarball/zip from a URL and extract it to `<data_dir>/plugins/installed/<name>/`.
 ///
-/// Uses `reqwest::blocking::get` to download and shell commands (tar, unzip) to extract.
+/// Fully async download (reqwest async client, connect + total timeouts): a
+/// hung plugin URL must NEVER block the core's async runtime (Aug 2026
+/// all-async push — the actions-plugin wedge class applied to the core).
+/// The remaining local work (temp dir, tar/unzip subprocess, copy) runs on
+/// tokio's blocking pool via `spawn_blocking`.
 /// Returns the parsed PluginManifest from the extracted plugin.json.
-pub fn install_from_url(url: &str, data_dir: &str) -> AppResult<PluginManifest> {
-    let response =
-        reqwest::blocking::get(url).ctx(format!("Failed to download plugin from {}", url))?;
+pub async fn install_from_url(url: &str, data_dir: &str) -> AppResult<PluginManifest> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .ctx("Failed to build HTTP client")?;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .ctx(format!("Failed to download plugin from {}", url))?;
 
     if !response.status().is_success() {
         err_msg!(
@@ -34,8 +47,27 @@ pub fn install_from_url(url: &str, data_dir: &str) -> AppResult<PluginManifest> 
 
     let bytes = response
         .bytes()
+        .await
         .ctx(format!("Failed to read response body from {}", url))?;
 
+    let url_owned = url.to_string();
+    let data_dir_owned = data_dir.to_string();
+
+    // Extraction + copy are local, bounded operations (tar/unzip subprocess,
+    // filesystem copies) — run them on the blocking pool so no async worker
+    // thread is ever occupied by them.
+    tokio::task::spawn_blocking(move || install_from_url_blocking(&url_owned, &bytes, &data_dir_owned))
+        .await
+        .ctx("install_from_url blocking task panicked")?
+}
+
+/// Blocking half of `install_from_url`: temp dir + tar/unzip + copy + verify.
+/// Runs on tokio's blocking pool (see `install_from_url`).
+fn install_from_url_blocking(
+    url: &str,
+    bytes: &[u8],
+    data_dir: &str,
+) -> AppResult<PluginManifest> {
     // Create a temp directory for extraction using a unique name under /tmp
     let temp_id = format!(
         "omniagent-plugin-{}",
@@ -54,7 +86,7 @@ pub fn install_from_url(url: &str, data_dir: &str) -> AppResult<PluginManifest> 
     let temp_path_clone = temp_path.clone();
     let cleanup = parking_lot::Mutex::new(Some(temp_path_clone));
 
-    let result = install_from_url_inner(url, &bytes, &temp_path, data_dir);
+    let result = install_from_url_inner(url, bytes, &temp_path, data_dir);
 
     // Clean up install path
     let mut path_opt = cleanup.lock();

@@ -12,8 +12,10 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::process::Command;
+use tokio::io::AsyncWriteExt;
 
 //  Constants
 
@@ -163,7 +165,10 @@ fn load_github_creds() -> Result<(String, String)> {
 }
 
 /// Create a JWT using RS256 via openssl subprocess.
-fn create_jwt(app_id: &str) -> Result<String> {
+///
+/// Fully async (tokio::process): openssl runs as a child process, never
+/// blocking an async worker thread (Aug 2026 all-plugins-async push).
+async fn create_jwt(app_id: &str) -> Result<String> {
     let header = base64url_encode(br#"{"alg":"RS256","typ":"JWT"}"#);
 
     let now = SystemTime::now()
@@ -190,17 +195,18 @@ fn create_jwt(app_id: &str) -> Result<String> {
         .context("Failed to spawn openssl process")?;
 
     {
-        use std::io::Write;
         let stdin = child
             .stdin
             .as_mut()
             .context("Failed to open openssl stdin")?;
-        stdin.write_all(signing_input.as_bytes())?;
-        stdin.flush()?;
+        stdin.write_all(signing_input.as_bytes()).await?;
+        stdin.flush().await?;
     }
 
-    let output = child
-        .wait_with_output()
+    // Bounded: openssl signing is local and instant; a 15s cap is generous.
+    let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+        .await
+        .context("openssl signing timed out")?
         .context("Failed to wait for openssl")?;
 
     if !output.status.success() {
@@ -213,7 +219,7 @@ fn create_jwt(app_id: &str) -> Result<String> {
 }
 
 /// Exchange a JWT for a GitHub App installation access token.
-fn get_installation_token(app_id: &str, inst_id: &str) -> Result<String> {
+async fn get_installation_token(app_id: &str, inst_id: &str) -> Result<String> {
     // Check cache first
     {
         let cache = TOKEN_CACHE.lock();
@@ -222,10 +228,11 @@ fn get_installation_token(app_id: &str, inst_id: &str) -> Result<String> {
         }
     }
 
-    let jwt = create_jwt(app_id)?;
+    let jwt = create_jwt(app_id).await?;
     let url = format!("{}/app/installations/{}/access_tokens", GITHUB_API, inst_id);
 
-    let client = reqwest::blocking::Client::builder()
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .build()
         .context("Failed to build HTTP client")?;
@@ -237,16 +244,18 @@ fn get_installation_token(app_id: &str, inst_id: &str) -> Result<String> {
         .header("User-Agent", USER_AGENT)
         .body("")
         .send()
+        .await
         .context("GitHub API request failed")?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().unwrap_or_default();
+        let body = response.text().await.unwrap_or_default();
         anyhow::bail!("GitHub API error {}: {}", status, body);
     }
 
     let data: Value = response
         .json()
+        .await
         .context("Failed to parse GitHub API response")?;
     let token = data["token"]
         .as_str()
@@ -269,7 +278,7 @@ fn get_installation_token(app_id: &str, inst_id: &str) -> Result<String> {
 ///
 /// Legacy fallback: a static token from config (`github_app_token`, e.g.
 /// `$secret:GH_APP_TOKEN`) — used directly, no JWT/private key needed.
-fn get_github_token() -> Result<String> {
+async fn get_github_token() -> Result<String> {
     let (key_cfg, static_token) = {
         let cfg = CONFIG.lock();
         (
@@ -283,7 +292,7 @@ fn get_github_token() -> Result<String> {
     // the config key nor a legacy key file exists — treat that as "no key".
     if !key_cfg.is_empty() || resolve_key_path().is_ok() {
         let (app_id, inst_id) = load_github_creds()?;
-        return get_installation_token(&app_id, &inst_id);
+        return get_installation_token(&app_id, &inst_id).await;
     }
 
     // Legacy fallback: a static installation token from config.
@@ -299,38 +308,38 @@ fn get_github_token() -> Result<String> {
 }
 
 /// Run a git command and return (stdout, stderr, exit_code).
-fn run_git(args: &[&str], cwd: Option<&str>, timeout_secs: u64) -> (String, String, i32) {
+///
+/// Fully async (tokio::process) — a git subprocess NEVER blocks an async
+/// worker thread (Aug 2026 all-plugins-async push). `kill_on_drop(true)`
+/// guarantees that when the timeout fires (the future holding the child is
+/// dropped), git is killed rather than left lingering holding repo locks.
+async fn run_git(args: &[&str], cwd: Option<&str>, timeout_secs: u64) -> (String, String, i32) {
     let mut cmd = Command::new("git");
     cmd.args(args).env("GIT_TERMINAL_PROMPT", "0");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    // CRITICAL: pipe stdout/stderr BEFORE spawn. `Child::wait_with_output()`
-    // only captures pipes that were configured on the Command; without this,
-    // git inherits the plugin's own stdout/stderr (the MCP channel + logs),
-    // every run returns empty output, and the MCP JSON-RPC stream gets
-    // corrupted by leaked git output.
+    // CRITICAL: pipe stdout/stderr BEFORE spawn. `wait_with_output()` only
+    // captures pipes that were configured on the Command; without this, git
+    // inherits the plugin's own stdout/stderr (the MCP channel + logs), every
+    // run returns empty output, and the MCP JSON-RPC stream gets corrupted by
+    // leaked git output.
     // stdin MUST be /dev/null, not inherited: a spawned git child that
     // inherits fd 0 (the MCP JSON-RPC pipe) can consume protocol bytes meant
     // for the server reader — the same request-loss class as the docker
     // compose CLI children (G17b, Aug 2026).
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
 
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return (String::new(), format!("Failed to spawn git: {}", e), -1),
     };
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let result = child.wait_with_output();
-        let _ = tx.send(result);
-    });
-
     let timeout = Duration::from_secs(timeout_secs);
-    match rx.recv_timeout(timeout) {
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(output)) => {
             let out = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -356,7 +365,7 @@ fn run_git(args: &[&str], cwd: Option<&str>, timeout_secs: u64) -> (String, Stri
 //  Tool Handlers
 
 /// `create_github_repo`: create a repository under nexuslbs org.
-fn handle_create_github_repo(args: Value) -> Result<(String, bool)> {
+async fn handle_create_github_repo(args: Value) -> Result<(String, bool)> {
     let repo_name = args["name"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required parameter: name"))?
@@ -368,7 +377,7 @@ fn handle_create_github_repo(args: Value) -> Result<(String, bool)> {
 
     let description = args["description"].as_str().unwrap_or("");
     let private = args["private"].as_bool().unwrap_or(false);
-    let token = get_github_token()?;
+    let token = get_github_token().await?;
 
     let url = format!("{}/orgs/{}/repos", GITHUB_API, GITHUB_ORG);
     let payload = serde_json::json!({
@@ -379,7 +388,8 @@ fn handle_create_github_repo(args: Value) -> Result<(String, bool)> {
         "gitignore_template": "",
     });
 
-    let client = reqwest::blocking::Client::builder()
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .build()
         .context("Failed to build HTTP client")?;
@@ -391,10 +401,11 @@ fn handle_create_github_repo(args: Value) -> Result<(String, bool)> {
         .header("User-Agent", USER_AGENT)
         .json(&payload)
         .send()
+        .await
         .context("GitHub API request failed")?;
 
     let status = response.status();
-    let body: Value = response.json().unwrap_or(serde_json::json!({}));
+    let body: Value = response.json().await.unwrap_or(serde_json::json!({}));
 
     if status.is_success() || status.as_u16() == 422 {
         let clone_url_default = format!("https://github.com/{}/{}.git", GITHUB_ORG, repo_name);
@@ -1016,7 +1027,7 @@ fn validate_git_args_within_workspace(repo_dir: &str, git_args: &[String]) -> Re
 }
 
 /// `clone_repo`: clone a git repository to local filesystem.
-fn handle_clone_repo(args: Value) -> Result<(String, bool)> {
+async fn handle_clone_repo(args: Value) -> Result<(String, bool)> {
     let url = args["url"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required parameter: url"))?
@@ -1057,7 +1068,7 @@ fn handle_clone_repo(args: Value) -> Result<(String, bool)> {
 
     // Run the clone with an explicit cwd so relative paths never resolve
     // against the plugin's own directory.
-    let (_stdout, stderr, rc) = run_git(&["clone", &url, &actual_dir], Some(&base_dir), 120);
+    let (_stdout, stderr, rc) = run_git(&["clone", &url, &actual_dir], Some(&base_dir), 120).await;
 
     if rc != 0 {
         let git_dir = format!("{}/.git", actual_dir);
@@ -1096,7 +1107,7 @@ fn handle_clone_repo(args: Value) -> Result<(String, bool)> {
 }
 
 /// `commit_and_push`: stage, commit, and push changes.
-fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
+async fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
     let repo_dir = args["repo_dir"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required parameter: repo_dir"))?
@@ -1133,14 +1144,14 @@ fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
     let (_stdout, stderr, rc) = if let Some(files_arr) = files {
         let file_strs: Vec<&str> = files_arr.iter().filter_map(|v| v.as_str()).collect();
         if file_strs.is_empty() {
-            run_git(&["add", "-A"], Some(&repo_dir), 30)
+            run_git(&["add", "-A"], Some(&repo_dir), 30).await
         } else {
             let mut git_args = vec!["add"];
             git_args.extend(&file_strs);
-            run_git(&git_args, Some(&repo_dir), 30)
+            run_git(&git_args, Some(&repo_dir), 30).await
         }
     } else {
-        run_git(&["add", "-A"], Some(&repo_dir), 30)
+        run_git(&["add", "-A"], Some(&repo_dir), 30).await
     };
 
     if rc != 0 {
@@ -1148,7 +1159,7 @@ fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
     }
 
     // Commit
-    let (out, stderr, rc) = run_git(&["commit", "-m", &message], Some(&repo_dir), 30);
+    let (out, stderr, rc) = run_git(&["commit", "-m", &message], Some(&repo_dir), 30).await;
 
     let mut commit_note = String::new();
     if rc != 0 {
@@ -1163,7 +1174,7 @@ fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
     }
 
     // Push
-    let token = match get_github_token() {
+    let token = match get_github_token().await {
         Ok(t) => t,
         Err(e) => {
             return Ok((format!("Cannot push: {}", e), true));
@@ -1171,7 +1182,7 @@ fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
     };
 
     // Get remote URL
-    let (remote_stdout, _, _) = run_git(&["remote", "get-url", "origin"], Some(&repo_dir), 15);
+    let (remote_stdout, _, _) = run_git(&["remote", "get-url", "origin"], Some(&repo_dir), 15).await;
     let remote_url = remote_stdout.trim().to_string();
 
     if remote_url.is_empty() {
@@ -1179,7 +1190,7 @@ fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
     }
 
     // Get current branch
-    let (branch_out, _, _) = run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(&repo_dir), 15);
+    let (branch_out, _, _) = run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(&repo_dir), 15).await;
     let branch = if branch_out.trim().is_empty() {
         "main"
     } else {
@@ -1201,7 +1212,7 @@ fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
         &["push", &push_url, &format!("HEAD:{}", branch)],
         Some(&repo_dir),
         120,
-    );
+    ).await;
 
     if push_rc != 0 {
         // Truncate stderr for display
@@ -1214,7 +1225,7 @@ fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
     }
 
     // Update local tracking refs
-    run_git(&["fetch", "origin", "--quiet"], Some(&repo_dir), 30);
+    run_git(&["fetch", "origin", "--quiet"], Some(&repo_dir), 30).await;
 
     let note = if commit_note.is_empty() {
         "Committed and pushed".to_string()
@@ -1237,7 +1248,7 @@ fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
 }
 
 /// `status`: get git status of a repository.
-fn handle_status(args: Value) -> Result<(String, bool)> {
+async fn handle_status(args: Value) -> Result<(String, bool)> {
     let repo_dir = args["repo_dir"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required parameter: repo_dir"))?
@@ -1257,8 +1268,8 @@ fn handle_status(args: Value) -> Result<(String, bool)> {
         anyhow::bail!("Not a git repository: {}", repo_dir);
     }
 
-    let (status_out, _, _) = run_git(&["status"], Some(&repo_dir), 30);
-    let (branch_out, _, _) = run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(&repo_dir), 15);
+    let (status_out, _, _) = run_git(&["status"], Some(&repo_dir), 30).await;
+    let (branch_out, _, _) = run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(&repo_dir), 15).await;
 
     Ok((
         serde_json::json!({
@@ -1304,7 +1315,7 @@ fn build_instead_of_override(token: &str, host_path: &str) -> String {
 /// via a `-c url.<token-url>.insteadOf=<original-url>` config override (the
 /// repo's own .git/config is NEVER modified), so push/fetch/pull against the
 /// origin https remote work with the same auth as commit_and_push.
-fn handle_run_command(args: Value) -> Result<(String, bool)> {
+async fn handle_run_command(args: Value) -> Result<(String, bool)> {
     let repo_dir = args["repo_dir"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required parameter: repo_dir"))?
@@ -1368,12 +1379,12 @@ fn handle_run_command(args: Value) -> Result<(String, bool)> {
     // Never mutates the repo config; only affects this one invocation.
     let mut full_args: Vec<String> = Vec::new();
     if use_auth {
-        let token = match get_github_token() {
+        let token = match get_github_token().await {
             Ok(t) => t,
             Err(e) => return Ok((format!("Cannot authenticate: {}", e), true)),
         };
         // Read the origin remote to know which https host to rewrite.
-        let (remote_out, _, _) = run_git(&["remote", "get-url", "origin"], Some(&repo_dir), 15);
+        let (remote_out, _, _) = run_git(&["remote", "get-url", "origin"], Some(&repo_dir), 15).await;
         let remote_url = remote_out.trim().to_string();
         if remote_url.starts_with("https://") {
             let rest = remote_url
@@ -1406,7 +1417,7 @@ fn handle_run_command(args: Value) -> Result<(String, bool)> {
     full_args.extend(git_args.iter().cloned());
 
     let arg_refs: Vec<&str> = full_args.iter().map(|s| s.as_str()).collect();
-    let (stdout, stderr, rc) = run_git(&arg_refs, Some(&repo_dir), timeout_secs);
+    let (stdout, stderr, rc) = run_git(&arg_refs, Some(&repo_dir), timeout_secs).await;
 
     // Truncate huge outputs (same policy as docker_compose: 50k chars).
     const MAX_OUT: usize = 50_000;
@@ -1463,7 +1474,7 @@ async fn main() -> Result<()> {
                     "required": ["name"]
                 }),
             },
-            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_create_github_repo(args) })),
+            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_create_github_repo(args).await })),
         },
         McpToolEntry {
             def: McpToolDef {
@@ -1492,7 +1503,7 @@ async fn main() -> Result<()> {
                     "required": ["url"]
                 }),
             },
-            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_clone_repo(args) })),
+            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_clone_repo(args).await })),
         },
         McpToolEntry {
             def: McpToolDef {
@@ -1523,7 +1534,7 @@ async fn main() -> Result<()> {
                     "required": ["repo_dir", "message"]
                 }),
             },
-            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_commit_and_push(args) })),
+            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_commit_and_push(args).await })),
         },
         McpToolEntry {
             def: McpToolDef {
@@ -1541,7 +1552,7 @@ async fn main() -> Result<()> {
                     "required": ["repo_dir"]
                 }),
             },
-            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_status(args) })),
+            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_status(args).await })),
         },
         McpToolEntry {
             def: McpToolDef {
@@ -1596,7 +1607,7 @@ async fn main() -> Result<()> {
                     "required": ["repo_dir", "args"]
                 }),
             },
-            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_run_command(args) })),
+            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_run_command(args).await })),
         },
     ];
 
@@ -1702,9 +1713,9 @@ mod tests {
 
     /// `temp_ws()` plus a real `git init` — for handler tests that probe
     /// `{repo}/.git` before validating arguments.
-    fn temp_git_repo() -> (String, String) {
+    async fn temp_git_repo() -> (String, String) {
         let (ws, repo) = temp_ws();
-        let (_, err, rc) = run_git(&["init", "-q"], Some(&repo), 15);
+        let (_, err, rc) = run_git(&["init", "-q"], Some(&repo), 15).await;
         assert_eq!(rc, 0, "git init in temp dir failed: {}", err);
         (ws, repo)
     }
@@ -1758,8 +1769,8 @@ mod tests {
         assert!(validate_repo_within_workspace("/opt/workspace/project").is_err());
     }
 
-    #[test]
-    fn sandbox_clone_destination_enforced() {
+    #[tokio::test]
+    async fn sandbox_clone_destination_enforced() {
         let _g = set_ws("/opt/workspace");
         // Clone with an absolute dir outside the workspace must be rejected
         // as a tool error (is_error=true), before any network access.
@@ -1767,13 +1778,13 @@ mod tests {
             "url": "https://github.com/nexuslbs/foo.git",
             "dir": "/tmp/escape-clone",
         });
-        let (msg, is_error) = handle_clone_repo(args).expect("returns Ok with is_error");
+        let (msg, is_error) = handle_clone_repo(args).await.expect("returns Ok with is_error");
         assert!(is_error, "clone outside sandbox should be an error result");
         assert!(msg.contains("outside the git workspace sandbox"));
     }
 
-    #[test]
-    fn sandbox_rejections_do_not_trip_handler_error() {
+    #[tokio::test]
+    async fn sandbox_rejections_do_not_trip_handler_error() {
         let _g = set_ws("/opt/workspace");
         // A sandbox rejection must come back as Ok((msg, true)) — NOT as an
         // Err — so the MCP circuit breaker doesn't count it as a server
@@ -1781,6 +1792,7 @@ mod tests {
         let (msg, is_error) = handle_status(serde_json::json!({
             "repo_dir": "/tmp/not-a-repo-outside",
         }))
+        .await
         .expect("sandbox rejection must be an Ok result");
         assert!(is_error);
         assert!(msg.contains("outside the git workspace sandbox"));
@@ -1918,15 +1930,16 @@ mod tests {
         assert!(validate_args(&["push", "origin", "main"]).is_ok());
     }
 
-    #[test]
-    fn args_rejections_do_not_trip_handler_error() {
-        let (ws, repo) = temp_git_repo();
+    #[tokio::test]
+    async fn args_rejections_do_not_trip_handler_error() {
+        let (ws, repo) = temp_git_repo().await;
         let _g = set_ws(&ws);
         // -C escape must come back as Ok((msg, true)), not Err.
         let (msg, is_error) = handle_run_command(serde_json::json!({
             "repo_dir": repo,
             "args": ["-C", "/tmp", "init"],
         }))
+        .await
         .expect("sandbox rejection must be an Ok result");
         assert!(is_error);
         assert!(msg.contains("outside the git workspace sandbox"));
@@ -1960,8 +1973,8 @@ mod tests {
         assert!(!cfg.contains('"'));
     }
 
-    #[test]
-    fn auth_override_roundtrip_parses_as_git_config_key() {
+    #[tokio::test]
+    async fn auth_override_roundtrip_parses_as_git_config_key() {
         // The override must be a syntactically valid `-c name=value` pair that
         // git can parse without error (git config --list round-trips it).
         let cfg = build_instead_of_override("ghs_TESTTOKEN", "github.com");
@@ -1969,7 +1982,7 @@ mod tests {
         // (-c is a global option, so it must precede the subcommand.)
         // Use a temp dir as cwd — the build context has no /opt/workspace.
         let (_ws, repo) = temp_ws();
-        let (out, _, rc) = run_git(&["-c", cfg.as_str(), "config", "--list"], Some(&repo), 15);
+        let (out, _, rc) = run_git(&["-c", cfg.as_str(), "config", "--list"], Some(&repo), 15).await;
         assert_eq!(rc, 0, "git must parse the override: {}", out);
     }
 
@@ -1985,12 +1998,13 @@ mod tests {
 
     /// Run `f` and report whether it panicked. Simulates a hypothetical
     /// handler bug that panics mid-critical-section while holding a lock.
+    /// handler bug that panics mid-critical-section while holding a lock.
     fn caught_panic<F: FnOnce()>(f: F) -> bool {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err()
     }
 
-    #[test]
-    fn panic_while_holding_config_does_not_poison_plugin() {
+    #[tokio::test]
+    async fn panic_while_holding_config_does_not_poison_plugin() {
         // Plugin configured and healthy.
         let _g = set_ws("/tmp/poison-test-ws");
 
@@ -2013,6 +2027,7 @@ mod tests {
             "repo_dir": "/etc",
             "args": ["status"],
         }))
+        .await
         .expect("git call after simulated poison must return Ok, not panic");
         assert!(is_error);
         assert!(msg.contains("outside the git workspace sandbox"));
@@ -2033,8 +2048,8 @@ mod tests {
         assert!(cache.get_cached().is_none());
     }
 
-    #[test]
-    fn git_handler_errors_leave_shared_state_healthy() {
+    #[tokio::test]
+    async fn git_handler_errors_leave_shared_state_healthy() {
         // A git call that fails must not corrupt the shared config: the
         // next call sees the same workspace and behaves identically.
         let _g = set_ws("/tmp/err-test-ws");
@@ -2043,6 +2058,7 @@ mod tests {
             "repo_dir": "/etc",
             "args": ["init"],
         }))
+        .await
         .expect("sandbox rejection returns Ok, not Err");
         assert!(is_error);
         assert!(msg.contains("outside the git workspace sandbox"));
