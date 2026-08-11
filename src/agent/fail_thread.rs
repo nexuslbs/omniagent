@@ -337,13 +337,13 @@ pub async fn manual_review_decision(
         .bind(task.workflow_id.clone().unwrap_or_default())
         .bind(step)
         .bind(
-            workflow_role_for_step(&step)
+            workflow_role_for_step(step)
                 .and_then(|role| wf.resolve_role(role))
                 .and_then(|r| r.provider)
                 .unwrap_or_default(),
         )
         .bind(
-            workflow_role_for_step(&step)
+            workflow_role_for_step(step)
                 .and_then(|role| wf.resolve_role(role))
                 .and_then(|r| r.model)
                 .unwrap_or_default(),
