@@ -716,12 +716,11 @@ async fn handle_tools_call(
     // cron tools must always answer within seconds). On timeout the handler
     // future is DROPPED — clean for async handlers — and a JSON-RPC error is
     // returned so the client's pending call resolves instead of leaking.
-    let handler_timeout: Option<std::time::Duration> =
-        std::env::var("MCP_HANDLER_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .filter(|s| *s > 0)
-            .map(std::time::Duration::from_secs);
+    let handler_timeout: Option<std::time::Duration> = std::env::var("MCP_HANDLER_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .map(std::time::Duration::from_secs);
 
     let (text, is_error) = match handler_timeout {
         Some(dur) => {
@@ -731,8 +730,7 @@ async fn handle_tools_call(
                 Ok(result) => match result {
                     Ok(result) => result,
                     Err(e) => {
-                        send_error(writer, req_id, -32603, format!("Handler error: {e}"))
-                            .await?;
+                        send_error(writer, req_id, -32603, format!("Handler error: {e}")).await?;
                         return Ok(());
                     }
                 },
@@ -922,9 +920,7 @@ mod tests {
     async fn sync_handler_propagates_sync_err_as_handler_err() {
         // A sync handler that errors must surface the error (Err path), so
         // callers see "Handler error: ..." rather than a silent success.
-        let handler = sync_handler(|_args: Value| {
-            anyhow::bail!("boom")
-        });
+        let handler = sync_handler(|_args: Value| anyhow::bail!("boom"));
         let res = handler(serde_json::json!({}), None).await;
         let err = res.expect_err("sync failure must propagate as Err");
         assert!(err.to_string().contains("boom"));

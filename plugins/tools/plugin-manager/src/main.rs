@@ -38,6 +38,7 @@ async fn handle_install(data_dir: &str, args: &Value) -> Result<(String, bool)> 
         .ok_or_else(|| anyhow::anyhow!("Missing required argument for install: 'url'"))?;
 
     let manifest = plugin::installer::install_from_url(url, data_dir)
+        .await
         .map_err(|e| anyhow::anyhow!("Installation failed: {:#}", e))?;
 
     // Register in YAML state

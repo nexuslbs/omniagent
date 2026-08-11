@@ -56,18 +56,16 @@ pub async fn install_from_url(url: &str, data_dir: &str) -> AppResult<PluginMani
     // Extraction + copy are local, bounded operations (tar/unzip subprocess,
     // filesystem copies) — run them on the blocking pool so no async worker
     // thread is ever occupied by them.
-    tokio::task::spawn_blocking(move || install_from_url_blocking(&url_owned, &bytes, &data_dir_owned))
-        .await
-        .ctx("install_from_url blocking task panicked")?
+    tokio::task::spawn_blocking(move || {
+        install_from_url_blocking(&url_owned, &bytes, &data_dir_owned)
+    })
+    .await
+    .ctx("install_from_url blocking task panicked")?
 }
 
 /// Blocking half of `install_from_url`: temp dir + tar/unzip + copy + verify.
 /// Runs on tokio's blocking pool (see `install_from_url`).
-fn install_from_url_blocking(
-    url: &str,
-    bytes: &[u8],
-    data_dir: &str,
-) -> AppResult<PluginManifest> {
+fn install_from_url_blocking(url: &str, bytes: &[u8], data_dir: &str) -> AppResult<PluginManifest> {
     // Create a temp directory for extraction using a unique name under /tmp
     let temp_id = format!(
         "omniagent-plugin-{}",

@@ -271,10 +271,7 @@ fn auto_note_read(
     let file = dir.join("auto-notes.md");
     let entry = format!(
         "## [engine:auto-note {tool}]\n{}\n",
-        content
-            .chars()
-            .take(entry_chars)
-            .collect::<String>()
+        content.chars().take(entry_chars).collect::<String>()
     );
     let existing = std::fs::read_to_string(&file).unwrap_or_default();
     let mut merged = format!("{existing}{entry}");

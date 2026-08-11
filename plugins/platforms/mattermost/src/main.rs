@@ -1776,10 +1776,9 @@ async fn main() -> Result<()> {
     // Cache bot_user_id for the react handler. Mutable + lazily refreshed so
     // a transient startup auth failure self-heals: handle_react re-runs
     // get_me() when the cache is empty and stores the id here (Aug 2026).
-    let bot_user_id_cache: std::sync::Arc<std::sync::Mutex<Option<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(
-            bot_user.as_ref().map(|u| u.id.clone()),
-        ));
+    let bot_user_id_cache: std::sync::Arc<std::sync::Mutex<Option<String>>> = std::sync::Arc::new(
+        std::sync::Mutex::new(bot_user.as_ref().map(|u| u.id.clone())),
+    );
 
     loop {
         let line = match lines.next_line().await {

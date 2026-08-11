@@ -8,6 +8,7 @@ use crate::err_msg;
 use crate::error::AppResult;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
 use crate::mcp::{truncate_content, McpToolCall, McpToolResult, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
+use futures::FutureExt;
 use std::time::Duration;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
@@ -1227,9 +1228,12 @@ Previous plan:\n{}",
             }
 
             let self_restart_block_for_task = self_restart_block.clone();
+            let panic_idx = idx;
+            let panic_tc_id = tc_id.clone();
+            let panic_tool_name = tool_name.clone();
             join_set.spawn(async move {
-
-                // Phase 1.5 guard: if this docker_compose call would restart the
+                let task_result = std::panic::AssertUnwindSafe(async move {
+                    // Phase 1.5 guard: if this docker_compose call would restart the
                 // agent's own stack, return a synthetic error result instead of
                 // executing it — the message plumbing below records it as a
                 // tool result with is_error=true so the model sees the block.
@@ -1443,11 +1447,41 @@ Previous plan:\n{}",
                     helpers::CreateMessageResult::Success(_) => {}
                 }
 
-                (idx, tc_id, tool_name, output, is_error)
+                    (idx, tc_id, tool_name, output, is_error)
+                })
+                .catch_unwind()
+                .await;
+
+                match task_result {
+                    Ok(result) => result,
+                    Err(panic_payload) => {
+                        let panic_message = panic_payload
+                            .downcast_ref::<&str>()
+                            .map(|s| (*s).to_string())
+                            .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "unknown panic payload".to_string());
+                        let output = format!(
+                            "Error executing tool '{}': tool task panicked: {}. Retry the tool or handle this error.",
+                            panic_tool_name, panic_message
+                        );
+                        error!("{}", output);
+                        (panic_idx, panic_tc_id, panic_tool_name, output, true)
+                    }
+                }
             });
         }
 
-        // Collect results as they complete (order may differ from call order)
+        // Collect results as they complete (order may differ from call order).
+        //
+        // IMPORTANT: JoinSet returns Err(JoinError) when a tool task panics. A
+        // previous implementation only logged that error, leaving the result
+        // slot as None. The message-building loop below then silently skipped
+        // that tool call, which left the provider with an unmatched tool call
+        // in multi-tool rounds and could derail the entire agent loop.
+        //
+        // Every tool call MUST produce a result for the LLM, including a panic
+        // result. Handle the panic at the omniagent boundary rather than
+        // requiring every plugin to catch its own panics.
         let mut tool_results: Vec<Option<(String, String, String)>> = vec![None; tool_count];
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
@@ -1455,8 +1489,27 @@ Previous plan:\n{}",
                     tool_results[idx] = Some((tc_id, tool_name, output));
                 }
                 Err(e) => {
-                    error!("Tool execution task panicked: {:?}", e);
+                    // The per-tool catch_unwind above should make this
+                    // unreachable for plugin panics. Keep a defensive log for
+                    // cancellation/runtime join failures; missing slots are
+                    // filled below before messages are sent to the provider.
+                    error!("Tool execution task could not be joined: {:?}", e);
                 }
+            }
+        }
+
+        // Defensive last line: every provider tool call must have a result,
+        // even if a task was cancelled or failed to join for a reason other
+        // than a caught plugin panic.
+        for (idx, tc) in response.tool_calls.iter().enumerate() {
+            if tool_results[idx].is_none() {
+                let tool_name = tc.function.name.clone();
+                let output = format!(
+                    "Error executing tool '{}': no tool result was produced. Retry the tool or handle this error.",
+                    tool_name
+                );
+                error!("{}", output);
+                tool_results[idx] = Some((tc.id.clone(), tool_name, output));
             }
         }
 

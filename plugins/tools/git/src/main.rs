@@ -14,8 +14,8 @@ use serde_json::Value;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::process::Command;
 use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 
 //  Constants
 
@@ -1182,7 +1182,8 @@ async fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
     };
 
     // Get remote URL
-    let (remote_stdout, _, _) = run_git(&["remote", "get-url", "origin"], Some(&repo_dir), 15).await;
+    let (remote_stdout, _, _) =
+        run_git(&["remote", "get-url", "origin"], Some(&repo_dir), 15).await;
     let remote_url = remote_stdout.trim().to_string();
 
     if remote_url.is_empty() {
@@ -1190,7 +1191,8 @@ async fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
     }
 
     // Get current branch
-    let (branch_out, _, _) = run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(&repo_dir), 15).await;
+    let (branch_out, _, _) =
+        run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(&repo_dir), 15).await;
     let branch = if branch_out.trim().is_empty() {
         "main"
     } else {
@@ -1212,7 +1214,8 @@ async fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
         &["push", &push_url, &format!("HEAD:{}", branch)],
         Some(&repo_dir),
         120,
-    ).await;
+    )
+    .await;
 
     if push_rc != 0 {
         // Truncate stderr for display
@@ -1269,7 +1272,8 @@ async fn handle_status(args: Value) -> Result<(String, bool)> {
     }
 
     let (status_out, _, _) = run_git(&["status"], Some(&repo_dir), 30).await;
-    let (branch_out, _, _) = run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(&repo_dir), 15).await;
+    let (branch_out, _, _) =
+        run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(&repo_dir), 15).await;
 
     Ok((
         serde_json::json!({
@@ -1384,7 +1388,8 @@ async fn handle_run_command(args: Value) -> Result<(String, bool)> {
             Err(e) => return Ok((format!("Cannot authenticate: {}", e), true)),
         };
         // Read the origin remote to know which https host to rewrite.
-        let (remote_out, _, _) = run_git(&["remote", "get-url", "origin"], Some(&repo_dir), 15).await;
+        let (remote_out, _, _) =
+            run_git(&["remote", "get-url", "origin"], Some(&repo_dir), 15).await;
         let remote_url = remote_out.trim().to_string();
         if remote_url.starts_with("https://") {
             let rest = remote_url
@@ -1778,7 +1783,9 @@ mod tests {
             "url": "https://github.com/nexuslbs/foo.git",
             "dir": "/tmp/escape-clone",
         });
-        let (msg, is_error) = handle_clone_repo(args).await.expect("returns Ok with is_error");
+        let (msg, is_error) = handle_clone_repo(args)
+            .await
+            .expect("returns Ok with is_error");
         assert!(is_error, "clone outside sandbox should be an error result");
         assert!(msg.contains("outside the git workspace sandbox"));
     }
@@ -1982,7 +1989,8 @@ mod tests {
         // (-c is a global option, so it must precede the subcommand.)
         // Use a temp dir as cwd — the build context has no /opt/workspace.
         let (_ws, repo) = temp_ws();
-        let (out, _, rc) = run_git(&["-c", cfg.as_str(), "config", "--list"], Some(&repo), 15).await;
+        let (out, _, rc) =
+            run_git(&["-c", cfg.as_str(), "config", "--list"], Some(&repo), 15).await;
         assert_eq!(rc, 0, "git must parse the override: {}", out);
     }
 
