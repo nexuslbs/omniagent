@@ -425,13 +425,13 @@ pub struct ResolvedThreadIdentity {
 /// and every thread creator shares exactly the same precedence.
 ///
 /// Precedence (highest first):
-/// - profile:  workflow role → workflow defaults → caller base profile →
-///             channel.current_profile → global default profile
+/// - profile: workflow role → workflow defaults → caller base profile →
+///   channel.current_profile → global default profile
 /// - provider: workflow role → workflow defaults → explicit caller →
-///             resolved profile's provider → channel.current_provider →
-///             global default provider
-/// - model:    resolved at the same tier as the provider (explicit model,
-///             profile model, channel model, or the provider's default model)
+///   resolved profile's provider → channel.current_provider →
+///   global default provider
+/// - model: resolved at the same tier as the provider (explicit model,
+///   profile model, channel model, or the provider's default model)
 ///
 /// Returns `Err` when no profile/provider/model can be resolved — creation
 /// must fail rather than persist an empty/invalid identity.
