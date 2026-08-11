@@ -892,7 +892,7 @@ mod tests {
     async fn soft_error_async_passes_through_existing_tool_error() {
         // Handlers that ALREADY return (msg, true) keep their shape.
         let handler = soft_error_async(|_args: Value, _meta: Option<McpMeta>| async move {
-            Ok((format!("already an error"), true))
+            Ok(("already an error".to_string(), true))
         });
         let (msg, is_error) = handler(serde_json::json!({}), None)
             .await
