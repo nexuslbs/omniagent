@@ -3,6 +3,12 @@
   "name": "Filesystem",
   "version": "1.1.0",
   "description": "Filesystem tools: read, list, search, info are unrestricted; WRITES are sandboxed to the workspace dir (always) plus OMNI_DIR subdirectories enabled by config (profiles/data/plugins toggles, or the whole OMNI_DIR with write_omni_all).",
+  "type": "mcp",
+  "entrypoint": {
+    "command": "mcp-server-filesystem",
+    "args": [],
+    "transport": "stdio"
+  },
   "config_schema": [
     {
       "key": "workspace_dir",
