@@ -439,16 +439,19 @@ async fn task_description(pool: &sqlx::PgPool, task_id: &str) -> String {
         title: String,
         body: Option<String>,
     }
-    let row = sqlx::query_as::<_, TaskTextRow>(
-        "SELECT title, body FROM kanban_tasks WHERE id = $1",
-    )
-    .bind(task_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten();
+    let row =
+        sqlx::query_as::<_, TaskTextRow>("SELECT title, body FROM kanban_tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
     match row {
-        Some(r) => match r.body.map(|b| b.trim().to_string()).filter(|b| !b.is_empty()) {
+        Some(r) => match r
+            .body
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty())
+        {
             Some(body) => format!("{}\n\n{}", r.title.trim(), body),
             None => r.title.trim().to_string(),
         },

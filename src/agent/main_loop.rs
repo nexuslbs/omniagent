@@ -374,10 +374,7 @@ Previous plan:\n{}",
     // prompt — the opposite of the executor layout (template = system,
     // task body = user). The step-thread cause message carries the task
     // description; template_section carries the role template.
-    let is_step_thread = matches!(
-        thread.workflow_step.as_deref(),
-        Some("testing" | "review")
-    );
+    let is_step_thread = matches!(thread.workflow_step.as_deref(), Some("testing" | "review"));
     let mut messages = vec![ChatMessage::system(&prompt_parts.system)];
     if !prompt_parts.memory.is_empty() {
         messages.push(ChatMessage::system(&prompt_parts.memory));
