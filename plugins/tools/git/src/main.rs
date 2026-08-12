@@ -646,97 +646,6 @@ fn positional_args(args: &[String], value_flags: &[&str]) -> Vec<String> {
     out
 }
 
-/// Normalize `git grep` argument order so the command works regardless of
-/// where the agent places options.
-///
-/// git grep is order-sensitive: everything AFTER the first non-option token is
-/// treated as a revision/path, NOT parsed as an option. So
-/// `git grep PATTERN -A 40 -- file` fails with
-/// `fatal: unable to resolve revision: -A` (observed in agent runs).
-/// Reorder: keep the subcommand prefix (global flags + `grep`) in place, then
-/// move option tokens (and their values) before the pattern.
-fn normalize_grep_args(args: &[String]) -> Vec<String> {
-    // Value-taking options in git grep (context, pattern-from-file, include
-    // filters). `--and/--or/--not` are boolean combinators — no value.
-    const VALUE_OPTS: &[&str] = &[
-        "-A",
-        "-B",
-        "-C",
-        "-e",
-        "-f",
-        "-O",
-        "--include",
-        "--exclude",
-        "--exclude-from",
-        "--exclude-dir",
-    ];
-    // Split off the leading prefix: global flags (with their values) + the
-    // `grep` subcommand itself (the first non-option token that is not a
-    // flag value). Options BEFORE the subcommand are git global options
-    // (e.g. --no-pager, -c k=v) and must stay where they are.
-    let mut prefix: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let a = args[i].as_str();
-        prefix.push(args[i].clone());
-        if a == "-C" || a == "-c" || a == "--config-env" {
-            // Value-taking global flag: include its value, keep scanning.
-            if let Some(v) = args.get(i + 1) {
-                prefix.push(v.clone());
-                i += 1;
-            }
-            i += 1;
-            continue;
-        }
-        if (a.starts_with("-C") || a.starts_with("-c")) && a.len() > 2 {
-            // Attached value form (-Cdir / -cfoo): an option, keep scanning.
-            i += 1;
-            continue;
-        }
-        if !a.starts_with('-') {
-            // First bare non-option token — the `grep` subcommand itself.
-            i += 1;
-            break;
-        }
-        i += 1;
-    }
-    let rest = &args[i..];
-
-    let mut opts: Vec<String> = Vec::new();
-    let mut positionals: Vec<String> = Vec::new();
-    let mut after_ddash: Vec<String> = Vec::new();
-    let mut j = 0;
-    while j < rest.len() {
-        let a = &rest[j];
-        if a == "--" {
-            after_ddash.extend(rest[j + 1..].iter().cloned());
-            break;
-        }
-        if a.starts_with('-') && a.len() > 1 {
-            let is_value_opt = VALUE_OPTS.contains(&a.as_str());
-            opts.push(a.clone());
-            if is_value_opt {
-                if let Some(v) = rest.get(j + 1) {
-                    opts.push(v.clone());
-                    j += 1;
-                }
-            }
-            j += 1;
-            continue;
-        }
-        positionals.push(a.clone());
-        j += 1;
-    }
-    let mut out = prefix;
-    out.extend(opts);
-    out.extend(positionals);
-    if !after_ddash.is_empty() {
-        out.push("--".to_string());
-        out.extend(after_ddash);
-    }
-    out
-}
-
 /// Detect the git subcommand (first non-option token) from raw args.
 ///
 /// Skips the values of global value-taking flags (`-C <dir>`, `-c <k=v>`,
@@ -1473,17 +1382,6 @@ async fn handle_run_command(args: Value) -> Result<(String, bool)> {
         anyhow::bail!("args cannot be empty");
     }
 
-    // git grep is order-sensitive: everything after the first non-option token
-    // is parsed as a revision/path. Agents routinely write
-    // `grep PATTERN -A 40 -- file`, which fails with
-    // "fatal: unable to resolve revision: -A". Normalize grep args so options
-    // precede the pattern (observed failure in agent runs).
-    let git_args = if git_subcommand(&git_args) == Some("grep") {
-        normalize_grep_args(&git_args)
-    } else {
-        git_args
-    };
-
     // Refuse NUL bytes (would truncate the argv at exec time).
     for a in &git_args {
         if a.contains('\u{0}') {
@@ -1719,18 +1617,24 @@ async fn main() -> Result<()> {
                     [\"stash\"], [\"tag\", \"-l\"], [\"show\", \"HEAD\"]. \
                     'repo_dir' (required) is the path to the git repository; \
                     'args' (required) is the array of git arguments — NEVER a shell string, \
-                    so no shell injection is possible. \\
-                    SANDBOX: both 'repo_dir' AND every path-bearing argument must stay inside \\
-                    the git workspace dir (/opt/workspace by default). Redirect flags \\
-                    (-C, --git-dir, --work-tree, --object-dir, --exec-path, --template, \\
-                    --shallow-file), write destinations (clone <url> <dir>, init <dir>, \\
-                    config --file, archive --output, format-patch -o, diff --output, \\
-                    apply --directory, bundle create, worktree add/move, checkout-index \\
-                    --prefix), config --global/--system, maintenance start/register, and \\
-                    exec/path -c overrides (core.pager, alias.*, credential.helper, \\
-                    core.hooksPath, core.excludesFile, ...) are validated and rejected \\
-                    when they would leave the workspace. \\
-                    'use_auth' (optional bool, default false): when true, injects the GitHub App \\
+                    so no shell injection is possible. \
+                    GIT GREP: put all options BEFORE the pattern, e.g. \
+                    [\"grep\", \"-n\", \"-A\", \"40\", \"<pattern>\", \"--\", \"<path>\"]. git grep \
+                    treats everything after the first non-option token as a revision/path, \
+                    so [\"grep\", \"<pattern>\", \"-A\", \"40\"] fails with \"unable to resolve \
+                    revision: -A\". Also: git grep exits 1 when there are no matches — \
+                    that is a valid result, not an error. \
+                    SANDBOX: both 'repo_dir' AND every path-bearing argument must stay inside \
+                    the git workspace dir (/opt/workspace by default). Redirect flags \
+                    (-C, --git-dir, --work-tree, --object-dir, --exec-path, --template, \
+                    --shallow-file), write destinations (clone <url> <dir>, init <dir>, \
+                    config --file, archive --output, format-patch -o, diff --output, \
+                    apply --directory, bundle create, worktree add/move, checkout-index \
+                    --prefix), config --global/--system, maintenance start/register, and \
+                    exec/path -c overrides (core.pager, alias.*, credential.helper, \
+                    core.hooksPath, core.excludesFile, ...) are validated and rejected \
+                    when they would leave the workspace. \
+                    'use_auth' (optional bool, default false): when true, injects the GitHub App \
                     installation token for this single invocation (via a -c url.insteadOf override — \
                     the repo's own .git/config is NEVER modified) so push/fetch/pull against the \
                     origin https remote authenticate like commit_and_push does. \
@@ -2087,107 +1991,9 @@ mod tests {
         assert!(validate_args(&["push", "origin", "main"]).is_ok());
     }
 
-    // ── git grep arg normalization ──
+    // ── git subcommand detection ──
     //
-    // Regression (Aug 2026): agents wrote `git grep PATTERN -A 40 -- file`
-    // (flags AFTER the pattern). git grep parses everything after the first
-    // non-option token as a revision/path, so this died with
-    // `fatal: unable to resolve revision: -A`. normalize_grep_args reorders
-    // options before the pattern so the intent works.
-
-    fn n(args: &[&str]) -> Vec<String> {
-        normalize_grep_args(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-    }
-
-    #[test]
-    fn grep_args_reorder_flags_after_pattern() {
-        // The exact observed failure: pattern, then -A 40, then -- path.
-        let out = n(&[
-            "grep",
-            "-n",
-            "def stop_other_stacks",
-            "-A",
-            "40",
-            "--",
-            "shared.py",
-        ]);
-        assert_eq!(
-            out,
-            vec![
-                "grep",
-                "-n",
-                "-A",
-                "40",
-                "def stop_other_stacks",
-                "--",
-                "shared.py"
-            ]
-        );
-    }
-
-    #[test]
-    fn grep_args_leave_correct_order_unchanged() {
-        // Flags already before the pattern: unchanged.
-        let out = n(&["grep", "-n", "-A", "40", "pattern", "--", "file.rs"]);
-        assert_eq!(
-            out,
-            vec!["grep", "-n", "-A", "40", "pattern", "--", "file.rs"]
-        );
-        // Bare pattern, no flags, no --.
-        let out = n(&["grep", "pattern"]);
-        assert_eq!(out, vec!["grep", "pattern"]);
-        // Plain no-match search with paths.
-        let out = n(&["grep", "-rn", "foo", "--", "src/"]);
-        assert_eq!(out, vec!["grep", "-rn", "foo", "--", "src/"]);
-    }
-
-    #[test]
-    fn grep_args_handles_value_flag_at_end() {
-        // -e pattern (value flag) must keep its value even after reordering.
-        let out = n(&["grep", "pattern", "-e", "other", "--", "f.rs"]);
-        assert_eq!(out, vec!["grep", "-e", "other", "pattern", "--", "f.rs"]);
-    }
-
-    #[test]
-    fn grep_args_handles_paths_only_after_ddash() {
-        // Everything after -- stays in place; a pattern-looking path is safe.
-        let out = n(&["grep", "needle", "--", "-weird-file"]);
-        assert_eq!(out, vec!["grep", "needle", "--", "-weird-file"]);
-    }
-
-    #[test]
-    fn grep_args_preserves_global_flags_before_subcommand() {
-        // Global options before the subcommand stay in place.
-        let out = n(&["--no-pager", "grep", "pattern", "-A", "5", "--", "f.rs"]);
-        assert_eq!(
-            out,
-            vec!["--no-pager", "grep", "-A", "5", "pattern", "--", "f.rs"]
-        );
-        // -c k=v before the subcommand: value stays attached, subcommand kept.
-        let out = n(&[
-            "-c",
-            "core.pager=cat",
-            "grep",
-            "pattern",
-            "-A",
-            "5",
-            "--",
-            "f.rs",
-        ]);
-        assert_eq!(
-            out,
-            vec![
-                "-c",
-                "core.pager=cat",
-                "grep",
-                "-A",
-                "5",
-                "pattern",
-                "--",
-                "f.rs"
-            ]
-        );
-    }
+    // Used to interpret grep's exit code (1 = no matches, not an error).
 
     #[test]
     fn git_subcommand_detection() {
