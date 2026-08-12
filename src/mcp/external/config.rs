@@ -346,7 +346,19 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
         ) {
             if let Some(obj) = yaml_config.as_object() {
                 for (key, val) in obj {
-                    let raw = val.as_str().map(|s| s.to_string()).unwrap_or_default();
+                    // YAML config values can be strings, numbers, or booleans
+                    // (e.g. `github_app_id: 3967918`). Serialize non-strings to
+                    // their literal form instead of silently dropping them —
+                    // as_str() on a Number returns None, which used to make
+                    // numeric plugin config (like git's github_app_id /
+                    // github_installation_id) vanish and auth fail with
+                    // "must be set in the plugin config".
+                    let raw = match val {
+                        serde_json::Value::String(s) => s.clone(),
+                        serde_json::Value::Number(n) => n.to_string(),
+                        serde_json::Value::Bool(b) => b.to_string(),
+                        _ => String::new(),
+                    };
                     if !raw.is_empty() {
                         let resolved = crate::plugins_yaml::resolve_config_value(&raw);
                         if !resolved.is_empty() {
@@ -461,7 +473,16 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
                     ) {
                         if let Some(obj) = yaml_config.as_object() {
                             for (key, val) in obj {
-                                let raw = val.as_str().map(|s| s.to_string()).unwrap_or_default();
+                                // YAML config values can be strings, numbers, or
+                                // booleans (e.g. `github_app_id: 3967918`).
+                                // Serialize non-strings to their literal form
+                                // instead of silently dropping them.
+                                let raw = match val {
+                                    serde_json::Value::String(s) => s.clone(),
+                                    serde_json::Value::Number(n) => n.to_string(),
+                                    serde_json::Value::Bool(b) => b.to_string(),
+                                    _ => String::new(),
+                                };
                                 if !raw.is_empty() {
                                     let resolved = crate::plugins_yaml::resolve_config_value(&raw);
                                     if !resolved.is_empty() {

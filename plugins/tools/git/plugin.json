@@ -20,28 +20,24 @@
     },
     {
       "key": "github_app_token",
-      "default": "$env:GH_APP_TOKEN",
       "label": "GitHub App Token (legacy static token)",
       "type": "string",
       "required": false
     },
     {
       "key": "github_app_private_key",
-      "default": "$env:GH_APP_PRIVATE_KEY",
       "label": "GitHub App Private Key (PEM)",
       "type": "string",
       "required": false
     },
     {
       "key": "github_app_id",
-      "default": "$env:GITHUB_APP_ID",
       "label": "GitHub App ID",
       "type": "string",
       "required": false
     },
     {
       "key": "github_installation_id",
-      "default": "$env:GITHUB_INSTALLATION_ID",
       "label": "GitHub Installation ID",
       "type": "string",
       "required": false

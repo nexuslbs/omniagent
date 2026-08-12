@@ -742,7 +742,17 @@ fn build_plugin_detail(
     // Config values override env vars
     if let Some(config_obj) = config.as_object() {
         for (key, val) in config_obj {
-            let raw = val.as_str().map(|s| s.to_string()).unwrap_or_default();
+            // YAML config values can be strings, numbers, or booleans
+            // (e.g. `github_app_id: 3967918`). Serialize non-strings to their
+            // literal form instead of silently dropping them — as_str() on a
+            // Number returns None, which used to make numeric plugin config
+            // vanish and auth fail with "must be set in the plugin config".
+            let raw = match val {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => String::new(),
+            };
             let resolved_val = resolve_config_value(&raw);
             resolved.insert(key.clone(), resolved_val);
         }
