@@ -368,6 +368,16 @@ Previous plan:\n{}",
     };
 
     // 5. Assemble messages from prompt parts
+    // Inverse role mapping (R7): for tester/reviewer STEP threads the role
+    // template (dev-tester/dev-reviewer) is the USER prompt, and the task
+    // description (title + body carried in the cause message) is the SYSTEM
+    // prompt — the opposite of the executor layout (template = system,
+    // task body = user). The step-thread cause message carries the task
+    // description; template_section carries the role template.
+    let is_step_thread = matches!(
+        thread.workflow_step.as_deref(),
+        Some("testing" | "review")
+    );
     let mut messages = vec![ChatMessage::system(&prompt_parts.system)];
     if !prompt_parts.memory.is_empty() {
         messages.push(ChatMessage::system(&prompt_parts.memory));
@@ -379,8 +389,11 @@ Previous plan:\n{}",
     // Inject task template FIRST (right after system prompt): highest instruction priority
     // for template-backed tasks (kanban/cron with template).
     // Flush-left position ensures the template guides the model before any other context.
+    // For step threads the template is deferred to the USER slot (see below).
     if let Some(ref template_section) = template_section {
-        messages.push(ChatMessage::system(template_section));
+        if !is_step_thread {
+            messages.push(ChatMessage::system(template_section));
+        }
     }
 
     // Add context from plugin as system message (before the user message)
@@ -407,8 +420,22 @@ Previous plan:\n{}",
         );
     }
 
-    // Add the user message (from the prompt parts: the plugin provides this)
-    messages.push(ChatMessage::user(&prompt_parts.user));
+    // Step threads: task description goes in the SYSTEM slot, the role
+    // template in the USER slot (inverse of the executor layout).
+    if is_step_thread {
+        messages.push(ChatMessage::system(&format!(
+            "=== Task Description ===\n{}",
+            prompt_parts.user
+        )));
+        if let Some(ref template_section) = template_section {
+            messages.push(ChatMessage::user(template_section));
+        } else {
+            messages.push(ChatMessage::user(&prompt_parts.user));
+        }
+    } else {
+        // Add the user message (from the prompt parts: the plugin provides this)
+        messages.push(ChatMessage::user(&prompt_parts.user));
+    }
 
     // Output-limit awareness: tell the model its per-response output ceiling so
     // it plans large deliverables (big file writes, long reports) in chunks

@@ -428,6 +428,34 @@ async fn resolve_step_identity(
     Ok((profile, provider, model, plan, template))
 }
 
+/// Build the task description (title + body) for a step-thread cause message.
+/// Mirrors `dispatch_content` in server/kanban.rs: the executor thread's cause
+/// carries the full task text; step threads must carry the same so the prompt
+/// builder can place the task description as the SYSTEM prompt for
+/// tester/reviewer threads (inverse role mapping).
+async fn task_description(pool: &sqlx::PgPool, task_id: &str) -> String {
+    #[derive(sqlx::FromRow)]
+    struct TaskTextRow {
+        title: String,
+        body: Option<String>,
+    }
+    let row = sqlx::query_as::<_, TaskTextRow>(
+        "SELECT title, body FROM kanban_tasks WHERE id = $1",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    match row {
+        Some(r) => match r.body.map(|b| b.trim().to_string()).filter(|b| !b.is_empty()) {
+            Some(body) => format!("{}\n\n{}", r.title.trim(), body),
+            None => r.title.trim().to_string(),
+        },
+        None => String::new(),
+    }
+}
+
 /// Create a scheduled `review` thread for a passed tester thread (row 7).
 /// Mirrors the thread creation in `engine_transition` (cause message seq-0).
 async fn create_review_thread(
@@ -440,6 +468,21 @@ async fn create_review_thread(
         id: i64,
     }
     let cause = thread.cause.clone();
+    let task_id = thread.task_id.clone().unwrap_or_default();
+    // Step threads carry the TASK DESCRIPTION in the cause message so the
+    // prompt builder can place it as the SYSTEM prompt for reviewer threads
+    // (inverse role mapping: role template -> USER, task description ->
+    // SYSTEM). A bare cause left the reviewer without the task description.
+    let task_desc = if task_id.is_empty() {
+        String::new()
+    } else {
+        task_description(pool, &task_id).await
+    };
+    let cause_msg = if task_desc.is_empty() {
+        cause.clone()
+    } else {
+        format!("Workflow step: review. Task: {task_id}\n\n{task_desc}")
+    };
     let wf_id = thread_workflow_id(pool, thread.id)
         .await
         .unwrap_or_default();
@@ -455,7 +498,7 @@ async fn create_review_thread(
     .bind(identity.0)
     .bind(identity.1)
     .bind(identity.2)
-    .bind(thread.task_id.clone().unwrap_or_default())
+    .bind(task_id)
     .bind(thread.id)
     .bind(wf_id)
     .bind(identity.3)
@@ -469,7 +512,7 @@ async fn create_review_thread(
          VALUES ($1, 'cause', $2, 0, 'cause')",
     )
     .bind(new_id.id)
-    .bind(cause)
+    .bind(cause_msg)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -503,7 +546,13 @@ async fn create_testing_thread(
         _ => return Ok(None),
     };
     let cause = testing_step_cause(&thread.cause);
-    let cause_msg = format!("Workflow step: testing. Task: {task_id}");
+    // The step thread's cause message carries the TASK DESCRIPTION (title +
+    // body) so the prompt builder can place it as the SYSTEM prompt for
+    // tester/reviewer threads (inverse role mapping: role template -> USER,
+    // task description -> SYSTEM). A bare "Workflow step: testing. Task: <id>"
+    // left the tester without the task description in its prompt at all.
+    let task_desc = task_description(pool, &task_id).await;
+    let cause_msg = format!("Workflow step: testing. Task: {task_id}\n\n{task_desc}");
     let wf_id = thread_workflow_id(pool, thread.id)
         .await
         .unwrap_or_default();
