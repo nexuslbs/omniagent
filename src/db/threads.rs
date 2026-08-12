@@ -428,8 +428,13 @@ pub struct ResolvedThreadIdentity {
 /// - profile: workflow role → workflow defaults → caller base profile →
 ///   channel.current_profile → global default profile
 /// - provider: workflow role → workflow defaults → explicit caller →
-///   resolved profile's provider → channel.current_provider →
+///   channel.current_provider → resolved profile's provider →
 ///   global default provider
+///
+/// Channel MUST beat profile: a channel's current_provider/current_model is
+/// the operator's explicit per-channel override (e.g. the wf-test channel
+/// pins noop/test-tool-caller so tests never hit a real LLM), while the
+/// profile's provider is only a default for channels that don't override.
 /// - model: resolved at the same tier as the provider (explicit model,
 ///   profile model, channel model, or the provider's default model)
 ///
@@ -501,6 +506,16 @@ pub fn resolve_thread_identity(
             .map(str::to_string)
             .or_else(|| crate::llm::resolve_default_model(prov));
         (prov.to_string(), model)
+    } else if let Some(prov) = channel
+        .and_then(|c| c.current_provider.as_deref())
+        .filter(|s| !s.is_empty())
+    {
+        let model = channel
+            .and_then(|c| c.current_model.as_deref())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| crate::llm::resolve_default_model(prov));
+        (prov.to_string(), model)
     } else if let Some(prov) = profile_data
         .as_ref()
         .and_then(|p| p.provider.as_deref())
@@ -509,16 +524,6 @@ pub fn resolve_thread_identity(
         let model = profile_data
             .as_ref()
             .and_then(|p| p.model.as_deref())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .or_else(|| crate::llm::resolve_default_model(prov));
-        (prov.to_string(), model)
-    } else if let Some(prov) = channel
-        .and_then(|c| c.current_provider.as_deref())
-        .filter(|s| !s.is_empty())
-    {
-        let model = channel
-            .and_then(|c| c.current_model.as_deref())
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .or_else(|| crate::llm::resolve_default_model(prov));
@@ -1456,5 +1461,79 @@ mod tests {
                 thread_status
             );
         }
+    }
+
+    // ---------- Thread identity resolution precedence ----------
+    // Regression guard for 83f461b: the Aug 11 refactor reversed the
+    // provider chain (profile.provider was checked BEFORE
+    // channel.current_provider). That made kanban executor threads on the
+    // wf-test channel (current_provider=noop) resolve to the omni profile's
+    // deepseek provider — a REAL LLM call in tests that must never hit one.
+    // Channel override MUST win: it is the operator's explicit per-channel
+    // choice; the profile's provider is only a default.
+
+    fn test_channel(provider: Option<&str>, model: Option<&str>) -> crate::db::types::Channel {
+        use chrono::Utc;
+        crate::db::types::Channel {
+            id: 1,
+            name: "test-channel".to_string(),
+            platform: None,
+            resource_identifier: None,
+            external_id: None,
+            cause: "test".to_string(),
+            current_profile: "omni".to_string(),
+            current_model: model.map(|s| s.to_string()),
+            current_provider: provider.map(|s| s.to_string()),
+            readonly: false,
+            closed: false,
+            metadata: serde_json::json!({}),
+            template: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn channel_provider_beats_profile_provider() {
+        // Channel pins noop/test-tool-caller (like the wf-test channel);
+        // profile (default/omni) declares deepseek. Channel must win so the
+        // thread NEVER resolves to a real LLM.
+        let data_dir = std::env::temp_dir().to_str().unwrap().to_string();
+        let ch = test_channel(Some("noop"), Some("test-tool-caller"));
+        let identity = resolve_thread_identity(
+            &data_dir,
+            "omni",
+            Some(&ch),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("identity must resolve from channel override");
+        assert_eq!(identity.provider, "noop", "channel provider must win over profile");
+        assert_eq!(identity.model, "test-tool-caller", "channel model must win over profile");
+    }
+
+    #[test]
+    fn profile_provider_used_when_channel_has_none() {
+        // No channel override → fall back to the profile's provider.
+        let data_dir = std::env::temp_dir().to_str().unwrap().to_string();
+        let ch = test_channel(None, None);
+        let identity = resolve_thread_identity(
+            &data_dir,
+            "omni",
+            Some(&ch),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("identity must resolve from profile");
+        // The omni profile on disk may not exist in the temp dir; the
+        // registry falls back to the default profile (deepseek). Either way
+        // the provider must come from the profile tier, NOT be empty, and
+        // NOT come from a channel override (there is none).
+        assert!(!identity.provider.is_empty(), "provider must resolve from profile");
+        assert!(!identity.model.is_empty(), "model must resolve from profile");
     }
 }
