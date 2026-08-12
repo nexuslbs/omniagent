@@ -364,12 +364,13 @@ pub(crate) async fn transition_with_comment(
 }
 
 /// Resolve the execution identity for a newly-created workflow step.
+/// Returns (profile, provider, model, plan, template).
 async fn resolve_step_identity(
     pool: &sqlx::PgPool,
     data_dir: &str,
     thread: &Thread,
     step: &str,
-) -> Result<(String, String, String, bool), String> {
+) -> Result<(String, String, String, bool, Option<String>), String> {
     let workflow_id = thread_workflow_id(pool, thread.id)
         .await
         .unwrap_or_default();
@@ -417,7 +418,14 @@ async fn resolve_step_identity(
         Some("off") => false,
         _ => thread.plan,
     };
-    Ok((profile, provider, model, plan))
+    // Template for step threads: the role template (e.g. dev-tester /
+    // dev-reviewer) must be applied so the thread actually loads the
+    // role guidance (timeout rules, verification requirements). Without
+    // this, tester/reviewer threads ran with template=NULL and never saw
+    // the template instructions (observed: thread 77 called wait-task
+    // with no timeout_secs and burned 15 iterations polling a build).
+    let template = role_cfg.as_ref().and_then(|r| r.template.clone());
+    Ok((profile, provider, model, plan, template))
 }
 
 /// Create a scheduled `review` thread for a passed tester thread (row 7).
@@ -438,9 +446,9 @@ async fn create_review_thread(
     let identity = resolve_step_identity(pool, data_dir, thread, "review").await?;
     let new_id = sqlx::query_as::<_, IdRow>(
         "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
-         task_id, parent_id, workflow_id, workflow_step, task_type, plan)
+         task_id, parent_id, workflow_id, workflow_step, task_type, plan, template)
          VALUES ('pending', $1, $2, $3, $4, $5,
-         $6, $7, $8, 'review', 'kanban', $9) RETURNING id",
+         $6, $7, $8, 'review', 'kanban', $9, $10) RETURNING id",
     )
     .bind(cause.as_str())
     .bind(thread.channel_id)
@@ -451,6 +459,7 @@ async fn create_review_thread(
     .bind(thread.id)
     .bind(wf_id)
     .bind(identity.3)
+    .bind(identity.4)
     .fetch_one(pool)
     .await
     .map_err(|e| format!("create review thread: {e}"))?;
@@ -501,9 +510,9 @@ async fn create_testing_thread(
     let identity = resolve_step_identity(pool, data_dir, thread, "testing").await?;
     let new_id = sqlx::query_as::<_, IdRow>(
         "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
-         task_id, parent_id, workflow_id, workflow_step, task_type, plan)
+         task_id, parent_id, workflow_id, workflow_step, task_type, plan, template)
          VALUES ('pending', $1, $2, $3, $4, $5,
-         $6, $7, $8, 'testing', 'kanban', $9) RETURNING id",
+         $6, $7, $8, 'testing', 'kanban', $9, $10) RETURNING id",
     )
     .bind(cause.as_str())
     .bind(thread.channel_id)
@@ -514,6 +523,7 @@ async fn create_testing_thread(
     .bind(thread.id)
     .bind(wf_id)
     .bind(identity.3)
+    .bind(identity.4)
     .fetch_one(pool)
     .await
     .map_err(|e| format!("create testing thread: {e}"))?;
