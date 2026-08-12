@@ -13,14 +13,31 @@ use crate::error::{AppResult, Error};
 // Thread query functions
 // ---------------------------------------------------------------------------
 
-/// Create a new thread with status 'created'.
-pub async fn create_thread(
-    pool: &PgPool,
+/// Create a new thread — THE single INSERT for every thread creation path.
+///
+/// All thread rows (general message threads, kanban executor threads, workflow
+/// step threads, engine re-runs, manual-review re-runs, skip-recovery
+/// reschedules) MUST go through this function so the full column set
+/// (plan, template, workflow_step, task_type, schedule_task_id, hook_caused)
+/// is always persisted. Hand-rolled INSERTs elsewhere have repeatedly drifted:
+/// step threads were created without `plan`/`template` (60-iteration no-plan
+/// budget, no role guidance — threads 75-78, 82) and `hook_caused` was missed
+/// in several paths.
+///
+/// `executor` accepts either a `&PgPool` or `&mut PgTransaction` (both
+/// implement `sqlx::Executor`), so callers inside a transaction keep
+/// transactional semantics.
+pub async fn create_thread<'e, E>(
+    executor: E,
+    status: &str,
     cause: &str,
     channel_id: i64,
     profile: &str,
     p: CreateThreadParams,
-) -> AppResult<Thread> {
+) -> AppResult<Thread>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     // Validate cause: must be 'user' or 'system'
     if cause != "user" && cause != "system" {
         err_msg!(
@@ -43,7 +60,7 @@ pub async fn create_thread(
         ThreadDb,
         r#"
         INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id, plan, parent_id, workflow_id, workflow_step, template, task_type, hook_caused)
-        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :plan, NULLIF(:parent_id, -1::bigint)::bigint, NULLIF(:workflow_id, '')::text, NULLIF(:workflow_step, '')::text, NULLIF(:template, '')::text, :task_type, :hook_caused)
+        VALUES (:status, :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :plan, NULLIF(:parent_id, -1::bigint)::bigint, NULLIF(:workflow_id, '')::text, NULLIF(:workflow_step, '')::text, NULLIF(:template, '')::text, :task_type, :hook_caused)
         RETURNING
             id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
             input_tokens, cached_tokens, output_tokens, duration_ms,
@@ -57,9 +74,9 @@ pub async fn create_thread(
             workflow_step,
             template
         "#,
-        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :plan = p.plan, :parent_id = p.parent_id.unwrap_or(-1i64), :workflow_id = p.workflow_id.as_deref().unwrap_or(""), :workflow_step = p.workflow_step.as_deref().unwrap_or(""), :template = p.template.as_deref().unwrap_or(""), :task_type = p.task_id.as_ref().map(|_| "kanban").unwrap_or(""), :hook_caused = p.hook_caused )
+        ( :status = status, :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :plan = p.plan, :parent_id = p.parent_id.unwrap_or(-1i64), :workflow_id = p.workflow_id.as_deref().unwrap_or(""), :workflow_step = p.workflow_step.as_deref().unwrap_or(""), :template = p.template.as_deref().unwrap_or(""), :task_type = p.task_id.as_ref().map(|_| "kanban").unwrap_or(""), :hook_caused = p.hook_caused )
     )
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     row.try_into()
@@ -298,12 +315,15 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
             task_id: Option<String>,
             workflow_id: Option<String>,
             workflow_step: Option<String>,
+            plan: bool,
+            template: Option<String>,
         }
 
         let t: Option<SkipRow> = sql_forge!(
             SkipRow,
             r#"
-            SELECT id, cause, channel_id, profile, provider, model, task_id, workflow_id, workflow_step
+            SELECT id, cause, channel_id, profile, provider, model, task_id, workflow_id, workflow_step,
+                   plan, template
             FROM threads
             WHERE id = :id
             "#,
@@ -339,33 +359,31 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
                         t.model.as_deref(),
                     )
                     .map_err(|e| Error::Message(format!("Thread #{}: {e}", t.id)))?;
-                    #[derive(sqlx::FromRow)]
-                    struct IdRow {
-                        id: i64,
-                    }
-                    let new_id = sql_forge!(
-                        IdRow,
-                        r#"
-                        INSERT INTO threads
-                            (status, cause, channel_id, profile, provider, model, task_id, parent_id, workflow_id, workflow_step, task_type)
-                        VALUES
-                            ('pending', :cause, :channel_id, :profile, :provider, :model, :task_id, :parent_id, :workflow_id, :workflow_step, 'kanban')
-                        RETURNING id
-                        "#,
-                        (
-                            :cause = t.cause.clone().unwrap_or_else(|| "re-run".to_string()),
-                            :channel_id = t.channel_id,
-                            :profile = profile.as_str(),
-                            :provider = provider.as_str(),
-                            :model = model.as_str(),
-                            :task_id = task_id,
-                            :parent_id = t.id,
-                            :workflow_id = t.workflow_id.clone().unwrap_or_default(),
-                            :workflow_step = t.workflow_step.clone().unwrap_or_default()
-                        )
+                    // Single canonical INSERT (create_thread): the re-scheduled
+                    // thread must carry the parent's full execution identity —
+                    // including plan + template — or it silently runs with a
+                    // no-plan iteration budget and no role guidance.
+                    let new_thread = create_thread(
+                        &mut *tx,
+                        "pending",
+                        t.cause.as_deref().unwrap_or("system"),
+                        t.channel_id,
+                        &profile,
+                        CreateThreadParams {
+                            provider: Some(provider.clone()),
+                            model: Some(model.clone()),
+                            task_id: t.task_id.clone(),
+                            schedule_task_id: None,
+                            plan: t.plan,
+                            parent_id: Some(t.id),
+                            workflow_id: t.workflow_id.clone(),
+                            workflow_step: t.workflow_step.clone(),
+                            template: t.template.clone(),
+                            hook_caused: false,
+                        },
                     )
-                    .fetch_one(&mut *tx)
                     .await?;
+                    let new_id = new_thread.id;
 
                     let cause = t.cause.clone().unwrap_or_else(|| "re-run".to_string());
                     sql_forge!(
@@ -373,7 +391,7 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
                         INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
                         VALUES (:tid, 'cause', :content, 0, 'cause')
                         "#,
-                        ( :tid = new_id.id, :content = cause )
+                        ( :tid = new_id, :content = cause )
                     )
                     .execute(&mut *tx)
                     .await?;
@@ -387,7 +405,7 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
 
                     let comment = format!(
                         "Thread #{} skipped ({}). Creating thread #{}",
-                        t.id, reason, new_id.id
+                        t.id, reason, new_id
                     );
                     sql_forge!(
                         r#"
@@ -672,6 +690,7 @@ pub async fn create_thread_with_cause(
     // 6. Create the thread (with resolved parent_id, if any)
     let thread = create_thread(
         pool,
+        "created",
         cause,
         channel_id,
         &resolved_profile,
@@ -821,11 +840,13 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
         task_id: Option<String>,
         workflow_id: Option<String>,
         workflow_step: Option<String>,
+        plan: bool,
+        template: Option<String>,
     }
     let threads: Vec<SkipRow> = sql_forge!(
         SkipRow,
         "SELECT id, cause, channel_id, profile, provider, model, task_id,
-                workflow_id, workflow_step
+                workflow_id, workflow_step, plan, template
          FROM threads
          WHERE channel_id = :channel_id AND status IN ('pending', 'processing')
          ORDER BY id",
@@ -857,32 +878,35 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
             .await?;
             if let Some(status) = task_status {
                 if status != "blocked" && status != "done" {
-                    let new_id = sql_forge!(
-                        IdRow,
-                        "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
-                                              task_id, parent_id, workflow_id, workflow_step, task_type)
-                         VALUES ('pending', :cause, :channel_id, :profile, :provider, :model,
-                                 :task_id, :parent_id, :workflow_id, :workflow_step, 'kanban')
-                         RETURNING id",
-                        (
-                            :cause = t.cause.as_deref().unwrap_or(""),
-                            :channel_id = t.channel_id,
-                            :profile = t.profile.as_deref().unwrap_or(""),
-                            :provider = t.provider.as_deref().unwrap_or(""),
-                            :model = t.model.as_deref().unwrap_or(""),
-                            :task_id = task_id.as_str(),
-                            :parent_id = t.id,
-                            :workflow_id = t.workflow_id.as_deref().unwrap_or(""),
-                            :workflow_step = t.workflow_step.as_deref().unwrap_or("")
-                        )
+                    // Single canonical INSERT (create_thread): carries the
+                    // parent's plan + template so a re-scheduled tester/reviewer
+                    // keeps its iteration budget and role guidance.
+                    let new_thread = create_thread(
+                        &mut *tx,
+                        "pending",
+                        t.cause.as_deref().unwrap_or("system"),
+                        t.channel_id,
+                        t.profile.as_deref().unwrap_or(""),
+                        CreateThreadParams {
+                            provider: t.provider.clone(),
+                            model: t.model.clone(),
+                            task_id: t.task_id.clone(),
+                            schedule_task_id: None,
+                            plan: t.plan,
+                            parent_id: Some(t.id),
+                            workflow_id: t.workflow_id.clone(),
+                            workflow_step: t.workflow_step.clone(),
+                            template: t.template.clone(),
+                            hook_caused: false,
+                        },
                     )
-                    .fetch_one(&mut *tx)
                     .await?;
+                    let new_id = new_thread.id;
                     let cause = t.cause.clone().unwrap_or_else(|| "re-run".to_string());
                     sql_forge!(
                         "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
                          VALUES (:tid, 'cause', :content, 0, 'cause')",
-                        ( :tid = new_id.id, :content = cause )
+                        ( :tid = new_id, :content = cause )
                     )
                     .execute(&mut *tx)
                     .await?;
@@ -894,7 +918,7 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
                     .await?;
                     let comment = format!(
                         "Thread #{} skipped (channel closed). Creating thread #{}",
-                        t.id, new_id.id
+                        t.id, new_id
                     );
                     sql_forge!(
                         "INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
@@ -973,12 +997,15 @@ pub async fn skip_all_pending_threads(pool: &PgPool) -> AppResult<u64> {
         task_id: Option<String>,
         workflow_id: Option<String>,
         workflow_step: Option<String>,
+        plan: bool,
+        template: Option<String>,
     }
 
     let threads: Vec<SkipRow> = sql_forge!(
         SkipRow,
         r#"
-        SELECT id, cause, channel_id, profile, provider, model, task_id, workflow_id, workflow_step
+        SELECT id, cause, channel_id, profile, provider, model, task_id, workflow_id, workflow_step,
+               plan, template
         FROM threads
         WHERE status IN ('pending', 'processing')
         "#,
@@ -1016,33 +1043,30 @@ pub async fn skip_all_pending_threads(pool: &PgPool) -> AppResult<u64> {
                 let task_id = t.task_id.as_deref().unwrap_or("");
                 let status = task_status.as_deref().unwrap_or("todo");
                 let reason = "startup recovery";
-                #[derive(sqlx::FromRow)]
-                struct IdRow {
-                    id: i64,
-                }
-                let new_id = sql_forge!(
-                        IdRow,
-                        r#"
-                        INSERT INTO threads
-                            (status, cause, channel_id, profile, provider, model, task_id, parent_id, workflow_id, workflow_step, task_type)
-                        VALUES
-                            ('pending', :cause, :channel_id, :profile, :provider, :model, :task_id, :parent_id, :workflow_id, :workflow_step, 'kanban')
-                        RETURNING id
-                        "#,
-                        (
-                            :cause = t.cause.clone().unwrap_or_else(|| "re-run".to_string()),
-                            :channel_id = t.channel_id,
-                            :profile = t.profile.clone().unwrap_or_else(|| "default".to_string()),
-                            :provider = t.provider.clone().unwrap_or_else(|| "openai".to_string()),
-                            :model = t.model.clone().unwrap_or_else(|| "gpt-4o-mini".to_string()),
-                            :task_id = task_id,
-                            :parent_id = t.id,
-                            :workflow_id = t.workflow_id.clone().unwrap_or_default(),
-                            :workflow_step = t.workflow_step.clone().unwrap_or_default()
-                        )
-                    )
-                    .fetch_one(&mut *tx)
-                    .await?;
+                // Single canonical INSERT (create_thread): carries the parent's
+                // plan + template so a re-scheduled tester/reviewer keeps its
+                // iteration budget and role guidance.
+                let new_thread = create_thread(
+                    &mut *tx,
+                    "pending",
+                    t.cause.as_deref().unwrap_or("system"),
+                    t.channel_id,
+                    t.profile.as_deref().unwrap_or("default"),
+                    CreateThreadParams {
+                        provider: t.provider.clone(),
+                        model: t.model.clone(),
+                        task_id: t.task_id.clone(),
+                        schedule_task_id: None,
+                        plan: t.plan,
+                        parent_id: Some(t.id),
+                        workflow_id: t.workflow_id.clone(),
+                        workflow_step: t.workflow_step.clone(),
+                        template: t.template.clone(),
+                        hook_caused: false,
+                    },
+                )
+                .await?;
+                let new_id = new_thread.id;
 
                 let cause = t.cause.clone().unwrap_or_else(|| "re-run".to_string());
                 sql_forge!(
@@ -1050,7 +1074,7 @@ pub async fn skip_all_pending_threads(pool: &PgPool) -> AppResult<u64> {
                         INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
                         VALUES (:tid, 'cause', :content, 0, 'cause')
                         "#,
-                    ( :tid = new_id.id, :content = cause )
+                    ( :tid = new_id, :content = cause )
                 )
                 .execute(&mut *tx)
                 .await?;
@@ -1064,7 +1088,7 @@ pub async fn skip_all_pending_threads(pool: &PgPool) -> AppResult<u64> {
 
                 let comment = format!(
                     "Thread #{} skipped ({}). Creating thread #{}",
-                    t.id, reason, new_id.id
+                    t.id, reason, new_id
                 );
                 sql_forge!(
                         r#"

@@ -1,7 +1,8 @@
 use crate::agent::config::AgentContext;
 use crate::agent::helpers;
+use crate::db::threads::create_thread;
 use crate::db::types as queries;
-use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
+use crate::db::types::{CompleteThreadStats, CreateThreadParams, Message, MessageNew, Thread};
 use crate::error::AppResult;
 use sql_forge::sql_forge;
 
@@ -320,11 +321,7 @@ pub async fn manual_review_decision(
     // Create the scheduled re-run thread for rework/retest (same pattern as
     // engine_transition: pending thread + seq-0 cause message).
     let new_thread_id: Option<i64> = if let Some(step) = rerun_step.as_deref() {
-        #[derive(sqlx::FromRow)]
-        struct IdRow {
-            id: i64,
-        }
-        let cause = format!("Manual review decision: {decision}. Task: {task_id}");
+        let cause_msg = format!("Manual review decision: {decision}. Task: {task_id}");
         let role_cfg = workflow_role_for_step(step).and_then(|role| wf.resolve_role(role));
         let plan = match role_cfg.as_ref().and_then(|r| r.plan_mode.as_deref()) {
             Some("on") => true,
@@ -332,46 +329,43 @@ pub async fn manual_review_decision(
             _ => task.plan,
         };
         let template = role_cfg.as_ref().and_then(|r| r.template.clone());
-        let new_id = sqlx::query_as::<_, IdRow>(
-            "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
-             task_id, parent_id, workflow_id, workflow_step, task_type, plan, template)
-             VALUES ('pending', $1, $2, $3, $7, $8,
-             $4, NULL, $5, $6, 'kanban', $9, $10) RETURNING id",
+        // Single canonical INSERT (create_thread). Note: threads.cause has
+        // CHECK chk_thread_cause (cause IN ('user','system')) — the free-text
+        // "Manual review decision: ..." text goes in the cause MESSAGE content,
+        // never in threads.cause.
+        let new_thread = create_thread(
+            &mut *tx,
+            "pending",
+            "system",
+            task.channel_id.unwrap_or_default(),
+            task.profile.as_deref().unwrap_or(""),
+            CreateThreadParams {
+                provider: role_cfg.as_ref().and_then(|r| r.provider.clone()),
+                model: role_cfg.as_ref().and_then(|r| r.model.clone()),
+                task_id: Some(task_id.to_string()),
+                schedule_task_id: None,
+                plan,
+                parent_id: None,
+                workflow_id: task.workflow_id.clone(),
+                workflow_step: Some(step.to_string()),
+                template,
+                hook_caused: false,
+            },
         )
-        .bind(cause.as_str())
-        .bind(task.channel_id)
-        .bind(task.profile.as_deref().unwrap_or(""))
-        .bind(task_id)
-        .bind(task.workflow_id.clone().unwrap_or_default())
-        .bind(step)
-        .bind(
-            role_cfg
-                .as_ref()
-                .and_then(|r| r.provider.clone())
-                .unwrap_or_default(),
-        )
-        .bind(
-            role_cfg
-                .as_ref()
-                .and_then(|r| r.model.clone())
-                .unwrap_or_default(),
-        )
-        .bind(plan)
-        .bind(template)
-        .fetch_one(&mut *tx)
         .await
         .map_err(|e| format!("insert manual review thread: {e}"))?;
+        let new_id = new_thread.id;
 
         sql_forge!(
             "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
              VALUES (:tid, 'cause', :content, 0, 'cause')",
-            ( :tid = new_id.id, :content = cause )
+            ( :tid = new_id, :content = cause_msg )
         )
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("insert manual review cause message: {e}"))?;
 
-        Some(new_id.id)
+        Some(new_id)
     } else {
         None
     };
@@ -993,32 +987,30 @@ pub(crate) async fn engine_transition(
         if profile.trim().is_empty() {
             return Err(format!("no profile configured for workflow step {step}"));
         }
-        let new_id = sql_forge!(
-            IdRow,
-            "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
-                                  task_id, parent_id, workflow_id, workflow_step, task_type,
-                                  plan, template)
-             VALUES ('pending', :cause, :channel_id, :profile, :provider, :model,
-                     :task_id, :parent_id, :workflow_id, :workflow_step, 'kanban',
-                     :plan, :template)
-             RETURNING id",
-            (
-                :cause = thread.cause.as_str(),
-                :channel_id = thread.channel_id,
-                :profile = profile.as_str(),
-                :provider = provider.as_str(),
-                :model = model.as_str(),
-                :task_id = task_id,
-                :parent_id = thread.id,
-                :workflow_id = wf_id.unwrap_or(""),
-                :workflow_step = step,
-                :plan = plan,
-                :template = template.as_deref().unwrap_or("")
-            )
+        // Single canonical INSERT (create_thread) — carries plan + template so
+        // re-run threads keep the role's iteration budget and guidance.
+        let new_thread = create_thread(
+            &mut *tx,
+            "pending",
+            thread.cause.as_str(),
+            thread.channel_id,
+            &profile,
+            CreateThreadParams {
+                provider: Some(provider.clone()),
+                model: Some(model.clone()),
+                task_id: Some(task_id.to_string()),
+                schedule_task_id: None,
+                plan,
+                parent_id: Some(thread.id),
+                workflow_id: wf_id.map(str::to_string),
+                workflow_step: Some(step.to_string()),
+                template,
+                hook_caused: false,
+            },
         )
-        .fetch_one(&mut *tx)
         .await
         .map_err(|e| format!("insert rerun thread: {e}"))?;
+        let new_id = new_thread.id;
 
         // seq-0 cause message for the re-run thread — copy the PARENT's
         // msg_type='kanban' message content (the actual script), NOT
@@ -1050,7 +1042,7 @@ pub(crate) async fn engine_transition(
         sql_forge!(
             "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
              VALUES (:tid, 'cause', :content, 0, 'kanban')",
-            ( :tid = new_id.id, :content = script_content )
+            ( :tid = new_id, :content = script_content )
         )
         .execute(&mut *tx)
         .await
@@ -1060,7 +1052,7 @@ pub(crate) async fn engine_transition(
         if increment {
             increment_execution(&mut executions, step);
         }
-        Some(new_id.id)
+        Some(new_id)
     } else if review_thread {
         // D7: retry-limit → review with a reviewer role creates a review
         // thread (same shape as the normal-completion review path, row 7);
@@ -1078,32 +1070,29 @@ pub(crate) async fn engine_transition(
         if profile.trim().is_empty() {
             return Err("no profile configured for workflow step review".to_string());
         }
-        let new_id = sql_forge!(
-            IdRow,
-            "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
-                                  task_id, parent_id, workflow_id, workflow_step, task_type,
-                                  plan, template)
-             VALUES ('pending', :cause, :channel_id, :profile, :provider, :model,
-                     :task_id, :parent_id, :workflow_id, :workflow_step, 'kanban',
-                     :plan, :template)
-             RETURNING id",
-            (
-                :cause = thread.cause.as_str(),
-                :channel_id = thread.channel_id,
-                :profile = profile.as_str(),
-                :provider = provider.as_str(),
-                :model = model.as_str(),
-                :task_id = task_id,
-                :parent_id = thread.id,
-                :workflow_id = wf_id.unwrap_or(""),
-                :workflow_step = "review",
-                :plan = plan,
-                :template = template.as_deref().unwrap_or("")
-            )
+        // Single canonical INSERT (create_thread) — carries plan + template.
+        let new_thread = create_thread(
+            &mut *tx,
+            "pending",
+            thread.cause.as_str(),
+            thread.channel_id,
+            &profile,
+            CreateThreadParams {
+                provider: Some(provider.clone()),
+                model: Some(model.clone()),
+                task_id: Some(task_id.to_string()),
+                schedule_task_id: None,
+                plan,
+                parent_id: Some(thread.id),
+                workflow_id: wf_id.map(str::to_string),
+                workflow_step: Some("review".to_string()),
+                template,
+                hook_caused: false,
+            },
         )
-        .fetch_one(&mut *tx)
         .await
         .map_err(|e| format!("insert review thread: {e}"))?;
+        let new_id = new_thread.id;
 
         // seq-0 cause message for the review thread (same task context).
         let cause = if thread.cause.is_empty() {
@@ -1114,7 +1103,7 @@ pub(crate) async fn engine_transition(
         sql_forge!(
             "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
              VALUES (:tid, 'cause', :content, 0, 'cause')",
-            ( :tid = new_id.id, :content = cause )
+            ( :tid = new_id, :content = cause )
         )
         .execute(&mut *tx)
         .await
@@ -1122,7 +1111,7 @@ pub(crate) async fn engine_transition(
 
         // NOTE: the review execution counter is NOT incremented here — the
         // reviewer has not run yet; it increments when a review thread runs.
-        Some(new_id.id)
+        Some(new_id)
     } else {
         None
     };

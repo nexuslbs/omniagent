@@ -1,7 +1,7 @@
 use crate::agent::config::AgentContext;
 use crate::agent::fail_thread::{engine_transition, RerunKind};
 use crate::db::types as queries;
-use crate::db::types::Thread;
+use crate::db::types::{CreateThreadParams, Thread};
 use crate::workflows::WorkflowsFile;
 use sql_forge::sql_forge;
 
@@ -466,10 +466,6 @@ async fn create_review_thread(
     data_dir: &str,
     thread: &Thread,
 ) -> Result<Option<i64>, String> {
-    #[derive(sqlx::FromRow)]
-    struct IdRow {
-        id: i64,
-    }
     let cause = thread.cause.clone();
     let task_id = thread.task_id.clone().unwrap_or_default();
     // Step threads carry the TASK DESCRIPTION in the cause message so the
@@ -490,37 +486,42 @@ async fn create_review_thread(
         .await
         .unwrap_or_default();
     let identity = resolve_step_identity(pool, data_dir, thread, "review").await?;
-    let new_id = sqlx::query_as::<_, IdRow>(
-        "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
-         task_id, parent_id, workflow_id, workflow_step, task_type, plan, template)
-         VALUES ('pending', $1, $2, $3, $4, $5,
-         $6, $7, $8, 'review', 'kanban', $9, $10) RETURNING id",
+    // Single canonical INSERT (create_thread) — carries plan + template so
+    // the reviewer keeps the role's iteration budget and guidance.
+    let new_thread = crate::db::threads::create_thread(
+        pool,
+        "pending",
+        &cause,
+        thread.channel_id,
+        &identity.0,
+        CreateThreadParams {
+            provider: Some(identity.1),
+            model: Some(identity.2),
+            task_id: Some(task_id.clone()),
+            schedule_task_id: None,
+            plan: identity.3,
+            parent_id: Some(thread.id),
+            workflow_id: Some(wf_id),
+            workflow_step: Some("review".to_string()),
+            template: identity.4,
+            hook_caused: false,
+        },
     )
-    .bind(cause.as_str())
-    .bind(thread.channel_id)
-    .bind(identity.0)
-    .bind(identity.1)
-    .bind(identity.2)
-    .bind(task_id)
-    .bind(thread.id)
-    .bind(wf_id)
-    .bind(identity.3)
-    .bind(identity.4)
-    .fetch_one(pool)
     .await
     .map_err(|e| format!("create review thread: {e}"))?;
+    let new_id = new_thread.id;
 
     sqlx::query(
         "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
          VALUES ($1, 'cause', $2, 0, 'cause')",
     )
-    .bind(new_id.id)
+    .bind(new_id)
     .bind(cause_msg)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(Some(new_id.id))
+    Ok(Some(new_id))
 }
 
 /// R7-D4: cause used for the testing step thread INSERT. `threads.cause` has
@@ -540,10 +541,6 @@ async fn create_testing_thread(
     data_dir: &str,
     thread: &Thread,
 ) -> Result<Option<i64>, String> {
-    #[derive(sqlx::FromRow)]
-    struct IdRow {
-        id: i64,
-    }
     let task_id = match thread.task_id.clone() {
         Some(t) if !t.is_empty() => t,
         _ => return Ok(None),
@@ -560,37 +557,42 @@ async fn create_testing_thread(
         .await
         .unwrap_or_default();
     let identity = resolve_step_identity(pool, data_dir, thread, "testing").await?;
-    let new_id = sqlx::query_as::<_, IdRow>(
-        "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
-         task_id, parent_id, workflow_id, workflow_step, task_type, plan, template)
-         VALUES ('pending', $1, $2, $3, $4, $5,
-         $6, $7, $8, 'testing', 'kanban', $9, $10) RETURNING id",
+    // Single canonical INSERT (create_thread) — carries plan + template so
+    // the tester keeps the role's iteration budget and guidance.
+    let new_thread = crate::db::threads::create_thread(
+        pool,
+        "pending",
+        &cause,
+        thread.channel_id,
+        &identity.0,
+        CreateThreadParams {
+            provider: Some(identity.1),
+            model: Some(identity.2),
+            task_id: Some(task_id.clone()),
+            schedule_task_id: None,
+            plan: identity.3,
+            parent_id: Some(thread.id),
+            workflow_id: Some(wf_id),
+            workflow_step: Some("testing".to_string()),
+            template: identity.4,
+            hook_caused: false,
+        },
     )
-    .bind(cause.as_str())
-    .bind(thread.channel_id)
-    .bind(identity.0.clone())
-    .bind(identity.1.clone())
-    .bind(identity.2.clone())
-    .bind(task_id)
-    .bind(thread.id)
-    .bind(wf_id)
-    .bind(identity.3)
-    .bind(identity.4)
-    .fetch_one(pool)
     .await
     .map_err(|e| format!("create testing thread: {e}"))?;
+    let new_id = new_thread.id;
 
     sqlx::query(
         "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
          VALUES ($1, 'cause', $2, 0, 'cause')",
     )
-    .bind(new_id.id)
+    .bind(new_id)
     .bind(cause_msg)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(Some(new_id.id))
+    Ok(Some(new_id))
 }
 
 /// True when the workflow referenced by the thread declares `role`.

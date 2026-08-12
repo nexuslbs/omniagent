@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, cause, channel_id, profile, provider, model, task_id, workflow_id, workflow_step\n        FROM threads\n        WHERE status IN ('pending', 'processing')\n        ",
+  "query": "\n        SELECT id, cause, channel_id, profile, provider, model, task_id, workflow_id, workflow_step,\n               plan, template\n        FROM threads\n        WHERE status IN ('pending', 'processing')\n        ",
   "describe": {
     "columns": [
       {
@@ -101,6 +101,28 @@
             "name": "workflow_step"
           }
         }
+      },
+      {
+        "ordinal": 9,
+        "name": "plan",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "plan"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "template",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "template"
+          }
+        }
       }
     ],
     "parameters": {
@@ -115,8 +137,10 @@
       true,
       true,
       true,
+      true,
+      false,
       true
     ]
   },
-  "hash": "30edb6a96bda73821dc381310db83d616a9981ddc3f07117ec7a45749fbba930"
+  "hash": "4eb6ca250ef639acca82a575c8959b84e36fc55aae32f1fe6c7fc0c0d16177e1"
 }
