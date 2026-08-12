@@ -212,6 +212,7 @@ struct ReviewTaskRow {
     workflow_state: Option<String>,
     channel_id: Option<i64>,
     profile: Option<String>,
+    plan: bool,
 }
 
 /// Apply a MANUAL/API review decision to a kanban task. This is the shared
@@ -254,7 +255,7 @@ pub async fn manual_review_decision(
     let mut tx = pool.begin().await.map_err(err_str)?;
 
     let task: Option<ReviewTaskRow> = sqlx::query_as::<_, ReviewTaskRow>(
-        "SELECT status, workflow_id, workflow_state, channel_id, profile
+        "SELECT status, workflow_id, workflow_state, channel_id, profile, plan
          FROM kanban_tasks WHERE id = $1 FOR UPDATE",
     )
     .bind(task_id)
@@ -324,11 +325,18 @@ pub async fn manual_review_decision(
             id: i64,
         }
         let cause = format!("Manual review decision: {decision}. Task: {task_id}");
+        let role_cfg = workflow_role_for_step(step).and_then(|role| wf.resolve_role(role));
+        let plan = match role_cfg.as_ref().and_then(|r| r.plan_mode.as_deref()) {
+            Some("on") => true,
+            Some("off") => false,
+            _ => task.plan,
+        };
+        let template = role_cfg.as_ref().and_then(|r| r.template.clone());
         let new_id = sqlx::query_as::<_, IdRow>(
             "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
-             task_id, parent_id, workflow_id, workflow_step, task_type)
+             task_id, parent_id, workflow_id, workflow_step, task_type, plan, template)
              VALUES ('pending', $1, $2, $3, $7, $8,
-             $4, NULL, $5, $6, 'kanban') RETURNING id",
+             $4, NULL, $5, $6, 'kanban', $9, $10) RETURNING id",
         )
         .bind(cause.as_str())
         .bind(task.channel_id)
@@ -337,17 +345,19 @@ pub async fn manual_review_decision(
         .bind(task.workflow_id.clone().unwrap_or_default())
         .bind(step)
         .bind(
-            workflow_role_for_step(step)
-                .and_then(|role| wf.resolve_role(role))
-                .and_then(|r| r.provider)
+            role_cfg
+                .as_ref()
+                .and_then(|r| r.provider.clone())
                 .unwrap_or_default(),
         )
         .bind(
-            workflow_role_for_step(step)
-                .and_then(|role| wf.resolve_role(role))
-                .and_then(|r| r.model)
+            role_cfg
+                .as_ref()
+                .and_then(|r| r.model.clone())
                 .unwrap_or_default(),
         )
+        .bind(plan)
+        .bind(template)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| format!("insert manual review thread: {e}"))?;
@@ -932,10 +942,19 @@ pub(crate) async fn engine_transition(
 
     // Resolve the next step's execution identity before inserting it. The
     // executor must never inherit stale parent settings when a workflow role
-    // defines its own identity.
+    // defines its own identity. Returns (profile, provider, model, plan, template)
+    // — mirroring kanban_updater::resolve_step_identity so re-run threads get
+    // the role's plan_mode and template (thread 82 ran with plan=false +
+    // template=NULL because this closure only resolved profile/provider/model).
     let resolve_step_identity = |step: &str| {
         let role = role_for_step(step);
         let role_cfg = workflow.as_ref().and_then(|wf| wf.resolve_role(role));
+        let plan = match role_cfg.as_ref().and_then(|r| r.plan_mode.as_deref()) {
+            Some("on") => true,
+            Some("off") => false,
+            _ => thread.plan,
+        };
+        let template = role_cfg.as_ref().and_then(|r| r.template.clone());
         (
             role_cfg
                 .as_ref()
@@ -955,6 +974,8 @@ pub(crate) async fn engine_transition(
                 .and_then(|r| r.model.clone())
                 .or_else(|| workflow.as_ref().and_then(|wf| wf.defaults.model.clone()))
                 .or_else(|| thread.model.clone()),
+            plan,
+            template,
         )
     };
 
@@ -965,7 +986,7 @@ pub(crate) async fn engine_transition(
         struct IdRow {
             id: i64,
         }
-        let (profile, provider, model) = resolve_step_identity(step);
+        let (profile, provider, model, plan, template) = resolve_step_identity(step);
         let provider =
             provider.ok_or_else(|| format!("no provider configured for workflow step {step}"))?;
         let model = model.ok_or_else(|| format!("no model configured for workflow step {step}"))?;
@@ -975,9 +996,11 @@ pub(crate) async fn engine_transition(
         let new_id = sql_forge!(
             IdRow,
             "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
-                                  task_id, parent_id, workflow_id, workflow_step, task_type)
+                                  task_id, parent_id, workflow_id, workflow_step, task_type,
+                                  plan, template)
              VALUES ('pending', :cause, :channel_id, :profile, :provider, :model,
-                     :task_id, :parent_id, :workflow_id, :workflow_step, 'kanban')
+                     :task_id, :parent_id, :workflow_id, :workflow_step, 'kanban',
+                     :plan, :template)
              RETURNING id",
             (
                 :cause = thread.cause.as_str(),
@@ -988,7 +1011,9 @@ pub(crate) async fn engine_transition(
                 :task_id = task_id,
                 :parent_id = thread.id,
                 :workflow_id = wf_id.unwrap_or(""),
-                :workflow_step = step
+                :workflow_step = step,
+                :plan = plan,
+                :template = template.as_deref().unwrap_or("")
             )
         )
         .fetch_one(&mut *tx)
@@ -1045,7 +1070,7 @@ pub(crate) async fn engine_transition(
         struct IdRow {
             id: i64,
         }
-        let (profile, provider, model) = resolve_step_identity("review");
+        let (profile, provider, model, plan, template) = resolve_step_identity("review");
         let provider = provider
             .ok_or_else(|| "no provider configured for workflow step review".to_string())?;
         let model =
@@ -1056,9 +1081,11 @@ pub(crate) async fn engine_transition(
         let new_id = sql_forge!(
             IdRow,
             "INSERT INTO threads (status, cause, channel_id, profile, provider, model,
-                                  task_id, parent_id, workflow_id, workflow_step, task_type)
+                                  task_id, parent_id, workflow_id, workflow_step, task_type,
+                                  plan, template)
              VALUES ('pending', :cause, :channel_id, :profile, :provider, :model,
-                     :task_id, :parent_id, :workflow_id, :workflow_step, 'kanban')
+                     :task_id, :parent_id, :workflow_id, :workflow_step, 'kanban',
+                     :plan, :template)
              RETURNING id",
             (
                 :cause = thread.cause.as_str(),
@@ -1070,6 +1097,8 @@ pub(crate) async fn engine_transition(
                 :parent_id = thread.id,
                 :workflow_id = wf_id.unwrap_or(""),
                 :workflow_step = "review",
+                :plan = plan,
+                :template = template.as_deref().unwrap_or("")
             )
         )
         .fetch_one(&mut *tx)
