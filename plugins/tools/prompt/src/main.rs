@@ -1502,9 +1502,12 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // a trigger. When the tool decides not to compact, it returns null.
     //
     // Compaction itself runs at most 3 passes with a progressively smaller
-    // keep_recent; if the size is still over the soft budget after that and
-    // material remains to compact, the tool raises an error (is_error=true)
-    // instead of looping forever.
+    // keep_recent; if the size is still over the soft budget after that, the
+    // tool returns the PARTIAL result (the reduction achieved so far) instead
+    // of erroring — the caller applies it, which gets the size under the HARD
+    // trigger budget, so later iterations stop re-triggering compaction.
+    // Erroring would discard the partial reduction and make every later
+    // iteration repeat the same failed compaction forever.
     let use_tokens = !cfg.tokenizer_encoding.is_empty();
     let measure_size = |items: &[crate::chat_message::ChatMessage]| -> usize {
         let chars: usize = items
