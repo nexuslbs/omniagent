@@ -425,8 +425,8 @@ fn wait_task_tool() -> McpTool {
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Maximum seconds to wait (default: 30). Use a GENEROUS value for long operations: a Rust cargo build or a full dev-stack setup takes 5-15+ minutes, so use 900-1800 and the tool will return as soon as the task finishes. There is NO hard cap; the handler self-bounds by this argument.",
-                    "default": 30
+                    "description": "Maximum seconds to wait (default: 900). The tool polls every 500ms and returns as soon as the task finishes, so a long value costs nothing for fast tasks and avoids burning an iteration per 30s on long ones. Use 900-1800 for a Rust cargo build or full dev-stack setup. There is NO hard cap; the handler self-bounds by this argument.",
+                    "default": 900
                 },
                 "tail": {
                     "type": "integer",

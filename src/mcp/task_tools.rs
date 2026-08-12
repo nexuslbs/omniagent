@@ -56,10 +56,16 @@ pub async fn handle_poll_task(args: Value, _ctx: AppContext) -> AppResult<McpToo
 
 pub async fn handle_wait_task(args: Value, _ctx: AppContext) -> AppResult<McpToolResult> {
     let task_id = get_task_id(&args).unwrap_or_default();
+    // Default to a GENEROUS wait: the loop polls every 500ms and returns as
+    // soon as the task completes, so a long default costs nothing when the
+    // task is fast. A short default (30s) made agents that omit timeout_secs
+    // burn one iteration per 30s of every long build/test — observed killing
+    // threads at the iteration cap mid-cargo-build (Aug 2026). 900s covers a
+    // full Rust release build / dev-stack setup in a single call.
     let timeout_secs = args
         .get("timeout_secs")
         .and_then(|v| v.as_u64())
-        .unwrap_or(30);
+        .unwrap_or(900);
     let tail = args.get("tail").and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
     let registry = task_registry::TASK_REGISTRY
         .get()
