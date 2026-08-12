@@ -122,16 +122,17 @@ pub async fn find_messages_without_embeddings(
     pool: &PgPool,
     limit: i64,
 ) -> AppResult<Vec<MessageEmbeddingRow>> {
-    let rows: Vec<MessageEmbeddingRow> = sqlx::query_as(
+    let rows: Vec<MessageEmbeddingRow> = sql_forge!(
+        MessageEmbeddingRow,
         r#"
         SELECT id, content
         FROM messages
         WHERE embedding_vec IS NULL
         ORDER BY id
-        LIMIT $1
+        LIMIT :limit
         "#,
+        ( :limit = limit )
     )
-    .bind(limit)
     .fetch_all(pool)
     .await?;
     Ok(rows)

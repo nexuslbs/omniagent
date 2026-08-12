@@ -32,6 +32,22 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use sql_forge::sql_forge;
+/// Row type: kanban task status + thread_status (transition lookups).
+#[derive(sqlx::FromRow)]
+struct TaskStatusRow {
+    status: Option<String>,
+    thread_status: Option<String>,
+}
+
+/// Row type: thread id + optional kanban task id (+ channel for lookups).
+#[derive(sqlx::FromRow)]
+struct ThreadTaskRow {
+    id: i64,
+    channel_id: i64,
+    task_id: Option<String>,
+}
+
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
@@ -252,20 +268,21 @@ async fn apply_stop_recovery(
     };
 
     // Fetch the task's current status + thread_status to decide the outcome.
-    let task = sqlx::query_as::<_, (Option<String>, Option<String>)>(
-        "SELECT status, thread_status FROM kanban_tasks WHERE id = $1",
+    let task = sql_forge!(
+        TaskStatusRow,
+        "SELECT status, thread_status FROM kanban_tasks WHERE id = :task_id",
+        ( :task_id = task_id )
     )
-    .bind(task_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| e.to_string())?;
 
     // Task gone: nothing to transition.
-    let Some((task_status, thread_status)) = task else {
+    let Some(task) = task else {
         return Ok(false);
     };
 
-    match queries::stop_thread_recovery(task_status.as_deref(), thread_status.as_deref()) {
+    match queries::stop_thread_recovery(task.status.as_deref(), task.thread_status.as_deref()) {
         queries::StopRecovery::Block { .. } => {
             let comment = format!(
                 "Task blocked: thread #{} stopped explicitly (operator {})",
@@ -290,10 +307,11 @@ async fn stop_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
     // 1. Collect pending/processing threads (id + kanban task) BEFORE skipping
-    let threads = match sqlx::query_as::<_, (i64, Option<String>)>(
-        "SELECT id, task_id FROM threads WHERE channel_id = $1 AND status IN ('pending', 'processing')",
+    let threads = match     sql_forge!(
+        ThreadTaskRow,
+        "SELECT id, channel_id, task_id FROM threads WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
+        ( :channel_id = channel_id )
     )
-    .bind(channel_id)
     .fetch_all(&state.pool)
     .await
     {
@@ -312,10 +330,10 @@ async fn stop_handler(
     };
 
     // 2. Mark them all as skipped (plain skip - no reschedule, no re-run thread)
-    let skipped = match sqlx::query(
-        "UPDATE threads SET status = 'skipped' WHERE channel_id = $1 AND status IN ('pending', 'processing')",
+    let skipped = match     sql_forge!(
+        "UPDATE threads SET status = 'skipped' WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
+        ( :channel_id = channel_id )
     )
-    .bind(channel_id)
     .execute(&state.pool)
     .await
     {
@@ -342,13 +360,13 @@ async fn stop_handler(
 
     // 3. Phase 6b: block the kanban tasks of the skipped threads
     let mut blocked = 0u32;
-    for (thread_id, task_id) in &threads {
-        match apply_stop_recovery(&state.pool, *thread_id, task_id.as_deref(), "stop").await {
+    for row in &threads {
+        match apply_stop_recovery(&state.pool, row.id, row.task_id.as_deref(), "stop").await {
             Ok(true) => blocked += 1,
             Ok(false) => {}
             Err(e) => error!(
                 "Stop: failed to apply recovery for thread {}: {}",
-                thread_id, e
+                row.id, e
             ),
         }
     }
@@ -388,14 +406,15 @@ async fn stop_thread_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
     // 1. Look up the thread's channel id + kanban task id
-    let (channel_id, task_id) = match sqlx::query_as::<_, (i64, Option<String>)>(
-        "SELECT channel_id, task_id FROM threads WHERE id = $1",
+    let (channel_id, task_id) = match sql_forge!(
+        ThreadTaskRow,
+        "SELECT id, channel_id, task_id FROM threads WHERE id = :thread_id",
+        ( :thread_id = thread_id )
     )
-    .bind(thread_id)
     .fetch_optional(&state.pool)
     .await
     {
-        Ok(Some((cid, tid))) => (cid, tid),
+        Ok(Some(row)) => (row.channel_id, row.task_id),
         Ok(None) => {
             return Json(serde_json::json!({
                 "status": "error",
@@ -497,10 +516,11 @@ async fn close_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
     // 1. Collect pending/processing threads (id + kanban task) BEFORE skipping
-    let threads = match sqlx::query_as::<_, (i64, Option<String>)>(
-        "SELECT id, task_id FROM threads WHERE channel_id = $1 AND status IN ('pending', 'processing')",
+    let threads = match     sql_forge!(
+        ThreadTaskRow,
+        "SELECT id, channel_id, task_id FROM threads WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
+        ( :channel_id = channel_id )
     )
-    .bind(channel_id)
     .fetch_all(&state.pool)
     .await
     {
@@ -519,10 +539,10 @@ async fn close_handler(
     };
 
     // 2. Mark them all as skipped (plain skip - no reschedule, no re-run thread)
-    let skipped = match sqlx::query(
-        "UPDATE threads SET status = 'skipped' WHERE channel_id = $1 AND status IN ('pending', 'processing')",
+    let skipped = match     sql_forge!(
+        "UPDATE threads SET status = 'skipped' WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
+        ( :channel_id = channel_id )
     )
-    .bind(channel_id)
     .execute(&state.pool)
     .await
     {
@@ -549,13 +569,13 @@ async fn close_handler(
 
     // 3. Phase 6b: block the kanban tasks of the skipped threads
     let mut blocked = 0u32;
-    for (thread_id, task_id) in &threads {
-        match apply_stop_recovery(&state.pool, *thread_id, task_id.as_deref(), "close").await {
+    for row in &threads {
+        match apply_stop_recovery(&state.pool, row.id, row.task_id.as_deref(), "close").await {
             Ok(true) => blocked += 1,
             Ok(false) => {}
             Err(e) => error!(
                 "Close: failed to apply recovery for thread {}: {}",
-                thread_id, e
+                row.id, e
             ),
         }
     }

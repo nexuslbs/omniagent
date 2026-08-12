@@ -1,0 +1,106 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT t.id,\n               t.task_id,\n               k.title        AS task_title,\n               t.workflow_step,\n               t.status,\n               m.content      AS last_content,\n               m.msg_type     AS last_msg_type\n        FROM threads t\n        LEFT JOIN kanban_tasks k ON k.id = t.task_id\n        LEFT JOIN LATERAL (\n            SELECT content, msg_type\n            FROM messages\n            WHERE thread_id = t.id\n            ORDER BY thread_sequence DESC NULLS LAST,\n                     iteration_number DESC NULLS LAST,\n                     id DESC\n            LIMIT 1\n        ) m ON true\n        WHERE t.channel_id = $1\n          AND t.id != $2\n          AND t.task_id IS NOT NULL\n          AND (NULLIF($3, '')::text IS NULL OR t.task_id != NULLIF($4, '')::text)\n          AND (NULLIF($5, '')::text IS NULL OR t.task_id != NULLIF($6, '')::text)\n          AND t.status IN ('completed', 'review', 'failed', 'interrupted', 'skipped')\n        ORDER BY t.id DESC\n        LIMIT $7\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "task_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "task_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "task_title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "workflow_step",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "workflow_step"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "last_content",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "content"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "last_msg_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "msg_type"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1dab981e4b6c6013e712381207d29ed56a0700805bfe7f5dedf132e413162332"
+}

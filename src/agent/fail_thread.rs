@@ -255,11 +255,12 @@ pub async fn manual_review_decision(
 
     let mut tx = pool.begin().await.map_err(err_str)?;
 
-    let task: Option<ReviewTaskRow> = sqlx::query_as::<_, ReviewTaskRow>(
-        "SELECT status, workflow_id, workflow_state, channel_id, profile, plan
-         FROM kanban_tasks WHERE id = $1 FOR UPDATE",
+    let task: Option<ReviewTaskRow> = sql_forge!(
+        ReviewTaskRow,
+        "SELECT status, workflow_id, CAST(workflow_state AS text) AS workflow_state, channel_id, profile, plan
+         FROM kanban_tasks WHERE id = :task_id FOR UPDATE",
+        ( :task_id = task_id )
     )
-    .bind(task_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(err_str)?;
@@ -388,15 +389,17 @@ pub async fn manual_review_decision(
     };
 
     let thread_status = new_thread_id.map(|_| "scheduled".to_string());
-    sqlx::query(
-        "UPDATE kanban_tasks SET status = $1, thread_status = $2,
-                workflow_state = CAST($3 AS jsonb)
-         WHERE id = $4",
+    sql_forge!(
+        "UPDATE kanban_tasks SET status = :p1, thread_status = NULLIF(:thread_status, '')::text,
+                workflow_state = CAST(:p3 AS jsonb)
+         WHERE id = :task_id",
+        (
+            :p1 = to_status.as_str(),
+            :thread_status = thread_status.as_deref().unwrap_or(""),
+            :p3 = state,
+            :task_id = task_id,
+        )
     )
-    .bind(to_status.as_str())
-    .bind(thread_status)
-    .bind(state.to_string())
-    .bind(task_id)
     .execute(&mut *tx)
     .await
     .map_err(err_str)?;
@@ -1559,50 +1562,59 @@ mod tests_rerun_script {
         let script = r#"{"title":"RerunScriptTest","body":"run","tools":[{"name":"builtin_fail-thread","arguments":{"step":"running"}}]}"#;
 
         // clean leftovers from any previous crashed run, then set up parent rows
-        let _ = sqlx::query(
-            "DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE task_id = $1)",
+        let _ =         sql_forge!(
+            "DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE task_id = :task_id)",
+            ( :task_id = &task_id )
         )
-        .bind(&task_id)
         .execute(&pool)
         .await;
-        let _ = sqlx::query("DELETE FROM threads WHERE task_id = $1")
-            .bind(&task_id)
-            .execute(&pool)
-            .await;
-        let _ = sqlx::query("DELETE FROM kanban_history WHERE kanban_task_id = $1")
-            .bind(&task_id)
-            .execute(&pool)
-            .await;
-        let _ = sqlx::query("DELETE FROM kanban_tasks WHERE id = $1")
-            .bind(&task_id)
-            .execute(&pool)
-            .await;
-
-        sqlx::query(
-            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
-             VALUES ($1, 'RerunScriptTest', '', 'running', 1, 1, 'test', 0, NULL, false, 'manual', 'test-wf')",
+        let _ = sql_forge!(
+            "DELETE FROM threads WHERE task_id = :task_id",
+            ( :task_id = &task_id )
         )
-        .bind(&task_id)
+        .execute(&pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM kanban_history WHERE kanban_task_id = :task_id",
+            ( :task_id = &task_id )
+        )
+        .execute(&pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM kanban_tasks WHERE id = :task_id",
+            ( :task_id = &task_id )
+        )
+        .execute(&pool)
+        .await;
+
+        sql_forge!(
+            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
+             VALUES (:task_id, 'RerunScriptTest', '', 'running', 1, 1, 'test', 0, NULL, false, 'manual', 'test-wf')",
+            ( :task_id = &task_id )
+        )
         .execute(&pool)
         .await
         .expect("insert kanban task");
 
-        let parent_id: i64 = sqlx::query_scalar::<_, i64>(
+        let parent_id: i64 =         sql_forge!(
+            scalar i64,
             "INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, parent_id, workflow_id, workflow_step, task_type)
-             VALUES ('running', 'user', 1, 'test', 'noop', 'noop', $1, NULL, 'test-wf', 'running', 'kanban')
+             VALUES ('running', 'user', 1, 'test', 'noop', 'noop', :task_id, NULL, 'test-wf', 'running', 'kanban')
              RETURNING id",
+            ( :task_id = &task_id )
         )
-        .bind(&task_id)
         .fetch_one(&pool)
         .await
         .expect("insert parent thread");
 
-        sqlx::query(
+        sql_forge!(
             "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
-             VALUES ($1, 'user', $2, 0, 'kanban')",
+             VALUES (:parent_id, 'user', :script, 0, 'kanban')",
+            (
+                :parent_id = parent_id,
+                :script = script,
+            )
         )
-        .bind(parent_id)
-        .bind(script)
         .execute(&pool)
         .await
         .expect("insert parent kanban message");
@@ -1644,10 +1656,11 @@ mod tests_rerun_script {
         .expect("engine_transition should create a rerun thread")
         .expect("rerun thread id");
 
-        let content: String = sqlx::query_scalar::<_, String>(
-            "SELECT content FROM messages WHERE thread_id = $1 AND msg_type = 'kanban' ORDER BY id LIMIT 1",
+        let content: String =         sql_forge!(
+            scalar String,
+            "SELECT content FROM messages WHERE thread_id = :new_id AND msg_type = 'kanban' ORDER BY id LIMIT 1",
+            ( :new_id = new_id )
         )
-        .bind(new_id)
         .fetch_one(&pool)
         .await
         .expect("fetch rerun cause message");
@@ -1659,24 +1672,36 @@ mod tests_rerun_script {
         );
 
         // cleanup (new thread first — it references the parent)
-        let _ = sqlx::query("DELETE FROM messages WHERE thread_id IN ($1, $2)")
-            .bind(new_id)
-            .bind(parent_id)
-            .execute(&pool)
-            .await;
-        let _ = sqlx::query("DELETE FROM threads WHERE id IN ($1, $2)")
-            .bind(new_id)
-            .bind(parent_id)
-            .execute(&pool)
-            .await;
-        let _ = sqlx::query("DELETE FROM kanban_history WHERE kanban_task_id = $1")
-            .bind(&task_id)
-            .execute(&pool)
-            .await;
-        let _ = sqlx::query("DELETE FROM kanban_tasks WHERE id = $1")
-            .bind(&task_id)
-            .execute(&pool)
-            .await;
+        let _ = sql_forge!(
+            "DELETE FROM messages WHERE thread_id IN (:new_id, :parent_id)",
+            (
+                :new_id = new_id,
+                :parent_id = parent_id,
+            )
+        )
+        .execute(&pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM threads WHERE id IN (:new_id, :parent_id)",
+            (
+                :new_id = new_id,
+                :parent_id = parent_id,
+            )
+        )
+        .execute(&pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM kanban_history WHERE kanban_task_id = :task_id",
+            ( :task_id = &task_id )
+        )
+        .execute(&pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM kanban_tasks WHERE id = :task_id",
+            ( :task_id = &task_id )
+        )
+        .execute(&pool)
+        .await;
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 }
@@ -1711,43 +1736,54 @@ mod tests_r8n_no_workflow_blocked {
         workflow_id: Option<&str>,
         thread_step: Option<&str>,
     ) -> i64 {
-        let _ = sqlx::query(
-            "DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE task_id = $1)",
+        let _ =         sql_forge!(
+            "DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE task_id = :task_id)",
+            ( :task_id = task_id )
         )
-        .bind(task_id)
         .execute(pool)
         .await;
-        let _ = sqlx::query("DELETE FROM threads WHERE task_id = $1")
-            .bind(task_id)
-            .execute(pool)
-            .await;
-        let _ = sqlx::query("DELETE FROM kanban_history WHERE kanban_task_id = $1")
-            .bind(task_id)
-            .execute(pool)
-            .await;
-        let _ = sqlx::query("DELETE FROM kanban_tasks WHERE id = $1")
-            .bind(task_id)
-            .execute(pool)
-            .await;
-
-        sqlx::query(
-            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
-             VALUES ($1, 'R8N', '', 'running', 1, 1, 'test', 0, NULL, false, 'manual', $2)",
+        let _ = sql_forge!(
+            "DELETE FROM threads WHERE task_id = :task_id",
+            ( :task_id = task_id )
         )
-        .bind(task_id)
-        .bind(workflow_id)
+        .execute(pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM kanban_history WHERE kanban_task_id = :task_id",
+            ( :task_id = task_id )
+        )
+        .execute(pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM kanban_tasks WHERE id = :task_id",
+            ( :task_id = task_id )
+        )
+        .execute(pool)
+        .await;
+
+        sql_forge!(
+            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
+             VALUES (:task_id, 'R8N', '', 'running', 1, 1, 'test', 0, NULL, false, 'manual', NULLIF(:workflow_id, '')::text)",
+            (
+                :task_id = task_id,
+                :workflow_id = workflow_id.unwrap_or(""),
+            )
+        )
         .execute(pool)
         .await
         .expect("insert kanban task");
 
-        sqlx::query_scalar::<_, i64>(
+        sql_forge!(
+            scalar i64,
             "INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, parent_id, workflow_id, workflow_step, task_type)
-             VALUES ('running', 'user', 1, 'test', 'noop', 'noop', $1, NULL, $2, $3, 'kanban')
+             VALUES ('running', 'user', 1, 'test', 'noop', 'noop', :task_id, NULL, NULLIF(:workflow_id, '')::text, NULLIF(:thread_step, '')::text, 'kanban')
              RETURNING id",
+            (
+                :task_id = task_id,
+                :workflow_id = workflow_id.unwrap_or(""),
+                :thread_step = thread_step.unwrap_or(""),
+            )
         )
-        .bind(task_id)
-        .bind(workflow_id.unwrap_or(""))
-        .bind(thread_step)
         .fetch_one(pool)
         .await
         .expect("insert parent thread")
@@ -1785,18 +1821,22 @@ mod tests_r8n_no_workflow_blocked {
     }
 
     async fn task_status(pool: &sqlx::PgPool, task_id: &str) -> String {
-        sqlx::query_scalar::<_, String>("SELECT status FROM kanban_tasks WHERE id = $1")
-            .bind(task_id)
-            .fetch_one(pool)
-            .await
-            .expect("fetch task status")
+        sql_forge!(
+            scalar String,
+            "SELECT status FROM kanban_tasks WHERE id = :task_id",
+            ( :task_id = task_id )
+        )
+        .fetch_one(pool)
+        .await
+        .expect("fetch task status")
     }
 
     async fn latest_history_comment(pool: &sqlx::PgPool, task_id: &str) -> String {
-        sqlx::query_scalar::<_, String>(
-            "SELECT comment FROM kanban_history WHERE kanban_task_id = $1 ORDER BY id DESC LIMIT 1",
+        sql_forge!(
+            scalar String,
+            "SELECT comment FROM kanban_history WHERE kanban_task_id = :task_id ORDER BY id DESC LIMIT 1",
+            ( :task_id = task_id )
         )
-        .bind(task_id)
         .fetch_one(pool)
         .await
         .expect("fetch kanban history comment")
@@ -1804,23 +1844,31 @@ mod tests_r8n_no_workflow_blocked {
 
     async fn cleanup(pool: &sqlx::PgPool, task_id: &str, thread_ids: &[i64]) {
         for tid in thread_ids {
-            let _ = sqlx::query("DELETE FROM messages WHERE thread_id = $1")
-                .bind(tid)
-                .execute(pool)
-                .await;
+            let _ = sql_forge!(
+                "DELETE FROM messages WHERE thread_id = :tid",
+                ( :tid = tid )
+            )
+            .execute(pool)
+            .await;
         }
-        let _ = sqlx::query("DELETE FROM threads WHERE task_id = $1")
-            .bind(task_id)
-            .execute(pool)
-            .await;
-        let _ = sqlx::query("DELETE FROM kanban_history WHERE kanban_task_id = $1")
-            .bind(task_id)
-            .execute(pool)
-            .await;
-        let _ = sqlx::query("DELETE FROM kanban_tasks WHERE id = $1")
-            .bind(task_id)
-            .execute(pool)
-            .await;
+        let _ = sql_forge!(
+            "DELETE FROM threads WHERE task_id = :task_id",
+            ( :task_id = task_id )
+        )
+        .execute(pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM kanban_history WHERE kanban_task_id = :task_id",
+            ( :task_id = task_id )
+        )
+        .execute(pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM kanban_tasks WHERE id = :task_id",
+            ( :task_id = task_id )
+        )
+        .execute(pool)
+        .await;
     }
 
     #[tokio::test]
@@ -1938,12 +1986,14 @@ mod tests_r8n_no_workflow_blocked {
         .expect("engine_transition should succeed")
         .expect("workflow interrupted must create a re-run thread");
 
-        let step: String =
-            sqlx::query_scalar::<_, String>("SELECT workflow_step FROM threads WHERE id = $1")
-                .bind(new_id)
-                .fetch_one(&pool)
-                .await
-                .expect("fetch rerun thread step");
+        let step: String = sql_forge!(
+            scalar String,
+            "SELECT workflow_step FROM threads WHERE id = :new_id",
+            ( :new_id = new_id )
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fetch rerun thread step");
         assert_eq!(step, "running", "I1: re-run the SAME step");
 
         // kanban status unchanged (task stays 'running', not 'blocked')
@@ -1982,12 +2032,14 @@ mod tests_r8n_no_workflow_blocked {
         .expect("engine_transition should succeed")
         .expect("workflow failed must create a re-run thread");
 
-        let step: String =
-            sqlx::query_scalar::<_, String>("SELECT workflow_step FROM threads WHERE id = $1")
-                .bind(new_id)
-                .fetch_one(&pool)
-                .await
-                .expect("fetch rerun thread step");
+        let step: String = sql_forge!(
+            scalar String,
+            "SELECT workflow_step FROM threads WHERE id = :new_id",
+            ( :new_id = new_id )
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fetch rerun thread step");
         assert_eq!(
             step, "running",
             "F0: failed executor re-runs the executor step"

@@ -1254,11 +1254,10 @@ pub async fn get_completed_seq0_threads_since(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Get a thread row by ID (used by the builtin fail-thread tool to resolve
-/// the current thread). Uses runtime sqlx instead of sql_forge! because these
-/// queries are not part of the SQLX_OFFLINE query cache (see db/messages.rs
-/// for the same pattern).
+/// the current thread).
 pub async fn get_thread_by_id(pool: &PgPool, thread_id: i64) -> AppResult<Option<Thread>> {
-    let row: Option<ThreadDb> = sqlx::query_as::<_, ThreadDb>(
+    let row: Option<ThreadDb> =     sql_forge!(
+        ThreadDb,
         r#"
         SELECT
             id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
@@ -1266,12 +1265,12 @@ pub async fn get_thread_by_id(pool: &PgPool, thread_id: i64) -> AppResult<Option
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
             COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
             COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
-            terminal, plan, parent_id, iterations
+            terminal, plan, parent_id, iterations, workflow_step, template
         FROM threads
-        WHERE id = $1
+        WHERE id = :thread_id
         "#,
+        ( :thread_id = thread_id )
     )
-    .bind(thread_id)
     .fetch_optional(pool)
     .await?;
 
@@ -1282,11 +1281,13 @@ pub async fn get_thread_by_id(pool: &PgPool, thread_id: i64) -> AppResult<Option
 /// Used by handle_response to detect a FAILED state already applied by the
 /// builtin fail-thread tool before normal finalization runs.
 pub async fn get_thread_status(pool: &PgPool, thread_id: i64) -> AppResult<Option<String>> {
-    let status: Option<String> =
-        sqlx::query_scalar::<_, String>("SELECT status FROM threads WHERE id = $1")
-            .bind(thread_id)
-            .fetch_optional(pool)
-            .await?;
+    let status: Option<String> = sql_forge!(
+        scalar String,
+        "SELECT status FROM threads WHERE id = :thread_id",
+        ( :thread_id = thread_id )
+    )
+    .fetch_optional(pool)
+    .await?;
 
     Ok(status)
 }
@@ -1295,7 +1296,8 @@ pub async fn get_thread_status(pool: &PgPool, thread_id: i64) -> AppResult<Optio
 /// Used by handle_response to return the fail-thread tool's Error message
 /// as the final thread message.
 pub async fn get_last_message(pool: &PgPool, thread_id: i64) -> AppResult<Option<Message>> {
-    let row: Option<MessageDb> = sqlx::query_as::<_, MessageDb>(
+    let row: Option<MessageDb> =     sql_forge!(
+        MessageDb,
         r#"
         SELECT
             id, thread_id, role, content, thread_sequence, external_id,
@@ -1304,12 +1306,12 @@ pub async fn get_last_message(pool: &PgPool, thread_id: i64) -> AppResult<Option
             duration_ms, token_usage::text AS "token_usage",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages
-        WHERE thread_id = $1
+        WHERE thread_id = :thread_id
         ORDER BY thread_sequence DESC, id DESC
         LIMIT 1
         "#,
+        ( :thread_id = thread_id )
     )
-    .bind(thread_id)
     .fetch_optional(pool)
     .await?;
 

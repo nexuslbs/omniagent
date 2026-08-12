@@ -224,22 +224,24 @@ async fn cancel_in_flight_for_channel(cfg: &AgentContext, channel_id: i64) {
     let Some(registry) = registry else {
         return; // registry not initialized — nothing to cancel
     };
-    let thread_ids: Vec<i64> =
-        match sqlx::query_scalar("SELECT id FROM threads WHERE channel_id = $1")
-            .bind(channel_id)
-            .fetch_all(&cfg.pool)
-            .await
-        {
-            Ok(ids) => ids,
-            Err(e) => {
-                tracing::warn!(
-                    "[supervisor] Failed to list threads for channel {} cleanup: {:?}",
-                    channel_id,
-                    e
-                );
-                return;
-            }
-        };
+    let thread_ids: Vec<i64> = match sql_forge!(
+        scalar i64,
+        "SELECT id FROM threads WHERE channel_id = :channel_id",
+        ( :channel_id = channel_id )
+    )
+    .fetch_all(&cfg.pool)
+    .await
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!(
+                "[supervisor] Failed to list threads for channel {} cleanup: {:?}",
+                channel_id,
+                e
+            );
+            return;
+        }
+    };
     for tid in thread_ids {
         let n = registry.cancel_all_for_thread(tid).await;
         if n > 0 {

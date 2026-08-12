@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use mcp_server_util::*;
 use parking_lot::Mutex;
 use serde_json::Value;
+use sql_forge::sql_forge;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -146,10 +147,11 @@ async fn handle_hindsight_populator(
         Err(_) => 0,
     };
 
-    let rows: Vec<(i64, String, String)> = sqlx::query_as(
-        "SELECT id, role, content FROM messages WHERE id > $1 AND msg_type IN ('message','reasoning','plan','error','cause','tool','tool-result') AND COALESCE(content,'') != '' ORDER BY id ASC LIMIT 200"
+    let rows: Vec<i64> = sql_forge!(
+        scalar i64,
+        "SELECT id FROM messages WHERE id > :last_id AND msg_type IN ('message','reasoning','plan','error','cause','tool','tool-result') AND COALESCE(content,'') != '' ORDER BY id ASC LIMIT 200",
+        ( :last_id = last_id )
     )
-    .bind(last_id)
     .fetch_all(pool)
     .await
     .map_err(|e| anyhow::anyhow!("Failed to query messages: {}", e))?;
@@ -159,7 +161,7 @@ async fn handle_hindsight_populator(
     }
 
     let count = rows.len();
-    let max_id = rows.iter().map(|r| r.0).max().unwrap_or(0);
+    let max_id = rows.iter().copied().max().unwrap_or(0);
 
     let watermark = serde_json::json!({"last_message_id": max_id, "last_run_at": chrono::Utc::now().to_rfc3339()});
     std::fs::write(&watermark_path, serde_json::to_string_pretty(&watermark)?)
@@ -283,34 +285,39 @@ async fn handle_setup_knowledge_pipeline(pool: &PgPool, args: &Value) -> Result<
     let skills_json = serde_json::json!(["knowledge-pipeline"]).to_string();
     let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("Run the knowledge pipeline maintenance (summarize channels, update wiki, run relevance indexer, populate hindsight).");
 
-    let existing: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM cron_jobs WHERE name = 'knowledge-pipeline' LIMIT 1")
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to check existing cron: {}", e))?;
+    let existing: Option<String> = sql_forge!(
+        scalar String,
+        "SELECT id FROM cron_jobs WHERE name = 'knowledge-pipeline' LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to check existing cron: {}", e))?;
 
     if existing.is_some() {
         return Ok(("Knowledge Pipeline cron already exists".to_string(), false));
     }
 
-    let channel: Option<(i64,)> = sqlx::query_as(
+    let channel: Option<i64> = sql_forge!(
+        scalar i64,
         "SELECT id FROM channels WHERE platform = 'cron' AND name = 'cron-default' LIMIT 1",
     )
     .fetch_optional(pool)
     .await
     .map_err(|e| anyhow::anyhow!("Failed to get cron channel: {}", e))?;
 
-    let channel_id = channel.map(|c| c.0);
+    let channel_id = channel;
 
-    sqlx::query(
+    sql_forge!(
         r#"INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, channel_id, mode, planning_mode, profile, enabled, active)
-           VALUES ($1, 'knowledge-pipeline', 'Knowledge Pipeline', $2, $3, $4, $5, 'agentic', 'plan_with_subtasks', 'pipeline', true, true)"#
+           VALUES (:id, 'knowledge-pipeline', 'Knowledge Pipeline', :schedule, :prompt, :skills_json, NULLIF(:channel_id, 0::bigint)::bigint, 'agentic', 'plan_with_subtasks', 'pipeline', true, true)"#,
+        (
+            :id = &id,
+            :schedule = schedule,
+            :prompt = prompt,
+            :skills_json = &skills_json,
+            :channel_id = channel_id.unwrap_or(0),
+        )
     )
-    .bind(&id)
-    .bind(schedule)
-    .bind(prompt)
-    .bind(&skills_json)
-    .bind(channel_id)
     .execute(pool)
     .await
     .map_err(|e| anyhow::anyhow!("Failed to create knowledge pipeline cron: {}", e))?;

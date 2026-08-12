@@ -14,6 +14,7 @@
 #![allow(dead_code, unused_imports)]
 
 use anyhow::{Context, Result};
+use sql_forge::sql_forge;
 mod chat_message;
 mod compact;
 mod dump;
@@ -260,19 +261,22 @@ async fn connect_db(database_url: &str) -> Result<PgPool> {
 }
 
 async fn get_thread_messages(pool: &PgPool, thread_id: i64, limit: i64) -> Result<Vec<MessageRow>> {
-    let rows = sqlx::query_as::<_, MessageRow>(
+    let rows = sql_forge!(
+        MessageRow,
         r#"
         SELECT id, thread_id, role, content, msg_type, msg_subtype,
-               COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'), '') AS created_at
+               COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS created_at
         FROM messages
-        WHERE thread_id = $1
+        WHERE thread_id = :thread_id
           AND (role = 'cause' OR msg_type IN ('message', 'reasoning'))
         ORDER BY created_at DESC
-        LIMIT $2
+        LIMIT :limit
         "#,
+        (
+            :thread_id = thread_id,
+            :limit = limit,
+        )
     )
-    .bind(thread_id)
-    .bind(limit)
     .fetch_all(pool)
     .await
     .context("Failed to fetch thread messages")?;
@@ -281,16 +285,17 @@ async fn get_thread_messages(pool: &PgPool, thread_id: i64, limit: i64) -> Resul
 }
 
 async fn get_latest_summary(pool: &PgPool, channel_id: i64) -> Result<Option<SummaryRow>> {
-    let row = sqlx::query_as::<_, SummaryRow>(
+    let row = sql_forge!(
+        SummaryRow,
         r#"
         SELECT id, channel_id, next_thread_id, content
         FROM summaries
-        WHERE channel_id = $1
+        WHERE channel_id = :channel_id
         ORDER BY id DESC
         LIMIT 1
         "#,
+        ( :channel_id = channel_id )
     )
-    .bind(channel_id)
     .fetch_optional(pool)
     .await
     .context("Failed to fetch latest summary")?;
@@ -304,20 +309,23 @@ async fn get_threads_since(
     since_id: i64,
     limit: i64,
 ) -> Result<Vec<ThreadRow>> {
-    let rows = sqlx::query_as::<_, ThreadRow>(
+    let rows = sql_forge!(
+        ThreadRow,
         r#"
         SELECT id, status, cause
         FROM threads
-        WHERE channel_id = $1
+        WHERE channel_id = :channel_id
           AND status = 'completed'
-          AND id > $2
+          AND id > :since_id
         ORDER BY id ASC
-        LIMIT $3
+        LIMIT :limit
         "#,
+        (
+            :channel_id = channel_id,
+            :since_id = since_id,
+            :limit = limit,
+        )
     )
-    .bind(channel_id)
-    .bind(since_id)
-    .bind(limit)
     .fetch_all(pool)
     .await
     .context("Failed to fetch completed threads")?;
@@ -356,21 +364,24 @@ async fn get_prior_threads_by_task(
     current_thread_id: i64,
     limit: i64,
 ) -> Result<Vec<PriorAttemptRow>> {
-    let rows = sqlx::query_as::<_, PriorAttemptRow>(
+    let rows = sql_forge!(
+        PriorAttemptRow,
         r#"
         SELECT id, status, iterations,
-               TO_CHAR(ended_at, 'YYYY-MM-DD HH24:MI') AS ended_at
+               TO_CHAR(ended_at, 'YYYY-MM-DD HH24' || CHR(58) || 'MI') AS ended_at
         FROM threads
-        WHERE task_id = $1
+        WHERE task_id = :task_id
           AND (task_type = 'kanban' OR task_type IS NULL)
-          AND id < $2
+          AND id < :current_thread_id
         ORDER BY id DESC
-        LIMIT $3
+        LIMIT :limit
         "#,
+        (
+            :task_id = task_id,
+            :current_thread_id = current_thread_id,
+            :limit = limit,
+        )
     )
-    .bind(task_id)
-    .bind(current_thread_id)
-    .bind(limit)
     .fetch_all(pool)
     .await
     .context("Failed to fetch prior threads of task")?;
@@ -381,15 +392,16 @@ async fn get_prior_threads_by_task(
 /// The thread's final summary message (msg_type='summary') if it produced
 /// one — this is the report a thread leaves behind for its successor.
 async fn get_thread_summary(pool: &PgPool, thread_id: i64) -> Result<Option<String>> {
-    let row = sqlx::query_as::<_, (String,)>(
-        "SELECT content FROM messages WHERE thread_id = $1 AND msg_type = 'summary' ORDER BY id DESC LIMIT 1",
+    let row = sql_forge!(
+        scalar String,
+        "SELECT content FROM messages WHERE thread_id = :thread_id AND msg_type = 'summary' ORDER BY id DESC LIMIT 1",
+        ( :thread_id = thread_id )
     )
-    .bind(thread_id)
     .fetch_optional(pool)
     .await
     .context("Failed to fetch thread summary")?;
 
-    Ok(row.map(|(content,)| content))
+    Ok(row)
 }
 
 /// Pure renderer for the prior-attempts block (R8-J). Every prior thread is
@@ -439,13 +451,15 @@ fn render_prior_attempts_block(
 /// Plain (non-task) threads get no block; any failure degrades gracefully
 /// to no block (the prompt must never fail because history is unavailable).
 async fn build_prior_attempts_block(pool: &PgPool, thread_id: i64) -> Result<Option<String>> {
-    let task_id =
-        sqlx::query_as::<_, (Option<String>,)>("SELECT task_id FROM threads WHERE id = $1")
-            .bind(thread_id)
-            .fetch_optional(pool)
-            .await
-            .context("Failed to fetch thread task_id")?;
-    let Some((Some(task_id),)) = task_id else {
+    let task_id = sql_forge!(
+        scalar Option<String>,
+        "SELECT task_id FROM threads WHERE id = :thread_id",
+        ( :thread_id = thread_id )
+    )
+    .fetch_optional(pool)
+    .await
+    .context("Failed to fetch thread task_id")?;
+    let Some(Some(task_id)) = task_id else {
         return Ok(None); // plain thread — no same-task history
     };
 
@@ -568,19 +582,22 @@ async fn count_interrupted_attempts(
     pool: &PgPool,
     thread_id: i64,
 ) -> Result<Option<i64>, anyhow::Error> {
-    let task_id =
-        sqlx::query_scalar::<_, Option<String>>("SELECT task_id FROM threads WHERE id = $1")
-            .bind(thread_id)
-            .fetch_optional(pool)
-            .await?;
+    let task_id = sql_forge!(
+        scalar Option<String>,
+        "SELECT task_id FROM threads WHERE id = :thread_id",
+        ( :thread_id = thread_id )
+    )
+    .fetch_optional(pool)
+    .await?;
     let task_id = match task_id {
         Some(Some(t)) => t,
         _ => return Ok(None),
     };
-    let count: i64 = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM threads WHERE task_id = $1 AND status = 'interrupted'",
+    let count: i64 = sql_forge!(
+        scalar i64,
+        "SELECT COUNT(*) FROM threads WHERE task_id = :task_id AND status = 'interrupted'",
+        ( :task_id = task_id )
     )
-    .bind(task_id)
     .fetch_one(pool)
     .await?;
     Ok(Some(count))
@@ -588,15 +605,16 @@ async fn count_interrupted_attempts(
 
 // ---------------------------------------------------------------------------
 async fn get_subtasks(pool: &PgPool, thread_id: i64) -> Result<Vec<SubtaskRow>> {
-    let rows = sqlx::query_as::<_, SubtaskRow>(
+    let rows = sql_forge!(
+        SubtaskRow,
         r#"
         SELECT id, description, status, thread_id
         FROM thread_subtasks
-        WHERE thread_id = $1
+        WHERE thread_id = :thread_id
         ORDER BY id ASC
         "#,
+        ( :thread_id = thread_id )
     )
-    .bind(thread_id)
     .fetch_all(pool)
     .await
     .context("Failed to fetch subtasks")?;
@@ -647,10 +665,11 @@ struct LastMessageRow {
 /// messages.msg_type). For a successful step-thread this is normally the thread
 /// summary; for a failed one it is the fail message (Error type).
 async fn last_message_info(pool: &PgPool, thread_id: i64) -> anyhow::Result<LastMessageRow> {
-    Ok(sqlx::query_as::<_, LastMessageRow>(
-        "SELECT content, msg_type FROM messages WHERE thread_id = $1 ORDER BY id DESC LIMIT 1",
+    Ok(    sql_forge!(
+        LastMessageRow,
+        "SELECT content, msg_type FROM messages WHERE thread_id = :thread_id ORDER BY id DESC LIMIT 1",
+        ( :thread_id = thread_id )
     )
-    .bind(thread_id)
     .fetch_optional(pool)
     .await?
     .unwrap_or(LastMessageRow {
@@ -780,10 +799,11 @@ fn render_cross_task_block(own: &OwnTaskLink, rows: Vec<CrossTaskThreadRow>) -> 
 /// `None` for plain (non-task) threads and when the channel has no other
 /// terminal task threads. One bounded query; never fails the prompt.
 async fn build_cross_task_block(pool: &PgPool, thread_id: i64) -> anyhow::Result<Option<String>> {
-    let thread_ref: Option<CrossTaskThreadRef> = sqlx::query_as::<_, CrossTaskThreadRef>(
-        "SELECT task_id, schedule_task_id, channel_id FROM threads WHERE id = $1",
+    let thread_ref: Option<CrossTaskThreadRef> = sql_forge!(
+        CrossTaskThreadRef,
+        "SELECT task_id, schedule_task_id, channel_id FROM threads WHERE id = :thread_id",
+        ( :thread_id = thread_id )
     )
-    .bind(thread_id)
     .fetch_optional(pool)
     .await?;
     let thread_ref = match thread_ref {
@@ -802,7 +822,8 @@ async fn build_cross_task_block(pool: &PgPool, thread_id: i64) -> anyhow::Result
         None => return Ok(None),
     };
 
-    let rows: Vec<CrossTaskThreadRow> = sqlx::query_as::<_, CrossTaskThreadRow>(
+    let rows: Vec<CrossTaskThreadRow> = sql_forge!(
+        CrossTaskThreadRow,
         r#"
         SELECT t.id,
                t.task_id,
@@ -822,21 +843,23 @@ async fn build_cross_task_block(pool: &PgPool, thread_id: i64) -> anyhow::Result
                      id DESC
             LIMIT 1
         ) m ON true
-        WHERE t.channel_id = $1
-          AND t.id != $2
+        WHERE t.channel_id = :channel_id
+          AND t.id != :thread_id
           AND t.task_id IS NOT NULL
-          AND ($3::text IS NULL OR t.task_id != $3)
-          AND ($4::text IS NULL OR t.task_id != $4)
+          AND (NULLIF(:task_id, '')::text IS NULL OR t.task_id != NULLIF(:task_id, '')::text)
+          AND (NULLIF(:schedule_task_id, '')::text IS NULL OR t.task_id != NULLIF(:schedule_task_id, '')::text)
           AND t.status IN ('completed', 'review', 'failed', 'interrupted', 'skipped')
         ORDER BY t.id DESC
-        LIMIT $5
+        LIMIT :i64
         "#,
+        (
+            :channel_id = channel_id,
+            :thread_id = thread_id,
+            :task_id = own.task_id.as_deref().unwrap_or(""),
+            :schedule_task_id = own.schedule_task_id.as_deref().unwrap_or(""),
+            :i64 = CROSS_TASK_MAX_ENTRIES as i64,
+        )
     )
-    .bind(channel_id)
-    .bind(thread_id)
-    .bind(own.task_id.as_deref())
-    .bind(own.schedule_task_id.as_deref())
-    .bind(CROSS_TASK_MAX_ENTRIES as i64)
     .fetch_all(pool)
     .await?;
 
@@ -867,10 +890,11 @@ fn extract_tracking_path(body: &str) -> Option<String> {
 /// (no-op) for threads without a task linkage; a failing sub-query degrades
 /// gracefully by simply omitting that sub-part — never fails the prompt.
 async fn build_continuation_block(pool: &PgPool, thread_id: i64) -> anyhow::Result<Option<String>> {
-    let thread_ref: Option<ThreadTaskRef> = sqlx::query_as::<_, ThreadTaskRef>(
-        "SELECT task_id, schedule_task_id FROM threads WHERE id = $1",
+    let thread_ref: Option<ThreadTaskRef> = sql_forge!(
+        ThreadTaskRef,
+        "SELECT task_id, schedule_task_id FROM threads WHERE id = :thread_id",
+        ( :thread_id = thread_id )
     )
-    .bind(thread_id)
     .fetch_optional(pool)
     .await?;
     let Some(thread_ref) = thread_ref else {
@@ -881,10 +905,11 @@ async fn build_continuation_block(pool: &PgPool, thread_id: i64) -> anyhow::Resu
 
     // Role instructions for the CURRENT thread's workflow step (executor /
     // tester / reviewer) plus thread-access rules (R11).
-    let step_row: Option<WorkflowStepRow> = sqlx::query_as::<_, WorkflowStepRow>(
-        "SELECT workflow_id, workflow_step FROM threads WHERE id = $1",
+    let step_row: Option<WorkflowStepRow> = sql_forge!(
+        WorkflowStepRow,
+        "SELECT workflow_id, workflow_step FROM threads WHERE id = :thread_id",
+        ( :thread_id = thread_id )
     )
-    .bind(thread_id)
     .fetch_optional(pool)
     .await?;
     if let Some(step) = step_row.and_then(|r| r.workflow_step) {
@@ -898,31 +923,40 @@ async fn build_continuation_block(pool: &PgPool, thread_id: i64) -> anyhow::Resu
     // the task_type backfill are treated as kanban (task_type IS NULL).
     let mut prior_threads: Vec<PriorThreadRow> = Vec::new();
     if let Some(task_id) = &thread_ref.task_id {
-        let rows = sqlx::query_as::<_, PriorThreadRow>(
-            "SELECT id, status, workflow_step FROM threads WHERE task_id = $1 AND (task_type = 'kanban' OR task_type IS NULL) AND id != $2 ORDER BY id DESC LIMIT 8",
+        let rows =         sql_forge!(
+            PriorThreadRow,
+            "SELECT id, status, workflow_step FROM threads WHERE task_id = :task_id AND (task_type = 'kanban' OR task_type IS NULL) AND id != :thread_id ORDER BY id DESC LIMIT 8",
+            (
+                :task_id = task_id,
+                :thread_id = thread_id,
+            )
         )
-        .bind(task_id)
-        .bind(thread_id)
         .fetch_all(pool)
         .await?;
         prior_threads.extend(rows);
     }
     if let Some(schedule_task_id) = &thread_ref.schedule_task_id {
         // Legacy cron threads carry the schedule id in schedule_task_id.
-        let rows = sqlx::query_as::<_, PriorThreadRow>(
-            "SELECT id, status, workflow_step FROM threads WHERE schedule_task_id = $1 AND id != $2 ORDER BY id DESC LIMIT 8",
+        let rows =         sql_forge!(
+            PriorThreadRow,
+            "SELECT id, status, workflow_step FROM threads WHERE schedule_task_id = :schedule_task_id AND id != :thread_id ORDER BY id DESC LIMIT 8",
+            (
+                :schedule_task_id = schedule_task_id,
+                :thread_id = thread_id,
+            )
         )
-        .bind(schedule_task_id)
-        .bind(thread_id)
         .fetch_all(pool)
         .await?;
         prior_threads.extend(rows);
         // Cron threads created after the migration carry task_id + task_type='cron'.
-        let rows = sqlx::query_as::<_, PriorThreadRow>(
-            "SELECT id, status, workflow_step FROM threads WHERE task_id = $1 AND task_type = 'cron' AND id != $2 ORDER BY id DESC LIMIT 8",
+        let rows =         sql_forge!(
+            PriorThreadRow,
+            "SELECT id, status, workflow_step FROM threads WHERE task_id = :schedule_task_id AND task_type = 'cron' AND id != :thread_id ORDER BY id DESC LIMIT 8",
+            (
+                :schedule_task_id = schedule_task_id,
+                :thread_id = thread_id,
+            )
         )
-        .bind(schedule_task_id)
-        .bind(thread_id)
         .fetch_all(pool)
         .await?;
         prior_threads.extend(rows);
@@ -956,10 +990,11 @@ async fn build_continuation_block(pool: &PgPool, thread_id: i64) -> anyhow::Resu
     // Recent kanban history: last status changes + comments (why this task is
     // being run again).
     if let Some(task_id) = &thread_ref.task_id {
-        let history = sqlx::query_as::<_, KanbanHistoryRow>(
-            "SELECT action, initial_board, final_board, comment, TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI') AS created_at FROM kanban_history WHERE kanban_task_id = $1 ORDER BY id DESC LIMIT 5",
+        let history =         sql_forge!(
+            KanbanHistoryRow,
+            "SELECT action, initial_board, final_board, comment, TO_CHAR(created_at, 'YYYY-MM-DD HH24' || CHR(58) || 'MI') AS created_at FROM kanban_history WHERE kanban_task_id = :task_id ORDER BY id DESC LIMIT 5",
+            ( :task_id = task_id )
         )
-        .bind(task_id)
         .fetch_all(pool)
         .await?;
         if !history.is_empty() {
@@ -986,11 +1021,13 @@ async fn build_continuation_block(pool: &PgPool, thread_id: i64) -> anyhow::Resu
 
     // Resume ledger: tracking file referenced by the task body.
     if let Some(task_id) = &thread_ref.task_id {
-        let body: Option<KanbanBodyRow> =
-            sqlx::query_as::<_, KanbanBodyRow>("SELECT body FROM kanban_tasks WHERE id = $1")
-                .bind(task_id)
-                .fetch_optional(pool)
-                .await?;
+        let body: Option<KanbanBodyRow> = sql_forge!(
+            KanbanBodyRow,
+            "SELECT body FROM kanban_tasks WHERE id = :task_id",
+            ( :task_id = task_id )
+        )
+        .fetch_optional(pool)
+        .await?;
         if let Some(b) = body {
             if let Some(ledger) = b.body.as_deref().and_then(extract_tracking_path) {
                 blocks.push(format!(
@@ -1396,10 +1433,11 @@ async fn handle_generate_full(
     // (template optional); tester/reviewer = template as USER prompt + task
     // description as SYSTEM prompt (template required).
     if let Some(tid) = thread_id {
-        match sqlx::query_as::<_, WorkflowStepRow>(
-            "SELECT workflow_id, workflow_step FROM threads WHERE id = $1",
+        match sql_forge!(
+            WorkflowStepRow,
+            "SELECT workflow_id, workflow_step FROM threads WHERE id = :tid",
+            ( :tid = tid )
         )
-        .bind(tid)
         .fetch_optional(pool)
         .await
         {
@@ -1970,14 +2008,15 @@ mod tests {
     async fn continuation_block_skipped_for_plain_thread() {
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
         let pool = connect_db(&url).await.expect("connect_db");
-        let row: (i64,) = sqlx::query_as(
+        let row: i64 = sql_forge!(
+            scalar i64,
             "SELECT id FROM threads WHERE task_id IS NULL AND schedule_task_id IS NULL ORDER BY id DESC LIMIT 1",
         )
         .fetch_one(&pool)
         .await
         .expect("a plain thread exists");
         assert!(
-            build_continuation_block(&pool, row.0)
+            build_continuation_block(&pool, row)
                 .await
                 .expect("build_continuation_block")
                 .is_none(),

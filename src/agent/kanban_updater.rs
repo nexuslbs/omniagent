@@ -335,21 +335,27 @@ pub(crate) async fn transition_with_comment(
     thread_status: Option<&str>,
     comment: &str,
 ) -> Result<(), String> {
-    let from: Option<String> =
-        sqlx::query_scalar::<_, String>("SELECT status FROM kanban_tasks WHERE id = $1")
-            .bind(task_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| format!("fetch task status: {e}"))?;
+    let from: Option<String> = sql_forge!(
+        scalar String,
+        "SELECT status FROM kanban_tasks WHERE id = :task_id",
+        ( :task_id = task_id )
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("fetch task status: {e}"))?;
     let from = from.unwrap_or_else(|| to.to_string());
 
-    sqlx::query("UPDATE kanban_tasks SET status = $1, thread_status = $2 WHERE id = $3")
-        .bind(to)
-        .bind(thread_status)
-        .bind(task_id)
-        .execute(pool)
-        .await
-        .map_err(|e| format!("transition task: {e}"))?;
+    sql_forge!(
+        "UPDATE kanban_tasks SET status = :to, thread_status = NULLIF(:thread_status, '')::text WHERE id = :task_id",
+        (
+            :to = to,
+            :thread_status = thread_status.unwrap_or(""),
+            :task_id = task_id,
+        )
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| format!("transition task: {e}"))?;
 
     sql_forge!(
         "INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
@@ -439,13 +445,15 @@ async fn task_description(pool: &sqlx::PgPool, task_id: &str) -> String {
         title: String,
         body: Option<String>,
     }
-    let row =
-        sqlx::query_as::<_, TaskTextRow>("SELECT title, body FROM kanban_tasks WHERE id = $1")
-            .bind(task_id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
+    let row = sql_forge!(
+        TaskTextRow,
+        "SELECT title, body FROM kanban_tasks WHERE id = :task_id",
+        ( :task_id = task_id )
+    )
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
     match row {
         Some(r) => match r
             .body
@@ -511,12 +519,14 @@ async fn create_review_thread(
     .map_err(|e| format!("create review thread: {e}"))?;
     let new_id = new_thread.id;
 
-    sqlx::query(
+    sql_forge!(
         "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
-         VALUES ($1, 'cause', $2, 0, 'cause')",
+         VALUES (:new_id, 'cause', :cause_msg, 0, 'cause')",
+        (
+            :new_id = new_id,
+            :cause_msg = cause_msg,
+        )
     )
-    .bind(new_id)
-    .bind(cause_msg)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -582,12 +592,14 @@ async fn create_testing_thread(
     .map_err(|e| format!("create testing thread: {e}"))?;
     let new_id = new_thread.id;
 
-    sqlx::query(
+    sql_forge!(
         "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
-         VALUES ($1, 'cause', $2, 0, 'cause')",
+         VALUES (:new_id, 'cause', :cause_msg, 0, 'cause')",
+        (
+            :new_id = new_id,
+            :cause_msg = cause_msg,
+        )
     )
-    .bind(new_id)
-    .bind(cause_msg)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -598,12 +610,15 @@ async fn create_testing_thread(
 /// True when the workflow referenced by the thread declares `role`.
 /// Fetch the workflow_id of a thread (the `Thread` struct does not carry it).
 async fn thread_workflow_id(pool: &sqlx::PgPool, thread_id: i64) -> Option<String> {
-    sqlx::query_scalar::<_, Option<String>>("SELECT workflow_id FROM threads WHERE id = $1")
-        .bind(thread_id)
-        .fetch_one(pool)
-        .await
-        .ok()
-        .flatten()
+    sql_forge!(
+        scalar Option<String>,
+        "SELECT workflow_id FROM threads WHERE id = :thread_id",
+        ( :thread_id = thread_id )
+    )
+    .fetch_one(pool)
+    .await
+    .ok()
+    .flatten()
 }
 
 fn workflow_has_role(data_dir: &str, workflow_id: &Option<String>, role: &str) -> bool {

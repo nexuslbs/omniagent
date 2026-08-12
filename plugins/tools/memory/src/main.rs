@@ -23,6 +23,7 @@ use mcp_server_util::*;
 use omniagent::db;
 use omniagent::db::types as queries;
 use serde_json::Value;
+use sql_forge::sql_forge;
 use sqlx::PgPool;
 use std::path::Path;
 use std::sync::Arc;
@@ -792,15 +793,15 @@ async fn handle_generate_summary(
     };
 
     // 7. Save summary to database
-    match sqlx::query(
-        "INSERT INTO summaries (channel_id, thread_id_start, thread_id_end, next_thread_id, content) \
-         VALUES ($1, $2, $3, $4, $5)",
+    match sql_forge!(
+        "INSERT INTO summaries (channel_id, next_thread_id, content)
+         VALUES (:channel_id, :pivot_thread_id, :summary_content)",
+        (
+            :channel_id = channel_id,
+            :pivot_thread_id = pivot_thread_id,
+            :summary_content = &summary_content,
+        )
     )
-    .bind(channel_id)
-    .bind(completed_threads[0].id)
-    .bind(completed_threads[(trigger_count - 1) as usize].id)
-    .bind(pivot_thread_id)
-    .bind(&summary_content)
     .execute(pool)
     .await
     {

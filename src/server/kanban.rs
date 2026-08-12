@@ -1609,21 +1609,24 @@ async fn list_history_handler(
     let limit = params.limit.unwrap_or(200).clamp(1, 500);
     let offset = params.offset.unwrap_or(0).max(0);
 
-    let rows = match sqlx::query_as::<_, HistoryRow>(
+    let rows = match sql_forge!(
+        HistoryRow,
         r#"
         SELECT id, kanban_task_id, action, initial_board, final_board,
                previous_values, comment, created_at::text AS created_at
         FROM kanban_history
-        WHERE kanban_task_id = $1
-          AND ($2 = '' OR action = $2)
+        WHERE kanban_task_id = :p1
+          AND (:action_filter = '' OR action = :action_filter)
         ORDER BY id DESC
-        LIMIT $3 OFFSET $4
+        LIMIT :limit OFFSET :offset
         "#,
+        (
+            :p1 = id.as_str(),
+            :action_filter = action_filter,
+            :limit = limit,
+            :offset = offset,
+        )
     )
-    .bind(id.as_str())
-    .bind(action_filter)
-    .bind(limit)
-    .bind(offset)
     .fetch_all(&state.pool)
     .await
     {
@@ -1649,21 +1652,24 @@ async fn list_all_history_handler(
     let limit = params.limit.unwrap_or(200).clamp(1, 500);
     let offset = params.offset.unwrap_or(0).max(0);
 
-    let rows = match sqlx::query_as::<_, HistoryRow>(
+    let rows = match sql_forge!(
+        HistoryRow,
         r#"
         SELECT id, kanban_task_id, action, initial_board, final_board,
                previous_values, comment, created_at::text AS created_at
         FROM kanban_history
-        WHERE ($1 = '' OR kanban_task_id = $1)
-          AND ($2 = '' OR action = $2)
+        WHERE (:task_filter = '' OR kanban_task_id = :task_filter)
+          AND (:action_filter = '' OR action = :action_filter)
         ORDER BY id DESC
-        LIMIT $3 OFFSET $4
+        LIMIT :limit OFFSET :offset
         "#,
+        (
+            :task_filter = task_filter,
+            :action_filter = action_filter,
+            :limit = limit,
+            :offset = offset,
+        )
     )
-    .bind(task_filter)
-    .bind(action_filter)
-    .bind(limit)
-    .bind(offset)
     .fetch_all(&state.pool)
     .await
     {
