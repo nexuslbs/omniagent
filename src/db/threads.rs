@@ -1500,18 +1500,17 @@ mod tests {
         // thread NEVER resolves to a real LLM.
         let data_dir = std::env::temp_dir().to_str().unwrap().to_string();
         let ch = test_channel(Some("noop"), Some("test-tool-caller"));
-        let identity = resolve_thread_identity(
-            &data_dir,
-            "omni",
-            Some(&ch),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("identity must resolve from channel override");
-        assert_eq!(identity.provider, "noop", "channel provider must win over profile");
-        assert_eq!(identity.model, "test-tool-caller", "channel model must win over profile");
+        let identity =
+            resolve_thread_identity(&data_dir, "omni", Some(&ch), None, None, None, None)
+                .expect("identity must resolve from channel override");
+        assert_eq!(
+            identity.provider, "noop",
+            "channel provider must win over profile"
+        );
+        assert_eq!(
+            identity.model, "test-tool-caller",
+            "channel model must win over profile"
+        );
     }
 
     #[test]
@@ -1519,21 +1518,20 @@ mod tests {
         // No channel override → fall back to the profile's provider.
         let data_dir = std::env::temp_dir().to_str().unwrap().to_string();
         let ch = test_channel(None, None);
-        let identity = resolve_thread_identity(
-            &data_dir,
-            "omni",
-            Some(&ch),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("identity must resolve from profile");
+        let identity =
+            resolve_thread_identity(&data_dir, "omni", Some(&ch), None, None, None, None)
+                .expect("identity must resolve from profile");
         // The omni profile on disk may not exist in the temp dir; the
         // registry falls back to the default profile (deepseek). Either way
         // the provider must come from the profile tier, NOT be empty, and
         // NOT come from a channel override (there is none).
-        assert!(!identity.provider.is_empty(), "provider must resolve from profile");
-        assert!(!identity.model.is_empty(), "model must resolve from profile");
+        assert!(
+            !identity.provider.is_empty(),
+            "provider must resolve from profile"
+        );
+        assert!(
+            !identity.model.is_empty(),
+            "model must resolve from profile"
+        );
     }
 }
