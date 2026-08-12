@@ -997,6 +997,7 @@ impl Platform for ExternalPlatformClient {
                                                                     template: channel.template.clone().filter(|t| !t.is_empty()),
                                                                 workflow_id: None,
                                                                 workflow_step: None,
+                                                                hook_caused: false,
                                                                 },
                                                             ).await {
                                                                 // success: message and thread created

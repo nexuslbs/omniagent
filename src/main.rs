@@ -9,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 
 use omniagent::error::{AppResult, Error};
 use omniagent::server::plugins_reload::refresh_env_from_file;
-use omniagent::{agent, db, mcp, platform, profile, scheduler, server};
+use omniagent::{agent, db, hooks, mcp, platform, profile, scheduler, server};
 
 /// OmniAgent: autonomous agent system with Postgres, pgvector, MCP tools.
 /// Read an environment variable with a fallback default value.
@@ -145,6 +145,16 @@ async fn run_server() -> AppResult<()> {
             external_clients.clone(),
             Some(pool.clone()), // resolves $secret:NAME refs in MCP plugin configs
         ));
+
+    // Initialize the event-driven Hooks engine (isolated, fire-and-forget):
+    // reads hooks from the DB and triggers agentic threads / actions on
+    // thread_started / thread_finished / new_message events.
+    hooks::init(hooks::HooksEngine::new(
+        pool.clone(),
+        data_dir.clone(),
+        plugin_manager.clone(),
+        ctx.clone(),
+    ));
 
     // Register platform clients for the read_attached_file MCP tool
     // Each platform plugin implements read_file internally, so the core

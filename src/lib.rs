@@ -8,6 +8,7 @@ pub mod agent;
 pub mod commands;
 pub mod db;
 pub mod error;
+pub mod hooks;
 pub mod llm;
 pub mod mcp;
 pub mod platform;

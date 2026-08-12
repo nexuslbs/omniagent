@@ -12,6 +12,7 @@
 
 pub(crate) mod actions;
 pub(crate) mod channels;
+pub(crate) mod hooks;
 pub(crate) mod kanban;
 pub(crate) mod llm_proxy;
 pub(crate) mod memory;
@@ -200,6 +201,7 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         .merge(kanban::kanban_router())
         // ── Schedule API routes (replaces dashboard schedule.ts) ──
         .merge(schedule::schedule_router())
+        .merge(hooks::hooks_router())
         // ── Actions CRUD routes (backed by actions.yml) ──
         .route("/actions", get(actions::list_actions_handler))
         .route("/actions", post(actions::create_action_handler))

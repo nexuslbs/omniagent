@@ -21,6 +21,78 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     create_triggers(pool).await?;
     seed_kanban_channel(pool).await?;
     seed_cron_channel(pool).await?;
+
+    // -- Event-driven Hooks (thread_started / thread_finished / new_message) --
+    // threads.hook_caused marks hook-caused threads so the hooks engine can
+    // skip them (infinite-loop protection: hook threads never re-trigger).
+    sqlx::query(
+        "ALTER TABLE threads ADD COLUMN IF NOT EXISTS hook_caused BOOLEAN NOT NULL DEFAULT false",
+    )
+    .execute(pool)
+    .await
+    .ok();
+
+    // hooks table: mirrors cron_jobs but keyed by event instead of schedule.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS hooks (
+            id            TEXT PRIMARY KEY,
+            name          TEXT NOT NULL,
+            display_name  TEXT NOT NULL DEFAULT '',
+            event         TEXT NOT NULL,
+            scope         TEXT NOT NULL DEFAULT 'global',
+            target        TEXT,
+            counter       JSONB NOT NULL DEFAULT '{"global": 0}'::jsonb,
+            count         INT  NOT NULL DEFAULT 1,
+            mode          TEXT NOT NULL DEFAULT 'agentic',
+            prompt        TEXT,
+            action_id     TEXT,
+            profile       TEXT,
+            channel_id    BIGINT REFERENCES channels(id) ON DELETE CASCADE,
+            planning_mode TEXT,
+            plan          BOOLEAN NOT NULL DEFAULT false,
+            template      TEXT,
+            enabled       BOOLEAN NOT NULL DEFAULT true,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .ok();
+
+    // Idempotent CHECK constraints (event/scope/mode/count value validation).
+    sqlx::query(
+        r#"
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'hooks_event_chk') THEN
+                ALTER TABLE hooks ADD CONSTRAINT hooks_event_chk
+                    CHECK (event IN ('thread_started', 'thread_finished', 'new_message'));
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'hooks_scope_chk') THEN
+                ALTER TABLE hooks ADD CONSTRAINT hooks_scope_chk
+                    CHECK (scope IN ('global', 'channel', 'profile'));
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'hooks_mode_chk') THEN
+                ALTER TABLE hooks ADD CONSTRAINT hooks_mode_chk
+                    CHECK (mode IN ('agentic', 'action'));
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'hooks_count_chk') THEN
+                ALTER TABLE hooks ADD CONSTRAINT hooks_count_chk CHECK (count >= 1);
+            END IF;
+        END $$;
+        "#,
+    )
+    .execute(pool)
+    .await
+    .ok();
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_hooks_enabled_event ON hooks (enabled, event)")
+        .execute(pool)
+        .await
+        .ok();
     // All messages store the time it took to produce (LLM call time for
     // assistant messages, tool execution time for tool results) and the
     // token usage from the LLM response that produced it.

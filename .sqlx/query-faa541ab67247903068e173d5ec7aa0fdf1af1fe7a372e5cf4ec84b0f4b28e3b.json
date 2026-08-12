@@ -1,0 +1,244 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE hooks SET\n            name = COALESCE(NULLIF($1, ''), name),\n            display_name = COALESCE(NULLIF($2, ''), display_name),\n            event = COALESCE(NULLIF($3, ''), event),\n            scope = COALESCE(NULLIF($4, ''), scope),\n            target = NULLIF($5, ''),\n            count = COALESCE($6, count),\n            mode = COALESCE(NULLIF($7, ''), mode),\n            prompt = COALESCE(NULLIF($8, ''), prompt),\n            action_id = COALESCE(NULLIF($9, ''), action_id),\n            profile = COALESCE(NULLIF($10, ''), profile),\n            channel_id = NULLIF($11, 0::bigint),\n            planning_mode = NULLIF($12, ''),\n            plan = COALESCE($13, plan),\n            template = COALESCE(NULLIF($14, ''), template),\n            enabled = COALESCE($15, enabled),\n            updated_at = NOW()\n        WHERE id = $16\n        RETURNING\n            id, name, display_name, event, scope, target,\n            counter::text AS counter, count, mode,\n            prompt, action_id, profile, channel_id, planning_mode, plan, template, enabled,\n            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\",\n            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"updated_at\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "display_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "display_name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "event",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "event"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "scope",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "scope"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "target",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "target"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "counter",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "count"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "mode",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "mode"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "prompt",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "prompt"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "action_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "action_id"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "profile",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "profile"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "planning_mode",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "planning_mode"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "plan",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "plan"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "template",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "template"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "enabled",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "hooks",
+            "name": "enabled"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "created_at",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 18,
+        "name": "updated_at",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Text",
+        "Bool",
+        "Text",
+        "Bool",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "faa541ab67247903068e173d5ec7aa0fdf1af1fe7a372e5cf4ec84b0f4b28e3b"
+}

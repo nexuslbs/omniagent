@@ -257,6 +257,7 @@ async fn tick(
                 parent_external_id: None,
             workflow_id: None,
             workflow_step: None,
+            hook_caused: false,
             },
         )
         .await
@@ -335,7 +336,7 @@ async fn release_job(
 }
 
 /// Ensure a cron channel exists (upsert on conflict).
-async fn ensure_cron_channel(pool: &PgPool) -> AppResult<crate::db::types::Channel> {
+pub(crate) async fn ensure_cron_channel(pool: &PgPool) -> AppResult<crate::db::types::Channel> {
     // First try to find existing cron channel
     if let Ok(Some(ch)) =
         queries::get_channel_by_platform_and_resource(pool, "cron", "cron-session").await
@@ -390,7 +391,7 @@ pub fn validate_cron_schedule_5field(schedule: &str) -> bool {
 /// Resolve an action_id to an `McpToolCall` by loading {data_dir}/actions.yml.
 /// Looks up the action entry and extracts tool_name + params. Returns an error
 /// if the action is not found, disabled, or the file can't be read.
-fn resolve_action(data_dir: &str, action_id: &str) -> AppResult<McpToolCall> {
+pub(crate) fn resolve_action(data_dir: &str, action_id: &str) -> AppResult<McpToolCall> {
     use serde::Deserialize;
     use std::collections::HashMap;
 
@@ -636,6 +637,7 @@ async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
             parent_external_id: None,
         workflow_id: None,
         workflow_step: None,
+        hook_caused: false,
         },
     )
     .await?;
@@ -946,6 +948,7 @@ pub async fn fire_cron_job_by_id(
             parent_external_id: None,
         workflow_id: None,
         workflow_step: None,
+        hook_caused: false,
         },
     )
     .await?;

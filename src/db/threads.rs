@@ -42,8 +42,8 @@ pub async fn create_thread(
     let row: ThreadDb = sql_forge!(
         ThreadDb,
         r#"
-        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id, plan, parent_id, workflow_id, workflow_step, template, task_type)
-        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :plan, NULLIF(:parent_id, -1::bigint)::bigint, NULLIF(:workflow_id, '')::text, NULLIF(:workflow_step, '')::text, NULLIF(:template, '')::text, :task_type)
+        INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, schedule_task_id, plan, parent_id, workflow_id, workflow_step, template, task_type, hook_caused)
+        VALUES ('created', :cause, :channel_id, :profile, NULLIF(:provider, '')::text, NULLIF(:model, '')::text, NULLIF(:task_id, '')::text, NULLIF(:schedule_task_id, '')::text, :plan, NULLIF(:parent_id, -1::bigint)::bigint, NULLIF(:workflow_id, '')::text, NULLIF(:workflow_step, '')::text, NULLIF(:template, '')::text, :task_type, :hook_caused)
         RETURNING
             id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
             input_tokens, cached_tokens, output_tokens, duration_ms,
@@ -57,7 +57,7 @@ pub async fn create_thread(
             workflow_step,
             template
         "#,
-        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :plan = p.plan, :parent_id = p.parent_id.unwrap_or(-1i64), :workflow_id = p.workflow_id.as_deref().unwrap_or(""), :workflow_step = p.workflow_step.as_deref().unwrap_or(""), :template = p.template.as_deref().unwrap_or(""), :task_type = p.task_id.as_ref().map(|_| "kanban").unwrap_or("") )
+        ( :cause = cause, :channel_id = channel_id, :profile = profile, :provider = p.provider.as_deref().unwrap_or(""), :model = p.model.as_deref().unwrap_or(""), :task_id = p.task_id.as_deref().unwrap_or(""), :schedule_task_id = p.schedule_task_id.as_deref().unwrap_or(""), :plan = p.plan, :parent_id = p.parent_id.unwrap_or(-1i64), :workflow_id = p.workflow_id.as_deref().unwrap_or(""), :workflow_step = p.workflow_step.as_deref().unwrap_or(""), :template = p.template.as_deref().unwrap_or(""), :task_type = p.task_id.as_ref().map(|_| "kanban").unwrap_or(""), :hook_caused = p.hook_caused )
     )
     .fetch_one(pool)
     .await?;
@@ -74,6 +74,8 @@ pub async fn set_thread_system(pool: &PgPool, thread_id: i64) -> AppResult<()> {
     )
     .execute(pool)
     .await?;
+    // Event-driven hooks: fire thread_finished (fire-and-forget, isolated).
+    crate::hooks::fire_thread_finished(thread_id);
     Ok(())
 }
 
@@ -87,6 +89,8 @@ pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> AppResult<()> {
     )
     .execute(pool)
     .await?;
+    // Event-driven hooks: fire thread_finished (fire-and-forget, isolated).
+    crate::hooks::fire_thread_finished(thread_id);
     Ok(())
 }
 
@@ -406,6 +410,10 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
     }
 
     tx.commit().await?;
+
+    // Event-driven hooks: fire new_message for the inserted seq-0 message.
+    crate::hooks::fire_new_message(msg.thread_id, saved.id);
+
     saved.try_into()
 }
 
@@ -677,6 +685,7 @@ pub async fn create_thread_with_cause(
             template: p.template.clone(),
             workflow_id: p.workflow_id.clone(),
             workflow_step: p.workflow_step.clone(),
+            hook_caused: p.hook_caused,
         },
     )
     .await?;
@@ -700,6 +709,9 @@ pub async fn create_thread_with_cause(
     };
 
     let saved = create_cause_and_set_pending(pool, &msg).await?;
+
+    // Event-driven hooks: fire thread_started (fire-and-forget, isolated).
+    crate::hooks::fire_thread_started(thread.id);
 
     Ok((thread, saved))
 }
@@ -783,6 +795,9 @@ pub async fn complete_thread(
     )
     .execute(pool)
     .await?;
+
+    // Event-driven hooks: fire thread_finished on terminal transition.
+    crate::hooks::fire_thread_finished(thread_id);
 
     Ok(())
 }
@@ -909,6 +924,11 @@ pub async fn skip_thread(pool: &PgPool, thread_id: i64) -> AppResult<u64> {
     )
     .execute(pool)
     .await?;
+
+    if result.rows_affected() > 0 {
+        // Event-driven hooks: fire thread_finished on terminal transition.
+        crate::hooks::fire_thread_finished(thread_id);
+    }
 
     Ok(result.rows_affected())
 }

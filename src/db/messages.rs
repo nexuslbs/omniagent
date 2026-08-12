@@ -38,7 +38,10 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> AppResult<Messag
     .fetch_one(pool)
     .await?;
 
-    row.try_into()
+    let saved: Message = row.try_into()?;
+    // Event-driven hooks: fire new_message (fire-and-forget, isolated).
+    crate::hooks::fire_new_message(saved.thread_id, saved.id);
+    Ok(saved)
 }
 
 /// Get recent messages from a thread for context assembly.

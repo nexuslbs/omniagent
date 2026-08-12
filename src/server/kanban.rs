@@ -2286,6 +2286,7 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         template: Some(resolved_template),
         workflow_id: detail.workflow_id.clone(),
         workflow_step: Some("running".to_string()),
+        hook_caused: false,
     };
 
     let (thread, _message) = match create_thread_with_cause(

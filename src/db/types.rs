@@ -294,6 +294,7 @@ pub struct CreateThreadParams {
     pub workflow_id: Option<String>,
     pub workflow_step: Option<String>,
     pub template: Option<String>,
+    pub hook_caused: bool,
 }
 
 /// Stats for completing a thread.
@@ -327,6 +328,7 @@ pub struct ThreadCauseParams {
     pub template: Option<String>,
     pub workflow_id: Option<String>,
     pub workflow_step: Option<String>,
+    pub hook_caused: bool,
 }
 
 // ---------------------------------------------------------------------------
