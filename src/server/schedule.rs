@@ -466,8 +466,7 @@ async fn create_schedule_handler(
         def.action = Some(action_id.to_string());
     }
     // Legacy create defaulted plan=true for new jobs — preserve that.
-    def.planning_mode =
-        tasks_yaml::PlanningMode::from_legacy(None, Some(body.plan.unwrap_or(true)));
+    def.plan = Some(body.plan.unwrap_or(true));
     // yml has no separate `active` column: enabled doubles as active.
     def.enabled = body.enabled.or(body.active).unwrap_or(true);
 
@@ -571,7 +570,7 @@ async fn update_schedule_handler(
         }
     }
     if let Some(plan) = body.plan {
-        def.planning_mode = tasks_yaml::PlanningMode::from_legacy(None, Some(plan));
+        def.plan = Some(plan);
     }
 
     if let Err(err) = tasks_yaml::validate_schedule(&id, def) {

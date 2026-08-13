@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — Planning normalized to a single `plan` bool
+
+- The legacy `planning_mode` string duplicate is gone everywhere: DB columns
+  (`threads`, `kanban_tasks`, `cron_jobs`, `hooks`, `channels`) are dropped after
+  backfilling `plan = true` for `auto_plan`/`auto_subtasks`/`always`; the
+  `tasks.yml` `PlanningMode` enum is removed (hooks/schedules now carry a plain
+  `plan` boolean); the kanban/cron/hook APIs and the dashboard expose only `plan`.
+- The retired `planning_mode`/`plan_with_subtasks` values from the earlier
+  "Phase 0a: planning mode" work are replaced by the boolean field.
+
+### Added — Default channel settings
+
+- Four new writable select settings — `default_cli_channel`, `default_schedule_channel`,
+  `default_hook_channel`, `default_kanban_channel` — each a select over the channels
+  defined in channels.yml (any platform; a platform-less channel is type `cli`).
+- The `kanban`/`cron`/`hook` channel platforms are gone; a channel with no `platform`
+  field is a `cli` channel.
+- Threads resolve their channel via: explicit channel -> default-*_channel setting -> ''.
+  A thread with no channel is still inserted (record kept for audit) and then marked
+  failed with "no channel defined".
+
 Workflow-based role assignment (implementation phases 0a, 0–7 of the
 `WorkflowImplementation` plan). Kanban tasks are now routed through a
 role-based workflow state machine (executor → tester → reviewer) with retry

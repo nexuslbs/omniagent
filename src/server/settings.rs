@@ -164,7 +164,7 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
     let path = settings_path(data_dir);
 
     // ── Section groupings for the nested YAML output ──
-    let section_order = ["general", "execution", "prompt", "memory"];
+    let section_order = ["general", "execution", "prompt", "memory", "channels"];
     let sections: std::collections::HashMap<&str, Vec<&str>> = [
         (
             "general",
@@ -229,6 +229,15 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "wiki_vectorization_interval",
                 "wiki_vectorization_method",
                 "wiki_vectorization_protocol",
+            ],
+        ),
+        (
+            "channels",
+            vec![
+                "default_cli_channel",
+                "default_schedule_channel",
+                "default_hook_channel",
+                "default_kanban_channel",
             ],
         ),
     ]
@@ -453,6 +462,47 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
         ),
         // API keys are now managed per-provider via the Providers page,
         // not settings.yml.
+        // ── Default channels (selects over channels.yml) ──
+        (
+            "default_cli_channel".into(),
+            SettingMeta {
+                field_type: "select".into(),
+                description: "Default channel for CLI tool calls with no explicit channel (platform-less channel = cli)".into(),
+                options: None,
+                readonly: false,
+                default: Some("".into()),
+            },
+        ),
+        (
+            "default_schedule_channel".into(),
+            SettingMeta {
+                field_type: "select".into(),
+                description: "Default channel for cron schedules with no explicit channel".into(),
+                options: None,
+                readonly: false,
+                default: Some("cron".into()),
+            },
+        ),
+        (
+            "default_hook_channel".into(),
+            SettingMeta {
+                field_type: "select".into(),
+                description: "Default channel for hooks with no explicit channel".into(),
+                options: None,
+                readonly: false,
+                default: Some("".into()),
+            },
+        ),
+        (
+            "default_kanban_channel".into(),
+            SettingMeta {
+                field_type: "select".into(),
+                description: "Default channel for kanban dispatch".into(),
+                options: None,
+                readonly: false,
+                default: Some("kanban".into()),
+            },
+        ),
         // ── System (read-only bootstrap from env vars) ──
         (
             "host".into(),
@@ -651,6 +701,25 @@ fn enrich_provider_options(meta: &mut SettingMeta, data_dir: &str) {
     );
 }
 
+/// Enrich default_*_channel setting options with the channels defined in
+/// channels.yml (any platform — including platform-less 'cli' channels).
+fn enrich_channel_options(meta: &mut SettingMeta, data_dir: &str) {
+    let _ = data_dir; // channels.yml path is resolved internally
+    let channels = match crate::channels_yaml::find_all() {
+        Ok(v) if !v.is_empty() => v,
+        _ => return, // Fall back to no options
+    };
+    meta.options = Some(
+        channels
+            .into_iter()
+            .map(|(name, _)| SettingOption {
+                id: name.clone(),
+                name,
+            })
+            .collect(),
+    );
+}
+
 // ── Handlers ──
 
 /// GET /settings: return all settings organized by category.
@@ -693,6 +762,21 @@ pub async fn get_settings_handler(State(state): State<Arc<AppState>>) -> Json<Se
         .find(|(name, _, _)| name == "default_provider")
     {
         enrich_provider_options(meta, &state.data_dir);
+    }
+
+    // Enrich default_*_channel options with the channels from channels.yml
+    for tool_key in [
+        "default_cli_channel",
+        "default_schedule_channel",
+        "default_hook_channel",
+        "default_kanban_channel",
+    ] {
+        if let Some((_, _, ref mut meta)) = defs
+            .iter_mut()
+            .find(|(name, _, _)| name.as_str() == tool_key)
+        {
+            enrich_channel_options(meta, &state.data_dir);
+        }
     }
 
     // Enrich prompt_generate_tool and prompt_compact_messages_tool with available MCP tools
@@ -758,6 +842,10 @@ pub async fn update_settings_handler(
         "prompt_log_level",
         "platform_max_spawn_retries",
         "default_profile",
+        "default_cli_channel",
+        "default_schedule_channel",
+        "default_hook_channel",
+        "default_kanban_channel",
     ]
     .into_iter()
     .collect();

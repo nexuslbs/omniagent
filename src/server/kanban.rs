@@ -161,7 +161,6 @@ struct CreateTaskRequest {
     status: Option<String>,
     template: Option<String>,
     plan: Option<bool>,
-    planning_mode: Option<String>,
     workflow_id: Option<String>,
 }
 
@@ -189,7 +188,6 @@ struct UpdateTaskRequest {
     archived: Option<bool>,
     template: Option<String>,
     plan: Option<bool>,
-    planning_mode: Option<String>,
     workflow_id: Option<String>,
 }
 
@@ -216,7 +214,6 @@ struct KanbanTaskRow {
     archived: Option<bool>,
     template: Option<String>,
     plan: Option<bool>,
-    planning_mode: Option<String>,
     workflow_id: Option<String>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -241,7 +238,6 @@ struct DeleteIdRow {
     archived: Option<bool>,
     template: Option<String>,
     plan: Option<bool>,
-    planning_mode: Option<String>,
     workflow_id: Option<String>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -333,7 +329,6 @@ struct KanbanTaskEntry {
     archived: bool,
     template: Option<String>,
     plan: Option<bool>,
-    planning_mode: Option<String>,
     workflow_id: Option<String>,
     created_at: Option<String>,
     updated_at: Option<String>,
@@ -422,7 +417,6 @@ fn task_row_to_entry(r: KanbanTaskRow) -> KanbanTaskEntry {
         archived: r.archived.unwrap_or(false),
         template: r.template,
         plan: r.plan,
-        planning_mode: r.planning_mode,
         workflow_id: r.workflow_id,
         created_at: r
             .created_at
@@ -516,7 +510,7 @@ async fn list_tasks_handler(
         r#"
         SELECT
             id, title, body, status, priority, position, assignee,
-            channel_id, profile, archived, template, plan, planning_mode, workflow_id,
+            channel_id, profile, archived, template, plan, workflow_id,
             created_at, updated_at
         FROM kanban_tasks
         WHERE (:show_archived_bool OR archived = false)
@@ -555,7 +549,7 @@ async fn get_task_handler(
         r#"
         SELECT
             id, title, body, status, priority, position, assignee,
-            channel_id, profile, archived, template, plan, planning_mode, workflow_id,
+            channel_id, profile, archived, template, plan, workflow_id,
             created_at, updated_at
         FROM kanban_tasks
         WHERE id = :id
@@ -665,10 +659,10 @@ async fn create_task_handler(
     if let Err(e) = sql_forge!(
         r#"
         INSERT INTO kanban_tasks
-            (id, title, body, assignee, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
+            (id, title, body, assignee, status, priority, channel_id, profile, position, template, plan, workflow_id)
         VALUES
             (:id, :title, :body, NULLIF(:assignee, '')::text, :status, :priority, NULLIF(:channel_id, '')::text, NULLIF(:profile, '')::text,
-             :position, NULLIF(:template, '')::text, :plan::boolean, NULLIF(:planning_mode, '')::text, NULLIF(:workflow_id, '')::text)
+             :position, NULLIF(:template, '')::text, :plan::boolean, NULLIF(:workflow_id, '')::text)
         "#,
         ( :id = id.as_str(),
           :title = &title,
@@ -681,7 +675,6 @@ async fn create_task_handler(
           :position = next_pos,
           :template = body.template.as_deref().unwrap_or(""),
           :plan = body.plan.unwrap_or(false),
-          :planning_mode = body.planning_mode.as_deref().unwrap_or(""),
             :workflow_id = body.workflow_id.as_deref().unwrap_or(""),
     )
     )
@@ -734,7 +727,7 @@ async fn change_status_handler(
         DeleteIdRow,
         r#"
         SELECT id, title, body, status, priority, position, assignee,
-               channel_id, profile, archived, template, plan, planning_mode,
+               channel_id, profile, archived, template, plan,
                workflow_id, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
@@ -877,7 +870,7 @@ async fn change_position_handler(
         DeleteIdRow,
         r#"
         SELECT id, title, body, status, priority, position, assignee,
-               channel_id, profile, archived, template, plan, planning_mode,
+               channel_id, profile, archived, template, plan,
                workflow_id, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
@@ -1016,7 +1009,7 @@ async fn update_task_handler(
         DeleteIdRow,
         r#"
         SELECT id, title, body, status, priority, position, assignee,
-               channel_id, profile, archived, template, plan, planning_mode,
+               channel_id, profile, archived, template, plan,
                workflow_id, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
@@ -1074,7 +1067,6 @@ async fn update_task_handler(
         || body.archived.is_some()
         || body.template.is_some()
         || body.plan.is_some()
-        || body.planning_mode.is_some()
         || body.workflow_id.is_some()
         || body.assignee.is_some();
 
@@ -1097,7 +1089,6 @@ async fn update_task_handler(
             archived = :archived,
             template = CASE WHEN :template = '' THEN template ELSE NULLIF(:template, '')::text END,
             plan = :plan,
-            planning_mode = CASE WHEN :planning_mode = '' THEN planning_mode ELSE NULLIF(:planning_mode, '')::text END,
             workflow_id = CASE WHEN :workflow_id = '' THEN workflow_id ELSE NULLIF(:workflow_id, '')::text END,
             updated_at = NOW()
         WHERE id = :id
@@ -1115,7 +1106,6 @@ async fn update_task_handler(
           :archived = body.archived.unwrap_or(before.archived.unwrap_or(false)),
           :template = body.template.as_deref().unwrap_or(""),
           :plan = body.plan.or(before.plan).unwrap_or(false),
-          :planning_mode = body.planning_mode.as_deref().unwrap_or(""),
           :workflow_id = body.workflow_id.as_deref().unwrap_or(""),
     )
     )
@@ -1186,7 +1176,6 @@ async fn update_task_handler(
             "profile": before.profile,
             "template": before.template,
             "plan": before.plan,
-            "planning_mode": before.planning_mode,
             "archived": before.archived,
             "assignee": before.assignee,
         });
@@ -1220,7 +1209,7 @@ async fn delete_task_handler(
         DeleteIdRow,
         r#"
         SELECT id, title, body, status, priority, position, assignee,
-               channel_id, profile, archived, template, plan, planning_mode,
+               channel_id, profile, archived, template, plan,
                workflow_id, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
@@ -1247,7 +1236,6 @@ async fn delete_task_handler(
         "profile": before.profile,
         "template": before.template,
         "plan": before.plan,
-        "planning_mode": before.planning_mode,
         "archived": before.archived,
         "assignee": before.assignee,
     });
@@ -2006,7 +1994,6 @@ struct DispatchTaskDetailRow {
     template: Option<String>,
     workflow_id: Option<String>,
     plan: Option<bool>,
-    planning_mode: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -2185,7 +2172,7 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
     let detail = match sql_forge!(
         DispatchTaskDetailRow,
         r#"
-        SELECT id, title, body, channel_id, profile, template, workflow_id, plan, planning_mode
+        SELECT id, title, body, channel_id, profile, template, workflow_id, plan
         FROM kanban_tasks
         WHERE id = :id
         "#,
@@ -2208,21 +2195,23 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
     };
 
     let channel_id = match detail.channel_id {
-        Some(id) => id,
-        None => {
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Task has no channel_id");
+        Some(id) => {
+            crate::channels_yaml::resolve_default_channel(Some(&id), "default_kanban_channel")
+                .unwrap_or_default()
         }
+        None => crate::channels_yaml::resolve_default_channel(None, "default_kanban_channel")
+            .unwrap_or_default(),
     };
 
     // 4. Resolve channel, profile, provider/model and template.
     let channel = match get_channel_by_id(&state.pool, &channel_id).await {
-        Ok(Some(channel)) => channel,
+        Ok(Some(channel)) => Some(channel),
         Ok(None) => {
             error!(
                 "[kanban/dispatch] channel {} not found for task {}",
                 channel_id, detail.id
             );
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Channel not found");
+            None
         }
         Err(e) => {
             error!(
@@ -2246,7 +2235,9 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         .clone()
         .filter(|profile| !profile.trim().is_empty())
         .or_else(|| {
-            (!channel.current_profile.trim().is_empty()).then(|| channel.current_profile.clone())
+            channel.as_ref().and_then(|c| {
+                (!c.current_profile.trim().is_empty()).then(|| c.current_profile.clone())
+            })
         })
         .unwrap_or_else(|| state.default_profile.clone());
     let plan = executor
@@ -2258,8 +2249,7 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
                 .and_then(|wf| wf.defaults.plan_mode.as_deref())
         })
         .map(|mode| matches!(mode, "on"))
-        .or(detail.plan)
-        .or_else(|| Some(detail.planning_mode.as_deref() == Some("on")));
+        .or(detail.plan);
     // R8-J: a dispatched thread must ALWAYS carry a template — an empty
     // threads.template meant the prompt builder never injected the workflow
     // guidance and agents improvised instead of following the dev template
@@ -2269,7 +2259,10 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         .as_ref()
         .and_then(|r| r.template.clone())
         .unwrap_or_else(|| {
-            resolve_dispatch_template(detail.template.as_deref(), channel.template.as_deref())
+            resolve_dispatch_template(
+                detail.template.as_deref(),
+                channel.as_ref().and_then(|c| c.template.as_deref()),
+            )
         });
 
     // 5. Build the thread-cause params and start the thread.
@@ -2482,7 +2475,6 @@ mod tests {
             archived: Some(false),
             template: None,
             plan: None,
-            planning_mode: None,
             workflow_id: Some("wf-x".to_string()),
             created_at: None,
             updated_at: None,
@@ -2538,7 +2530,6 @@ mod tests {
             archived: Some(false),
             template: None,
             plan: None,
-            planning_mode: None,
             workflow_id: None,
             created_at: None,
             updated_at: None,
@@ -2565,7 +2556,6 @@ mod tests {
             archived: None,
             template: None,
             plan: None,
-            planning_mode: None,
             workflow_id: None,
             created_at: None,
             updated_at: None,

@@ -163,26 +163,32 @@ async fn tick(
         }
 
         // ── Determine which channel to fire into ──
-        let channel = if let Some(cid) = job.channel_id {
-            match queries::find_channel_by_id(pool, cid.as_str()).await {
-                Ok(Some(ch)) => ch,
-                _ => {
-                    error!(
-                        "[cron-scheduler] Schedule '{}' references channel_id {} which doesn't exist, falling back to default cron channel",
-                        display_name, cid
-                    );
-                    ensure_cron_channel(pool).await?
-                }
-            }
+        // Resolution chain: explicit channel -> default_schedule_channel -> ''
+        // (empty = the thread is created and then failed with "no channel
+        // defined"; the record is kept for audit).
+        let channel_id = crate::channels_yaml::resolve_default_channel(
+            job.channel_id.as_deref(),
+            "default_schedule_channel",
+        )
+        .unwrap_or_default();
+        let channel = if channel_id.is_empty() {
+            None
         } else {
-            ensure_cron_channel(pool).await?
+            queries::find_channel_by_id(pool, &channel_id)
+                .await
+                .ok()
+                .flatten()
         };
 
         // Resolve the profile for this message
         let profile_name = if let Some(ref p) = job.profile {
             p.clone()
+        } else if let Some(ch) = &channel {
+            ch.current_profile.clone()
         } else {
-            channel.current_profile.clone()
+            crate::profile::ProfileRegistry::new(data_dir)
+                .default_profile
+                .clone()
         };
 
         // Resolve provider+model for stamping on the thread
@@ -198,9 +204,12 @@ async fn tick(
         // Use the shared resolution function for provider and model
         let resolved = resolve_thread_config(
             job.profile.as_deref(),
-            &channel.current_profile,
-            channel.current_provider.as_deref(),
-            channel.current_model.as_deref(),
+            channel
+                .as_ref()
+                .map(|c| c.current_profile.as_str())
+                .unwrap_or(""),
+            channel.as_ref().and_then(|c| c.current_provider.as_deref()),
+            channel.as_ref().and_then(|c| c.current_model.as_deref()),
             prof.provider.as_deref(),
             prof.model.as_deref(),
         );
@@ -216,7 +225,7 @@ async fn tick(
             pool,
             data_dir,
             "system",
-            &channel.id,
+            &channel_id,
             &profile_name,
             queries::ThreadCauseParams {
                 provider,
@@ -230,14 +239,14 @@ async fn tick(
                     "cron_job_name": job.name,
                     "cron_display_name": display_name,
                     "scheduled_at": job.schedule,
-                    "channel_id": channel.id,
+                    "channel_id": channel_id,
                     "profile": profile_name,
-                    "template": job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()).unwrap_or_default(),
+                    "template": job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.as_ref().and_then(|c| c.template.clone())).unwrap_or_default(),
                 }),
                 msg_type: "cron".to_string(),
                 msg_subtype: Some(subtype),
                 task_plan: job.plan,
-                template: job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()),
+                template: job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.as_ref().and_then(|c| c.template.clone())),
                 parent_external_id: None,
             workflow_id: None,
             workflow_step: None,
@@ -332,27 +341,6 @@ pub fn is_due(cron_expr: &str, last_fire: Option<DateTime<Utc>>, now: DateTime<U
     }
 }
 
-/// Ensure a cron channel exists (upsert on conflict).
-pub(crate) async fn ensure_cron_channel(pool: &PgPool) -> AppResult<crate::db::types::Channel> {
-    // First try to find existing cron channel
-    if let Ok(Some(ch)) =
-        queries::get_channel_by_platform_and_resource(pool, "cron", "cron-session").await
-    {
-        return Ok(ch);
-    }
-    queries::create_channel(
-        pool,
-        queries::CreateChannelParams {
-            name: "cron-session".to_string(),
-            platform: "cron".to_string(),
-            external_id: "cron-default".to_string(),
-            cause: "cron".to_string(),
-            resource_identifier: "cron-session".to_string(),
-        },
-    )
-    .await
-    .map_err(|e| Error::Message(format!("Failed to create cron channel: {:#}", e)))
-}
 /// Parse a cron expression and compute the next run after `now`.
 /// The expression is expected in 5-field Linux format (min hour day month weekday).
 /// We prepend "0 " (second=0) to convert to 6-field for the `cron` crate.
@@ -585,20 +573,30 @@ struct ActionThreadCtx<'a> {
 /// marks the thread as terminal (system for success, failed for error).
 async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
     // Resolve the channel the same way as the agentic mode path
-    let channel = if let Some(cid) = ctx.job.channel_id.as_deref() {
-        match queries::find_channel_by_id(ctx.pool, cid).await {
-            Ok(Some(ch)) => ch,
-            _ => ensure_cron_channel(ctx.pool).await?,
-        }
+    // explicit channel -> default_schedule_channel -> '' (fail-with-record).
+    let channel_id = crate::channels_yaml::resolve_default_channel(
+        ctx.job.channel_id.as_deref(),
+        "default_schedule_channel",
+    )
+    .unwrap_or_default();
+    let channel = if channel_id.is_empty() {
+        None
     } else {
-        ensure_cron_channel(ctx.pool).await?
+        queries::find_channel_by_id(ctx.pool, &channel_id)
+            .await
+            .ok()
+            .flatten()
     };
 
     // Resolve profile
     let profile_name = if let Some(ref p) = ctx.job.profile {
         p.clone()
+    } else if let Some(ch) = &channel {
+        ch.current_profile.clone()
     } else {
-        channel.current_profile.clone()
+        crate::profile::ProfileRegistry::new(ctx.data_dir)
+            .default_profile
+            .clone()
     };
 
     let subtype = ctx.job.name.clone().unwrap_or_default();
@@ -609,7 +607,7 @@ async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
         ctx.pool,
         ctx.data_dir,
         ctx.cause,
-        &channel.id,
+        &channel_id,
         &profile_name,
         queries::ThreadCauseParams {
             provider: None,
@@ -623,11 +621,11 @@ async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
                 "cron_job_name": ctx.job.name,
                 "cron_display_name": ctx.display_name,
                 "scheduled_at": ctx.job.schedule,
-                "channel_id": channel.id,
+                "channel_id": channel_id,
                 "profile": profile_name,
-                "template": ctx.job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()).unwrap_or_default(),
+                "template": ctx.job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.as_ref().and_then(|c| c.template.clone())).unwrap_or_default(),
             }),
-            template: ctx.job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()),
+            template: ctx.job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.as_ref().and_then(|c| c.template.clone())),
             msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
             task_plan: ctx.job.plan,
@@ -861,19 +859,29 @@ pub async fn fire_cron_job_by_id(
     }
 
     // Standard agentic mode: same logic as the scheduler tick
-    let channel = if let Some(cid) = job.channel_id.as_deref() {
-        match queries::find_channel_by_id(pool, cid).await {
-            Ok(Some(ch)) => ch,
-            _ => ensure_cron_channel(pool).await?,
-        }
+    // explicit channel -> default_schedule_channel -> '' (fail-with-record).
+    let channel_id = crate::channels_yaml::resolve_default_channel(
+        job.channel_id.as_deref(),
+        "default_schedule_channel",
+    )
+    .unwrap_or_default();
+    let channel = if channel_id.is_empty() {
+        None
     } else {
-        ensure_cron_channel(pool).await?
+        queries::find_channel_by_id(pool, &channel_id)
+            .await
+            .ok()
+            .flatten()
     };
 
     let profile_name = if let Some(ref p) = job.profile {
         p.clone()
+    } else if let Some(ch) = &channel {
+        ch.current_profile.clone()
     } else {
-        channel.current_profile.clone()
+        crate::profile::ProfileRegistry::new(data_dir)
+            .default_profile
+            .clone()
     };
 
     let profile_registry = crate::profile::ProfileRegistry::new(data_dir);
@@ -887,9 +895,12 @@ pub async fn fire_cron_job_by_id(
 
     let resolved = resolve_thread_config(
         job.profile.as_deref(),
-        &channel.current_profile,
-        channel.current_provider.as_deref(),
-        channel.current_model.as_deref(),
+        channel
+            .as_ref()
+            .map(|c| c.current_profile.as_str())
+            .unwrap_or(""),
+        channel.as_ref().and_then(|c| c.current_provider.as_deref()),
+        channel.as_ref().and_then(|c| c.current_model.as_deref()),
         prof.provider.as_deref(),
         prof.model.as_deref(),
     );
@@ -904,7 +915,7 @@ pub async fn fire_cron_job_by_id(
         pool,
         data_dir,
         "user",
-        &channel.id,
+        &channel_id,
         &profile_name,
         queries::ThreadCauseParams {
             provider,
@@ -918,11 +929,11 @@ pub async fn fire_cron_job_by_id(
                 "cron_job_name": job.name,
                 "cron_display_name": display_name,
                 "scheduled_at": job.schedule,
-                "channel_id": channel.id,
+                "channel_id": channel_id,
                 "profile": profile_name,
-                "template": job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()).unwrap_or_default(),
+                "template": job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.as_ref().and_then(|c| c.template.clone())).unwrap_or_default(),
             }),
-            template: job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.template.clone()),
+            template: job.template.clone().filter(|t| !t.is_empty()).or_else(|| channel.as_ref().and_then(|c| c.template.clone())),
             msg_type: "cron".to_string(),
             msg_subtype: Some(subtype),
             task_plan: job.plan,
