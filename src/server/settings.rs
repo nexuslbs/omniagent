@@ -194,8 +194,6 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "max_iterations_no_plan",
                 "max_iterations_plan",
                 "tool_bg_secs",
-                "tool_long_timeout_secs",
-                "tool_short_timeout_secs",
             ],
         ),
         (
@@ -208,7 +206,6 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "prompt_log_level",
                 "prompt_token_budget_hard",
                 "prompt_token_budget_soft",
-                "prompt_token_safety_factor",
                 "prompt_tool_excerpt_chars",
                 "prompt_total_excerpt_cap",
                 "prompt_read_excerpt_chars",
