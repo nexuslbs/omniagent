@@ -9,7 +9,7 @@
 //!     enabled: true
 //!     channel: cron            # channel NAME (resolved to channel_id at load)
 //!     profile: omni
-//!     planning_mode: true      # on/off/None → legacy planning_mode/plan
+//!     plan: true               # plan mode on/off
 //!     cron: 0 6 * * *
 //!     prompt: Some cron prompt
 //! hooks:
@@ -68,9 +68,9 @@ pub struct ScheduleDef {
     pub channel: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    /// `true`/`false`/`"on"`/`"off"`/None → legacy planning_mode + plan.
+    /// `true`/`false`/None — the single plan-mode bool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub planning_mode: Option<PlanningMode>,
+    pub plan: Option<bool>,
     /// The cron expression, 5-field Linux format (legacy column `schedule`).
     pub cron: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,7 +101,7 @@ pub struct HookDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub planning_mode: Option<PlanningMode>,
+    pub plan: Option<bool>,
     /// Event name: thread_started | thread_finished | new_message.
     pub event: String,
     /// Scope: global | channel | profile (default global).
@@ -127,15 +127,6 @@ pub struct HookDef {
     pub display_name: Option<String>,
 }
 
-/// `planning_mode` accepts a bool (`planning_mode: true`) or a string
-/// (`planning_mode: on`) — both map to the legacy planning_mode/plan pair.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
-pub enum PlanningMode {
-    Bool(bool),
-    Str(String),
-}
-
 fn default_true() -> bool {
     true
 }
@@ -154,7 +145,7 @@ impl Default for ScheduleDef {
             enabled: true,
             channel: None,
             profile: None,
-            planning_mode: None,
+            plan: None,
             cron: String::new(),
             prompt: None,
             action: None,
@@ -172,7 +163,7 @@ impl Default for HookDef {
             enabled: true,
             channel: None,
             profile: None,
-            planning_mode: None,
+            plan: None,
             event: String::new(),
             scope: "global".to_string(),
             target: None,
@@ -182,41 +173,6 @@ impl Default for HookDef {
             mode: None,
             template: None,
             display_name: None,
-        }
-    }
-}
-
-impl PlanningMode {
-    /// Map back to the legacy `(planning_mode TEXT, plan BOOL)` pair.
-    pub fn to_legacy(&self) -> (Option<String>, Option<bool>) {
-        match self {
-            PlanningMode::Bool(true) => (Some("on".to_string()), Some(true)),
-            PlanningMode::Bool(false) => (Some("off".to_string()), Some(false)),
-            PlanningMode::Str(s) => match s.to_lowercase().as_str() {
-                "on" | "true" | "1" | "always" | "auto_plan" | "plan_with_subtasks" => {
-                    (Some("on".to_string()), Some(true))
-                }
-                "off" | "false" | "0" | "never" | "none" => (Some("off".to_string()), Some(false)),
-                other => (Some(other.to_string()), None),
-            },
-        }
-    }
-
-    /// Build from the legacy request pair (plan bool wins over planning_mode
-    /// string; empty string → None).
-    pub fn from_legacy(planning_mode: Option<&str>, plan: Option<bool>) -> Option<Self> {
-        if let Some(p) = plan {
-            return Some(PlanningMode::Bool(p));
-        }
-        match planning_mode.map(str::trim).filter(|s| !s.is_empty()) {
-            Some(s) => match s.to_lowercase().as_str() {
-                "on" | "true" | "1" | "always" | "auto_plan" | "plan_with_subtasks" => {
-                    Some(PlanningMode::Bool(true))
-                }
-                "off" | "false" | "0" | "never" | "none" => Some(PlanningMode::Bool(false)),
-                other => Some(PlanningMode::Str(other.to_string())),
-            },
-            None => None,
         }
     }
 }
@@ -237,14 +193,9 @@ impl ScheduleDef {
         }
     }
 
-    /// Normalized legacy plan flag (planning_mode → plan).
+    /// The single plan-mode flag.
     pub fn plan(&self) -> Option<bool> {
-        self.planning_mode.as_ref().and_then(|p| p.to_legacy().1)
-    }
-
-    /// Normalized legacy planning_mode string.
-    pub fn planning_mode_str(&self) -> Option<String> {
-        self.planning_mode.as_ref().and_then(|p| p.to_legacy().0)
+        self.plan
     }
 }
 
@@ -272,12 +223,9 @@ impl HookDef {
         }
     }
 
+    /// The single plan-mode flag.
     pub fn plan(&self) -> Option<bool> {
-        self.planning_mode.as_ref().and_then(|p| p.to_legacy().1)
-    }
-
-    pub fn planning_mode_str(&self) -> Option<String> {
-        self.planning_mode.as_ref().and_then(|p| p.to_legacy().0)
+        self.plan
     }
 }
 
@@ -445,7 +393,7 @@ schedules:
     enabled: true
     channel: cron
     profile: omni
-    planning_mode: true
+    plan: true
     cron: 0 6 * * *
     prompt: Run the knowledge pipeline
   nightly:
@@ -457,7 +405,7 @@ hooks:
     enabled: true
     channel: my-channel
     profile: omni
-    planning_mode: true
+    plan: true
     event: thread_started
     scope: channel
     target: my-scopped-channel
@@ -482,7 +430,6 @@ hooks:
         assert_eq!(s.channel.as_deref(), Some("cron"));
         assert_eq!(s.cron, "0 6 * * *");
         assert_eq!(s.plan(), Some(true));
-        assert_eq!(s.planning_mode_str().as_deref(), Some("on"));
         assert_eq!(s.mode(), "agentic");
 
         let n = &tasks.schedules["nightly"];
@@ -557,36 +504,6 @@ hooks:
         let reloaded = load_tasks(dir.to_str().unwrap()).expect("reload2");
         assert_eq!(reloaded.hooks["h1"].count, 3);
         assert_eq!(reloaded.hooks["h1"].mode(), "agentic");
-    }
-
-    #[test]
-    fn planning_mode_normalization() {
-        assert_eq!(
-            PlanningMode::Bool(true).to_legacy(),
-            (Some("on".to_string()), Some(true))
-        );
-        assert_eq!(
-            PlanningMode::Bool(false).to_legacy(),
-            (Some("off".to_string()), Some(false))
-        );
-        assert_eq!(
-            PlanningMode::Str("on".to_string()).to_legacy(),
-            (Some("on".to_string()), Some(true))
-        );
-        assert_eq!(
-            PlanningMode::Str("weird".to_string()).to_legacy(),
-            (Some("weird".to_string()), None)
-        );
-        // from legacy: plan wins
-        assert_eq!(
-            PlanningMode::from_legacy(Some("on"), Some(false)),
-            Some(PlanningMode::Bool(false))
-        );
-        assert_eq!(PlanningMode::from_legacy(None, None), None);
-        assert_eq!(
-            PlanningMode::from_legacy(Some("auto_plan"), None),
-            Some(PlanningMode::Bool(true))
-        );
     }
 
     #[test]

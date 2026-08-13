@@ -63,7 +63,6 @@ pub struct ChannelEntry {
     pub current_model: Option<String>,
     pub readonly: bool,
     pub plan: bool,
-    pub planning_mode: Option<String>,
     pub template: Option<String>,
 }
 
@@ -88,7 +87,6 @@ impl From<Channel> for ChannelEntry {
             current_model: c.current_model,
             readonly: c.readonly,
             plan: c.plan,
-            planning_mode: None,
             template: c.template,
         }
     }

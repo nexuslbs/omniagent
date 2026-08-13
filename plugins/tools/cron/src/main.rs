@@ -128,7 +128,7 @@ async fn handle_create(
         enabled: true,
         channel: channel_name,
         profile: profile_arg.map(|s| s.to_string()),
-        planning_mode: None,
+        plan: None,
         cron: schedule.to_string(),
         prompt: Some(prompt.unwrap_or("").to_string()),
         action: if mode == "action" {

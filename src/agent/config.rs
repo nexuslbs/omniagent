@@ -231,12 +231,12 @@ impl AgentConfig {
                 "prompt_compact_messages_tool",
                 "prompt_compact-messages",
             ),
-            char_budget_hard: get("prompt_char_budget_hard", "500000")
+            char_budget_hard: get("prompt_char_budget_hard", "200000")
                 .parse()
-                .unwrap_or(500000),
-            char_budget_soft: get("prompt_char_budget_soft", "350000")
+                .unwrap_or(200000),
+            char_budget_soft: get("prompt_char_budget_soft", "100000")
                 .parse()
-                .unwrap_or(350000),
+                .unwrap_or(100000),
             read_keep_last: get("read_keep_last", "3").parse().unwrap_or(3),
             read_excerpt_chars: get("read_excerpt_chars", "2000").parse().unwrap_or(2000),
             auto_note_max_chars: get("auto_note_max_chars", "24000").parse().unwrap_or(24000),
@@ -327,12 +327,12 @@ impl AgentConfig {
                 "prompt_compact_messages_tool",
                 "prompt_compact-messages",
             ),
-            char_budget_hard: get("prompt_char_budget_hard", "500000")
+            char_budget_hard: get("prompt_char_budget_hard", "200000")
                 .parse()
-                .unwrap_or(500000),
-            char_budget_soft: get("prompt_char_budget_soft", "350000")
+                .unwrap_or(200000),
+            char_budget_soft: get("prompt_char_budget_soft", "100000")
                 .parse()
-                .unwrap_or(350000),
+                .unwrap_or(100000),
             read_keep_last: get("read_keep_last", "3").parse().unwrap_or(3),
             read_excerpt_chars: get("read_excerpt_chars", "2000").parse().unwrap_or(2000),
             auto_note_max_chars: get("auto_note_max_chars", "24000").parse().unwrap_or(24000),
@@ -404,8 +404,8 @@ mod tests {
             delete_after_days: 30,
             prompt_tool_name: "prompt_generate".to_string(),
             compact_messages_tool_name: "prompt_compact-messages".to_string(),
-            char_budget_hard: 500000,
-            char_budget_soft: 350000,
+            char_budget_hard: 200000,
+            char_budget_soft: 100000,
             read_keep_last: 3,
             read_excerpt_chars: 2000,
             auto_note_max_chars: 24000,

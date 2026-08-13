@@ -74,10 +74,10 @@ impl PluginConfig {
                     .to_string(),
             prompt_plan_max_tokens: 2048,
             tokenizer_encoding: String::new(),
-            char_budget_soft: 350000,
-            char_budget_hard: 500000,
-            token_budget_soft: 200000,
-            token_budget_hard: 350000,
+            char_budget_soft: 100000,
+            char_budget_hard: 200000,
+            token_budget_soft: 100000,
+            token_budget_hard: 200000,
             old_msg_budget: 100000,
             condense_keep_turns: 4,
             tool_excerpt_chars: 800,
@@ -97,7 +97,7 @@ impl PluginConfig {
     /// The omniagent sends ALL config values as JSON strings (it builds the
     /// configure payload from a HashMap<String,String>), so numeric fields
     /// must be parsed leniently: accept both a real JSON number and a
-    /// numeric string ("350000"). Previously `as_i64()` was used, which
+    /// numeric string ("200000"). Previously `as_i64()` was used, which
     /// returns None for strings — silently dropping every configured budget
     /// and forcing the plugin to run on defaults forever.
     fn from_json(json: &Value) -> Self {

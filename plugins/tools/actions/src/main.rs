@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use mcp_server_util::*;
-use omniagent::tasks_yaml::{self, PlanningMode, ScheduleDef};
+use omniagent::tasks_yaml::{self, ScheduleDef};
 use parking_lot::Mutex;
 use serde_json::Value;
 use sql_forge::sql_forge;
@@ -294,7 +294,7 @@ async fn handle_setup_knowledge_pipeline(
         enabled: true,
         channel: Some("cron-default".to_string()),
         profile: Some("pipeline".to_string()),
-        planning_mode: Some(PlanningMode::Str("plan_with_subtasks".to_string())),
+        plan: Some(true),
         cron: schedule.to_string(),
         prompt: Some(prompt.to_string()),
         action: None,

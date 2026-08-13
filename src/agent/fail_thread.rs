@@ -1589,8 +1589,8 @@ mod tests_rerun_script {
         .await;
 
         sql_forge!(
-            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
-             VALUES (:task_id, 'RerunScriptTest', '', 'running', 1, 'kanban', 'test', 0, NULL, false, 'manual', 'test-wf')",
+            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, workflow_id)
+             VALUES (:task_id, 'RerunScriptTest', '', 'running', 1, 'kanban', 'test', 0, NULL, false, 'test-wf')",
             ( :task_id = &task_id )
         )
         .execute(&pool)
@@ -1763,8 +1763,8 @@ mod tests_r8n_no_workflow_blocked {
         .await;
 
         sql_forge!(
-            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
-             VALUES (:task_id, 'R8N', '', 'running', 1, 'kanban', 'test', 0, NULL, false, 'manual', NULLIF(:workflow_id, '')::text)",
+            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, workflow_id)
+             VALUES (:task_id, 'R8N', '', 'running', 1, 'kanban', 'test', 0, NULL, false, NULLIF(:workflow_id, '')::text)",
             (
                 :task_id = task_id,
                 :workflow_id = workflow_id.unwrap_or(""),

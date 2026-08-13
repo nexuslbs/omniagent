@@ -51,7 +51,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             action_id     TEXT,
             profile       TEXT,
             channel_id    TEXT,
-            planning_mode TEXT,
             plan          BOOLEAN NOT NULL DEFAULT false,
             template      TEXT,
             enabled       BOOLEAN NOT NULL DEFAULT true,
@@ -144,18 +143,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .await
         .ok();
 
-    // ── Column constraint fixes ────────────────────────────────────────────
-    // planning_mode columns were created with NOT NULL DEFAULT '' but should
-    // accept NULL. These ALTERs are idempotent.
-    sqlx::query("ALTER TABLE kanban_tasks ALTER COLUMN planning_mode DROP NOT NULL")
-        .execute(pool)
-        .await
-        .ok();
-    sqlx::query("ALTER TABLE cron_jobs ALTER COLUMN planning_mode DROP NOT NULL")
-        .execute(pool)
-        .await
-        .ok();
-
     // ── Migrate planning_mode string to plan boolean ─────────────────────
     // Add plan column to threads, backfill from planning_mode
     sqlx::query("ALTER TABLE threads ADD COLUMN IF NOT EXISTS plan BOOLEAN NOT NULL DEFAULT false")
@@ -183,7 +170,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await
     .ok();
 
-    // Add plan column to cron_jobs
+    // Add plan column to cron_jobs (dormant table, back-compat only)
     sqlx::query(
         "ALTER TABLE cron_jobs ADD COLUMN IF NOT EXISTS plan BOOLEAN NOT NULL DEFAULT false",
     )
@@ -197,20 +184,29 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await
     .ok();
 
-    // (Legacy) plan column on the channels table -- only relevant for pre-yml
-    // databases; no-op on fresh installs (channels table no longer created).
-    sqlx::query(
-        "ALTER TABLE channels ADD COLUMN IF NOT EXISTS plan BOOLEAN NOT NULL DEFAULT false",
-    )
-    .execute(pool)
-    .await
-    .ok();
-    sqlx::query(
-        "UPDATE channels SET plan = true WHERE planning_mode IN ('auto_plan', 'auto_subtasks', 'always')"
-    )
-    .execute(pool)
-    .await
-    .ok();
+    // ── Drop legacy planning_mode columns ────────────────────────────────
+    // Normalized to the single `plan` bool: the TEXT duplicate is gone from
+    // the schema. Order-independent vs the dormant cron_jobs/hooks tables.
+    sqlx::query("ALTER TABLE threads DROP COLUMN IF EXISTS planning_mode")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE kanban_tasks DROP COLUMN IF EXISTS planning_mode")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE cron_jobs DROP COLUMN IF EXISTS planning_mode")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE hooks DROP COLUMN IF EXISTS planning_mode")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE channels DROP COLUMN IF EXISTS planning_mode")
+        .execute(pool)
+        .await
+        .ok();
 
     // ── Add per-message duration and token tracking ─────────────────────
     // Each message stores the time it took to produce (LLM call time for
@@ -378,9 +374,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await
         .ok();
-    tracing::info!(
-        "[migration] Dropped cron_jobs + hooks (definitions now in config/tasks.yml)"
-    );
+    tracing::info!("[migration] Dropped cron_jobs + hooks (definitions now in config/tasks.yml)");
     Ok(())
 }
 
@@ -436,7 +430,6 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
             terminal          BOOLEAN NOT NULL DEFAULT false,
             task_id           TEXT,
             schedule_task_id  TEXT,
-            planning_mode     TEXT NOT NULL DEFAULT '',
             parent_id         BIGINT REFERENCES threads(id),
             iterations        INT NOT NULL DEFAULT 0
         );
@@ -484,7 +477,6 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
             archived        BOOLEAN NOT NULL DEFAULT false,
             position        INTEGER,
             template        TEXT DEFAULT '',
-            planning_mode   TEXT NOT NULL DEFAULT '',
             created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         );
@@ -551,7 +543,7 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
             action_id         TEXT,
             silent            BOOLEAN NOT NULL DEFAULT false,
             template          TEXT DEFAULT '',
-            planning_mode     TEXT NOT NULL DEFAULT ''
+            plan              BOOLEAN NOT NULL DEFAULT false
         );
         "#,
     )
