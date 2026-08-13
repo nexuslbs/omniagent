@@ -133,7 +133,7 @@ impl WorkflowsFile {
         if id.trim().is_empty() {
             return Ok(None);
         }
-        let path = Path::new(data_dir).join("workflows.yml");
+        let path = crate::config_path::config_path(data_dir, "workflows.yml");
         match Self::load(&path) {
             Ok(file) => Ok(file.workflows.get(id).cloned()),
             Err(WorkflowConfigError::NotFound { .. }) => Ok(None),
@@ -509,7 +509,8 @@ mod tests {
     #[test]
     fn load_workflow_propagates_parse_errors() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("workflows.yml");
+        std::fs::create_dir_all(dir.path().join("config")).expect("create config dir");
+        let path = dir.path().join("config").join("workflows.yml");
         std::fs::write(&path, "workflows: [not-a-map").expect("write broken yaml");
         let err = WorkflowsFile::load_workflow(dir.path().to_str().unwrap(), "wf")
             .expect_err("broken yaml must not be swallowed");
@@ -522,7 +523,8 @@ mod tests {
     #[test]
     fn load_workflow_returns_workflow_for_known_id() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("workflows.yml");
+        std::fs::create_dir_all(dir.path().join("config")).expect("create config dir");
+        let path = dir.path().join("config").join("workflows.yml");
         WorkflowsFile::from_yaml(VALID_YAML)
             .expect("valid yaml")
             .save(&path)

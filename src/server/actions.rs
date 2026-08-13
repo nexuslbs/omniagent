@@ -75,8 +75,8 @@ pub(crate) struct UpdateActionRequest {
 
 // ── Helpers ──
 
-fn actions_path(data_dir: &str) -> String {
-    format!("{}/actions.yml", data_dir)
+fn actions_path(data_dir: &str) -> std::path::PathBuf {
+    crate::config_path::config_path(data_dir, "actions.yml")
 }
 
 pub(crate) fn load_actions(data_dir: &str) -> ActionsFile {
@@ -100,7 +100,7 @@ fn save_actions(data_dir: &str, file: &ActionsFile) -> AppResult<()> {
         crate::error::Error::Message(format!("Failed to serialize actions.yml: {}", e))
     })?;
     // Atomic write with .tmp rename
-    let tmp_path = format!("{}.tmp", path);
+    let tmp_path = path.with_extension("yml.tmp");
     std::fs::write(&tmp_path, &content)
         .map_err(|e| crate::error::Error::Message(format!("Failed to write actions.yml: {}", e)))?;
     std::fs::rename(&tmp_path, &path).map_err(|e| {

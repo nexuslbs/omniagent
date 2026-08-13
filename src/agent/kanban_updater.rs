@@ -389,7 +389,7 @@ async fn resolve_step_identity(
     let role_cfg = if workflow_id.is_empty() || role.is_empty() {
         None
     } else {
-        let path = std::path::Path::new(data_dir).join("workflows.yml");
+        let path = crate::config_path::config_path(data_dir, "workflows.yml");
         crate::workflows::WorkflowsFile::load(&path)
             .ok()
             .and_then(|f| {
@@ -625,9 +625,8 @@ fn workflow_has_role(data_dir: &str, workflow_id: &Option<String>, role: &str) -
     let Some(wf_id) = workflow_id else {
         return false;
     };
-    let Ok(wfs) = WorkflowsFile::load(&std::path::PathBuf::from(format!(
-        "{data_dir}/workflows.yml"
-    ))) else {
+    let Ok(wfs) = WorkflowsFile::load(&crate::config_path::config_path(data_dir, "workflows.yml"))
+    else {
         return false;
     };
     wfs.workflows

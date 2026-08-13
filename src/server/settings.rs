@@ -94,8 +94,8 @@ pub fn settings_router() -> Router<Arc<AppState>> {
 }
 
 /// Path to the settings.yml file relative to data_dir.
-fn settings_path(data_dir: &str) -> String {
-    format!("{}/settings.yml", data_dir)
+fn settings_path(data_dir: &str) -> std::path::PathBuf {
+    crate::config_path::config_path(data_dir, "settings.yml")
 }
 
 /// Load settings.yml as a flat key-value map from nested sections only.

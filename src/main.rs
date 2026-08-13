@@ -9,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 
 use omniagent::error::{AppResult, Error};
 use omniagent::server::plugins_reload::refresh_env_from_file;
-use omniagent::{agent, db, hooks, mcp, platform, profile, scheduler, server};
+use omniagent::{agent, config_path, db, hooks, mcp, platform, profile, scheduler, server};
 
 /// OmniAgent: autonomous agent system with Postgres, pgvector, MCP tools.
 /// Read an environment variable with a fallback default value.
@@ -67,6 +67,9 @@ async fn run_server() -> AppResult<()> {
     // Determine data directory from OMNI_DIR env var (required)
     let data_dir = std::env::var("OMNI_DIR").expect("OMNI_DIR must be set");
     tracing::info!("Data directory: {}", data_dir);
+
+    // Ensure the config/ subdir exists (root-level yml config files live there).
+    config_path::ensure_config_dir(&data_dir);
 
     let default_profile = profile::default_profile_name();
     tracing::info!("Default profile: {}", default_profile);

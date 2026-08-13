@@ -6,6 +6,7 @@
 )]
 pub mod agent;
 pub mod commands;
+pub mod config_path;
 pub mod db;
 pub mod error;
 pub mod hooks;

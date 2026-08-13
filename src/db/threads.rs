@@ -631,7 +631,7 @@ pub async fn create_thread_with_cause(
     // error is propagated (never silently swallowed).
     let workflow = match p.workflow_id.as_deref() {
         Some(id) => {
-            let path = std::path::Path::new(data_dir).join("workflows.yml");
+            let path = crate::config_path::config_path(data_dir, "workflows.yml");
             match crate::workflows::WorkflowsFile::load(&path) {
                 Ok(file) => file.workflows.get(id).cloned(),
                 Err(crate::workflows::WorkflowConfigError::NotFound { .. }) => None,

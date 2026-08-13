@@ -1777,7 +1777,7 @@ async fn review_handler(
 
 /// Absolute path to the deployment's `workflows.yml` (under the data dir).
 fn workflows_file_path(state: &AppState) -> std::path::PathBuf {
-    std::path::Path::new(&state.data_dir).join("workflows.yml")
+    crate::config_path::config_path(&state.data_dir, "workflows.yml")
 }
 
 /// Load the workflows file; a missing file counts as an empty document.

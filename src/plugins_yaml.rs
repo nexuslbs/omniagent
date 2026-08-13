@@ -197,7 +197,7 @@ pub struct PluginDetail {
 
 fn file_path(data_dir: &str, _pt: &PluginYamlType) -> PathBuf {
     // Unified plugins.yml replaces the old per-type files
-    PathBuf::from(data_dir).join("plugins.yml")
+    crate::config_path::config_path(data_dir, "plugins.yml")
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +206,7 @@ fn file_path(data_dir: &str, _pt: &PluginYamlType) -> PathBuf {
 
 /// Load the entire PluginYamlFile (all three sections) from plugins.yml.
 pub fn load_all_sections(data_dir: &str) -> AppResult<PluginYamlFile> {
-    let path = PathBuf::from(data_dir).join("plugins.yml");
+    let path = crate::config_path::config_path(data_dir, "plugins.yml");
     if !path.exists() {
         return Ok(PluginYamlFile {
             platforms: None,
@@ -222,7 +222,7 @@ pub fn load_all_sections(data_dir: &str) -> AppResult<PluginYamlFile> {
 
 /// Save the entire PluginYamlFile (all three sections) to plugins.yml.
 pub fn save_all_sections(data_dir: &str, file: &PluginYamlFile) -> AppResult<()> {
-    let path = PathBuf::from(data_dir).join("plugins.yml");
+    let path = crate::config_path::config_path(data_dir, "plugins.yml");
     let tmp_path = path.with_extension("yml.tmp");
     let yaml = serde_yaml::to_string(file).ctx("Failed to serialize plugin YAML")?;
     {
@@ -398,16 +398,15 @@ pub struct RemotePluginStore {
     pub providers: Option<std::collections::BTreeMap<String, PluginRemote>>,
 }
 
-fn remote_plugins_path(data_dir: &str) -> String {
-    format!("{}/remote.yml", data_dir)
+fn remote_plugins_path(data_dir: &str) -> std::path::PathBuf {
+    crate::config_path::config_path(data_dir, "remote.yml")
 }
 
 /// Load the remote plugin store from `.remote/plugins.yml`.
 pub fn load_remote_plugins(data_dir: &str) -> RemotePluginStore {
     let path = remote_plugins_path(data_dir);
-    let p = std::path::Path::new(&path);
-    if p.exists() {
-        std::fs::read_to_string(p)
+    if path.exists() {
+        std::fs::read_to_string(&path)
             .ok()
             .and_then(|c| serde_yaml::from_str(&c).ok())
             .unwrap_or_default()
@@ -431,7 +430,7 @@ pub fn save_remote_plugin(
     };
     entries.insert(name.to_string(), remote.clone());
     let path = remote_plugins_path(data_dir);
-    if let Some(parent) = std::path::Path::new(&path).parent() {
+    if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             tracing::warn!(
                 "[plugins_yaml] Failed to create parent dir for remote.yml: {:?}",
@@ -1877,11 +1876,14 @@ mod tests {
     fn test_data_dir() -> (tempfile::TempDir, String) {
         let dir = tempdir().unwrap();
         let path = dir.path().to_str().unwrap().to_string();
+        // Root-level yml config files now live in {data_dir}/config/.
+        std::fs::create_dir_all(format!("{path}/config")).unwrap();
         (dir, path)
     }
 
     fn write_test_file(data_dir: &str, pt: &PluginYamlType, content: &str) {
         let path = file_path(data_dir, pt);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, content).unwrap();
     }
 
@@ -2017,9 +2019,7 @@ providers:
         set_entry(&path, &pt, "p2", false, serde_json::json!({})).unwrap();
 
         // Verify no .tmp file remains
-        let tmp = PathBuf::from(&path)
-            .join(pt.yaml_file())
-            .with_extension("yml.tmp");
+        let tmp = file_path(&path, &pt).with_extension("yml.tmp");
         assert!(!tmp.exists());
 
         // Verify file is valid YAML
@@ -2076,15 +2076,15 @@ providers:
         // All plugin types now use unified plugins.yml
         assert_eq!(
             file_path(path, &PluginYamlType::Platform),
-            PathBuf::from(path).join("plugins.yml")
+            PathBuf::from(path).join("config").join("plugins.yml")
         );
         assert_eq!(
             file_path(path, &PluginYamlType::Tool),
-            PathBuf::from(path).join("plugins.yml")
+            PathBuf::from(path).join("config").join("plugins.yml")
         );
         assert_eq!(
             file_path(path, &PluginYamlType::Provider),
-            PathBuf::from(path).join("plugins.yml")
+            PathBuf::from(path).join("config").join("plugins.yml")
         );
     }
 }

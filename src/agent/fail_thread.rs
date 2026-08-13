@@ -281,9 +281,10 @@ pub async fn manual_review_decision(
     }
 
     // Workflow config: role presence + retry budgets (workflows.yml).
-    let wfs = crate::workflows::WorkflowsFile::load(std::path::Path::new(&format!(
-        "{data_dir}/workflows.yml"
-    )))
+    let wfs = crate::workflows::WorkflowsFile::load(&crate::config_path::config_path(
+        data_dir,
+        "workflows.yml",
+    ))
     .map_err(err_str)?;
     let wf = task
         .workflow_id
@@ -795,7 +796,7 @@ pub(crate) async fn engine_transition(
 
     // Load the workflow definition (retry limits / roles).
     let workflow = if let Some(id) = wf_id {
-        let path = std::path::Path::new(data_dir).join("workflows.yml");
+        let path = crate::config_path::config_path(data_dir, "workflows.yml");
         match crate::workflows::WorkflowsFile::load(&path) {
             Ok(file) => file.workflows.get(id).cloned(),
             Err(_) => None,
@@ -1551,9 +1552,9 @@ mod tests_rerun_script {
         // throwaway data_dir with a minimal workflow (executor/tester/reviewer roles)
         let data_dir =
             std::env::temp_dir().join(format!("rerun-script-test-{}", std::process::id()));
-        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(data_dir.join("config")).unwrap();
         std::fs::write(
-            data_dir.join("workflows.yml"),
+            data_dir.join("config").join("workflows.yml"),
             "workflows:\n  test-wf:\n    profile: test\n    provider: noop\n    model: noop\n    plan_mode: manual\n    retries: 0\n    clear_executions_on_review: false\n    roles:\n      executor:\n        template: \"executor system prompt\"\n        provider: noop\n        model: noop\n      tester:\n        template: \"tester system prompt\"\n        provider: noop\n        model: noop\n      reviewer:\n        template: \"reviewer system prompt\"\n        provider: noop\n        model: noop\n",
         )
         .unwrap();
@@ -1715,10 +1716,10 @@ mod tests_r8n_no_workflow_blocked {
     fn temp_data_dir(tag: &str, wf: Option<&str>) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("r8n-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("config")).unwrap();
         if let Some(name) = wf {
             std::fs::write(
-                dir.join("workflows.yml"),
+                dir.join("config").join("workflows.yml"),
                 format!(
                     "workflows:\n  {name}:\n    profile: test\n    provider: noop\n    model: noop\n    plan_mode: manual\n    retries: 0\n    clear_executions_on_review: false\n    roles:\n      executor:\n        template: \"executor system prompt\"\n        provider: noop\n        model: noop\n"
                 ),

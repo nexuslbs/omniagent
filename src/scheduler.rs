@@ -408,7 +408,7 @@ pub(crate) fn resolve_action(data_dir: &str, action_id: &str) -> AppResult<McpTo
         params: serde_json::Value,
     }
 
-    let path = format!("{}/actions.yml", data_dir);
+    let path = crate::config_path::config_path(data_dir, "actions.yml");
     let content = std::fs::read_to_string(&path)
         .map_err(|e| Error::Message(format!("Failed to read actions.yml: {}", e)))?;
 
