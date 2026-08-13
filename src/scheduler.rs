@@ -37,7 +37,7 @@ struct CronJobDueRow {
     display_name: String,
     schedule: String,
     prompt: Option<String>,
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
     profile: Option<String>,
     mode: Option<String>,
     action_id: Option<String>,
@@ -49,7 +49,7 @@ struct CronJobDueRow {
 impl CronJobDueRow {
     /// Build a due-row from a tasks.yml schedule definition (channel NAME is
     /// resolved to an id by the caller; unknown → None = default channel).
-    fn from_yml(key: &str, def: &tasks_yaml::ScheduleDef, channel_id: Option<i64>) -> Self {
+    fn from_yml(key: &str, def: &tasks_yaml::ScheduleDef, channel_id: Option<String>) -> Self {
         Self {
             id: key.to_string(),
             name: Some(key.to_string()),
@@ -164,7 +164,7 @@ async fn tick(
 
         // ── Determine which channel to fire into ──
         let channel = if let Some(cid) = job.channel_id {
-            match queries::find_channel_by_id(pool, cid).await {
+            match queries::find_channel_by_id(pool, cid.as_str()).await {
                 Ok(Some(ch)) => ch,
                 _ => {
                     error!(
@@ -216,7 +216,7 @@ async fn tick(
             pool,
             data_dir,
             "system",
-            channel.id,
+            &channel.id,
             &profile_name,
             queries::ThreadCauseParams {
                 provider,
@@ -585,7 +585,7 @@ struct ActionThreadCtx<'a> {
 /// marks the thread as terminal (system for success, failed for error).
 async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
     // Resolve the channel the same way as the agentic mode path
-    let channel = if let Some(cid) = ctx.job.channel_id {
+    let channel = if let Some(cid) = ctx.job.channel_id.as_deref() {
         match queries::find_channel_by_id(ctx.pool, cid).await {
             Ok(Some(ch)) => ch,
             _ => ensure_cron_channel(ctx.pool).await?,
@@ -609,7 +609,7 @@ async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
         ctx.pool,
         ctx.data_dir,
         ctx.cause,
-        channel.id,
+        &channel.id,
         &profile_name,
         queries::ThreadCauseParams {
             provider: None,
@@ -861,7 +861,7 @@ pub async fn fire_cron_job_by_id(
     }
 
     // Standard agentic mode: same logic as the scheduler tick
-    let channel = if let Some(cid) = job.channel_id {
+    let channel = if let Some(cid) = job.channel_id.as_deref() {
         match queries::find_channel_by_id(pool, cid).await {
             Ok(Some(ch)) => ch,
             _ => ensure_cron_channel(pool).await?,
@@ -904,7 +904,7 @@ pub async fn fire_cron_job_by_id(
         pool,
         data_dir,
         "user",
-        channel.id,
+        &channel.id,
         &profile_name,
         queries::ThreadCauseParams {
             provider,

@@ -1,323 +1,156 @@
-use sql_forge::sql_forge;
 use sqlx::PgPool;
 
+use crate::channels_yaml::{self, ChannelDef, ChannelsFile};
 use crate::db::types::{
-    Channel, ChannelDb, ChannelSeq0Message, ChannelStatus, CreateChannelParams, OldChannelInfo,
+    Channel, ChannelSeq0Message, ChannelStatus, CreateChannelParams, OldChannelInfo,
 };
-use crate::error::AppResult;
+use crate::error::{AppResult, Error};
 
 // ---------------------------------------------------------------------------
-// Channel query functions
+// Channel store: channels.yml (the `channels` table is DROPPED — see
+// db-migrations). All definitions AND runtime state live in the yml; the
+// functions below keep their historical signatures (pool first — unused for
+// pure yml reads, still needed for thread-count / message queries) so call
+// sites change only in id type: numeric channel ids are now channel NAMES.
 // ---------------------------------------------------------------------------
 
-pub async fn find_all_channels(pool: &PgPool) -> AppResult<Vec<Channel>> {
-    let rows: Vec<ChannelDb> = sql_forge!(
-        ChannelDb,
-        r#"
-        SELECT
-            id, name,
-            COALESCE(platform, '') AS "platform",
-            resource_identifier,
-            COALESCE(external_id, '') AS "external_id",
-            cause,
-            current_profile, current_model, current_provider,
-            readonly,
-            COALESCE(closed, false) as "closed",
-            COALESCE(plan, true) as "plan",
-            '{}'::text AS "metadata",
-            COALESCE(template, '') AS "template",
-            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
-        FROM channels
-        ORDER BY name ASC
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
-
-    rows.into_iter().map(|r| r.try_into()).collect()
-}
-
-pub async fn get_channel_by_name(pool: &PgPool, name: &str) -> AppResult<Option<Channel>> {
-    let row: Option<ChannelDb> = sql_forge!(
-        ChannelDb,
-        r#"
-        SELECT
-            id, name,
-            COALESCE(platform, '') AS "platform",
-            resource_identifier,
-            COALESCE(external_id, '') AS "external_id",
-            cause,
-            current_profile, current_model, current_provider,
-            readonly,
-            COALESCE(closed, false) as "closed",
-            COALESCE(plan, true) as "plan",
-            '{}'::text AS "metadata",
-            COALESCE(template, '') AS "template",
-            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
-        FROM channels
-        WHERE name = :name
-        "#,
-        ( :name = name )
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    row.map(|r| r.try_into()).transpose()
-}
-
-pub async fn get_channel_by_platform_name(
-    pool: &PgPool,
-    platform: &str,
-    name: &str,
-) -> AppResult<Option<Channel>> {
-    let row: Option<ChannelDb> = sql_forge!(
-        ChannelDb,
-        r#"
-        SELECT
-            id, name,
-            COALESCE(platform, '') AS "platform",
-            resource_identifier,
-            COALESCE(external_id, '') AS "external_id",
-            cause,
-            current_profile, current_model, current_provider,
-            readonly,
-            COALESCE(closed, false) as "closed",
-            COALESCE(plan, true) as "plan",
-            '{}'::text AS "metadata",
-            COALESCE(template, '') AS "template",
-            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
-        FROM channels
-        WHERE platform = :platform AND name = :name
-        "#,
-        ( :platform = platform, :name = name )
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    row.map(|r| r.try_into()).transpose()
-}
-
-pub async fn find_channel_by_id(pool: &PgPool, channel_id: i64) -> AppResult<Option<Channel>> {
-    let row: Option<ChannelDb> = sql_forge!(
-        ChannelDb,
-        r#"
-        SELECT
-            id, name,
-            COALESCE(platform, '') AS "platform",
-            resource_identifier,
-            COALESCE(external_id, '') AS "external_id",
-            cause,
-            current_profile, current_model, current_provider,
-            readonly,
-            COALESCE(closed, false) as "closed",
-            COALESCE(plan, true) as "plan",
-            '{}'::text AS "metadata",
-            COALESCE(template, '') AS "template",
-            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
-        FROM channels
-        WHERE id = :channel_id
-        "#,
-        ( :channel_id = channel_id )
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    row.map(|r| r.try_into()).transpose()
-}
-
-/// Get a channel by id, including its actual metadata (not hardcoded '{}').
-pub async fn get_channel_by_id(pool: &PgPool, channel_id: i64) -> AppResult<Option<Channel>> {
-    let row: Option<ChannelDb> = sql_forge!(
-        ChannelDb,
-        r#"
-        SELECT
-            id, name,
-            COALESCE(platform, '') AS "platform",
-            resource_identifier,
-            COALESCE(external_id, '') AS "external_id",
-            cause,
-            current_profile, current_model, current_provider,
-            readonly,
-            COALESCE(closed, false) as "closed",
-            COALESCE(plan, true) as "plan",
-            COALESCE(metadata::text, '{}') AS "metadata",
-            COALESCE(template, '') AS "template",
-            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
-        FROM channels
-        WHERE id = :id
-        "#,
-        ( :id = channel_id )
-    )
-    .fetch_optional(pool)
-    .await?;
-    row.map(|r| r.try_into()).transpose()
-}
-
-/// Get a channel's plan setting directly from the DB column.
-/// Returns None if the channel is not found.
-pub async fn get_channel_plan(pool: &PgPool, channel_id: i64) -> AppResult<Option<bool>> {
-    // Use sql_forge to get the nullable boolean column
-    match sql_forge!(
-        scalar Option<bool>,
-        "SELECT plan FROM channels WHERE id = :channel_id",
-        ( :channel_id = channel_id )
-    )
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(Some(val)) => Ok(val),
-        Ok(None) => Ok(None),
-        Err(e) => {
-            tracing::warn!(
-                "get_channel_plan failed for channel {}: {:?}",
-                channel_id,
-                e
-            );
-            Ok(None)
-        }
+fn def_to_channel(name: &str, def: &ChannelDef) -> Channel {
+    let profile = def.profile.clone().unwrap_or_default();
+    let rid = def.resource_identifier.clone().unwrap_or_default();
+    Channel {
+        id: name.to_string(),
+        name: name.to_string(),
+        platform: def.platform.clone(),
+        resource_identifier: def.resource_identifier.clone(),
+        // external_id is NOT a stored yml field — it was always equal to
+        // resource_identifier at every creation site; derive for compat.
+        external_id: (!rid.is_empty()).then_some(rid),
+        cause: def.cause.clone(),
+        current_profile: profile,
+        current_model: def.model.clone(),
+        current_provider: def.provider.clone(),
+        readonly: def.readonly.unwrap_or(false),
+        closed: def.closed.unwrap_or(false),
+        plan: def.plan.unwrap_or(true),
+        metadata: serde_json::json!({}),
+        template: def.template.clone().filter(|t| !t.is_empty()),
+        created_at: chrono::DateTime::UNIX_EPOCH,
+        updated_at: chrono::DateTime::UNIX_EPOCH,
     }
 }
 
-pub async fn create_channel(pool: &PgPool, p: CreateChannelParams) -> AppResult<Channel> {
-    let default_profile = crate::profile::default_profile_name();
-    let row: ChannelDb = sql_forge!(
-        ChannelDb,
-        r#"
-        INSERT INTO channels (name, platform, external_id, cause, resource_identifier, current_profile)
-        VALUES (:name, NULLIF(:platform, '')::text, :external_id, :cause, NULLIF(:resource_identifier, '')::text, :current_profile)
-        ON CONFLICT (name)
-        DO UPDATE SET
-            resource_identifier = NULLIF(:resource_identifier, '')::text,
-            closed = false,
-            updated_at = NOW()
-        RETURNING
-            id, name,
-            COALESCE(platform, '') AS "platform",
-            resource_identifier,
-            COALESCE(external_id, '') AS "external_id",
-            cause,
-            current_profile, current_model, current_provider,
-            readonly,
-            COALESCE(closed, false) as "closed",
-            COALESCE(plan, true) as "plan",
-            COALESCE(metadata::text, '{}') AS "metadata",
-            COALESCE(template, '') AS "template",
-            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
-        "#,
-        ( :name = p.name.as_str(), :platform = p.platform.as_str(), :external_id = p.external_id.as_str(), :cause = p.cause.as_str(), :resource_identifier = p.resource_identifier.as_str(), :current_profile = default_profile.as_str() )
-    )
-    .fetch_one(pool)
-    .await?;
+pub async fn find_all_channels(_pool: &PgPool) -> AppResult<Vec<Channel>> {
+    Ok(channels_yaml::find_all()?
+        .into_iter()
+        .map(|(name, def)| def_to_channel(&name, &def))
+        .collect())
+}
 
-    row.try_into()
+pub async fn get_channel_by_name(_pool: &PgPool, name: &str) -> AppResult<Option<Channel>> {
+    Ok(channels_yaml::get_by_name(name)?.map(|def| def_to_channel(name, &def)))
+}
+
+pub async fn get_channel_by_platform_name(
+    _pool: &PgPool,
+    platform: &str,
+    name: &str,
+) -> AppResult<Option<Channel>> {
+    let def = channels_yaml::get_by_name(name)?;
+    let def = def.filter(|d| {
+        d.platform
+            .as_deref()
+            .map(|p| p == platform)
+            .unwrap_or(false)
+    });
+    Ok(def.map(|d| def_to_channel(name, &d)))
+}
+
+/// Look up a channel by its name (yml key). The old numeric id is gone:
+/// id == name. Kept as the historical entry point — callers pass the yml key.
+pub async fn find_channel_by_id(_pool: &PgPool, name: &str) -> AppResult<Option<Channel>> {
+    Ok(channels_yaml::get_by_name(name)?.map(|def| def_to_channel(name, &def)))
+}
+
+/// Get a channel by id (== name) including its runtime state.
+pub async fn get_channel_by_id(_pool: &PgPool, name: &str) -> AppResult<Option<Channel>> {
+    Ok(channels_yaml::get_by_name(name)?.map(|def| def_to_channel(name, &def)))
+}
+
+/// Get a channel's plan setting directly from the yml `plan` field.
+/// Returns None if the channel is not found or no plan is set.
+pub async fn get_channel_plan(_pool: &PgPool, name: &str) -> AppResult<Option<bool>> {
+    Ok(channels_yaml::get_by_name(name)?.and_then(|d| d.plan))
+}
+
+/// Upsert a channel BY NAME (yml key). When a channel with that name exists
+/// it is UPDATED to the incoming platform + resource_identifier — a channel
+/// is not pinned to the platform that first created it (same semantics as the
+/// old `ON CONFLICT (name) DO UPDATE`). Auto-created channels APPEND to
+/// channels.yml and become visible immediately (the yml IS the runtime store).
+pub async fn create_channel(_pool: &PgPool, p: CreateChannelParams) -> AppResult<Channel> {
+    let default_profile = crate::profile::default_profile_name();
+    let name = p.name.clone();
+    let def = channels_yaml::update_channel(&name, |existing| {
+        let mut d = existing.cloned().unwrap_or_default();
+        // Definition fields: rewritten on every upsert (name conflict wins).
+        d.platform = (!p.platform.is_empty()).then(|| p.platform.clone());
+        d.resource_identifier =
+            (!p.resource_identifier.is_empty()).then(|| p.resource_identifier.clone());
+        d.cause = p.cause.clone();
+        // Runtime fields: keep existing values on conflict (like the old
+        // ON CONFLICT DO UPDATE which only rewrote resource_identifier and
+        // reopened the channel); set the default profile on first creation.
+        if d.profile.is_none() {
+            d.profile = Some(default_profile.clone());
+        }
+        d.closed = Some(false);
+        if let Err(e) = channels_yaml::validate_channel(&name, &d) {
+            return Err(Error::Message(e));
+        }
+        Ok(d)
+    })?;
+    Ok(def_to_channel(&name, &def))
 }
 
 /// Look up a channel by (platform, resource_identifier).
 pub async fn get_channel_by_platform_and_resource(
-    pool: &PgPool,
+    _pool: &PgPool,
     platform: &str,
     resource_identifier: &str,
 ) -> AppResult<Option<Channel>> {
-    let row: Option<ChannelDb> = sql_forge!(
-        ChannelDb,
-        r#"
-        SELECT
-            id, name,
-            COALESCE(platform, '') AS "platform",
-            resource_identifier,
-            COALESCE(external_id, '') AS "external_id",
-            cause,
-            current_profile, current_model, current_provider,
-            readonly,
-            COALESCE(closed, false) as "closed",
-            COALESCE(plan, true) as "plan",
-            COALESCE(metadata::text, '{}') AS "metadata",
-            COALESCE(template, '') AS "template",
-            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
-        FROM channels
-        WHERE platform = :platform AND resource_identifier = :resource_identifier
-        "#,
-        ( :platform = platform, :resource_identifier = resource_identifier )
+    Ok(
+        channels_yaml::get_by_platform_and_resource(platform, resource_identifier)?
+            .map(|(name, def)| def_to_channel(&name, &def)),
     )
-    .fetch_optional(pool)
-    .await?;
-
-    row.map(|r| r.try_into()).transpose()
 }
 
-/// Update a channel's platform + resource_identifier by its stable channel ID.
+/// Update a channel's platform + resource_identifier by its name (yml key).
 ///
-/// This is used when a channel's connection changes (e.g., from telegram:chat1
-/// to discord:server1). The channel is found by its stable `channel_id`, not
-/// by platform + external_id (which just changed).
-///
-/// Returns the old platform and resource_identifier values so callers can
-/// notify the old platform that the channel is no longer active there.
+/// Used when a channel's connection changes (e.g., from telegram:chat1 to
+/// discord:server1). Returns the old platform and resource_identifier values
+/// so callers can notify the old platform that the channel is no longer
+/// active there.
 #[allow(dead_code)]
 pub async fn update_channel_platform(
-    pool: &PgPool,
-    channel_id: i64,
+    _pool: &PgPool,
+    name: &str,
     new_platform: &str,
     new_resource_identifier: &str,
-    new_external_id: &str,
+    _new_external_id: &str,
 ) -> AppResult<OldChannelInfo> {
-    // Query old values first
-    let old: Option<ChannelDb> = sql_forge!(
-        ChannelDb,
-        r#"
-        SELECT
-            id, name,
-            COALESCE(platform, '') AS "platform",
-            resource_identifier,
-            COALESCE(external_id, '') AS "external_id",
-            cause,
-            current_profile, current_model, current_provider,
-            readonly,
-            COALESCE(closed, false) as "closed",
-            COALESCE(plan, true) as "plan",
-            '{}'::text AS "metadata",
-            COALESCE(template, '') AS "template",
-            ''::text AS "created_at",
-            ''::text AS "updated_at"
-        FROM channels
-        WHERE id = :id
-        "#,
-        ( :id = channel_id )
-    )
-    .fetch_optional(pool)
-    .await?;
+    let old = channels_yaml::get_by_name(name)?;
+    let old_platform = old.as_ref().and_then(|d| d.platform.clone());
+    let old_resource_identifier = old.as_ref().and_then(|d| d.resource_identifier.clone());
 
-    let old_platform = old.as_ref().and_then(|c| {
-        let p = c.platform.as_deref().unwrap_or("");
-        if p.is_empty() {
-            None
-        } else {
-            Some(p.to_string())
-        }
-    });
-    let old_resource_identifier = old.as_ref().and_then(|c| c.resource_identifier.clone());
-
-    // Update the row
-    sql_forge!(
-        r#"
-        UPDATE channels
-        SET platform = NULLIF(:platform, '')::text,
-            resource_identifier = NULLIF(:resource_identifier, '')::text,
-            external_id = NULLIF(:external_id, '')::text,
-            updated_at = NOW()
-        WHERE id = :id
-        "#,
-        ( :platform = new_platform, :resource_identifier = new_resource_identifier, :external_id = new_external_id, :id = channel_id )
-    )
-    .execute(pool)
-    .await?;
+    channels_yaml::update_channel(name, |existing| {
+        let mut d = existing
+            .cloned()
+            .ok_or_else(|| Error::Message(format!("Channel '{}' not found", name)))?;
+        d.platform = (!new_platform.is_empty()).then(|| new_platform.to_string());
+        d.resource_identifier =
+            (!new_resource_identifier.is_empty()).then(|| new_resource_identifier.to_string());
+        Ok(d)
+    })?;
 
     Ok(OldChannelInfo {
         old_platform,
@@ -325,88 +158,47 @@ pub async fn update_channel_platform(
     })
 }
 
-/// Update a channel's provider and/or model by its stable channel ID.
+/// Update a channel's provider and/or model by its name (yml key).
 ///
 /// Only non-None fields are updated (partial update). Pass `None` to leave
-/// the current value unchanged, or `Some("")` to clear it to NULL.
+/// the current value unchanged, or `Some("")` to clear it.
 pub async fn update_channel_model(
-    pool: &PgPool,
-    channel_id: i64,
+    _pool: &PgPool,
+    name: &str,
     provider: Option<&str>,
     model: Option<&str>,
 ) -> AppResult<()> {
-    match (provider, model) {
-        (Some(p), Some(m)) => {
-            sql_forge!(
-                r#"
-                UPDATE channels
-                SET current_provider = NULLIF(:provider, '')::text,
-                    current_model = NULLIF(:model, '')::text,
-                    updated_at = NOW()
-                WHERE id = :id
-                "#,
-                ( :provider = p, :model = m, :id = channel_id )
-            )
-            .execute(pool)
-            .await?;
+    channels_yaml::update_channel(name, |existing| {
+        let mut d = existing
+            .cloned()
+            .ok_or_else(|| Error::Message(format!("Channel '{}' not found", name)))?;
+        if let Some(p) = provider {
+            d.provider = (!p.is_empty()).then(|| p.to_string());
         }
-        (Some(p), None) => {
-            sql_forge!(
-                r#"
-                UPDATE channels
-                SET current_provider = NULLIF(:provider, '')::text,
-                    updated_at = NOW()
-                WHERE id = :id
-                "#,
-                ( :provider = p, :id = channel_id )
-            )
-            .execute(pool)
-            .await?;
+        if let Some(m) = model {
+            d.model = (!m.is_empty()).then(|| m.to_string());
         }
-        (None, Some(m)) => {
-            sql_forge!(
-                r#"
-                UPDATE channels
-                SET current_model = NULLIF(:model, '')::text,
-                    updated_at = NOW()
-                WHERE id = :id
-                "#,
-                ( :model = m, :id = channel_id )
-            )
-            .execute(pool)
-            .await?;
-        }
-        (None, None) => {}
-    }
+        Ok(d)
+    })?;
     Ok(())
 }
 
-/// Claim a channel for a session by updating its resource_identifier.
-/// Returns the old resource_identifier (if any) so the caller can notify the
-/// previous session.
+/// Claim a channel for a session by rewriting its resource_identifier in the
+/// yml. Returns the old resource_identifier (if any) so the caller can notify
+/// the previous session.
 pub async fn claim_channel_resource(
-    pool: &PgPool,
-    channel_id: i64,
+    _pool: &PgPool,
+    name: &str,
     session_id: &str,
 ) -> AppResult<Option<String>> {
-    // Get old resource_identifier first
-    let old = find_channel_by_id(pool, channel_id).await?;
-    let old_rid = old.and_then(|c| c.resource_identifier.filter(|r| !r.is_empty()));
-
-    // Update resource_identifier and external_id to our session_id
-    sql_forge!(
-        r#"
-        UPDATE channels
-        SET resource_identifier = :session_id,
-            external_id = :session_id,
-            updated_at = NOW()
-        WHERE id = :channel_id
-        "#,
-        ( :session_id = session_id, :channel_id = channel_id )
-    )
-    .execute(pool)
-    .await?;
-
+    let old_rid = channels_yaml::get_by_name(name)?.and_then(|d| d.resource_identifier);
+    channels_yaml::update_channel(name, |existing| {
+        let mut d = existing
+            .cloned()
+            .ok_or_else(|| Error::Message(format!("Channel '{}' not found", name)))?;
+        d.resource_identifier = Some(session_id.to_string());
+        Ok(d)
+    })?;
     Ok(old_rid)
 }
 
@@ -415,83 +207,58 @@ pub async fn claim_channel_resource(
 // ---------------------------------------------------------------------------
 
 /// Close a channel: sets closed=true and skips pending/processing threads.
-pub async fn close_channel(pool: &PgPool, channel_id: i64) -> AppResult<()> {
-    sql_forge!(
-        "UPDATE channels SET closed = true, updated_at = NOW() WHERE id = :id",
-        ( :id = channel_id )
-    )
-    .execute(pool)
-    .await?;
+pub async fn close_channel(_pool: &PgPool, name: &str) -> AppResult<()> {
+    channels_yaml::update_channel(name, |existing| {
+        let mut d = existing
+            .cloned()
+            .ok_or_else(|| Error::Message(format!("Channel '{}' not found", name)))?;
+        d.closed = Some(true);
+        Ok(d)
+    })?;
     Ok(())
 }
 
 /// Open a channel: sets closed=false so the supervisor spawns a handler.
-pub async fn open_channel(pool: &PgPool, channel_id: i64) -> AppResult<()> {
-    sql_forge!(
-        "UPDATE channels SET closed = false, updated_at = NOW() WHERE id = :id",
-        ( :id = channel_id )
-    )
-    .execute(pool)
-    .await?;
+pub async fn open_channel(_pool: &PgPool, name: &str) -> AppResult<()> {
+    channels_yaml::update_channel(name, |existing| {
+        let mut d = existing
+            .cloned()
+            .ok_or_else(|| Error::Message(format!("Channel '{}' not found", name)))?;
+        d.closed = Some(false);
+        Ok(d)
+    })?;
     Ok(())
 }
 
-/// Check if a channel is closed.
-pub async fn is_channel_closed(pool: &PgPool, channel_id: i64) -> AppResult<bool> {
-    let row: Option<ChannelDb> = sql_forge!(
-        ChannelDb,
-        r#"
-        SELECT
-            id, name,
-            COALESCE(platform, '') AS "platform",
-            resource_identifier,
-            COALESCE(external_id, '') AS "external_id",
-            cause,
-            current_profile, current_model, current_provider,
-            readonly,
-            COALESCE(closed, false) as "closed",
-            COALESCE(plan, true) as "plan",
-            '{}'::text AS "metadata",
-            COALESCE(template, '') AS "template",
-            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
-        FROM channels
-        WHERE id = :channel_id
-        "#,
-        ( :channel_id = channel_id )
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(row.and_then(|r| r.closed).unwrap_or(false))
+/// Check if a channel is closed (from the yml).
+pub async fn is_channel_closed(_pool: &PgPool, name: &str) -> AppResult<bool> {
+    Ok(channels_yaml::get_by_name(name)?
+        .and_then(|d| d.closed)
+        .unwrap_or(false))
 }
 
-/// Get channel status with thread counts.
-pub async fn get_channel_status(
-    pool: &PgPool,
-    channel_id: i64,
-) -> AppResult<Option<ChannelStatus>> {
-    let ch = find_channel_by_id(pool, channel_id).await?;
-    let ch = match ch {
+/// Get channel status with thread counts (thread counts still come from DB).
+pub async fn get_channel_status(pool: &PgPool, name: &str) -> AppResult<Option<ChannelStatus>> {
+    let ch = match get_channel_by_name(pool, name).await? {
         Some(c) => c,
         None => return Ok(None),
     };
 
-    let pending: Option<i64> = sql_forge!(
-        scalar Option<i64>,
-        "SELECT COUNT(*) FROM threads WHERE channel_id = :cid AND status = 'pending'",
-        ( :cid = channel_id )
+    let pending: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM threads WHERE channel_id = $1 AND status = 'pending'",
     )
+    .bind(name)
     .fetch_one(pool)
-    .await?;
+    .await
+    .ok();
 
-    let processing: Option<i64> = sql_forge!(
-        scalar Option<i64>,
-        "SELECT COUNT(*) FROM threads WHERE channel_id = :cid AND status = 'processing'",
-        ( :cid = channel_id )
+    let processing: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM threads WHERE channel_id = $1 AND status = 'processing'",
     )
+    .bind(name)
     .fetch_one(pool)
-    .await?;
+    .await
+    .ok();
 
     Ok(Some(ChannelStatus {
         channel_id: ch.id,
@@ -514,23 +281,39 @@ pub async fn get_channel_status(
 /// Filters out cron and kanban system messages: only user-facing conversations.
 pub async fn get_recent_channel_seq0_messages(
     pool: &PgPool,
-    channel_id: i64,
+    name: &str,
     limit: i64,
 ) -> AppResult<Vec<ChannelSeq0Message>> {
-    let rows: Vec<ChannelSeq0Message> = sql_forge!(
-        ChannelSeq0Message,
+    let rows: Vec<ChannelSeq0Message> = sqlx::query_as(
         r#"
         SELECT id, content, role, msg_type
         FROM messages
-        WHERE thread_id IN (SELECT id FROM threads WHERE channel_id = :channel_id)
+        WHERE thread_id IN (SELECT id FROM threads WHERE channel_id = $1)
           AND thread_sequence = 0
           AND (msg_type IS NULL OR msg_type NOT IN ('cron', 'kanban'))
         ORDER BY created_at DESC
-        LIMIT :limit
+        LIMIT $2
         "#,
-        ( :channel_id = channel_id, :limit = limit )
     )
+    .bind(name)
+    .bind(limit)
     .fetch_all(pool)
     .await?;
     Ok(rows)
+}
+
+// Convenience accessors on the raw yml store (used by server handlers that
+// need the bare yml fields rather than the compat `Channel` view).
+
+/// Load the raw ChannelsFile (server API + dashboard compat).
+pub fn raw_channels_file() -> AppResult<ChannelsFile> {
+    channels_yaml::load_channels()
+}
+
+/// Mutate + persist a single channel entry (server PATCH handler).
+pub fn mutate_channel<F>(name: &str, mutate: F) -> AppResult<ChannelDef>
+where
+    F: FnOnce(Option<&ChannelDef>) -> AppResult<ChannelDef>,
+{
+    channels_yaml::update_channel(name, mutate)
 }

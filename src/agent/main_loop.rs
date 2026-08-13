@@ -1193,7 +1193,7 @@ Previous plan:\n{}",
 
             let mut tool_ctx = cfg.ctx.clone();
             tool_ctx.current_thread_id = Some(thread.id);
-            tool_ctx.current_channel_id = Some(thread.channel_id);
+            tool_ctx.current_channel_id = Some(thread.channel_id.clone());
             tool_ctx.current_profile_name = Some(profile_name.to_string());
             tool_ctx.current_channel_name = Some(channel.name.clone());
             tool_ctx.current_platform = channel.platform.clone();

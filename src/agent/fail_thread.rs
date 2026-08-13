@@ -72,7 +72,7 @@ pub(crate) async fn fail_thread(
     crate::agent::kanban_updater::update_kanban_status(cfg, thread, "failed").await;
 
     // Deliver the error message back to the user's platform
-    if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, thread.channel_id).await {
+    if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, &thread.channel_id).await {
         helpers::enqueue_delivery(
             &cfg.ctx,
             &saved,
@@ -211,7 +211,7 @@ struct ReviewTaskRow {
     status: String,
     workflow_id: Option<String>,
     workflow_state: Option<String>,
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
     profile: Option<String>,
     plan: bool,
 }
@@ -339,7 +339,7 @@ pub async fn manual_review_decision(
             &mut *tx,
             "pending",
             "system",
-            task.channel_id.unwrap_or_default(),
+            task.channel_id.as_deref().unwrap_or(""),
             task.profile.as_deref().unwrap_or(""),
             CreateThreadParams {
                 provider: role_cfg.as_ref().and_then(|r| r.provider.clone()),
@@ -600,7 +600,7 @@ pub(crate) async fn fail_thread_tool(
 
     // 5. Deliver the error message + failure reaction (mirrors fail_thread).
     if let Ok(Some(channel)) =
-        crate::db::channels::get_channel_by_id(&ctx.pool, thread.channel_id).await
+        crate::db::channels::get_channel_by_id(&ctx.pool, &thread.channel_id).await
     {
         let cause_ext = crate::db::threads::get_cause_message(&ctx.pool, thread.id)
             .await
@@ -997,7 +997,7 @@ pub(crate) async fn engine_transition(
             &mut *tx,
             "pending",
             thread.cause.as_str(),
-            thread.channel_id,
+            &thread.channel_id,
             &profile,
             CreateThreadParams {
                 provider: Some(provider.clone()),
@@ -1079,7 +1079,7 @@ pub(crate) async fn engine_transition(
             &mut *tx,
             "pending",
             thread.cause.as_str(),
-            thread.channel_id,
+            &thread.channel_id,
             &profile,
             CreateThreadParams {
                 provider: Some(provider.clone()),
@@ -1590,7 +1590,7 @@ mod tests_rerun_script {
 
         sql_forge!(
             "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
-             VALUES (:task_id, 'RerunScriptTest', '', 'running', 1, 1, 'test', 0, NULL, false, 'manual', 'test-wf')",
+             VALUES (:task_id, 'RerunScriptTest', '', 'running', 1, 'kanban', 'test', 0, NULL, false, 'manual', 'test-wf')",
             ( :task_id = &task_id )
         )
         .execute(&pool)
@@ -1600,7 +1600,7 @@ mod tests_rerun_script {
         let parent_id: i64 =         sql_forge!(
             scalar i64,
             "INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, parent_id, workflow_id, workflow_step, task_type)
-             VALUES ('running', 'user', 1, 'test', 'noop', 'noop', :task_id, NULL, 'test-wf', 'running', 'kanban')
+             VALUES ('running', 'user', 'kanban', 'test', 'noop', 'noop', :task_id, NULL, 'test-wf', 'running', 'kanban')
              RETURNING id",
             ( :task_id = &task_id )
         )
@@ -1624,7 +1624,7 @@ mod tests_rerun_script {
             id: parent_id,
             status: "running".to_string(),
             cause: "user".to_string(),
-            channel_id: 1,
+            channel_id: "kanban".to_string(),
             profile: "test".to_string(),
             provider: Some("noop".to_string()),
             model: Some("noop".to_string()),
@@ -1764,7 +1764,7 @@ mod tests_r8n_no_workflow_blocked {
 
         sql_forge!(
             "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
-             VALUES (:task_id, 'R8N', '', 'running', 1, 1, 'test', 0, NULL, false, 'manual', NULLIF(:workflow_id, '')::text)",
+             VALUES (:task_id, 'R8N', '', 'running', 1, 'kanban', 'test', 0, NULL, false, 'manual', NULLIF(:workflow_id, '')::text)",
             (
                 :task_id = task_id,
                 :workflow_id = workflow_id.unwrap_or(""),
@@ -1777,7 +1777,7 @@ mod tests_r8n_no_workflow_blocked {
         sql_forge!(
             scalar i64,
             "INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, parent_id, workflow_id, workflow_step, task_type)
-             VALUES ('running', 'user', 1, 'test', 'noop', 'noop', :task_id, NULL, NULLIF(:workflow_id, '')::text, NULLIF(:thread_step, '')::text, 'kanban')
+             VALUES ('running', 'user', 'kanban', 'test', 'noop', 'noop', :task_id, NULL, NULLIF(:workflow_id, '')::text, NULLIF(:thread_step, '')::text, 'kanban')
              RETURNING id",
             (
                 :task_id = task_id,
@@ -1799,7 +1799,7 @@ mod tests_r8n_no_workflow_blocked {
             id: thread_id,
             status: "running".to_string(),
             cause: "user".to_string(),
-            channel_id: 1,
+            channel_id: "kanban".to_string(),
             profile: "test".to_string(),
             provider: Some("noop".to_string()),
             model: Some("noop".to_string()),

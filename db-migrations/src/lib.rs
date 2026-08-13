@@ -6,7 +6,7 @@
 //! No legacy data migrations, no ADD COLUMN / DROP COLUMN evolution steps.
 //! Safe to run on every startup (all statements use IF NOT EXISTS).
 //!
-//! Profile columns (channels.current_profile, threads.profile) have NO
+//! Profile columns (threads.profile) have NO
 //! DEFAULT: the application supplies the profile name (default: "omni")
 //! at insert time.
 
@@ -19,8 +19,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     create_indexes(pool).await?;
     create_vector_support(pool).await?;
     create_triggers(pool).await?;
-    seed_kanban_channel(pool).await?;
-    seed_cron_channel(pool).await?;
+    migrate_channels_to_yml(pool).await?;
 
     // -- Event-driven Hooks (thread_started / thread_finished / new_message) --
     // threads.hook_caused marks hook-caused threads so the hooks engine can
@@ -51,7 +50,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             prompt        TEXT,
             action_id     TEXT,
             profile       TEXT,
-            channel_id    BIGINT REFERENCES channels(id) ON DELETE CASCADE,
+            channel_id    TEXT,
             planning_mode TEXT,
             plan          BOOLEAN NOT NULL DEFAULT false,
             template      TEXT,
@@ -198,7 +197,8 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await
     .ok();
 
-    // Add plan column to channels
+    // (Legacy) plan column on the channels table -- only relevant for pre-yml
+    // databases; no-op on fresh installs (channels table no longer created).
     sqlx::query(
         "ALTER TABLE channels ADD COLUMN IF NOT EXISTS plan BOOLEAN NOT NULL DEFAULT false",
     )
@@ -235,7 +235,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     // trg_messages_append_only blocks UPDATE); existing rows keep NULL
     // channel_id and the index simply doesn't cover them (NULLs are distinct
     // in btree unique indexes), so enforcement applies to new inserts only.
-    sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS channel_id BIGINT")
+    sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS channel_id TEXT")
         .execute(pool)
         .await
         .ok();
@@ -393,32 +393,11 @@ async fn create_extensions(pool: &PgPool) -> Result<()> {
 
 async fn create_tables(pool: &PgPool) -> Result<()> {
     // ── Channels ──────────────────────────────────────────────────────────
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS channels (
-            id                  BIGSERIAL PRIMARY KEY,
-            name                TEXT NOT NULL,
-            platform            TEXT,
-            external_id         TEXT,
-            resource_identifier TEXT,
-            cause               TEXT NOT NULL,
-            metadata            JSONB DEFAULT '{}',
-            current_profile     TEXT NOT NULL,
-            current_model       TEXT,
-            current_provider    TEXT,
-            readonly            BOOLEAN NOT NULL DEFAULT false,
-            closed              BOOLEAN NOT NULL DEFAULT false,
-            planning_mode       TEXT NOT NULL DEFAULT '',
-            template            TEXT DEFAULT '',
-            created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            UNIQUE(platform, external_id),
-            UNIQUE(platform, resource_identifier)
-        );
-        "#,
-    )
-    .execute(pool)
-    .await?;
+    // Channels: moved to {data_dir}/config/channels.yml (no DB table).
+    // Channel definitions AND runtime state live in channels.yml; dependent
+    // tables keep a `channel_id` TEXT column holding the channel NAME
+    // (the yml key) -- same pattern as threads.schedule_task_id /
+    // threads.workflow_id / threads.task_id referencing yml keys.
 
     // ── Threads ───────────────────────────────────────────────────────────
     sqlx::query(
@@ -427,7 +406,7 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
             id                BIGSERIAL PRIMARY KEY,
             status            TEXT NOT NULL DEFAULT 'created',
             cause             TEXT NOT NULL,
-            channel_id        BIGINT NOT NULL REFERENCES channels(id),
+            channel_id        TEXT NOT NULL,
             profile           TEXT NOT NULL,
             provider          TEXT,
             model             TEXT,
@@ -484,7 +463,7 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
             status          TEXT NOT NULL DEFAULT 'backlog',
             priority        INTEGER DEFAULT 0,
             assignee        TEXT DEFAULT '',
-            channel_id      BIGINT REFERENCES channels(id),
+            channel_id      TEXT,
             profile         TEXT,
             archived        BOOLEAN NOT NULL DEFAULT false,
             position        INTEGER,
@@ -550,7 +529,7 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
             mode              TEXT NOT NULL DEFAULT 'agentic',
             direct_task_type  TEXT DEFAULT NULL,
             active            BOOLEAN NOT NULL DEFAULT true,
-            channel_id        BIGINT REFERENCES channels(id),
+            channel_id        TEXT,
             profile           TEXT,
             running           BOOLEAN NOT NULL DEFAULT false,
             action_id         TEXT,
@@ -568,7 +547,7 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
         r#"
         CREATE TABLE IF NOT EXISTS summaries (
             id              BIGSERIAL PRIMARY KEY,
-            channel_id      BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            channel_id      TEXT NOT NULL,
             next_thread_id  BIGINT NOT NULL,
             content         TEXT NOT NULL,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -710,20 +689,6 @@ async fn create_indexes(pool: &PgPool) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_secret_versions_secret_id
             ON secret_versions(secret_id);
         "#,
-    )
-    .execute(pool)
-    .await?;
-
-    // Channels: unique name constraint (created separately so IF NOT EXISTS works)
-    sqlx::query(
-        r#"DO $$ BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM pg_constraint
-                WHERE conname = 'channels_name_key'
-            ) THEN
-                ALTER TABLE channels ADD CONSTRAINT channels_name_key UNIQUE (name);
-            END IF;
-        END $$;"#,
     )
     .execute(pool)
     .await?;
@@ -889,38 +854,109 @@ async fn create_triggers(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-// ── Seed data ───────────────────────────────────────────────────────────────
+// ── Channels moved to {data_dir}/config/channels.yml ────────────────────────
+// The `channels` table AND ALL FOREIGN KEYS REFERENCING IT are dropped.
+// Dependent tables keep their `channel_id` column -- RETYPED from BIGINT to
+// TEXT, now holding the channel NAME (the channels.yml key) instead of a
+// DB-generated id. Order-independent vs the (already removed)
+// cron_jobs/hooks/channel_stops/channel_subscriptions tables: the FK drop
+// iterates pg_constraint dynamically, so it works whether or not those
+// tables still exist.
 
-async fn seed_kanban_channel(pool: &PgPool) -> Result<()> {
+async fn migrate_channels_to_yml(pool: &PgPool) -> Result<()> {
+    // 1. Drop every FK referencing the channels table (dynamic: works no
+    //    matter which dependent tables still exist).
     sqlx::query(
         r#"
-        INSERT INTO channels (name, platform, external_id, resource_identifier, cause, current_profile)
-        SELECT 'kanban', 'kanban', 'kanban', 'kanban', 'system', ''
-        WHERE NOT EXISTS (
-            SELECT 1 FROM channels WHERE platform = 'kanban' AND name = 'kanban'
-        );
+        DO $$
+        DECLARE
+            r record;
+        BEGIN
+            IF to_regclass('public.channels') IS NOT NULL THEN
+                FOR r IN
+                    SELECT conname, conrelid::regclass AS tbl
+                    FROM pg_constraint
+                    WHERE contype = 'f' AND confrelid = 'channels'::regclass
+                LOOP
+                    EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', r.tbl, r.conname);
+                END LOOP;
+            END IF;
+        END $$;
         "#,
     )
     .execute(pool)
     .await?;
 
-    tracing::info!("[migration] Kanban channel seeded");
-    Ok(())
-}
+    // 2. Retype channel_id BIGINT -> TEXT, backfilling with the channel NAME.
+    //    Conditional on data_type='bigint' (fresh installs already have TEXT).
+    //    Nullability is preserved: threads/summaries stay NOT NULL (backfill
+    //    must succeed), messages/kanban_tasks stay nullable.
+    for (tbl, not_null) in [
+        ("threads", true),
+        ("messages", false),
+        ("kanban_tasks", false),
+        ("summaries", true),
+    ] {
+        let not_null_sql = if not_null {
+            format!("\n                    ALTER TABLE {tbl} ALTER COLUMN channel_id SET NOT NULL;")
+        } else {
+            String::new()
+        };
+        let swap = format!(
+            r#"
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = '{tbl}' AND column_name = 'channel_id'
+                      AND data_type = 'bigint'
+                ) AND to_regclass('public.channels') IS NOT NULL THEN
+                    ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS channel_name TEXT;
+                    ALTER TABLE {tbl} DISABLE TRIGGER USER;
+                    UPDATE {tbl} SET channel_name = c.name
+                    FROM channels c
+                    WHERE c.id = {tbl}.channel_id;
+                    ALTER TABLE {tbl} ENABLE TRIGGER USER;
+                    ALTER TABLE {tbl} DROP COLUMN channel_id;
+                    ALTER TABLE {tbl} RENAME COLUMN channel_name TO channel_id;{not_null_sql}
+                END IF;
+            END $$;
+            "#
+        );
+        sqlx::query(sqlx::AssertSqlSafe(swap.as_str()))
+            .execute(pool)
+            .await?;
+    }
 
-async fn seed_cron_channel(pool: &PgPool) -> Result<()> {
+    // 3. The channels table itself is gone; channels.yml is the single source.
+    sqlx::query("DROP TABLE IF EXISTS channels")
+        .execute(pool)
+        .await?;
+
+    // 4. Recreate the messages seq-0 dedup index for the TEXT column (the
+    //    old BIGINT index was dropped together with the column).
+    sqlx::query("DROP INDEX IF EXISTS uq_messages_seq0_external_id")
+        .execute(pool)
+        .await?;
     sqlx::query(
         r#"
-        INSERT INTO channels (name, platform, external_id, resource_identifier, cause, current_profile)
-        SELECT 'cron', 'cron', 'cron', 'cron', 'system', ''
-        WHERE NOT EXISTS (
-            SELECT 1 FROM channels WHERE platform = 'cron' AND name = 'cron'
-        );
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_messages_seq0_external_id
+        ON messages (channel_id, external_id)
+        WHERE thread_sequence = 0 AND external_id IS NOT NULL
         "#,
     )
     .execute(pool)
     .await?;
 
-    tracing::info!("[migration] Cron channel seeded");
+    // 5. Recreate the threads channel-status index for the TEXT column.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_threads_channel_status ON threads (channel_id, status)",
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!(
+        "[migration] Channels moved to config/channels.yml; channels table + FKs dropped"
+    );
     Ok(())
 }

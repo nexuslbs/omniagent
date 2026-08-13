@@ -136,7 +136,7 @@ where
 #[derive(Debug, FromRow)]
 struct EventThreadRow {
     id: i64,
-    channel_id: i64,
+    channel_id: String,
     channel_name: String,
     profile: String,
     hook_caused: bool,
@@ -155,14 +155,14 @@ struct HookRow {
     prompt: Option<String>,
     action_id: Option<String>,
     profile: Option<String>,
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
     planning_mode: Option<String>,
     plan: Option<bool>,
     template: Option<String>,
 }
 
 impl HookRow {
-    fn from_yml(key: &str, def: &crate::tasks_yaml::HookDef, channel_id: Option<i64>) -> Self {
+    fn from_yml(key: &str, def: &crate::tasks_yaml::HookDef, channel_id: Option<String>) -> Self {
         let (planning_mode, plan) = def
             .planning_mode
             .as_ref()
@@ -194,9 +194,8 @@ impl HooksEngine {
         let row: Option<EventThreadRow> = sql_forge!(
             EventThreadRow,
             r#"
-            SELECT t.id, t.channel_id, ch.name AS channel_name, t.profile, t.hook_caused
+            SELECT t.id, t.channel_id, t.channel_id AS channel_name, t.profile, t.hook_caused
             FROM threads t
-            JOIN channels ch ON ch.id = t.channel_id
             WHERE t.id = :thread_id
             "#,
             ( :thread_id = thread_id )
@@ -341,7 +340,10 @@ impl HooksEngine {
     /// jobs). The spawned thread is marked `hook_caused` so it never
     /// re-triggers hooks (infinite-loop protection).
     async fn run_agentic(&self, hook: &HookRow, thread: &EventThreadRow) -> AppResult<Option<i64>> {
-        let channel_id = hook.channel_id.unwrap_or(thread.channel_id);
+        let channel_id = hook
+            .channel_id
+            .clone()
+            .unwrap_or_else(|| thread.channel_id.clone());
         let profile = hook
             .profile
             .clone()
@@ -372,7 +374,7 @@ impl HooksEngine {
             &self.pool,
             &self.data_dir,
             "system",
-            channel_id,
+            &channel_id,
             &profile,
             queries::ThreadCauseParams {
                 provider: None,
@@ -547,7 +549,7 @@ pub async fn fire_hook_by_id(
     let channel_id = crate::tasks_yaml::resolve_channel_id(pool, def.channel.as_deref()).await;
     let hook = HookRow::from_yml(hook_id, def, channel_id);
 
-    let channel = if let Some(cid) = hook.channel_id {
+    let channel = if let Some(cid) = hook.channel_id.as_deref() {
         crate::db::channels::get_channel_by_id(pool, cid)
             .await?
             .ok_or_else(|| {

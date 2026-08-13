@@ -68,7 +68,7 @@ struct HookResponse {
     prompt: Option<String>,
     action_id: Option<String>,
     profile: Option<String>,
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
     planning_mode: Option<String>,
     plan: Option<bool>,
     template: Option<String>,
@@ -81,7 +81,7 @@ impl HookResponse {
     fn from_def(
         key: &str,
         def: &HookDef,
-        channel_id: Option<i64>,
+        channel_id: Option<String>,
         counter: serde_json::Value,
     ) -> Self {
         let (planning_mode, plan) = def
@@ -140,7 +140,7 @@ struct CreateHookRequest {
     #[serde(default)]
     profile: Option<String>,
     #[serde(default)]
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
     #[serde(default)]
     planning_mode: Option<String>,
     #[serde(default)]
@@ -174,7 +174,7 @@ struct UpdateHookRequest {
     #[serde(default)]
     profile: Option<String>,
     #[serde(default)]
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
     #[serde(default)]
     planning_mode: Option<String>,
     #[serde(default)]
@@ -425,7 +425,7 @@ async fn update_hook_handler(
         };
     }
     if let Some(cid) = body.channel_id {
-        if cid == 0 {
+        if cid.trim().is_empty() {
             def.channel = None;
         } else {
             def.channel = tasks_yaml::channel_name_for_id(&state.pool, Some(cid)).await;

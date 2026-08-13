@@ -124,7 +124,7 @@ impl Agent {
     ///
     /// The `cancel_tokens` map is shared with the HTTP server so the
     /// `/stop/{channel_id}` endpoint can cancel channel handlers.
-    pub async fn run(self, cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>) {
+    pub async fn run(self, cancel_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>) {
         let agent_ctx = AgentContext {
             pool: self.pool,
             llm: self.llm,
@@ -146,11 +146,13 @@ impl Agent {
             let mut tokens = cancel_tokens.lock().await;
 
             // Collect channel IDs before iterating to avoid borrow conflicts
-            let channel_ids: Vec<i64> = channels.iter().map(|c| c.id).collect();
+            let channel_ids: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
 
             // Spawn handlers for channels not yet being processed
-            for &channel_id in &channel_ids {
-                if let std::collections::hash_map::Entry::Vacant(e) = tokens.entry(channel_id) {
+            for channel_id in &channel_ids {
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    tokens.entry(channel_id.clone())
+                {
                     // Skip spawning if the channel is closed: it will be spawned
                     // when the channel is opened via the /open endpoint
                     if let Ok(true) = queries::is_channel_closed(&agent_ctx.pool, channel_id).await
@@ -163,9 +165,10 @@ impl Agent {
                     e.insert(token);
 
                     let cfg = agent_ctx.clone();
+                    let cid = channel_id.clone();
 
                     tokio::spawn(async move {
-                        channel_handler(cfg, channel_id, handler_token).await;
+                        channel_handler(cfg, cid, handler_token).await;
                     });
 
                     info!(
@@ -173,7 +176,7 @@ impl Agent {
                         channel_id,
                         channels
                             .iter()
-                            .find(|c| c.id == channel_id)
+                            .find(|c| &c.id == channel_id)
                             .map(|c| c.name.as_str())
                             .unwrap_or("unknown")
                     );
@@ -181,9 +184,9 @@ impl Agent {
             }
 
             // Cancel handlers for channels that have been stopped
-            let stopped_ids: Vec<i64> = tokens.keys().copied().collect();
-            for &channel_id in &stopped_ids {
-                if let Some(token) = tokens.get(&channel_id) {
+            let stopped_ids: Vec<String> = tokens.keys().cloned().collect();
+            for channel_id in &stopped_ids {
+                if let Some(token) = tokens.get(channel_id) {
                     if !token.is_cancelled() {
                         if let Ok(true) =
                             queries::is_channel_closed(&agent_ctx.pool, channel_id).await
@@ -200,7 +203,7 @@ impl Agent {
             tokens.retain(|_, t| !t.is_cancelled());
 
             // Prune tokens for channels that no longer exist in the DB
-            let active_ids: Vec<i64> = channels.iter().map(|c| c.id).collect();
+            let active_ids: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
             tokens.retain(|k, _| active_ids.contains(k));
 
             drop(tokens);
@@ -219,7 +222,7 @@ impl Agent {
 /// cleanup they keep the plugin request alive and the `docker compose exec …`
 /// child keeps running with no consumer (thread 73, Aug 2026: cargo chain
 /// still alive 6+ min after thread end).
-async fn cancel_in_flight_for_channel(cfg: &AgentContext, channel_id: i64) {
+async fn cancel_in_flight_for_channel(cfg: &AgentContext, channel_id: &str) {
     let registry = crate::agent::task_registry::TASK_REGISTRY.get().cloned();
     let Some(registry) = registry else {
         return; // registry not initialized — nothing to cancel
@@ -264,7 +267,7 @@ async fn cancel_in_flight_for_channel(cfg: &AgentContext, channel_id: i64) {
 ///
 /// The loop exits cleanly when the cancellation token is triggered or
 /// when the channel is marked as stopped in the database.
-async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: CancellationToken) {
+async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: CancellationToken) {
     info!("Channel handler started for channel {}", channel_id);
 
     loop {
@@ -280,7 +283,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                 // `docker compose exec …` children (thread 73, Aug 2026).
                 // (Foreground calls are already killed by dropping the
                 // handler futures below.)
-                cancel_in_flight_for_channel(&cfg, channel_id).await;
+                cancel_in_flight_for_channel(&cfg, &channel_id).await;
                 // Don't skip pending threads here: stop_thread_handler already marked the
                 // specific thread as skipped before cancelling. Remaining pending threads
                 // should survive and be picked up when the supervisor respawns this handler.
@@ -288,17 +291,17 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
             }
             _ = async {
                 // Check if the channel has been closed in the DB
-                if let Ok(true) = queries::is_channel_closed(&cfg.pool, channel_id).await {
+                if let Ok(true) = queries::is_channel_closed(&cfg.pool, &channel_id).await {
                     info!("Channel {} is closed in DB, handler exiting", channel_id);
-                    if let Err(e) = queries::skip_channel_threads(&cfg.pool, channel_id).await {
+                    if let Err(e) = queries::skip_channel_threads(&cfg.pool, &channel_id).await {
                         tracing::warn!("[supervisor] Failed to skip threads for channel {}: {:?}", channel_id, e);
                     }
-                    cancel_in_flight_for_channel(&cfg, channel_id).await;
+                    cancel_in_flight_for_channel(&cfg, &channel_id).await;
                     return;
                 }
 
                 // Fetch pending threads for this channel
-                let threads = match queries::find_pending_threads_by_channel(&cfg.pool, channel_id).await {
+                let threads = match queries::find_pending_threads_by_channel(&cfg.pool, &channel_id).await {
                     Ok(threads) => threads,
                     Err(e) => {
                         error!("Error fetching pending threads for channel {}: {:?}", channel_id, e);
@@ -309,19 +312,19 @@ async fn channel_handler(cfg: AgentContext, channel_id: i64, cancel: Cancellatio
                 for thread in &threads {
                     // Best-effort cancellation check before each thread
                     if cancel.is_cancelled() {
-                        cancel_in_flight_for_channel(&cfg, channel_id).await;
+                        cancel_in_flight_for_channel(&cfg, &channel_id).await;
                         // Don't skip pending threads: stop_thread_handler already handled
                         // the target thread. The supervisor will respawn the handler.
                         return;
                     }
 
                     // Check if the channel was closed between batches
-                    if let Ok(true) = queries::is_channel_closed(&cfg.pool, channel_id).await {
+                    if let Ok(true) = queries::is_channel_closed(&cfg.pool, &channel_id).await {
                         info!("Channel {} closed during batch processing", channel_id);
-                        if let Err(e) = queries::skip_channel_threads(&cfg.pool, channel_id).await {
+                        if let Err(e) = queries::skip_channel_threads(&cfg.pool, &channel_id).await {
                             tracing::warn!("[supervisor] Failed to skip threads for channel {}: {:?}", channel_id, e);
                         }
-                        cancel_in_flight_for_channel(&cfg, channel_id).await;
+                        cancel_in_flight_for_channel(&cfg, &channel_id).await;
                         return;
                     }
 

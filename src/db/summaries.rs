@@ -10,7 +10,7 @@ use crate::db::types::SummaryDb;
 /// Get the latest (most recent) summary for a channel.
 pub async fn get_latest_summary(
     pool: &PgPool,
-    channel_id: i64,
+    channel_id: &str,
 ) -> crate::error::AppResult<Option<SummaryDb>> {
     let row: Option<SummaryDb> = sql_forge!(
         SummaryDb,
@@ -35,7 +35,7 @@ pub async fn get_latest_summary(
 #[allow(dead_code)]
 pub async fn get_recent_summaries(
     pool: &PgPool,
-    channel_id: i64,
+    channel_id: &str,
     limit: i64,
 ) -> crate::error::AppResult<Vec<SummaryDb>> {
     let rows: Vec<SummaryDb> = sql_forge!(
@@ -60,7 +60,7 @@ pub async fn get_recent_summaries(
 /// Create a new summary record.
 pub async fn create_summary(
     pool: &PgPool,
-    channel_id: i64,
+    channel_id: &str,
     next_thread_id: i64,
     content: &str,
 ) -> crate::error::AppResult<SummaryDb> {

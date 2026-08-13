@@ -155,7 +155,7 @@ struct CreateTaskRequest {
     title: String,
     body: Option<String>,
     assignee: Option<String>,
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
     profile: Option<String>,
     priority: Option<i32>,
     status: Option<String>,
@@ -182,7 +182,7 @@ struct UpdateTaskRequest {
     title: Option<String>,
     body: Option<String>,
     assignee: Option<String>,
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
     profile: Option<String>,
     priority: Option<i32>,
     status: Option<String>,
@@ -211,7 +211,7 @@ struct KanbanTaskRow {
     priority: Option<i32>,
     position: Option<i32>,
     assignee: Option<String>,
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
     profile: Option<String>,
     archived: Option<bool>,
     template: Option<String>,
@@ -236,7 +236,7 @@ struct DeleteIdRow {
     priority: Option<i32>,
     position: Option<i32>,
     assignee: Option<String>,
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
     profile: Option<String>,
     archived: Option<bool>,
     template: Option<String>,
@@ -328,7 +328,7 @@ struct KanbanTaskEntry {
     priority: i32,
     position: i32,
     assignee: Option<String>,
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
     profile: Option<String>,
     archived: bool,
     template: Option<String>,
@@ -667,7 +667,7 @@ async fn create_task_handler(
         INSERT INTO kanban_tasks
             (id, title, body, assignee, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
         VALUES
-            (:id, :title, :body, NULLIF(:assignee, '')::text, :status, :priority, NULLIF(:channel_id, 0::bigint), NULLIF(:profile, '')::text,
+            (:id, :title, :body, NULLIF(:assignee, '')::text, :status, :priority, NULLIF(:channel_id, '')::text, NULLIF(:profile, '')::text,
              :position, NULLIF(:template, '')::text, :plan::boolean, NULLIF(:planning_mode, '')::text, NULLIF(:workflow_id, '')::text)
         "#,
         ( :id = id.as_str(),
@@ -676,7 +676,7 @@ async fn create_task_handler(
           :assignee = body.assignee.as_deref().unwrap_or(""),
           :status = &task_status,
           :priority = task_priority,
-          :channel_id = body.channel_id.unwrap_or(0),
+          :channel_id = body.channel_id.as_deref().unwrap_or(""),
           :profile = body.profile.as_deref().unwrap_or(""),
           :position = next_pos,
           :template = body.template.as_deref().unwrap_or(""),
@@ -1090,7 +1090,7 @@ async fn update_task_handler(
             title = CASE WHEN :title = '' THEN title ELSE NULLIF(:title, '')::text END,
             body = CASE WHEN :body = :ign_str THEN body ELSE :body END,
             assignee = CASE WHEN :assignee = '' THEN assignee ELSE NULLIF(:assignee, '')::text END,
-            channel_id = CASE WHEN :channel_id = -999999::bigint THEN channel_id ELSE :channel_id END,
+            channel_id = CASE WHEN :channel_id = :ign_channel THEN channel_id ELSE NULLIF(:channel_id, '')::text END,
             profile = CASE WHEN :profile = '' THEN profile ELSE NULLIF(:profile, '')::text END,
             priority = CASE WHEN :priority = -999999::bigint THEN priority::bigint ELSE :priority END,
             status = CASE WHEN :status = '' THEN status ELSE :status END,
@@ -1107,7 +1107,8 @@ async fn update_task_handler(
           :body = body.body.as_deref().unwrap_or(IGNORE_STR),
           :assignee = body.assignee.as_deref().unwrap_or(""),
           :ign_str = IGNORE_STR,
-          :channel_id = body.channel_id.unwrap_or(IGNORE_INT),
+          :ign_channel = IGNORE_STR,
+          :channel_id = body.channel_id.as_deref().unwrap_or(IGNORE_STR),
           :profile = body.profile.as_deref().unwrap_or(""),
           :priority = body.priority.map(|v| v as i64).unwrap_or(IGNORE_INT),
           :status = body.status.as_deref().unwrap_or(""),
@@ -1373,9 +1374,8 @@ async fn list_threads_handler(
             m.created_at,
             m.metadata,
             t.status AS thread_status,
-            c.name AS channel_name
+            t.channel_id AS channel_name
         FROM threads t
-        LEFT JOIN channels c ON c.id = t.channel_id
         LEFT JOIN LATERAL (
             SELECT m_sub.*
             FROM messages m_sub
@@ -2001,7 +2001,7 @@ struct DispatchTaskDetailRow {
     id: String,
     title: String,
     body: Option<String>,
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
     profile: Option<String>,
     template: Option<String>,
     workflow_id: Option<String>,
@@ -2215,7 +2215,7 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
     };
 
     // 4. Resolve channel, profile, provider/model and template.
-    let channel = match get_channel_by_id(&state.pool, channel_id).await {
+    let channel = match get_channel_by_id(&state.pool, &channel_id).await {
         Ok(Some(channel)) => channel,
         Ok(None) => {
             error!(
@@ -2299,7 +2299,7 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         &state.pool,
         &state.data_dir,
         "system",
-        channel_id,
+        &channel_id,
         &effective_profile,
         params,
     )
@@ -2477,7 +2477,7 @@ mod tests {
             priority: Some(3),
             position: Some(1),
             assignee: Some("alice".to_string()),
-            channel_id: Some(42),
+            channel_id: Some("kanban".to_string()),
             profile: Some("default".to_string()),
             archived: Some(false),
             template: None,
@@ -2533,7 +2533,7 @@ mod tests {
             priority: Some(3),
             position: Some(1),
             assignee: Some("alice".to_string()),
-            channel_id: Some(42),
+            channel_id: Some("kanban".to_string()),
             profile: Some("default".to_string()),
             archived: Some(false),
             template: None,

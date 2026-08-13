@@ -191,7 +191,8 @@ impl PluginConfig {
 fn extract_i64(args: &Value, meta: &Option<McpMeta>, key: &str) -> Option<i64> {
     args[key].as_i64().or_else(|| {
         meta.as_ref().and_then(|m| match key {
-            "channel_id" => m.channel_id,
+            // channel ids are strings now (channel NAMES).
+            "channel_id" => None,
             "thread_id" => m.thread_id,
             _ => None,
         })
@@ -228,7 +229,7 @@ struct MessageRow {
 #[derive(Debug, FromRow)]
 struct SummaryRow {
     id: i64,
-    channel_id: i64,
+    channel_id: String,
     next_thread_id: i64,
     content: String,
 }
@@ -284,7 +285,7 @@ async fn get_thread_messages(pool: &PgPool, thread_id: i64, limit: i64) -> Resul
     Ok(rows)
 }
 
-async fn get_latest_summary(pool: &PgPool, channel_id: i64) -> Result<Option<SummaryRow>> {
+async fn get_latest_summary(pool: &PgPool, channel_id: &str) -> Result<Option<SummaryRow>> {
     let row = sql_forge!(
         SummaryRow,
         r#"
@@ -294,7 +295,7 @@ async fn get_latest_summary(pool: &PgPool, channel_id: i64) -> Result<Option<Sum
         ORDER BY id DESC
         LIMIT 1
         "#,
-        ( :channel_id = channel_id )
+        ( :channel_id = &channel_id )
     )
     .fetch_optional(pool)
     .await
@@ -305,7 +306,7 @@ async fn get_latest_summary(pool: &PgPool, channel_id: i64) -> Result<Option<Sum
 
 async fn get_threads_since(
     pool: &PgPool,
-    channel_id: i64,
+    channel_id: &str,
     since_id: i64,
     limit: i64,
 ) -> Result<Vec<ThreadRow>> {
@@ -321,7 +322,7 @@ async fn get_threads_since(
         LIMIT :limit
         "#,
         (
-            :channel_id = channel_id,
+            :channel_id = &channel_id,
             :since_id = since_id,
             :limit = limit,
         )
@@ -731,7 +732,7 @@ impl OwnTaskLink {
 struct CrossTaskThreadRef {
     task_id: Option<String>,
     schedule_task_id: Option<String>,
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -853,7 +854,7 @@ async fn build_cross_task_block(pool: &PgPool, thread_id: i64) -> anyhow::Result
         LIMIT :i64
         "#,
         (
-            :channel_id = channel_id,
+            :channel_id = &channel_id,
             :thread_id = thread_id,
             :task_id = own.task_id.as_deref().unwrap_or(""),
             :schedule_task_id = own.schedule_task_id.as_deref().unwrap_or(""),
@@ -1234,7 +1235,10 @@ async fn handle_generate_full(
         })
         .unwrap_or_default();
     let thread_id = extract_i64(args, &meta, "thread_id");
-    let channel_id = extract_i64(args, &meta, "channel_id");
+    let channel_id = args["channel_id"]
+        .as_str()
+        .map(String::from)
+        .or_else(|| meta.as_ref().and_then(|m| m.channel_id.clone()));
     let data_dir = &cfg.omni_dir;
 
     // 1. Build system prompt parts using the builder
@@ -1304,7 +1308,7 @@ async fn handle_generate_full(
 
     // 2b. Latest summary and threads since
     if let Some(cid) = channel_id {
-        match get_latest_summary(pool, cid).await {
+        match get_latest_summary(pool, &cid).await {
             Ok(Some(summary)) => {
                 context_blocks.push(format!(
                     "Previous channel summary (covers threads up to id={}):\n{}",
@@ -1312,7 +1316,7 @@ async fn handle_generate_full(
                     truncate_str(&summary.content, 4000)
                 ));
 
-                match get_threads_since(pool, cid, summary.next_thread_id, 5).await {
+                match get_threads_since(pool, &cid, summary.next_thread_id, 5).await {
                     Ok(threads) if !threads.is_empty() => {
                         let thread_info: Vec<String> = threads
                             .iter()

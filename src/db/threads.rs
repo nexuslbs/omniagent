@@ -31,7 +31,7 @@ pub async fn create_thread<'e, E>(
     executor: E,
     status: &str,
     cause: &str,
-    channel_id: i64,
+    channel_id: &str,
     profile: &str,
     p: CreateThreadParams,
 ) -> AppResult<Thread>
@@ -270,20 +270,22 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
     // Determine thread status based on channel state
     // If the channel is closed, set to 'skipped' unless the message role is 'system' (for /open etc.)
     let thread_status = {
-        let channel_closed: Option<bool> = sql_forge!(
-            scalar Option<bool>,
-            r#"
-            SELECT ch.closed
-            FROM channels ch
-            JOIN threads t ON t.channel_id = ch.id
-            WHERE t.id = :thread_id
-            "#,
+        let thread_channel: Option<String> = sql_forge!(
+            scalar String,
+            "SELECT channel_id FROM threads WHERE id = :thread_id",
             ( :thread_id = msg.thread_id )
         )
-        .fetch_one(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
+        let channel_closed = if let Some(name) = thread_channel.as_deref() {
+            crate::db::channels::is_channel_closed(pool, name)
+                .await
+                .unwrap_or(false)
+        } else {
+            false
+        };
 
-        if channel_closed.unwrap_or(false) && msg.role != "system" {
+        if channel_closed && msg.role != "system" {
             "skipped"
         } else {
             "pending"
@@ -308,7 +310,7 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
         struct SkipRow {
             id: i64,
             cause: Option<String>,
-            channel_id: i64,
+            channel_id: String,
             profile: Option<String>,
             provider: Option<String>,
             model: Option<String>,
@@ -367,7 +369,7 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
                         &mut *tx,
                         "pending",
                         t.cause.as_deref().unwrap_or("system"),
-                        t.channel_id,
+                        &t.channel_id,
                         &profile,
                         CreateThreadParams {
                             provider: Some(provider.clone()),
@@ -593,7 +595,7 @@ pub async fn create_thread_with_cause(
     pool: &PgPool,
     data_dir: &str,
     cause: &str,
-    channel_id: i64,
+    channel_id: &str,
     profile: &str,
     p: ThreadCauseParams,
 ) -> AppResult<(Thread, Message)> {
@@ -614,14 +616,12 @@ pub async fn create_thread_with_cause(
         .ok_or_else(|| Error::Message(format!("Channel {} not found", channel_id)))?;
 
     // 3. Resolve planning mode (internal: lets plugin decide at runtime)
-    // Channel-level plan comes from the plan column (if explicitly set) or
-    // from metadata (deprecated JSON field for backward compatibility).
-    // When neither is set, the prompt plugin decides at runtime.
-    // Priority: task_plan > channel.plan (column, if not NULL) > channel.metadata["plan"]
+    // Channel-level plan comes from the channels.yml `plan` field (single
+    // bool). When unset, the prompt plugin decides at runtime.
+    // Priority: task_plan > channel.plan (yml `plan` bool).
     let channel_plan_from_column: Option<bool> =
         crate::db::channels::get_channel_plan(pool, channel_id).await?;
-    let channel_plan_from_metadata = channel.metadata.get("plan").and_then(|v| v.as_bool());
-    let channel_plan = channel_plan_from_column.or(channel_plan_from_metadata);
+    let channel_plan = channel_plan_from_column;
     let plan = resolve_thread_plan(channel_plan, p.task_plan).unwrap_or(false); // false = placeholder, plugin may override at runtime
 
     // 4. Resolve provider/model/profile once, at thread creation.
@@ -738,7 +738,7 @@ pub async fn create_thread_with_cause(
 /// Find pending threads for a channel.
 pub async fn find_pending_threads_by_channel(
     pool: &PgPool,
-    channel_id: i64,
+    channel_id: &str,
 ) -> AppResult<Vec<Thread>> {
     let rows: Vec<ThreadDb> = sql_forge!(
         ThreadDb,
@@ -822,7 +822,7 @@ pub async fn complete_thread(
 }
 
 /// Set all pending/processing threads for a channel to 'skipped'.
-pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<usize> {
+pub async fn skip_channel_threads(pool: &PgPool, channel_id: &str) -> AppResult<usize> {
     // Phase 3 (R3): channel closure/deletion re-schedules instead of dropping work.
     // Every pending/processing thread linked to a kanban task is marked skipped and a
     // re-run thread (thread_status='scheduled') is created in the SAME transaction,
@@ -833,7 +833,7 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
     struct SkipRow {
         id: i64,
         cause: Option<String>,
-        channel_id: i64,
+        channel_id: String,
         profile: Option<String>,
         provider: Option<String>,
         model: Option<String>,
@@ -885,7 +885,7 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: i64) -> AppResult<u
                         &mut *tx,
                         "pending",
                         t.cause.as_deref().unwrap_or("system"),
-                        t.channel_id,
+                        &t.channel_id,
                         t.profile.as_deref().unwrap_or(""),
                         CreateThreadParams {
                             provider: t.provider.clone(),
@@ -990,7 +990,7 @@ pub async fn skip_all_pending_threads(pool: &PgPool) -> AppResult<u64> {
     struct SkipRow {
         id: i64,
         cause: Option<String>,
-        channel_id: i64,
+        channel_id: String,
         profile: Option<String>,
         provider: Option<String>,
         model: Option<String>,
@@ -1050,7 +1050,7 @@ pub async fn skip_all_pending_threads(pool: &PgPool) -> AppResult<u64> {
                     &mut *tx,
                     "pending",
                     t.cause.as_deref().unwrap_or("system"),
-                    t.channel_id,
+                    &t.channel_id,
                     t.profile.as_deref().unwrap_or("default"),
                     CreateThreadParams {
                         provider: t.provider.clone(),
@@ -1147,7 +1147,7 @@ pub async fn get_cause_message(pool: &PgPool, thread_id: i64) -> AppResult<Optio
 /// - `Some(Some(p))`: returns sibling threads (parent_id = p) plus the parent thread itself (id = p)
 pub async fn get_completed_seq0_threads_since(
     pool: &PgPool,
-    channel_id: i64,
+    channel_id: String,
     since_id: i64,
     limit: i64,
     parent_id: Option<Option<i64>>,
@@ -1521,7 +1521,7 @@ mod tests {
     fn test_channel(provider: Option<&str>, model: Option<&str>) -> crate::db::types::Channel {
         use chrono::Utc;
         crate::db::types::Channel {
-            id: 1,
+            id: "test-channel".to_string(),
             name: "test-channel".to_string(),
             platform: None,
             resource_identifier: None,
@@ -1532,6 +1532,7 @@ mod tests {
             current_provider: provider.map(|s| s.to_string()),
             readonly: false,
             closed: false,
+            plan: true,
             metadata: serde_json::json!({}),
             template: None,
             created_at: Utc::now(),

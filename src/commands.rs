@@ -5,7 +5,6 @@
 
 use crate::err_msg;
 use crate::error::{AppResult, Error};
-use sql_forge::sql_forge;
 use sqlx::PgPool;
 
 use crate::db::types::Channel;
@@ -280,54 +279,35 @@ pub async fn handle_new_external(
     Ok(channel)
 }
 
-/// Set the profile on a channel by updating `current_profile`.
+/// Set the profile on a channel (yml `profile` field; channel_id = channel
+/// name, the channels.yml key).
 pub async fn handle_profile_set(
-    pool: &PgPool,
-    channel_id: i64,
+    _pool: &PgPool,
+    channel_id: String,
     profile_name: &str,
 ) -> AppResult<()> {
-    sql_forge!(
-        "UPDATE channels SET current_profile = :profile_name, updated_at = NOW() WHERE id = :channel_id",
-        ( :profile_name = profile_name, :channel_id = channel_id )
-    )
-    .execute(pool)
-    .await?;
+    crate::channels_yaml::update_channel(&channel_id, |existing| {
+        let mut d = existing
+            .cloned()
+            .ok_or_else(|| Error::Message(format!("Channel '{}' not found", channel_id)))?;
+        d.profile = Some(profile_name.to_string());
+        Ok(d)
+    })?;
     Ok(())
 }
 
-/// List channels by platform.
+/// List channels by platform (channels live in channels.yml now).
 pub async fn handle_channel_list(pool: &PgPool, platform: &str) -> AppResult<Vec<Channel>> {
-    let rows: Vec<crate::db::types::ChannelDb> = sql_forge!(
-        crate::db::types::ChannelDb,
-        r#"
-        SELECT
-            id, name,
-            COALESCE(platform, '') AS "platform",
-            resource_identifier,
-            COALESCE(external_id, '') AS "external_id",
-            cause,
-            current_profile, current_model, current_provider,
-            readonly,
-            COALESCE(closed, false) as "closed",
-            COALESCE(plan, true) as "plan",
-            '{}'::text AS "metadata",
-            COALESCE(template, '') AS "template",
-            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
-            COALESCE(TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "updated_at"
-        FROM channels
-        WHERE platform = :platform
-        ORDER BY name ASC
-        "#,
-        ( :platform = platform )
-    )
-    .fetch_all(pool)
-    .await?;
-    rows.into_iter()
-        .map(|r| {
-            r.try_into()
-                .map_err(|e| Error::Message(format!("Channel conversion failed: {}", e)))
+    let all = crate::db::channels::find_all_channels(pool).await?;
+    Ok(all
+        .into_iter()
+        .filter(|c| {
+            c.platform
+                .as_deref()
+                .map(|p| p == platform)
+                .unwrap_or(false)
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]

@@ -137,7 +137,7 @@ pub async fn process_thread(
         LLMClient::new(llm_cfg)
     };
 
-    let channel = queries::get_channel_by_id(&cfg.pool, thread.channel_id)
+    let channel = queries::get_channel_by_id(&cfg.pool, &thread.channel_id)
         .await?
         .unwrap_or_default();
 

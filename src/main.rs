@@ -71,6 +71,10 @@ async fn run_server() -> AppResult<()> {
     // Ensure the config/ subdir exists (root-level yml config files live there).
     config_path::ensure_config_dir(&data_dir);
 
+    // Channels live in {data_dir}/config/channels.yml (no DB table). Set the
+    // global data dir so the yml store is reachable from every channel query.
+    omniagent::channels_yaml::set_data_dir(&data_dir);
+
     let default_profile = profile::default_profile_name();
     tracing::info!("Default profile: {}", default_profile);
 
@@ -208,7 +212,7 @@ async fn run_server() -> AppResult<()> {
     }
 
     // Shared cancellation tokens for /stop endpoint
-    let cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>> =
+    let cancel_tokens: Arc<Mutex<HashMap<String, CancellationToken>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let cancel_tokens_agent = cancel_tokens.clone();
     let cancel_tokens_server = cancel_tokens.clone();

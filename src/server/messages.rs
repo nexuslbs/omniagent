@@ -37,7 +37,7 @@ pub fn messages_router() -> Router<Arc<AppState>> {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelFilterEntry {
-    pub id: i64,
+    pub id: String,
     pub name: String,
     pub count: i64,
 }
@@ -87,7 +87,7 @@ pub struct MessageEventEntry {
     #[serde(rename = "subtype")]
     pub msg_subtype: Option<String>,
     pub iteration_number: Option<i32>,
-    pub channel_id: Option<i64>,
+    pub channel_id: Option<String>,
     pub status: Option<String>,
     pub profile: Option<String>,
     pub provider: Option<String>,
@@ -115,7 +115,7 @@ pub struct MessagesEventsResponse {
 
 #[derive(FromRow)]
 struct ChannelCountRow {
-    id: i64,
+    id: String,
     name: String,
     count: Option<i64>,
 }
@@ -159,7 +159,7 @@ struct MessageEventRow {
     msg_type: Option<String>,
     msg_subtype: Option<String>,
     iteration_number: Option<i32>,
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
     status: Option<String>,
     profile: Option<String>,
     provider: Option<String>,
@@ -203,11 +203,10 @@ async fn filters_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     let channels = match sql_forge!(
         ChannelCountRow,
         r#"
-        SELECT c.id, c.name, COUNT(t.id) AS count
-        FROM channels c
-        JOIN threads t ON t.channel_id = c.id
-        GROUP BY c.id, c.name
-        ORDER BY c.name
+        SELECT t.channel_id AS id, t.channel_id AS name, COUNT(t.id) AS count
+        FROM threads t
+        GROUP BY t.channel_id
+        ORDER BY t.channel_id
         "#,
     )
     .fetch_all(&state.pool)
@@ -370,8 +369,6 @@ async fn events_handler(
         format!("%{}%", subtype)
     };
 
-    // Parse string IDs to i64 for bigint SQL params
-    let channel_int = channel_id.parse::<i64>().unwrap_or(0);
     let thread_int = thread_id.parse::<i64>().unwrap_or(0);
 
     // ── Count query ──
@@ -381,9 +378,8 @@ async fn events_handler(
         SELECT COUNT(*) AS total
         FROM messages m
         JOIN threads t ON t.id = m.thread_id
-        JOIN channels c ON c.id = t.channel_id
         WHERE 1=1
-          AND (:channel_id = '' OR :channel_id = 'all' OR t.channel_id = :channel_int)
+          AND (:channel_id = '' OR :channel_id = 'all' OR t.channel_id = :channel_id)
           AND (:thread_id = '' OR m.thread_id = :thread_int)
           AND (:role = '' OR :role = 'all' OR m.role = :role)
           AND (:provider = '' OR :provider = 'all' OR t.provider = :provider)
@@ -393,7 +389,6 @@ async fn events_handler(
           AND (:subtype_pattern = '' OR m.msg_subtype LIKE :subtype_pattern)
         "#,
         ( :channel_id = &channel_id,
-          :channel_int = channel_int,
           :thread_id = &thread_id,
           :thread_int = thread_int,
           :role = &role,
@@ -446,13 +441,12 @@ async fn events_handler(
                 t.input_tokens::bigint AS thread_input_tokens,
                 t.output_tokens::bigint AS thread_output_tokens,
                 t.cached_tokens::bigint AS thread_cached_tokens,
-                c.name AS channel_name,
+                t.channel_id AS channel_name,
                 m.token_usage::text AS msg_token_usage
             FROM messages m
             JOIN threads t ON t.id = m.thread_id
-            JOIN channels c ON c.id = t.channel_id
             WHERE 1=1
-              AND (:channel_id = '' OR :channel_id = 'all' OR t.channel_id = :channel_int)
+              AND (:channel_id = '' OR :channel_id = 'all' OR t.channel_id = :channel_id)
               AND (:thread_id = '' OR m.thread_id = :thread_int)
               AND (:role = '' OR :role = 'all' OR m.role = :role)
               AND (:provider = '' OR :provider = 'all' OR t.provider = :provider)
@@ -464,7 +458,6 @@ async fn events_handler(
             LIMIT :limit_val OFFSET :offset_val
             "#,
             ( :channel_id = &channel_id,
-              :channel_int = channel_int,
               :thread_id = &thread_id,
               :thread_int = thread_int,
               :role = &role,
@@ -513,13 +506,12 @@ async fn events_handler(
                 t.input_tokens::bigint AS thread_input_tokens,
                 t.output_tokens::bigint AS thread_output_tokens,
                 t.cached_tokens::bigint AS thread_cached_tokens,
-                c.name AS channel_name,
+                t.channel_id AS channel_name,
                 m.token_usage::text AS msg_token_usage
             FROM messages m
             JOIN threads t ON t.id = m.thread_id
-            JOIN channels c ON c.id = t.channel_id
             WHERE 1=1
-              AND (:channel_id = '' OR :channel_id = 'all' OR t.channel_id = :channel_int)
+              AND (:channel_id = '' OR :channel_id = 'all' OR t.channel_id = :channel_id)
               AND (:thread_id = '' OR m.thread_id = :thread_int)
               AND (:role = '' OR :role = 'all' OR m.role = :role)
               AND (:provider = '' OR :provider = 'all' OR t.provider = :provider)
@@ -531,7 +523,6 @@ async fn events_handler(
             LIMIT :limit_val OFFSET :offset_val
             "#,
             ( :channel_id = &channel_id,
-              :channel_int = channel_int,
               :thread_id = &thread_id,
               :thread_int = thread_int,
               :role = &role,

@@ -56,8 +56,9 @@ async fn handle_search_messages(
         .ok_or_else(|| anyhow::anyhow!("'query' is required for query_search_messages"))?
         .to_string();
     let channel_id = args["channel_id"]
-        .as_i64()
-        .or_else(|| meta.and_then(|m| m.channel_id));
+        .as_str()
+        .map(String::from)
+        .or_else(|| meta.and_then(|m| m.channel_id.clone()));
     let limit = args["limit"].as_i64().unwrap_or(10).min(50);
 
     let hash_vec = HashVectorizer;
@@ -183,8 +184,9 @@ async fn handle_search_channel_prompts(
     meta: Option<&McpMeta>,
 ) -> Result<(String, bool)> {
     let channel_id = args["channel_id"]
-        .as_i64()
-        .or_else(|| meta.and_then(|m| m.channel_id))
+        .as_str()
+        .map(String::from)
+        .or_else(|| meta.and_then(|m| m.channel_id.clone()))
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "'channel_id' is required for query_channel_prompts (no current channel in \
@@ -208,7 +210,7 @@ async fn handle_search_channel_prompts(
             ORDER BY id DESC
             LIMIT :limit
             "#,
-            ( :channel_id = channel_id, :limit = limit )
+            ( :channel_id = &channel_id, :limit = limit )
         )
         .fetch_all(pool)
         .await
@@ -565,25 +567,25 @@ async fn handle_query(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 
 /// query_channels: list channels with id, name, platform and cause.
 /// Helps the agent discover channel_id values for channel-scoped queries.
-async fn handle_query_channels(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
-    let limit = args["limit"].as_i64().unwrap_or(50).min(200);
+async fn handle_query_channels(_pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+    let limit = args["limit"].as_i64().unwrap_or(50).min(200) as usize;
 
-    let rows: Vec<(i64, String, String, String)> =
-        sqlx::query_as("SELECT id, name, platform, cause FROM channels ORDER BY id LIMIT $1")
-            .bind(limit)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to list channels: {e}"))?;
+    // Channels live in {data_dir}/config/channels.yml now (id == name).
+    let channels = omniagent::channels_yaml::find_all()
+        .map_err(|e| anyhow::anyhow!("Failed to load channels.yml: {e}"))?;
 
-    if rows.is_empty() {
+    if channels.is_empty() {
         return Ok(("[query_channels] No channels found.".to_string(), false));
     }
 
-    let mut lines = vec![format!("[query_channels] {} channel(s):", rows.len())];
-    for (id, name, platform, cause) in &rows {
+    let mut lines = vec![format!("[query_channels] {} channel(s):", channels.len())];
+    for (name, def) in channels.into_iter().take(limit) {
         lines.push(format!(
             "#{} {} (platform: {}, cause: {})",
-            id, name, platform, cause
+            name,
+            name,
+            def.platform.as_deref().unwrap_or(""),
+            def.cause
         ));
     }
     Ok((lines.join("\n"), false))
@@ -675,6 +677,10 @@ impl PluginConfig {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Shared pool — populated by configure callback before any tool call
+    // Channels live in {OMNI_DIR}/config/channels.yml — set the global data dir.
+    omniagent::channels_yaml::set_data_dir(
+        &std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/omni".to_string()),
+    );
     let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
 
     // Helper to fetch the shared pool; returns a soft error if not configured.

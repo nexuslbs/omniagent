@@ -44,7 +44,7 @@ struct TaskStatusRow {
 #[derive(sqlx::FromRow)]
 struct ThreadTaskRow {
     id: i64,
-    channel_id: i64,
+    channel_id: String,
     task_id: Option<String>,
 }
 
@@ -107,7 +107,7 @@ pub(crate) type PlatformRestartSignals =
 #[derive(Clone)]
 pub(crate) struct AppState {
     pool: PgPool,
-    cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
+    cancel_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
     data_dir: String,
     /// Default profile name (from global config default_profile setting)
     default_profile: String,
@@ -129,7 +129,7 @@ pub struct ServerConfig {
     pub pool: PgPool,
     pub host: String,
     pub port: u16,
-    pub cancel_tokens: Arc<Mutex<HashMap<i64, CancellationToken>>>,
+    pub cancel_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
     pub data_dir: String,
     pub default_profile: String,
     pub app_context: AppContext,
@@ -303,14 +303,14 @@ async fn apply_stop_recovery(
 /// kanban tasks of the skipped threads and clears their thread_status - no
 /// retry is consumed and no re-run thread is created. The channel stays open.
 async fn stop_handler(
-    Path(channel_id): Path<i64>,
+    Path(channel_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
     // 1. Collect pending/processing threads (id + kanban task) BEFORE skipping
     let threads = match     sql_forge!(
         ThreadTaskRow,
         "SELECT id, channel_id, task_id FROM threads WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
-        ( :channel_id = channel_id )
+        ( :channel_id = channel_id.as_str() )
     )
     .fetch_all(&state.pool)
     .await
@@ -332,7 +332,7 @@ async fn stop_handler(
     // 2. Mark them all as skipped (plain skip - no reschedule, no re-run thread)
     let skipped = match     sql_forge!(
         "UPDATE threads SET status = 'skipped' WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
-        ( :channel_id = channel_id )
+        ( :channel_id = channel_id.as_str() )
     )
     .execute(&state.pool)
     .await
@@ -512,14 +512,14 @@ async fn stop_thread_handler(
 /// Phase 6b: like stop, the kanban tasks of the skipped threads move to blocked
 /// (thread_status cleared) - no retry consumed, no re-run thread.
 async fn close_handler(
-    Path(channel_id): Path<i64>,
+    Path(channel_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
     // 1. Collect pending/processing threads (id + kanban task) BEFORE skipping
     let threads = match     sql_forge!(
         ThreadTaskRow,
         "SELECT id, channel_id, task_id FROM threads WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
-        ( :channel_id = channel_id )
+        ( :channel_id = channel_id.as_str() )
     )
     .fetch_all(&state.pool)
     .await
@@ -541,7 +541,7 @@ async fn close_handler(
     // 2. Mark them all as skipped (plain skip - no reschedule, no re-run thread)
     let skipped = match     sql_forge!(
         "UPDATE threads SET status = 'skipped' WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
-        ( :channel_id = channel_id )
+        ( :channel_id = channel_id.as_str() )
     )
     .execute(&state.pool)
     .await
@@ -587,7 +587,7 @@ async fn close_handler(
     }
 
     // 4. Set channel as closed
-    if let Err(e) = queries::close_channel(&state.pool, channel_id).await {
+    if let Err(e) = queries::close_channel(&state.pool, &channel_id).await {
         error!("Close: failed to close channel {}: {:?}", channel_id, e);
         return Json(serde_json::json!({
             "status": "error",
@@ -621,10 +621,10 @@ async fn close_handler(
 
 /// Open: reopen a closed channel so the supervisor can spawn a handler.
 async fn open_handler(
-    Path(channel_id): Path<i64>,
+    Path(channel_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
-    match queries::open_channel(&state.pool, channel_id).await {
+    match queries::open_channel(&state.pool, &channel_id).await {
         Ok(_) => {
             info!("Open: reopened channel {}", channel_id);
             Json(serde_json::json!({
@@ -646,10 +646,10 @@ async fn open_handler(
 
 /// Status: show channel info and thread counts.
 async fn status_handler(
-    Path(channel_id): Path<i64>,
+    Path(channel_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    match queries::get_channel_status(&state.pool, channel_id).await {
+    match queries::get_channel_status(&state.pool, &channel_id).await {
         Ok(Some(status)) => {
             let has_handler = {
                 let tokens = state.cancel_tokens.lock().await;
@@ -855,7 +855,7 @@ async fn prompt_preview_handler(
     // as the cause content, so the context reflects what would actually be
     // assembled when a real message is processed.
     if let Some(ch) = &channel {
-        if let Ok(Some(latest)) = queries::get_latest_seq0_message(&state.pool, ch.id).await {
+        if let Ok(Some(latest)) = queries::get_latest_seq0_message(&state.pool, &ch.id).await {
             if let Ok(Some(tid)) = queries::get_message_thread(&state.pool, latest.id).await {
                 let profile_registry = crate::profile::ProfileRegistry::new(&state.data_dir);
                 let _prof = profile_registry
@@ -871,7 +871,7 @@ async fn prompt_preview_handler(
                     platform,
                     &body.prompt,
                     tid,
-                    ch.id,
+                    &ch.id,
                 )
                 .await;
 
@@ -1082,8 +1082,10 @@ async fn execute_mcp_tool_handler(
     // caller did not specify one.
     let mut ctx = state.app_context.clone();
     if let Some(meta_obj) = body.meta.as_ref().and_then(|v| v.as_object()) {
-        if let Some(cid) = meta_obj.get("channel_id").and_then(|v| v.as_i64()) {
-            ctx.current_channel_id = Some(cid);
+        if let Some(cid) = meta_obj.get("channel_id").and_then(|v| v.as_str()) {
+            if !cid.is_empty() {
+                ctx.current_channel_id = Some(cid.to_string());
+            }
         }
         if let Some(tid) = meta_obj.get("thread_id").and_then(|v| v.as_i64()) {
             ctx.current_thread_id = Some(tid);
@@ -1166,7 +1168,7 @@ async fn context_preview_handler(
 
     // Get the latest seq-0 message in this channel to use as the cause
     // (so retrieval/search context is based on real content).
-    let (cause_id, cause_content) = match queries::get_latest_seq0_message(&state.pool, channel.id)
+    let (cause_id, cause_content) = match queries::get_latest_seq0_message(&state.pool, &channel.id)
         .await
     {
         Ok(Some(msg)) => (msg.id, msg.content),
@@ -1221,7 +1223,7 @@ async fn context_preview_handler(
         platform,
         &cause_content,
         thread_id,
-        channel.id,
+        &channel.id,
     )
     .await;
 
@@ -1240,7 +1242,7 @@ async fn call_prompt_context(
     platform: &str,
     user_message: &str,
     thread_id: i64,
-    channel_id: i64,
+    channel_id: &str,
 ) -> String {
     let prompt_tool_name = crate::agent::config::get_global()
         .map(|g| g.read().prompt_tool_name.clone())

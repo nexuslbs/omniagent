@@ -19,7 +19,7 @@ pub struct ThreadDb {
     pub id: i64,
     pub status: String,
     pub cause: String,
-    pub channel_id: i64,
+    pub channel_id: String,
     pub profile: String,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -173,80 +173,6 @@ impl TryFrom<MessageDb> for Message {
 }
 
 // ---------------------------------------------------------------------------
-// Channel DB struct (for SELECT results): unchanged
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct ChannelDb {
-    pub id: i64,
-    pub name: String,
-    pub platform: Option<String>,
-    pub resource_identifier: Option<String>,
-    pub external_id: Option<String>,
-    pub cause: String,
-    pub current_profile: String,
-    pub current_model: Option<String>,
-    pub current_provider: Option<String>,
-    pub readonly: bool,
-    pub closed: Option<bool>,
-    pub plan: Option<bool>,
-    pub metadata: Option<String>,
-    pub template: Option<String>,
-    pub created_at: Option<String>,
-    pub updated_at: Option<String>,
-}
-
-impl TryFrom<ChannelDb> for Channel {
-    type Error = crate::error::Error;
-
-    fn try_from(db: ChannelDb) -> Result<Self, Self::Error> {
-        Ok(Self {
-            id: db.id,
-            name: db.name,
-            platform: db.platform,
-            resource_identifier: db.resource_identifier,
-            external_id: db.external_id,
-            cause: db.cause,
-            current_profile: db.current_profile,
-            current_model: db.current_model,
-            current_provider: db.current_provider,
-            readonly: db.readonly,
-            closed: db.closed.unwrap_or(false),
-            metadata: db
-                .metadata
-                .as_deref()
-                .map(|s| serde_json::from_str(s).unwrap_or_default())
-                .unwrap_or_default(),
-            template: db.template.filter(|t| !t.is_empty()),
-            created_at: db
-                .created_at
-                .as_deref()
-                .unwrap_or("")
-                .parse::<DateTime<Utc>>()
-                .map_err(|e| {
-                    crate::error::Error::Message(format!(
-                        "Invalid timestamp '{}': {}",
-                        db.created_at.as_deref().unwrap_or("?"),
-                        e
-                    ))
-                })?,
-            updated_at: db
-                .updated_at
-                .as_deref()
-                .unwrap_or("")
-                .parse::<DateTime<Utc>>()
-                .map_err(|e| {
-                    crate::error::Error::Message(format!(
-                        "Invalid timestamp '{}': {}",
-                        db.updated_at.as_deref().unwrap_or("?"),
-                        e
-                    ))
-                })?,
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Summary DB struct (for SELECT results)
 // ---------------------------------------------------------------------------
 
@@ -254,7 +180,7 @@ impl TryFrom<ChannelDb> for Channel {
 pub struct SummaryDb {
     pub id: i64,
     #[allow(dead_code)]
-    pub channel_id: i64,
+    pub channel_id: String,
     pub next_thread_id: i64,
     pub content: String,
     #[allow(dead_code)]
@@ -339,7 +265,7 @@ pub struct OldChannelInfo {
 /// Status info for a channel: open/closed, thread counts, config.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ChannelStatus {
-    pub channel_id: i64,
+    pub channel_id: String,
     pub name: String,
     pub platform: String,
     pub closed: bool,
@@ -366,7 +292,7 @@ pub struct ChannelSeq0Message {
 
 /// Replica details from the messages table for the overview endpoint.
 pub struct Channel {
-    pub id: i64,
+    pub id: String,
     pub name: String,
     /// Platform name ("telegram", "cli", etc.).  NULL means no-platform
     /// (e.g. cron/kanban channels that only exist for scheduling).
@@ -383,6 +309,7 @@ pub struct Channel {
     pub current_provider: Option<String>,
     pub readonly: bool,
     pub closed: bool,
+    pub plan: bool,
     pub metadata: serde_json::Value,
     pub template: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -392,7 +319,7 @@ pub struct Channel {
 impl Default for Channel {
     fn default() -> Self {
         Self {
-            id: 0,
+            id: String::new(),
             name: String::new(),
             platform: None,
             resource_identifier: None,
@@ -403,6 +330,7 @@ impl Default for Channel {
             current_provider: None,
             readonly: false,
             closed: false,
+            plan: true,
             metadata: serde_json::Value::Object(serde_json::Map::new()),
             template: None,
             created_at: DateTime::from_timestamp(0, 0).unwrap_or(DateTime::UNIX_EPOCH),
@@ -456,7 +384,7 @@ pub struct Thread {
     pub id: i64,
     pub status: String,
     pub cause: String,
-    pub channel_id: i64,
+    pub channel_id: String,
     pub profile: String,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -483,7 +411,7 @@ pub struct Thread {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadNew {
     pub cause: String,
-    pub channel_id: i64,
+    pub channel_id: String,
     pub profile: String,
     pub provider: Option<String>,
     pub model: Option<String>,

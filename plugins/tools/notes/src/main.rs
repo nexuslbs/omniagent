@@ -55,7 +55,8 @@ impl PluginConfig {
 fn extract_i64(args: &Value, meta: &Option<McpMeta>, key: &str) -> Option<i64> {
     args[key].as_i64().or_else(|| {
         meta.as_ref().and_then(|m| match key {
-            "channel_id" => m.channel_id,
+            // channel ids are strings now (channel NAMES); notes uses thread_id only.
+            "channel_id" => None,
             "thread_id" => m.thread_id,
             _ => None,
         })

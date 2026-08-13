@@ -5,6 +5,7 @@
     reason = "lib items may be consumed by main bin or MCP server binaries"
 )]
 pub mod agent;
+pub mod channels_yaml;
 pub mod commands;
 pub mod config_path;
 pub mod db;

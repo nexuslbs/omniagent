@@ -44,7 +44,7 @@ pub fn memory_router() -> Router<Arc<AppState>> {
 #[derive(Debug, Deserialize)]
 pub struct StatsQueryParams {
     pub profile: Option<String>,
-    pub channel: Option<i64>,
+    pub channel: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -64,7 +64,7 @@ pub struct StatsResponse {
 pub struct SearchQueryParams {
     pub q: String,
     pub profile: Option<String>,
-    pub channel: Option<i64>,
+    pub channel: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -80,7 +80,7 @@ pub struct MessageSearchEntry {
     pub created_at: String,
     pub msg_type: Option<String>,
     pub msg_subtype: Option<String>,
-    pub channel_id: Option<i64>,
+    pub channel_id: Option<String>,
     pub status: Option<String>,
     pub profile: Option<String>,
     pub provider: Option<String>,
@@ -130,7 +130,7 @@ struct SearchMessageRow {
     created_at: chrono::DateTime<chrono::Utc>,
     msg_type: Option<String>,
     msg_subtype: Option<String>,
-    channel_id: Option<i64>,
+    channel_id: Option<String>,
     status: Option<String>,
     profile: Option<String>,
     provider: Option<String>,
@@ -170,7 +170,7 @@ async fn stats_handler(
     Query(params): Query<StatsQueryParams>,
 ) -> impl IntoResponse {
     let profile = params.profile.unwrap_or_default();
-    let channel_id = params.channel.unwrap_or(0);
+    let channel_id = params.channel.unwrap_or_default();
 
     // ── Threads count (all statuses) ──
     let threads = match sql_forge!(
@@ -180,10 +180,10 @@ async fn stats_handler(
         FROM threads
         WHERE 1=1
           AND (:profile = '' OR profile = :profile)
-          AND (:channel_id = 0::bigint OR channel_id = :channel_id)
+          AND (:channel_id = '' OR channel_id = :channel_id)
         "#,
         ( :profile = &profile,
-          :channel_id = channel_id )
+          :channel_id = channel_id.as_str() )
     )
     .fetch_one(&state.pool)
     .await
@@ -203,11 +203,11 @@ async fn stats_handler(
         FROM threads
         WHERE 1=1
           AND (:profile = '' OR profile = :profile)
-          AND (:channel_id = 0::bigint OR channel_id = :channel_id)
+          AND (:channel_id = '' OR channel_id = :channel_id)
           AND status = 'completed'
         "#,
         ( :profile = &profile,
-          :channel_id = channel_id )
+          :channel_id = channel_id.as_str() )
     )
     .fetch_one(&state.pool)
     .await
@@ -230,11 +230,11 @@ async fn stats_handler(
         FROM threads
         WHERE 1=1
           AND (:profile = '' OR profile = :profile)
-          AND (:channel_id = 0::bigint OR channel_id = :channel_id)
+          AND (:channel_id = '' OR channel_id = :channel_id)
           AND status = 'failed'
         "#,
         ( :profile = &profile,
-          :channel_id = channel_id )
+          :channel_id = channel_id.as_str() )
     )
     .fetch_one(&state.pool)
     .await
@@ -259,11 +259,11 @@ async fn stats_handler(
             SELECT id FROM threads
             WHERE 1=1
               AND (:profile = '' OR profile = :profile)
-              AND (:channel_id = 0::bigint OR channel_id = :channel_id)
+              AND (:channel_id = '' OR channel_id = :channel_id)
         )
         "#,
         ( :profile = &profile,
-          :channel_id = channel_id )
+          :channel_id = channel_id.as_str() )
     )
     .fetch_one(&state.pool)
     .await
@@ -289,11 +289,11 @@ async fn stats_handler(
             SELECT id FROM threads
             WHERE 1=1
               AND (:profile = '' OR profile = :profile)
-              AND (:channel_id = 0::bigint OR channel_id = :channel_id)
+              AND (:channel_id = '' OR channel_id = :channel_id)
         )
         "#,
         ( :profile = &profile,
-          :channel_id = channel_id )
+          :channel_id = channel_id.as_str() )
     )
     .fetch_one(&state.pool)
     .await
@@ -328,7 +328,7 @@ async fn search_handler(
     }
 
     let profile = params.profile.unwrap_or_default();
-    let channel_id = params.channel.unwrap_or(0);
+    let channel_id = params.channel.unwrap_or_default();
     let limit = params.limit.unwrap_or(10).clamp(1, 500);
     let pattern = format!("%{}%", q);
 
@@ -355,7 +355,7 @@ async fn search_handler(
             t.input_tokens AS thread_input_tokens,
             t.output_tokens AS thread_output_tokens,
             t.cached_tokens AS thread_cached_tokens,
-            c.name AS channel_name,
+            t.channel_id AS channel_name,
             t.duration_ms AS processing_time_ms,
             jsonb_build_object(
                 'input_tokens', t.input_tokens,
@@ -364,16 +364,15 @@ async fn search_handler(
             )::text AS token_usage
         FROM messages m
         JOIN threads t ON t.id = m.thread_id
-        JOIN channels c ON c.id = t.channel_id
         WHERE m.content ILIKE :pattern
           AND (:profile = '' OR t.profile = :profile)
-          AND (:channel_id = 0::bigint OR t.channel_id = :channel_id)
+          AND (:channel_id = '' OR t.channel_id = :channel_id)
         ORDER BY m.id DESC
         LIMIT :limit
         "#,
         ( :pattern = &pattern,
           :profile = &profile,
-          :channel_id = channel_id,
+          :channel_id = channel_id.as_str(),
           :limit = limit )
     )
     .fetch_all(&state.pool)

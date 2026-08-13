@@ -1,11 +1,22 @@
 //! Channels API: list, detail, and update channels.
 //!
-//! Replaces the dashboard's direct PostgreSQL queries at
-//! `omni-dashboard/repo/server/routes/channels.ts`.
+//! Channel definitions AND runtime state live in `{data_dir}/config/channels.yml`
+//! (the `channels` database table is DROPPED — see db-migrations). The channel
+//! NAME (the yml key) is the stable identifier used everywhere: API ids,
+//! `threads.channel_id`, `messages.channel_id`, `kanban_tasks.channel_id`,
+//! `summaries.channel_id` and tasks.yml `channel:` references.
 //!
 //! - `GET  /channels`      : list all channels
-//! - `GET  /channels/{id}` : get single channel detail
-//! - `PATCH /channels/{id}`: update channel fields (NULLIF pattern)
+//! - `GET  /channels/{id}` : get single channel detail (id == name)
+//! - `PATCH /channels/{id}`: update runtime fields (current_profile /
+//!   current_provider / current_model / closed / readonly / plan / template) —
+//!   persisted atomically to channels.yml. Definition fields
+//!   (platform / resource_identifier / cause) are NOT editable via the API;
+//!   they change only by editing the yml (or via the `update_channel_platform`
+//!   identity-change path used when a plugin's resource identifier changes).
+//!
+//! Response shape keeps the legacy `current_*` names + `plan` for dashboard
+//! compatibility (the yml itself uses bare `profile`/`model`/`provider`).
 
 use axum::{
     extract::{Path, State},
@@ -15,12 +26,13 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use sql_forge::sql_forge;
-use sqlx::FromRow;
 use std::sync::Arc;
 use tracing::error;
 
 use super::{err_json, ok_json, AppState};
+use crate::db::channels;
+use crate::db::types::Channel;
+use crate::error::Error;
 
 // ---------------------------------------------------------------------------
 // Router
@@ -39,10 +51,12 @@ pub fn channels_router() -> Router<Arc<AppState>> {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelEntry {
-    pub id: i64,
+    pub id: String,
     pub name: String,
     pub platform: Option<String>,
     pub resource_identifier: Option<String>,
+    pub external_id: Option<String>,
+    pub cause: String,
     pub closed: bool,
     pub current_profile: String,
     pub current_provider: Option<String>,
@@ -53,37 +67,77 @@ pub struct ChannelEntry {
     pub template: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Types: Row types for sqlx / sql_forge
-// ---------------------------------------------------------------------------
-
-#[derive(FromRow)]
-struct ChannelRow {
-    id: i64,
-    name: String,
-    platform: Option<String>,
-    resource_identifier: Option<String>,
-    closed: Option<bool>,
-    current_profile: String,
-    current_provider: Option<String>,
-    current_model: Option<String>,
-    readonly: bool,
-    plan: bool,
-    planning_mode: Option<String>,
-    template: Option<String>,
+impl From<Channel> for ChannelEntry {
+    fn from(c: Channel) -> Self {
+        let rid = c
+            .resource_identifier
+            .clone()
+            .or_else(|| c.external_id.clone());
+        Self {
+            id: c.id.clone(),
+            name: c.name,
+            platform: c.platform,
+            resource_identifier: rid.clone(),
+            // external_id was always equal to resource_identifier; derive for
+            // response compatibility (NOT stored in the yml).
+            external_id: rid,
+            cause: c.cause,
+            closed: c.closed,
+            current_profile: c.current_profile,
+            current_provider: c.current_provider,
+            current_model: c.current_model,
+            readonly: c.readonly,
+            plan: c.plan,
+            planning_mode: None,
+            template: c.template,
+        }
+    }
 }
 
-#[derive(FromRow)]
-struct ChannelReadonlyRow {
-    readonly: bool,
-    closed: bool,
-    plan: bool,
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+async fn list_channels_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let all = match channels::find_all_channels(&state.pool).await {
+        Ok(chs) => chs,
+        Err(e) => {
+            error!("Failed to list channels: {:?}", e);
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load channels from channels.yml",
+            );
+        }
+    };
+    let entries: Vec<ChannelEntry> = all.into_iter().map(ChannelEntry::from).collect();
+    ok_json(entries)
 }
 
-// ---------------------------------------------------------------------------
-// Types: PATCH request body
-// ---------------------------------------------------------------------------
+async fn get_channel_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let channel = match channels::get_channel_by_name(&state.pool, &id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return err_json(
+                StatusCode::NOT_FOUND,
+                &format!("Channel '{}' not found", id),
+            );
+        }
+        Err(e) => {
+            error!("Failed to load channel '{}': {:?}", id, e);
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load channel from channels.yml",
+            );
+        }
+    };
+    ok_json(ChannelEntry::from(channel))
+}
 
+// PATCH body — runtime-mutable fields only (NULLIF-style partial updates:
+// None = leave unchanged, Some("") = clear, Some(v) = set).
 #[derive(Debug, Deserialize)]
 pub struct UpdateChannelRequest {
     pub name: Option<String>,
@@ -91,279 +145,101 @@ pub struct UpdateChannelRequest {
     pub current_provider: Option<String>,
     pub current_model: Option<String>,
     pub closed: Option<bool>,
+    pub readonly: Option<bool>,
     pub plan: Option<bool>,
     pub template: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
-
-/// GET /channels: list all channels, ordered by name.
-async fn list_channels_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let channels = match sql_forge!(
-        ChannelRow,
-        r#"
-        SELECT
-            id,
-            name,
-            platform,
-            resource_identifier,
-            closed,
-            current_profile,
-            current_provider,
-            current_model,
-            readonly,
-            plan,
-            planning_mode,
-            template
-        FROM channels
-        ORDER BY name
-        "#,
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
-        Ok(rows) => rows
-            .into_iter()
-            .map(|r| ChannelEntry {
-                id: r.id,
-                name: r.name,
-                platform: r.platform,
-                resource_identifier: r.resource_identifier,
-                closed: r.closed.unwrap_or(false),
-                current_profile: r.current_profile,
-                current_provider: r.current_provider,
-                current_model: r.current_model,
-                readonly: r.readonly,
-                plan: r.plan,
-                planning_mode: r.planning_mode,
-                template: r.template,
-            })
-            .collect::<Vec<_>>(),
-        Err(e) => {
-            error!("[channels] list query failed: {:?}", e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to fetch channels",
-            );
-        }
-    };
-
-    ok_json(channels)
-}
-
-/// GET /channels/{id}: get a single channel by id.
-async fn get_channel_handler(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
-) -> impl IntoResponse {
-    let channel = match sql_forge!(
-        ChannelRow,
-        r#"
-        SELECT
-            id,
-            name,
-            platform,
-            resource_identifier,
-            closed,
-            current_profile,
-            current_provider,
-            current_model,
-            readonly,
-            plan,
-            planning_mode,
-            template
-        FROM channels
-        WHERE id = :id
-        "#,
-        ( :id = id )
-    )
-    .fetch_optional(&state.pool)
-    .await
-    {
-        Ok(Some(r)) => ChannelEntry {
-            id: r.id,
-            name: r.name,
-            platform: r.platform,
-            resource_identifier: r.resource_identifier,
-            closed: r.closed.unwrap_or(false),
-            current_profile: r.current_profile,
-            current_provider: r.current_provider,
-            current_model: r.current_model,
-            readonly: r.readonly,
-            plan: r.plan,
-            planning_mode: r.planning_mode,
-            template: r.template,
-        },
-        Ok(None) => {
-            return err_json(StatusCode::NOT_FOUND, "Channel not found");
-        }
-        Err(e) => {
-            error!("[channels/{}] get query failed: {:?}", id, e);
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch channel");
-        }
-    };
-
-    ok_json(channel)
-}
-
-/// PATCH /channels/{id}: update channel fields.
-///
-/// Uses the NULLIF pattern to convert empty strings to NULL, and only
-/// updates fields that are explicitly provided in the request body.
-/// Checks the readonly constraint before updating.
 async fn update_channel_handler(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
+    Path(id): Path<String>,
     Json(body): Json<UpdateChannelRequest>,
 ) -> impl IntoResponse {
-    // ── 1. Check if channel exists and get readonly status ──
-    let existing = match sql_forge!(
-        ChannelReadonlyRow,
-        r#"
-        SELECT readonly, closed, plan
-        FROM channels
-        WHERE id = :id
-        "#,
-        ( :id = id )
-    )
-    .fetch_optional(&state.pool)
-    .await
-    {
-        Ok(Some(row)) => row,
+    // Load current definition (also gives the readonly flag).
+    let current = match channels::get_channel_by_name(&state.pool, &id).await {
+        Ok(Some(c)) => c,
         Ok(None) => {
-            return err_json(StatusCode::NOT_FOUND, "Channel not found");
+            return err_json(
+                StatusCode::NOT_FOUND,
+                &format!("Channel '{}' not found", id),
+            );
         }
         Err(e) => {
-            error!("[channels/{}] check query failed: {:?}", id, e);
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to check channel");
+            error!("Failed to load channel '{}': {:?}", id, e);
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load channel from channels.yml",
+            );
         }
     };
 
-    // ── 2. Enforce readonly constraints ──
-    // Readonly channels can only update: closed, current_profile, current_provider, current_model.
-    // They cannot be renamed (name) or have plan/template changed.
-    if existing.readonly {
-        let allowed = body.closed.is_some()
-            || body.current_profile.is_some()
-            || body.current_provider.is_some()
-            || body.current_model.is_some();
-        let blocked = body.name.is_some() || body.plan.is_some() || body.template.is_some();
-        if !allowed || blocked {
-            return err_json(
-                StatusCode::FORBIDDEN,
-                "Permanent channels can only update status, profile, provider, and model",
-            );
-        }
-    }
-
-    // ── 3. Apply updates using NULLIF pattern ──
-    // Each field uses NULLIF to convert empty string → NULL.
-    // Fields not provided in the request body receive the current DB value
-    // via COALESCE, preserving existing data.
-    //
-    // Note: boolean fields (closed, plan) don't use the NULLIF
-    // pattern since they are not nullable text columns.
-    if let Err(e) = sql_forge!(
-        r#"
-        UPDATE channels
-        SET
-            name = CASE
-                WHEN :name = '' THEN name
-                ELSE NULLIF(:name, '')::text
-            END,
-            current_profile = CASE
-                WHEN :current_profile = '' THEN current_profile
-                ELSE NULLIF(:current_profile, '')::text
-            END,
-            current_provider = CASE
-                WHEN :current_provider = '' THEN current_provider
-                ELSE NULLIF(:current_provider, '')::text
-            END,
-            current_model = CASE
-                WHEN :current_model = '' THEN current_model
-                ELSE NULLIF(:current_model, '')::text
-            END,
-            closed = :closed,
-            plan = :plan,
-            template = CASE
-                WHEN :template = '' THEN template
-                ELSE NULLIF(:template, '')::text
-            END,
-            updated_at = NOW()
-        WHERE id = :id
-        "#,
-        ( :name = body.name.as_deref().unwrap_or(""),
-          :current_profile = body.current_profile.as_deref().unwrap_or(""),
-          :current_provider = body.current_provider.as_deref().unwrap_or(""),
-          :current_model = body.current_model.as_deref().unwrap_or(""),
-          :closed = body.closed.unwrap_or(existing.closed),
-          :plan = body.plan.unwrap_or(existing.plan),
-          :template = body.template.as_deref().unwrap_or(""),
-          :id = id )
-    )
-    .execute(&state.pool)
-    .await
+    // Readonly channels: only closed / profile / provider / model may change
+    // (name / plan / template are definition-level; the old DB rule).
+    if current.readonly
+        && (body.name.is_some()
+            || body.plan.is_some()
+            || body.template.is_some()
+            || body.readonly.is_some())
     {
-        error!("[channels/{}] update failed: {:?}", id, e);
         return err_json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to update channel",
+            StatusCode::BAD_REQUEST,
+            "Readonly channels only allow updating closed/profile/provider/model",
         );
     }
 
-    // ── 4. Return the updated channel ──
-    // Re-fetch the channel using the detail query
-    let updated = match sql_forge!(
-        ChannelRow,
-        r#"
-        SELECT
-            id,
-            name,
-            platform,
-            resource_identifier,
-            closed,
-            current_profile,
-            current_provider,
-            current_model,
-            readonly,
-            plan,
-            planning_mode,
-            template
-        FROM channels
-        WHERE id = :id
-        "#,
-        ( :id = id )
-    )
-    .fetch_optional(&state.pool)
-    .await
-    {
-        Ok(Some(r)) => ChannelEntry {
-            id: r.id,
-            name: r.name,
-            platform: r.platform,
-            resource_identifier: r.resource_identifier,
-            closed: r.closed.unwrap_or(false),
-            current_profile: r.current_profile,
-            current_provider: r.current_provider,
-            current_model: r.current_model,
-            readonly: r.readonly,
-            plan: r.plan,
-            planning_mode: r.planning_mode,
-            template: r.template,
-        },
-        Ok(None) => {
-            return err_json(StatusCode::NOT_FOUND, "Channel not found after update");
+    if let Err(e) = channels::mutate_channel(&id, |existing| {
+        let mut d = existing
+            .cloned()
+            .ok_or_else(|| Error::Message(format!("Channel '{}' not found", id)))?;
+        if let Some(name) = body.name.as_deref() {
+            if !name.trim().is_empty() {
+                return Err(Error::Message(
+                    "Channel name is the yml key and cannot be renamed via PATCH".to_string(),
+                ));
+            }
         }
-        Err(e) => {
-            error!("[channels/{}] re-fetch after update failed: {:?}", id, e);
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to fetch updated channel",
-            );
+        if let Some(profile) = body.current_profile.as_deref() {
+            d.profile = (!profile.trim().is_empty()).then(|| profile.to_string());
         }
-    };
+        if let Some(provider) = body.current_provider.as_deref() {
+            d.provider = (!provider.trim().is_empty()).then(|| provider.to_string());
+        }
+        if let Some(model) = body.current_model.as_deref() {
+            d.model = (!model.trim().is_empty()).then(|| model.to_string());
+        }
+        if let Some(closed) = body.closed {
+            d.closed = Some(closed);
+        }
+        if let Some(readonly) = body.readonly {
+            d.readonly = Some(readonly);
+        }
+        if let Some(plan) = body.plan {
+            d.plan = Some(plan);
+        }
+        if let Some(template) = body.template.as_deref() {
+            d.template = (!template.trim().is_empty()).then(|| template.to_string());
+        }
+        Ok(d)
+    }) {
+        error!("Failed to update channel '{}': {:?}", id, e);
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to persist channel update: {e}"),
+        );
+    }
 
-    ok_json(updated)
+    match channels::get_channel_by_name(&state.pool, &id).await {
+        Ok(Some(c)) => ok_json(ChannelEntry::from(c)),
+        Ok(None) => err_json(
+            StatusCode::NOT_FOUND,
+            &format!("Channel '{}' not found", id),
+        ),
+        Err(e) => {
+            error!("Failed to reload channel '{}': {:?}", id, e);
+            err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to reload channel from channels.yml",
+            )
+        }
+    }
 }

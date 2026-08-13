@@ -821,7 +821,7 @@ impl Platform for ExternalPlatformClient {
                                                                 let reply = handle_external_model_command(
                                                                     &pool,
                                                                     &self.data_dir,
-                                                                    channel.id,
+                                                                    &channel.id,
                                                                     &inbound.text,
                                                                 ).await;
                                                                 send_external_reply(
@@ -952,7 +952,7 @@ impl Platform for ExternalPlatformClient {
                                                                 // path deliver the same message.
                                                                 let already_has_thread = thread_exists_for_external_id(
                                                                     &pool,
-                                                                    channel.id,
+                                                                    &channel.id,
                                                                     &inbound.external_id,
                                                                 )
                                                                 .await;
@@ -965,7 +965,7 @@ impl Platform for ExternalPlatformClient {
                                                                 &pool,
                                                                 &self.data_dir,
                                                                 "user",
-                                                                channel.id,
+                                                                &channel.id,
                                                                 &channel.current_profile,
                                                                 crate::db::types::ThreadCauseParams {
                                                                     provider: channel.current_provider.clone(),
@@ -1505,7 +1505,7 @@ impl Platform for ExternalPlatformClient {
 async fn handle_external_model_command(
     pool: &sqlx::PgPool,
     data_dir: &str,
-    channel_id: i64,
+    channel_id: &str,
     text: &str,
 ) -> String {
     let parsed = match crate::commands::parse_model_command(text) {
@@ -1677,7 +1677,7 @@ async fn handle_external_channel_command(
                 };
             // Claim the channel by updating resource_identifier
             if let Err(e) =
-                crate::db::types::claim_channel_resource(pool, channel.id, resource_identifier)
+                crate::db::types::claim_channel_resource(pool, &channel.id, resource_identifier)
                     .await
             {
                 return format!("Error claiming channel: {}", e);
@@ -1733,7 +1733,7 @@ async fn handle_external_profile_command(
                 );
             }
             if let Err(e) =
-                crate::commands::handle_profile_set(pool, current_channel.id, name).await
+                crate::commands::handle_profile_set(pool, current_channel.id.clone(), name).await
             {
                 return format!("Error setting profile: {}", e);
             }
@@ -1742,7 +1742,8 @@ async fn handle_external_profile_command(
         crate::commands::ProfileCommand::Reset => {
             let default_name = crate::profile::default_profile_name();
             if let Err(e) =
-                crate::commands::handle_profile_set(pool, current_channel.id, &default_name).await
+                crate::commands::handle_profile_set(pool, current_channel.id.clone(), &default_name)
+                    .await
             {
                 return format!("Error resetting profile: {}", e);
             }
@@ -1787,7 +1788,7 @@ async fn send_react(
 ///
 /// Errors are treated as "no thread" (returns false) so a transient DB issue
 /// never causes a message to be silently dropped.
-async fn thread_exists_for_external_id(pool: &PgPool, channel_id: i64, external_id: &str) -> bool {
+async fn thread_exists_for_external_id(pool: &PgPool, channel_id: &str, external_id: &str) -> bool {
     if external_id.is_empty() {
         return false;
     }
@@ -1837,23 +1838,31 @@ async fn handle_message_deleted(
         status: String,
     }
 
+    // Resolve the channel name from channels.yml (platform + resource).
+    let channel_name =
+        crate::channels_yaml::get_by_platform_and_resource(platform, resource_identifier)?
+            .map(|(name, _)| name)
+            .ok_or_else(|| {
+                crate::error::Error::Message(format!(
+                    "channel for platform {} resource {} not found in channels.yml",
+                    platform, resource_identifier
+                ))
+            })?;
+
     let row: Option<ThreadStatusRow> = sql_forge!(
         ThreadStatusRow,
         r#"
         SELECT t.id, t.status
         FROM messages m
         JOIN threads t ON t.id = m.thread_id
-        JOIN channels ch ON ch.id = t.channel_id
         WHERE m.external_id = :external_id
           AND m.thread_sequence = 0
-          AND ch.platform = :platform
-          AND ch.resource_identifier = :resource_identifier
+          AND t.channel_id = :channel_id
         LIMIT 1
         "#,
         (
             :external_id = external_id,
-            :platform = platform,
-            :resource_identifier = resource_identifier,
+            :channel_id = &channel_name,
         )
     )
     .fetch_optional(pool)
@@ -1926,23 +1935,31 @@ async fn handle_message_edited(
         status: String,
     }
 
+    // Resolve the channel name from channels.yml (platform + resource).
+    let channel_name =
+        crate::channels_yaml::get_by_platform_and_resource(platform, resource_identifier)?
+            .map(|(name, _)| name)
+            .ok_or_else(|| {
+                crate::error::Error::Message(format!(
+                    "channel for platform {} resource {} not found in channels.yml",
+                    platform, resource_identifier
+                ))
+            })?;
+
     let row: Option<MessageThreadRow> = sql_forge!(
         MessageThreadRow,
         r#"
         SELECT m.id AS msg_id, t.id AS thread_id, t.status
         FROM messages m
         JOIN threads t ON t.id = m.thread_id
-        JOIN channels ch ON ch.id = t.channel_id
         WHERE m.external_id = :external_id
           AND m.thread_sequence = 0
-          AND ch.platform = :platform
-          AND ch.resource_identifier = :resource_identifier
+          AND t.channel_id = :channel_id
         LIMIT 1
         "#,
         (
             :external_id = external_id,
-            :platform = platform,
-            :resource_identifier = resource_identifier,
+            :channel_id = &channel_name,
         )
     )
     .fetch_optional(pool)

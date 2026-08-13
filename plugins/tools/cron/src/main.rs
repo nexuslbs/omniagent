@@ -23,15 +23,10 @@ fn data_dir() -> String {
     std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/omni".to_string())
 }
 
-/// Resolve a channel id to its NAME (the yml stores channel names, not ids).
-async fn channel_name_for_id(pool: &PgPool, id: i64) -> Option<String> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT name FROM channels WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten();
-    row.map(|(n,)| n)
+/// Resolve a channel id to its NAME — with string ids the id IS the name
+/// (channels.yml key). Verified to exist in the yml; unknown -> None.
+async fn channel_name_for_id(_pool: &PgPool, id: &str) -> Option<String> {
+    omniagent::channels_yaml::exists(id).then(|| id.to_string())
 }
 
 fn validate_5field(schedule: &str) -> Result<()> {
@@ -66,8 +61,9 @@ async fn handle_create(
     // channel: explicit channel_id wins; else the CURRENT channel from the
     // agent's runtime context (_meta.channel_id); else no channel (default).
     let channel_id_arg = args["channel_id"]
-        .as_i64()
-        .or_else(|| meta.and_then(|m| m.channel_id));
+        .as_str()
+        .map(|s| s.to_string())
+        .or_else(|| meta.and_then(|m| m.channel_id.clone()));
     // profile: explicit argument wins; else the agent's ACTIVE profile from
     // _meta.profile_name (the job runs under that profile when fired).
     let profile_owned = args["profile"]
@@ -119,7 +115,7 @@ async fn handle_create(
 
     // yml stores channel NAME — resolve from id (if given), else default (None).
     let channel_name = match channel_id_arg {
-        Some(cid) => channel_name_for_id(pool, cid).await,
+        Some(cid) => channel_name_for_id(pool, &cid).await,
         None => None,
     };
 
@@ -279,6 +275,8 @@ impl PluginConfig {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Shared pool — populated by configure callback before any tool call
+    // Channels live in {OMNI_DIR}/config/channels.yml — set the global data dir.
+    omniagent::channels_yaml::set_data_dir(&data_dir());
     let pool = Arc::new(RwLock::new(None::<PgPool>));
 
     // Wrap each handler to capture a clone of the shared pool

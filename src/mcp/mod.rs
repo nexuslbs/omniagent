@@ -60,11 +60,6 @@ struct CauseMetadataRow {
     metadata: Value,
 }
 
-#[derive(FromRow)]
-struct ChannelPlatformRow {
-    platform: Option<String>,
-}
-
 /// Shared application context, available to all MCP tool handlers.
 #[derive(Debug, Clone)]
 pub struct AppContext {
@@ -80,9 +75,9 @@ pub struct AppContext {
     /// tool-calling loop so MCP tools can auto-detect context without the LLM
     /// having to pass `thread_id` explicitly).
     pub current_thread_id: Option<i64>,
-    /// Current channel ID being executed (set per-tool-call so the MCP
-    /// client layer can route to the per-channel connection pool).
-    pub current_channel_id: Option<i64>,
+    /// Current channel ID (== channel NAME, the channels.yml key) being
+    /// executed (set per-tool-call so MCP tools know the channel identity).
+    pub current_channel_id: Option<String>,
     /// Profile-allowed tool names for the current thread execution.
     /// Set per-tool-call alongside `current_thread_id` so the
     /// `list_tool_details` introspection tool knows which tools are
@@ -595,19 +590,14 @@ fn read_attached_file_tool() -> McpTool {
                     }
                 };
 
-                // Determine platform from channel
+                // Determine platform from channel (channels.yml; id == name)
                 let platform = if let Some(cid) = ctx.current_channel_id {
-                    match sql_forge!(
-                        ChannelPlatformRow,
-                        r#"SELECT platform FROM channels WHERE id = :cid"#,
-                        ( :cid = cid )
-                    )
-                    .fetch_optional(&ctx.pool)
-                    .await
-                    {
-                        Ok(Some(row)) => row.platform.unwrap_or_default(),
-                        _ => String::new(),
-                    }
+                    crate::db::channels::get_channel_by_name(&ctx.pool, &cid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|c| c.platform)
+                        .unwrap_or_default()
                 } else {
                     String::new()
                 };

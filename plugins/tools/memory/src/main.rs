@@ -638,12 +638,13 @@ async fn handle_generate_summary(
     }
 
     let channel_id = args["channel_id"]
-        .as_i64()
+        .as_str()
+        .map(String::from)
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'channel_id'"))?;
     let trigger_count = window * 2;
 
     // 1. Get latest summary's next_thread_id
-    let since_id = match queries::get_latest_summary(pool, channel_id).await {
+    let since_id = match queries::get_latest_summary(pool, &channel_id).await {
         Ok(Some(summary)) => summary.next_thread_id,
         _ => 0i64,
     };
@@ -651,7 +652,7 @@ async fn handle_generate_summary(
     // 2. Fetch completed threads since last summary
     let completed_threads = match queries::get_completed_seq0_threads_since(
         pool,
-        channel_id,
+        channel_id.clone(),
         since_id,
         trigger_count,
         None,
@@ -723,7 +724,7 @@ async fn handle_generate_summary(
     }
 
     // 4. Fetch the last summary for context
-    let previous_summary_text = match queries::get_latest_summary(pool, channel_id).await {
+    let previous_summary_text = match queries::get_latest_summary(pool, &channel_id).await {
         Ok(Some(s)) => s.content,
         _ => String::new(),
     };
@@ -797,7 +798,7 @@ async fn handle_generate_summary(
         "INSERT INTO summaries (channel_id, next_thread_id, content)
          VALUES (:channel_id, :pivot_thread_id, :summary_content)",
         (
-            :channel_id = channel_id,
+            :channel_id = &channel_id,
             :pivot_thread_id = pivot_thread_id,
             :summary_content = &summary_content,
         )

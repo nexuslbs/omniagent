@@ -42,7 +42,7 @@ async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, 
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'query'"))?;
     let limit = args["limit"].as_i64().unwrap_or(10).min(50);
-    let channel_id = args["channel_id"].as_i64();
+    let channel_id = args["channel_id"].as_str().map(|s| s.to_string());
 
     let query_owned = query.to_string();
     let pool_ref = pool.clone();
@@ -58,7 +58,7 @@ async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, 
             ORDER BY m.created_at DESC
             LIMIT :limit
             "#,
-            ( :channel_id = cid, :query = &query_owned, :limit = limit )
+            ( :channel_id = cid.as_str(), :query = &query_owned, :limit = limit )
         )
         .fetch_all(&pool_ref)
         .await

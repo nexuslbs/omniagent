@@ -79,8 +79,9 @@ async fn handle_create(
         "workflow_id": args["workflow_id"].as_str().unwrap_or(""),
     });
     let channel_id = args["channel_id"]
-        .as_i64()
-        .or_else(|| meta.and_then(|m| m.channel_id));
+        .as_str()
+        .map(String::from)
+        .or_else(|| meta.and_then(|m| m.channel_id.clone()));
     if let Some(cid) = channel_id {
         req["channel_id"] = serde_json::json!(cid);
     }

@@ -38,7 +38,7 @@ pub fn threads_router() -> Router<Arc<AppState>> {
 pub struct ThreadsQueryParams {
     pub status: Option<String>,
     pub cause: Option<String>,
-    pub channel_id: Option<i64>,
+    pub channel_id: Option<String>,
     pub id: Option<i64>,
     pub parent_id: Option<i64>,
     pub limit: Option<i64>,
@@ -48,7 +48,7 @@ pub struct ThreadsQueryParams {
 #[derive(Debug, Serialize)]
 pub struct ThreadEntry {
     pub id: i64,
-    pub channel_id: i64,
+    pub channel_id: String,
     pub channel_name: Option<String>,
     pub status: Option<String>,
     pub cause: Option<String>,
@@ -102,7 +102,7 @@ pub struct SubtaskEntry {
 #[derive(FromRow)]
 struct ThreadListRow {
     id: i64,
-    channel_id: i64,
+    channel_id: String,
     channel_name: Option<String>,
     status: Option<String>,
     cause: Option<String>,
@@ -124,7 +124,6 @@ struct ThreadListRow {
     cause_content_preview: Option<String>,
     cause_msg_type: Option<String>,
     cause_msg_subtype: Option<String>,
-    channel_closed: Option<bool>,
 }
 
 #[derive(FromRow)]
@@ -171,17 +170,16 @@ async fn list_threads_handler(
         r#"
         SELECT COUNT(*) AS total
         FROM threads t
-        LEFT JOIN channels c ON c.id = t.channel_id
         WHERE 1=1
           AND (:status = '' OR t.status = ANY(string_to_array(:status, ',')))
           AND (:cause = '' OR t.cause = :cause)
-          AND (:channel_id = 0::bigint OR t.channel_id = :channel_id)
+          AND (:channel_id = '' OR t.channel_id = :channel_id)
           AND (:id = 0::bigint OR t.id = :id)
           AND (:parent_id = 0::bigint OR t.parent_id = :parent_id)
         "#,
         ( :status = &status,
           :cause = &cause,
-          :channel_id = params.channel_id.unwrap_or(0),
+          :channel_id = params.channel_id.as_deref().unwrap_or(""),
           :id = params.id.unwrap_or(0),
           :parent_id = params.parent_id.unwrap_or(0) )
     )
@@ -202,7 +200,7 @@ async fn list_threads_handler(
         SELECT
             t.id,
             t.channel_id,
-            c.name AS channel_name,
+            t.channel_id AS channel_name,
             t.status,
             t.cause,
             t.profile,
@@ -221,16 +219,14 @@ async fn list_threads_handler(
             m0.content AS cause_content_preview,
             m0.msg_type AS cause_msg_type,
             m0.msg_subtype AS cause_msg_subtype,
-            COALESCE(c.closed, false) AS channel_closed,
             COALESCE((SELECT COUNT(*) FROM messages sub WHERE sub.thread_id = t.id), 0) AS msg_count,
             (SELECT content FROM messages sub2 WHERE sub2.thread_id = t.id ORDER BY sub2.id DESC LIMIT 1) AS last_message
         FROM threads t
-        LEFT JOIN channels c ON c.id = t.channel_id
         LEFT JOIN messages m0 ON m0.thread_id = t.id AND m0.thread_sequence = 0
         WHERE 1=1
           AND (:status = '' OR t.status = ANY(string_to_array(:status, ',')))
           AND (:cause = '' OR t.cause = :cause)
-          AND (:channel_id = 0::bigint OR t.channel_id = :channel_id)
+          AND (:channel_id = '' OR t.channel_id = :channel_id)
           AND (:id = 0::bigint OR t.id = :id)
           AND (:parent_id = 0::bigint OR t.parent_id = :parent_id)
         ORDER BY t.id DESC
@@ -238,7 +234,7 @@ async fn list_threads_handler(
         "#,
         ( :status = &status,
           :cause = &cause,
-          :channel_id = params.channel_id.unwrap_or(0),
+          :channel_id = params.channel_id.as_deref().unwrap_or(""),
           :id = params.id.unwrap_or(0),
           :parent_id = params.parent_id.unwrap_or(0),
           :limit_val = limit,
@@ -257,37 +253,46 @@ async fn list_threads_handler(
         }
     };
 
+    let channels_file = crate::channels_yaml::load_channels_or_empty();
+
     let threads: Vec<ThreadEntry> = threads
         .into_iter()
-        .map(|r| ThreadEntry {
-            id: r.id,
-            channel_id: r.channel_id,
-            channel_name: r.channel_name,
-            status: r.status,
-            cause: r.cause,
-            profile: r.profile,
-            provider: r.provider,
-            model: r.model,
-            created_at: r.created_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            ended_at: r
-                .ended_at
-                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-            duration_ms: r.duration_ms.map(|v| v as i64),
-            input_tokens: r.input_tokens.map(|v| v as i64),
-            output_tokens: r.output_tokens.map(|v| v as i64),
-            cached_tokens: r.cached_tokens.map(|v| v as i64),
-            iterations: r.iterations.map(|v| v as i64),
-            parent_id: r.parent_id,
-            msg_count: r.msg_count.unwrap_or(0),
-            last_message: r.last_message,
-            plan: r.plan,
-            started_at: r
-                .started_at
-                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
-            cause_content_preview: r.cause_content_preview,
-            cause_msg_type: r.cause_msg_type,
-            cause_msg_subtype: r.cause_msg_subtype,
-            channel_closed: r.channel_closed.unwrap_or(false),
+        .map(|r| {
+            let channel_closed = channels_file
+                .channels
+                .get(&r.channel_id)
+                .and_then(|c| c.closed)
+                .unwrap_or(false);
+            ThreadEntry {
+                id: r.id,
+                channel_id: r.channel_id,
+                channel_name: r.channel_name,
+                status: r.status,
+                cause: r.cause,
+                profile: r.profile,
+                provider: r.provider,
+                model: r.model,
+                created_at: r.created_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                ended_at: r
+                    .ended_at
+                    .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+                duration_ms: r.duration_ms.map(|v| v as i64),
+                input_tokens: r.input_tokens.map(|v| v as i64),
+                output_tokens: r.output_tokens.map(|v| v as i64),
+                cached_tokens: r.cached_tokens.map(|v| v as i64),
+                iterations: r.iterations.map(|v| v as i64),
+                parent_id: r.parent_id,
+                msg_count: r.msg_count.unwrap_or(0),
+                last_message: r.last_message,
+                plan: r.plan,
+                started_at: r
+                    .started_at
+                    .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+                cause_content_preview: r.cause_content_preview,
+                cause_msg_type: r.cause_msg_type,
+                cause_msg_subtype: r.cause_msg_subtype,
+                channel_closed,
+            }
         })
         .collect();
 

@@ -34,7 +34,7 @@ pub fn overview_router() -> Router<Arc<AppState>> {
 #[derive(FromRow)]
 struct OverviewRow {
     id: i64,
-    channel_id: i64,
+    channel_id: String,
     thread_id: i64,
     content_preview: Option<String>,
     status: Option<String>,
@@ -97,7 +97,7 @@ struct TopToolRow {
 #[derive(Serialize)]
 struct OverviewEntry {
     id: i64,
-    channel_id: i64,
+    channel_id: String,
     thread_id: i64,
     content_preview: String,
     status: String,
@@ -187,12 +187,11 @@ async fn overview_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
             t.duration_ms AS processing_time_ms,
             (t.input_tokens + t.output_tokens) AS total_tokens,
             COALESCE(t.created_at, NOW()) AS created_at,
-            COALESCE(c.name, 'unknown') AS channel_name,
+            COALESCE(t.channel_id, 'unknown') AS channel_name,
             t.model,
             (SELECT COUNT(*) FROM messages sub WHERE sub.thread_id = t.id) AS thread_count
         FROM threads t
         JOIN messages m ON m.thread_id = t.id AND m.thread_sequence = 0
-        LEFT JOIN channels c ON c.id = t.channel_id
         ORDER BY t.id DESC
         LIMIT 50
         "#,
@@ -395,12 +394,11 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
             t.duration_ms AS processing_time_ms,
             (t.input_tokens + t.output_tokens) AS total_tokens,
             COALESCE(t.created_at, NOW()) AS created_at,
-            COALESCE(c.name, 'unknown') AS channel_name,
+            COALESCE(t.channel_id, 'unknown') AS channel_name,
             t.model,
             (SELECT COUNT(*) FROM messages sub WHERE sub.thread_id = t.id) AS thread_count
         FROM threads t
         JOIN messages m ON m.thread_id = t.id AND m.thread_sequence = 0
-        LEFT JOIN channels c ON c.id = t.channel_id
         ORDER BY t.id DESC
         LIMIT 10
         "#,
@@ -445,7 +443,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         ChannelHealthRow,
         r#"
         SELECT
-            COALESCE(c.name, 'unknown') AS name,
+            COALESCE(t.channel_id, 'unknown') AS name,
             COUNT(*) FILTER (
                 WHERE t.created_at >= date_trunc('day', NOW()) AND t.status != 'system'
             )::bigint AS threads_today,
@@ -460,8 +458,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
             END AS success_rate,
             COALESCE(MAX(t.created_at)::text, '') AS last_activity
         FROM threads t
-        LEFT JOIN channels c ON c.id = t.channel_id
-        GROUP BY c.name
+        GROUP BY t.channel_id
         ORDER BY threads_today DESC
         "#,
     )

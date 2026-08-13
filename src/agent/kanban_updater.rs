@@ -500,7 +500,7 @@ async fn create_review_thread(
         pool,
         "pending",
         &cause,
-        thread.channel_id,
+        &thread.channel_id,
         &identity.0,
         CreateThreadParams {
             provider: Some(identity.1),
@@ -573,7 +573,7 @@ async fn create_testing_thread(
         pool,
         "pending",
         &cause,
-        thread.channel_id,
+        &thread.channel_id,
         &identity.0,
         CreateThreadParams {
             provider: Some(identity.1),

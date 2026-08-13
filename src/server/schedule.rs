@@ -68,7 +68,7 @@ pub struct JobEntry {
     pub mode: Option<String>,
     pub action_id: Option<String>,
     pub action_name: Option<String>,
-    pub channel_id: Option<i64>,
+    pub channel_id: Option<String>,
     pub channel_name: Option<String>,
     pub profile: Option<String>,
     pub last_run: Option<String>,
@@ -183,7 +183,7 @@ pub struct CreateScheduleRequest {
     pub schedule: Option<String>,
     pub prompt: Option<String>,
     pub active: Option<bool>,
-    pub channel_id: Option<i64>,
+    pub channel_id: Option<String>,
     pub profile: Option<String>,
     pub mode: Option<String>,
     pub action_id: Option<String>,
@@ -201,7 +201,7 @@ pub struct UpdateScheduleRequest {
     pub prompt: Option<String>,
     pub active: Option<bool>,
     pub enabled: Option<bool>,
-    pub channel_id: Option<i64>,
+    pub channel_id: Option<String>,
     pub profile: Option<String>,
     pub mode: Option<String>,
     pub action_id: Option<String>,
@@ -564,7 +564,7 @@ async fn update_schedule_handler(
         }
     }
     if let Some(cid) = body.channel_id {
-        if cid == 0 {
+        if cid.trim().is_empty() {
             def.channel = None;
         } else {
             def.channel = tasks_yaml::channel_name_for_id(&state.pool, Some(cid)).await;
@@ -675,9 +675,8 @@ async fn schedule_threads_handler(
             last_msg.created_at,
             last_msg.metadata::text AS metadata,
             t.status AS thread_status,
-            c.name AS channel_name
+            t.channel_id AS channel_name
         FROM threads t
-        LEFT JOIN channels c ON c.id = t.channel_id
         LEFT JOIN LATERAL (
             SELECT m.id, m.thread_id, m.role, m.content, m.msg_type,
                    m.msg_subtype, NULL::text AS token_usage,

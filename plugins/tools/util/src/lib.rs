@@ -125,7 +125,7 @@ pub struct McpToolDef {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct McpMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel_id: Option<i64>,
+    pub channel_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

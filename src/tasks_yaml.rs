@@ -413,30 +413,23 @@ pub fn validate_hook(key: &str, def: &HookDef) -> Result<(), String> {
 
 // ── Channel resolution ──────────────────────────────────────────────────────
 
-/// Resolve a channel NAME to its id via the channels table.
-/// Missing/unknown/empty name → `None` (default-channel semantics) — never
-/// crashes. Re-resolved every load so yml edits take effect immediately.
-pub async fn resolve_channel_id(pool: &PgPool, name: Option<&str>) -> Option<i64> {
+/// Resolve a channel NAME to its id — since channels now live in
+/// channels.yml, the id IS the name (the yml key). Missing/unknown/empty
+/// name → `None` (default-channel semantics) — never crashes.
+pub async fn resolve_channel_id(_pool: &PgPool, name: Option<&str>) -> Option<String> {
     let name = name.map(str::trim).filter(|n| !n.is_empty())?;
-    sqlx::query_scalar::<_, i64>("SELECT id FROM channels WHERE name =  LIMIT 1")
-        .bind(name)
-        .fetch_optional(pool)
-        .await
-        .unwrap_or(None)
+    crate::channels_yaml::exists(name).then(|| name.to_string())
 }
 
-/// Resolve a channel id to its NAME (inverse of [`resolve_channel_id`]).
+/// Resolve a channel id (== name) to its NAME (identity — channels.yml keys
+/// are referenced by key string, like schedule_task_id/workflow_id).
 /// Unknown/zero id → `None`.
-pub async fn channel_name_for_id(pool: &PgPool, id: Option<i64>) -> Option<String> {
+pub async fn channel_name_for_id(_pool: &PgPool, id: Option<String>) -> Option<String> {
     let id = id?;
-    if id == 0 {
+    if id.is_empty() {
         return None;
     }
-    sqlx::query_scalar::<_, String>("SELECT name FROM channels WHERE id =  LIMIT 1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-        .unwrap_or(None)
+    crate::channels_yaml::exists(&id).then_some(id)
 }
 
 // ── Unit tests ──────────────────────────────────────────────────────────────
