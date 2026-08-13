@@ -5,7 +5,6 @@ use crate::db::types as queries;
 use crate::db::types::{Channel, CompleteThreadStats, Message, MessageNew, Thread};
 use crate::llm::{ChatMessage, Usage};
 use crate::mcp::AppContext;
-use crate::platform::enqueue_notification;
 use crate::platform::queue::OutboundEnvelope;
 
 /// Merge cumulative usage with a new usage value.
@@ -833,28 +832,6 @@ pub async fn enqueue_delivery(
             saved.id,
             e
         );
-    }
-
-    // If this is a summary, also deliver to all subscribers of this channel
-    if saved.msg_type == "summary" {
-        let subscribers = queries::get_subscribers_for_channel(&ctx.pool, channel.id).await;
-        if let Ok(subs) = subscribers {
-            for sub in subs {
-                tracing::info!(
-                    "Forwarding summary from channel '{}' to subscriber {}:{}",
-                    channel.name,
-                    sub.subscriber_platform,
-                    sub.subscriber_resource,
-                );
-                enqueue_notification(
-                    &ctx.platform_senders,
-                    &sub.subscriber_platform,
-                    &sub.subscriber_resource,
-                    &format!("[summary from {}]\n{}", channel.name, saved.content),
-                )
-                .await;
-            }
-        }
     }
 }
 

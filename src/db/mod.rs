@@ -6,7 +6,6 @@ pub mod migrations;
 pub mod schedule;
 pub mod schema;
 pub mod stats;
-pub mod subscriptions;
 pub mod summaries;
 pub mod threads;
 pub mod types;

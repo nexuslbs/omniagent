@@ -347,6 +347,24 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     tracing::info!(
         "[migration] Schema v7: threads.template (task template as a first-class thread field)"
     );
+
+    // ── Removed tables: channel_subscriptions + channel_stops ──────────────
+    // The cross-channel summary-forwarding feature is removed: messages
+    // (including summaries) are delivered ONLY to their own channel. Both
+    // tables are gone from the declarative schema above; these idempotent
+    // DROPs clean up databases created before the removal (safe to run on
+    // every startup).
+    sqlx::query("DROP TABLE IF EXISTS channel_subscriptions")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("DROP TABLE IF EXISTS channel_stops")
+        .execute(pool)
+        .await
+        .ok();
+    tracing::info!(
+        "[migration] Dropped channel_subscriptions + channel_stops (cross-channel summary forwarding removed)"
+    );
     Ok(())
 }
 
@@ -396,20 +414,6 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
             updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE(platform, external_id),
             UNIQUE(platform, resource_identifier)
-        );
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    // ── Channel stops ──────────────────────────────────────────────────────
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS channel_stops (
-            id          BIGSERIAL PRIMARY KEY,
-            channel_id  BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-            stopped_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            UNIQUE(channel_id)
         );
         "#,
     )
@@ -568,22 +572,6 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
             next_thread_id  BIGINT NOT NULL,
             content         TEXT NOT NULL,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    // ── Channel subscriptions ─────────────────────────────────────────────
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS channel_subscriptions (
-            id                      BIGSERIAL PRIMARY KEY,
-            channel_id              BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-            subscriber_platform     TEXT NOT NULL,
-            subscriber_resource     TEXT NOT NULL,
-            created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            UNIQUE(channel_id, subscriber_platform, subscriber_resource)
         );
         "#,
     )

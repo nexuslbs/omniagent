@@ -49,17 +49,6 @@
 //  UNIQUE(channel_id, external_id)
 //  INDEX(thread_id, thread_sequence)
 //
-// ── channel_stops ─────────────────────────────────────────────────────────
-//
-// Tracks channels that have been stopped (paused). When a channel is stopped,
-// new pending messages are not processed until the stop is cleared.
-//
-//  id          BIGSERIAL PRIMARY KEY
-//  channel_id  BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE
-//  stopped_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-//
-//  UNIQUE(channel_id)
-//
 // ── Indexes ───────────────────────────────────────────────────────────────
 //
 //  idx_messages_channel_status  ON messages(channel_id, status, created_at)

@@ -218,23 +218,6 @@ Channels can be marked as `closed` (boolean, default `false`). A closed channel:
 ALTER TABLE channels ADD COLUMN closed BOOLEAN NOT NULL DEFAULT false;
 ```
 
-### Channel Subscriptions
-
-The `channel_subscriptions` table enables cross-platform listening:
-
-| Field | Description |
-|-------|-------------|
-| `channel_id` | The channel that receives updates |
-| `subscriber_platform` | Platform of the subscriber |
-| `subscriber_resource` | Resource identifier of the subscriber |
-
-A Telegram channel can subscribe to another channel's summaries: when a summary is generated, it's forwarded to the subscriber. The unique constraint is `(channel_id, subscriber_platform, subscriber_resource)`.
-
-```sql
-INSERT INTO channel_subscriptions (channel_id, subscriber_platform, subscriber_resource)
-VALUES (1, 'telegram', 'my-telegram-chat');
-```
-
 ## Profiles
 
 Profiles bundle model configuration, provider, and allowed tools. A `default` profile is created on first startup.
@@ -632,9 +615,8 @@ curl -X POST http://localhost:8080/stop/1
 
 This will:
 1. Mark all **pending** and **processing** messages in the channel as `skipped`
-2. Record the stop in the `channel_stops` table
-3. Cancel the channel's processing task
-4. The supervisor will not respawn a handler for this channel until resumed
+2. Cancel the channel's processing task
+3. The supervisor will not respawn a handler for this channel until resumed
 
 ### `GET /resume/{channel_id}`
 
@@ -645,10 +627,9 @@ curl http://localhost:8080/resume/1
 ```
 
 This will:
-1. Delete the stop record from `channel_stops`
-2. The supervisor will detect the channel is no longer stopped
-3. A fresh handler will be spawned in idle state
-4. New pending messages will be processed immediately
+1. The supervisor will detect the channel is no longer stopped
+2. A fresh handler will be spawned in idle state
+3. New pending messages will be processed immediately
 
 ### Behavior
 

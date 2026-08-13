@@ -262,22 +262,6 @@ pub struct SummaryDb {
 }
 
 // ---------------------------------------------------------------------------
-// Subscription DB struct
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct SubscriptionDb {
-    #[allow(dead_code)]
-    pub id: i64,
-    #[allow(dead_code)]
-    pub channel_id: i64,
-    pub subscriber_platform: String,
-    pub subscriber_resource: String,
-    #[allow(dead_code)]
-    pub created_at: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
 // Thread parameter structs
 // ---------------------------------------------------------------------------
 
@@ -656,6 +640,5 @@ pub async fn search_wiki_qdrant(
 pub use crate::db::channels::*;
 pub use crate::db::kanban::*;
 pub use crate::db::messages::*;
-pub use crate::db::subscriptions::*;
 pub use crate::db::summaries::*;
 pub use crate::db::threads::*;
