@@ -132,7 +132,7 @@ fn resolve_project_file(
 fn build_compose_command(
     command: &str,
     project_dir: &str,
-    compose_file: &str,
+    compose_files: &[String],
     env_file: &str,
     service_name: &str,
     exec_args: &str,
@@ -150,11 +150,12 @@ fn build_compose_command(
     let mut cmd = Command::new("docker");
     cmd.arg("compose");
 
-    // Compose file: resolve against project_dir (default docker-compose.yml).
-    // It's already validated to stay inside project_dir by the caller.
-    let compose_path = Path::new(project_dir).join(compose_file);
-    cmd.arg("-f");
-    cmd.arg(&compose_path);
+    // Compose files: one -f per file, in order (base first, overrides after).
+    // Each is already validated to stay inside the workspace by the caller.
+    for compose_path in compose_files {
+        cmd.arg("-f");
+        cmd.arg(compose_path);
+    }
 
     // Optional env file: --env-file must be given BEFORE the subcommand.
     if !env_file.is_empty() {
@@ -474,7 +475,14 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
         .to_string();
 
     let project_dir_arg = args["project_dir"].as_str().unwrap_or("").to_string();
-    let compose_file_arg = args["compose_file"].as_str().unwrap_or("").to_string();
+    let compose_files_arg: Vec<String> = match &args["compose_file"] {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(items) => items
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => vec![],
+    };
     let env_file_arg = args["env_file"].as_str().unwrap_or("").to_string();
     let service_name = args["service"].as_str().unwrap_or("");
     let exec_args = args["args"].as_str().unwrap_or("");
@@ -491,18 +499,28 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
     }
     let project_dir = resolve_project_dir(&project_dir_arg, configured_workspace)?;
 
-    // Resolve compose_file: relative to project_dir, default docker-compose.yml.
-    let compose_file = if compose_file_arg.is_empty() {
-        "docker-compose.yml".to_string()
+    // Resolve compose_file(s): each relative to project_dir or absolute inside
+    // workspace. Default docker-compose.yml when omitted. Multiple entries become
+    // repeated -f flags (base first, overrides after) — like
+    // `docker compose -f base -f overlay`.
+    let mut resolved_compose_files: Vec<String> = Vec::new();
+    if compose_files_arg.is_empty() {
+        resolved_compose_files.push(resolve_project_file(
+            "docker-compose.yml",
+            &project_dir,
+            configured_workspace,
+            "compose_file",
+        )?);
     } else {
-        compose_file_arg.clone()
-    };
-    let resolved_compose_file = resolve_project_file(
-        &compose_file,
-        &project_dir,
-        configured_workspace,
-        "compose_file",
-    )?;
+        for cf in &compose_files_arg {
+            resolved_compose_files.push(resolve_project_file(
+                cf,
+                &project_dir,
+                configured_workspace,
+                "compose_file",
+            )?);
+        }
+    }
 
     // Resolve env_file: relative to project_dir or absolute inside workspace, optional.
     let resolved_env_file = if env_file_arg.is_empty() {
@@ -535,7 +553,7 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
     let mut cmd = build_compose_command(
         &command,
         &project_dir,
-        &resolved_compose_file,
+        &resolved_compose_files,
         &resolved_env_file,
         service_name,
         exec_args,
@@ -720,9 +738,12 @@ async fn main() -> Result<()> {
             description:
                 "Run docker compose commands on a compose project inside the workspace. \
                  'project_dir' (required) is the compose project directory — the workspace dir or a subdirectory of it. \
-                 'compose_file' (optional) is the compose file: a path RELATIVE to project_dir (default docker-compose.yml, \
-                 may include subdirectories), or an ABSOLUTE path anywhere inside the workspace (e.g. a shared overlay). \
-                 'env_file' (optional) is a .env-style file: relative to project_dir, or an ABSOLUTE path anywhere inside \
+                 'compose_file' (optional) is the compose file(s): a STRING or ARRAY of strings — each a path RELATIVE \\
+                 to project_dir (default docker-compose.yml when omitted), or an ABSOLUTE path anywhere inside the \\
+                 workspace (e.g. a shared overlay). Multiple entries are passed as repeated -f flags in order \\
+                 (e.g. [\"docker-compose.yml\", \"docker-compose.dev.yml\"] -> -f docker-compose.yml -f docker-compose.dev.yml), \\
+                 so overrides merge exactly like `docker compose -f base -f overlay`. \\
+                 'env_file' (optional) is a .env-style file: relative to project_dir, or an ABSOLUTE path anywhere inside \\
                  the workspace (e.g. /opt/workspace/<project>/<name>.env for a shared env file) — passed via --env-file. \
                  Use 'command' for the compose verb + flags (e.g. 'up -d', 'ps', 'build', 'logs --tail=50'). \
                  For exec/run: use 'service' (container name) and 'args' (command to run inside container). \
@@ -746,8 +767,9 @@ async fn main() -> Result<()> {
                         "description": "The compose project directory: the workspace dir or a subdirectory of it."
                     },
                     "compose_file": {
-                        "type": "string",
-                        "description": "Compose file: relative to project_dir (default docker-compose.yml), or an absolute path anywhere inside the workspace."
+                        "type": ["string", "array"],
+                        "items": {"type": "string"},
+                        "description": "Compose file(s): a string or array of strings, each relative to project_dir (default docker-compose.yml) or an absolute path inside the workspace. Multiple entries are passed as repeated -f flags in order (base first, overrides after)."
                     },
                     "env_file": {
                         "type": "string",
@@ -1048,5 +1070,42 @@ mod tests {
                 .canonicalize()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn build_compose_command_emits_one_dash_f_per_file() {
+        // Multiple compose files -> repeated -f flags in order (base, overlay).
+        let cmd = build_compose_command(
+            "exec",
+            "/tmp/proj",
+            &[
+                "/tmp/proj/docker-compose.yml".to_string(),
+                "/tmp/proj/docker-compose.dev.yml".to_string(),
+            ],
+            "",
+            "omniagent",
+            "cargo build",
+            "",
+        )
+        .unwrap();
+        let repr = format!("{:?}", cmd);
+        // Expect: docker compose -f /tmp/proj/docker-compose.yml -f /tmp/proj/docker-compose.dev.yml exec ...
+        // (Debug format: "docker" "compose" "-f" "/tmp/proj/docker-compose.yml" "-f" "/tmp/proj/docker-compose.dev.yml" ...)
+        let dash_f_count = repr.matches("-f").count();
+        assert_eq!(dash_f_count, 2, "expected exactly 2 -f flags: {repr}");
+        assert!(
+            repr.contains("docker-compose.yml"),
+            "base file missing: {repr}"
+        );
+        assert!(
+            repr.contains("docker-compose.dev.yml"),
+            "overlay file missing: {repr}"
+        );
+        // Base file must appear before the overlay file (order preserved).
+        let base_pos = repr.find("docker-compose.yml").expect("base file position");
+        let dev_pos = repr
+            .find("docker-compose.dev.yml")
+            .expect("overlay file position");
+        assert!(base_pos < dev_pos, "base must precede overlay: {repr}");
     }
 }
