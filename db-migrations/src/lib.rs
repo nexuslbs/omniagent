@@ -365,6 +365,22 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     tracing::info!(
         "[migration] Dropped channel_subscriptions + channel_stops (cross-channel summary forwarding removed)"
     );
+    // ── Removed tables: cron_jobs + hooks (tasks.yml is now the source) ────
+    // Definitions moved to {data_dir}/config/tasks.yml (`schedules:` and
+    // `hooks:` keys); these idempotent DROPs clean up databases created
+    // before the move (safe to run on every startup). Runtime state tables
+    // hook_counters + task_runs are kept.
+    sqlx::query("DROP TABLE IF EXISTS cron_jobs")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("DROP TABLE IF EXISTS hooks")
+        .execute(pool)
+        .await
+        .ok();
+    tracing::info!(
+        "[migration] Dropped cron_jobs + hooks (definitions now in config/tasks.yml)"
+    );
     Ok(())
 }
 

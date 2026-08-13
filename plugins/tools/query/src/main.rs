@@ -780,8 +780,8 @@ JOIN across tables) and structured lookups that the purpose-built query tools do
 The statement MUST start with SELECT or WITH; write/DDL keywords (INSERT/UPDATE/DELETE/DROP/\
 ALTER/...) are rejected, and the query runs inside a read-only transaction, so writes are \
 blocked at the database level.\n\n\
-Available tables: messages, threads, channels, summaries, kanban_tasks, \
-cron_jobs, profiles. Include the full table/column names in your SQL.\n\n\
+Available tables: messages, threads, summaries, kanban_tasks, \
+profiles. Include the full table/column names in your SQL.\n\n\
 For common lookups prefer the purpose-built tools: query_search-messages (semantic search), \
 query_thread-messages (thread contents), query_channel-prompts (channel prompt history), \
 query_channels (channel ids)."
