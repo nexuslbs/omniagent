@@ -24,29 +24,9 @@ pub(crate) async fn enable_plugin_handler(
     let yaml_type = plugins_yaml::PluginYamlType::from_type_str(&p_type);
     if let Ok(Some(entry)) = plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name) {
         if entry.enabled && entry.source == source {
-            if yaml_type == plugins_yaml::PluginYamlType::Platform {
-                reload_platform_plugin(&state, &name).await;
-            } else if yaml_type == plugins_yaml::PluginYamlType::Tool {
-                state.plugin_manager.remove_client(&name);
-                match state
-                    .plugin_manager
-                    .initialize_single_server(&state.data_dir, &name)
-                    .await
-                {
-                    Ok(tools) => {
-                        state.plugin_manager.remove_server_tools(&name).await;
-                        state.plugin_manager.register_tools(tools).await;
-                    }
-                    Err(e) => {
-                        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": format!("MCP server for '{}' failed to start: {}", name, e)}))).into_response();
-                    }
-                }
-            }
-            // Provider: ensure subprocess is running even if YAML was already enabled
-            if yaml_type == plugins_yaml::PluginYamlType::Provider {
-                crate::llm::refresh_provider_metadata();
-                let _ = super::plugins_env::reload_plugins(state.clone()).await;
-            }
+            // Already enabled — idempotent no-op: just return the plugin detail.
+            // (Previously this branch force-restarted the plugin, which is the
+            // job of the dedicated /restart endpoint, not /enable.)
             if let Ok(Some(detail)) = plugins_yaml::get_plugin(&state.data_dir, &name, &yaml_type) {
                 return (
                     StatusCode::OK,
@@ -165,10 +145,91 @@ pub(crate) async fn disable_plugin_handler(
     }
 }
 
+/// Which restart action applies to a given plugin type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestartAction {
+    Tool,
+    Platform,
+    Provider,
+}
+
+/// Map a plugin YAML type to its restart action. Pure helper, unit-tested.
+fn restart_action_for(yaml_type: &plugins_yaml::PluginYamlType) -> RestartAction {
+    match yaml_type {
+        plugins_yaml::PluginYamlType::Tool => RestartAction::Tool,
+        plugins_yaml::PluginYamlType::Platform => RestartAction::Platform,
+        plugins_yaml::PluginYamlType::Provider => RestartAction::Provider,
+    }
+}
+
 pub(crate) async fn restart_plugin_handler(
-    Path((_p_type, _source, name)): Path<(String, String, String)>,
+    Path((p_type, _source, name)): Path<(String, String, String)>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    reload_platform_plugin(&state, &name).await;
+    if let Err(e) = validate_plugin_type(&p_type) {
+        return e.into_response();
+    }
+    let yaml_type = plugins_yaml::PluginYamlType::from_type_str(&p_type);
+    match restart_action_for(&yaml_type) {
+        RestartAction::Tool => {
+            reload_tool_plugin(&state, &name).await;
+        }
+        RestartAction::Platform => {
+            reload_platform_plugin(&state, &name).await;
+        }
+        RestartAction::Provider => {
+            crate::llm::refresh_provider_metadata();
+            let _ = super::plugins_env::reload_plugins(state.clone()).await;
+        }
+    }
     (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restart_action_dispatches_by_plugin_type() {
+        assert_eq!(
+            restart_action_for(&plugins_yaml::PluginYamlType::Tool),
+            RestartAction::Tool
+        );
+        assert_eq!(
+            restart_action_for(&plugins_yaml::PluginYamlType::Platform),
+            RestartAction::Platform
+        );
+        assert_eq!(
+            restart_action_for(&plugins_yaml::PluginYamlType::Provider),
+            RestartAction::Provider
+        );
+    }
+
+    #[test]
+    fn from_type_str_maps_api_path_types() {
+        assert_eq!(
+            plugins_yaml::PluginYamlType::from_type_str("tools"),
+            plugins_yaml::PluginYamlType::Tool
+        );
+        assert_eq!(
+            plugins_yaml::PluginYamlType::from_type_str("tool"),
+            plugins_yaml::PluginYamlType::Tool
+        );
+        assert_eq!(
+            plugins_yaml::PluginYamlType::from_type_str("platforms"),
+            plugins_yaml::PluginYamlType::Platform
+        );
+        assert_eq!(
+            plugins_yaml::PluginYamlType::from_type_str("platform"),
+            plugins_yaml::PluginYamlType::Platform
+        );
+        assert_eq!(
+            plugins_yaml::PluginYamlType::from_type_str("providers"),
+            plugins_yaml::PluginYamlType::Provider
+        );
+        assert_eq!(
+            plugins_yaml::PluginYamlType::from_type_str("provider"),
+            plugins_yaml::PluginYamlType::Provider
+        );
+    }
 }
