@@ -17,3 +17,4 @@ sqlx = { version = "0.9", features = ["postgres", "runtime-tokio", "chrono"] }
 sql-forge = "0.5.0"
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
+tiktoken-rs = "0.5"

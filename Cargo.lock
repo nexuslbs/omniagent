@@ -1471,6 +1471,7 @@ dependencies = [
  "sha2 0.10.9",
  "sql-forge",
  "sqlx",
+ "tiktoken-rs",
  "tokio",
  "tracing",
  "tracing-subscriber",

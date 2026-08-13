@@ -1502,6 +1502,93 @@ async fn handle_generate_full(
 }
 
 // ---------------------------------------------------------------------------
+// Real size measurement for the compaction gate (tiktoken BPE).
+// ---------------------------------------------------------------------------
+
+/// Unit of the size measurement returned by [`measure_size`]. The compaction
+/// gate compares against the TOKEN budgets only when the measurement is in
+/// real tokens; on tokenizer failure the measurement falls back to chars and
+/// the gate must use the CHAR budgets — never chars/4 against token budgets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SizeUnit {
+    Tokens,
+    Chars,
+}
+
+/// Measure the size of a message list for the compaction gate.
+///
+/// When `tokenizer_encoding` is configured (e.g. "gpt-4" -> cl100k_base,
+/// "o200k_base"), the size is the REAL tiktoken BPE token count of the
+/// JSON-serialized message array — the same proven counter the core uses in
+/// src/agent/helpers.rs::count_tokens. This replaces the old chars/4 proxy,
+/// which made the token budgets 4x too lenient in chars: real long threads
+/// (thread 87: 845K chars peak, 25.5M input tokens) never crossed the hard
+/// budget, so the compaction gate stayed dead and context grew unbounded.
+///
+/// On tokenizer failure (bad encoding, tiktoken load error, serialize error)
+/// the measurement falls back to the CHAR size; the caller then compares
+/// against the CHAR budgets. Empty `tokenizer_encoding` always measures
+/// chars (the deployment does not use token budgets).
+fn measure_size(
+    items: &[crate::chat_message::ChatMessage],
+    tokenizer_encoding: &str,
+) -> (usize, SizeUnit) {
+    // Char measurement (the tokenizer-free path and the fallback).
+    let chars: usize = items
+        .iter()
+        .map(|m| {
+            let calls = m
+                .tool_calls
+                .as_ref()
+                .map(|calls| {
+                    calls
+                        .iter()
+                        .map(|call| {
+                            call.function.name.chars().count()
+                                + call.function.arguments.chars().count()
+                        })
+                        .sum::<usize>()
+                })
+                .unwrap_or(0);
+            m.content.chars().count() + calls
+        })
+        .sum();
+
+    if tokenizer_encoding.is_empty() {
+        return (chars, SizeUnit::Chars);
+    }
+
+    // Real token count: serialize the array exactly as the API receives it,
+    // then run tiktoken BPE with special tokens (mirrors
+    // src/agent/helpers.rs::count_tokens).
+    let json = match serde_json::to_string(items) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!(
+                "[prompt] Failed to serialize messages for token counting: {}",
+                e
+            );
+            return (chars, SizeUnit::Chars);
+        }
+    };
+    let bpe = match tiktoken_rs::get_bpe_from_model(tokenizer_encoding) {
+        Ok(bpe) => bpe,
+        Err(e) => {
+            tracing::warn!(
+                "[prompt] Failed to load BPE encoding '{}': {}: falling back to char budget",
+                tokenizer_encoding,
+                e
+            );
+            return (chars, SizeUnit::Chars);
+        }
+    };
+    (
+        bpe.encode_with_special_tokens(&json).len(),
+        SizeUnit::Tokens,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tool: prompt_compact_messages
 // ---------------------------------------------------------------------------
 
@@ -1546,43 +1633,18 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // trigger budget, so later iterations stop re-triggering compaction.
     // Erroring would discard the partial reduction and make every later
     // iteration repeat the same failed compaction forever.
-    let use_tokens = !cfg.tokenizer_encoding.is_empty();
-    let measure_size = |items: &[crate::chat_message::ChatMessage]| -> usize {
-        let chars: usize = items
-            .iter()
-            .map(|m| {
-                let calls = m
-                    .tool_calls
-                    .as_ref()
-                    .map(|calls| {
-                        calls
-                            .iter()
-                            .map(|call| {
-                                call.function.name.chars().count()
-                                    + call.function.arguments.chars().count()
-                            })
-                            .sum::<usize>()
-                    })
-                    .unwrap_or(0);
-                m.content.chars().count() + calls
-            })
-            .sum();
-        if use_tokens {
-            chars / 4
-        } else {
-            chars
-        }
+    // Real size measurement: tiktoken BPE tokens when a tokenizer encoding
+    // is configured, chars otherwise (and on tokenizer failure). The budget
+    // compared against follows the measurement unit: token budgets for real
+    // tokens, char budgets for chars — never chars/4 against token budgets.
+    let (current_size, size_unit) = measure_size(&messages, &cfg.tokenizer_encoding);
+    let hard_budget = match size_unit {
+        SizeUnit::Tokens => cfg.token_budget_hard,
+        SizeUnit::Chars => cfg.char_budget_hard,
     };
-    let current_size = measure_size(&messages);
-    let hard_budget = if use_tokens {
-        cfg.token_budget_hard
-    } else {
-        cfg.char_budget_hard
-    };
-    let soft_budget = if use_tokens {
-        cfg.token_budget_soft
-    } else {
-        cfg.char_budget_soft
+    let soft_budget = match size_unit {
+        SizeUnit::Tokens => cfg.token_budget_soft,
+        SizeUnit::Chars => cfg.char_budget_soft,
     };
 
     let before = messages.len();
@@ -1620,7 +1682,7 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
                 dump_file = Some(df);
             }
             entries += outcome.dump_entries;
-            let after_size = measure_size(&messages);
+            let after_size = measure_size(&messages, &cfg.tokenizer_encoding).0;
             if after_size <= soft_budget || keep == 0 {
                 break;
             }
@@ -1684,45 +1746,16 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
     let before = messages.len();
 
     // Read config from shared plugin config (set by configure message)
-    let use_tokens = !cfg.tokenizer_encoding.is_empty();
-    let soft_budget = if use_tokens {
-        cfg.token_budget_soft
-    } else {
-        cfg.char_budget_soft
+    let (current_size, size_unit) = measure_size(&messages, &cfg.tokenizer_encoding);
+    let soft_budget = match size_unit {
+        SizeUnit::Tokens => cfg.token_budget_soft,
+        SizeUnit::Chars => cfg.char_budget_soft,
     };
-    let hard_budget = if use_tokens {
-        cfg.token_budget_hard
-    } else {
-        cfg.char_budget_hard
+    let hard_budget = match size_unit {
+        SizeUnit::Tokens => cfg.token_budget_hard,
+        SizeUnit::Chars => cfg.char_budget_hard,
     };
     let target_budget = soft_budget.min(hard_budget);
-
-    let current_size: usize = {
-        let chars: usize = messages
-            .iter()
-            .map(|m| {
-                let calls = m
-                    .tool_calls
-                    .as_ref()
-                    .map(|calls| {
-                        calls
-                            .iter()
-                            .map(|call| {
-                                call.function.name.chars().count()
-                                    + call.function.arguments.chars().count()
-                            })
-                            .sum::<usize>()
-                    })
-                    .unwrap_or(0);
-                m.content.chars().count() + calls
-            })
-            .sum();
-        if use_tokens {
-            chars / 4
-        } else {
-            chars
-        }
-    };
 
     let current_iteration = args["current_iteration"].as_i64().unwrap_or(0);
     let last_condense_iteration = args["last_condense_iteration"].as_i64().unwrap_or(-1);
@@ -1748,11 +1781,7 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
             },
         );
 
-        let after_size: usize = if use_tokens {
-            messages.iter().map(|m| m.content.len()).sum::<usize>() / 4
-        } else {
-            messages.iter().map(|m| m.content.len()).sum::<usize>()
-        };
+        let after_size: usize = measure_size(&messages, &cfg.tokenizer_encoding).0;
 
         if after_size > target_budget {
             let aggressive_keep = condense_keep_turns.saturating_sub(1);
@@ -2618,5 +2647,319 @@ mod prior_attempts_tests {
             .expect("hint block must be emitted even with no memories");
         assert!(block.contains("none yet"));
         assert!(block.contains("memory_promote-to-memory"));
+    }
+}
+
+#[cfg(test)]
+mod token_counting_tests {
+    use super::*;
+    use crate::chat_message::{ChatMessage, ToolCallData, ToolCallFunction};
+    use serde_json::json;
+
+    fn user_msg(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "user".to_string(),
+            content: content.to_string(),
+            tool_call_id: None,
+            tool_calls: None,
+            name: None,
+        }
+    }
+
+    fn assistant_msg(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            tool_call_id: None,
+            tool_calls: None,
+            name: None,
+        }
+    }
+
+    fn tool_call_msg(name: &str, args: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+            tool_call_id: None,
+            tool_calls: Some(vec![ToolCallData {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: name.to_string(),
+                    arguments: args.to_string(),
+                },
+            }]),
+            name: None,
+        }
+    }
+
+    fn tool_result(name: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "tool".to_string(),
+            content: content.to_string(),
+            tool_call_id: Some("call_1".to_string()),
+            tool_calls: None,
+            name: Some(name.to_string()),
+        }
+    }
+
+    fn compact_cfg(tokenizer: &str, hard: usize, soft: usize) -> PluginConfig {
+        let mut cfg = PluginConfig::default();
+        cfg.tokenizer_encoding = tokenizer.to_string();
+        cfg.token_budget_hard = hard;
+        cfg.token_budget_soft = soft;
+        cfg
+    }
+
+    /// Ground-truth real token count of the JSON-serialized message array
+    /// via tiktoken — what the plugin measurement must match.
+    fn real_tokens(messages: &[ChatMessage]) -> usize {
+        let json = serde_json::to_string(messages).unwrap();
+        tiktoken_rs::get_bpe_from_model("gpt-4")
+            .unwrap()
+            .encode_with_special_tokens(&json)
+            .len()
+    }
+
+    /// The OLD chars/4 proxy this task replaces (kept here to prove it is
+    /// dead: the gate must fire on the real count even when chars/4 would
+    /// stay under the budget).
+    fn chars_4_proxy(messages: &[ChatMessage]) -> usize {
+        chars_of(messages) / 4
+    }
+
+    fn chars_of(messages: &[ChatMessage]) -> usize {
+        messages
+            .iter()
+            .map(|m| {
+                let calls = m
+                    .tool_calls
+                    .as_ref()
+                    .map(|calls| {
+                        calls
+                            .iter()
+                            .map(|call| {
+                                call.function.name.chars().count()
+                                    + call.function.arguments.chars().count()
+                            })
+                            .sum::<usize>()
+                    })
+                    .unwrap_or(0);
+                m.content.chars().count() + calls
+            })
+            .sum()
+    }
+
+    async fn run_compact(
+        messages: &[ChatMessage],
+        cfg: &PluginConfig,
+        keep_recent: usize,
+        thread_dir: Option<&str>,
+    ) -> serde_json::Value {
+        let arr: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| serde_json::to_value(m).unwrap())
+            .collect();
+        let mut args = json!({
+            "messages": arr,
+            "keep_recent": keep_recent,
+        });
+        if let Some(dir) = thread_dir {
+            args["thread_dir"] = json!(dir);
+            args["current_iteration"] = json!(7);
+        }
+        let (out, is_error) = handle_compact_messages(&args, cfg).await.unwrap();
+        assert!(!is_error, "compact-messages must not error: {out}");
+        serde_json::from_str(&out).unwrap()
+    }
+
+    // (a) The measurement uses REAL tiktoken tokens, not the chars/4 proxy.
+    #[test]
+    fn measure_uses_real_tiktoken_tokens_not_chars_proxy() {
+        let msgs = vec![
+            user_msg("hello world"),
+            tool_call_msg(
+                "filesystem_read",
+                r#"{"path":"/opt/workspace/omniagent/src/main.rs","offset":0,"limit":50000}"#,
+                "reading the file",
+            ),
+            tool_result("filesystem_read", &"x".repeat(2000)),
+        ];
+
+        // Configured encoding -> real tokens, exactly matching tiktoken.
+        let (size, unit) = measure_size(&msgs, "gpt-4");
+        assert_eq!(unit, SizeUnit::Tokens);
+        assert_eq!(size, real_tokens(&msgs), "must be the real tiktoken count");
+        assert!(size > 0);
+
+        // Meaningfully different from the chars/4 proxy (dense JSON args
+        // tokenize far denser than 4 chars per token).
+        assert!(
+            (size as i64 - chars_4_proxy(&msgs) as i64).abs() > 10,
+            "real token count must differ meaningfully from chars/4"
+        );
+
+        // No encoding configured -> chars (token budgets not in use).
+        let (chars_size, chars_unit) = measure_size(&msgs, "");
+        assert_eq!(chars_unit, SizeUnit::Chars);
+        assert_eq!(chars_size, chars_of(&msgs));
+
+        // Tokenizer failure -> char fallback, reported as Chars so the gate
+        // compares against the CHAR budgets (never chars/4 vs token budgets).
+        let (fallback_size, fallback_unit) = measure_size(&msgs, "nonexistent_encoding_xyz");
+        assert_eq!(fallback_unit, SizeUnit::Chars);
+        assert_eq!(fallback_size, chars_size);
+    }
+
+    // (b) Compaction triggers on the REAL token count — a case where the old
+    // chars/4 proxy would stay under the hard budget and never fire.
+    #[tokio::test]
+    async fn compaction_triggers_on_real_token_count_where_chars_proxy_stays_dead() {
+        // Digit-dense tool args/results tokenize ~1 token/char in cl100k_base,
+        // so the REAL count dwarfs the chars/4 proxy.
+        let dense = "1234567890".repeat(20_000); // 200,000 chars of digits
+        let mut msgs = vec![user_msg("run the analysis")];
+        for i in 0..4 {
+            msgs.push(tool_call_msg(
+                "query_database",
+                &dense,
+                &format!("query {i}"),
+            ));
+            msgs.push(tool_result("query_database", &dense));
+        }
+        msgs.push(assistant_msg("done"));
+
+        let real = real_tokens(&msgs);
+        let proxy = chars_4_proxy(&msgs);
+        assert!(
+            real > proxy,
+            "dense digits must tokenize denser than chars/4"
+        );
+
+        // A hard budget the REAL count exceeds but the proxy stays under:
+        // the old gate would never fire; the new one must.
+        let hard = (real + proxy) / 2;
+        assert!(real > hard, "REAL token count must exceed the hard budget");
+        assert!(
+            proxy < hard,
+            "chars/4 proxy must stay under the hard budget"
+        );
+
+        // Positive: real tokens over hard -> compaction fires and drains old
+        // tool-result turns.
+        let cfg = compact_cfg("gpt-4", hard, hard / 2);
+        let out = run_compact(&msgs, &cfg, 2, None).await;
+        assert_eq!(out["was_compacted"], true);
+        let arr = out["messages"].as_array().expect("compacted array");
+        assert!(
+            arr.len() < msgs.len(),
+            "old tool-result turns must be drained"
+        );
+
+        // Negative control: budget above the real count -> no compaction.
+        let cfg2 = compact_cfg("gpt-4", real + 1000, real + 1000);
+        let out2 = run_compact(&msgs, &cfg2, 2, None).await;
+        assert_eq!(out2["was_compacted"], false);
+        assert!(
+            out2["messages"].is_null(),
+            "no compaction -> messages must be null"
+        );
+    }
+
+    // (c) keep_recent turns survive verbatim through compaction.
+    #[tokio::test]
+    async fn keep_recent_turns_survive_verbatim() {
+        let mut msgs = vec![user_msg("start")];
+        for i in 0..5 {
+            msgs.push(tool_call_msg(
+                "filesystem_read",
+                r#"{"path":"/etc/x"}"#,
+                &format!("reading {i}"),
+            ));
+            msgs.push(tool_result("filesystem_read", &format!("result {i}")));
+        }
+        msgs.push(assistant_msg("final answer"));
+
+        // Hard budget triggers; soft budget is HIGH so the kept recent
+        // turns fit after the first pass (the point: keep_recent survives).
+        let cfg = compact_cfg("gpt-4", 100, 5000);
+        let out = run_compact(&msgs, &cfg, 2, None).await;
+        assert_eq!(out["was_compacted"], true);
+        let arr = out["messages"].as_array().expect("compacted array");
+
+        // Only the 2 most recent tool-result messages survive, verbatim.
+        let tool_msgs: Vec<&serde_json::Value> =
+            arr.iter().filter(|m| m["role"] == "tool").collect();
+        assert_eq!(
+            tool_msgs.len(),
+            2,
+            "only the 2 most recent tool results survive"
+        );
+        assert_eq!(tool_msgs[0]["content"], "result 3");
+        assert_eq!(tool_msgs[1]["content"], "result 4");
+
+        // Their assistant tool-call turns survive too, with tool_calls intact.
+        let call_msgs: Vec<&serde_json::Value> = arr
+            .iter()
+            .filter(|m| m["role"] == "assistant" && m["tool_calls"].is_array())
+            .collect();
+        assert_eq!(call_msgs.len(), 2);
+        assert_eq!(call_msgs[0]["content"], "reading 3");
+        assert_eq!(call_msgs[1]["content"], "reading 4");
+
+        // Final answer kept; oldest drained turns marked as compacted.
+        let joined = serde_json::to_string(&arr).unwrap();
+        assert!(joined.contains("final answer"));
+        assert!(joined.contains("[context compacted: filesystem_read"));
+    }
+
+    // (d) Retention channels stay intact: read-type tool results are
+    // excerpted into auto-notes.md AND dumped to context-<iter>.json.
+    #[tokio::test]
+    async fn read_type_results_excerpted_into_auto_notes_and_dump() {
+        let tmp = std::env::temp_dir().join(format!(
+            "prompt-compact-retention-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let dir = tmp.to_str().unwrap().to_string();
+
+        let mut msgs = vec![user_msg("read the files")];
+        for i in 0..4 {
+            msgs.push(tool_call_msg(
+                "filesystem_read",
+                r#"{"path":"/etc/x"}"#,
+                &format!("reading {i}"),
+            ));
+            msgs.push(tool_result(
+                "filesystem_read",
+                &format!("FILE CONTENT {i} ").repeat(50),
+            ));
+        }
+        msgs.push(assistant_msg("done"));
+
+        let cfg = compact_cfg("gpt-4", 100, 50);
+        let out = run_compact(&msgs, &cfg, 2, Some(&dir)).await;
+        assert_eq!(out["was_compacted"], true);
+
+        // WS-2/WS-3: durable context dump written with the drained read results.
+        let dump_path = tmp.join("context-7.json");
+        let dump_text = std::fs::read_to_string(&dump_path)
+            .unwrap_or_else(|_| panic!("context dump missing: {}", dump_path.display()));
+        assert!(dump_text.contains("filesystem_read"));
+
+        // Auto-notes: read-type results excerpted into auto-notes.md.
+        let notes_path = tmp.join("auto-notes.md");
+        let notes_text = std::fs::read_to_string(&notes_path)
+            .unwrap_or_else(|_| panic!("auto-notes missing: {}", notes_path.display()));
+        assert!(notes_text.contains("[engine:auto-note filesystem_read]"));
+        assert!(notes_text.contains("FILE CONTENT"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
