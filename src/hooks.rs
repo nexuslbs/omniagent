@@ -6,6 +6,11 @@
 //!   - `thread_finished` : a thread reaches a terminal state
 //!   - `new_message`     : a message is inserted
 //!
+//! Definitions live in `{data_dir}/config/tasks.yml` (`hooks:` key — the
+//! git-tracked source of truth), NOT in the (dormant) `hooks` table. The
+//! only runtime state is the per-hook JSON counter, stored in the small
+//! `hook_counters (hook_key, counter)` table.
+//!
 //! Semantics:
 //!   - Each hook has a JSON counter (per-scope keys) that increments on every
 //!     matching event. When the counter reaches the hook's `count` threshold
@@ -125,7 +130,7 @@ where
     });
 }
 
-// ── DB row structs ──────────────────────────────────────────────────────────
+// ── Row structs ─────────────────────────────────────────────────────────────
 
 /// Thread projection used for scope resolution + infinite-loop protection.
 #[derive(Debug, FromRow)]
@@ -137,14 +142,14 @@ struct EventThreadRow {
     hook_caused: bool,
 }
 
-#[derive(Debug, FromRow)]
+/// A resolved hook definition (from tasks.yml + channel resolution).
+#[derive(Debug, Clone)]
 struct HookRow {
     id: String,
     name: String,
     event: String,
     scope: String,
     target: Option<String>,
-    counter: Option<String>,
     count: i32,
     mode: String,
     prompt: Option<String>,
@@ -156,9 +161,30 @@ struct HookRow {
     template: Option<String>,
 }
 
-#[derive(Debug, FromRow)]
-struct CounterRow {
-    counter: Option<String>,
+impl HookRow {
+    fn from_yml(key: &str, def: &crate::tasks_yaml::HookDef, channel_id: Option<i64>) -> Self {
+        let (planning_mode, plan) = def
+            .planning_mode
+            .as_ref()
+            .map(|p| p.to_legacy())
+            .unwrap_or((None, None));
+        Self {
+            id: key.to_string(),
+            name: key.to_string(),
+            event: def.event.clone(),
+            scope: def.scope.clone(),
+            target: def.target.clone(),
+            count: def.count,
+            mode: def.mode(),
+            prompt: def.prompt.clone(),
+            action_id: def.action.clone(),
+            profile: def.profile.clone(),
+            channel_id,
+            planning_mode,
+            plan,
+            template: def.template.clone(),
+        }
+    }
 }
 
 // ── Event handling ──────────────────────────────────────────────────────────
@@ -180,20 +206,21 @@ impl HooksEngine {
         Ok(row)
     }
 
+    /// Load enabled hooks for an event from tasks.yml (parsed fresh on every
+    /// event so file edits take effect without restart). Channel NAMEs are
+    /// resolved to ids; unknown names → None (default channel semantics).
     async fn load_enabled_hooks(&self, event: &str) -> AppResult<Vec<HookRow>> {
-        let rows: Vec<HookRow> = sql_forge!(
-            HookRow,
-            r#"
-            SELECT id, name, event, scope, target, counter::text AS counter, count, mode,
-                   prompt, action_id, profile, channel_id, planning_mode, plan, template
-            FROM hooks
-            WHERE enabled = true AND event = :event
-            ORDER BY created_at ASC, id ASC
-            "#,
-            ( :event = event )
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let tasks = crate::tasks_yaml::load_tasks_or_empty(&self.data_dir);
+        let mut rows: Vec<HookRow> = Vec::new();
+        for (key, def) in &tasks.hooks {
+            if !def.enabled || def.event != event {
+                continue;
+            }
+            let channel_id =
+                crate::tasks_yaml::resolve_channel_id(&self.pool, def.channel.as_deref()).await;
+            rows.push(HookRow::from_yml(key, def, channel_id));
+        }
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(rows)
     }
 
@@ -243,8 +270,9 @@ impl HooksEngine {
         Ok(())
     }
 
-    /// Atomically increment the hook's counter for `key`; when the new value
-    /// reaches `count`, reset the counter and trigger the hook AFTER commit.
+    /// Atomically increment the hook's counter for `key` (in the
+    /// `hook_counters` table); when the new value reaches `count`, reset the
+    /// counter and trigger the hook AFTER commit.
     async fn record_and_maybe_trigger(
         &self,
         hook: &HookRow,
@@ -252,38 +280,29 @@ impl HooksEngine {
         thread: &EventThreadRow,
     ) -> AppResult<()> {
         let mut tx = self.pool.begin().await?;
-        let counter_row: Option<CounterRow> = sql_forge!(
-            CounterRow,
-            r#"
-            SELECT counter::text AS counter
-            FROM hooks
-            WHERE id = :id
-            FOR UPDATE
-            "#,
-            ( :id = &hook.id )
+        let counter_row: Option<(String,)> = sqlx::query_as(
+            "SELECT counter::text AS counter FROM hook_counters WHERE hook_key = $1 FOR UPDATE",
         )
+        .bind(&hook.id)
         .fetch_optional(&mut *tx)
         .await?;
-        let Some(counter_row) = counter_row else {
-            return Ok(()); // hook deleted while processing: nothing to do
-        };
 
-        let mut counter: Value = serde_json::from_str(counter_row.counter.as_deref().unwrap_or(""))
-            .unwrap_or_else(|_| default_counter());
+        // No row yet → counter starts at the default ({"global": 0}).
+        let mut counter: Value = counter_row
+            .and_then(|(counter,)| serde_json::from_str(&counter).ok())
+            .unwrap_or_else(default_counter);
         let new_value = counter_increment(&mut counter, &hook.scope, key);
         let should_trigger = new_value >= hook.count as i64;
         if should_trigger {
             counter_reset(&mut counter, &hook.scope, key);
         }
 
-        sql_forge!(
-            r#"
-            UPDATE hooks
-            SET counter = :counter, updated_at = NOW()
-            WHERE id = :id
-            "#,
-            ( :counter = &counter, :id = &hook.id )
+        sqlx::query(
+            "INSERT INTO hook_counters (hook_key, counter) VALUES ($1, $2) \
+             ON CONFLICT (hook_key) DO UPDATE SET counter = EXCLUDED.counter",
         )
+        .bind(&hook.id)
+        .bind(&counter)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -506,6 +525,7 @@ pub fn counter_reset(counter: &mut Value, scope: &str, key: &str) {
 /// execution channel: the hook's explicit channel, or the cron channel as a
 /// fallback. Profile: the hook's explicit profile, or the channel's profile.
 /// Returns the spawned thread id (agentic mode) or None (action mode).
+/// Reads the hook definition from tasks.yml.
 pub async fn fire_hook_by_id(
     pool: &PgPool,
     data_dir: &str,
@@ -519,22 +539,13 @@ pub async fn fire_hook_by_id(
         plugin_manager.clone(),
         app_context.clone(),
     );
-    let hooks: Vec<HookRow> = sql_forge!(
-        HookRow,
-        r#"
-        SELECT id, name, event, scope, target, counter::text AS counter, count, mode,
-               prompt, action_id, profile, channel_id, planning_mode, plan, template
-        FROM hooks
-        WHERE id = :id
-        "#,
-        ( :id = hook_id )
-    )
-    .fetch_all(pool)
-    .await?;
-    let hook = hooks
-        .into_iter()
-        .next()
+    let tasks = crate::tasks_yaml::load_tasks(data_dir)?;
+    let def = tasks
+        .hooks
+        .get(hook_id)
         .ok_or_else(|| Error::Message(format!("Hook '{}' not found", hook_id)))?;
+    let channel_id = crate::tasks_yaml::resolve_channel_id(pool, def.channel.as_deref()).await;
+    let hook = HookRow::from_yml(hook_id, def, channel_id);
 
     let channel = if let Some(cid) = hook.channel_id {
         crate::db::channels::get_channel_by_id(pool, cid)

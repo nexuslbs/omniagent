@@ -1,16 +1,22 @@
-//! Schedule CRUD API: replaces dashboard's schedule.ts SQL.
+//! Schedule CRUD API: backed by `{data_dir}/config/tasks.yml` (`schedules:`).
 //!
-//! All 10 SQL queries from the original TypeScript are replaced with
-//! `sql_forge!()` macros. No raw sqlx query calls.
+//! Definitions (previously `cron_jobs` rows) now live in the git-tracked yml
+//! file; every handler reads/writes it (parsed fresh per request, so edits to
+//! the file take effect immediately). The API response shape is unchanged so
+//! the dashboard keeps working: `id` = yml key, `name` = key, and the legacy
+//! field names (schedule/prompt/enabled/active/mode/action_id/profile/
+//! channel_id/template/plan/...) are preserved. `last_run`/`next_run`/
+//! `created_at` no longer exist and are returned as null/empty; runs are
+//! observable via the threads view (`GET /schedule/{id}/threads`).
 //!
-//! - `GET    /schedule`             : list cron jobs (optionally filter by active)
-//! - `GET    /schedule/{id}`        : single cron job detail
-//! - `POST   /schedule`             : create/upsert cron job
-//! - `PATCH  /schedule/{id}`        : update cron job fields (NULLIF pattern)
-//! - `PATCH  /schedule/{id}/toggle` : toggle active state
+//! - `GET    /schedule`             : list schedules (optionally filter by active)
+//! - `GET    /schedule/{id}`        : single schedule detail
+//! - `POST   /schedule`             : create/upsert schedule
+//! - `PATCH  /schedule/{id}`        : update schedule fields
+//! - `PATCH  /schedule/{id}/toggle` : toggle enabled state
 //! - `GET    /schedule/{id}/threads`: threads for a schedule task
 //! - `GET    /schedule/{id}/subtasks`: subtasks for all threads of a job
-//! - `POST   /schedule/{id}/run`    : manually trigger a cron job
+//! - `POST   /schedule/{id}/run`    : manually trigger a schedule
 
 use axum::{
     extract::{Path, Query, State},
@@ -26,6 +32,7 @@ use std::sync::Arc;
 use tracing::error;
 
 use super::{err_json, ok_json, AppState};
+use crate::tasks_yaml::{self, ScheduleDef};
 
 // ---------------------------------------------------------------------------
 // Router
@@ -51,7 +58,7 @@ pub fn schedule_router() -> Router<Arc<AppState>> {
 pub struct JobEntry {
     pub id: String,
     pub name: String,
-    pub display_name: Option<String>,
+    pub display_name: String,
     pub schedule: String,
     pub prompt_preview: String,
     pub prompt: Option<String>,
@@ -120,37 +127,8 @@ pub struct SubtasksResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Row types (sqlx::FromRow for sql_forge!)
+// Row types (threads/subtasks queries stay DB-backed — runs live in threads)
 // ---------------------------------------------------------------------------
-
-#[derive(FromRow)]
-struct CronJobRow {
-    id: String,
-    name: String,
-    display_name: Option<String>,
-    schedule: String,
-    prompt: Option<String>,
-    skills: Option<String>,
-    enabled: Option<bool>,
-    active: Option<bool>,
-    mode: Option<String>,
-    action_id: Option<String>,
-    action_name: Option<String>,
-    channel_id: Option<i64>,
-    channel_name: Option<String>,
-    profile: Option<String>,
-    last_run_at: Option<chrono::DateTime<chrono::Utc>>,
-    next_run_at: Option<chrono::DateTime<chrono::Utc>>,
-    created_at: Option<chrono::DateTime<chrono::Utc>>,
-    silent: Option<bool>,
-    template: Option<String>,
-    plan: Option<bool>,
-}
-
-#[derive(FromRow)]
-struct IdRow {
-    id: String,
-}
 
 #[derive(FromRow)]
 struct ThreadCountRow {
@@ -279,20 +257,6 @@ fn fmt_ts(ts: &chrono::DateTime<chrono::Utc>) -> String {
     ts.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-/// Look up the default cron channel ID. Returns 0 as fallback (caller should handle).
-async fn lookup_cron_channel(pool: &sqlx::PgPool) -> i64 {
-    match sql_forge!(
-        i64,
-        r#"SELECT id FROM channels WHERE platform = 'cron' AND name = 'cron' LIMIT 1"#,
-    )
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(Some(id)) => id,
-        _ => 0,
-    }
-}
-
 fn fmt_ts_opt(ts: Option<chrono::DateTime<chrono::Utc>>) -> Option<String> {
     ts.map(|t| fmt_ts(&t))
 }
@@ -324,8 +288,17 @@ fn validate_cron(schedule: &str) -> Option<String> {
     }
 }
 
-fn job_row_to_entry(row: CronJobRow) -> JobEntry {
-    let prompt_preview = row
+/// Build a JobEntry from a tasks.yml schedule key+def (channel NAME resolved
+/// to id; unknown → None). last_run/next_run/created_at no longer exist and
+/// are returned as null/empty (runs are visible via /schedule/{id}/threads).
+async fn schedule_to_entry(
+    pool: &sqlx::PgPool,
+    data_dir: &str,
+    key: &str,
+    def: &ScheduleDef,
+) -> JobEntry {
+    let channel_id = tasks_yaml::resolve_channel_id(pool, def.channel.as_deref()).await;
+    let prompt_preview = def
         .prompt
         .as_deref()
         .map(|p| {
@@ -336,40 +309,43 @@ fn job_row_to_entry(row: CronJobRow) -> JobEntry {
             }
         })
         .unwrap_or_default();
-
-    let enabled = row.enabled.unwrap_or(false);
-    let silent = row.silent.unwrap_or(false);
-    let active = row.active.unwrap_or(false);
-
+    let enabled = def.enabled;
+    let action_id = def.action.clone();
+    let action_name = action_id.as_deref().and_then(|a| {
+        super::actions::load_actions(data_dir)
+            .actions
+            .get(a)
+            .and_then(|act| act.description.clone())
+    });
     JobEntry {
-        id: row.id,
-        name: row.name,
-        display_name: row.display_name,
-        schedule: row.schedule,
+        id: key.to_string(),
+        name: key.to_string(),
+        display_name: def.display_name.clone().unwrap_or_else(|| key.to_string()),
+        schedule: def.cron.clone(),
         prompt_preview,
-        prompt: row.prompt,
-        skills: parse_skills(row.skills),
+        prompt: def.prompt.clone(),
+        skills: parse_skills(def.skills.clone()),
         enabled,
-        active,
-        mode: row.mode,
-        action_id: row.action_id,
-        action_name: row.action_name,
-        channel_id: row.channel_id,
-        channel_name: row.channel_name,
-        profile: row.profile,
-        last_run: fmt_ts_opt(row.last_run_at),
-        next_run: fmt_ts_opt(row.next_run_at),
-        last_run_at: fmt_ts_opt(row.last_run_at),
-        next_run_at: fmt_ts_opt(row.next_run_at),
-        created_at: row.created_at.as_ref().map(fmt_ts).unwrap_or_default(),
+        active: enabled,
+        mode: Some(def.mode()),
+        action_id,
+        action_name,
+        channel_id,
+        channel_name: def.channel.clone(),
+        profile: def.profile.clone(),
+        last_run: None,
+        next_run: None,
+        last_run_at: None,
+        next_run_at: None,
+        created_at: String::new(),
         status: if enabled {
             "active".to_string()
         } else {
             "paused".to_string()
         },
-        silent,
-        template: row.template,
-        plan: row.plan.unwrap_or_default(),
+        silent: def.silent.unwrap_or(false),
+        template: def.template.clone(),
+        plan: def.plan().unwrap_or(false),
     }
 }
 
@@ -377,145 +353,62 @@ fn job_row_to_entry(row: CronJobRow) -> JobEntry {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// GET /schedule: list cron jobs, optionally filtering by active status.
-///
-/// SQL queries used: 1 (single SELECT with DISTINCT ON and optional WHERE)
+/// GET /schedule: list schedules from tasks.yml (active filter = enabled).
 async fn list_schedule_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListScheduleQuery>,
 ) -> impl IntoResponse {
     let active_only = params.active.as_deref() != Some("false");
-
-    let rows = match sql_forge!(
-        CronJobRow,
-        r#"
-        SELECT DISTINCT ON (cj.name)
-            cj.id,
-            cj.name,
-            cj.display_name,
-            cj.schedule,
-            cj.prompt,
-            cj.skills,
-            cj.enabled,
-            cj.active,
-            cj.mode,
-            cj.action_id,
-            NULL::TEXT AS action_name,
-            cj.channel_id,
-            ch.name AS channel_name,
-            cj.profile,
-            cj.last_run_at,
-            cj.next_run_at,
-            cj.created_at,
-            cj.silent,
-            cj.template,
-            cj.plan
-        FROM cron_jobs cj
-        LEFT JOIN channels ch ON ch.id = cj.channel_id
-        WHERE (:active_only = false OR cj.active = true)
-        ORDER BY cj.name, cj.created_at DESC
-        "#,
-        ( :active_only = active_only )
-    )
-    .fetch_all(&state.pool)
-    .await
-    {
-        Ok(rows) => rows,
+    let tasks = match tasks_yaml::load_tasks(&state.data_dir) {
+        Ok(t) => t,
         Err(e) => {
-            error!("[schedule] list query failed: {:?}", e);
+            error!("[schedule] load tasks.yml failed: {:?}", e);
             return err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to fetch cron jobs",
+                "Failed to load schedules from tasks.yml",
             );
         }
     };
-
-    let mut jobs: Vec<JobEntry> = rows.into_iter().map(job_row_to_entry).collect();
-    // Resolve action names from actions.yml (stored in JSON/YAML file, not DB)
-    let actions = super::actions::load_actions(&state.data_dir);
-    for job in &mut jobs {
-        if let Some(action_id) = &job.action_id {
-            if job.action_name.is_none() {
-                job.action_name = actions
-                    .actions
-                    .get(action_id)
-                    .and_then(|a| a.description.clone());
-            }
-        }
+    let mut keys: Vec<&String> = tasks
+        .schedules
+        .iter()
+        .filter(|(_, def)| !active_only || def.enabled)
+        .map(|(k, _)| k)
+        .collect();
+    keys.sort();
+    let mut jobs: Vec<JobEntry> = Vec::with_capacity(keys.len());
+    for key in keys {
+        let def = &tasks.schedules[key];
+        jobs.push(schedule_to_entry(&state.pool, &state.data_dir, key, def).await);
     }
     ok_json(jobs)
 }
 
-/// GET /schedule/{id}: single cron job detail.
-///
-/// SQL queries used: 1 (SELECT with LEFT JOIN and WHERE id = :id)
+/// GET /schedule/{id}: single schedule detail from tasks.yml.
 async fn get_schedule_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let row = match sql_forge!(
-        CronJobRow,
-        r#"
-        SELECT
-            cj.id,
-            cj.name,
-            cj.display_name,
-            cj.schedule,
-            cj.prompt,
-            cj.skills,
-            cj.enabled,
-            cj.active,
-            cj.mode,
-            cj.action_id,
-            NULL::TEXT AS action_name,
-            cj.channel_id,
-            ch.name AS channel_name,
-            cj.profile,
-            cj.last_run_at,
-            cj.next_run_at,
-            cj.created_at,
-            cj.silent,
-            cj.template,
-            cj.plan
-        FROM cron_jobs cj
-        LEFT JOIN channels ch ON ch.id = cj.channel_id
-        WHERE cj.id = :id
-        "#,
-        ( :id = &id )
-    )
-    .fetch_optional(&state.pool)
-    .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            return err_json(StatusCode::NOT_FOUND, "Job not found");
-        }
+    let tasks = match tasks_yaml::load_tasks(&state.data_dir) {
+        Ok(t) => t,
         Err(e) => {
-            error!("[schedule/{}] get query failed: {:?}", id, e);
+            error!("[schedule/{}] load tasks.yml failed: {:?}", id, e);
             return err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to fetch cron job",
+                "Failed to load schedules from tasks.yml",
             );
         }
     };
-
-    let mut entry = job_row_to_entry(row);
-    // Resolve action name from actions.yml
-    if let Some(action_id) = &entry.action_id {
-        if entry.action_name.is_none() {
-            let actions = super::actions::load_actions(&state.data_dir);
-            entry.action_name = actions
-                .actions
-                .get(action_id)
-                .and_then(|a| a.description.clone());
+    match tasks.schedules.get(&id) {
+        Some(def) => {
+            let entry = schedule_to_entry(&state.pool, &state.data_dir, &id, def).await;
+            ok_json(entry)
         }
+        None => err_json(StatusCode::NOT_FOUND, "Job not found"),
     }
-    ok_json(entry)
 }
 
-/// POST /schedule: create or upsert a cron job.
-///
-/// SQL queries used: 1 (INSERT with ON CONFLICT DO UPDATE)
+/// POST /schedule: create or upsert a schedule in tasks.yml.
 async fn create_schedule_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateScheduleRequest>,
@@ -533,206 +426,168 @@ async fn create_schedule_handler(
     }
 
     let job_id = generate_id(name);
-    let display_name = body.display_name.as_deref().unwrap_or(name);
+    let mode = body.mode.as_deref().unwrap_or("agentic");
+    let action_id = body.action_id.as_deref().map(str::trim).unwrap_or("");
+    if mode == "action" && action_id.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "mode=action requires an action_id");
+    }
+    if mode != "agentic" && mode != "action" {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            "mode must be 'agentic' or 'action'",
+        );
+    }
 
-    // When no channel_id is provided, use the permanent default cron channel
-    let effective_channel_id: i64 = if let Some(cid) = body.channel_id {
-        if cid != 0 {
-            cid
-        } else {
-            lookup_cron_channel(&state.pool).await
+    let mut tasks = match tasks_yaml::load_tasks(&state.data_dir) {
+        Ok(t) => t,
+        Err(e) => {
+            error!("[schedule] load tasks.yml failed: {:?}", e);
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load schedules from tasks.yml",
+            );
         }
-    } else {
-        lookup_cron_channel(&state.pool).await
     };
 
-    // Execute INSERT with RETURNING, using ON CONFLICT DO UPDATE for upsert
-    match sql_forge!(
-        r#"
-        INSERT INTO cron_jobs (
-            id, name, display_name, schedule, prompt, active,
-            channel_id, profile, mode, action_id, enabled,
-            silent, template, plan
-        )
-        VALUES (
-            :id, :name, :display_name, :schedule, :prompt, :active,
-            :channel_id, NULLIF(:profile, '')::text, :mode, :action_id, :enabled,
-            :silent, :template, :plan::boolean
-        )
-        ON CONFLICT (id) DO UPDATE SET
-            name = EXCLUDED.name,
-            display_name = EXCLUDED.display_name,
-            schedule = EXCLUDED.schedule,
-            prompt = EXCLUDED.prompt,
-            active = EXCLUDED.active,
-            channel_id = EXCLUDED.channel_id,
-            profile = EXCLUDED.profile,
-            mode = EXCLUDED.mode,
-            action_id = EXCLUDED.action_id,
-            enabled = EXCLUDED.enabled,
-            silent = EXCLUDED.silent,
-            template = EXCLUDED.template,
-            plan = EXCLUDED.plan,
-            updated_at = NOW()
-        "#,
-        ( :id = &job_id,
-          :name = name,
-          :display_name = display_name,
-          :schedule = schedule_val,
-          :prompt = body.prompt.as_deref().unwrap_or(""),
-          :active = body.active.unwrap_or(true),
-          :channel_id = effective_channel_id,
-          :profile = body.profile.as_deref().unwrap_or(""),
-          :mode = body.mode.as_deref().unwrap_or("agentic"),
-          :action_id = body.action_id.as_deref().unwrap_or(""),
-          :enabled = body.enabled.unwrap_or(true),
-          :silent = body.silent.unwrap_or(false),
-          :template = body.template.as_deref().unwrap_or(""),
-          :plan = body.plan.unwrap_or(true), )
-    )
-    .execute(&state.pool)
-    .await
-    {
-        Ok(_) => ok_json(serde_json::json!({ "success": true, "id": job_id })),
-        Err(e) => {
-            error!("[schedule] create failed: {:?}", e);
-            err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to create cron job",
-            )
-        }
+    // Channel: id → NAME for the yml (unknown id → no channel = default).
+    let channel_name = tasks_yaml::channel_name_for_id(&state.pool, body.channel_id).await;
+
+    let mut def = ScheduleDef {
+        cron: schedule_val.to_string(),
+        prompt: body.prompt.clone().filter(|p| !p.trim().is_empty()),
+        channel: channel_name,
+        profile: body.profile.clone().filter(|p| !p.trim().is_empty()),
+        display_name: body.display_name.clone().filter(|d| !d.trim().is_empty()),
+        template: body.template.clone().filter(|t| !t.trim().is_empty()),
+        silent: body.silent,
+        ..Default::default()
+    };
+    if mode == "action" {
+        def.action = Some(action_id.to_string());
     }
+    // Legacy create defaulted plan=true for new jobs — preserve that.
+    def.planning_mode =
+        tasks_yaml::PlanningMode::from_legacy(None, Some(body.plan.unwrap_or(true)));
+    // yml has no separate `active` column: enabled doubles as active.
+    def.enabled = body.enabled.or(body.active).unwrap_or(true);
+
+    if let Err(err) = tasks_yaml::validate_schedule(&job_id, &def) {
+        return err_json(StatusCode::BAD_REQUEST, &err);
+    }
+    tasks.schedules.insert(job_id.clone(), def);
+    if let Err(e) = tasks_yaml::save_tasks(&state.data_dir, &tasks) {
+        error!("[schedule] save tasks.yml failed: {:?}", e);
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to save schedule to tasks.yml",
+        );
+    }
+    ok_json(serde_json::json!({ "success": true, "id": job_id }))
 }
 
-/// PATCH /schedule/{id}: update cron job fields.
-///
-/// Uses the NULLIF/CASE pattern for text fields to preserve existing values
-/// when a field is not provided (empty string sentinel).
-///
-/// SQL queries used: 2 (check exists + UPDATE with NULLIF)
+/// PATCH /schedule/{id}: update schedule fields in tasks.yml.
+/// Text fields: None = keep, Some("") = clear, Some(v) = set.
+/// Booleans: None = keep.
 async fn update_schedule_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(body): Json<UpdateScheduleRequest>,
 ) -> impl IntoResponse {
-    // ── 1. Check job exists and fetch current values ──
-    let current_job = match sql_forge!(
-        CronJobRow,
-        r#"
-        SELECT
-            cj.id, cj.name, cj.display_name, cj.schedule, cj.prompt, cj.skills,
-            cj.enabled, cj.active, cj.mode, cj.action_id, NULL::TEXT AS action_name, cj.channel_id,
-            NULL::TEXT AS channel_name, cj.profile,
-            cj.last_run_at, cj.next_run_at, cj.created_at, cj.silent,
-            cj.template, cj.plan
-        FROM cron_jobs cj
-        WHERE cj.id = :id
-        "#,
-        ( :id = &id )
-    )
-    .fetch_optional(&state.pool)
-    .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            return err_json(StatusCode::NOT_FOUND, "Job not found");
-        }
+    let mut tasks = match tasks_yaml::load_tasks(&state.data_dir) {
+        Ok(t) => t,
         Err(e) => {
-            error!("[schedule/{}] check query failed: {:?}", id, e);
+            error!("[schedule/{}] load tasks.yml failed: {:?}", id, e);
             return err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to check cron job",
+                "Failed to load schedules from tasks.yml",
             );
         }
     };
+    let def = match tasks.schedules.get_mut(&id) {
+        Some(d) => d,
+        None => return err_json(StatusCode::NOT_FOUND, "Job not found"),
+    };
 
-    // ── 2. Validate cron format if schedule is being updated ──
+    // Validate cron if being updated
     if let Some(ref sched) = body.schedule {
         if let Some(err) = validate_cron(sched) {
             return err_json(StatusCode::BAD_REQUEST, &err);
         }
+        def.cron = sched.clone();
     }
-
-    // ── 3. Apply updates using NULLIF pattern ──
-    // Text fields use CASE WHEN :field = '' THEN field ELSE NULLIF(:field, '')::text END
-    // which preserves existing value when not provided (empty string sentinel).
-    // Boolean and numeric fields use the current value as fallback.
-    match sql_forge!(
-        r#"
-        UPDATE cron_jobs
-        SET
-            name = CASE
-                WHEN :name = '' THEN name
-                ELSE NULLIF(:name, '')::text
-            END,
-            display_name = CASE
-                WHEN :display_name = '' THEN display_name
-                ELSE NULLIF(:display_name, '')::text
-            END,
-            schedule = CASE
-                WHEN :schedule = '' THEN schedule
-                ELSE NULLIF(:schedule, '')::text
-            END,
-            prompt = CASE
-                WHEN :prompt = '' THEN prompt
-                ELSE NULLIF(:prompt, '')::text
-            END,
-            channel_id = :channel_id,
-            profile = CASE
-                WHEN :profile = '' THEN profile
-                ELSE NULLIF(:profile, '')::text
-            END,
-            mode = CASE
-                WHEN :mode = '' THEN mode
-                ELSE NULLIF(:mode, '')::text
-            END,
-            action_id = CASE
-                WHEN :action_id = '' THEN action_id
-                ELSE NULLIF(:action_id, '')::text
-            END,
-            enabled = :enabled,
-            active = :active,
-            silent = :silent,
-            template = CASE
-                WHEN :template = '' THEN template
-                ELSE NULLIF(:template, '')::text
-            END,
-            plan = :plan,
-            updated_at = NOW()
-        WHERE id = :id
-        "#,
-        ( :id = &id,
-          :name = body.name.as_deref().unwrap_or(""),
-          :display_name = body.display_name.as_deref().unwrap_or(""),
-          :schedule = body.schedule.as_deref().unwrap_or(""),
-          :prompt = body.prompt.as_deref().unwrap_or(""),
-          :channel_id = body.channel_id.or(current_job.channel_id).unwrap_or(0),
-          :profile = body.profile.as_deref().unwrap_or(""),
-          :mode = body.mode.as_deref().unwrap_or(""),
-          :action_id = body.action_id.as_deref().unwrap_or(""),
-          :enabled = body.enabled.unwrap_or(current_job.enabled.unwrap_or(true)),
-          :active = body.active.unwrap_or(current_job.active.unwrap_or(true)),
-          :silent = body.silent.unwrap_or(current_job.silent.unwrap_or(false)),
-          :template = body.template.as_deref().unwrap_or(""),
-          :plan = body.plan.or(current_job.plan).unwrap_or(true), )
-    )
-    .execute(&state.pool)
-    .await
-    {
-        Ok(_) => ok_json(serde_json::json!({ "success": true })),
-        Err(e) => {
-            error!("[schedule/{}] update failed: {:?}", id, e);
-            err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to update cron job",
-            )
+    if let Some(p) = body.prompt.clone() {
+        def.prompt = if p.is_empty() { None } else { Some(p) };
+    }
+    if let Some(d) = body.display_name.clone() {
+        def.display_name = if d.is_empty() { None } else { Some(d) };
+    }
+    if let Some(p) = body.profile.clone() {
+        def.profile = if p.is_empty() { None } else { Some(p) };
+    }
+    if let Some(t) = body.template.clone() {
+        def.template = if t.is_empty() { None } else { Some(t) };
+    }
+    if let Some(silent) = body.silent {
+        def.silent = Some(silent);
+    }
+    if let Some(en) = body.enabled {
+        def.enabled = en;
+    }
+    if let Some(active) = body.active {
+        def.enabled = active;
+    }
+    if let Some(mode) = body.mode.as_deref() {
+        if mode == "action" {
+            if body
+                .action_id
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            {
+                return err_json(StatusCode::BAD_REQUEST, "mode=action requires an action_id");
+            }
+            def.action = body.action_id.clone().filter(|a| !a.trim().is_empty());
+        } else if mode == "agentic" {
+            def.action = None;
+        } else {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                "mode must be 'agentic' or 'action'",
+            );
+        }
+    } else if let Some(action_id) = body.action_id.clone() {
+        if action_id.trim().is_empty() {
+            def.action = None;
+        } else {
+            def.action = Some(action_id);
         }
     }
+    if let Some(cid) = body.channel_id {
+        if cid == 0 {
+            def.channel = None;
+        } else {
+            def.channel = tasks_yaml::channel_name_for_id(&state.pool, Some(cid)).await;
+        }
+    }
+    if let Some(plan) = body.plan {
+        def.planning_mode = tasks_yaml::PlanningMode::from_legacy(None, Some(plan));
+    }
+
+    if let Err(err) = tasks_yaml::validate_schedule(&id, def) {
+        return err_json(StatusCode::BAD_REQUEST, &err);
+    }
+    if let Err(e) = tasks_yaml::save_tasks(&state.data_dir, &tasks) {
+        error!("[schedule/{}] save tasks.yml failed: {:?}", id, e);
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to save schedule to tasks.yml",
+        );
+    }
+    ok_json(serde_json::json!({ "success": true }))
 }
 
-/// PATCH /schedule/{id}/toggle: toggle the active state of a cron job.
-///
-/// SQL queries used: 1 (UPDATE active)
+/// PATCH /schedule/{id}/toggle: toggle the enabled state of a schedule.
 async fn toggle_schedule_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -744,25 +599,29 @@ async fn toggle_schedule_handler(
             return err_json(StatusCode::BAD_REQUEST, "Missing 'active' field");
         }
     };
-
-    match sql_forge!(
-        r#"UPDATE cron_jobs SET active = :active, updated_at = NOW() WHERE id = :id"#,
-        ( :active = active, :id = &id )
-    )
-    .execute(&state.pool)
-    .await
-    {
-        Ok(result) if result.rows_affected() > 0 => {
+    let mut tasks = match tasks_yaml::load_tasks(&state.data_dir) {
+        Ok(t) => t,
+        Err(e) => {
+            error!("[schedule/{}/toggle] load tasks.yml failed: {:?}", id, e);
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load schedules from tasks.yml",
+            );
+        }
+    };
+    match tasks.schedules.get_mut(&id) {
+        Some(def) => {
+            def.enabled = active;
+            if let Err(e) = tasks_yaml::save_tasks(&state.data_dir, &tasks) {
+                error!("[schedule/{}/toggle] save failed: {:?}", id, e);
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to save schedule to tasks.yml",
+                );
+            }
             ok_json(serde_json::json!({ "success": true, "active": active }))
         }
-        Ok(_) => err_json(StatusCode::NOT_FOUND, "Job not found"),
-        Err(e) => {
-            error!("[schedule/{}/toggle] failed: {:?}", id, e);
-            err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to toggle cron job",
-            )
-        }
+        None => err_json(StatusCode::NOT_FOUND, "Job not found"),
     }
 }
 
@@ -935,7 +794,7 @@ async fn schedule_subtasks_handler(
     ok_json(SubtasksResponse { subtasks: entries })
 }
 
-/// POST /schedule/{id}/run: manually trigger a cron job.
+/// POST /schedule/{id}/run: manually trigger a schedule.
 ///
 /// Delegates to `crate::scheduler::fire_cron_job_by_id` (the same function
 /// used by the existing `/run-cron/{schedule_id}` endpoint).

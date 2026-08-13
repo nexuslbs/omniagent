@@ -1,18 +1,25 @@
-//! Cron scheduler: polls `cron_jobs` table and fires due jobs by creating
-//! threads with cause='cron' and a cause message, then setting them pending
-//! for the executor to pick up.
+//! Cron scheduler: polls `{data_dir}/config/tasks.yml` (`schedules:` key) and
+//! fires due jobs by creating threads with cause='cron' and a cause message,
+//! then setting them pending for the executor to pick up.
+//!
+//! Definitions live in the yml (git-tracked source of truth), NOT in the
+//! (dormant) `cron_jobs` table. Runtime cadence is tracked in the minimal
+//! `task_runs (task_key, last_fired_at)` bookkeeping table, updated on every
+//! fire (agentic, action and silent modes alike), so a schedule fires at its
+//! cron cadence, never twice for the same due time, and not on every tick.
 //!
 //! The scheduler runs as a background tokio task, polling every 30 seconds.
-//! Concurrency is enforced atomically at the DB level:
-//! - Job is claimed with `UPDATE ... WHERE NOT running`
-//! - If 0 rows affected, another tick already claimed it → skip
-//! - After firing, `running` is cleared and timestamps updated
+//! Concurrency is enforced by an atomic claim in `task_runs`: the fire record
+//! is upserted with `WHERE last_fired_at IS NOT DISTINCT FROM :last_seen`, so
+//! only one tick can win the claim for a given due time. Runs themselves are
+//! NOT stored beyond the cadence marker — they are observable via the threads
+//! each schedule creates (`threads.schedule_task_id = <yml key>`).
 
 use crate::err_msg;
 use crate::error::{AppResult, Error};
+use crate::tasks_yaml;
 use chrono::{DateTime, Utc};
 use cron::Schedule;
-use sql_forge::sql_forge;
 use sqlx::FromRow;
 use sqlx::PgPool;
 use std::str::FromStr;
@@ -39,6 +46,27 @@ struct CronJobDueRow {
     plan: Option<bool>,
 }
 
+impl CronJobDueRow {
+    /// Build a due-row from a tasks.yml schedule definition (channel NAME is
+    /// resolved to an id by the caller; unknown → None = default channel).
+    fn from_yml(key: &str, def: &tasks_yaml::ScheduleDef, channel_id: Option<i64>) -> Self {
+        Self {
+            id: key.to_string(),
+            name: Some(key.to_string()),
+            display_name: def.display_name.clone().unwrap_or_else(|| key.to_string()),
+            schedule: def.cron.clone(),
+            prompt: def.prompt.clone(),
+            channel_id,
+            profile: def.profile.clone(),
+            mode: Some(def.mode()),
+            action_id: def.action.clone(),
+            silent: def.silent,
+            template: def.template.clone(),
+            plan: def.plan(),
+        }
+    }
+}
+
 /// Spawn the cron scheduler loop as a background task.
 pub fn spawn(
     pool: PgPool,
@@ -46,30 +74,6 @@ pub fn spawn(
     plugin_manager: Arc<dyn crate::agent::plugin_manager::PluginManager>,
     app_context: AppContext,
 ) -> tokio::task::JoinHandle<()> {
-    // Clear stale running flags from previous process life (crash/restart)
-    let pool2 = pool.clone();
-    tokio::spawn(async move {
-        match sql_forge!(
-            "UPDATE cron_jobs SET running = false, updated_at = NOW() WHERE running = true"
-        )
-        .execute(&pool2)
-        .await
-        {
-            Ok(res) => {
-                if res.rows_affected() > 0 {
-                    info!(
-                        "[cron-scheduler] Cleared {} stale running flag(s) from previous process life",
-                        res.rows_affected()
-                    );
-                }
-            }
-            Err(e) => error!(
-                "[cron-scheduler] Failed to clear stale running flags: {:?}",
-                e
-            ),
-        }
-    });
-
     tokio::spawn(async move {
         info!("[cron-scheduler] Starting cron scheduler loop");
 
@@ -82,14 +86,15 @@ pub fn spawn(
     })
 }
 
-/// One tick: find due jobs, claim one atomically, fire it, release.
+/// One tick: find due schedules in tasks.yml, atomically claim each one in
+/// `task_runs`, then fire it (action mode, silent, or agentic thread).
 async fn tick(
     pool: &PgPool,
     data_dir: &str,
     plugin_manager: &Arc<dyn crate::agent::plugin_manager::PluginManager>,
     app_context: &AppContext,
 ) -> AppResult<()> {
-    let jobs = fetch_due_jobs(pool).await?;
+    let jobs = fetch_due_jobs(pool, data_dir).await?;
 
     for job in jobs {
         let now = Utc::now();
@@ -99,46 +104,32 @@ async fn tick(
             &job.display_name
         };
 
-        // ── Atomic claim: only one tick can claim this job ──
-        let claimed = sql_forge!(
-            r#"
-            UPDATE cron_jobs
-            SET running = true,
-                updated_at = NOW()
-            WHERE id = :id
-              AND (
-                NOT running
-                OR (running = true AND updated_at <= NOW() - INTERVAL '10 minutes')
-              )
-            "#,
-            ( :id = &job.id )
-        )
-        .execute(pool)
-        .await?;
+        // ── Validate 5-field cron format ──
+        if !validate_cron_schedule_5field(&job.schedule) {
+            warn!(
+                "[cron-scheduler] Schedule '{}' has invalid cron expression '{}': expected 5 fields (min hour dom month dow), got {} fields. Schedule will be skipped.",
+                display_name, job.schedule, job.schedule.split_whitespace().count()
+            );
+            continue;
+        }
 
-        if claimed.rows_affected() == 0 {
+        // ── Atomic claim: only one tick can fire this schedule occurrence ──
+        let last_fire = last_fired_at(pool, &job.id).await?;
+        if !is_due(&job.schedule, last_fire, now) {
+            continue; // another tick already claimed this occurrence
+        }
+        if !claim_fire(pool, &job.id, last_fire, now).await? {
             info!(
-                "[cron-scheduler] Job '{}' already claimed by another process, skipping",
+                "[cron-scheduler] Schedule '{}' already claimed by another process, skipping",
                 display_name
             );
             continue;
         }
 
         info!(
-            "[cron-scheduler] Firing job '{}' (id={})",
+            "[cron-scheduler] Firing schedule '{}' (id={})",
             display_name, job.id
         );
-
-        // ── Validate 5-field cron format ──
-        if !validate_cron_schedule_5field(&job.schedule) {
-            warn!(
-                "[cron-scheduler] Job '{}' has invalid cron schedule '{}': expected 5 fields (min hour dom month dow), got {} fields. Job will be skipped.",
-                display_name, job.schedule, job.schedule.split_whitespace().count()
-            );
-            let new_next = calculate_next_run(&job.schedule, &now);
-            release_job(pool, &job.id, &now, &new_next).await?;
-            continue;
-        }
 
         // ── Check mode and silent flags ──
         let is_action = job.mode.as_deref() == Some("action");
@@ -159,22 +150,15 @@ async fn tick(
                 cause: "system",
             })
             .await;
-
-            // Release the job claim and update timestamps
-            let new_next = calculate_next_run(&job.schedule, &now);
-            release_job(pool, &job.id, &now, &new_next).await?;
             continue;
         }
 
         if is_silent {
             // Silent (non-action) mode: no thread created, no messages saved.
-            // Cannot execute an agentic prompt without a thread, so just release.
             info!(
-                "[cron-scheduler] Silent job '{}' fired (no thread created for non-action silent job)",
+                "[cron-scheduler] Silent schedule '{}' fired (no thread created for non-action silent schedule)",
                 display_name
             );
-            let new_next = calculate_next_run(&job.schedule, &now);
-            release_job(pool, &job.id, &now, &new_next).await?;
             continue;
         }
 
@@ -184,7 +168,7 @@ async fn tick(
                 Ok(Some(ch)) => ch,
                 _ => {
                     error!(
-                        "[cron-scheduler] Job '{}' references channel_id {} which doesn't exist, falling back to default cron channel",
+                        "[cron-scheduler] Schedule '{}' references channel_id {} which doesn't exist, falling back to default cron channel",
                         display_name, cid
                     );
                     ensure_cron_channel(pool).await?
@@ -264,75 +248,88 @@ async fn tick(
         {
             Ok((thread, created)) => {
                 info!(
-                    "[cron-scheduler] Created thread {} / cause message {} for job '{}'",
+                    "[cron-scheduler] Created thread {} / cause message {} for schedule '{}'",
                     thread.id, created.id, display_name
                 );
             }
             Err(e) => {
                 error!(
-                    "[cron-scheduler] Failed to create thread for job '{}': {:?}",
+                    "[cron-scheduler] Failed to create thread for schedule '{}': {:?}",
                     display_name, e
                 );
-                let new_next = calculate_next_run(&job.schedule, &now);
-                release_job(pool, &job.id, &now, &new_next).await?;
-                continue;
             }
         }
-
-        // ── Set thread status to 'pending' so the executor picks it up ──
-        // (now handled inside create_cause_and_set_pending)
-
-        // ── Release claim and update timestamps ──
-        let new_next = calculate_next_run(&job.schedule, &now);
-        release_job(pool, &job.id, &now, &new_next).await?;
     }
 
     Ok(())
 }
 
-/// Fetch enabled jobs whose next_run_at is due (null or ≤ now).
-async fn fetch_due_jobs(pool: &PgPool) -> AppResult<Vec<CronJobDueRow>> {
-    let rows: Vec<CronJobDueRow> = sql_forge!(
-        CronJobDueRow,
-        r#"
-        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id, silent, template, plan
-        FROM cron_jobs
-        WHERE enabled = true
-          AND active = true
-          AND (next_run_at IS NULL OR next_run_at <= NOW())
-          AND 1 = :_one
-        ORDER BY created_at ASC
-        "#,
-        ( :_one = 1i32 )
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows)
+/// Fetch due enabled schedules from tasks.yml (parsed fresh on every tick so
+/// file edits take effect without restart).
+///
+/// Due-ness: a schedule is due when it has never fired, or when the next run
+/// computed from its last fire (`task_runs.last_fired_at`) is <= now.
+async fn fetch_due_jobs(pool: &PgPool, data_dir: &str) -> AppResult<Vec<CronJobDueRow>> {
+    let tasks = tasks_yaml::load_tasks_or_empty(data_dir);
+    let now = Utc::now();
+    let mut due = Vec::new();
+    for (key, def) in &tasks.schedules {
+        if !def.enabled {
+            continue;
+        }
+        if !validate_cron_schedule_5field(&def.cron) {
+            continue; // invalid cron: warn+skip happens in tick
+        }
+        let last_fire = last_fired_at(pool, key).await?;
+        if !is_due(&def.cron, last_fire, now) {
+            continue;
+        }
+        let channel_id = tasks_yaml::resolve_channel_id(pool, def.channel.as_deref()).await;
+        due.push(CronJobDueRow::from_yml(key, def, channel_id));
+    }
+    Ok(due)
 }
 
-/// Release the running flag and update timestamps.
-async fn release_job(
-    pool: &PgPool,
-    job_id: &str,
-    last_run: &DateTime<Utc>,
-    next_run: &DateTime<Utc>,
-) -> AppResult<()> {
-    sql_forge!(
-        r#"
-        UPDATE cron_jobs
-        SET running = false,
-            last_run_at = :last_run,
-            next_run_at = :next_run,
-            updated_at = NOW()
-        WHERE id = :id
-        "#,
-        ( :last_run = *last_run, :next_run = *next_run, :id = job_id )
+/// Last recorded fire time for a schedule key (None = never fired).
+async fn last_fired_at(pool: &PgPool, key: &str) -> AppResult<Option<DateTime<Utc>>> {
+    Ok(sqlx::query_scalar::<_, DateTime<Utc>>(
+        "SELECT last_fired_at FROM task_runs WHERE task_key = $1",
     )
+    .bind(key)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Atomically record `now` as the last fire for `key` — but ONLY if the
+/// schedule is still at the same last-fire state we computed due from
+/// (`last_fire`). Returns true when this tick won the claim (proceed to
+/// fire); false when a concurrent tick already claimed this occurrence.
+async fn claim_fire(
+    pool: &PgPool,
+    key: &str,
+    last_fire: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> AppResult<bool> {
+    let res = sqlx::query(
+        "INSERT INTO task_runs (task_key, last_fired_at) VALUES ($1, $2) \
+         ON CONFLICT (task_key) DO UPDATE SET last_fired_at = EXCLUDED.last_fired_at \
+         WHERE task_runs.last_fired_at IS NOT DISTINCT FROM $3",
+    )
+    .bind(key)
+    .bind(now)
+    .bind(last_fire)
     .execute(pool)
     .await?;
+    Ok(res.rows_affected() > 0)
+}
 
-    Ok(())
+/// Pure due-ness check: no last fire → due now; otherwise due when the next
+/// run after the last fire is at or before `now`.
+pub fn is_due(cron_expr: &str, last_fire: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    match last_fire {
+        None => true,
+        Some(last) => calculate_next_run(cron_expr, &last) <= now,
+    }
 }
 
 /// Ensure a cron channel exists (upsert on conflict).
@@ -460,7 +457,7 @@ async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
         Some(ref id) => id.clone(),
         None => {
             error!(
-                "[cron-action] Job '{}' has mode=action but no action_id set, skipping",
+                "[cron-action] Schedule '{}' has mode=action but no action_id set, skipping",
                 ctx.display_name
             );
             return None;
@@ -472,7 +469,7 @@ async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
         Ok(tc) => tc,
         Err(e) => {
             error!(
-                "[cron-action] Failed to resolve action '{}' for job '{}': {}",
+                "[cron-action] Failed to resolve action '{}' for schedule '{}': {}",
                 action_id, ctx.display_name, e
             );
             return None;
@@ -480,7 +477,7 @@ async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
     };
 
     info!(
-        "[cron-action] Executing action job '{}' (tool: {}, action_id: {})",
+        "[cron-action] Executing action schedule '{}' (tool: {}, action_id: {})",
         ctx.display_name, tool_call.name, action_id
     );
 
@@ -497,12 +494,12 @@ async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
 
             if is_error {
                 error!(
-                    "[cron-action] Action job '{}' (action_id={}) returned error: {}",
+                    "[cron-action] Action schedule '{}' (action_id={}) returned error: {}",
                     ctx.display_name, action_id, result.content
                 );
             } else if !is_silent {
                 info!(
-                    "[cron-action] Action job '{}' (action_id={}) completed successfully",
+                    "[cron-action] Action schedule '{}' (action_id={}) completed successfully",
                     ctx.display_name, action_id
                 );
             }
@@ -537,7 +534,7 @@ async fn handle_action_mode(ctx: ActionModeCtx<'_>) -> Option<i64> {
         }
         Err(e) => {
             error!(
-                "[cron-action] Action job '{}' (action_id={}) execution failed: {}",
+                "[cron-action] Action schedule '{}' (action_id={}) execution failed: {}",
                 ctx.display_name, action_id, e
             );
 
@@ -674,13 +671,13 @@ async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
     if ctx.is_error {
         queries::set_thread_failed(ctx.pool, thread.id).await?;
         info!(
-            "[cron-action] Created failure thread {} for action job '{}'",
+            "[cron-action] Created failure thread {} for action schedule '{}'",
             thread.id, ctx.display_name
         );
     } else {
         queries::set_thread_system(ctx.pool, thread.id).await?;
         info!(
-            "[cron-action] Created result thread {} for action job '{}'",
+            "[cron-action] Created result thread {} for action schedule '{}'",
             thread.id, ctx.display_name
         );
     }
@@ -791,10 +788,10 @@ fn extract_error_code(err_msg: &str) -> Option<String> {
     None
 }
 
-/// Fire a cron job by schedule_id: used by the HTTP run-cron endpoint.
+/// Fire a cron schedule by yml key: used by the HTTP run-cron endpoint.
 /// This reuses the same scheduler logic (channel resolution, profile/provider/model resolution,
 /// thread creation) so the manual Run button goes through exactly the same code path as the
-/// scheduled tick.
+/// scheduled tick. Reads the definition from tasks.yml (no DB write).
 pub async fn fire_cron_job_by_id(
     pool: &PgPool,
     data_dir: &str,
@@ -803,34 +800,13 @@ pub async fn fire_cron_job_by_id(
     schedule_id: &str,
     force: bool,
 ) -> AppResult<Option<i64>> {
-    let jobs: Vec<CronJobDueRow> = sql_forge!(
-        CronJobDueRow,
-        r#"
-        SELECT id, name, display_name, schedule, prompt, channel_id, profile, mode, action_id, silent, template, plan
-        FROM cron_jobs
-        WHERE id = :id
-        LIMIT 1
-        "#,
-        ( :id = schedule_id )
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let job = jobs
-        .into_iter()
-        .next()
+    let tasks = tasks_yaml::load_tasks(data_dir)?;
+    let def = tasks
+        .schedules
+        .get(schedule_id)
         .ok_or_else(|| Error::Message(format!("Cron job '{}' not found", schedule_id)))?;
 
-    // Check active status (skip if force)
-    let active: bool = sql_forge!(
-        scalar bool,
-        r#"SELECT active FROM cron_jobs WHERE id = :id"#,
-        ( :id = schedule_id )
-    )
-    .fetch_one(pool)
-    .await?;
-
-    if !active && !force {
+    if !def.enabled && !force {
         err_msg!(
             "Job '{}' is not active. Use force=true to run anyway.",
             schedule_id
@@ -838,14 +814,19 @@ pub async fn fire_cron_job_by_id(
     }
 
     // Validate 5-field cron format
-    if !validate_cron_schedule_5field(&job.schedule) {
-        let j_name = job.display_name.as_str();
+    if !validate_cron_schedule_5field(&def.cron) {
+        let j_name = def
+            .display_name
+            .clone()
+            .unwrap_or_else(|| schedule_id.to_string());
         err_msg!(
             "Invalid cron schedule '{}' for job '{}': expected exactly 5 fields (min hour dom month dow), got {} fields. Use standard Linux crontab format, e.g. '0 9 * * 1-5' for weekdays at 9am.",
-            job.schedule, j_name, job.schedule.split_whitespace().count()
+            def.cron, j_name, def.cron.split_whitespace().count()
         );
     }
 
+    let channel_id = tasks_yaml::resolve_channel_id(pool, def.channel.as_deref()).await;
+    let job = CronJobDueRow::from_yml(schedule_id, def, channel_id);
     let now = Utc::now();
     let display_name = if job.display_name.is_empty() {
         job.name.as_deref().unwrap_or("cron-job")
@@ -965,6 +946,45 @@ pub async fn fire_cron_job_by_id(
 mod tests {
     use super::*;
     use chrono::Timelike;
+
+    // ─── is_due (scheduler cadence from task_runs) ───
+
+    #[test]
+    fn test_is_due_never_fired() {
+        let now = Utc::now();
+        assert!(is_due("*/5 * * * *", None, now), "never fired → due now");
+    }
+
+    #[test]
+    fn test_is_due_recent_fire_not_due() {
+        let now = Utc::now();
+        // Fired 1 minute ago with a daily cron → next run is ~24h away.
+        let last = now - chrono::Duration::minutes(1);
+        assert!(!is_due("0 9 * * *", Some(last), now));
+    }
+
+    #[test]
+    fn test_is_due_past_next_occurrence() {
+        let now = Utc::now();
+        // Fired 10 minutes ago on an every-minute cron → the next minute
+        // boundary has already passed → due again.
+        let last = now - chrono::Duration::minutes(10);
+        assert!(is_due("* * * * *", Some(last), now));
+    }
+
+    #[test]
+    fn test_is_due_exact_occurrence() {
+        // Fixed timestamps: fired at 12:00:00, due window opens at 12:01:00.
+        let fired = DateTime::parse_from_rfc3339("2026-08-13T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let at_occurrence = DateTime::parse_from_rfc3339("2026-08-13T12:01:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(is_due("* * * * *", Some(fired), at_occurrence));
+        let before = at_occurrence - chrono::Duration::seconds(1);
+        assert!(!is_due("* * * * *", Some(fired), before));
+    }
 
     // ─── Profile resolution ───
 
@@ -1423,16 +1443,4 @@ mod tests {
     fn test_validate_cron_5field_with_whitespace() {
         assert!(validate_cron_schedule_5field("  0 9 * * *  "));
     }
-
-    // ─── Notes about integration tests ─────────────────────────────────
-    //
-    // Tests for create_action_thread and handle_action_mode require a
-    // live PgPool (cron_jobs table, channels, etc.) and are located in
-    // the integration test suite at tests/integration/action_thread.rs.
-    //
-    // These integration tests verify:
-    //   - Scheduled action mode → thread cause="system", msg_type="cron"
-    //   - Manual run action mode → thread cause="user", msg_type="cron"
-    //   - Silent action with errors → error thread created
-    //   - Silent action without errors → no thread created
 }

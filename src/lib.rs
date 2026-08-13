@@ -21,5 +21,6 @@ pub mod safety;
 pub mod scheduler;
 pub mod server;
 pub mod subtask;
+pub mod tasks_yaml;
 pub mod vectorizer;
 pub mod workflows;

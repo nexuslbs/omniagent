@@ -33,6 +33,9 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .ok();
 
     // hooks table: mirrors cron_jobs but keyed by event instead of schedule.
+    // NOTE (tasks.yml): definitions now live in {data_dir}/config/tasks.yml
+    // (`hooks:` key); this table is kept dormant for back-compat and is no
+    // longer read for definitions. Hook counters moved to `hook_counters`.
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS hooks (
@@ -93,6 +96,38 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await
         .ok();
+
+    // hook_counters: runtime hook counter state — one JSON counter per hook
+    // key (definitions live in {data_dir}/config/tasks.yml). The counter shape
+    // matches the legacy hooks.counter JSONB column.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS hook_counters (
+            hook_key TEXT PRIMARY KEY,
+            counter  JSONB NOT NULL DEFAULT '{"global": 0}'::jsonb
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .ok();
+
+    // task_runs: scheduler cadence bookkeeping — one last-fired timestamp per
+    // schedule key (definitions live in {data_dir}/config/tasks.yml). This is
+    // the ONLY runtime state the scheduler keeps; runs themselves are
+    // observable via the threads each schedule creates.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS task_runs (
+            task_key      TEXT PRIMARY KEY,
+            last_fired_at TIMESTAMPTZ NOT NULL
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .ok();
+
     // All messages store the time it took to produce (LLM call time for
     // assistant messages, tool execution time for tool results) and the
     // token usage from the LLM response that produced it.
@@ -131,9 +166,9 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     sqlx::query(
         "UPDATE threads SET plan = true WHERE planning_mode IN ('auto_plan', 'auto_subtasks', 'always')"
     )
-        .execute(pool)
-        .await
-        .ok();
+    .execute(pool)
+    .await
+    .ok();
 
     // Add plan column to kanban_tasks
     sqlx::query(
@@ -145,9 +180,9 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     sqlx::query(
         "UPDATE kanban_tasks SET plan = true WHERE planning_mode IN ('auto_plan', 'auto_subtasks', 'always')"
     )
-        .execute(pool)
-        .await
-        .ok();
+    .execute(pool)
+    .await
+    .ok();
 
     // Add plan column to cron_jobs
     sqlx::query(
@@ -159,9 +194,9 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     sqlx::query(
         "UPDATE cron_jobs SET plan = true WHERE planning_mode IN ('auto_plan', 'auto_subtasks', 'always')"
     )
-        .execute(pool)
-        .await
-        .ok();
+    .execute(pool)
+    .await
+    .ok();
 
     // Add plan column to channels
     sqlx::query(
@@ -173,9 +208,9 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     sqlx::query(
         "UPDATE channels SET plan = true WHERE planning_mode IN ('auto_plan', 'auto_subtasks', 'always')"
     )
-        .execute(pool)
-        .await
-        .ok();
+    .execute(pool)
+    .await
+    .ok();
 
     // ── Add per-message duration and token tracking ─────────────────────
     // Each message stores the time it took to produce (LLM call time for
@@ -491,6 +526,9 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
     .await?;
 
     // ── Cron jobs ─────────────────────────────────────────────────────────
+    // NOTE (tasks.yml): definitions now live in {data_dir}/config/tasks.yml
+    // (`schedules:` key); this table is kept dormant for back-compat and is
+    // no longer read for definitions. Cadence bookkeeping moved to `task_runs`.
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS cron_jobs (

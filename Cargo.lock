@@ -1275,6 +1275,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "mcp-server-util",
+ "omniagent",
  "parking_lot",
  "reqwest",
  "serde",

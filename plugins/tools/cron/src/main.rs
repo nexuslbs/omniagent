@@ -2,16 +2,52 @@
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
 //! Tools: create_cron_job, list_cron_jobs, delete_cron_job, update_cron_job
+//!
+//! Definitions live in {OMNI_DIR}/config/tasks.yml (`schedules:` key) — the
+//! git-tracked source of truth. Runtime state (cadence) is tracked implicitly
+//! via the threads each schedule creates (threads.schedule_task_id) and the
+//! task_runs bookkeeping table.
 
 use anyhow::Result;
 use mcp_server_util::*;
 use omniagent::db;
+use omniagent::tasks_yaml::{self, ScheduleDef};
 use serde_json::Value;
-use sql_forge::sql_forge;
 use sqlx::PgPool;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// OMNI_DIR (data_dir) — config files live in {data_dir}/config/.
+fn data_dir() -> String {
+    std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/omni".to_string())
+}
+
+/// Resolve a channel id to its NAME (the yml stores channel names, not ids).
+async fn channel_name_for_id(pool: &PgPool, id: i64) -> Option<String> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT name FROM channels WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+    row.map(|(n,)| n)
+}
+
+fn validate_5field(schedule: &str) -> Result<()> {
+    let fields: Vec<&str> = schedule.split_whitespace().collect();
+    if fields.len() != 5 {
+        return Err(anyhow::anyhow!(
+            "Invalid cron expression '{}': expected 5 fields (min hour day month weekday), got {} fields",
+            schedule,
+            fields.len()
+        ));
+    }
+    let cron_expr = format!("0 {}", schedule);
+    cron::Schedule::from_str(&cron_expr)
+        .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", schedule, e))?;
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Tool: create_cron_job
@@ -27,8 +63,8 @@ async fn handle_create(
     let prompt = args["prompt"].as_str();
     let display_name = args["display_name"].as_str().unwrap_or(name);
     let skills_str = args["skills"].as_str().unwrap_or("");
-    // channel_id: explicit argument wins; else the CURRENT channel from the
-    // agent's runtime context (_meta.channel_id); else the default cron channel.
+    // channel: explicit channel_id wins; else the CURRENT channel from the
+    // agent's runtime context (_meta.channel_id); else no channel (default).
     let channel_id_arg = args["channel_id"]
         .as_i64()
         .or_else(|| meta.and_then(|m| m.channel_id));
@@ -49,22 +85,7 @@ async fn handle_create(
     if schedule.is_empty() {
         return Err(anyhow::anyhow!("Schedule must not be empty"));
     }
-    // Validate 5-field cron
-    let fields: Vec<&str> = schedule.split_whitespace().collect();
-    if fields.len() != 5 {
-        return Err(anyhow::anyhow!(
-            "Invalid cron expression '{}': expected 5 fields (min hour day month weekday), got {} fields",
-            schedule, fields.len()
-        ));
-    }
-    let cron_expr = format!("0 {}", schedule);
-    if let Err(e) = cron::Schedule::from_str(&cron_expr) {
-        return Err(anyhow::anyhow!(
-            "Invalid cron expression '{}': {}",
-            schedule,
-            e
-        ));
-    }
+    validate_5field(schedule)?;
     if mode == "agentic" && prompt.unwrap_or("").is_empty() {
         return Err(anyhow::anyhow!("Prompt must not be empty for agentic mode"));
     }
@@ -96,25 +117,37 @@ async fn handle_create(
         serde_json::json!(parts)
     };
 
-    let resolved_channel_id = if let Some(cid) = channel_id_arg {
-        cid
-    } else {
-        match db::types::get_channel_by_platform_name(pool, "cron", "cron").await {
-            Ok(Some(ch)) => ch.id,
-            _ => anyhow::bail!("No default cron channel found. Create a channel with platform='cron' and name='cron' first."),
-        }
+    // yml stores channel NAME — resolve from id (if given), else default (None).
+    let channel_name = match channel_id_arg {
+        Some(cid) => channel_name_for_id(pool, cid).await,
+        None => None,
     };
 
-    sql_forge!(
-        r#"
-        INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, channel_id, profile, mode, action_id, silent)
-        VALUES (:id, :name, :display_name, :schedule, NULLIF(:prompt, '')::text, :skills, :channel_id, NULLIF(:profile, '')::text, :mode, NULLIF(:action_id, '')::text, :silent)
-        "#,
-        ( :id = &id, :name = name, :display_name = display_name, :schedule = schedule, :prompt = prompt.unwrap_or(""), :skills = skills_json.to_string(), :channel_id = resolved_channel_id, :profile = profile_arg.unwrap_or(""), :mode = mode, :action_id = action_id.unwrap_or(""), :silent = silent.unwrap_or(false) )
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create cron job: {}", e))?;
+    let mut tasks = tasks_yaml::load_tasks_or_empty(&data_dir());
+    if tasks.schedules.contains_key(&id) {
+        return Err(anyhow::anyhow!("Cron job '{}' already exists", name));
+    }
+
+    let def = ScheduleDef {
+        enabled: true,
+        channel: channel_name,
+        profile: profile_arg.map(|s| s.to_string()),
+        planning_mode: None,
+        cron: schedule.to_string(),
+        prompt: Some(prompt.unwrap_or("").to_string()),
+        action: if mode == "action" {
+            action_id.map(|s| s.to_string())
+        } else {
+            None
+        },
+        template: None,
+        skills: Some(skills_json.to_string()),
+        silent: Some(silent.unwrap_or(false)),
+        display_name: Some(display_name.to_string()),
+    };
+    tasks.schedules.insert(id.clone(), def);
+    tasks_yaml::save_tasks(&data_dir(), &tasks)
+        .map_err(|e| anyhow::anyhow!("Failed to save tasks.yml: {}", e))?;
 
     Ok((
         format!("✅ Created cron job **{}** (`{}`)", display_name, name),
@@ -126,61 +159,23 @@ async fn handle_create(
 // Tool: list_cron_jobs
 // ---------------------------------------------------------------------------
 
-use chrono::{DateTime, Utc};
-use sqlx::FromRow;
+async fn handle_list(_pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
+    let tasks = tasks_yaml::load_tasks_or_empty(&data_dir());
 
-#[derive(Debug, FromRow)]
-#[allow(dead_code)]
-struct CronJobRow {
-    id: String,
-    name: Option<String>,
-    schedule: String,
-    prompt: Option<String>,
-    enabled: Option<bool>,
-    active: Option<bool>,
-    mode: Option<String>,
-    action_id: Option<String>,
-    last_run_at: Option<DateTime<Utc>>,
-    next_run_at: Option<DateTime<Utc>>,
-    created_at: Option<DateTime<Utc>>,
-    silent: Option<bool>,
-}
-
-async fn handle_list(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
-    let rows: Vec<CronJobRow> = sql_forge!(
-        CronJobRow,
-        r#"
-        SELECT id, name, schedule, prompt, enabled, active, mode, action_id,
-               last_run_at, next_run_at, created_at, silent
-        FROM cron_jobs
-        ORDER BY created_at DESC
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to list cron jobs: {}", e))?;
-
-    if rows.is_empty() {
+    if tasks.schedules.is_empty() {
         return Ok(("_No cron jobs configured._".to_string(), false));
     }
 
     let mut lines = vec!["**Cron Jobs:**".to_string()];
-    for (i, row) in rows.iter().enumerate() {
-        let status = if row.active.unwrap_or(false) {
-            "🟢"
+    for (i, (id, row)) in tasks.schedules.iter().enumerate() {
+        let enabled = row.enabled;
+        let status = if enabled { "🟢" } else { "🔴" };
+        let name_display = row.display_name.clone().unwrap_or_else(|| id.clone());
+        let mode_display = if row.action.is_some() {
+            "action"
         } else {
-            "🔴"
+            "agentic"
         };
-        let name_display = row.name.as_deref().unwrap_or(&row.id);
-        let mode_display = row.mode.as_deref().unwrap_or("agentic");
-        let last = row
-            .last_run_at
-            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_else(|| "never".to_string());
-        let next = row
-            .next_run_at
-            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_else(|| "unknown".to_string());
         let prompt_preview = row
             .prompt
             .as_deref()
@@ -188,9 +183,10 @@ async fn handle_list(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
             .chars()
             .take(80)
             .collect::<String>();
+        let channel = row.channel.clone().unwrap_or_else(|| "default".to_string());
         lines.push(format!(
-            "{}. {} **{}** (`{}`)\n   - Schedule: `{}` | Mode: {} | Active: {}\n   - Last: {} | Next: {}\n   - Prompt: {}",
-            i + 1, status, name_display, row.id, row.schedule, mode_display, status, last, next, prompt_preview
+            "{}. {} **{}** (`{}`)\n   - Schedule: `{}` | Mode: {} | Channel: {}\n   - Runs are visible via threads (schedule_task_id = `{}`)\n   - Prompt: {}",
+            i + 1, status, name_display, id, row.cron, mode_display, channel, id, prompt_preview
         ));
     }
 
@@ -201,19 +197,18 @@ async fn handle_list(pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
 // Tool: delete_cron_job
 // ---------------------------------------------------------------------------
 
-async fn handle_delete(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_delete(_pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let job_id = args["job_id"].as_str().unwrap_or("");
     if job_id.is_empty() {
         return Err(anyhow::anyhow!("Missing required argument: 'job_id'"));
     }
 
-    sql_forge!(
-        r#"DELETE FROM cron_jobs WHERE id = :job_id"#,
-        ( :job_id = job_id )
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to delete cron job: {}", e))?;
+    let mut tasks = tasks_yaml::load_tasks_or_empty(&data_dir());
+    if tasks.schedules.remove(job_id).is_none() {
+        return Err(anyhow::anyhow!("Cron job `{}` not found", job_id));
+    }
+    tasks_yaml::save_tasks(&data_dir(), &tasks)
+        .map_err(|e| anyhow::anyhow!("Failed to save tasks.yml: {}", e))?;
 
     Ok((format!("🗑️ Deleted cron job `{}`", job_id), false))
 }
@@ -222,49 +217,32 @@ async fn handle_delete(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Tool: update_cron_job
 // ---------------------------------------------------------------------------
 
-async fn handle_update(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_update(_pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let job_id = args["job_id"].as_str().unwrap_or("");
     if job_id.is_empty() {
         return Err(anyhow::anyhow!("Missing required argument: 'job_id'"));
     }
 
-    // Build UPDATE with only the fields that are provided
-    if let Some(schedule) = args["schedule"].as_str() {
-        // Validate 5-field cron
-        let fields: Vec<&str> = schedule.split_whitespace().collect();
-        if fields.len() != 5 {
-            anyhow::bail!("Invalid cron expression '{}': expected 5 fields", schedule);
-        }
-        let cron_expr = format!("0 {}", schedule);
-        cron::Schedule::from_str(&cron_expr)
-            .map_err(|e| anyhow::anyhow!("Invalid cron expression '{}': {}", schedule, e))?;
+    let mut tasks = tasks_yaml::load_tasks_or_empty(&data_dir());
+    let entry = tasks
+        .schedules
+        .get_mut(job_id)
+        .ok_or_else(|| anyhow::anyhow!("Cron job `{}` not found", job_id))?;
 
-        sql_forge!(
-            r#"UPDATE cron_jobs SET schedule = :schedule, updated_at = NOW() WHERE id = :job_id"#,
-            ( :schedule = schedule, :job_id = job_id )
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to update cron job schedule: {}", e))?;
+    if let Some(schedule) = args["schedule"].as_str() {
+        validate_5field(schedule)?;
+        entry.cron = schedule.to_string();
     }
     if let Some(prompt) = args["prompt"].as_str() {
-        sql_forge!(
-            r#"UPDATE cron_jobs SET prompt = NULLIF(:prompt, '')::text, mode = 'agentic', updated_at = NOW() WHERE id = :job_id"#,
-            ( :prompt = prompt, :job_id = job_id )
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to update cron job prompt: {}", e))?;
+        entry.prompt = Some(prompt.to_string());
+        entry.action = None; // prompt switches mode to agentic
     }
     if let Some(active) = args["active"].as_bool() {
-        sql_forge!(
-            r#"UPDATE cron_jobs SET active = :active, updated_at = NOW() WHERE id = :job_id"#,
-            ( :active = active, :job_id = job_id )
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to update cron job active: {}", e))?;
+        entry.enabled = active;
     }
+
+    tasks_yaml::save_tasks(&data_dir(), &tasks)
+        .map_err(|e| anyhow::anyhow!("Failed to save tasks.yml: {}", e))?;
 
     Ok((format!("✅ Updated cron job `{}`", job_id), false))
 }
@@ -369,7 +347,7 @@ async fn main() -> Result<()> {
         McpToolEntry {
             def: McpToolDef {
                 name: "list_cron_jobs".to_string(),
-                description: "List all cron jobs with their schedule, status, and last/next run times.".to_string(),
+                description: "List all cron jobs with their schedule and status. Runs are visible via the threads each job creates.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {},

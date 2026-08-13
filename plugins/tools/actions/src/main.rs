@@ -4,11 +4,12 @@
 //! Tools: kanban_dispatcher, hindsight_populator, relevance_indexer,
 //!        setup_knowledge_pipeline
 //!
-//! Fully self-contained — no dependency on the omniagent crate.
-//! Connects directly to Postgres via sqlx.
+//! Depends on the omniagent crate for tasks.yml helpers (setup_knowledge_pipeline
+//! seeds {OMNI_DIR}/config/tasks.yml); connects directly to Postgres via sqlx.
 
 use anyhow::{Context, Result};
 use mcp_server_util::*;
+use omniagent::tasks_yaml::{self, PlanningMode, ScheduleDef};
 use parking_lot::Mutex;
 use serde_json::Value;
 use sql_forge::sql_forge;
@@ -16,10 +17,6 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Plugin config — received via MCP configure message, not from env vars
@@ -269,62 +266,52 @@ fn collect_md_files(dir: &std::path::Path, entries: &mut Vec<(String, u64)>, pre
 // Tool: setup_knowledge_pipeline
 // ---------------------------------------------------------------------------
 
-async fn handle_setup_knowledge_pipeline(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_setup_knowledge_pipeline(
+    _pool: &PgPool,
+    args: &Value,
+    config: &Config,
+) -> Result<(String, bool)> {
     let schedule = args
         .get("schedule")
         .and_then(|v| v.as_str())
         .unwrap_or("0 */6 * * *");
-    let id = format!(
-        "knowledge-pipeline-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Run the knowledge pipeline maintenance (summarize channels, update wiki, run relevance indexer, populate hindsight).");
 
-    let skills_json = serde_json::json!(["knowledge-pipeline"]).to_string();
-    let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("Run the knowledge pipeline maintenance (summarize channels, update wiki, run relevance indexer, populate hindsight).");
-
-    let existing: Option<String> = sql_forge!(
-        scalar String,
-        "SELECT id FROM cron_jobs WHERE name = 'knowledge-pipeline' LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to check existing cron: {}", e))?;
-
-    if existing.is_some() {
-        return Ok(("Knowledge Pipeline cron already exists".to_string(), false));
+    // Definitions live in {OMNI_DIR}/config/tasks.yml (`schedules:` key).
+    let mut tasks = tasks_yaml::load_tasks_or_empty(&config.omni_dir);
+    if tasks.schedules.contains_key("knowledge_pipeline") {
+        return Ok((
+            "Knowledge Pipeline schedule already exists in tasks.yml".to_string(),
+            false,
+        ));
     }
 
-    let channel: Option<i64> = sql_forge!(
-        scalar i64,
-        "SELECT id FROM channels WHERE platform = 'cron' AND name = 'cron-default' LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to get cron channel: {}", e))?;
-
-    let channel_id = channel;
-
-    sql_forge!(
-        r#"INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, skills, channel_id, mode, planning_mode, profile, enabled, active)
-           VALUES (:id, 'knowledge-pipeline', 'Knowledge Pipeline', :schedule, :prompt, :skills_json, NULLIF(:channel_id, 0::bigint)::bigint, 'agentic', 'plan_with_subtasks', 'pipeline', true, true)"#,
-        (
-            :id = &id,
-            :schedule = schedule,
-            :prompt = prompt,
-            :skills_json = &skills_json,
-            :channel_id = channel_id.unwrap_or(0),
-        )
-    )
-    .execute(pool)
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to create knowledge pipeline cron: {}", e))?;
+    let skills_json = serde_json::json!(["knowledge-pipeline"]).to_string();
+    let def = ScheduleDef {
+        enabled: true,
+        channel: Some("cron-default".to_string()),
+        profile: Some("pipeline".to_string()),
+        planning_mode: Some(PlanningMode::Str("plan_with_subtasks".to_string())),
+        cron: schedule.to_string(),
+        prompt: Some(prompt.to_string()),
+        action: None,
+        template: None,
+        skills: Some(skills_json),
+        silent: Some(false),
+        display_name: Some("Knowledge Pipeline".to_string()),
+    };
+    tasks
+        .schedules
+        .insert("knowledge_pipeline".to_string(), def);
+    tasks_yaml::save_tasks(&config.omni_dir, &tasks)
+        .map_err(|e| anyhow::anyhow!("Failed to save tasks.yml: {}", e))?;
 
     Ok((
         format!(
-            "Knowledge Pipeline cron job created with schedule '{}'",
+            "Knowledge Pipeline schedule created in tasks.yml with cron '{}'",
             schedule
         ),
         false,
@@ -381,12 +368,15 @@ async fn main() -> Result<()> {
     });
 
     let p_pipeline = pool.clone();
+    let c_pipeline = config.clone();
     let pipeline_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let p = p_pipeline.clone();
+        let c = c_pipeline.clone();
         Box::pin(async move {
             let guard = p.read().await;
             let pool = guard.as_ref().expect("Pool not initialized").clone();
-            handle_setup_knowledge_pipeline(&pool, &args).await
+            let config = c.lock().clone();
+            handle_setup_knowledge_pipeline(&pool, &args, &config).await
         })
     });
 
@@ -430,7 +420,7 @@ async fn main() -> Result<()> {
         McpToolEntry {
             def: McpToolDef {
                 name: "setup_knowledge_pipeline".to_string(),
-                description: "Create or verify the periodic knowledge pipeline cron job. Creates a cron job that runs the maintenance pipeline (summarize channels, update wiki/skills, relevance indexing, hindsight populate).".to_string(),
+                description: "Create or verify the periodic knowledge pipeline schedule in tasks.yml. Creates a schedule that runs the maintenance pipeline (summarize channels, update wiki/skills, relevance indexing, hindsight populate).".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
