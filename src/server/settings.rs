@@ -989,4 +989,53 @@ mod tests {
             options
         );
     }
+
+    #[test]
+    fn max_tokens_on_truncation_is_number_writable_and_execution() {
+        // The global truncation-escalation budget must be exposed by the
+        // settings API like any other writable setting: defined with a
+        // number type and 16384 default, writable via PUT /settings, and
+        // categorized under "execution" next to max_tokens.
+        let defs = get_all_setting_definitions();
+        let by_name: std::collections::HashMap<&str, &SettingMeta> =
+            defs.iter().map(|(n, m)| (n.as_str(), m)).collect();
+        let meta = by_name
+            .get("max_tokens_on_truncation")
+            .unwrap_or_else(|| panic!("max_tokens_on_truncation must be defined"));
+        assert_eq!(meta.field_type, "number", "is a number");
+        assert!(!meta.readonly, "is writable");
+        assert_eq!(meta.default.as_deref(), Some("16384"));
+        assert!(
+            meta.description.contains("truncated"),
+            "description mentions truncation: {}",
+            meta.description
+        );
+
+        let keys = writable_setting_keys();
+        assert!(
+            keys.contains("max_tokens_on_truncation"),
+            "must be in the writable whitelist (PUT /settings)"
+        );
+
+        // Categorized under "execution" alongside max_tokens.
+        let defs_with_value: Vec<(String, String, SettingMeta)> = defs
+            .iter()
+            .filter(|(n, _)| n == "max_tokens_on_truncation" || n == "max_tokens")
+            .map(|(n, m)| (n.clone(), String::new(), m.clone()))
+            .collect();
+        let cats = categorize_settings(defs_with_value);
+        let execution = cats
+            .iter()
+            .find(|c| c.name == "execution")
+            .unwrap_or_else(|| panic!("execution category must exist"));
+        let names: Vec<&str> = execution.settings.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"max_tokens_on_truncation"),
+            "max_tokens_on_truncation in execution: {names:?}"
+        );
+        assert!(
+            names.contains(&"max_tokens"),
+            "max_tokens in execution: {names:?}"
+        );
+    }
 }
