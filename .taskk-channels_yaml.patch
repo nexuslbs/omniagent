@@ -1,0 +1,33 @@
+--- a/src/channels_yaml.rs
++++ b/src/channels_yaml.rs
+@@ -261,5 +261,31 @@
+ pub fn exists(name: &str) -> bool {
+     get_by_name(name).map(|c| c.is_some()).unwrap_or(false)
+ }
++
++/// Resolve the effective channel NAME for a producer (scheduler, hooks,
++/// kanban dispatch, CLI): an explicit channel name (must exist in
++/// channels.yml) wins; otherwise the named default-channel setting
++/// (`default_*_channel` in settings.yml) is used. When neither resolves to
++/// a known channel, returns `None` — the caller creates the thread with an
++/// empty channel and fails it with "no channel defined" (the record is
++/// kept for audit).
++pub fn resolve_default_channel(explicit: Option<&str>, setting_name: &str) -> Option<String> {
++    if let Some(name) = explicit.map(str::trim).filter(|n| !n.is_empty()) {
++        if exists(name) {
++            return Some(name.to_string());
++        }
++    }
++    let dir = data_dir()?;
++    let value = crate::server::settings::load_settings_file(dir)
++        .get(setting_name)
++        .cloned()
++        .unwrap_or_default();
++    let name = value.trim().to_string();
++    if name.is_empty() || !exists(&name) {
++        return None;
++    }
++    Some(name)
++}
+ 
+ // ── Validation ──────────────────────────────────────────────────────────────

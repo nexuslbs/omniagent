@@ -1,0 +1,50 @@
+--- a/src/db/threads.rs
++++ b/src/db/threads.rs
+@@ -610,9 +610,14 @@
+     if p.msg_type == "user" {
+         err_msg!("msg_type 'user' is no longer valid for seq-0 messages: use 'Cause' instead");
+     }
+-    // 1. Get channel for its plan override and current_* fields
+-    let channel = crate::db::channels::get_channel_by_id(pool, channel_id)
+-        .await?
+-        .ok_or_else(|| Error::Message(format!("Channel {} not found", channel_id)))?;
++    // 1. Get channel for its plan override and current_* fields. A thread
++    // with no channel (empty channel_id — the explicit -> default -> ''
++    // resolution chain came up empty) is still CREATED so the record
++    // persists for audit; it is then marked failed with "no channel
++    // defined" below. Unknown channel names are treated the same way.
++    let channel = if channel_id.trim().is_empty() {
++        None
++    } else {
++        crate::db::channels::get_channel_by_id(pool, channel_id).await?
++    };
+ 
+     // 3. Resolve planning mode (internal: lets plugin decide at runtime)
+@@ -643,10 +643,10 @@
+     let identity = resolve_thread_identity(
+         data_dir,
+         profile,
+-        Some(&channel),
++        channel.as_ref(),
+         workflow.as_ref(),
+         p.workflow_step.as_deref(),
+         p.provider.as_deref(),
+         p.model.as_deref(),
+     )
+@@ -735,7 +735,17 @@
+     let saved = create_cause_and_set_pending(pool, &msg).await?;
++
++    // 8. Fail-with-record: a thread with no channel cannot be executed.
++    //    The thread row (status='failed', terminal=true) and its cause
++    //    message persist for audit; thread_started hooks do not fire for
++    //    a doomed thread.
++    if channel.is_none() {
++        set_thread_failed(pool, thread.id).await?;
++        return Err(Error::Message("no channel defined".to_string()));
++    }
++
+     // Event-driven hooks: fire thread_started (fire-and-forget, isolated).
+     crate::hooks::fire_thread_started(thread.id);
+ 
+     Ok((thread, saved))
+ }

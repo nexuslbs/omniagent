@@ -1,0 +1,25 @@
+--- a/src/server/kanban.rs
++++ b/src/server/kanban.rs
+@@ -2208,20 +2208,20 @@
+     let channel = match get_channel_by_id(&state.pool, &channel_id).await {
+-        Ok(Some(channel)) => channel,
++        Ok(Some(channel)) => Some(channel),
+         Ok(None) => {
+             error!(
+                 "[kanban/dispatch] channel {} not found for task {}",
+                 channel_id, detail.id
+             );
+-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Channel not found");
++            None
+         }
+         Err(e) => {
+             error!(
+                 "[kanban/dispatch] failed to load channel {}: {:?}",
+                 channel_id, e
+             );
+             return err_json(
+                 StatusCode::INTERNAL_SERVER_ERROR,
+                 &format!("Failed to load channel: {e}"),
+             );
+         }
+     };

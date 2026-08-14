@@ -1,0 +1,9 @@
+diff --git a/src/channels_yaml.rs b/src/channels_yaml.rs
+--- a/src/channels_yaml.rs
++++ b/src/channels_yaml.rs
+@@ -87,3 +87,2 @@
+ /// One channel definition. Field names are BARE (`profile`/`model`/
+-/// `provider`/`plan`) — the legacy `current_*`/`planning_mode`/`metadata`
+-/// names are dead and NOT accepted here.
++/// `provider`/`plan`) — the legacy `current_*`/`metadata` names are dead
++/// and NOT accepted here.

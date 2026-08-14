@@ -1,0 +1,14 @@
+diff --git a/src/channels_yaml.rs b/src/channels_yaml.rs
+--- a/src/channels_yaml.rs
++++ b/src/channels_yaml.rs
+@@ -32,5 +32,4 @@
+-//! - `plan` (bool) — the single channel-level plan override. The legacy
+-//!   `planning_mode` TEXT + `plan` BOOL pair is eliminated.
++//! - `plan` (bool) — the single channel-level plan override.
+ //! - NO `metadata`, NO `external_id` (derived from `resource_identifier`),
+-//!   NO `planning_mode`, NO `created_at`/`updated_at` (no runtime clock in a
++//!   NO `created_at`/`updated_at` (no runtime clock in a
+ //!   static file).
+@@ -88,1 +88,1 @@
+-/// `provider`/`plan`) — the legacy `current_*`/`planning_mode`/`metadata`
++/// `provider`/`plan`) — the legacy `current_*`/`metadata`

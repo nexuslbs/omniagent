@@ -1,0 +1,137 @@
+diff --git a/src/server/kanban.rs b/src/server/kanban.rs
+--- a/src/server/kanban.rs
++++ b/src/server/kanban.rs
+@@ -162,5 +162,4 @@
+     template: Option<String>,
+     plan: Option<bool>,
+-    planning_mode: Option<String>,
+     workflow_id: Option<String>,
+ }
+@@ -190,5 +190,4 @@
+     template: Option<String>,
+     plan: Option<bool>,
+-    planning_mode: Option<String>,
+     workflow_id: Option<String>,
+ }
+@@ -217,5 +217,4 @@
+     template: Option<String>,
+     plan: Option<bool>,
+-    planning_mode: Option<String>,
+     workflow_id: Option<String>,
+     created_at: Option<chrono::DateTime<chrono::Utc>>,
+@@ -242,5 +242,4 @@
+     template: Option<String>,
+     plan: Option<bool>,
+-    planning_mode: Option<String>,
+     workflow_id: Option<String>,
+     created_at: Option<chrono::DateTime<chrono::Utc>>,
+@@ -334,5 +334,4 @@
+     template: Option<String>,
+     plan: Option<bool>,
+-    planning_mode: Option<String>,
+     workflow_id: Option<String>,
+     created_at: Option<String>,
+@@ -423,4 +423,3 @@
+         template: r.template,
+         plan: r.plan,
+-        planning_mode: r.planning_mode,
+         workflow_id: r.workflow_id,
+@@ -517,4 +517,3 @@
+         SELECT
+             id, title, body, status, priority, position, assignee,
+-            channel_id, profile, archived, template, plan, planning_mode, workflow_id,
++            channel_id, profile, archived, template, plan, workflow_id,
+             created_at, updated_at
+@@ -556,4 +556,3 @@
+         SELECT
+             id, title, body, status, priority, position, assignee,
+-            channel_id, profile, archived, template, plan, planning_mode, workflow_id,
++            channel_id, profile, archived, template, plan, workflow_id,
+             created_at, updated_at
+@@ -666,7 +666,6 @@
+         r#"
+         INSERT INTO kanban_tasks
+-            (id, title, body, assignee, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
++            (id, title, body, assignee, status, priority, channel_id, profile, position, template, plan, workflow_id)
+         VALUES
+-            (:id, :title, :body, NULLIF(:assignee, '')::text, :status, :priority, NULLIF(:channel_id, '')::text, NULLIF(:profile, '')::text,
+-             :position, NULLIF(:template, '')::text, :plan::boolean, NULLIF(:planning_mode, '')::text, NULLIF(:workflow_id, '')::text)
++            (:id, :title, :body, NULLIF(:assignee, '')::text, :status, :priority, NULLIF(:channel_id, '')::text, NULLIF(:profile, '')::text,
++             :position, NULLIF(:template, '')::text, :plan::boolean, NULLIF(:workflow_id, '')::text)
+         "#,
+@@ -682,4 +681,3 @@
+           :template = body.template.as_deref().unwrap_or(""),
+           :plan = body.plan.unwrap_or(false),
+-          :planning_mode = body.planning_mode.as_deref().unwrap_or(""),
+           :workflow_id = body.workflow_id.as_deref().unwrap_or(""),
+@@ -735,4 +734,3 @@
+         SELECT id, title, body, status, priority, position, assignee,
+-               channel_id, profile, archived, template, plan, planning_mode,
++               channel_id, profile, archived, template, plan,
+                workflow_id, created_at, updated_at
+@@ -878,4 +877,3 @@
+         SELECT id, title, body, status, priority, position, assignee,
+-               channel_id, profile, archived, template, plan, planning_mode,
++               channel_id, profile, archived, template, plan,
+                workflow_id, created_at, updated_at
+@@ -1017,4 +1016,3 @@
+         SELECT id, title, body, status, priority, position, assignee,
+-               channel_id, profile, archived, template, plan, planning_mode,
++               channel_id, profile, archived, template, plan,
+                workflow_id, created_at, updated_at
+@@ -1075,5 +1074,4 @@
+         || body.template.is_some()
+         || body.plan.is_some()
+-        || body.planning_mode.is_some()
+         || body.workflow_id.is_some()
+@@ -1098,4 +1097,3 @@
+             template = CASE WHEN :template = '' THEN template ELSE NULLIF(:template, '')::text END,
+             plan = :plan,
+-            planning_mode = CASE WHEN :planning_mode = '' THEN planning_mode ELSE NULLIF(:planning_mode, '')::text END,
+             workflow_id = CASE WHEN :workflow_id = '' THEN workflow_id ELSE NULLIF(:workflow_id, '')::text END,
+@@ -1116,4 +1115,3 @@
+           :template = body.template.as_deref().unwrap_or(""),
+           :plan = body.plan.or(before.plan).unwrap_or(false),
+-          :planning_mode = body.planning_mode.as_deref().unwrap_or(""),
+           :workflow_id = body.workflow_id.as_deref().unwrap_or(""),
+@@ -1187,4 +1186,3 @@
+             "template": before.template,
+             "plan": before.plan,
+-            "planning_mode": before.planning_mode,
+             "archived": before.archived,
+@@ -1221,4 +1220,3 @@
+         SELECT id, title, body, status, priority, position, assignee,
+-               channel_id, profile, archived, template, plan, planning_mode,
++               channel_id, profile, archived, template, plan,
+                workflow_id, created_at, updated_at
+@@ -1248,4 +1247,3 @@
+         "template": before.template,
+         "plan": before.plan,
+-        "planning_mode": before.planning_mode,
+         "archived": before.archived,
+@@ -2007,3 +2006,2 @@
+     workflow_id: Option<String>,
+     plan: Option<bool>,
+-    planning_mode: Option<String>,
+ }
+@@ -2186,4 +2185,3 @@
+         DispatchTaskDetailRow,
+         r#"
+-        SELECT id, title, body, channel_id, profile, template, workflow_id, plan, planning_mode
++        SELECT id, title, body, channel_id, profile, template, workflow_id, plan
+         FROM kanban_tasks
+@@ -2483,4 +2482,3 @@
+             template: None,
+             plan: None,
+-            planning_mode: None,
+             workflow_id: Some("wf-x".to_string()),
+@@ -2539,4 +2538,3 @@
+             template: None,
+             plan: None,
+-            planning_mode: None,
+             workflow_id: None,
+@@ -2566,4 +2565,3 @@
+             template: None,
+             plan: None,
+-            planning_mode: None,
+             workflow_id: None,

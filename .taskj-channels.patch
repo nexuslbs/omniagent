@@ -1,0 +1,17 @@
+--- a/src/server/channels.rs
++++ b/src/server/channels.rs
+@@ -63,6 +63,5 @@
+     pub current_model: Option<String>,
+     pub readonly: bool,
+     pub plan: bool,
+-    pub planning_mode: Option<String>,
+     pub template: Option<String>,
+ }
+@@ -88,6 +87,5 @@
+             current_model: c.current_model,
+             readonly: c.readonly,
+             plan: c.plan,
+-            planning_mode: None,
+             template: c.template,
+         }
+     }

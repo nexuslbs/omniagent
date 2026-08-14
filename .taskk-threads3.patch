@@ -1,0 +1,19 @@
+--- a/src/db/threads.rs
++++ b/src/db/threads.rs
+@@ -736,7 +736,17 @@
+     let saved = create_cause_and_set_pending(pool, &msg).await?;
+ 
++    // 8. Fail-with-record: a thread with no channel cannot be executed.
++    //    The thread row (status='failed', terminal=true) and its cause
++    //    message persist for audit; thread_started hooks do not fire for
++    //    a doomed thread.
++    if channel.is_none() {
++        set_thread_failed(pool, thread.id).await?;
++        return Err(Error::Message("no channel defined".to_string()));
++    }
++
+     // Event-driven hooks: fire thread_started (fire-and-forget, isolated).
+     crate::hooks::fire_thread_started(thread.id);
+ 
+     Ok((thread, saved))
+ }

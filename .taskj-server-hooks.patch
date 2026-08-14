@@ -1,0 +1,74 @@
+--- a/src/server/hooks.rs
++++ b/src/server/hooks.rs
+@@ -33,7 +33,7 @@
+ 
+ use super::{err_json, ok_json, AppState};
+ use crate::hooks::default_counter;
+-use crate::tasks_yaml::{self, HookDef, PlanningMode};
++use crate::tasks_yaml::{self, HookDef};
+@@ -68,7 +68,6 @@
+     action_id: Option<String>,
+     profile: Option<String>,
+     channel_id: Option<String>,
+-    planning_mode: Option<String>,
+     plan: Option<bool>,
+     template: Option<String>,
+     enabled: bool,
+@@ -84,11 +83,7 @@
+         channel_id: Option<String>,
+         counter: serde_json::Value,
+     ) -> Self {
+-        let (planning_mode, plan) = def
+-            .planning_mode
+-            .as_ref()
+-            .map(|p| p.to_legacy())
+-            .unwrap_or((None, None));
++        let plan = def.plan();
+         Self {
+             id: key.to_string(),
+             name: key.to_string(),
+@@ -102,9 +97,8 @@
+             action_id: def.action.clone(),
+             profile: def.profile.clone(),
+             channel_id,
+-            planning_mode,
+             plan,
+             template: def.template.clone(),
+             enabled: def.enabled,
+@@ -141,7 +135,6 @@
+     #[serde(default)]
+     channel_id: Option<String>,
+     #[serde(default)]
+-    planning_mode: Option<String>,
+-    #[serde(default)]
+     plan: Option<bool>,
+     #[serde(default)]
+     template: Option<String>,
+@@ -175,7 +168,6 @@
+     #[serde(default)]
+     channel_id: Option<String>,
+     #[serde(default)]
+-    planning_mode: Option<String>,
+-    #[serde(default)]
+     plan: Option<bool>,
+     #[serde(default)]
+     template: Option<String>,
+@@ -336,7 +328,7 @@
+     if let Some(mode) = body.mode.clone().filter(|m| !m.trim().is_empty()) {
+         def.mode = Some(mode);
+     }
+-    def.planning_mode = PlanningMode::from_legacy(body.planning_mode.as_deref(), body.plan);
++    def.plan = body.plan;
+     def.enabled = body.enabled.unwrap_or(true);
+     def.channel = tasks_yaml::channel_name_for_id(&state.pool, body.channel_id).await;
+@@ -430,8 +422,8 @@
+             def.channel = tasks_yaml::channel_name_for_id(&state.pool, Some(cid)).await;
+         }
+     }
+-    if body.planning_mode.is_some() || body.plan.is_some() {
+-        def.planning_mode = PlanningMode::from_legacy(body.planning_mode.as_deref(), body.plan);
++    if body.plan.is_some() {
++        def.plan = body.plan;
+     }
+     if let Some(en) = body.enabled {
+         def.enabled = en;

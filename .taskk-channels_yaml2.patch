@@ -1,0 +1,15 @@
+--- a/src/channels_yaml.rs
++++ b/src/channels_yaml.rs
+@@ -272,8 +272,10 @@
+ pub fn resolve_default_channel(explicit: Option<&str>, setting_name: &str) -> Option<String> {
+     if let Some(name) = explicit.map(str::trim).filter(|n| !n.is_empty()) {
+-        if exists(name) {
+-            return Some(name.to_string());
+-        }
++        // The explicit name wins even when it is NOT a known channel: the
++        // caller then fails the thread with "channel not found" (fail-with-
++        // record) — never silently substitute the default setting.
++        return Some(name.to_string());
+     }
+     let dir = data_dir()?;
+     let value = crate::server::settings::load_settings_file(dir)

@@ -1,0 +1,33 @@
+--- a/src/hooks.rs
++++ b/src/hooks.rs
+@@ -156,7 +156,6 @@
+     action_id: Option<String>,
+     profile: Option<String>,
+     channel_id: Option<String>,
+-    planning_mode: Option<String>,
+     plan: Option<bool>,
+     template: Option<String>,
+ }
+@@ -164,8 +163,4 @@
+ impl HookRow {
+     fn from_yml(key: &str, def: &crate::tasks_yaml::HookDef, channel_id: Option<String>) -> Self {
+-        let (planning_mode, plan) = def
+-            .planning_mode
+-            .as_ref()
+-            .map(|p| p.to_legacy())
+-            .unwrap_or((None, None));
++        let plan = def.plan();
+         Self {
+@@ -361,12 +355,7 @@
+         let mut metadata = json!({
+             "hook_id": hook.id,
+             "hook_name": hook.name,
+             "hook_event": hook.event,
+         });
+-        if let Some(planning_mode) = hook.planning_mode.as_deref() {
+-            if !planning_mode.is_empty() {
+-                metadata["planning_mode"] = json!(planning_mode);
+-            }
+-        }
+ 
+         let external_id = format!("hook:{}:{}", hook.id, Utc::now().timestamp_millis());

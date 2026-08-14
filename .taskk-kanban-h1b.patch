@@ -1,0 +1,17 @@
+--- a/src/server/kanban.rs
++++ b/src/server/kanban.rs
+@@ -2197,9 +2197,9 @@
+     let channel_id = match detail.channel_id {
+-        Some(id) => id,
+-        None => {
+-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Task has no channel_id");
+-        }
+-    };
++        Some(id) => crate::channels_yaml::resolve_default_channel(Some(&id), "default_kanban_channel")
++            .unwrap_or_default(),
++        None => crate::channels_yaml::resolve_default_channel(None, "default_kanban_channel")
++            .unwrap_or_default(),
++    };
+ 
+     // 4. Resolve channel, profile, provider/model and template.
+     let channel = match get_channel_by_id(&state.pool, &channel_id).await {

@@ -1,0 +1,5 @@
+--- a/src/server/kanban.rs
++++ b/src/server/kanban.rs
+@@ -2175,2 +2175,2 @@
+-        SELECT id, title, body, channel_id, profile, template, workflow_id, plan
++        SELECT id, title, body, channel_id, profile, template, workflow_id, plan

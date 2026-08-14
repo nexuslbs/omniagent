@@ -1,0 +1,15 @@
+--- a/src/server/schedule.rs
++++ b/src/server/schedule.rs
+@@ -468,4 +468,3 @@
+     // Legacy create defaulted plan=true for new jobs — preserve that.
+-    def.planning_mode =
+-        tasks_yaml::PlanningMode::from_legacy(None, Some(body.plan.unwrap_or(true)));
++    def.plan = Some(body.plan.unwrap_or(true));
+     // yml has no separate `active` column: enabled doubles as active.
+@@ -573,5 +573,5 @@
+     if let Some(plan) = body.plan {
+-        def.planning_mode = tasks_yaml::PlanningMode::from_legacy(None, Some(plan));
++        def.plan = Some(plan);
+     }
+ 
+     if let Err(err) = tasks_yaml::validate_schedule(&id, def) {

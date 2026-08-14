@@ -1,0 +1,65 @@
+--- a/src/server/kanban.rs
++++ b/src/server/kanban.rs
+@@ -2195,30 +2195,36 @@
+     };
+ 
+-    let channel_id = match detail.channel_id {
+-        Some(id) => id,
+-        None => {
+-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Task has no channel_id");
+-        }
+-    };
++    // Resolution chain: task's explicit channel -> default_kanban_channel ->
++    // '' (empty = the thread is created and then failed with "no channel
++    // defined"; the record is kept for audit).
++    let channel_id = crate::channels_yaml::resolve_default_channel(
++        detail.channel_id.as_deref(),
++        "default_kanban_channel",
++    )
++    .unwrap_or_default();
+ 
+     // 4. Resolve channel, profile, provider/model and template.
+-    let channel = match get_channel_by_id(&state.pool, &channel_id).await {
+-        Ok(Some(channel)) => channel,
+-        Ok(None) => {
+-            error!(
+-                "[kanban/dispatch] channel {} not found for task {}",
+-                channel_id, detail.id
+-            );
+-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Channel not found");
+-        }
+-        Err(e) => {
+-            error!(
+-                "[kanban/dispatch] failed to load channel {}: {:?}",
+-                channel_id, e
+-            );
+-            return err_json(
+-                StatusCode::INTERNAL_SERVER_ERROR,
+-                &format!("Failed to load channel: {e}"),
+-            );
+-        }
+-    };
++    let channel = if channel_id.is_empty() {
++        None
++    } else {
++        match get_channel_by_id(&state.pool, &channel_id).await {
++            Ok(Some(channel)) => Some(channel),
++            Ok(None) => {
++                error!(
++                    "[kanban/dispatch] channel {} not found for task {}",
++                    channel_id, detail.id
++                );
++                None
++            }
++            Err(e) => {
++                error!(
++                    "[kanban/dispatch] failed to load channel {}: {:?}",
++                    channel_id, e
++                );
++                return err_json(
++                    StatusCode::INTERNAL_SERVER_ERROR,
++                    &format!("Failed to load channel: {e}"),
++                );
++            }
++        }
++    };

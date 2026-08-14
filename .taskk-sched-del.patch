@@ -1,0 +1,27 @@
+--- a/src/scheduler.rs
++++ b/src/scheduler.rs
+@@ -333,24 +333,3 @@
+ }
+ 
+-/// Ensure a cron channel exists (upsert on conflict).
+-pub(crate) async fn ensure_cron_channel(pool: &PgPool) -> AppResult<crate::db::types::Channel> {
+-    // First try to find existing cron channel
+-    if let Ok(Some(ch)) =
+-        queries::get_channel_by_platform_and_resource(pool, "cron", "cron-session").await
+-    {
+-        return Ok(ch);
+-    }
+-    queries::create_channel(
+-        pool,
+-        queries::CreateChannelParams {
+-            name: "cron-session".to_string(),
+-            platform: "cron".to_string(),
+-            external_id: "cron-default".to_string(),
+-            cause: "cron".to_string(),
+-            resource_identifier: "cron-session".to_string(),
+-        },
+-    )
+-    .await
+-    .map_err(|e| Error::Message(format!("Failed to create cron channel: {:#}", e)))
+-}
+ /// Parse a cron expression and compute the next run after `now`.

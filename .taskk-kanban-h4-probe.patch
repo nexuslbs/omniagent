@@ -1,0 +1,6 @@
+--- a/src/server/kanban.rs
++++ b/src/server/kanban.rs
+@@ -2260,3 +2260,6 @@
+             resolve_dispatch_template(detail.template.as_deref(), channel.template.as_deref())
++            ;
+         });

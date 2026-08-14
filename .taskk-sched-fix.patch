@@ -1,0 +1,7 @@
+--- a/src/scheduler.rs
++++ b/src/scheduler.rs
+@@ -233,3 +233,3 @@
+                     "scheduled_at": job.schedule,
+-                    "channel_id": channel.id,
++                    "channel_id": channel_id,
+                     "profile": profile_name,

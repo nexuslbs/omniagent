@@ -1,0 +1,21 @@
+diff --git a/src/agent/fail_thread.rs b/src/agent/fail_thread.rs
+index 5f4b7e1..2c3a4d5 100644
+--- a/src/agent/fail_thread.rs
++++ b/src/agent/fail_thread.rs
+@@ -1591,5 +1591,5 @@
+         sql_forge!(
+-            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
+-             VALUES (:task_id, 'RerunScriptTest', '', 'running', 1, 'kanban', 'test', 0, NULL, false, 'manual', 'test-wf')",
++            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, workflow_id)
++             VALUES (:task_id, 'RerunScriptTest', '', 'running', 1, 'kanban', 'test', 0, NULL, false, 'test-wf')",
+             ( :task_id = &task_id )
+         )
+@@ -1765,6 +1765,6 @@
+         sql_forge!(
+-            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, planning_mode, workflow_id)
+-             VALUES (:task_id, 'R8N', '', 'running', 1, 'kanban', 'test', 0, NULL, false, 'manual', NULLIF(:workflow_id, '')::text)",
++            "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, workflow_id)
++             VALUES (:task_id, 'R8N', '', 'running', 1, 'kanban', 'test', 0, NULL, false, NULLIF(:workflow_id, '')::text)",
+             (
+                 :task_id = task_id,
+                 :workflow_id = workflow_id.unwrap_or(""),

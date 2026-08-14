@@ -1,0 +1,10 @@
+diff --git a/src/hooks.rs b/src/hooks.rs
+index 5f4b7e1..2c3a4d5 100644
+--- a/src/hooks.rs
++++ b/src/hooks.rs
+@@ -176,4 +176,3 @@
+             profile: def.profile.clone(),
+             channel_id,
+-            planning_mode,
+             plan,
+             template: def.template.clone(),

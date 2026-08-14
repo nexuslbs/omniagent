@@ -1,0 +1,9 @@
+diff --git a/src/server/kanban.rs b/src/server/kanban.rs
+--- a/src/server/kanban.rs
++++ b/src/server/kanban.rs
+@@ -2258,5 +2258,4 @@
+         .map(|mode| matches!(mode, "on"))
+-        .or(detail.plan)
+-        .or_else(|| Some(detail.planning_mode.as_deref() == Some("on")));
++        .or(detail.plan);
+     // R8-J: a dispatched thread must ALWAYS carry a template — an empty

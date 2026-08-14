@@ -1,0 +1,5 @@
+--- a/src/server/mod.rs
++++ b/src/server/mod.rs
+@@ -1113,1 +1113,1 @@
+         .get_or_insert_with(|| "cli".to_string());
++        .get_or_insert_with(|| "cli".to_string());

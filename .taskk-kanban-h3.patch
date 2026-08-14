@@ -1,0 +1,10 @@
+--- a/src/server/kanban.rs
++++ b/src/server/kanban.rs
+@@ -2236,4 +2236,6 @@
+         .filter(|profile| !profile.trim().is_empty())
+         .or_else(|| {
+-            (!channel.current_profile.trim().is_empty()).then(|| channel.current_profile.clone())
++            channel.as_ref().and_then(|c| {
++                (!c.current_profile.trim().is_empty()).then(|| c.current_profile.clone())
++            })
+         })

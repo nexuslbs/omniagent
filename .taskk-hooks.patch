@@ -1,0 +1,76 @@
+--- a/src/hooks.rs
++++ b/src/hooks.rs
+@@ -336,8 +336,20 @@
+     /// re-triggers hooks (infinite-loop protection).
+     async fn run_agentic(&self, hook: &HookRow, thread: &EventThreadRow) -> AppResult<Option<i64>> {
+-        let channel_id = hook
+-            .channel_id
+-            .clone()
+-            .unwrap_or_else(|| thread.channel_id.clone());
++        // Resolution chain: hook's explicit channel -> triggering thread's
++        // channel -> default_hook_channel -> '' (empty = the thread is
++        // created and then failed with "no channel defined"; the record is
++        // kept for audit).
++        let channel_id = hook
++            .channel_id
++            .as_deref()
++            .filter(|c| !c.trim().is_empty() && crate::channels_yaml::exists(c.trim()))
++            .map(str::to_string)
++            .or_else(|| {
++                (!thread.channel_id.trim().is_empty()
++                    && crate::channels_yaml::exists(&thread.channel_id))
++                .then(|| thread.channel_id.clone())
++            })
++            .or_else(|| {
++                crate::channels_yaml::resolve_default_channel(None, "default_hook_channel")
++            })
++            .unwrap_or_default();
+         let profile = hook
+             .profile
+             .clone()
+@@ -541,14 +553,24 @@
+     let hook = HookRow::from_yml(hook_id, def, channel_id);
+ 
+-    let channel = if let Some(cid) = hook.channel_id.as_deref() {
+-        crate::db::channels::get_channel_by_id(pool, cid)
+-            .await?
+-            .ok_or_else(|| {
+-                Error::Message(format!(
+-                    "Hook '{}' references channel {} which does not exist",
+-                    hook.name, cid
+-                ))
+-            })?
+-    } else {
+-        // Fall back to the permanent cron channel when the hook has no
+-        // explicit channel (mirrors cron manual-run behavior).
+-        crate::scheduler::ensure_cron_channel(pool).await?
+-    };
++    // Resolution chain: explicit channel -> default_hook_channel -> ''
++    // (empty = the thread is created and then failed with "no channel
++    // defined"; the record is kept for audit).
++    let channel_id = crate::channels_yaml::resolve_default_channel(
++        def.channel.as_deref(),
++        "default_hook_channel",
++    )
++    .unwrap_or_default();
++    let channel = if channel_id.is_empty() {
++        None
++    } else {
++        crate::db::channels::get_channel_by_id(pool, &channel_id).await?
++    };
+     let profile = hook
+         .profile
+         .clone()
+         .filter(|p| !p.trim().is_empty())
+-        .unwrap_or_else(|| channel.current_profile.clone());
++        .or_else(|| channel.as_ref().map(|c| c.current_profile.clone()))
++        .unwrap_or_else(crate::profile::default_profile_name);
+     let thread_ctx = EventThreadRow {
+         id: 0,
+-        channel_id: channel.id,
+-        channel_name: channel.name.clone(),
++        channel_id,
++        channel_name: channel.as_ref().map(|c| c.name.clone()).unwrap_or_default(),
+         profile,
+         hook_caused: false,
+     };
