@@ -17,7 +17,7 @@
 // kanban task id.
 //
 // Each channels.yml entry uses BARE field names (no metadata, no external_id,
-// no planning_mode, no timestamps):
+// no timestamps):
 //
 //  <channel name>:
 //    resource_identifier: <identifier within the platform>  -- e.g. chat_id, session id
