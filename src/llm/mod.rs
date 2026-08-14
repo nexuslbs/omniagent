@@ -758,6 +758,166 @@ struct AnthropicUsage {
 }
 
 // ---------------------------------------------------------------------------
+// Transport hardening
+// ---------------------------------------------------------------------------
+
+/// Total request timeout (unchanged from before): 5 minutes.
+const LLM_TOTAL_TIMEOUT_SECS: u64 = 300;
+/// TCP/TLS connect timeout: a hung connect fails fast instead of waiting for
+/// the total request timeout.
+const LLM_CONNECT_TIMEOUT_SECS: u64 = 30;
+/// Idle keep-alive socket lifetime: stale pooled connections closed by the
+/// peer or a CloudFront edge are recycled instead of reused.
+const LLM_POOL_IDLE_TIMEOUT_SECS: u64 = 90;
+/// Maximum attempts for transient transport errors (initial + 2 retries).
+const LLM_TRANSPORT_RETRY_ATTEMPTS: u32 = 3;
+/// Base backoff between transport retries, in ms; doubles per retry.
+const LLM_TRANSPORT_RETRY_BASE_DELAY_MS: u64 = 500;
+
+/// Build the hardened reqwest client used for LLM completion requests.
+///
+/// - `timeout`: total request timeout (5 minutes) — unchanged.
+/// - `connect_timeout`: fail fast on hung TCP/TLS connects (30s).
+/// - `pool_idle_timeout`: recycle keep-alive sockets after 90s idle so stale
+///   connections closed by the peer are not reused for new requests.
+fn build_llm_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(LLM_TOTAL_TIMEOUT_SECS))
+        .connect_timeout(std::time::Duration::from_secs(LLM_CONNECT_TIMEOUT_SECS))
+        .pool_idle_timeout(std::time::Duration::from_secs(LLM_POOL_IDLE_TIMEOUT_SECS))
+        .build()
+        .expect("Failed to build reqwest Client")
+}
+
+/// Transient transport failure categories the retry layer understands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransportFailure {
+    /// Connection establishment failed, or a pooled keep-alive socket was
+    /// found dead (connection reset/closed by the peer or a CloudFront edge).
+    Connect,
+    /// The request timed out (connect timeout or total timeout).
+    Timeout,
+    /// Failed while reading the response body.
+    Body,
+    /// Failed while decoding the response body.
+    Decode,
+    /// Failed while sending the request with a transient IO error
+    /// (connection reset, broken pipe, unexpected EOF).
+    SendIo,
+}
+
+/// Classify a reqwest error as a retryable transient transport failure.
+///
+/// Retryable: connect failures, timeouts, body-read and decode errors, and
+/// IO-level send failures. NOT retryable: deterministic errors such as
+/// request-build failures (invalid URL) and redirect loops. HTTP status
+/// errors are not `reqwest::Error` at all — a 4xx/5xx response arrives as
+/// `Ok(response)` and never reaches this function, so the transport layer
+/// never retries on status codes (429 has its own `RateLimited` path).
+fn classify_transport_error(err: &reqwest::Error) -> Option<TransportFailure> {
+    if err.is_timeout() {
+        return Some(TransportFailure::Timeout);
+    }
+    if err.is_connect() {
+        return Some(TransportFailure::Connect);
+    }
+    if err.is_body() {
+        return Some(TransportFailure::Body);
+    }
+    if err.is_decode() {
+        return Some(TransportFailure::Decode);
+    }
+    if err.is_request() && error_source_is_transient_io(err) {
+        return Some(TransportFailure::SendIo);
+    }
+    None
+}
+
+/// Walk an error's source chain looking for a transient IO error (connection
+/// reset, connection aborted, broken pipe, unexpected EOF) or hyper-level
+/// "connection closed" text. Used to decide whether a send-phase failure
+/// (e.g. `error sending request for url ...`) is worth retrying.
+fn error_source_is_transient_io(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next = err.source();
+    while let Some(source) = next {
+        if let Some(io_err) = source.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io_err.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::TimedOut
+            );
+        }
+        // Hyper surfaces some stale-pool failures (e.g. "connection closed
+        // before message completed") without an io::Error in the chain.
+        if error_text_says_transient(source) {
+            return true;
+        }
+        next = source.source();
+    }
+    false
+}
+
+/// True when an error's message names a transient transport condition.
+fn error_text_says_transient(err: &(dyn std::error::Error + 'static)) -> bool {
+    let msg = err.to_string().to_lowercase();
+    [
+        "connection reset",
+        "broken pipe",
+        "unexpected eof",
+        "connection closed",
+        "connection aborted",
+        "reset by peer",
+        "eof while",
+    ]
+    .iter()
+    .any(|pat| msg.contains(pat))
+}
+
+/// Send a request, retrying transient transport errors with short backoff.
+///
+/// Retries connect failures, timeouts, and body/decode errors up to
+/// [`LLM_TRANSPORT_RETRY_ATTEMPTS`] times with exponential backoff starting
+/// at [`LLM_TRANSPORT_RETRY_BASE_DELAY_MS`]. HTTP status codes are NEVER
+/// retried here: the response is returned as-is and the caller decides
+/// (429 becomes `Error::RateLimited`, other statuses surface immediately).
+async fn send_with_transport_retry(
+    req: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let mut attempt: u32 = 1;
+    let mut delay = std::time::Duration::from_millis(LLM_TRANSPORT_RETRY_BASE_DELAY_MS);
+    loop {
+        // JSON payloads are replayable, so clone per attempt. Non-replayable
+        // bodies fall back to a single attempt.
+        let attempt_req = match req.try_clone() {
+            Some(clone) => clone,
+            None => return req.send().await,
+        };
+        match attempt_req.send().await {
+            Ok(resp) => return Ok(resp),
+            Err(err) => {
+                let retryable = classify_transport_error(&err).is_some();
+                if attempt >= LLM_TRANSPORT_RETRY_ATTEMPTS || !retryable {
+                    return Err(err);
+                }
+                warn!(
+                    "[llm] transient transport error (attempt {}/{}) — retrying in {}ms: {}",
+                    attempt,
+                    LLM_TRANSPORT_RETRY_ATTEMPTS,
+                    delay.as_millis(),
+                    err
+                );
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+                attempt += 1;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LLM Client
 // ---------------------------------------------------------------------------
 
@@ -772,10 +932,7 @@ pub struct LLMClient {
 impl LLMClient {
     /// Create a new client from the given configuration.
     pub fn new(config: LLMConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300)) // 5 minutes
-            .build()
-            .expect("Failed to build reqwest Client");
+        let client = build_llm_http_client();
         Self {
             config,
             client,
@@ -785,10 +942,7 @@ impl LLMClient {
 
     /// Create a new client with a custom per-provider throttle.
     pub fn new_with_throttle(config: LLMConfig, throttle: ProviderThrottle) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300)) // 5 minutes
-            .build()
-            .expect("Failed to build reqwest Client");
+        let client = build_llm_http_client();
         Self {
             config,
             client,
@@ -920,15 +1074,15 @@ impl LLMClient {
             }
         }
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .ctx("Failed to send OpenAI-compatible completion request")?;
+        let resp = send_with_transport_retry(
+            self.client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.config.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body),
+        )
+        .await
+        .ctx("Failed to send OpenAI-compatible completion request")?;
 
         let retry_after = resp
             .headers()
@@ -1142,9 +1296,7 @@ impl LLMClient {
             }
         }
 
-        let resp = req
-            .json(&body)
-            .send()
+        let resp = send_with_transport_retry(req.json(&body))
             .await
             .ctx("Failed to send Anthropic completion request")?;
 
@@ -1442,6 +1594,344 @@ mod tests {
         assert_eq!(
             parsed2.reasoning_content.as_deref(),
             Some("thinking step by step")
+        );
+    }
+
+    // ── Transport hardening: retry classification ──────────────────────────
+
+    /// Minimal error wrapper for building synthetic source chains in tests.
+    #[derive(Debug)]
+    struct TestChainError {
+        msg: String,
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    }
+
+    impl TestChainError {
+        fn leaf(msg: &str) -> Self {
+            Self {
+                msg: msg.to_string(),
+                source: None,
+            }
+        }
+        fn chain(msg: &str, source: Box<dyn std::error::Error + Send + Sync>) -> Self {
+            Self {
+                msg: msg.to_string(),
+                source: Some(source),
+            }
+        }
+    }
+
+    impl std::fmt::Display for TestChainError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.msg)
+        }
+    }
+
+    impl std::error::Error for TestChainError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.source
+                .as_deref()
+                .map(|s| s as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    fn io_error(kind: std::io::ErrorKind, msg: &str) -> std::io::Error {
+        std::io::Error::new(kind, msg)
+    }
+
+    fn chain(msg: &str, source: Box<dyn std::error::Error + Send + Sync>) -> TestChainError {
+        TestChainError::chain(msg, source)
+    }
+
+    #[test]
+    fn test_transient_io_detects_connection_reset() {
+        let err = chain(
+            "error sending request for url (https://api.deepseek.com/v1/chat/completions)",
+            Box::new(io_error(
+                std::io::ErrorKind::ConnectionReset,
+                "connection reset by peer",
+            )),
+        );
+        assert!(error_source_is_transient_io(&err));
+    }
+
+    #[test]
+    fn test_transient_io_detects_broken_pipe() {
+        let err = chain(
+            "error sending request",
+            Box::new(io_error(std::io::ErrorKind::BrokenPipe, "broken pipe")),
+        );
+        assert!(error_source_is_transient_io(&err));
+    }
+
+    #[test]
+    fn test_transient_io_detects_unexpected_eof() {
+        let err = chain(
+            "error sending request",
+            Box::new(io_error(
+                std::io::ErrorKind::UnexpectedEof,
+                "unexpected EOF",
+            )),
+        );
+        assert!(error_source_is_transient_io(&err));
+    }
+
+    #[test]
+    fn test_transient_io_detects_connection_aborted() {
+        let err = chain(
+            "error sending request",
+            Box::new(io_error(
+                std::io::ErrorKind::ConnectionAborted,
+                "connection aborted",
+            )),
+        );
+        assert!(error_source_is_transient_io(&err));
+    }
+
+    #[test]
+    fn test_transient_io_detects_io_timeout() {
+        let err = chain(
+            "error sending request",
+            Box::new(io_error(std::io::ErrorKind::TimedOut, "timed out")),
+        );
+        assert!(error_source_is_transient_io(&err));
+    }
+
+    #[test]
+    fn test_transient_io_rejects_non_transient_io() {
+        // A non-transient IO kind (file-not-found) must not be retried.
+        let err = chain(
+            "error sending request",
+            Box::new(io_error(
+                std::io::ErrorKind::NotFound,
+                "no such file or directory",
+            )),
+        );
+        assert!(!error_source_is_transient_io(&err));
+    }
+
+    #[test]
+    fn test_transient_io_rejects_non_io_source() {
+        // A deterministic failure (e.g. "builder error: invalid url") with no
+        // transient IO in its chain must not be retried.
+        let err = chain(
+            "error sending request",
+            Box::new(TestChainError::leaf("builder error: invalid url")),
+        );
+        assert!(!error_source_is_transient_io(&err));
+    }
+
+    #[test]
+    fn test_transient_io_detects_hyper_connection_closed_text() {
+        // Hyper surfaces stale-pool failures without an io::Error in the
+        // chain; the message text identifies the transient condition.
+        let err = chain(
+            "error sending request",
+            Box::new(TestChainError::leaf(
+                "connection closed before message completed",
+            )),
+        );
+        assert!(error_source_is_transient_io(&err));
+    }
+
+    #[test]
+    fn test_transient_io_walks_deep_chains() {
+        let inner = chain(
+            "connection error",
+            Box::new(io_error(
+                std::io::ErrorKind::ConnectionReset,
+                "connection reset by peer",
+            )),
+        );
+        let outer = chain("error sending request", Box::new(inner));
+        assert!(error_source_is_transient_io(&outer));
+    }
+
+    // ── Transport hardening: retry behaviour (end-to-end) ──────────────────
+
+    /// Spawn a minimal HTTP/1.1 server on an ephemeral port. Each accepted
+    /// connection is answered with `responder(request_index)` — the raw HTTP
+    /// response text. Returns (base_url, request counter).
+    fn spawn_http_server(
+        responder: impl Fn(usize) -> String + Send + 'static,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = Arc::clone(&count);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                let idx = count2.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf); // consume the request
+                let resp = responder(idx);
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        (format!("http://{addr}"), count)
+    }
+
+    fn http_response(status_line: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            status_line,
+            body.len(),
+            body
+        )
+    }
+
+    #[tokio::test]
+    async fn test_transport_retry_does_not_retry_http_statuses() {
+        // 5xx and 4xx (incl. 429) responses must NOT be retried by the
+        // transport layer: each status gets exactly one request. 429 is
+        // converted to Error::RateLimited by the completion callers.
+        for (status_line, status) in [
+            (
+                "500 Internal Server Error",
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            ("502 Bad Gateway", reqwest::StatusCode::BAD_GATEWAY),
+            (
+                "503 Service Unavailable",
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            ("404 Not Found", reqwest::StatusCode::NOT_FOUND),
+            ("400 Bad Request", reqwest::StatusCode::BAD_REQUEST),
+            (
+                "429 Too Many Requests",
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+            ),
+        ] {
+            let (base, count) = spawn_http_server(move |_| http_response(status_line, "{}"));
+            let client = reqwest::Client::new();
+            let resp = send_with_transport_retry(
+                client
+                    .post(format!("{base}/chat/completions"))
+                    .json(&serde_json::json!({"model": "t"})),
+            )
+            .await
+            .expect("response must be returned without retry");
+            assert_eq!(resp.status(), status);
+            assert_eq!(
+                count.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "status {status} must not be retried"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_transport_retry_retries_connection_failure() {
+        // A server that accepts and then closes without responding produces a
+        // transient transport error (EOF / connection closed). The request
+        // must be retried up to LLM_TRANSPORT_RETRY_ATTEMPTS times.
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = Arc::clone(&count);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                count2.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 8192];
+                // Consume the request, then close without a response.
+                let _ = stream.read(&mut buf);
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("build client");
+        let err = send_with_transport_retry(
+            client
+                .post(format!("http://{addr}/chat/completions"))
+                .json(&serde_json::json!({"model": "t"})),
+        )
+        .await
+        .expect_err("all retries must be exhausted");
+        assert!(
+            classify_transport_error(&err).is_some(),
+            "final error must still be a transport error: {err}"
+        );
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            LLM_TRANSPORT_RETRY_ATTEMPTS as usize,
+            "transient connection failure must be retried LLM_TRANSPORT_RETRY_ATTEMPTS times"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_transport_retry_does_not_retry_builder_error() {
+        // An invalid URL is a deterministic request-build failure: it must
+        // not be retried and classify_transport_error must reject it.
+        let client = reqwest::Client::new();
+        let err = send_with_transport_retry(client.post("not a valid url"))
+            .await
+            .expect_err("invalid URL must fail");
+        assert!(err.is_builder());
+        assert_eq!(classify_transport_error(&err), None);
+    }
+
+    #[tokio::test]
+    async fn test_completion_429_still_returns_rate_limited() {
+        // The existing 429 → Error::RateLimited path is unchanged: a 429
+        // response surfaces as RateLimited { retry_after } and is NOT retried
+        // at the transport layer.
+        let (base, count) = spawn_http_server(|_| {
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 7\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                .to_string()
+        });
+        let config = LLMConfig {
+            provider: ProviderId::new("test-provider"),
+            api_mode: ApiMode::ChatCompletions,
+            api_key: "test-key".to_string(),
+            base_url: base,
+            model: "test-model".to_string(),
+            max_tokens: 128,
+            temperature: 0.0,
+            supports_reasoning: false,
+        };
+        let client = LLMClient::new(config);
+        let request = CompletionRequest {
+            messages: vec![ChatMessage::user("hi")],
+            max_tokens: 128,
+            temperature: 0.0,
+            stream: false,
+            tools: None,
+        };
+        let err = client
+            .completion(request)
+            .await
+            .expect_err("429 must error");
+        match &err {
+            Error::RateLimited { retry_after } => {
+                assert_eq!(*retry_after, Some(7));
+            }
+            other => panic!("expected RateLimited, got: {other}"),
+        }
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "429 must not be retried at the transport layer"
         );
     }
 }
