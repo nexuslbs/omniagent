@@ -450,10 +450,7 @@ async fn main() -> Result<()> {
                             "type": "string",
                             "description": "Optional assignee name"
                         },
-                        "channel_id": {
-                            "type": "integer",
-                            "description": "Optional channel ID for thread/cause creation (default: current channel)"
-                        },
+                        "channel_id": { "type": "string", "description": "Optional channel name for thread/cause creation (default: current channel)" },
                         "profile": {
                             "type": "string",
                             "description": "Optional profile name for the task (default: current profile)"
@@ -520,10 +517,7 @@ async fn main() -> Result<()> {
                             "type": "string",
                             "description": "New assignee"
                         },
-                        "channel_id": {
-                            "type": "integer",
-                            "description": "New channel ID"
-                        },
+                        "channel_id": { "type": "string", "description": "New channel name" },
                         "profile": {
                             "type": "string",
                             "description": "New profile name"

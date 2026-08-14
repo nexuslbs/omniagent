@@ -331,7 +331,7 @@ async fn main() -> Result<()> {
                         "schedule": { "type": "string", "description": "Cron schedule expression in 5-field Linux format (min hour day month weekday)" },
                         "prompt": { "type": "string", "description": "The prompt/message to execute when the cron job triggers" },
                         "skills": { "type": "string", "description": "Optional comma-separated list of skill names" },
-                        "channel_id": { "type": "integer", "description": "Optional channel ID (default: current channel)" },
+                        "channel_id": { "type": "string", "description": "Optional channel name (default: current channel)" },
                         "profile": { "type": "string", "description": "Optional profile name (default: current profile)" },
                         "mode": { "type": "string", "description": "Job mode: 'agentic' (default) or 'action'" },
                         "action_id": { "type": "string", "description": "For mode='action': the action ID to execute" },

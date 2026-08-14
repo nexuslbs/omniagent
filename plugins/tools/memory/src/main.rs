@@ -1055,10 +1055,7 @@ async fn main() -> Result<()> {
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "channel_id": {
-                            "type": "integer",
-                            "description": "Channel ID to generate summary for"
-                        }
+                        "channel_id": { "type": "string", "description": "Channel name to generate summary for" }
                     },
                     "required": ["channel_id"]
                 }),

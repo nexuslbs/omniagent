@@ -318,10 +318,7 @@ async fn main() -> Result<()> {
                             "description": "Max results (max 50)",
                             "default": 10
                         },
-                        "channel_id": {
-                            "type": "integer",
-                            "description": "Optional channel ID filter"
-                        }
+                        "channel_id": { "type": "string", "description": "Optional channel name filter" }
                     },
                     "required": ["query"]
                 }),

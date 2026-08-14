@@ -1928,10 +1928,7 @@ async fn main() -> Result<()> {
                             "type": "integer",
                             "description": "Thread ID for context assembly (recent messages, subtasks)"
                         },
-                        "channel_id": {
-                            "type": "integer",
-                            "description": "Channel ID for context assembly (summaries)"
-                        },
+                        "channel_id": { "type": "string", "description": "Channel name for context assembly (summaries)" },
                         "plan": {
                             "type": "boolean",
                             "description": "Plan mode suggestion: true=plan, false=no plan, null=let plugin decide based on config"

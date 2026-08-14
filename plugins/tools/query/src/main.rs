@@ -815,10 +815,7 @@ channels use search_messages instead."
                             "type": "string",
                             "description": "Search text to find semantically similar messages"
                         },
-                        "channel_id": {
-                            "type": "integer",
-                            "description": "Channel ID filter (default: current channel)"
-                        },
+                        "channel_id": { "type": "string", "description": "Channel name filter (default: current channel)" },
                         "limit": {
                             "type": "integer",
                             "description": "Max results (max 50)",
@@ -864,10 +861,7 @@ to the CURRENT channel; pass channel_id for a different one."
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "channel_id": {
-                            "type": "integer",
-                            "description": "Channel ID (default: current channel)"
-                        },
+                        "channel_id": { "type": "string", "description": "Channel name (default: current channel)" },
                         "limit": {
                             "type": "integer",
                             "description": "Max results (max 50)",

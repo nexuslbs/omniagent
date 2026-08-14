@@ -5,20 +5,28 @@
 //
 // ── channels ──────────────────────────────────────────────────────────────
 //
-// Stores communication channels (e.g., Telegram group/channel, cron jobs).
+// Channel definitions AND runtime state live in {data_dir}/config/channels.yml
+// (git-tracked; see src/channels_yaml.rs). There is NO `channels` database
+// table and NO foreign keys referencing it — the channels TABLE AND ALL FKs
+// WERE DROPPED. The YAML map key is the channel NAME: the stable identifier
+// used everywhere — the API channel id, the threads/messages/kanban_tasks/
+// summaries channel_id column (TEXT holding the name), and tasks.yml
+// `channel:` references. This mirrors the established pattern of referencing
+// yml keys by key string: threads.schedule_task_id holds the tasks.yml key,
+// threads.workflow_id holds the workflows.yml key, threads.task_id holds the
+// kanban task id.
 //
-//  id          BIGSERIAL PRIMARY KEY        -- auto-incrementing
-//  name        TEXT NOT NULL                -- e.g. "user-lucas", "cron-daily-backup"
-//  platform    TEXT NOT NULL                -- e.g. "telegram", "cron"
-//  external_id TEXT NOT NULL                -- e.g. Telegram chat ID (legacy, same as resource_identifier)
-//  resource_identifier TEXT                 -- identifier within the platform (chat_id, session id, etc.)
-//  cause       TEXT NOT NULL                -- 'user' or 'cron'
-//  metadata    JSONB DEFAULT '{}'           -- arbitrary metadata
-//  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-//  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+// Each channels.yml entry uses BARE field names (no metadata, no external_id,
+// no planning_mode, no timestamps):
 //
-//  UNIQUE(platform, external_id)
-//  UNIQUE(platform, resource_identifier)
+//  <channel name>:
+//    resource_identifier: <identifier within the platform>  -- e.g. chat_id, session id
+//    platform:            <e.g. "telegram", "cron", "cli">  -- platform-less channel = cli
+//    cause:               <'user' | 'system' | 'cron'>
+//    profile:             <profile name>
+//    model:               <model name>
+//    provider:            <provider name>
+//    plan:                <true | false>                    -- single plan bool
 //
 // ── messages ──────────────────────────────────────────────────────────────
 //
@@ -26,7 +34,7 @@
 // calls. Messages are grouped into threads for conversation tracking.
 //
 //  id               BIGSERIAL PRIMARY KEY           -- auto-incrementing
-//  channel_id       BIGINT NOT NULL REFERENCES channels(id) ON DELETE CASCADE
+//  channel_id       TEXT NOT NULL                   -- channel NAME (key into channels.yml)
 //  role             TEXT NOT NULL                   -- 'cause', 'agent', 'system', 'tool'
 //  content          TEXT NOT NULL                   -- message body
 //  status           TEXT NOT NULL DEFAULT 'pending'
@@ -48,6 +56,14 @@
 //
 //  UNIQUE(channel_id, external_id)
 //  INDEX(thread_id, thread_sequence)
+//
+// ── Dependent tables ──────────────────────────────────────────────────────
+//
+// threads.channel_id, messages.channel_id, kanban_tasks.channel_id and
+// summaries.channel_id are TEXT columns holding the channel NAME (key into
+// channels.yml). There are NO FK constraints referencing channels — the name
+// IS the reference, exactly like threads.schedule_task_id / workflow_id /
+// task_id reference their respective yml keys.
 //
 // ── Indexes ───────────────────────────────────────────────────────────────
 //
