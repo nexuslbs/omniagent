@@ -1981,6 +1981,9 @@ async fn reset_workflow_executions_handler(
 struct DispatchTaskRow {
     id: String,
     title: String,
+    /// Channel name (yml key) the task targets; needed to gate dispatch on
+    /// the channel's active threads without a per-task detail fetch.
+    channel_id: Option<String>,
 }
 
 /// Full row needed to actually dispatch the picked task.
@@ -2021,9 +2024,58 @@ fn deps_satisfied(deps: &[DepState]) -> bool {
     })
 }
 
-/// Index of the first task whose dependencies are all satisfied.
-fn first_eligible_index(task_deps: &[Vec<DepState>]) -> Option<usize> {
-    task_deps.iter().position(|deps| deps_satisfied(deps))
+/// Index of the first task that is BOTH dependency-eligible AND whose channel
+/// has no active (queued/running) thread. `channel_active_counts[i]` is the
+/// number of active threads on candidate i's channel (0 = free to dispatch).
+fn first_dispatchable_index(
+    task_deps: &[Vec<DepState>],
+    channel_active_counts: &[i64],
+) -> Option<usize> {
+    task_deps
+        .iter()
+        .zip(channel_active_counts)
+        .position(|(deps, &active)| deps_satisfied(deps) && active == 0)
+}
+
+/// Number of ACTIVE (queued/running) threads on a channel.
+///
+/// The dispatch gate blocks a channel that has any of these — the in-flight
+/// task's full workflow (executor -> tester -> reviewer -> done) must finish
+/// before the next task on the same channel begins. The filter is STATUS-based
+/// (`pending` = queued, `processing` = running) — deliberately NOT
+/// terminal-based: an operator stop leaves `skipped` threads with
+/// terminal=false, and a terminal gate would block dispatch on that channel
+/// forever. The `idx_threads_channel_status (channel_id, status)` index keeps
+/// the count cheap.
+async fn channel_active_thread_count(
+    pool: &sqlx::PgPool,
+    channel_id: &str,
+) -> Result<i64, sqlx::Error> {
+    let count: i64 = sql_forge!(
+        scalar i64,
+        r#"
+        SELECT COUNT(*) FROM threads
+        WHERE channel_id = :channel_id AND status IN ('pending', 'processing')
+        "#,
+        ( :channel_id = channel_id )
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
+}
+
+/// Resolve the effective channel NAME for a task: the explicit task channel
+/// wins (even when unknown — the caller then fails the thread with "channel
+/// not found"), else the `default_kanban_channel` setting, else "".
+fn resolve_task_channel(task_channel: Option<&str>) -> String {
+    match task_channel {
+        Some(id) => {
+            crate::channels_yaml::resolve_default_channel(Some(id), "default_kanban_channel")
+                .unwrap_or_default()
+        }
+        None => crate::channels_yaml::resolve_default_channel(None, "default_kanban_channel")
+            .unwrap_or_default(),
+    }
 }
 
 /// Build the thread body from a task's title and body (body may be empty).
@@ -2073,13 +2125,16 @@ fn resolve_profile(
 ///
 /// Promote the highest-priority eligible `todo` task to `ready` and start a
 /// thread for it. A task is eligible when every non-archived dependency is
-/// `done`. Returns `{"dispatched": false}` when nothing is eligible.
+/// `done` AND its channel has no active (queued/running) thread — the channel
+/// gate lets the current task's full workflow (executor -> tester -> reviewer
+/// -> done) finish before the next task on the same channel begins. Returns
+/// `{"dispatched": false}` when nothing is eligible.
 async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // 1. Scan 'todo' tasks in priority order.
     let tasks = match sql_forge!(
         DispatchTaskRow,
         r#"
-        SELECT id, title
+        SELECT id, title, channel_id
         FROM kanban_tasks
         WHERE status = :status
         ORDER BY priority ASC, position ASC
@@ -2099,7 +2154,7 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         }
     };
 
-    // 2. Resolve dependency state for each candidate; pick the first eligible.
+    // 2. Resolve dependency state for each candidate.
     let mut all_deps: Vec<Vec<DepState>> = Vec::with_capacity(tasks.len());
     for task in &tasks {
         let dep_ids = match sql_forge!(
@@ -2158,12 +2213,56 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         all_deps.push(dep_states);
     }
 
-    let picked = match first_eligible_index(&all_deps).and_then(|i| tasks.get(i)) {
+    // 2b. Channel-busy gate: skip candidates whose channel has an active
+    // (queued/running) thread — the status-based gate, NOT terminal-based (an
+    // operator stop leaves `skipped` threads with terminal=false, and a
+    // terminal gate would block dispatch on that channel forever). Skipping a
+    // busy channel lets the in-flight task's full workflow (executor ->
+    // tester -> reviewer -> done) finish before the next task on the same
+    // channel begins. Pick the first task that is BOTH dependency-eligible
+    // AND channel-free.
+    let mut channel_active_counts: Vec<i64> = Vec::with_capacity(tasks.len());
+    let mut busy_channel: Option<(String, i64)> = None;
+    for (i, task) in tasks.iter().enumerate() {
+        // A dependency-blocked candidate can never be picked; its channel
+        // state is irrelevant (0 keeps the index alignment).
+        if !deps_satisfied(&all_deps[i]) {
+            channel_active_counts.push(0);
+            continue;
+        }
+        let channel_id = resolve_task_channel(task.channel_id.as_deref());
+        let active = match channel_active_thread_count(&state.pool, &channel_id).await {
+            Ok(n) => n,
+            Err(e) => {
+                error!(
+                    "[kanban/dispatch] failed to count active threads for channel {}: {:?}",
+                    channel_id, e
+                );
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to count active threads for channel {channel_id}: {e}"),
+                );
+            }
+        };
+        if busy_channel.is_none() && active > 0 {
+            busy_channel = Some((channel_id, active));
+        }
+        channel_active_counts.push(active);
+    }
+
+    let picked = match first_dispatchable_index(&all_deps, &channel_active_counts)
+        .and_then(|i| tasks.get(i))
+    {
         Some(task) => task,
         None => {
             return ok_json(serde_json::json!({
                 "dispatched": false,
-                "message": "No eligible kanban tasks",
+                "message": match busy_channel {
+                    Some((channel_id, active)) => format!(
+                        "Channel busy: {channel_id} has {active} active thread(s)"
+                    ),
+                    None => "No eligible kanban tasks".to_string(),
+                },
             }));
         }
     };
@@ -2194,14 +2293,7 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         }
     };
 
-    let channel_id = match detail.channel_id {
-        Some(id) => {
-            crate::channels_yaml::resolve_default_channel(Some(&id), "default_kanban_channel")
-                .unwrap_or_default()
-        }
-        None => crate::channels_yaml::resolve_default_channel(None, "default_kanban_channel")
-            .unwrap_or_default(),
-    };
+    let channel_id = resolve_task_channel(detail.channel_id.as_deref());
 
     // 4. Resolve channel, profile, provider/model and template.
     let channel = match get_channel_by_id(&state.pool, &channel_id).await {
@@ -2340,11 +2432,11 @@ mod tests {
         // A task whose dependency is still 'todo' is not eligible -> no dispatch.
         let blocked = vec![Some(("todo".to_string(), Some(false)))];
         assert!(!deps_satisfied(&blocked));
-        assert_eq!(first_eligible_index(&[blocked]), None);
+        assert_eq!(first_dispatchable_index(&[blocked], &[0]), None);
 
         // Missing dependency rows also block.
         assert!(!deps_satisfied(&[None]));
-        assert_eq!(first_eligible_index(&[vec![None]]), None);
+        assert_eq!(first_dispatchable_index(&[vec![None]], &[0]), None);
     }
 
     #[test]
@@ -2356,11 +2448,12 @@ mod tests {
             vec![Some(("done".to_string(), Some(false)))],
             vec![],
         ];
-        assert_eq!(first_eligible_index(&task_deps), Some(1));
+        // All channels free -> same result as the old dep-only picker.
+        assert_eq!(first_dispatchable_index(&task_deps, &[0, 0, 0]), Some(1));
 
         // All blocked -> None (dispatched: false).
         let all_blocked = vec![vec![Some(("todo".to_string(), Some(false)))], vec![None]];
-        assert_eq!(first_eligible_index(&all_blocked), None);
+        assert_eq!(first_dispatchable_index(&all_blocked, &[0, 0]), None);
 
         // Archived dependencies never block, regardless of status.
         let archived = vec![
@@ -2368,6 +2461,54 @@ mod tests {
             Some(("backlog".to_string(), Some(true))),
         ];
         assert!(deps_satisfied(&archived));
+    }
+
+    /// Mirror of the gate's status filter in `channel_active_thread_count`:
+    /// only queued (`pending`) or running (`processing`) threads count as
+    /// active. Kept in sync with the SQL.
+    fn active_thread_count(statuses: &[&str]) -> i64 {
+        statuses
+            .iter()
+            .copied()
+            .filter(|s| matches!(*s, "pending" | "processing"))
+            .count() as i64
+    }
+
+    #[test]
+    fn dispatch_channel_busy_gate_status_based() {
+        // (a) A queued thread on the channel blocks dispatch.
+        assert_eq!(active_thread_count(&["pending"]), 1);
+        // (b) A running thread on the channel blocks dispatch.
+        assert_eq!(active_thread_count(&["processing"]), 1);
+        assert_eq!(active_thread_count(&["pending", "processing"]), 2);
+        // (c) Terminal-status threads never block dispatch.
+        assert_eq!(
+            active_thread_count(&["completed", "failed", "skipped", "interrupted", "created"]),
+            0
+        );
+        // (d) Regression: an operator-stop `skipped` thread with
+        // terminal=false does NOT block — the gate never looks at `terminal`.
+        assert_eq!(active_thread_count(&["skipped"]), 0);
+    }
+
+    #[test]
+    fn dispatch_channel_busy_gate_picks_first_free_channel() {
+        // All candidates dependency-eligible.
+        let free = vec![vec![], vec![], vec![]];
+        // (a)+(b): first candidate's channel has a queued/running thread ->
+        // skipped in favor of the next channel-free candidate.
+        assert_eq!(first_dispatchable_index(&free, &[1, 0]), Some(1));
+        assert_eq!(first_dispatchable_index(&free, &[2, 0]), Some(1));
+        // (c): only terminal threads on the channels -> first candidate wins.
+        assert_eq!(first_dispatchable_index(&free, &[0, 0, 0]), Some(0));
+        // (d): a skipped thread is NOT counted -> channel free, dispatched.
+        assert_eq!(first_dispatchable_index(&free, &[0, 1]), Some(0));
+        // A dependency-blocked candidate is skipped even when its channel is
+        // free; the first free dep-eligible candidate is picked.
+        let mixed = vec![vec![Some(("todo".to_string(), Some(false)))], vec![]];
+        assert_eq!(first_dispatchable_index(&mixed, &[0, 0]), Some(1));
+        // All channels busy -> None (dispatch returns dispatched:false).
+        assert_eq!(first_dispatchable_index(&free, &[1, 1, 1]), None);
     }
 
     #[test]
