@@ -440,4 +440,99 @@ channels:
         assert!(validate_channel("x", &bad_cause).is_err());
         assert!(validate_channel("", &ChannelDef::default()).is_err());
     }
+
+    // ── default channel resolution (explicit -> default setting -> '') ──
+
+    /// Ensure a global data dir exists for the resolution tests. The
+    /// OnceLock global may already be set by an earlier test in this
+    /// process; fixtures are upserted into whatever dir is current (the
+    /// channels.yml writer is serialized by the save lock, so concurrent
+    /// fixture writes merge safely).
+    fn ensure_global_data_dir() -> String {
+        if let Some(d) = data_dir() {
+            return d.to_string();
+        }
+        let d = std::env::temp_dir().join(format!("channelsyml-rdc-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        set_data_dir(d.to_str().unwrap());
+        d.to_str().unwrap().to_string()
+    }
+
+    fn seed_platformless_channel(name: &str) {
+        update_channel(name, |_| {
+            Ok(ChannelDef {
+                cause: "system".to_string(),
+                ..Default::default()
+            })
+        })
+        .expect("seed channel");
+    }
+
+    fn write_settings_yml(content: &str) {
+        let dir = data_dir().expect("global data dir");
+        std::fs::create_dir_all(std::path::Path::new(dir).join("config")).unwrap();
+        std::fs::write(
+            std::path::Path::new(dir)
+                .join("config")
+                .join("settings.yml"),
+            content,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resolve_default_channel_resolution_chain() {
+        let _ = ensure_global_data_dir();
+        seed_platformless_channel("cron");
+        seed_platformless_channel("kanban");
+
+        // No default configured -> None (empty channel -> fail-with-record).
+        write_settings_yml("general:\n  x: 1\n");
+        assert_eq!(
+            resolve_default_channel(None, "default_schedule_channel"),
+            None
+        );
+
+        // Explicit channel always wins (unknown names too — the caller then
+        // fails with "channel not found" instead of substituting a default).
+        assert_eq!(
+            resolve_default_channel(Some("kanban"), "default_schedule_channel").as_deref(),
+            Some("kanban")
+        );
+        assert_eq!(
+            resolve_default_channel(Some("no-such-channel"), "default_schedule_channel").as_deref(),
+            Some("no-such-channel")
+        );
+
+        // Default settings resolve to known channels.yml names.
+        write_settings_yml(
+            "channels:\n  default_schedule_channel: cron\n  default_kanban_channel: kanban\n",
+        );
+        assert_eq!(
+            resolve_default_channel(Some("   "), "default_schedule_channel").as_deref(),
+            Some("cron"),
+            "whitespace explicit falls through to the default setting"
+        );
+        assert_eq!(
+            resolve_default_channel(None, "default_schedule_channel").as_deref(),
+            Some("cron")
+        );
+        assert_eq!(
+            resolve_default_channel(None, "default_kanban_channel").as_deref(),
+            Some("kanban")
+        );
+
+        // A default naming a missing channel -> None (no silent substitution;
+        // the thread is created empty and fails with "no channel defined").
+        write_settings_yml("channels:\n  default_schedule_channel: missing-channel\n");
+        assert_eq!(
+            resolve_default_channel(None, "default_schedule_channel"),
+            None
+        );
+        assert_eq!(
+            resolve_default_channel(Some("cron"), "default_schedule_channel").as_deref(),
+            Some("cron"),
+            "explicit still wins over a broken default setting"
+        );
+    }
 }

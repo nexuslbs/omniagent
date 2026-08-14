@@ -720,6 +720,35 @@ fn enrich_channel_options(meta: &mut SettingMeta, data_dir: &str) {
     );
 }
 
+/// Known writable setting names (everything except bootstrap env vars).
+fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
+    [
+        "max_tokens",
+        "temperature",
+        "max_iterations_no_plan",
+        "max_iterations_plan",
+        "max_unfinished_subtask_retries",
+        "prompt_generate_tool",
+        "prompt_compact_messages_tool",
+        "delete_after_days",
+        "thread_summary_tokens",
+        "memory_max_chars",
+        "soul_max_chars",
+        "default_provider",
+        "max_inline_file_kb",
+        "tool_bg_secs",
+        "prompt_log_level",
+        "platform_max_spawn_retries",
+        "default_profile",
+        "default_cli_channel",
+        "default_schedule_channel",
+        "default_hook_channel",
+        "default_kanban_channel",
+    ]
+    .into_iter()
+    .collect()
+}
+
 // ── Handlers ──
 
 /// GET /settings: return all settings organized by category.
@@ -824,31 +853,7 @@ pub async fn update_settings_handler(
     }
 
     // Known writable setting names (everything except bootstrap env vars)
-    let writable_keys: std::collections::HashSet<&str> = [
-        "max_tokens",
-        "temperature",
-        "max_iterations_no_plan",
-        "max_iterations_plan",
-        "max_unfinished_subtask_retries",
-        "prompt_generate_tool",
-        "prompt_compact_messages_tool",
-        "delete_after_days",
-        "thread_summary_tokens",
-        "memory_max_chars",
-        "soul_max_chars",
-        "default_provider",
-        "max_inline_file_kb",
-        "tool_bg_secs",
-        "prompt_log_level",
-        "platform_max_spawn_retries",
-        "default_profile",
-        "default_cli_channel",
-        "default_schedule_channel",
-        "default_hook_channel",
-        "default_kanban_channel",
-    ]
-    .into_iter()
-    .collect();
+    let writable_keys = writable_setting_keys();
 
     // Load current settings.yml values
     let data_dir = state.data_dir.clone();
@@ -898,5 +903,77 @@ pub async fn update_settings_handler(
                 Json(serde_json::json!({ "error": e })),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ensure_global_data_dir() {
+        if crate::channels_yaml::data_dir().is_none() {
+            let d = std::env::temp_dir().join(format!("settings-tests-{}", std::process::id()));
+            std::fs::create_dir_all(&d).unwrap();
+            crate::channels_yaml::set_data_dir(d.to_str().unwrap());
+        }
+    }
+
+    #[test]
+    fn default_channel_settings_are_writable_selects() {
+        let defs = get_all_setting_definitions();
+        let by_name: std::collections::HashMap<&str, &SettingMeta> =
+            defs.iter().map(|(n, m)| (n.as_str(), m)).collect();
+        for (name, expected_default) in [
+            ("default_cli_channel", ""),
+            ("default_schedule_channel", "cron"),
+            ("default_hook_channel", ""),
+            ("default_kanban_channel", "kanban"),
+        ] {
+            let meta = by_name
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} must be defined"));
+            assert_eq!(meta.field_type, "select", "{name} is a select");
+            assert!(!meta.readonly, "{name} is writable");
+            assert_eq!(meta.default.as_deref(), Some(expected_default));
+        }
+    }
+
+    #[test]
+    fn default_channel_keys_are_in_writable_whitelist() {
+        let keys = writable_setting_keys();
+        for name in [
+            "default_cli_channel",
+            "default_schedule_channel",
+            "default_hook_channel",
+            "default_kanban_channel",
+        ] {
+            assert!(keys.contains(name), "{name} must be writable");
+        }
+    }
+
+    #[test]
+    fn enrich_channel_options_builds_from_channel_store() {
+        ensure_global_data_dir();
+        crate::channels_yaml::update_channel("settings-enrich-test", |_| {
+            Ok(crate::channels_yaml::ChannelDef {
+                cause: "system".to_string(),
+                ..Default::default()
+            })
+        })
+        .expect("seed channel into channels.yml");
+        let mut meta = SettingMeta {
+            field_type: "select".into(),
+            description: "test".into(),
+            options: None,
+            readonly: false,
+            default: None,
+        };
+        enrich_channel_options(&mut meta, "/nonexistent");
+        let options = meta.options.expect("options must be enriched");
+        assert!(
+            options.iter().any(|o| o.id == "settings-enrich-test"),
+            "options must include channels.yml channels: {:?}",
+            options
+        );
     }
 }
