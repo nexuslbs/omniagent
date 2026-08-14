@@ -375,6 +375,37 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .await
         .ok();
     tracing::info!("[migration] Dropped cron_jobs + hooks (definitions now in config/tasks.yml)");
+
+    // ── Terminal status invariant ──────────────────────────────────────────
+    // Every thread in a terminal status (skipped/completed/failed/interrupted/
+    // system) MUST have terminal=true — enforced structurally so a terminal
+    // row can never look like active work to code checking `terminal` (e.g. a
+    // dispatch gate `WHERE terminal = false` would block a channel forever).
+    // Backfill FIRST: pre-existing bad rows (e.g. operator-stop skips written
+    // before the invariant) would make ADD CONSTRAINT fail.
+    sqlx::query(
+        "UPDATE threads SET terminal = true \
+         WHERE status IN ('skipped', 'completed', 'failed', 'interrupted', 'system') \
+           AND NOT terminal",
+    )
+    .execute(pool)
+    .await
+    .ok();
+    sqlx::query(
+        r#"DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_thread_terminal_status') THEN
+                ALTER TABLE threads ADD CONSTRAINT chk_thread_terminal_status
+                    CHECK (status NOT IN ('skipped', 'completed', 'failed', 'interrupted', 'system') OR terminal = true);
+            END IF;
+        END $$;"#,
+    )
+    .execute(pool)
+    .await
+    .ok();
+    tracing::info!(
+        "[migration] Terminal status invariant: threads backfilled + CHECK constraint chk_thread_terminal_status added"
+    );
+
     Ok(())
 }
 

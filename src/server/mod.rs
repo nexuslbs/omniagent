@@ -329,34 +329,30 @@ async fn stop_handler(
         }
     };
 
-    // 2. Mark them all as skipped (plain skip - no reschedule, no re-run thread)
-    let skipped = match     sql_forge!(
-        "UPDATE threads SET status = 'skipped' WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
-        ( :channel_id = channel_id.as_str() )
-    )
-    .execute(&state.pool)
-    .await
-    {
-        Ok(res) => {
-            info!(
-                "Stop: skipped {} pending/processing threads for channel {}",
-                res.rows_affected(),
-                channel_id
-            );
-            res.rows_affected()
+    // 2. Mark them all as skipped (plain skip - no reschedule, no re-run thread).
+    //    Every terminal write funnels through queries::mark_thread_terminal so
+    //    the terminal=true invariant holds on the skipped rows.
+    let mut skipped = 0u64;
+    for row in &threads {
+        match queries::mark_thread_terminal(&state.pool, row.id, "skipped").await {
+            Ok(n) => skipped += n,
+            Err(e) => {
+                error!(
+                    "Stop: failed to skip thread {} for channel {}: {:?}",
+                    row.id, channel_id, e
+                );
+                return Json(serde_json::json!({
+                    "status": "error",
+                    "error": e.to_string(),
+                    "channel_id": channel_id,
+                }));
+            }
         }
-        Err(e) => {
-            error!(
-                "Stop: failed to skip threads for channel {}: {:?}",
-                channel_id, e
-            );
-            return Json(serde_json::json!({
-                "status": "error",
-                "error": e.to_string(),
-                "channel_id": channel_id,
-            }));
-        }
-    };
+    }
+    info!(
+        "Stop: skipped {} pending/processing threads for channel {}",
+        skipped, channel_id
+    );
 
     // 3. Phase 6b: block the kanban tasks of the skipped threads
     let mut blocked = 0u32;
@@ -538,34 +534,30 @@ async fn close_handler(
         }
     };
 
-    // 2. Mark them all as skipped (plain skip - no reschedule, no re-run thread)
-    let skipped = match     sql_forge!(
-        "UPDATE threads SET status = 'skipped' WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
-        ( :channel_id = channel_id.as_str() )
-    )
-    .execute(&state.pool)
-    .await
-    {
-        Ok(res) => {
-            info!(
-                "Close: skipped {} pending/processing threads for channel {}",
-                res.rows_affected(),
-                channel_id
-            );
-            res.rows_affected()
+    // 2. Mark them all as skipped (plain skip - no reschedule, no re-run thread).
+    //    Every terminal write funnels through queries::mark_thread_terminal so
+    //    the terminal=true invariant holds on the skipped rows.
+    let mut skipped = 0u64;
+    for row in &threads {
+        match queries::mark_thread_terminal(&state.pool, row.id, "skipped").await {
+            Ok(n) => skipped += n,
+            Err(e) => {
+                error!(
+                    "Close: failed to skip thread {} for channel {}: {:?}",
+                    row.id, channel_id, e
+                );
+                return Json(serde_json::json!({
+                    "status": "error",
+                    "error": e.to_string(),
+                    "channel_id": channel_id,
+                }));
+            }
         }
-        Err(e) => {
-            error!(
-                "Close: failed to skip threads for channel {}: {:?}",
-                channel_id, e
-            );
-            return Json(serde_json::json!({
-                "status": "error",
-                "error": e.to_string(),
-                "channel_id": channel_id,
-            }));
-        }
-    };
+    }
+    info!(
+        "Close: skipped {} pending/processing threads for channel {}",
+        skipped, channel_id
+    );
 
     // 3. Phase 6b: block the kanban tasks of the skipped threads
     let mut blocked = 0u32;

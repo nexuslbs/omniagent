@@ -1875,24 +1875,9 @@ async fn handle_message_deleted(
 
     match info.status.as_str() {
         "pending" | "processing" => {
-            // Skip the thread: marks it as skipped + terminal
-            sql_forge!(
-                r#"
-                UPDATE threads
-                SET status = 'skipped',
-                    ended_at = NOW(),
-                    terminal = true,
-                    iterations = COALESCE(
-                        (SELECT MAX(iteration_number) FROM messages WHERE thread_id = :id),
-                        0
-                    )
-                WHERE id = :id
-                  AND status IN ('pending', 'processing')
-                "#,
-                ( :id = info.id )
-            )
-            .execute(pool)
-            .await?;
+            // Skip the thread: marks it as skipped + terminal via the single
+            // terminal-write choke point (status + ended_at + terminal=true).
+            crate::db::threads::mark_thread_terminal(pool, info.id, "skipped").await?;
 
             tracing::info!(
                 "message_deleted: skipped thread {} (was {}) due to seq-0 message deletion",

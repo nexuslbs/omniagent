@@ -85,12 +85,8 @@ where
 /// Set a thread's status to 'system' (terminal: init messages like /start).
 /// These threads should never be picked up by the executor.
 pub async fn set_thread_system(pool: &PgPool, thread_id: i64) -> AppResult<()> {
-    sql_forge!(
-        "UPDATE threads SET status = 'system', terminal = true WHERE id = :id",
-        ( :id = thread_id )
-    )
-    .execute(pool)
-    .await?;
+    // Single choke point: status + ended_at + terminal=true + iterations.
+    mark_thread_terminal(pool, thread_id, "system").await?;
     // Event-driven hooks: fire thread_finished (fire-and-forget, isolated).
     crate::hooks::fire_thread_finished(thread_id);
     Ok(())
@@ -100,12 +96,8 @@ pub async fn set_thread_system(pool: &PgPool, thread_id: i64) -> AppResult<()> {
 /// These threads should never be picked up by the executor.
 #[allow(dead_code)]
 pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> AppResult<()> {
-    sql_forge!(
-        "UPDATE threads SET status = 'failed', terminal = true WHERE id = :id",
-        ( :id = thread_id )
-    )
-    .execute(pool)
-    .await?;
+    // Single choke point: status + ended_at + terminal=true + iterations.
+    mark_thread_terminal(pool, thread_id, "failed").await?;
     // Event-driven hooks: fire thread_finished (fire-and-forget, isolated).
     crate::hooks::fire_thread_finished(thread_id);
     Ok(())
@@ -292,12 +284,19 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
         }
     };
 
-    sql_forge!(
-        "UPDATE threads SET status = :status WHERE id = :id AND NOT terminal",
-        ( :status = thread_status, :id = msg.thread_id )
-    )
-    .execute(&mut *tx)
-    .await?;
+    // 'pending' is NOT a terminal status: a plain status flip is enough.
+    // 'skipped' IS terminal — route it through the single choke point
+    // (mark_thread_terminal) so terminal=true is always set with it.
+    if thread_status == "skipped" {
+        mark_thread_terminal(&mut *tx, msg.thread_id, "skipped").await?;
+    } else {
+        sql_forge!(
+            "UPDATE threads SET status = :status WHERE id = :id AND NOT terminal",
+            ( :status = thread_status, :id = msg.thread_id )
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
 
     // R3 (Phase 6): channel closure/deletion is a pre-start/external skip — it
     // NEVER consumes retry and NEVER moves the task back to 'todo' (the old
@@ -872,12 +871,8 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: &str) -> AppResult<
 
     for t in &threads {
         let mut tx = pool.begin().await?;
-        sql_forge!(
-            "UPDATE threads SET status = 'skipped' WHERE id = :id",
-            ( :id = t.id )
-        )
-        .execute(&mut *tx)
-        .await?;
+        // Terminal write: single choke point sets terminal=true with 'skipped'.
+        mark_thread_terminal(&mut *tx, t.id, "skipped").await?;
 
         if let Some(ref task_id) = t.task_id {
             #[derive(sqlx::FromRow)]
@@ -955,21 +950,59 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: &str) -> AppResult<
     Ok(threads.len())
 }
 
-/// Skip a single pending/processing thread by setting its status to 'skipped'.
-pub async fn skip_thread(pool: &PgPool, thread_id: i64) -> AppResult<u64> {
+/// Mark a thread terminal: set status + ended_at + terminal=true + iterations.
+///
+/// THE single choke point for every write that flips a thread into a terminal
+/// status ('skipped' / 'failed' / 'interrupted' / 'completed' / 'system'). The
+/// DB CHECK constraint `chk_thread_terminal_status` enforces the same
+/// invariant structurally: a terminal-status row MUST have terminal=true, so a
+/// skipped/completed/failed thread can never look like active work to code
+/// checking `terminal` (e.g. a dispatch gate `WHERE terminal = false`).
+///
+/// `executor` accepts either a `&PgPool` or a `&mut PgTransaction` (both
+/// implement `sqlx::Executor`), so single-thread writes and batch loops
+/// (channel-wide skips, startup recovery, closed-channel skips) all funnel
+/// through the same statement. Only `NOT terminal` rows are touched: an
+/// already-terminal thread is never re-flipped.
+pub async fn mark_thread_terminal<'e, E>(
+    executor: E,
+    thread_id: i64,
+    status: &str,
+) -> AppResult<u64>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let result = sql_forge!(
-        "UPDATE threads SET status = 'skipped', ended_at = NOW(), terminal = true, iterations = COALESCE((SELECT MAX(iteration_number) FROM messages WHERE thread_id = :id), 0) WHERE id = :id AND status IN ('pending', 'processing')",
-        ( :id = thread_id )
+        r#"
+        UPDATE threads
+        SET status = :status,
+            ended_at = NOW(),
+            iterations = COALESCE(
+                (SELECT MAX(iteration_number) FROM messages WHERE thread_id = :id),
+                0
+            ),
+            terminal = true
+        WHERE id = :id AND NOT terminal
+        "#,
+        ( :status = status, :id = thread_id )
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
 
-    if result.rows_affected() > 0 {
+    Ok(result.rows_affected())
+}
+
+/// Skip a single pending/processing thread by setting its status to 'skipped'.
+pub async fn skip_thread(pool: &PgPool, thread_id: i64) -> AppResult<u64> {
+    // Single choke point: status + ended_at + terminal=true + iterations.
+    let result = mark_thread_terminal(pool, thread_id, "skipped").await?;
+
+    if result > 0 {
         // Event-driven hooks: fire thread_finished on terminal transition.
         crate::hooks::fire_thread_finished(thread_id);
     }
 
-    Ok(result.rows_affected())
+    Ok(result)
 }
 
 /// Count messages in a thread.
@@ -1030,12 +1063,8 @@ pub async fn skip_all_pending_threads(pool: &PgPool) -> AppResult<u64> {
 
     let mut tx = pool.begin().await?;
     for t in &threads {
-        sql_forge!(
-            "UPDATE threads SET status = 'skipped', ended_at = now() WHERE id = :id",
-            ( :id = t.id )
-        )
-        .execute(&mut *tx)
-        .await?;
+        // Terminal write: single choke point sets terminal=true with 'skipped'.
+        mark_thread_terminal(&mut *tx, t.id, "skipped").await?;
 
         // Phase 6 (R3): re-schedule kanban-linked threads at startup — same rule
         // as channel closure: fresh thread, thread_status = 'scheduled', kanban
