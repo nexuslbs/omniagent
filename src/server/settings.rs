@@ -175,6 +175,7 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "llm_provider",
                 "max_inline_file_kb",
                 "max_tokens",
+                "max_tokens_on_truncation",
                 "max_unfinished_subtask_retries",
                 "old_message_char_budget",
                 "soul_max_chars",
@@ -321,6 +322,16 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 options: None,
                 readonly: false,
                 default: Some("32768".into()),
+            },
+        ),
+        (
+            "max_tokens_on_truncation".into(),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Output budget used when a response is truncated (finish_reason=length)".into(),
+                options: None,
+                readonly: false,
+                default: Some("16384".into()),
             },
         ),
         (
@@ -626,6 +637,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             "max_iterations_no_plan"
             | "max_iterations_plan"
             | "max_tokens"
+            | "max_tokens_on_truncation"
             | "max_unfinished_subtask_retries"
             | "temperature"
             | "tool_bg_secs" => "execution",
@@ -724,6 +736,7 @@ fn enrich_channel_options(meta: &mut SettingMeta, data_dir: &str) {
 fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
     [
         "max_tokens",
+        "max_tokens_on_truncation",
         "temperature",
         "max_iterations_no_plan",
         "max_iterations_plan",

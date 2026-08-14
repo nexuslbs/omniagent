@@ -72,6 +72,9 @@ pub struct AgentConfig {
     pub llm_api_key: String,
     pub default_provider: String,
     pub max_tokens: u32,
+    /// Output budget used when a response is truncated (finish_reason=length).
+    /// Normal calls keep the small `max_tokens`; the retry escalates to this.
+    pub max_tokens_on_truncation: u32,
     pub temperature: f32,
     /// Max iterations for threads with no planning mode (complexity-based).
     pub max_iterations_no_plan: u32,
@@ -217,6 +220,9 @@ impl AgentConfig {
             llm_api_key: String::new(),
             default_provider: get("default_provider", "openai"),
             max_tokens: get("max_tokens", "32768").parse().unwrap_or(32768),
+            max_tokens_on_truncation: get("max_tokens_on_truncation", "16384")
+                .parse()
+                .unwrap_or(16384),
             temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
             max_iterations_plan: get("max_iterations_plan", "120").parse().unwrap_or(120),
@@ -313,6 +319,9 @@ impl AgentConfig {
             llm_api_key: String::new(),
             default_provider: get("default_provider", "openai"),
             max_tokens: get("max_tokens", "32768").parse().unwrap_or(32768),
+            max_tokens_on_truncation: get("max_tokens_on_truncation", "16384")
+                .parse()
+                .unwrap_or(16384),
             temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
             max_iterations_plan: get("max_iterations_plan", "120").parse().unwrap_or(120),
@@ -395,6 +404,7 @@ mod tests {
             llm_api_key: "".to_string(),
             default_provider: "openai".to_string(),
             max_tokens: 32768,
+            max_tokens_on_truncation: 16384,
             temperature: 0.7,
             max_iterations_no_plan: 30,
             max_iterations_plan: 120,
@@ -436,6 +446,7 @@ mod tests {
         };
         assert_eq!(cfg.default_provider, "openai");
         assert_eq!(cfg.max_tokens, 32768);
+        assert_eq!(cfg.max_tokens_on_truncation, 16384);
         assert_eq!(cfg.temperature, 0.7);
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 3000);
@@ -457,6 +468,7 @@ mod tests {
             llm_api_key: String::new(),
             default_provider: String::new(),
             max_tokens: 0,
+            max_tokens_on_truncation: 0,
             temperature: 0.0,
             max_iterations_no_plan: 0,
             max_iterations_plan: 0,
