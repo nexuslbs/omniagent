@@ -33,10 +33,10 @@ use std::sync::Arc;
 use tracing::error;
 
 use super::{err_json, ok_json, AppState};
-use crate::db::channels::get_channel_by_id;
 use crate::db::kanban::update_kanban_task_status;
-use crate::db::threads::create_thread_with_cause;
-use crate::db::types::ThreadCauseParams;
+use crate::db::threads::{
+    create_kanban_step_thread, dispatch_task_for_status, kanban_step_actionable,
+};
 use crate::workflows::{Workflow, WorkflowConfigError, WorkflowsFile};
 
 // ---------------------------------------------------------------------------
@@ -120,6 +120,9 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
         )
         // 16. Dispatch: promote the highest-priority eligible 'todo' task to 'ready'
         .route("/kanban/dispatch", post(dispatch_handler))
+        // 17. Redispatch: re-create the role thread for a task already in a
+        //     workflow column (running/testing/review) without changing status.
+        .route("/kanban/tasks/{id}/redispatch", post(redispatch_handler))
 }
 
 // ---------------------------------------------------------------------------
@@ -853,7 +856,30 @@ async fn change_status_handler(
         }
     }
 
-    ok_json(serde_json::json!({ "success": true }))
+    // 6. Dispatch: a status change into a workflow column starts the mapped
+    //    role thread (running -> executor, testing -> tester, review ->
+    //    reviewer) via the shared status-dispatch path. Best-effort: the
+    //    column move already succeeded; a dispatch failure is logged and
+    //    surfaced in the response, never rolled back.
+    let mut dispatched_thread: Option<i64> = None;
+    if old_status != body.status {
+        match dispatch_task_for_status(&state.pool, &state.data_dir, &id, &body.status).await {
+            Ok(Some(tid)) => dispatched_thread = Some(tid),
+            Ok(None) => {}
+            Err(e) => {
+                error!(
+                    "[kanban/tasks/{}/status] dispatch after status change failed: {:?}",
+                    id, e
+                );
+            }
+        }
+    }
+
+    ok_json(serde_json::json!({
+        "success": true,
+        "dispatched": dispatched_thread.is_some(),
+        "thread_id": dispatched_thread,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1986,19 +2012,6 @@ struct DispatchTaskRow {
     channel_id: Option<String>,
 }
 
-/// Full row needed to actually dispatch the picked task.
-#[derive(FromRow)]
-struct DispatchTaskDetailRow {
-    id: String,
-    title: String,
-    body: Option<String>,
-    channel_id: Option<String>,
-    profile: Option<String>,
-    template: Option<String>,
-    workflow_id: Option<String>,
-    plan: Option<bool>,
-}
-
 #[derive(FromRow)]
 struct DispatchDependencyRow {
     depends_on_id: String,
@@ -2076,49 +2089,6 @@ fn resolve_task_channel(task_channel: Option<&str>) -> String {
         None => crate::channels_yaml::resolve_default_channel(None, "default_kanban_channel")
             .unwrap_or_default(),
     }
-}
-
-/// Build the thread body from a task's title and body (body may be empty).
-fn dispatch_content(title: &str, body: Option<&str>) -> String {
-    match body.map(str::trim).filter(|b| !b.is_empty()) {
-        Some(body) => format!("{title}\n\n{body}"),
-        None => title.to_string(),
-    }
-}
-
-/// Resolve the template to apply: task.template -> channel.template -> none.
-fn resolve_template(task_template: Option<&str>, channel_template: Option<&str>) -> Option<String> {
-    task_template
-        .filter(|t| !t.is_empty())
-        .or_else(|| channel_template.filter(|t| !t.is_empty()))
-        .map(str::to_string)
-}
-/// Resolve the template for a DISPATCHED thread (R8-J): task.template ->
-/// channel.template -> "dev-development" (NEVER None). The dev kanban
-/// channel dispatches dev tasks, so dev-development is the safe general
-/// default; guaranteeing a non-empty template means the prompt builder
-/// always injects the workflow guidance instead of silently skipping it
-/// (an empty threads.template was the root cause of 6 budget-deaths:
-/// threads 113/138/140/155 never saw the dev-development template).
-fn resolve_dispatch_template(
-    task_template: Option<&str>,
-    channel_template: Option<&str>,
-) -> String {
-    resolve_template(task_template, channel_template)
-        .unwrap_or_else(|| "dev-development".to_string())
-}
-
-/// Resolve the effective profile: task.profile -> channel.current_profile -> default.
-fn resolve_profile(
-    task_profile: Option<&str>,
-    channel_profile: &str,
-    default_profile: &str,
-) -> String {
-    task_profile
-        .filter(|p| !p.is_empty())
-        .or_else(|| (!channel_profile.is_empty()).then_some(channel_profile))
-        .unwrap_or(default_profile)
-        .to_string()
 }
 
 /// POST /kanban/dispatch
@@ -2267,148 +2237,38 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         }
     };
 
-    // 3. Load the full task row.
-    let detail = match sql_forge!(
-        DispatchTaskDetailRow,
-        r#"
-        SELECT id, title, body, channel_id, profile, template, workflow_id, plan
-        FROM kanban_tasks
-        WHERE id = :id
-        "#,
-        ( :id = picked.id.as_str() )
-    )
-    .fetch_one(&state.pool)
-    .await
-    {
-        Ok(row) => row,
-        Err(e) => {
-            error!(
-                "[kanban/dispatch] failed to load task {}: {:?}",
-                picked.id, e
-            );
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to load task {}: {e}", picked.id),
-            );
-        }
-    };
+    // 3. Start the executor thread via the shared status-dispatch path (the
+    //    same code as status-change dispatch and /redispatch): it skips any
+    //    stale active threads, resolves the executor role/template/plan and
+    //    creates the thread with workflow_step='running'.
+    let thread_id =
+        match dispatch_task_for_status(&state.pool, &state.data_dir, &picked.id, "running").await {
+            Ok(Some(tid)) => tid,
+            Ok(None) => {
+                error!(
+                    "[kanban/dispatch] no executor role to run for task {}",
+                    picked.id
+                );
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, "No executor role to run");
+            }
+            Err(e) => {
+                error!(
+                    "[kanban/dispatch] failed to create thread for {}: {:?}",
+                    picked.id, e
+                );
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Failed to create thread: {e}"),
+                );
+            }
+        };
 
-    let channel_id = resolve_task_channel(detail.channel_id.as_deref());
-
-    // 4. Resolve channel, profile, provider/model and template.
-    let channel = match get_channel_by_id(&state.pool, &channel_id).await {
-        Ok(Some(channel)) => Some(channel),
-        Ok(None) => {
-            error!(
-                "[kanban/dispatch] channel {} not found for task {}",
-                channel_id, detail.id
-            );
-            None
-        }
-        Err(e) => {
-            error!(
-                "[kanban/dispatch] failed to load channel {}: {:?}",
-                channel_id, e
-            );
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to load channel: {e}"),
-            );
-        }
-    };
-
-    let workflow = detail
-        .workflow_id
-        .as_deref()
-        .and_then(|id| load_workflows_file(&state).ok()?.workflows.get(id).cloned());
-    let executor = workflow.as_ref().and_then(|wf| wf.resolve_role("executor"));
-    let effective_profile = detail
-        .profile
-        .clone()
-        .filter(|profile| !profile.trim().is_empty())
-        .or_else(|| {
-            channel.as_ref().and_then(|c| {
-                (!c.current_profile.trim().is_empty()).then(|| c.current_profile.clone())
-            })
-        })
-        .unwrap_or_else(|| state.default_profile.clone());
-    let plan = executor
-        .as_ref()
-        .and_then(|r| r.plan_mode.as_deref())
-        .or_else(|| {
-            workflow
-                .as_ref()
-                .and_then(|wf| wf.defaults.plan_mode.as_deref())
-        })
-        .map(|mode| matches!(mode, "on"))
-        .or(detail.plan);
-    // R8-J: a dispatched thread must ALWAYS carry a template — an empty
-    // threads.template meant the prompt builder never injected the workflow
-    // guidance and agents improvised instead of following the dev template
-    // (root cause of 6 budget-deaths). Default to "dev-development" when
-    // neither the task nor the channel specifies one.
-    let resolved_template = executor
-        .as_ref()
-        .and_then(|r| r.template.clone())
-        .unwrap_or_else(|| {
-            resolve_dispatch_template(
-                detail.template.as_deref(),
-                channel.as_ref().and_then(|c| c.template.as_deref()),
-            )
-        });
-
-    // 5. Build the thread-cause params and start the thread.
-    let params = ThreadCauseParams {
-        provider: None,
-        model: None,
-        task_id: Some(detail.id.clone()),
-        schedule_task_id: None,
-        content: dispatch_content(&detail.title, detail.body.as_deref()),
-        external_id: None,
-        parent_external_id: None,
-        metadata: serde_json::json!({
-            "kanban_task_id": detail.id,
-            "kanban_task_title": detail.title,
-            "template": resolved_template.clone(),
-        }),
-        msg_type: "kanban".to_string(),
-        msg_subtype: Some(detail.id.clone()),
-        task_plan: plan,
-        template: Some(resolved_template),
-        workflow_id: detail.workflow_id.clone(),
-        workflow_step: Some("running".to_string()),
-        hook_caused: false,
-    };
-
-    let (thread, _message) = match create_thread_with_cause(
-        &state.pool,
-        &state.data_dir,
-        "system",
-        &channel_id,
-        &effective_profile,
-        params,
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(e) => {
-            error!(
-                "[kanban/dispatch] failed to create thread for {}: {:?}",
-                detail.id, e
-            );
-            return err_json(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to create thread: {e}"),
-            );
-        }
-    };
-
-    // 6. Mark the task running ("ready" was retired — see VALID_STATUSES; the
+    // 4. Mark the task running ("ready" was retired — see VALID_STATUSES; the
     //    executor would flip it to "running" on pickup anyway).
-    if let Err(e) = update_kanban_task_status(&state.pool, &detail.id, "running").await {
+    if let Err(e) = update_kanban_task_status(&state.pool, &picked.id, "running").await {
         error!(
             "[kanban/dispatch] failed to mark task {} running: {:?}",
-            detail.id, e
+            picked.id, e
         );
         return err_json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2418,9 +2278,111 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
 
     ok_json(serde_json::json!({
         "dispatched": true,
-        "task_id": detail.id,
-        "thread_id": thread.id,
+        "task_id": picked.id,
+        "thread_id": thread_id,
     }))
+}
+
+/// POST /kanban/tasks/{id}/redispatch
+///
+/// Re-create the role thread for a task ALREADY in a workflow column
+/// (`running`/`testing`/`review`) without changing its status. No-op
+/// (`redispatch: false`) when the status has no role to run or the task
+/// already has an active thread. Example: a task stuck in `running` whose
+/// executor thread died without a terminal transition -> redispatch creates a
+/// fresh executor thread and the agent loop picks it up.
+async fn redispatch_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // 1. Load the task; 404 when missing.
+    #[derive(FromRow)]
+    struct RedispatchTaskRow {
+        status: String,
+        workflow_id: Option<String>,
+    }
+    let task = match sql_forge!(
+        RedispatchTaskRow,
+        r#"SELECT status, workflow_id FROM kanban_tasks WHERE id = :id"#,
+        ( :id = &id )
+    )
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return err_json(StatusCode::NOT_FOUND, "Task not found"),
+        Err(e) => {
+            error!("[kanban/tasks/{}/redispatch] load failed: {:?}", id, e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load task");
+        }
+    };
+
+    // 2. Role gate: only workflow columns map to a role thread. `running`
+    //    always; `testing`/`review` only when the workflow defines the role.
+    let role_present = match load_workflows_file(&state) {
+        Ok(file) => task
+            .workflow_id
+            .as_deref()
+            .and_then(|wf_id| file.workflows.get(wf_id))
+            .and_then(|wf| {
+                crate::workflows::role_for_step(&task.status).and_then(|role| wf.resolve_role(role))
+            })
+            .is_some(),
+        Err(_) => false,
+    };
+    if !kanban_step_actionable(&task.status, task.workflow_id.as_deref(), role_present) {
+        return ok_json(serde_json::json!({
+            "redispatch": false,
+            "reason": format!("status '{}' has no role to run", task.status),
+        }));
+    }
+
+    // 3. Already-active thread -> no-op (redispatch is for tasks that are NOT
+    //    actually running; never skip a live thread here).
+    let active: i64 = match sql_forge!(
+        scalar i64,
+        r#"SELECT COUNT(*) FROM threads WHERE task_id = :task_id AND status IN ('pending', 'processing')"#,
+        ( :task_id = &id )
+    )
+    .fetch_one(&state.pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            error!("[kanban/tasks/{}/redispatch] active check failed: {:?}", id, e);
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to check active threads",
+            );
+        }
+    };
+    if active > 0 {
+        return ok_json(serde_json::json!({
+            "redispatch": false,
+            "reason": "already active",
+        }));
+    }
+
+    // 4. Create the role thread for the task's CURRENT status (no stale
+    //    skip — the check above guarantees no active thread) and mark
+    //    thread_status='scheduled'. Task status is left unchanged.
+    match create_kanban_step_thread(&state.pool, &state.data_dir, &id, &task.status, false).await {
+        Ok(Some(tid)) => ok_json(serde_json::json!({
+            "redispatch": true,
+            "thread_id": tid,
+        })),
+        Ok(None) => ok_json(serde_json::json!({
+            "redispatch": false,
+            "reason": format!("status '{}' has no role to run", task.status),
+        })),
+        Err(e) => {
+            error!("[kanban/tasks/{}/redispatch] create failed: {:?}", id, e);
+            err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to redispatch: {e}"),
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2511,60 +2473,6 @@ mod tests {
         assert_eq!(first_dispatchable_index(&free, &[1, 1, 1]), None);
     }
 
-    #[test]
-    fn dispatch_template_and_profile_resolution() {
-        // Task template wins over channel template.
-        assert_eq!(
-            resolve_template(Some("task-tpl"), Some("channel-tpl")),
-            Some("task-tpl".to_string())
-        );
-        // Channel template is the fallback.
-        assert_eq!(
-            resolve_template(None, Some("channel-tpl")),
-            Some("channel-tpl".to_string())
-        );
-        // Empty templates resolve to None.
-        assert_eq!(resolve_template(Some(""), Some("")), None);
-        assert_eq!(resolve_template(None, None), None);
-        // R8-J: dispatched threads must NEVER get an empty template — the
-        // dispatch default fills in dev-development so the prompt builder
-        // always injects the workflow guidance.
-        assert_eq!(
-            resolve_dispatch_template(Some("task-tpl"), Some("channel-tpl")),
-            "task-tpl".to_string()
-        );
-        assert_eq!(
-            resolve_dispatch_template(None, Some("channel-tpl")),
-            "channel-tpl".to_string()
-        );
-        assert_eq!(
-            resolve_dispatch_template(Some(""), Some("")),
-            "dev-development".to_string()
-        );
-        assert_eq!(
-            resolve_dispatch_template(None, None),
-            "dev-development".to_string()
-        );
-
-        // Profile chain: task -> channel -> default.
-        assert_eq!(
-            resolve_profile(Some("task-prof"), "channel-prof", "default-prof"),
-            "task-prof".to_string()
-        );
-        assert_eq!(
-            resolve_profile(None, "channel-prof", "default-prof"),
-            "channel-prof".to_string()
-        );
-        assert_eq!(
-            resolve_profile(Some(""), "", "default-prof"),
-            "default-prof".to_string()
-        );
-
-        // Content: title only when body is empty/missing.
-        assert_eq!(dispatch_content("Title", None), "Title");
-        assert_eq!(dispatch_content("Title", Some("")), "Title");
-        assert_eq!(dispatch_content("Title", Some("Body")), "Title\n\nBody");
-    }
     use super::*;
 
     #[test]

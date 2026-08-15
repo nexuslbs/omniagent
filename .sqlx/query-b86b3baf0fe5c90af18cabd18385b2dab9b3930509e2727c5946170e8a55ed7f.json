@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, title, body, channel_id, profile, template, workflow_id, plan\n        FROM kanban_tasks\n        WHERE id = $1\n        ",
+  "query": "\n        SELECT id, title, body, status, channel_id, profile, template, plan, workflow_id\n        FROM kanban_tasks WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -38,6 +38,17 @@
       },
       {
         "ordinal": 3,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
         "name": "channel_id",
         "type_info": "Text",
         "origin": {
@@ -48,7 +59,7 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "profile",
         "type_info": "Text",
         "origin": {
@@ -59,24 +70,13 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "template",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "kanban_tasks",
             "name": "template"
-          }
-        }
-      },
-      {
-        "ordinal": 6,
-        "name": "workflow_id",
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "kanban_tasks",
-            "name": "workflow_id"
           }
         }
       },
@@ -90,6 +90,17 @@
             "name": "plan"
           }
         }
+      },
+      {
+        "ordinal": 8,
+        "name": "workflow_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "workflow_id"
+          }
+        }
       }
     ],
     "parameters": {
@@ -101,12 +112,13 @@
       false,
       false,
       true,
+      false,
       true,
       true,
       true,
-      true,
-      false
+      false,
+      true
     ]
   },
-  "hash": "bcce75aa8be1e2ab1aa55cddfffb2ab067ff268ff8b1b3bb194ef352b0c10206"
+  "hash": "b86b3baf0fe5c90af18cabd18385b2dab9b3930509e2727c5946170e8a55ed7f"
 }
