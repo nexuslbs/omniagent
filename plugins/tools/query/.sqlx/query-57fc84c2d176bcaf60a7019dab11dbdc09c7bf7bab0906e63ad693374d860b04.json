@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE kanban_tasks SET\n            title = CASE WHEN $1 = '' THEN title ELSE NULLIF($2, '')::text END,\n            body = CASE WHEN $3 = $4 THEN body ELSE $5 END,\n            assignee = CASE WHEN $6 = '' THEN assignee ELSE NULLIF($7, '')::text END,\n            channel_id = CASE WHEN $8 = $9 THEN channel_id ELSE NULLIF($10, '')::text END,\n            profile = CASE WHEN $11 = '' THEN profile ELSE NULLIF($12, '')::text END,\n            priority = CASE WHEN $13 = -999999::bigint THEN priority::bigint ELSE $14 END,\n            status = CASE WHEN $15 = '' THEN status ELSE $16 END,\n            archived = $17,\n            template = CASE WHEN $18 = '' THEN template ELSE NULLIF($19, '')::text END,\n            plan = $20,\n            workflow_id = CASE WHEN $21 = '' THEN workflow_id ELSE NULLIF($22, '')::text END,\n            updated_at = NOW()\n        WHERE id = $23\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Text",
+        "Bool",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "57fc84c2d176bcaf60a7019dab11dbdc09c7bf7bab0906e63ad693374d860b04"
+}
