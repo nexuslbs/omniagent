@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, channel_id, task_id FROM threads WHERE id = $1",
+  "query": "SELECT id, channel_id, task_id, status FROM threads WHERE channel_id = $1 AND status IN ('pending', 'processing')",
   "describe": {
     "columns": [
       {
@@ -35,18 +35,30 @@
             "name": "task_id"
           }
         }
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "status"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
-        "Int8"
+        "Text"
       ]
     },
     "nullable": [
       false,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "09ce79ffaa36bcd17d057bd153dc6eb10c55e42ada8a40cffc5bd59da10b4c62"
+  "hash": "53aaa02176dbd96728a898409fe83dfa96c37d85c15cf37cb2272fca9703a532"
 }

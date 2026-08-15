@@ -270,12 +270,38 @@ async fn cancel_in_flight_for_channel(cfg: &AgentContext, channel_id: &str) {
 async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: CancellationToken) {
     info!("Channel handler started for channel {}", channel_id);
 
+    // The thread this handler is actively processing, shared with the
+    // cancellation branch. Updated synchronously right after claim_thread
+    // succeeds (before any await, so select! cannot drop the loop body in
+    // between) and cleared after process_thread completes. When the handler
+    // is cancelled mid-processing, the cancel branch uses it to skip the
+    // orphaned thread (idempotent: no-op once it is already terminal).
+    let active_thread = std::sync::Arc::new(std::sync::Mutex::new(None::<i64>));
+
     loop {
         // Use tokio::select! so cancellation is prompt rather than
         // waiting for the next iteration boundary.
         tokio::select! {
             _ = cancel.cancelled() => {
                 info!("Channel {} handler cancelled", channel_id);
+                // Safety net: never leave a `processing` thread ownerless. If
+                // the handler was dropped mid-processing, the thread it was
+                // actively processing is still `processing` — skip it (the
+                // skip is a no-op when it already reached a terminal state).
+                let active_id = active_thread.lock().unwrap().take();
+                if let Some(active_id) = active_id {
+                    if let Err(e) = queries::skip_thread(&cfg.pool, active_id).await {
+                        tracing::warn!(
+                            "[supervisor] Failed to skip active thread {} on cancel: {:?}",
+                            active_id, e
+                        );
+                    } else {
+                        info!(
+                            "Channel {} handler cancelled: skipped in-flight thread {}",
+                            channel_id, active_id
+                        );
+                    }
+                }
                 // Kill any tool-spawned subprocesses still running for this
                 // channel's threads: the agent's BACKGROUND tool tasks are
                 // detached and only stop when the registry abort fires —
@@ -427,6 +453,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                         );
                         continue;
                     }
+                    // Track the thread we're about to process: the cancellation
+                    // branch skips it if the handler is dropped mid-flight.
+                    *active_thread.lock().unwrap() = Some(thread.id);
 
                     // If this thread is linked to a kanban task, mark it as running
                                         if let Some(ref task_id) = thread.task_id {
@@ -491,6 +520,10 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                             }
                         }
                     }
+                    // process_thread finished (Ok or Err): the thread is now
+                    // terminal — clear the active marker so a later
+                    // cancellation skips nothing.
+                    *active_thread.lock().unwrap() = None;
                 }
 
                 // Brief pause between polling iterations
