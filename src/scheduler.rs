@@ -1254,8 +1254,12 @@ mod tests {
             "next run for */5 should be within the hour, not fallback"
         );
         let diff = next - now;
+        // Full-precision lower bound: `schedule.after(now)` guarantees a
+        // strictly-after result, but when `now` is within 1s of the next
+        // `*/5` match (e.g. 23:39:59.7 → 23:40:00) the diff is sub-second
+        // and `num_seconds()` truncates it to 0, falsely failing the check.
         assert!(
-            diff.num_seconds() > 0 && diff.num_seconds() <= 300,
+            diff > chrono::Duration::zero() && diff.num_seconds() <= 300,
             "next run for */5 should be within 5 minutes, got {}s",
             diff.num_seconds()
         );
