@@ -259,6 +259,12 @@ impl ExternalProviderClient {
     pub fn models(&self) -> Vec<String> {
         self.models.lock().clone()
     }
+
+    /// The command and args this client was spawned with (the plugin entrypoint).
+    /// Used by the reload handler to detect entrypoint/source changes.
+    pub fn entrypoint(&self) -> (String, Vec<String>) {
+        (self.command.clone(), self.args.clone())
+    }
 }
 
 impl Drop for ExternalProviderClient {

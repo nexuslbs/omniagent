@@ -13,6 +13,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::provider::registry::PROVIDER_REGISTRY;
 use crate::server::AppState;
 
 use super::plugins_reload::*;
@@ -264,7 +265,34 @@ pub(crate) async fn reload_plugins(
                     running,
                     plugin.entrypoint.is_some()
                 );
-                if enabled && !running {
+                let mut should_start = enabled && !running;
+                if enabled && running {
+                    // Entrypoint/source change (e.g. remote -> bundled with the
+                    // same provider name): the running subprocess is stale and
+                    // must be restarted, otherwise replies come from the old
+                    // binary. Compare the desired entrypoint with the one the
+                    // running client was spawned with.
+                    let changed = PROVIDER_REGISTRY
+                        .read()
+                        .get_cloned(name)
+                        .map(|client| {
+                            let (cur_cmd, cur_args) = client.entrypoint();
+                            match &plugin.entrypoint {
+                                Some((cmd, args)) => cur_cmd != *cmd || cur_args != *args,
+                                None => true,
+                            }
+                        })
+                        .unwrap_or(false);
+                    if changed {
+                        tracing::info!(
+                            "Reload: provider '{}' entrypoint changed — restarting subprocess",
+                            name
+                        );
+                        PROVIDER_REGISTRY.write().remove(name);
+                        should_start = true;
+                    }
+                }
+                if should_start {
                     if let Some((cmd, args)) = &plugin.entrypoint {
                         tracing::info!(
                             "Reload: starting provider '{}' with cmd={} args={:?}",
