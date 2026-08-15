@@ -1833,7 +1833,13 @@ pub fn load_plugin_yaml_config(
     data_dir: &str,
     yaml_type: &PluginYamlType,
 ) -> Option<serde_json::Value> {
-    let yaml_path = PathBuf::from(data_dir).join(yaml_type.yaml_file());
+    // Canonical config location is {data_dir}/config/{name} (config_path) —
+    // NOT {data_dir}/{name}. The legacy root-level plugins.yml was the old
+    // layout; reading it directly would miss the config/ subdir and silently
+    // return None on fresh data dirs, starving platform/tool/provider
+    // configure messages of their YAML config (e.g. mattermost
+    // access_token_name) and breaking auth/connectivity.
+    let yaml_path = crate::config_path::config_path(data_dir, yaml_type.yaml_file());
 
     // Load the YAML file and find this plugin's config
     (|| -> Option<serde_json::Value> {
