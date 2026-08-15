@@ -101,6 +101,7 @@ FROM debian:trixie-slim
 #   - python3-psycopg2: for integration tests (tests.py) that read DB rows
 #     directly (workflow tests GROUP 22) — Debian package because PEP 668
 #     blocks bare pip on python3.13
+#   - python3-yaml: integration tests read config yml files (settings.yml)
 #   - nodejs: for JavaScript/Node.js MCP servers
 RUN apt-get update -qq && \
     apt-get install -y -qq \
@@ -113,6 +114,7 @@ RUN apt-get update -qq && \
       python3 \
       python3-pip \
       python3-psycopg2 \
+      python3-yaml \
       nodejs && \
     rm -rf /var/lib/apt/lists/* && \
     git config --global --add safe.directory '*'

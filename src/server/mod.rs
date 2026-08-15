@@ -156,6 +156,32 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         plugin_manager: config.plugin_manager,
     });
 
+    // Eagerly start enabled plugins at boot. Without this, provider subprocesses
+    // (and enabled MCP tool servers) only spawn when /api/reload or a plugin
+    // enable/disable/restart call runs reload_plugins — on a cold stack (fresh
+    // deploy, container restart) an enabled provider has NO running subprocess
+    // until some unrelated API call happens to trigger a reload, so the first
+    // LLM completion falls through to HTTP and fails ("builder error" for
+    // subprocess-only providers like noop). Run it in a spawned task so startup
+    // is not blocked; reload_plugins is idempotent (skips already-running).
+    {
+        let boot_state = app_state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            match crate::server::plugins_env::reload_plugins(boot_state).await {
+                Ok((started, stopped, errors)) => {
+                    tracing::info!(
+                        "Startup reload complete: started={} stopped={} errors={:?}",
+                        started,
+                        stopped,
+                        errors
+                    );
+                }
+                Err(e) => tracing::error!("Startup reload failed: {:?}", e),
+            }
+        });
+    }
+
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/stop/{channel_id}", post(stop_handler))
