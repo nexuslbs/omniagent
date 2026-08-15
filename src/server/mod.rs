@@ -46,6 +46,9 @@ struct ThreadTaskRow {
     id: i64,
     channel_id: String,
     task_id: Option<String>,
+    /// Thread status at stop time. stop_thread_handler uses it to decide
+    /// whether to cancel the channel handler; stop/close carry it along.
+    status: Option<String>,
 }
 
 use sqlx::PgPool;
@@ -247,6 +250,38 @@ async fn health_handler() -> &'static str {
     "ok"
 }
 
+/// Pure decision: must `stop-thread` cancel the channel handler?
+///
+/// Only when the target thread was actively `processing`: the handler
+/// processes one thread at a time per channel, so a `pending` target (or any
+/// other state) means the handler is running a DIFFERENT thread or is idle —
+/// cancelling it would silently kill that unrelated thread.
+fn stop_thread_cancels_handler(target_status: Option<&str>) -> bool {
+    matches!(target_status, Some("processing"))
+}
+
+/// Pure decision: the thread_status value to persist on the kanban task after
+/// an explicit stop. `Block` with the clear flag drops the marker; `Block`
+/// without it keeps the current marker. `Noop` always drops the marker when
+/// one is set (the task must not keep pointing at a stopped thread) while
+/// leaving the task's own status untouched.
+fn stop_recovery_thread_status(
+    recovery: &queries::StopRecovery,
+    current: Option<&str>,
+) -> Option<String> {
+    match recovery {
+        queries::StopRecovery::Block {
+            clear_thread_status: true,
+            ..
+        } => None,
+        queries::StopRecovery::Block {
+            clear_thread_status: false,
+            ..
+        } => current.map(String::from),
+        queries::StopRecovery::Noop => None,
+    }
+}
+
 /// Stop: mark all pending/processing threads as skipped and cancel
 /// the channel's executor so it restarts fresh.
 /// Phase 6b: apply the explicit-stop outcome for one kanban-linked thread.
@@ -283,17 +318,47 @@ async fn apply_stop_recovery(
     };
 
     match queries::stop_thread_recovery(task.status.as_deref(), task.thread_status.as_deref()) {
-        queries::StopRecovery::Block { .. } => {
+        queries::StopRecovery::Block {
+            new_status,
+            clear_thread_status,
+        } => {
             let comment = format!(
                 "Task blocked: thread #{} stopped explicitly (operator {})",
                 thread_id, operator
             );
-            transition_with_comment(pool, task_id, "blocked", None, &comment)
-                .await
-                .map_err(|e| e.to_string())?;
+            let thread_status = stop_recovery_thread_status(
+                &queries::StopRecovery::Block {
+                    new_status,
+                    clear_thread_status,
+                },
+                task.thread_status.as_deref(),
+            );
+            transition_with_comment(
+                pool,
+                task_id,
+                new_status,
+                thread_status.as_deref(),
+                &comment,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
             Ok(true)
         }
-        queries::StopRecovery::Noop => Ok(false),
+        queries::StopRecovery::Noop => {
+            // The task is NOT moved (todo/backlog/done/manual review stay put),
+            // but its thread_status must not keep pointing at the stopped
+            // thread: clear the marker when one is set (task status untouched).
+            if task.thread_status.is_some() {
+                sql_forge!(
+                    "UPDATE kanban_tasks SET thread_status = NULL WHERE id = :task_id AND thread_status IS NOT NULL",
+                    ( :task_id = task_id )
+                )
+                .execute(pool)
+                .await
+                .map_err(|e| e.to_string())?;
+            }
+            Ok(false)
+        }
     }
 }
 
@@ -309,7 +374,7 @@ async fn stop_handler(
     // 1. Collect pending/processing threads (id + kanban task) BEFORE skipping
     let threads = match     sql_forge!(
         ThreadTaskRow,
-        "SELECT id, channel_id, task_id FROM threads WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
+        "SELECT id, channel_id, task_id, status FROM threads WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
         ( :channel_id = channel_id.as_str() )
     )
     .fetch_all(&state.pool)
@@ -402,15 +467,15 @@ async fn stop_thread_handler(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
     // 1. Look up the thread's channel id + kanban task id
-    let (channel_id, task_id) = match sql_forge!(
+    let (channel_id, task_id, status) = match sql_forge!(
         ThreadTaskRow,
-        "SELECT id, channel_id, task_id FROM threads WHERE id = :thread_id",
+        "SELECT id, channel_id, task_id, status FROM threads WHERE id = :thread_id",
         ( :thread_id = thread_id )
     )
     .fetch_optional(&state.pool)
     .await
     {
-        Ok(Some(row)) => (row.channel_id, row.task_id),
+        Ok(Some(row)) => (row.channel_id, row.task_id, row.status),
         Ok(None) => {
             return Json(serde_json::json!({
                 "status": "error",
@@ -479,16 +544,31 @@ async fn stop_thread_handler(
         }
     };
 
-    // 5. Cancel the channel's processing task (if running)
+    // 5. Cancel the channel's processing task ONLY when the target thread was
+    //    the one actively being processed (status 'processing' at lookup time).
+    //    The handler processes one thread at a time per channel, so any other
+    //    target state means the handler is running a DIFFERENT thread — or is
+    //    idle — and must NOT be cancelled (stopping one thread must never kill
+    //    an unrelated in-flight thread). The skip in step 2 already made the
+    //    target terminal, so the handler can no longer claim it and the
+    //    supervisor keeps the channel handler running for remaining threads.
     let mut tokens = state.cancel_tokens.lock().await;
-    let has_handler = if let Some(token) = tokens.remove(&channel_id) {
-        token.cancel();
-        info!(
-            "Stop-thread: cancelled processing task for channel {}",
-            channel_id
-        );
-        true
+    let has_handler = if stop_thread_cancels_handler(status.as_deref()) {
+        if let Some(token) = tokens.remove(&channel_id) {
+            token.cancel();
+            info!(
+                "Stop-thread: cancelled processing task for channel {}",
+                channel_id
+            );
+            true
+        } else {
+            false
+        }
     } else {
+        info!(
+            "Stop-thread: thread {} was not processing; channel {} handler left running",
+            thread_id, channel_id
+        );
         false
     };
 
@@ -514,7 +594,7 @@ async fn close_handler(
     // 1. Collect pending/processing threads (id + kanban task) BEFORE skipping
     let threads = match     sql_forge!(
         ThreadTaskRow,
-        "SELECT id, channel_id, task_id FROM threads WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
+        "SELECT id, channel_id, task_id, status FROM threads WHERE channel_id = :channel_id AND status IN ('pending', 'processing')",
         ( :channel_id = channel_id.as_str() )
     )
     .fetch_all(&state.pool)
@@ -1421,5 +1501,55 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["plan"].is_null());
+    }
+
+    // ─── Stop-thread surgical cancellation decisions ──────────────────────
+
+    #[test]
+    fn stop_thread_cancels_handler_only_when_target_was_processing() {
+        // A pending target: the handler is processing a DIFFERENT thread (or
+        // idle) — it must NOT be cancelled, or the unrelated thread dies.
+        assert!(!stop_thread_cancels_handler(None));
+        assert!(!stop_thread_cancels_handler(Some("pending")));
+        assert!(!stop_thread_cancels_handler(Some("completed")));
+        assert!(!stop_thread_cancels_handler(Some("skipped")));
+        // Only the actively-processing target justifies handler cancellation.
+        assert!(stop_thread_cancels_handler(Some("processing")));
+    }
+
+    #[test]
+    fn stop_recovery_clears_thread_status_in_block_and_noop() {
+        // Block with the clear flag (current decision table) drops the marker.
+        assert_eq!(
+            stop_recovery_thread_status(
+                &queries::StopRecovery::Block {
+                    new_status: "blocked",
+                    clear_thread_status: true,
+                },
+                Some("running"),
+            ),
+            None
+        );
+        // Block without the flag keeps the current marker.
+        assert_eq!(
+            stop_recovery_thread_status(
+                &queries::StopRecovery::Block {
+                    new_status: "blocked",
+                    clear_thread_status: false,
+                },
+                Some("running"),
+            ),
+            Some("running".to_string())
+        );
+        // Noop drops the marker when one is set — the task status itself is
+        // untouched (apply_stop_recovery does not transition the task there).
+        assert_eq!(
+            stop_recovery_thread_status(&queries::StopRecovery::Noop, Some("scheduled")),
+            None
+        );
+        assert_eq!(
+            stop_recovery_thread_status(&queries::StopRecovery::Noop, None),
+            None
+        );
     }
 }
