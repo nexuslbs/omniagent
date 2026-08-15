@@ -27,6 +27,20 @@ pub(crate) async fn enable_plugin_handler(
             // Already enabled — idempotent no-op: just return the plugin detail.
             // (Previously this branch force-restarted the plugin, which is the
             // job of the dedicated /restart endpoint, not /enable.)
+            //
+            // EXCEPT for providers: reload_plugins is the ONLY place that
+            // spawns the provider subprocess, and on a cold stack (fresh
+            // deploy, container restart) the subprocess has not been started
+            // yet — nothing triggers the startup reload. If we return here
+            // without reloading, an enabled provider stays subprocess-less
+            // until some unrelated API call happens to run reload_plugins, and
+            // the first LLM completion falls back to HTTP and fails. Reload is
+            // idempotent for already-running providers (entrypoint unchanged ->
+            // no restart), so it is safe to run it in the idempotent branch.
+            if yaml_type == plugins_yaml::PluginYamlType::Provider {
+                crate::llm::refresh_provider_metadata();
+                let _ = super::plugins_env::reload_plugins(state.clone()).await;
+            }
             if let Ok(Some(detail)) = plugins_yaml::get_plugin(&state.data_dir, &name, &yaml_type) {
                 return (
                     StatusCode::OK,

@@ -26,8 +26,9 @@ RUN apt-get update -qq && apt-get install -y -qq nodejs python3 python3-pip && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # psycopg2: integration tests (tests.py) read DB rows directly (workflow tests)
+# python3-yaml: integration tests read config yml files (settings.yml)
 # Debian package (PEP 668 blocks bare pip on python3.13)
-RUN apt-get update -qq && apt-get install -y -qq python3-psycopg2 && \
+RUN apt-get update -qq && apt-get install -y -qq python3-psycopg2 python3-yaml && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Trust all repos under /opt/workspace (container mounts host git repos)
