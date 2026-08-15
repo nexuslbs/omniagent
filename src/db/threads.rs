@@ -1032,31 +1032,292 @@ pub async fn get_max_thread_sequence(pool: &PgPool, thread_id: i64) -> AppResult
     Ok(max_seq.unwrap_or(0))
 }
 
-/// Skip all pending/processing threads on startup.
-pub async fn skip_all_pending_threads(pool: &PgPool) -> AppResult<u64> {
+// ---------------------------------------------------------------------------
+// Kanban status-change dispatch / redispatch
+// ---------------------------------------------------------------------------
+
+/// Gate: does `status` map to a runnable workflow role for this task?
+/// `running` always runs (plain executor path even without a workflow);
+/// `testing`/`review` only when the task has a workflow that defines the
+/// role. Other statuses never dispatch.
+pub(crate) fn kanban_step_actionable(
+    status: &str,
+    workflow_id: Option<&str>,
+    has_role: bool,
+) -> bool {
+    match status {
+        "running" => true,
+        "testing" | "review" => workflow_id.is_some() && has_role,
+        _ => false,
+    }
+}
+
+/// R8-J: an executor thread must ALWAYS carry a template — the role template
+/// wins; for the running step the fallback chain is task.template ->
+/// channel.template -> "dev-development" (never None). Step threads
+/// (testing/review) carry their role template only (required by workflow
+/// validation); without one they stay None exactly like kanban_updater's
+/// step-thread creation.
+fn resolve_kanban_thread_template(
+    role_template: Option<String>,
+    is_running: bool,
+    task_template: Option<&str>,
+    channel_template: Option<&str>,
+) -> Option<String> {
+    role_template.or_else(|| {
+        is_running.then(|| {
+            task_template
+                .filter(|t| !t.is_empty())
+                .or_else(|| channel_template.filter(|t| !t.is_empty()))
+                .unwrap_or("dev-development")
+                .to_string()
+        })
+    })
+}
+
+/// Build the thread body from a task's title and body (body may be empty).
+fn kanban_thread_content(title: &str, body: Option<&str>) -> String {
+    match body.map(str::trim).filter(|b| !b.is_empty()) {
+        Some(body) => format!("{title}\n\n{body}"),
+        None => title.to_string(),
+    }
+}
+
+/// Core of kanban status-change dispatch and `/redispatch`: create the
+/// workflow-role thread for `status` on `task_id` and mark the task's
+/// `thread_status` as 'scheduled'. The task's OWN status is NEVER changed
+/// here — the caller owns the status transition.
+///
+/// Returns `Some(thread_id)` when a thread was created, `None` when the
+/// status has no role to run (non-workflow `testing`/`review`, a workflow
+/// without that role, or a non-workflow-column status).
+///
+/// `skip_stale` (true for status-change dispatch): any still-active
+/// pending/processing threads for the task are marked skipped FIRST (through
+/// the `mark_thread_terminal` choke point) so they cannot race the new step.
+pub(crate) async fn create_kanban_step_thread(
+    pool: &PgPool,
+    data_dir: &str,
+    task_id: &str,
+    status: &str,
+    skip_stale: bool,
+) -> AppResult<Option<i64>> {
+    // 1. Load the task detail.
+    #[derive(sqlx::FromRow)]
+    struct KanbanDispatchRow {
+        id: String,
+        title: String,
+        body: Option<String>,
+        status: String,
+        channel_id: Option<String>,
+        profile: Option<String>,
+        template: Option<String>,
+        plan: Option<bool>,
+        workflow_id: Option<String>,
+    }
+    let task = match sql_forge!(
+        KanbanDispatchRow,
+        r#"
+        SELECT id, title, body, status, channel_id, profile, template, plan, workflow_id
+        FROM kanban_tasks WHERE id = :task_id
+        "#,
+        ( :task_id = task_id )
+    )
+    .fetch_optional(pool)
+    .await?
+    {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    // 2. Resolve the workflow role config and gate on role availability.
+    let role = crate::workflows::role_for_step(status);
+    let workflow = task.workflow_id.as_deref().and_then(|wf_id| {
+        let path = crate::config_path::config_path(data_dir, "workflows.yml");
+        crate::workflows::WorkflowsFile::load(&path)
+            .ok()
+            .and_then(|f| f.workflows.get(wf_id).cloned())
+    });
+    let role_cfg = role.and_then(|r| workflow.as_ref().and_then(|wf| wf.resolve_role(r)));
+    if !kanban_step_actionable(status, task.workflow_id.as_deref(), role_cfg.is_some()) {
+        return Ok(None);
+    }
+
+    // 3. Skip stale active threads (status-change dispatch only).
+    if skip_stale {
+        #[derive(sqlx::FromRow)]
+        struct StaleThreadRow {
+            id: i64,
+        }
+        let stale: Vec<StaleThreadRow> = sql_forge!(
+            StaleThreadRow,
+            r#"SELECT id FROM threads WHERE task_id = :task_id AND status IN ('pending', 'processing')"#,
+            ( :task_id = task_id )
+        )
+        .fetch_all(pool)
+        .await?;
+        for t in &stale {
+            mark_thread_terminal(pool, t.id, "skipped").await?;
+            // Audit the skip in kanban history (best-effort, like the
+            // existing re-schedule paths do).
+            let comment = format!("Thread #{} skipped (status changed to '{}')", t.id, status);
+            let _ = sql_forge!(
+                r#"
+                INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
+                VALUES (:task_id, 'workflow', :initial, :to_status, :comment)
+                "#,
+                ( :task_id = task_id, :initial = &task.status, :to_status = &task.status, :comment = comment.as_str() )
+            )
+            .execute(pool)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    "[kanban dispatch] history insert for skipped thread #{} failed: {:?}",
+                    t.id, e
+                )
+            });
+        }
+    }
+
+    // 4. Resolve the effective channel, profile, plan and template.
+    let channel_id = match task.channel_id.as_deref() {
+        Some(cid) => {
+            crate::channels_yaml::resolve_default_channel(Some(cid), "default_kanban_channel")
+                .unwrap_or_default()
+        }
+        None => crate::channels_yaml::resolve_default_channel(None, "default_kanban_channel")
+            .unwrap_or_default(),
+    };
+    let channel = if channel_id.trim().is_empty() {
+        None
+    } else {
+        crate::db::channels::get_channel_by_id(pool, &channel_id).await?
+    };
+    let effective_profile = task
+        .profile
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .or_else(|| {
+            channel.as_ref().and_then(|c| {
+                (!c.current_profile.trim().is_empty()).then(|| c.current_profile.clone())
+            })
+        })
+        .unwrap_or_else(crate::profile::default_profile_name);
+    // Plan budget: role plan_mode ('on'/'off') wins; fall back to the
+    // workflow defaults, then the task column.
+    let plan = role_cfg
+        .as_ref()
+        .and_then(|r| r.plan_mode.as_deref())
+        .or_else(|| {
+            workflow
+                .as_ref()
+                .and_then(|wf| wf.defaults.plan_mode.as_deref())
+        })
+        .map(|mode| matches!(mode, "on"))
+        .or(task.plan);
+    let resolved_template = resolve_kanban_thread_template(
+        role_cfg.as_ref().and_then(|r| r.template.clone()),
+        status == "running",
+        task.template.as_deref(),
+        channel.as_ref().and_then(|c| c.template.as_deref()),
+    );
+
+    // 5. Create the thread via the single canonical creation path
+    //    (create_thread_with_cause resolves provider/model from the workflow
+    //    role via workflow_step; the role template is passed explicitly).
+    let params = ThreadCauseParams {
+        provider: None,
+        model: None,
+        task_id: Some(task.id.clone()),
+        schedule_task_id: None,
+        content: kanban_thread_content(&task.title, task.body.as_deref()),
+        external_id: None,
+        parent_external_id: None,
+        metadata: serde_json::json!({
+            "kanban_task_id": task.id,
+            "kanban_task_title": task.title,
+            "template": resolved_template.clone(),
+        }),
+        msg_type: "kanban".to_string(),
+        msg_subtype: Some(task.id.clone()),
+        task_plan: plan,
+        template: resolved_template,
+        workflow_id: task.workflow_id.clone(),
+        workflow_step: Some(status.to_string()),
+        hook_caused: false,
+    };
+    let (thread, _message) = create_thread_with_cause(
+        pool,
+        data_dir,
+        "system",
+        &channel_id,
+        &effective_profile,
+        params,
+    )
+    .await?;
+
+    // 6. Mark the task as queued for the agent loop + audit history.
+    sql_forge!(
+        "UPDATE kanban_tasks SET thread_status = 'scheduled' WHERE id = :task_id",
+        ( :task_id = task_id )
+    )
+    .execute(pool)
+    .await?;
+    let comment = format!("Thread #{} created for step '{}'", thread.id, status);
+    let _ = sql_forge!(
+        r#"
+        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
+        VALUES (:task_id, 'workflow', :initial, :to_status, :comment)
+        "#,
+        ( :task_id = task_id, :initial = &task.status, :to_status = &task.status, :comment = comment.as_str() )
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        tracing::warn!(
+            "[kanban dispatch] history insert for new thread #{} failed: {:?}",
+            thread.id, e
+        )
+    });
+
+    Ok(Some(thread.id))
+}
+
+/// Dispatch a kanban task for a target status: skip any stale active
+/// threads, create the mapped role thread (running -> executor, testing ->
+/// tester, review -> reviewer) and mark the task `thread_status='scheduled'`.
+/// Does NOT change the task's own status — the caller owns the transition.
+///
+/// Returns `Some(thread_id)` when a thread was created, `None` when the
+/// status has no role to run.
+pub(crate) async fn dispatch_task_for_status(
+    pool: &PgPool,
+    data_dir: &str,
+    task_id: &str,
+    new_status: &str,
+) -> AppResult<Option<i64>> {
+    create_kanban_step_thread(pool, data_dir, task_id, new_status, true).await
+}
+
+/// Skip all pending/processing threads on startup, then redispatch every
+/// kanban task sitting in a workflow column without an active thread.
+///
+/// The old per-thread re-schedule branch is gone: the unified startup
+/// recovery marks every pending/processing thread terminal (single choke
+/// point) and then re-creates the role thread for each kanban task in
+/// `running`/`testing`/`review` that has NO active thread — the SAME code
+/// path as status-change dispatch and `/redispatch`. Safeguards preserved:
+/// no retry consumed, task status never moved back to `todo`, blocked/done
+/// tasks untouched.
+pub async fn skip_all_pending_threads(pool: &PgPool, data_dir: &str) -> AppResult<u64> {
     #[derive(sqlx::FromRow)]
     struct SkipRow {
         id: i64,
-        cause: Option<String>,
-        channel_id: String,
-        profile: Option<String>,
-        provider: Option<String>,
-        model: Option<String>,
-        task_id: Option<String>,
-        workflow_id: Option<String>,
-        workflow_step: Option<String>,
-        plan: bool,
-        template: Option<String>,
     }
 
     let threads: Vec<SkipRow> = sql_forge!(
         SkipRow,
-        r#"
-        SELECT id, cause, channel_id, profile, provider, model, task_id, workflow_id, workflow_step,
-               plan, template
-        FROM threads
-        WHERE status IN ('pending', 'processing')
-        "#,
+        r#"SELECT id FROM threads WHERE status IN ('pending', 'processing')"#,
     )
     .fetch_all(pool)
     .await?;
@@ -1065,94 +1326,45 @@ pub async fn skip_all_pending_threads(pool: &PgPool) -> AppResult<u64> {
     for t in &threads {
         // Terminal write: single choke point sets terminal=true with 'skipped'.
         mark_thread_terminal(&mut *tx, t.id, "skipped").await?;
-
-        // Phase 6 (R3): re-schedule kanban-linked threads at startup — same rule
-        // as channel closure: fresh thread, thread_status = 'scheduled', kanban
-        // status unchanged, NO retry consumed, NEVER moved back to todo.
-        let task_status: Option<String> = match t.task_id.as_deref() {
-            Some(tid) => {
-                sql_forge!(
-                    scalar String,
-                    "SELECT status FROM kanban_tasks WHERE id = :task_id FOR UPDATE",
-                    ( :task_id = tid )
-                )
-                .fetch_optional(&mut *tx)
-                .await?
-            }
-            None => None,
-        };
-
-        match skip_recovery(t.task_id.as_deref(), task_status.as_deref()) {
-            SkipRecovery::Reschedule { .. } => {
-                let task_id = t.task_id.as_deref().unwrap_or("");
-                let status = task_status.as_deref().unwrap_or("todo");
-                let reason = "startup recovery";
-                // Single canonical INSERT (create_thread): carries the parent's
-                // plan + template so a re-scheduled tester/reviewer keeps its
-                // iteration budget and role guidance.
-                let new_thread = create_thread(
-                    &mut *tx,
-                    "pending",
-                    t.cause.as_deref().unwrap_or("system"),
-                    &t.channel_id,
-                    t.profile.as_deref().unwrap_or("default"),
-                    CreateThreadParams {
-                        provider: t.provider.clone(),
-                        model: t.model.clone(),
-                        task_id: t.task_id.clone(),
-                        schedule_task_id: None,
-                        plan: t.plan,
-                        parent_id: Some(t.id),
-                        workflow_id: t.workflow_id.clone(),
-                        workflow_step: t.workflow_step.clone(),
-                        template: t.template.clone(),
-                        hook_caused: false,
-                    },
-                )
-                .await?;
-                let new_id = new_thread.id;
-
-                let cause = t.cause.clone().unwrap_or_else(|| "re-run".to_string());
-                sql_forge!(
-                    r#"
-                        INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
-                        VALUES (:tid, 'cause', :content, 0, 'cause')
-                        "#,
-                    ( :tid = new_id, :content = cause )
-                )
-                .execute(&mut *tx)
-                .await?;
-
-                sql_forge!(
-                    "UPDATE kanban_tasks SET thread_status = 'scheduled' WHERE id = :task_id",
-                    ( :task_id = task_id )
-                )
-                .execute(&mut *tx)
-                .await?;
-
-                let comment = format!(
-                    "Thread #{} skipped ({}). Creating thread #{}",
-                    t.id, reason, new_id
-                );
-                sql_forge!(
-                        r#"
-                        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
-                        VALUES (:task_id, 'workflow', :initial, :to_status, :comment)
-                        "#,
-                        (
-                            :task_id = task_id,
-                            :initial = status,
-                            :to_status = status,
-                            :comment = comment.as_str()
-                        )
-                    )
-                    .execute(&mut *tx)
-                    .await?;
-            }
-            SkipRecovery::SkipOnly | SkipRecovery::Noop => {}
-        }
     }
     tx.commit().await?;
+
+    // Unified startup redispatch: every kanban task in a workflow column
+    // WITHOUT an active thread gets its role thread re-created (the skipped
+    // threads above leave those tasks without a runner). Blocked/done tasks
+    // are untouched; task status is never changed; no retry is consumed.
+    #[derive(sqlx::FromRow)]
+    struct StuckTaskRow {
+        id: String,
+        status: String,
+    }
+    let stuck: Vec<StuckTaskRow> = sql_forge!(
+        StuckTaskRow,
+        r#"
+        SELECT t.id, t.status
+        FROM kanban_tasks t
+        WHERE t.status IN ('running', 'testing', 'review')
+          AND NOT EXISTS (
+              SELECT 1 FROM threads th
+              WHERE th.task_id = t.id AND th.status IN ('pending', 'processing')
+          )
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    for task in &stuck {
+        if let Err(e) =
+            create_kanban_step_thread(pool, data_dir, &task.id, &task.status, false).await
+        {
+            tracing::warn!(
+                "[startup] failed to redispatch kanban task {} (step {}): {:?}",
+                task.id,
+                task.status,
+                e
+            );
+        }
+    }
+
     Ok(threads.len() as u64)
 }
 
@@ -1623,6 +1835,74 @@ mod tests {
         assert!(
             !identity.model.is_empty(),
             "model must resolve from profile"
+        );
+    }
+
+    // ---------- Kanban status-change dispatch / redispatch ----------
+
+    #[test]
+    fn kanban_step_actionable_gates() {
+        // running always runs, even without a workflow.
+        assert!(kanban_step_actionable("running", None, false));
+        assert!(kanban_step_actionable("running", Some("wf"), false));
+        // testing/review require a workflow that defines the role.
+        assert!(!kanban_step_actionable("testing", None, false));
+        assert!(!kanban_step_actionable("testing", Some("wf"), false));
+        assert!(kanban_step_actionable("testing", Some("wf"), true));
+        assert!(!kanban_step_actionable("review", None, true));
+        assert!(!kanban_step_actionable("review", Some("wf"), false));
+        assert!(kanban_step_actionable("review", Some("wf"), true));
+        // Other statuses never dispatch.
+        for s in ["backlog", "todo", "blocked", "done", ""] {
+            assert!(!kanban_step_actionable(s, Some("wf"), true), "status {s}");
+        }
+    }
+
+    #[test]
+    fn resolve_kanban_thread_template_precedence() {
+        // Role template wins for workflow steps.
+        assert_eq!(
+            resolve_kanban_thread_template(
+                Some("dev-tester".to_string()),
+                false,
+                Some("t"),
+                Some("c")
+            ),
+            Some("dev-tester".to_string())
+        );
+        // Running without a role template: task -> channel -> dev-development.
+        assert_eq!(
+            resolve_kanban_thread_template(None, true, Some("task-tpl"), Some("channel-tpl")),
+            Some("task-tpl".to_string())
+        );
+        assert_eq!(
+            resolve_kanban_thread_template(None, true, None, Some("channel-tpl")),
+            Some("channel-tpl".to_string())
+        );
+        assert_eq!(
+            resolve_kanban_thread_template(None, true, Some(""), Some("")),
+            Some("dev-development".to_string())
+        );
+        assert_eq!(
+            resolve_kanban_thread_template(None, true, None, None),
+            Some("dev-development".to_string())
+        );
+        // Step threads (testing/review) without a role template stay None —
+        // same as kanban_updater's step-thread creation.
+        assert_eq!(
+            resolve_kanban_thread_template(None, false, Some("task-tpl"), Some("channel-tpl")),
+            None
+        );
+    }
+
+    #[test]
+    fn kanban_thread_content_title_and_body() {
+        assert_eq!(kanban_thread_content("Title", None), "Title");
+        assert_eq!(kanban_thread_content("Title", Some("")), "Title");
+        assert_eq!(kanban_thread_content("Title", Some("  ")), "Title");
+        assert_eq!(
+            kanban_thread_content("Title", Some("Body")),
+            "Title\n\nBody"
         );
     }
 }

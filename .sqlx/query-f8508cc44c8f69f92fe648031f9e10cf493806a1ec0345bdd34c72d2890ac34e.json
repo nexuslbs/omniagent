@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, parent_id, workflow_id, workflow_step, task_type)\n             VALUES ('running', 'user', 'kanban', 'test', 'noop', 'noop', $1, NULL, 'test-wf', 'running', 'kanban')\n             RETURNING id",
+  "query": "SELECT id FROM threads WHERE task_id = $1 AND status IN ('pending', 'processing')",
   "describe": {
     "columns": [
       {
@@ -24,5 +24,5 @@
       false
     ]
   },
-  "hash": "eee612fb61d7fd6dce84130c01a86d3f8d504fa408e2d7525c0cfee6b11a099b"
+  "hash": "f8508cc44c8f69f92fe648031f9e10cf493806a1ec0345bdd34c72d2890ac34e"
 }

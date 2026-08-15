@@ -197,7 +197,7 @@ async fn run_server() -> AppResult<()> {
     }
 
     // ── STARTUP: Skip pending/processing messages BEFORE spawning any concurrent tasks ──
-    match agent::skip_on_startup(&pool).await {
+    match agent::skip_on_startup(&pool, &data_dir).await {
         Ok(skipped) => {
             if skipped > 0 {
                 tracing::info!("Skipped {} pending/processing threads on startup", skipped);

@@ -505,7 +505,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
 /// On startup, find any threads that are still `processing` and mark them as `failed`.
 /// Also skip all pending/processing threads.
 /// Returns the number of recovered threads.
-pub async fn skip_on_startup(pool: &PgPool) -> crate::error::AppResult<u64> {
+pub async fn skip_on_startup(pool: &PgPool, data_dir: &str) -> crate::error::AppResult<u64> {
     // Debug: check specific message 122 still works (for backward compat)
     #[derive(Debug, FromRow)]
     struct MsgRow {
@@ -562,7 +562,7 @@ pub async fn skip_on_startup(pool: &PgPool) -> crate::error::AppResult<u64> {
             );
         }
 
-        let c = queries::skip_all_pending_threads(pool).await?;
+        let c = queries::skip_all_pending_threads(pool, data_dir).await?;
         if c > 0 {
             info!(
                 "[startup] Skipped {} pending/processing threads on startup",
@@ -572,16 +572,17 @@ pub async fn skip_on_startup(pool: &PgPool) -> crate::error::AppResult<u64> {
         c
     };
 
-    // ── Phase 6 (R3): re-schedule instead of resetting ──
-    // skip_all_pending_threads above already re-scheduled every kanban-linked
-    // thread: a fresh thread was created, thread_status = 'scheduled', kanban
-    // status UNCHANGED, NO retry consumed. Tasks are never moved back to
-    // todo/blocked here (completed workflow steps are never re-run).
+    // ── Phase 6 (R3): unified redispatch instead of resetting ──
+    // skip_all_pending_threads marks every pending/processing thread terminal
+    // and then redispatches every kanban task sitting in a workflow column
+    // (running/testing/review) without an active thread: a fresh role thread
+    // is created, thread_status = 'scheduled', kanban status UNCHANGED, NO
+    // retry consumed. Tasks are never moved back to todo/blocked here.
     if count > 0 {
         info!(
             "[startup] Skipped {} pending/processing threads on startup; \
-             kanban-linked tasks were re-scheduled (fresh thread, \
-             thread_status='scheduled', status unchanged)",
+             kanban tasks in workflow columns were redispatched \
+             (fresh thread, thread_status='scheduled', status unchanged)",
             count
         );
     }
