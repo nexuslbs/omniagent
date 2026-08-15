@@ -2911,7 +2911,14 @@ mod token_counting_tests {
         // Final answer kept; oldest drained turns marked as compacted.
         let joined = serde_json::to_string(&arr).unwrap();
         assert!(joined.contains("final answer"));
-        assert!(joined.contains("[context compacted: filesystem_read"));
+        assert!(
+            joined.contains("=== Compaction Summary ==="),
+            "frozen summary block must be present"
+        );
+        assert!(
+            joined.contains("filesystem_read"),
+            "drained tool names must appear in the summary"
+        );
     }
 
     // (d) Retention channels stay intact: read-type tool results are
