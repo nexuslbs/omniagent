@@ -977,6 +977,12 @@ async fn migrate_channels_to_yml(pool: &PgPool) -> Result<()> {
     sqlx::query("DROP INDEX IF EXISTS uq_messages_seq0_external_id")
         .execute(pool)
         .await?;
+    // Fresh installs have no messages.channel_id yet (it is added by the
+    // schema-v5 step later in run()) — ensure it exists first, otherwise
+    // the CREATE INDEX below fails with "column channel_id does not exist".
+    sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS channel_id TEXT")
+        .execute(pool)
+        .await?;
     sqlx::query(
         r#"
         CREATE UNIQUE INDEX IF NOT EXISTS uq_messages_seq0_external_id
