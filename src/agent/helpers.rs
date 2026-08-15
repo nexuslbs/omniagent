@@ -215,12 +215,27 @@ pub fn hash_tool_args(args: &str) -> u64 {
     h
 }
 
-/// WS-3/WS-4c: replace-or-append a marker-prefixed system message (budget
+/// WS-3/WS-4c: replace-or-append a marker-prefixed context block (budget
 /// hint, working notes, compaction notice). Keeps the message list bounded
 /// while making the latest value always visible to the LLM.
+///
+/// Pushed as a USER-role message, NOT system. DeepSeek (and similar
+/// providers) hoist system-role messages into the system-prompt region of
+/// the cache key. These blocks change every iteration (budget counter,
+/// notes content), so a system-role upsert changed the hoisted system
+/// prompt and shattered the prefix cache at the static head on EVERY call
+/// (observed: thread 514 froze at exactly 7,424 cached tokens = messages
+/// 0-6, 6.9% hit rate). A user-role block stays in the conversation stream
+/// at the tail, so the byte-identical prefix (system prompt + all prior
+/// tool rounds) rides the cache: empirically 98-99% hit vs 77% collapse.
 pub fn upsert_system_message(messages: &mut Vec<ChatMessage>, marker: &str, content: String) {
-    messages.retain(|m| m.role != "system" || !m.content.starts_with(marker));
-    messages.push(ChatMessage::system(&content));
+    // Remove any prior instance (legacy system-role or current user-role) so
+    // the latest value replaces it. Restrict to system|user roles: a tool
+    // result or assistant reply could legitimately CONTAIN the marker text.
+    messages.retain(|m| {
+        !(matches!(m.role.as_str(), "system" | "user") && m.content.starts_with(marker))
+    });
+    messages.push(ChatMessage::user(&content));
 }
 
 /// Tools whose results ARE the agent's working memory (file contents, listings,
