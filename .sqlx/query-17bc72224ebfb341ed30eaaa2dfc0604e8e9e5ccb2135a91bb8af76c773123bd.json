@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, title, channel_id\n        FROM kanban_tasks\n        WHERE status = $1\n        ORDER BY priority ASC, position ASC\n        ",
+  "query": "\n        SELECT id, title, channel_id, board\n        FROM kanban_tasks\n        WHERE status = $1\n        ORDER BY priority ASC, position ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -35,6 +35,17 @@
             "name": "channel_id"
           }
         }
+      },
+      {
+        "ordinal": 3,
+        "name": "board",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "board"
+          }
+        }
       }
     ],
     "parameters": {
@@ -45,8 +56,9 @@
     "nullable": [
       false,
       false,
+      true,
       true
     ]
   },
-  "hash": "2acf14cad43b61e1b99e660ffc6df94e03662350d6acad9ecebd37474326a4a3"
+  "hash": "17bc72224ebfb341ed30eaaa2dfc0604e8e9e5ccb2135a91bb8af76c773123bd"
 }

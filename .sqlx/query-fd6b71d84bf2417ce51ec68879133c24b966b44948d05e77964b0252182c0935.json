@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id, title, body, status, priority, position, assignee,\n            channel_id, profile, archived, template, plan, workflow_id,\n            created_at, updated_at\n        FROM kanban_tasks\n        WHERE ($1 OR archived = false)\n           OR (NOT $2 AND archived = false)\n        ORDER BY position ASC, created_at DESC\n        ",
+  "query": "\n        SELECT id, title, body, status, channel_id, profile, template, plan, workflow_id, board\n        FROM kanban_tasks WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -49,39 +49,6 @@
       },
       {
         "ordinal": 4,
-        "name": "priority",
-        "type_info": "Int4",
-        "origin": {
-          "Table": {
-            "table": "kanban_tasks",
-            "name": "priority"
-          }
-        }
-      },
-      {
-        "ordinal": 5,
-        "name": "position",
-        "type_info": "Int4",
-        "origin": {
-          "Table": {
-            "table": "kanban_tasks",
-            "name": "position"
-          }
-        }
-      },
-      {
-        "ordinal": 6,
-        "name": "assignee",
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "kanban_tasks",
-            "name": "assignee"
-          }
-        }
-      },
-      {
-        "ordinal": 7,
         "name": "channel_id",
         "type_info": "Text",
         "origin": {
@@ -92,7 +59,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 5,
         "name": "profile",
         "type_info": "Text",
         "origin": {
@@ -103,18 +70,7 @@
         }
       },
       {
-        "ordinal": 9,
-        "name": "archived",
-        "type_info": "Bool",
-        "origin": {
-          "Table": {
-            "table": "kanban_tasks",
-            "name": "archived"
-          }
-        }
-      },
-      {
-        "ordinal": 10,
+        "ordinal": 6,
         "name": "template",
         "type_info": "Text",
         "origin": {
@@ -125,7 +81,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 7,
         "name": "plan",
         "type_info": "Bool",
         "origin": {
@@ -136,7 +92,7 @@
         }
       },
       {
-        "ordinal": 12,
+        "ordinal": 8,
         "name": "workflow_id",
         "type_info": "Text",
         "origin": {
@@ -147,32 +103,20 @@
         }
       },
       {
-        "ordinal": 13,
-        "name": "created_at",
-        "type_info": "Timestamptz",
+        "ordinal": 9,
+        "name": "board",
+        "type_info": "Text",
         "origin": {
           "Table": {
             "table": "kanban_tasks",
-            "name": "created_at"
-          }
-        }
-      },
-      {
-        "ordinal": 14,
-        "name": "updated_at",
-        "type_info": "Timestamptz",
-        "origin": {
-          "Table": {
-            "table": "kanban_tasks",
-            "name": "updated_at"
+            "name": "board"
           }
         }
       }
     ],
     "parameters": {
       "Left": [
-        "Bool",
-        "Bool"
+        "Text"
       ]
     },
     "nullable": [
@@ -183,15 +127,10 @@
       true,
       true,
       true,
-      true,
-      true,
       false,
-      true,
-      false,
-      true,
       true,
       true
     ]
   },
-  "hash": "74b3f3699a825c9ac29d172c618c248a73558a355200b1705c0c0a0e24bb6fbc"
+  "hash": "fd6b71d84bf2417ce51ec68879133c24b966b44948d05e77964b0252182c0935"
 }

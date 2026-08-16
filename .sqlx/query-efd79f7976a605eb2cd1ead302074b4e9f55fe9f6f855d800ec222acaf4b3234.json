@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "DELETE FROM kanban_tasks WHERE id = $1",
+  "query": "DELETE FROM kanban_tasks WHERE board = $1",
   "describe": {
     "columns": [],
     "parameters": {
@@ -10,5 +10,5 @@
     },
     "nullable": []
   },
-  "hash": "3b12f310cbe8d489a3114f6fb4d6726bccaabb2ce52c7c22fbf13450a7e55697"
+  "hash": "efd79f7976a605eb2cd1ead302074b4e9f55fe9f6f855d800ec222acaf4b3234"
 }
