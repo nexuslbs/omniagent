@@ -1,0 +1,13 @@
+{
+  "servers": [
+    {
+      "name": "ssh",
+      "transport": "stdio",
+      "args": [],
+      "max_retries": 3,
+      "allowed_tools": [
+        "*"
+      ]
+    }
+  ]
+}

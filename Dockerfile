@@ -31,6 +31,7 @@ COPY plugins/tools/actions/Cargo.toml ./plugins/tools/actions/
 COPY plugins/tools/fetch/Cargo.toml ./plugins/tools/fetch/
 COPY plugins/tools/filesystem/Cargo.toml ./plugins/tools/filesystem/
 COPY plugins/tools/git/Cargo.toml ./plugins/tools/git/
+COPY plugins/tools/ssh/Cargo.toml ./plugins/tools/ssh/
 COPY plugins/tools/skills/Cargo.toml ./plugins/tools/skills/
 COPY plugins/platforms/mattermost/Cargo.toml ./plugins/platforms/mattermost/
 
