@@ -19,8 +19,7 @@ use tokio::sync::RwLock;
 // ---------------------------------------------------------------------------
 
 async fn handle_add(pool: &PgPool, args: &Value, meta: Option<&McpMeta>) -> Result<(String, bool)> {
-    let thread_id = args["thread_id"]
-        .as_i64()
+    let thread_id = as_i64(&args["thread_id"])
         .or_else(|| meta.and_then(|m| m.thread_id))
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -35,7 +34,7 @@ async fn handle_add(pool: &PgPool, args: &Value, meta: Option<&McpMeta>) -> Resu
         anyhow::bail!("Subtask description must not be empty");
     }
 
-    let priority = args["priority"].as_i64().unwrap_or(0) as i32;
+    let priority = as_i64(&args["priority"]).unwrap_or(0) as i32;
 
     let _subtask = subtask::add_subtask(pool, thread_id, description, priority).await?;
 
@@ -85,8 +84,7 @@ async fn handle_list(
     args: &Value,
     meta: Option<&McpMeta>,
 ) -> Result<(String, bool)> {
-    let thread_id = args["thread_id"]
-        .as_i64()
+    let thread_id = as_i64(&args["thread_id"])
         .or_else(|| meta.and_then(|m| m.thread_id))
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -139,13 +137,11 @@ async fn handle_update(
     args: &Value,
     meta: Option<&McpMeta>,
 ) -> Result<(String, bool)> {
-    let subtask_id = args["subtask_id"]
-        .as_i64()
+    let subtask_id = as_i64(&args["subtask_id"])
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'subtask_id'"))?;
 
     // Need thread_id for counts after update
-    let thread_id = args["thread_id"]
-        .as_i64()
+    let thread_id = as_i64(&args["thread_id"])
         .or_else(|| meta.and_then(|m| m.thread_id))
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -230,12 +226,10 @@ async fn handle_delete(
     args: &Value,
     meta: Option<&McpMeta>,
 ) -> Result<(String, bool)> {
-    let subtask_id = args["subtask_id"]
-        .as_i64()
+    let subtask_id = as_i64(&args["subtask_id"])
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'subtask_id'"))?;
 
-    let thread_id = args["thread_id"]
-        .as_i64()
+    let thread_id = as_i64(&args["thread_id"])
         .or_else(|| meta.and_then(|m| m.thread_id))
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -294,8 +288,7 @@ async fn handle_get_counts(
     args: &Value,
     meta: Option<&McpMeta>,
 ) -> Result<(String, bool)> {
-    let thread_id = args["thread_id"]
-        .as_i64()
+    let thread_id = as_i64(&args["thread_id"])
         .or_else(|| meta.and_then(|m| m.thread_id))
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -336,6 +329,13 @@ enum ManageAction {
     GetCounts,
 }
 
+/// Coerce a JSON value to i64: numbers directly, or numeric strings
+/// (script-driven test-tool-caller agents pass ids as strings).
+fn as_i64(v: &Value) -> Option<i64> {
+    v.as_i64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+}
+
 /// Parse + validate the `action` argument and the per-action required fields.
 /// Pure function (no DB access) — unit-tested.
 fn parse_manage_action(args: &Value) -> Result<ManageAction> {
@@ -354,7 +354,7 @@ fn parse_manage_action(args: &Value) -> Result<ManageAction> {
         }
         "list" => Ok(ManageAction::List),
         "update" => {
-            args["subtask_id"].as_i64().ok_or_else(|| {
+            as_i64(&args["subtask_id"]).ok_or_else(|| {
                 anyhow::anyhow!("Missing required argument: 'subtask_id' for action='update'")
             })?;
             let has_status = args["status"].as_str().is_some();
@@ -374,7 +374,7 @@ fn parse_manage_action(args: &Value) -> Result<ManageAction> {
             Ok(ManageAction::Update)
         }
         "delete" => {
-            args["subtask_id"].as_i64().ok_or_else(|| {
+            as_i64(&args["subtask_id"]).ok_or_else(|| {
                 anyhow::anyhow!("Missing required argument: 'subtask_id' for action='delete'")
             })?;
             Ok(ManageAction::Delete)
@@ -428,8 +428,7 @@ async fn handle_manage(
 ) -> Result<(String, bool)> {
     let action = parse_manage_action(args)?;
 
-    let thread_id = args["thread_id"]
-        .as_i64()
+    let thread_id = as_i64(&args["thread_id"])
         .or_else(|| meta.and_then(|m| m.thread_id))
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -440,7 +439,7 @@ async fn handle_manage(
     match action {
         ManageAction::Add => {
             let description = args["description"].as_str().unwrap_or("");
-            let priority = args["priority"].as_i64().unwrap_or(0) as i32;
+            let priority = as_i64(&args["priority"]).unwrap_or(0) as i32;
             let added = subtask::add_subtask(pool, thread_id, description, priority).await?;
             let counts = subtask::get_subtask_counts(pool, thread_id).await?;
             let current = subtask::get_current_subtask(pool, thread_id).await?;
@@ -468,7 +467,7 @@ async fn handle_manage(
             Ok((serde_json::to_string_pretty(&output)?, false))
         }
         ManageAction::Update => {
-            let subtask_id = args["subtask_id"].as_i64().unwrap_or(0);
+            let subtask_id = as_i64(&args["subtask_id"]).unwrap_or(0);
             let mut updated_any = false;
             if let Some(status) = args["status"].as_str() {
                 let rows = subtask::update_subtask_status(pool, subtask_id, status).await?;
@@ -502,7 +501,7 @@ async fn handle_manage(
             Ok((serde_json::to_string_pretty(&output)?, false))
         }
         ManageAction::Delete => {
-            let subtask_id = args["subtask_id"].as_i64().unwrap_or(0);
+            let subtask_id = as_i64(&args["subtask_id"]).unwrap_or(0);
             let rows = subtask::delete_subtask(pool, subtask_id).await?;
             if rows == 0 {
                 anyhow::bail!("Subtask {} not found", subtask_id);
@@ -868,6 +867,31 @@ mod manage_action_tests {
     fn parse_get_counts_valid() {
         let args = serde_json::json!({"action": "get_counts"});
         assert_eq!(parse_manage_action(&args).unwrap(), ManageAction::GetCounts);
+    }
+
+    #[test]
+    fn parse_update_string_subtask_id() {
+        let args = serde_json::json!({
+            "action": "update",
+            "subtask_id": "17",
+            "status": "completed",
+        });
+        assert_eq!(parse_manage_action(&args).unwrap(), ManageAction::Update);
+    }
+
+    #[test]
+    fn parse_delete_string_subtask_id() {
+        let args = serde_json::json!({"action": "delete", "subtask_id": "3"});
+        assert_eq!(parse_manage_action(&args).unwrap(), ManageAction::Delete);
+    }
+
+    #[test]
+    fn as_i64_coercion() {
+        assert_eq!(as_i64(&serde_json::json!(7)), Some(7));
+        assert_eq!(as_i64(&serde_json::json!("7")), Some(7));
+        assert_eq!(as_i64(&serde_json::json!(" 12 ")), Some(12));
+        assert_eq!(as_i64(&serde_json::json!("abc")), None);
+        assert_eq!(as_i64(&serde_json::json!(null)), None);
     }
 
     #[test]
