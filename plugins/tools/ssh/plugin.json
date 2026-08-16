@@ -1,0 +1,35 @@
+{
+  "name": "ssh",
+  "label": "ssh",
+  "version": "0.1.0",
+  "type": "mcp",
+  "description": "SSH operations — run commands on and copy files to/from a remote machine (ssh_run, ssh_copy, ssh_status)",
+  "config_schema": [
+    {
+      "key": "ssh_dir",
+      "default": "",
+      "label": "SSH Dir (directory with ssh config + keys; default {OMNI_DIR}/data/ssh)",
+      "type": "string",
+      "required": false
+    },
+    {
+      "key": "connect_timeout_secs",
+      "default": "10",
+      "label": "SSH Connect Timeout (seconds)",
+      "type": "string",
+      "required": false
+    },
+    {
+      "key": "workspace_dir",
+      "default": "/opt/workspace",
+      "label": "Workspace Dir (sandbox — local side of ssh_copy must stay inside)",
+      "type": "string",
+      "required": false
+    }
+  ],
+  "entrypoint": {
+    "command": "mcp-server-ssh",
+    "args": [],
+    "transport": "stdio"
+  }
+}

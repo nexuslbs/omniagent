@@ -19,6 +19,7 @@ members = [
     "plugins/tools/fetch",
     "plugins/tools/filesystem",
     "plugins/tools/git",
+    "plugins/tools/ssh",
     "plugins/tools/skills",
     "plugins/platforms/mattermost",
 ]

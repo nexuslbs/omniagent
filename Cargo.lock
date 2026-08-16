@@ -1527,6 +1527,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcp-server-ssh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mcp-server-util",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "mcp-server-subtasks"
 version = "0.1.0"
 dependencies = [
