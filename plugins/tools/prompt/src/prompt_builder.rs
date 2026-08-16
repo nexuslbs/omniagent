@@ -42,7 +42,9 @@ fn build_dynamic_identity(tool_names: &[String]) -> String {
             || n.starts_with("clone_repo")
             || n == "status"
     });
-    let has_subtasks = tool_names.iter().any(|n| n.starts_with("manage_subtask"));
+    let has_subtasks = tool_names
+        .iter()
+        .any(|n| n.starts_with("subtasks_") || n.starts_with("manage_subtask"));
     let has_skills = tool_names
         .iter()
         .any(|n| n.starts_with("create_skill") || n.starts_with("list_skills"));
@@ -91,6 +93,7 @@ fn build_dynamic_identity(tool_names: &[String]) -> String {
             || name.starts_with("clone_repo")
             || name == "status"
             || name.starts_with("manage_subtask")
+            || name.starts_with("subtasks_")
             || name.starts_with("create_skill")
             || name.starts_with("list_skills")
             || name == "plugin_manager"
@@ -169,7 +172,13 @@ disk, when you need content again.\n\
 12. NEVER RE-READ CONTEXT DUMPS: a context-*.json dump is read ONCE per \
 thread — a second read returns a '[duplicate read ...]' marker, not content. \
 Trust the injected '=== Context Compacted ===' summary and your notes instead; \
-re-reading dumps is a forbidden anti-loop that wastes iterations.";
+re-reading dumps is a forbidden anti-loop that wastes iterations.\n\
+13. SUBTASKS: after planning a multi-step task, create one subtask per plan step \
+with the subtasks tool (subtasks_manage-subtasks, action=\"add\"); as you finish \
+each step mark its subtask completed (action=\"update\", subtask_id=N, \
+status=\"completed\"); cancel any subtask that is no longer needed \
+(status=\"cancelled\"); before your final answer, complete or cancel ALL subtasks \
+so none remain pending.";
 
 fn build_active_profile_hint(profile_name: &str) -> String {
     format!("Active profile: {profile_name}.")

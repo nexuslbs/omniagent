@@ -227,7 +227,7 @@ impl AgentConfig {
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
             max_iterations_plan: get("max_iterations_plan", "120").parse().unwrap_or(120),
             thread_summary_tokens: get("thread_summary_tokens", "2048").parse().unwrap_or(2048),
-            max_unfinished_subtask_retries: get("max_unfinished_subtask_retries", "3")
+            max_unfinished_subtask_retries: get("max_unfinished_subtask_retries", "1")
                 .parse()
                 .unwrap_or(3),
             provider_max_retries: get("provider_max_retries", "3").parse().unwrap_or(3),
@@ -326,7 +326,7 @@ impl AgentConfig {
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
             max_iterations_plan: get("max_iterations_plan", "120").parse().unwrap_or(120),
             thread_summary_tokens: get("thread_summary_tokens", "2048").parse().unwrap_or(2048),
-            max_unfinished_subtask_retries: get("max_unfinished_subtask_retries", "3")
+            max_unfinished_subtask_retries: get("max_unfinished_subtask_retries", "1")
                 .parse()
                 .unwrap_or(3),
             provider_max_retries: get("provider_max_retries", "3").parse().unwrap_or(3),
@@ -409,7 +409,7 @@ mod tests {
             max_iterations_no_plan: 30,
             max_iterations_plan: 120,
             thread_summary_tokens: 2048,
-            max_unfinished_subtask_retries: 3,
+            max_unfinished_subtask_retries: 1,
             provider_max_retries: 3,
             delete_after_days: 30,
             prompt_tool_name: "prompt_generate".to_string(),

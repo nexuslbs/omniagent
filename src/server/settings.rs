@@ -378,10 +378,10 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             "max_unfinished_subtask_retries".into(),
             SettingMeta {
                 field_type: "number".into(),
-                description: "Max retries before marking a thread as failed when subtasks remain unfinished or plan JSON is invalid".into(),
+                description: "Max enforcement nudges before ending a thread with unfinished subtasks (default 1 = one nudge max)".into(),
                 options: None,
                 readonly: false,
-                default: Some("3".into()),
+                default: Some("1".into()),
             },
         ),
         (

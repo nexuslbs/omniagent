@@ -1,7 +1,8 @@
 //! mcp-server-subtasks: standalone MCP server for thread subtask management.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
-//! Tools: add_subtask, list_subtasks, update_subtask, delete_subtask, get_subtask_counts
+//! Tools: add_subtask, list_subtasks, update_subtask, delete_subtask, get_subtask_counts,
+//!        manage_subtasks (unified tool with `action` param).
 
 #![allow(dead_code)]
 
@@ -322,6 +323,215 @@ async fn handle_get_counts(
 }
 
 // ---------------------------------------------------------------------------
+// Tool: manage_subtasks (unified) — action: add | list | update | delete | get_counts
+// ---------------------------------------------------------------------------
+
+/// The unified `manage_subtasks` action, validated from the incoming args.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManageAction {
+    Add,
+    List,
+    Update,
+    Delete,
+    GetCounts,
+}
+
+/// Parse + validate the `action` argument and the per-action required fields.
+/// Pure function (no DB access) — unit-tested.
+fn parse_manage_action(args: &Value) -> Result<ManageAction> {
+    let action = args["action"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'action'"))?;
+    match action {
+        "add" => {
+            let desc = args["description"].as_str().ok_or_else(|| {
+                anyhow::anyhow!("Missing required argument: 'description' for action='add'")
+            })?;
+            if desc.trim().is_empty() {
+                anyhow::bail!("Subtask description must not be empty");
+            }
+            Ok(ManageAction::Add)
+        }
+        "list" => Ok(ManageAction::List),
+        "update" => {
+            args["subtask_id"].as_i64().ok_or_else(|| {
+                anyhow::anyhow!("Missing required argument: 'subtask_id' for action='update'")
+            })?;
+            let has_status = args["status"].as_str().is_some();
+            let has_desc = args["description"].as_str().is_some();
+            if !has_status && !has_desc {
+                anyhow::bail!("No fields provided to update. Specify 'status' or 'description'.");
+            }
+            if let Some(status) = args["status"].as_str() {
+                let valid_statuses = ["pending", "completed", "cancelled", "error"];
+                if !valid_statuses.contains(&status) {
+                    anyhow::bail!(
+                        "Invalid status '{}'. Must be one of: pending, completed, cancelled, error",
+                        status
+                    );
+                }
+            }
+            Ok(ManageAction::Update)
+        }
+        "delete" => {
+            args["subtask_id"].as_i64().ok_or_else(|| {
+                anyhow::anyhow!("Missing required argument: 'subtask_id' for action='delete'")
+            })?;
+            Ok(ManageAction::Delete)
+        }
+        "get_counts" => Ok(ManageAction::GetCounts),
+        other => anyhow::bail!(
+            "Invalid action '{}'. Must be one of: add, list, update, delete, get_counts",
+            other
+        ),
+    }
+}
+
+fn subtask_json(s: &subtask::SubtaskRow) -> Value {
+    serde_json::json!({
+        "id": s.id,
+        "thread_id": s.thread_id,
+        "description": s.description,
+        "status": s.status,
+        "priority": s.priority.unwrap_or(0),
+        "created_at": s.created_at,
+        "updated_at": s.updated_at,
+    })
+}
+
+fn current_subtask_json(s: Option<&subtask::SubtaskRow>) -> Value {
+    match s {
+        Some(s) => serde_json::json!({
+            "id": s.id,
+            "description": s.description,
+            "status": s.status,
+            "priority": s.priority.unwrap_or(0),
+        }),
+        None => Value::Null,
+    }
+}
+
+fn counts_json(c: &subtask::SubtaskCounts) -> Value {
+    serde_json::json!({
+        "completed_count": c.completed_count,
+        "pending_count": c.pending_count,
+        "cancelled_count": c.cancelled_count,
+        "error_count": c.error_count,
+        "total_count": c.total_count,
+    })
+}
+
+async fn handle_manage(
+    pool: &PgPool,
+    args: &Value,
+    meta: Option<&McpMeta>,
+) -> Result<(String, bool)> {
+    let action = parse_manage_action(args)?;
+
+    let thread_id = args["thread_id"]
+        .as_i64()
+        .or_else(|| meta.and_then(|m| m.thread_id))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Missing 'thread_id' (no current thread in context). Pass thread_id explicitly."
+            )
+        })?;
+
+    match action {
+        ManageAction::Add => {
+            let description = args["description"].as_str().unwrap_or("");
+            let priority = args["priority"].as_i64().unwrap_or(0) as i32;
+            let added = subtask::add_subtask(pool, thread_id, description, priority).await?;
+            let counts = subtask::get_subtask_counts(pool, thread_id).await?;
+            let current = subtask::get_current_subtask(pool, thread_id).await?;
+            let output = serde_json::json!({
+                "action": "add",
+                "id": added.id,
+                "subtask": subtask_json(&added),
+                "counts": counts_json(&counts),
+                "current_subtask": current_subtask_json(current.as_ref()),
+                "message": format!("Subtask added: {}", description),
+            });
+            Ok((serde_json::to_string_pretty(&output)?, false))
+        }
+        ManageAction::List => {
+            let all = subtask::list_subtasks(pool, thread_id).await?;
+            let counts = subtask::get_subtask_counts(pool, thread_id).await?;
+            let current = subtask::get_current_subtask(pool, thread_id).await?;
+            let subtasks_json: Vec<Value> = all.iter().map(subtask_json).collect();
+            let output = serde_json::json!({
+                "action": "list",
+                "counts": counts_json(&counts),
+                "current_subtask": current_subtask_json(current.as_ref()),
+                "subtasks": subtasks_json,
+            });
+            Ok((serde_json::to_string_pretty(&output)?, false))
+        }
+        ManageAction::Update => {
+            let subtask_id = args["subtask_id"].as_i64().unwrap_or(0);
+            let mut updated_any = false;
+            if let Some(status) = args["status"].as_str() {
+                let rows = subtask::update_subtask_status(pool, subtask_id, status).await?;
+                if rows == 0 {
+                    anyhow::bail!("Subtask {} not found", subtask_id);
+                }
+                updated_any = true;
+            }
+            if let Some(description) = args["description"].as_str() {
+                if !description.is_empty() {
+                    let rows =
+                        subtask::update_subtask_description(pool, subtask_id, description).await?;
+                    if rows == 0 {
+                        anyhow::bail!("Subtask {} not found", subtask_id);
+                    }
+                    updated_any = true;
+                }
+            }
+            if !updated_any {
+                anyhow::bail!("No fields provided to update. Specify 'status' or 'description'.");
+            }
+            let counts = subtask::get_subtask_counts(pool, thread_id).await?;
+            let current = subtask::get_current_subtask(pool, thread_id).await?;
+            let output = serde_json::json!({
+                "action": "update",
+                "subtask_id": subtask_id,
+                "counts": counts_json(&counts),
+                "current_subtask": current_subtask_json(current.as_ref()),
+                "message": format!("Subtask {} updated successfully", subtask_id),
+            });
+            Ok((serde_json::to_string_pretty(&output)?, false))
+        }
+        ManageAction::Delete => {
+            let subtask_id = args["subtask_id"].as_i64().unwrap_or(0);
+            let rows = subtask::delete_subtask(pool, subtask_id).await?;
+            if rows == 0 {
+                anyhow::bail!("Subtask {} not found", subtask_id);
+            }
+            let counts = subtask::get_subtask_counts(pool, thread_id).await?;
+            let current = subtask::get_current_subtask(pool, thread_id).await?;
+            let output = serde_json::json!({
+                "action": "delete",
+                "subtask_id": subtask_id,
+                "counts": counts_json(&counts),
+                "current_subtask": current_subtask_json(current.as_ref()),
+                "message": format!("Subtask {} deleted", subtask_id),
+            });
+            Ok((serde_json::to_string_pretty(&output)?, false))
+        }
+        ManageAction::GetCounts => {
+            let counts = subtask::get_subtask_counts(pool, thread_id).await?;
+            let current = subtask::get_current_subtask(pool, thread_id).await?;
+            let output = serde_json::json!({
+                "action": "get_counts",
+                "counts": counts_json(&counts),
+                "current_subtask": current_subtask_json(current.as_ref()),
+            });
+            Ok((serde_json::to_string_pretty(&output)?, false))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Plugin config hook
 // ---------------------------------------------------------------------------
 
@@ -410,6 +620,17 @@ async fn main() -> Result<()> {
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
             handle_get_counts(&pool, &args, meta.as_ref()).await
+        })
+    });
+    let p_mng = pool.clone();
+    let manage_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
+        let p = p_mng.clone();
+        Box::pin(async move {
+            let guard = p.read().await;
+
+            let pool = guard.as_ref().expect("Pool not initialized").clone();
+
+            handle_manage(&pool, &args, meta.as_ref()).await
         })
     });
 
@@ -504,6 +725,39 @@ async fn main() -> Result<()> {
             },
             handler: counts_handler,
         },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "manage_subtasks".to_string(),
+                description:
+                    "Manage subtasks for a thread with a single tool. `action` selects the operation: \
+                 'add' (requires description, optional priority), 'list' (full list + counts), \
+                 'update' (requires subtask_id + status and/or description), 'delete' (requires subtask_id), \
+                 'get_counts' (counts + current subtask). Returns compact output: counts + affected \
+                 row, NOT the full list on every call (token efficiency)."
+                    .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "description": "Operation to perform: add, list, update, delete, get_counts",
+                            "enum": ["add", "list", "update", "delete", "get_counts"]
+                        },
+                        "thread_id": { "type": "integer", "description": "The thread ID (default: current thread)" },
+                        "description": { "type": "string", "description": "Subtask description (required for add; optional for update)" },
+                        "priority": { "type": "integer", "description": "Subtask priority for add (default: 0). Higher = more important." },
+                        "subtask_id": { "type": "integer", "description": "The subtask ID (required for update/delete)" },
+                        "status": {
+                            "type": "string",
+                            "description": "New status for update: pending, completed, cancelled, error",
+                            "enum": ["pending", "completed", "cancelled", "error"]
+                        },
+                    },
+                    "required": ["action"],
+                }),
+            },
+            handler: manage_handler,
+        },
     ];
 
     let server_info = ServerInfo {
@@ -526,4 +780,107 @@ async fn main() -> Result<()> {
         })
     })
     .await
+}
+
+#[cfg(test)]
+mod manage_action_tests {
+    use super::*;
+
+    #[test]
+    fn parse_add_valid() {
+        let args = serde_json::json!({
+            "action": "add",
+            "description": "Read the task body",
+            "priority": 2,
+        });
+        assert_eq!(parse_manage_action(&args).unwrap(), ManageAction::Add);
+    }
+
+    #[test]
+    fn parse_add_missing_description() {
+        let args = serde_json::json!({"action": "add"});
+        let err = parse_manage_action(&args).unwrap_err();
+        assert!(err.to_string().contains("description"), "{err}");
+    }
+
+    #[test]
+    fn parse_add_empty_description() {
+        let args = serde_json::json!({"action": "add", "description": "   "});
+        let err = parse_manage_action(&args).unwrap_err();
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn parse_list_valid() {
+        let args = serde_json::json!({"action": "list"});
+        assert_eq!(parse_manage_action(&args).unwrap(), ManageAction::List);
+    }
+
+    #[test]
+    fn parse_update_valid_status() {
+        let args = serde_json::json!({
+            "action": "update",
+            "subtask_id": 7,
+            "status": "completed",
+        });
+        assert_eq!(parse_manage_action(&args).unwrap(), ManageAction::Update);
+    }
+
+    #[test]
+    fn parse_update_missing_subtask_id() {
+        let args = serde_json::json!({"action": "update", "status": "completed"});
+        let err = parse_manage_action(&args).unwrap_err();
+        assert!(err.to_string().contains("subtask_id"), "{err}");
+    }
+
+    #[test]
+    fn parse_update_no_fields() {
+        let args = serde_json::json!({"action": "update", "subtask_id": 7});
+        let err = parse_manage_action(&args).unwrap_err();
+        assert!(err.to_string().contains("No fields"), "{err}");
+    }
+
+    #[test]
+    fn parse_update_invalid_status() {
+        let args = serde_json::json!({
+            "action": "update",
+            "subtask_id": 7,
+            "status": "banana",
+        });
+        let err = parse_manage_action(&args).unwrap_err();
+        assert!(err.to_string().contains("Invalid status"), "{err}");
+    }
+
+    #[test]
+    fn parse_delete_valid() {
+        let args = serde_json::json!({"action": "delete", "subtask_id": 3});
+        assert_eq!(parse_manage_action(&args).unwrap(), ManageAction::Delete);
+    }
+
+    #[test]
+    fn parse_delete_missing_subtask_id() {
+        let args = serde_json::json!({"action": "delete"});
+        let err = parse_manage_action(&args).unwrap_err();
+        assert!(err.to_string().contains("subtask_id"), "{err}");
+    }
+
+    #[test]
+    fn parse_get_counts_valid() {
+        let args = serde_json::json!({"action": "get_counts"});
+        assert_eq!(parse_manage_action(&args).unwrap(), ManageAction::GetCounts);
+    }
+
+    #[test]
+    fn parse_missing_action() {
+        let args = serde_json::json!({});
+        let err = parse_manage_action(&args).unwrap_err();
+        assert!(err.to_string().contains("'action'"), "{err}");
+    }
+
+    #[test]
+    fn parse_invalid_action() {
+        let args = serde_json::json!({"action": "explode"});
+        let err = parse_manage_action(&args).unwrap_err();
+        assert!(err.to_string().contains("Invalid action"), "{err}");
+    }
 }
