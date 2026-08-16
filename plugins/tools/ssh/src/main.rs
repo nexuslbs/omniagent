@@ -19,9 +19,9 @@ use anyhow::{Context, Result};
 use mcp_server_util::*;
 use parking_lot::Mutex;
 use serde_json::Value;
-use std::sync::LazyLock;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -94,8 +94,8 @@ fn secure_ssh_dir(dir: &str) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         // The directory itself should be private too (keys inside).
         let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700));
-        let entries = std::fs::read_dir(d)
-            .with_context(|| format!("Failed to read ssh dir {}", dir))?;
+        let entries =
+            std::fs::read_dir(d).with_context(|| format!("Failed to read ssh dir {}", dir))?;
         for entry in entries.flatten() {
             let path = entry.path();
             let Ok(meta) = std::fs::metadata(&path) else {
@@ -172,7 +172,8 @@ fn split_host_port(host: &str) -> (String, Option<u16>) {
 /// ConnectTimeout, and `-F <ssh_dir>/config` when the config file exists.
 fn add_ssh_options(cmd: &mut Command, ssh_dir: &str, connect_timeout: u64) {
     cmd.arg("-o").arg("BatchMode=yes");
-    cmd.arg("-o").arg(format!("ConnectTimeout={}", connect_timeout));
+    cmd.arg("-o")
+        .arg(format!("ConnectTimeout={}", connect_timeout));
     let cfg_path = Path::new(ssh_dir).join("config");
     if cfg_path.is_file() {
         cmd.arg("-F").arg(&cfg_path);
@@ -369,7 +370,11 @@ async fn run_ssh(
 async fn handle_run(args: Value) -> Result<(String, bool)> {
     let host = args["host"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Missing required parameter: host (host alias from ssh config OR user@host:port)"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Missing required parameter: host (host alias from ssh config OR user@host:port)"
+            )
+        })?
         .to_string();
     if host.is_empty() {
         anyhow::bail!("host cannot be empty");
@@ -465,17 +470,26 @@ async fn handle_run(args: Value) -> Result<(String, bool)> {
 async fn handle_copy(args: Value) -> Result<(String, bool)> {
     let host = args["host"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Missing required parameter: host (host alias from ssh config OR user@host:port)"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Missing required parameter: host (host alias from ssh config OR user@host:port)"
+            )
+        })?
         .to_string();
     if host.is_empty() {
         anyhow::bail!("host cannot be empty");
     }
     let direction = args["direction"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Missing required parameter: direction (to-remote|from-remote)"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("Missing required parameter: direction (to-remote|from-remote)")
+        })?
         .to_string();
     if direction != "to-remote" && direction != "from-remote" {
-        anyhow::bail!("direction must be 'to-remote' or 'from-remote', got '{}'", direction);
+        anyhow::bail!(
+            "direction must be 'to-remote' or 'from-remote', got '{}'",
+            direction
+        );
     }
     let source = args["source"].as_str().unwrap_or("").to_string();
     let destination = args["destination"].as_str().unwrap_or("").to_string();
@@ -543,10 +557,7 @@ async fn handle_copy(args: Value) -> Result<(String, bool)> {
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return Ok((
-                format!("Failed to spawn scp: {}", e),
-                true,
-            ));
+            return Ok((format!("Failed to spawn scp: {}", e), true));
         }
     };
     let wait_fut = child.wait_with_output();
@@ -674,8 +685,7 @@ async fn main() -> Result<()> {
         McpToolEntry {
             def: McpToolDef {
                 name: "run".to_string(),
-                description:
-                    "RUN a command on a remote machine over SSH. \
+                description: "RUN a command on a remote machine over SSH. \
                     'host' (required) is a host alias from the ssh config file in ssh_dir, \
                     OR an inline 'user@host:port' spec. 'command' (required) is the shell \
                     command to run — no character restrictions, interpreted by the remote \
@@ -686,7 +696,7 @@ async fn main() -> Result<()> {
                     commands run as tracked background tasks; use builtin_wait-task to follow). \
                     'ssh_dir' (optional) overrides the configured ssh dir (default \
                     {OMNI_DIR}/data/ssh). Returns stdout, stderr, exit code and duration."
-                        .to_string(),
+                    .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -718,13 +728,14 @@ async fn main() -> Result<()> {
                     "required": ["host"]
                 }),
             },
-            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_run(args).await })),
+            handler: Box::new(|args: Value, _meta: Option<McpMeta>| {
+                Box::pin(async move { handle_run(args).await })
+            }),
         },
         McpToolEntry {
             def: McpToolDef {
                 name: "copy".to_string(),
-                description:
-                    "COPY files to or from a remote machine over SSH (scp). \
+                description: "COPY files to or from a remote machine over SSH (scp). \
                     'host' (required) is a host alias OR 'user@host:port' inline. \
                     'direction' (required) is 'to-remote' (local source -> remote destination) \
                     or 'from-remote' (remote source -> local destination). 'source' and \
@@ -733,7 +744,7 @@ async fn main() -> Result<()> {
                     The LOCAL side is sandboxed to the configured workspace_dir \
                     (default /opt/workspace). 'timeout' (optional) bounds the copy in seconds. \
                     'ssh_dir' (optional) overrides the configured ssh dir."
-                        .to_string(),
+                    .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -770,18 +781,19 @@ async fn main() -> Result<()> {
                     "required": ["host", "direction", "source", "destination"]
                 }),
             },
-            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_copy(args).await })),
+            handler: Box::new(|args: Value, _meta: Option<McpMeta>| {
+                Box::pin(async move { handle_copy(args).await })
+            }),
         },
         McpToolEntry {
             def: McpToolDef {
                 name: "status".to_string(),
-                description:
-                    "CHECK connectivity to a remote host: runs `ssh host true` with the \
+                description: "CHECK connectivity to a remote host: runs `ssh host true` with the \
                     configured ConnectTimeout and reports ok/error plus latency. Use this \
                     to fail fast before scripting a long remote setup. 'host' (required) is \
                     a host alias OR 'user@host:port' inline. 'ssh_dir' (optional) overrides \
                     the configured ssh dir."
-                        .to_string(),
+                    .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -801,7 +813,9 @@ async fn main() -> Result<()> {
                     "required": ["host"]
                 }),
             },
-            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_status(args).await })),
+            handler: Box::new(|args: Value, _meta: Option<McpMeta>| {
+                Box::pin(async move { handle_status(args).await })
+            }),
         },
     ];
 
@@ -991,7 +1005,10 @@ mod tests {
         let _g = set_config("", "/opt/workspace");
         let r = resolve_local_path("/tmp/escape", "/opt/workspace", "source");
         assert!(r.is_err());
-        assert!(r.unwrap_err().to_string().contains("outside the ssh plugin workspace sandbox"));
+        assert!(r
+            .unwrap_err()
+            .to_string()
+            .contains("outside the ssh plugin workspace sandbox"));
         // Traversal escape: workspace/../etc
         let r = resolve_local_path("/opt/workspace/../etc", "/opt/workspace", "source");
         assert!(r.is_err());

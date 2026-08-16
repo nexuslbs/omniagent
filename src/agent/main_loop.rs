@@ -27,6 +27,147 @@ async fn backoff_delay(attempt: u32) -> Duration {
     Duration::from_millis(delay_ms)
 }
 
+/// Extract up to 6 plan steps from plan content (markdown or JSON).
+///
+/// Real plans are markdown: `<plan>1. step one</plan>` or plain numbered/bulleted
+/// lists. We no longer REQUIRE JSON `{"steps": [...]}` — that never matched real
+/// plans (every live plan is markdown), so no subtasks were ever auto-created.
+/// JSON steps are still honored as a fallback. Priority is preserved: the FIRST
+/// step gets the HIGHEST priority.
+fn extract_plan_steps(content: &str) -> Vec<String> {
+    // 1. JSON fallback: {"steps": ["a", "b"]}
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(content) {
+        if let Some(steps) = v.get("steps").and_then(|s| s.as_array()) {
+            let mut out = Vec::new();
+            for s in steps.iter().take(6) {
+                if let Some(t) = s.as_str() {
+                    let clean = t.trim().trim_end_matches(['*', '`']).trim();
+                    if !clean.is_empty() {
+                        out.push(clean.to_string());
+                    }
+                }
+            }
+            if !out.is_empty() {
+                return out;
+            }
+        }
+    }
+    // 2. Markdown: extract the <plan>...</plan> block if present (case-insensitive).
+    let lower = content.to_lowercase();
+    let body = if let Some(start) = lower.find("<plan>") {
+        let after = &content[start + "<plan>".len()..];
+        if let Some(end_rel) = lower[start + "<plan>".len()..].find("</plan>") {
+            &after[..end_rel]
+        } else {
+            after
+        }
+    } else {
+        content
+    };
+    // 3. Parse numbered/bulleted lines.
+    let mut out: Vec<String> = Vec::new();
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let step = if let Some(rest) = trimmed
+            .strip_prefix('-')
+            .or_else(|| trimmed.strip_prefix('*'))
+        {
+            rest.trim()
+        } else {
+            // numbered: "1.", "1)", "1:" optionally followed by space
+            let bytes = trimmed.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i > 0 && i < bytes.len() && matches!(bytes[i], b'.' | b')' | b':') {
+                trimmed[i + 1..].trim()
+            } else {
+                continue;
+            }
+        };
+        let clean = step.trim().trim_end_matches(['*', '`']).trim();
+        if !clean.is_empty() && !out.iter().any(|o| o == clean) {
+            out.push(clean.to_string());
+            if out.len() >= 6 {
+                break;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod plan_extract_tests {
+    use super::*;
+
+    #[test]
+    fn markdown_plan_numbered() {
+        let content = "<plan>\n1. Read the task body\n2. Implement the change\n3. Run tests\n4. Commit\n</plan>";
+        let steps = extract_plan_steps(content);
+        assert_eq!(steps.len(), 4);
+        assert_eq!(steps[0], "Read the task body");
+        assert_eq!(steps[2], "Run tests");
+    }
+
+    #[test]
+    fn markdown_plan_bullets() {
+        let content = "<plan>\n- First step\n- Second step\n- Third step\n</plan>";
+        let steps = extract_plan_steps(content);
+        assert_eq!(steps, vec!["First step", "Second step", "Third step"]);
+    }
+
+    #[test]
+    fn markdown_plain_list_without_tags() {
+        let content = "Plan:\n1. orient\n2. edit\n3. test\n4. commit\n5. push\n6. report\n7. extra";
+        let steps = extract_plan_steps(content);
+        assert_eq!(steps.len(), 6, "max 6 steps");
+        assert_eq!(steps[0], "orient");
+        assert_eq!(steps[5], "report");
+    }
+
+    #[test]
+    fn json_steps_fallback() {
+        let content = r#"{"description": "task", "steps": ["a", "b", "c"]}"#;
+        let steps = extract_plan_steps(content);
+        assert_eq!(steps, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn empty_and_plain_text() {
+        assert!(extract_plan_steps("<plan></plan>").is_empty());
+        assert!(extract_plan_steps("no steps here just prose").is_empty());
+        assert!(extract_plan_steps("").is_empty());
+    }
+
+    #[test]
+    fn priority_order_preserved() {
+        let content = "<plan>\n1. first\n2. second\n3. third\n</plan>";
+        let steps = extract_plan_steps(content);
+        assert_eq!(steps[0], "first");
+        assert_eq!(steps[2], "third");
+    }
+
+    #[test]
+    fn markdown_inline_formatting_stripped() {
+        let content = "<plan>\n1. **bold step**\n2. `code step`\n</plan>";
+        let steps = extract_plan_steps(content);
+        assert_eq!(steps.len(), 2);
+        assert!(steps[0].contains("bold step"));
+        assert!(steps[1].contains("code step"));
+    }
+
+    #[test]
+    fn dedupes_repeated_lines() {
+        let content = "<plan>\n1. same\n2. same\n3. other\n</plan>";
+        let steps = extract_plan_steps(content);
+        assert_eq!(steps, vec!["same", "other"]);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_main_loop(
     cfg: &AgentContext,
@@ -72,12 +213,11 @@ pub(crate) async fn run_main_loop(
         let max_iter = 0; // one-shot, no refinement iterations
         let max_tokens = cfg_snapshot.thread_summary_tokens; // configurable planning/summary token limit
         let mut last_plan: Option<String> = None;
-        let mut json_failure_count: u32 = 0;
-        let mut json_error_msg: Option<String> = None;
 
-        for iter in 0..(max_iter + 1) {
-            // Build planning messages from prompt parts
-            // User's request goes in context; planning instruction goes in user
+        'plan: {
+            let iter: u32 = 0; // one-shot: no refinement iterations
+                               // Build planning messages from prompt parts
+                               // User's request goes in context; planning instruction goes in user
             let mut planning_messages = vec![ChatMessage::system(&prompt_parts.system)];
             if !prompt_parts.memory.is_empty() {
                 planning_messages.push(ChatMessage::system(&prompt_parts.memory));
@@ -94,9 +234,6 @@ pub(crate) async fn run_main_loop(
             // Inject the task template so the plan is aware of the instructions
             if let Some(ref ts) = template_section {
                 planning_messages.push(ChatMessage::system(ts));
-            }
-            if let Some(ref err) = json_error_msg {
-                planning_messages.push(ChatMessage::system(err));
             }
             // Include the actual user request (task body for kanban/cron tasks,
             // original message for user threads) so the plan phase sees WHAT the
@@ -278,86 +415,49 @@ Previous plan:\n{}",
                     // embed the plan text again, duplicating what's already saved.
                     has_logged_first_prompt = true;
 
-                    // For complex tasks, auto-create subtasks from JSON plan content
+                    // For complex tasks, auto-create subtasks from the plan content.
+                    // Plans are markdown (`<plan>1. step</plan>`), not JSON: parse
+                    // numbered/bulleted lines (max 6, priority preserved). JSON
+                    // `{"steps": [...]}` plans are still honored as a fallback.
+                    // No force-fail: a plan with no parseable steps simply skips
+                    // subtask auto-create (a markdown plan is never an error).
                     if enable_subtasks && plan_content.len() > 100 {
-                        let max_json_retries: u32 =
-                            cfg.config_snapshot().max_unfinished_subtask_retries;
-                        match serde_json::from_str::<serde_json::Value>(&plan_content) {
-                            Ok(plan_json) => {
-                                if let Some(steps) =
-                                    plan_json.get("steps").and_then(|v| v.as_array())
+                        let steps = extract_plan_steps(&plan_content);
+                        if steps.is_empty() {
+                            warn!(
+                                "[plan] No parseable steps in plan for thread {} — skipping subtask auto-create",
+                                thread.id
+                            );
+                        } else {
+                            let total = steps.len();
+                            for (i, step) in steps.iter().enumerate() {
+                                let priority = (total - i) as i32;
+                                if let Err(e) = crate::subtask::add_subtask(
+                                    &cfg.pool, thread.id, step, priority,
+                                )
+                                .await
                                 {
-                                    // Valid JSON with steps: create subtasks
-                                    let total = steps.len().min(6);
-                                    for (i, step_val) in steps.iter().enumerate().take(6) {
-                                        if let Some(step) = step_val.as_str() {
-                                            let clean =
-                                                step.trim().trim_end_matches(['*', '`']).trim();
-                                            if !clean.is_empty() {
-                                                let priority = (total - i) as i32;
-                                                if let Err(e) = crate::subtask::add_subtask(
-                                                    &cfg.pool, thread.id, clean, priority,
-                                                )
-                                                .await
-                                                {
-                                                    warn!("[plan] Failed to create subtask '{}': {:?}", clean, e);
-                                                } else {
-                                                    info!("[plan] Created subtask '{}' for complex thread {}", clean, thread.id);
-                                                }
-                                            }
-                                        }
-                                    }
+                                    warn!("[plan] Failed to create subtask '{}': {:?}", step, e);
                                 } else {
-                                    // JSON valid but missing "steps" field
-                                    json_failure_count += 1;
-                                    if json_failure_count > max_json_retries {
-                                        warn!("[plan] JSON validation exhausted: missing 'steps' field after {} retries for thread {}", max_json_retries, thread.id);
-                                        force_failed = true;
-                                        break;
-                                    }
-                                    json_error_msg = Some(format!(
-                                        "ERROR: Your plan JSON is missing the required \"steps\" array. \
-                                         You MUST return a JSON object with \"description\" (string) and \"steps\" (array of strings). \
-                                         No surrounding markdown, no backticks, no extra text. \
-                                         Attempt {}/{}: fix the JSON or the thread will fail.",
-                                        json_failure_count, max_json_retries
-                                    ));
-                                    last_plan = Some(plan_content.clone());
-                                    continue;
+                                    info!(
+                                        "[plan] Created subtask '{}' for complex thread {}",
+                                        step, thread.id
+                                    );
                                 }
-                            }
-                            Err(e) => {
-                                // Invalid JSON syntax
-                                json_failure_count += 1;
-                                if json_failure_count > max_json_retries {
-                                    warn!("[plan] JSON validation exhausted: invalid JSON after {} retries for thread {}: {}", max_json_retries, thread.id, e);
-                                    force_failed = true;
-                                    break;
-                                }
-                                json_error_msg = Some(format!(
-                                    "ERROR: Your response was not valid JSON. Parsing error: {}. \
-                                     You MUST return a valid JSON object with \"description\" and \"steps\" fields. \
-                                     No surrounding markdown, no backticks, no extra text. \
-                                     Attempt {}/{}: fix the JSON or the thread will fail.",
-                                    e, json_failure_count, max_json_retries
-                                ));
-                                last_plan = Some(plan_content.clone());
-                                continue;
                             }
                         }
                     }
-
                     last_plan = Some(plan_content);
 
                     // One-shot: no refinement iterations: plan is final
-                    break;
+                    break 'plan;
                 }
                 Err(e) => {
                     warn!(
                         "[plan] Failed to generate plan for thread {}: {:?}",
                         thread.id, e
                     );
-                    break;
+                    break 'plan;
                 }
             }
         }
@@ -909,7 +1009,7 @@ Previous plan:\n{}",
                         .collect();
                     let feedback = format!(
                         "[Subtask Required] You cannot end this thread while subtasks are still pending. \
-                         BEFORE writing your final answer, call `manage_subtasks(action=\"update\", subtask_id=N, status=\"completed\")` \
+                         BEFORE writing your final answer, call `subtasks_manage-subtasks(action=\"update\", subtask_id=N, status=\"completed\")` \
                          for each subtask you've already finished. If any subtask is no longer needed, use status=\"cancelled\".\n\n\
                          Remaining unfinished subtasks:\n{}\n\n\
                          You will be retried (attempt {}/{}): use this chance to manage them.",
@@ -917,7 +1017,7 @@ Previous plan:\n{}",
                         unfinished_subtask_retries,
                         max_retries,
                     );
-                    messages.push(ChatMessage::system(&feedback));
+                    messages.push(ChatMessage::user(&feedback));
                     info!(
                         "[subtask] Enforcement: LLM tried to end with {} unfinished subtask(s) (retry {}/{})",
                         pending_subtasks.len(),
@@ -1609,17 +1709,17 @@ Previous plan:\n{}",
         // rounds without managing subtasks, inject a gentle nudge.
         if enable_subtasks {
             // Check if any tool call in this round was manage_subtasks
-            let called_manage = response
-                .tool_calls
-                .iter()
-                .any(|tc| tc.function.name == "manage_subtasks");
+            let called_manage = response.tool_calls.iter().any(|tc| {
+                tc.function.name == "subtasks_manage-subtasks"
+                    || tc.function.name == "manage_subtasks"
+            });
             if called_manage {
                 calls_since_subtask_management = 0;
             } else {
                 calls_since_subtask_management += 1;
             }
 
-            if calls_since_subtask_management >= 3 {
+            if calls_since_subtask_management >= 10 {
                 if let Ok(subtasks) = crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
                     let pending_count = subtasks
                         .iter()
@@ -1628,11 +1728,11 @@ Previous plan:\n{}",
                     if pending_count > 0 {
                         let reminder = format!(
                             "[Progress Check] You've made {} tool call rounds without updating your subtasks. \
-                             If you've completed any steps, call `manage_subtasks(action=\"update\", subtask_id=N, status=\"completed\")` \
+                             If you've completed any steps, call `subtasks_manage-subtasks(action=\"update\", subtask_id=N, status=\"completed\")` \
                              for each finished subtask now. This keeps progress accurate.",
                             calls_since_subtask_management,
                         );
-                        messages.push(ChatMessage::system(&reminder));
+                        messages.push(ChatMessage::user(&reminder));
                         calls_since_subtask_management = 0;
                     }
                 }
