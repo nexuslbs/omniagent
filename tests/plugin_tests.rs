@@ -177,6 +177,7 @@ fn test_list_builtins_have_source_code() {
         "plugin-manager",
         "query",
         "search",
+        "ssh",
         "subtasks",
     ] {
         let plugin = data
