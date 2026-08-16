@@ -881,7 +881,7 @@ async fn install_node_deps(plugin_dir: &str) -> Result<String, String> {
     }
 
     // TypeScript servers compile to dist/ via a build script when declared.
-    let has_build_script = std::fs::read_to_string(&format!("{}/package.json", plugin_dir))
+    let has_build_script = std::fs::read_to_string(format!("{}/package.json", plugin_dir))
         .ok()
         .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
         .map(|v| {
