@@ -63,28 +63,55 @@ pub(crate) async fn install_plugin_handler(
         }
         Ok(false) => {
             // Ok(false) means no Cargo.toml found — the plugin directory exists but
-            // isn't a Rust crate. For remote plugins this is an error: install-git
-            // should have cloned a proper Rust project. For bundled plugins, a missing
-            // Cargo.toml means it's a non-Rust plugin (e.g. Python) — let it through.
-            if category_source == "remote" {
-                let msg = format!(
-                    "Install: no Cargo.toml found for remote plugin '{}' at {}",
-                    name, plugin_dir
-                );
-                tracing::error!("{}", msg);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": msg,
-                    })),
-                )
-                    .into_response();
+            // isn't a Rust crate, so it's a non-Rust plugin (Python/NodeJS). Install
+            // its declared dependencies (requirements.txt / pyproject.toml /
+            // package.json) hermetically so it can actually run. Remote plugins with
+            // NO dependency manifest at all are an error: install-git should have
+            // cloned a proper project. Bundled plugins without a manifest (e.g. a
+            // dependency-free script) still pass through.
+            match install_non_rust_deps(&plugin_dir).await {
+                Ok(Some(desc)) => {
+                    info!("Install: {} for '{}'", desc, name);
+                }
+                Ok(None) => {
+                    if category_source == "remote" {
+                        let msg = format!(
+                            "Install: no Cargo.toml and no dependency manifest \
+                             (requirements.txt/pyproject.toml/package.json) found for remote \
+                             plugin '{}' at {}",
+                            name, plugin_dir
+                        );
+                        tracing::error!("{}", msg);
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "success": false,
+                                "error": msg,
+                            })),
+                        )
+                            .into_response();
+                    }
+                    info!(
+                        "Install: compilation skipped for '{}' (no Cargo.toml, no deps)",
+                        name
+                    );
+                }
+                Err(e) => {
+                    let msg = format!(
+                        "Install: dependency installation failed for '{}': {}",
+                        name, e
+                    );
+                    tracing::error!("{}", msg);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "success": false,
+                            "error": msg,
+                        })),
+                    )
+                        .into_response();
+                }
             }
-            info!(
-                "Install: compilation skipped for '{}' (no Cargo.toml)",
-                name
-            );
         }
         Err(e) => {
             let msg = format!("Install: compilation failed for '{}': {}", name, e);
@@ -737,4 +764,170 @@ pub(crate) async fn rename_plugin_handler(
         })),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Non-Rust (Python/NodeJS) dependency installation
+// ---------------------------------------------------------------------------
+
+/// Install dependencies for a non-Rust (Python/NodeJS) plugin.
+///
+/// Hermetic by design — no global package pollution:
+/// - **Python** (`requirements.txt` or `pyproject.toml`): creates a venv at
+///   `{plugin_dir}/.venv` and pip-installs into it. Falls back to
+///   `pip install --target {plugin_dir}/pylib` when `python3 -m venv` is
+///   unavailable (e.g. missing `python3-venv` on minimal images).
+/// - **NodeJS** (`package.json`): `npm ci` when a lockfile exists, else
+///   `npm install`; then `npm run build` when the package declares a build
+///   script (TypeScript MCP servers compile to `dist/` this way, matching the
+///   reference servers' own Dockerfiles: `npm ci && npm run build`).
+///
+/// Returns `Ok(Some(summary))` when dependencies were installed, `Ok(None)`
+/// when the directory declares no dependency manifest (nothing to do), and
+/// `Err` on failure.
+async fn install_non_rust_deps(plugin_dir: &str) -> Result<Option<String>, String> {
+    let dir = std::path::Path::new(plugin_dir);
+    let has_python = dir.join("requirements.txt").exists() || dir.join("pyproject.toml").exists();
+    let has_node = dir.join("package.json").exists();
+
+    if has_python {
+        let desc = install_python_deps(plugin_dir).await?;
+        return Ok(Some(desc));
+    }
+    if has_node {
+        let desc = install_node_deps(plugin_dir).await?;
+        return Ok(Some(desc));
+    }
+    Ok(None)
+}
+
+/// Install Python dependencies into a hermetic venv (or `pylib/` fallback).
+async fn install_python_deps(plugin_dir: &str) -> Result<String, String> {
+    let venv_python = format!("{}/.venv/bin/python", plugin_dir);
+    let venv_pip = format!("{}/.venv/bin/pip", plugin_dir);
+    let has_requirements =
+        std::path::Path::new(&format!("{}/requirements.txt", plugin_dir)).exists();
+
+    // Prefer a hermetic venv; fall back to `pip install --target` when venv
+    // creation is unavailable in the image (no python3-venv / ensurepip).
+    if !std::path::Path::new(&venv_python).exists() {
+        match run_capture(
+            "python3",
+            &["-m", "venv", &format!("{}/.venv", plugin_dir)],
+            None,
+        )
+        .await
+        {
+            Ok(_) => info!("Install: created Python venv at {}", venv_python),
+            Err(venv_err) => {
+                tracing::warn!(
+                    "Install: python venv unavailable ({}); falling back to pip install --target",
+                    venv_err
+                );
+                let target = format!("{}/pylib", plugin_dir);
+                let mut args = vec![
+                    "-m",
+                    "pip",
+                    "install",
+                    "--disable-pip-version-check",
+                    "--target",
+                    &target,
+                ];
+                let req_path = format!("{}/requirements.txt", plugin_dir);
+                if has_requirements {
+                    args.push("-r");
+                    args.push(&req_path);
+                } else {
+                    args.push(".");
+                }
+                run_capture("python3", &args, Some(plugin_dir)).await?;
+                return Ok(format!(
+                    "Python dependencies installed into {}/pylib",
+                    plugin_dir
+                ));
+            }
+        }
+    }
+
+    let mut args = vec!["install", "--disable-pip-version-check"];
+    let req_path = format!("{}/requirements.txt", plugin_dir);
+    if has_requirements {
+        args.push("-r");
+        args.push(&req_path);
+    } else {
+        args.push(".");
+    }
+    run_capture(&venv_pip, &args, Some(plugin_dir)).await?;
+    Ok(format!(
+        "Python dependencies installed into {}/.venv",
+        plugin_dir
+    ))
+}
+
+/// Install NodeJS dependencies into the local `node_modules/` (hermetic).
+async fn install_node_deps(plugin_dir: &str) -> Result<String, String> {
+    let has_lockfile = std::path::Path::new(&format!("{}/package-lock.json", plugin_dir)).exists()
+        || std::path::Path::new(&format!("{}/npm-shrinkwrap.json", plugin_dir)).exists();
+
+    if has_lockfile {
+        run_capture("npm", &["ci", "--no-audit", "--no-fund"], Some(plugin_dir)).await?;
+    } else {
+        run_capture(
+            "npm",
+            &["install", "--no-audit", "--no-fund"],
+            Some(plugin_dir),
+        )
+        .await?;
+    }
+
+    // TypeScript servers compile to dist/ via a build script when declared.
+    let has_build_script = std::fs::read_to_string(&format!("{}/package.json", plugin_dir))
+        .ok()
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+        .map(|v| {
+            v.get("scripts")
+                .and_then(|s| s.get("build"))
+                .and_then(|b| b.as_str())
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if has_build_script {
+        run_capture("npm", &["run", "build"], Some(plugin_dir)).await?;
+    }
+
+    Ok(format!(
+        "NodeJS dependencies installed into {}/node_modules",
+        plugin_dir
+    ))
+}
+
+/// Run a command, capturing stdout/stderr. Returns Err with a truncated tail
+/// of the combined output on non-zero exit.
+async fn run_capture(
+    program: &str,
+    args: &[&str],
+    cwd: Option<&str>,
+) -> Result<(String, String), String> {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args);
+    if let Some(c) = cwd {
+        cmd.current_dir(c);
+    }
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("failed to spawn '{}': {}", program, e))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        let combined = format!("{}{}", stdout, stderr);
+        let tail: Vec<&str> = combined.lines().rev().take(40).collect();
+        let tail_str = tail.iter().rev().cloned().collect::<Vec<_>>().join("\n");
+        return Err(format!(
+            "'{}' exited with {}:\n{}",
+            program, output.status, tail_str
+        ));
+    }
+    Ok((stdout, stderr))
 }
