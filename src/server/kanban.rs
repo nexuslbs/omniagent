@@ -123,6 +123,13 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
         // 17. Redispatch: re-create the role thread for a task already in a
         //     workflow column (running/testing/review) without changing status.
         .route("/kanban/tasks/{id}/redispatch", post(redispatch_handler))
+        // 18. Boards CRUD (config/boards.yml)
+        .route("/boards", get(list_boards_handler))
+        .route(
+            "/boards/{key}",
+            put(upsert_board_handler).post(upsert_board_handler),
+        )
+        .route("/boards/{key}", delete(delete_board_handler))
 }
 
 // ---------------------------------------------------------------------------
@@ -132,6 +139,8 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
 #[derive(Debug, Deserialize)]
 struct ListTasksQuery {
     show_archived: Option<String>,
+    /// Optional board name filter: when set, only tasks of that board are returned.
+    board: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,6 +174,7 @@ struct CreateTaskRequest {
     template: Option<String>,
     plan: Option<bool>,
     workflow_id: Option<String>,
+    board: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,6 +202,7 @@ struct UpdateTaskRequest {
     template: Option<String>,
     plan: Option<bool>,
     workflow_id: Option<String>,
+    board: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,6 +229,7 @@ struct KanbanTaskRow {
     template: Option<String>,
     plan: Option<bool>,
     workflow_id: Option<String>,
+    board: Option<String>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -242,6 +254,7 @@ struct DeleteIdRow {
     template: Option<String>,
     plan: Option<bool>,
     workflow_id: Option<String>,
+    board: Option<String>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -333,6 +346,7 @@ struct KanbanTaskEntry {
     template: Option<String>,
     plan: Option<bool>,
     workflow_id: Option<String>,
+    board: Option<String>,
     created_at: Option<String>,
     updated_at: Option<String>,
 }
@@ -421,6 +435,7 @@ fn task_row_to_entry(r: KanbanTaskRow) -> KanbanTaskEntry {
         template: r.template,
         plan: r.plan,
         workflow_id: r.workflow_id,
+        board: r.board,
         created_at: r
             .created_at
             .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
@@ -513,14 +528,15 @@ async fn list_tasks_handler(
         r#"
         SELECT
             id, title, body, status, priority, position, assignee,
-            channel_id, profile, archived, template, plan, workflow_id,
+            channel_id, profile, archived, template, plan, workflow_id, board,
             created_at, updated_at
         FROM kanban_tasks
-        WHERE (:show_archived_bool OR archived = false)
-           OR (NOT :show_archived_bool AND archived = false)
+        WHERE ((:show_archived_bool OR archived = false)
+           OR (NOT :show_archived_bool AND archived = false))
+          AND (:board = '' OR board = :board)
         ORDER BY position ASC, created_at DESC
         "#,
-        ( :show_archived_bool = show_archived_bool )
+        ( :show_archived_bool = show_archived_bool, :board = params.board.as_deref().unwrap_or("") )
     )
     .fetch_all(&state.pool)
     .await
@@ -552,7 +568,7 @@ async fn get_task_handler(
         r#"
         SELECT
             id, title, body, status, priority, position, assignee,
-            channel_id, profile, archived, template, plan, workflow_id,
+            channel_id, profile, archived, template, plan, workflow_id, board,
             created_at, updated_at
         FROM kanban_tasks
         WHERE id = :id
@@ -662,10 +678,10 @@ async fn create_task_handler(
     if let Err(e) = sql_forge!(
         r#"
         INSERT INTO kanban_tasks
-            (id, title, body, assignee, status, priority, channel_id, profile, position, template, plan, workflow_id)
+            (id, title, body, assignee, status, priority, channel_id, profile, position, template, plan, workflow_id, board)
         VALUES
             (:id, :title, :body, NULLIF(:assignee, '')::text, :status, :priority, NULLIF(:channel_id, '')::text, NULLIF(:profile, '')::text,
-             :position, NULLIF(:template, '')::text, :plan::boolean, NULLIF(:workflow_id, '')::text)
+             :position, NULLIF(:template, '')::text, :plan::boolean, NULLIF(:workflow_id, '')::text, NULLIF(:board, '')::text)
         "#,
         ( :id = id.as_str(),
           :title = &title,
@@ -679,6 +695,7 @@ async fn create_task_handler(
           :template = body.template.as_deref().unwrap_or(""),
           :plan = body.plan.unwrap_or(false),
             :workflow_id = body.workflow_id.as_deref().unwrap_or(""),
+            :board = body.board.as_deref().unwrap_or(""),
     )
     )
     .execute(&state.pool)
@@ -731,7 +748,7 @@ async fn change_status_handler(
         r#"
         SELECT id, title, body, status, priority, position, assignee,
                channel_id, profile, archived, template, plan,
-               workflow_id, created_at, updated_at
+               workflow_id, board, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
         ( :id = &id )
@@ -897,7 +914,7 @@ async fn change_position_handler(
         r#"
         SELECT id, title, body, status, priority, position, assignee,
                channel_id, profile, archived, template, plan,
-               workflow_id, created_at, updated_at
+               workflow_id, board, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
         ( :id = &id )
@@ -1036,7 +1053,7 @@ async fn update_task_handler(
         r#"
         SELECT id, title, body, status, priority, position, assignee,
                channel_id, profile, archived, template, plan,
-               workflow_id, created_at, updated_at
+               workflow_id, board, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
         ( :id = &id )
@@ -1094,6 +1111,7 @@ async fn update_task_handler(
         || body.template.is_some()
         || body.plan.is_some()
         || body.workflow_id.is_some()
+        || body.board.is_some()
         || body.assignee.is_some();
 
     if !has_fields {
@@ -1116,6 +1134,7 @@ async fn update_task_handler(
             template = CASE WHEN :template = '' THEN template ELSE NULLIF(:template, '')::text END,
             plan = :plan,
             workflow_id = CASE WHEN :workflow_id = '' THEN workflow_id ELSE NULLIF(:workflow_id, '')::text END,
+            board = CASE WHEN :board = '' THEN board ELSE NULLIF(:board, '')::text END,
             updated_at = NOW()
         WHERE id = :id
         "#,
@@ -1133,6 +1152,7 @@ async fn update_task_handler(
           :template = body.template.as_deref().unwrap_or(""),
           :plan = body.plan.or(before.plan).unwrap_or(false),
           :workflow_id = body.workflow_id.as_deref().unwrap_or(""),
+          :board = body.board.as_deref().unwrap_or(""),
     )
     )
     .execute(&state.pool)
@@ -1204,6 +1224,7 @@ async fn update_task_handler(
             "plan": before.plan,
             "archived": before.archived,
             "assignee": before.assignee,
+            "board": before.board,
         });
         if let Err(e) = sql_forge!(
             r#"
@@ -1236,7 +1257,7 @@ async fn delete_task_handler(
         r#"
         SELECT id, title, body, status, priority, position, assignee,
                channel_id, profile, archived, template, plan,
-               workflow_id, created_at, updated_at
+               workflow_id, board, created_at, updated_at
         FROM kanban_tasks WHERE id = :id
         "#,
         ( :id = &id )
@@ -1264,6 +1285,7 @@ async fn delete_task_handler(
         "plan": before.plan,
         "archived": before.archived,
         "assignee": before.assignee,
+        "board": before.board,
     });
 
     if let Err(e) = sql_forge!(
@@ -1909,6 +1931,163 @@ async fn delete_workflow_handler(
 }
 
 // ---------------------------------------------------------------------------
+// Boards CRUD (kanban boards — config/boards.yml)
+// ---------------------------------------------------------------------------
+
+/// Absolute path to the deployment's `boards.yml` (under the data dir).
+fn boards_file_path(state: &AppState) -> std::path::PathBuf {
+    crate::config_path::config_path(&state.data_dir, "boards.yml")
+}
+
+/// Load the boards file; a missing file counts as an empty document.
+fn load_boards_file(
+    state: &AppState,
+) -> Result<crate::boards::BoardsFile, crate::boards::BoardsConfigError> {
+    let path = boards_file_path(state);
+    match crate::boards::BoardsFile::load(&path) {
+        Ok(file) => Ok(file),
+        Err(crate::boards::BoardsConfigError::NotFound { .. }) => {
+            Ok(crate::boards::BoardsFile::default())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Serialize a boards file for the API.
+fn boards_response(file: &crate::boards::BoardsFile) -> serde_json::Value {
+    let boards: Vec<serde_json::Value> = file
+        .boards
+        .iter()
+        .map(|(key, board)| serde_json::json!({ "key": key, "board": board }))
+        .collect();
+    serde_json::json!({ "boards": boards })
+}
+
+async fn list_boards_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match load_boards_file(&state) {
+        Ok(file) => ok_json(boards_response(&file)),
+        Err(err) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("failed to load boards.yml: {err}"),
+        ),
+    }
+}
+
+async fn upsert_board_handler(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(body): Json<crate::boards::BoardConfig>,
+) -> impl IntoResponse {
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "board name cannot be empty");
+    }
+    let mut file = match load_boards_file(&state) {
+        Ok(file) => file,
+        Err(err) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to load boards.yml: {err}"),
+            );
+        }
+    };
+    file.upsert(&key, body);
+    if let Err(err) = file.save(&boards_file_path(&state)) {
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("failed to write boards.yml: {err}"),
+        );
+    }
+    ok_json(boards_response(&file))
+}
+
+/// Delete a board AND every task that belongs to it. The per-task cleanup
+/// mirrors `delete_task_handler` (history record, dependency rows, thread
+/// detach) so board deletion is consistent with the existing task-delete
+/// behavior; only then is the board removed from boards.yml.
+async fn delete_board_handler(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> impl IntoResponse {
+    let mut file = match load_boards_file(&state) {
+        Ok(file) => file,
+        Err(err) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("failed to load boards.yml: {err}"),
+            );
+        }
+    };
+    if file.remove(&key).is_none() {
+        return err_json(StatusCode::NOT_FOUND, &format!("board '{key}' not found"));
+    }
+
+    // 1. History: record every deleted task.
+    let _ = sql_forge!(
+        r#"
+        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values)
+        SELECT id, 'deleted', NULL, NULL, jsonb_build_object('board', :board::text)
+        FROM kanban_tasks WHERE board = :board
+        "#,
+        ( :board = &key )
+    )
+    .execute(&state.pool)
+    .await
+    .map_err(|e| {
+        tracing::warn!("[kanban/boards/{}] history insert failed: {:?}", key, e)
+    });
+
+    // 2. Clear dependencies (both directions) for the board's tasks.
+    let _ = sql_forge!(
+        r#"
+        DELETE FROM kanban_task_dependencies
+        WHERE task_id IN (SELECT id FROM kanban_tasks WHERE board = :board)
+           OR depends_on_id IN (SELECT id FROM kanban_tasks WHERE board = :board)
+        "#,
+        ( :board = &key )
+    )
+    .execute(&state.pool)
+    .await
+    .map_err(|e| tracing::warn!("[kanban/boards/{}] dependency delete failed: {:?}", key, e));
+
+    // 3. Detach threads of the board's tasks.
+    let _ = sql_forge!(
+        r#"
+        UPDATE threads SET task_id = NULL
+        WHERE task_id IN (SELECT id FROM kanban_tasks WHERE board = :board)
+        "#,
+        ( :board = &key )
+    )
+    .execute(&state.pool)
+    .await
+    .map_err(|e| tracing::warn!("[kanban/boards/{}] thread detach failed: {:?}", key, e));
+
+    // 4. Delete the tasks themselves.
+    if let Err(e) = sql_forge!(
+        r#"DELETE FROM kanban_tasks WHERE board = :board"#,
+        ( :board = &key )
+    )
+    .execute(&state.pool)
+    .await
+    {
+        error!("[kanban/boards/{}] task delete failed: {:?}", key, e);
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to delete board tasks",
+        );
+    }
+
+    // 5. Persist the boards file (board removed).
+    if let Err(err) = file.save(&boards_file_path(&state)) {
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("failed to write boards.yml: {err}"),
+        );
+    }
+    ok_json(boards_response(&file))
+}
+
+// ---------------------------------------------------------------------------
 // Reset workflow executions (Phase 5)
 // ---------------------------------------------------------------------------
 
@@ -2010,6 +2189,10 @@ struct DispatchTaskRow {
     /// Channel name (yml key) the task targets; needed to gate dispatch on
     /// the channel's active threads without a per-task detail fetch.
     channel_id: Option<String>,
+    /// Board the task belongs to (NULL = no board). When boards.yml is
+    /// present, NULL/unknown-board tasks are skipped by the eligibility
+    /// scan (invalid-board tasks are never promoted/dispatched).
+    board: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -2104,7 +2287,7 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
     let tasks = match sql_forge!(
         DispatchTaskRow,
         r#"
-        SELECT id, title, channel_id
+        SELECT id, title, channel_id, board
         FROM kanban_tasks
         WHERE status = :status
         ORDER BY priority ASC, position ASC
@@ -2122,6 +2305,42 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
                 &format!("Failed to list todo tasks: {e}"),
             );
         }
+    };
+
+    // 1b. Board gate (feature-flagged on the presence of config/boards.yml):
+    //     when boards are enabled, tasks with no board or an unknown board
+    //     are INVALID-BOARD tasks — skipped exactly like backlog/archived
+    //     tasks (never promoted/dispatched). Thread creation for them is
+    //     additionally blocked/failed in create_kanban_step_thread.
+    let boards_enabled = crate::boards::boards_enabled(&state.data_dir);
+    let boards_file: Option<crate::boards::BoardsFile> = if boards_enabled {
+        match crate::boards::BoardsFile::load(&crate::config_path::config_path(
+            &state.data_dir,
+            "boards.yml",
+        )) {
+            Ok(file) => Some(file),
+            Err(e) => {
+                error!("[kanban/dispatch] failed to load boards.yml: {:?}", e);
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to load boards.yml",
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let tasks: Vec<DispatchTaskRow> = match &boards_file {
+        Some(file) => tasks
+            .into_iter()
+            .filter(|t| {
+                t.board
+                    .as_deref()
+                    .map(|b| file.boards.contains_key(b))
+                    .unwrap_or(false)
+            })
+            .collect(),
+        None => tasks,
     };
 
     // 2. Resolve dependency state for each candidate.
@@ -2200,7 +2419,14 @@ async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
             channel_active_counts.push(0);
             continue;
         }
-        let channel_id = resolve_task_channel(task.channel_id.as_deref());
+        let channel_id = resolve_task_channel(task.channel_id.as_deref().or_else(|| {
+            boards_file.as_ref().and_then(|file| {
+                task.board
+                    .as_deref()
+                    .and_then(|b| file.boards.get(b))
+                    .and_then(|cfg| cfg.channel.as_deref())
+            })
+        }));
         let active = match channel_active_thread_count(&state.pool, &channel_id).await {
             Ok(n) => n,
             Err(e) => {
@@ -2525,6 +2751,7 @@ mod tests {
             template: None,
             plan: None,
             workflow_id: Some("wf-x".to_string()),
+            board: None,
             created_at: None,
             updated_at: None,
         };
@@ -2580,6 +2807,7 @@ mod tests {
             template: None,
             plan: None,
             workflow_id: None,
+            board: None,
             created_at: None,
             updated_at: None,
         };
@@ -2606,6 +2834,7 @@ mod tests {
             template: None,
             plan: None,
             workflow_id: None,
+            board: None,
             created_at: None,
             updated_at: None,
         };

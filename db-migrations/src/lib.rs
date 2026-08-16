@@ -21,6 +21,17 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     create_triggers(pool).await?;
     migrate_channels_to_yml(pool).await?;
 
+    // -- Kanban boards (config/boards.yml) --
+    // Nullable `board` column on kanban_tasks: NULL = no board. Board gating is
+    // feature-flagged on the presence of config/boards.yml (src/boards.rs); the
+    // column is inert (and stays NULL for existing tasks) when the file is
+    // absent. Board deletion removes its tasks via the board-delete API handler
+    // (per-task cleanup mirrors the existing task-delete behavior).
+    sqlx::query("ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS board TEXT")
+        .execute(pool)
+        .await
+        .ok();
+
     // -- Event-driven Hooks (thread_started / thread_finished / new_message) --
     // threads.hook_caused marks hook-caused threads so the hooks engine can
     // skip them (infinite-loop protection: hook threads never re-trigger).

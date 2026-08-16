@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, title, body, status, priority, position, assignee,\n               channel_id, profile, archived, template, plan,\n               workflow_id, created_at, updated_at\n        FROM kanban_tasks WHERE id = $1\n        ",
+  "query": "\n        SELECT\n            id, title, body, status, priority, position, assignee,\n            channel_id, profile, archived, template, plan, workflow_id, board,\n            created_at, updated_at\n        FROM kanban_tasks\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -148,6 +148,17 @@
       },
       {
         "ordinal": 13,
+        "name": "board",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "board"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -158,7 +169,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -189,8 +200,9 @@
       false,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "838428975171b04fa05499a928b967aa2e9b611f46ac10efbaa07a76b2ee738f"
+  "hash": "ae24b58365f3f32acb48fd62122f8ab4c1c3a3a673fdcfcad714d7fe2f41520a"
 }

@@ -476,6 +476,20 @@ async fn create_review_thread(
 ) -> Result<Option<i64>, String> {
     let cause = thread.cause.clone();
     let task_id = thread.task_id.clone().unwrap_or_default();
+    // Board gate (feature-flagged): never create a review thread for an
+    // invalid-board task (board NULL or not in boards.yml).
+    if !task_id.is_empty() {
+        if let Err(board_err) =
+            crate::db::threads::ensure_task_board_valid(pool, data_dir, &task_id).await
+        {
+            tracing::warn!(
+                "[workflow] not creating review thread for task {}: {}",
+                task_id,
+                board_err
+            );
+            return Ok(None);
+        }
+    }
     // Step threads carry the TASK DESCRIPTION in the cause message so the
     // prompt builder can place it as the SYSTEM prompt for reviewer threads
     // (inverse role mapping: role template -> USER, task description ->
@@ -555,6 +569,18 @@ async fn create_testing_thread(
         Some(t) if !t.is_empty() => t,
         _ => return Ok(None),
     };
+    // Board gate (feature-flagged): never create a testing thread for an
+    // invalid-board task (board NULL or not in boards.yml).
+    if let Err(board_err) =
+        crate::db::threads::ensure_task_board_valid(pool, data_dir, &task_id).await
+    {
+        tracing::warn!(
+            "[workflow] not creating testing thread for task {}: {}",
+            task_id,
+            board_err
+        );
+        return Ok(None);
+    }
     let cause = testing_step_cause(&thread.cause);
     // The step thread's cause message carries the TASK DESCRIPTION (title +
     // body) so the prompt builder can place it as the SYSTEM prompt for

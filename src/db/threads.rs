@@ -1095,6 +1095,23 @@ fn kanban_thread_content(title: &str, body: Option<&str>) -> String {
 /// `skip_stale` (true for status-change dispatch): any still-active
 /// pending/processing threads for the task are marked skipped FIRST (through
 /// the `mark_thread_terminal` choke point) so they cannot race the new step.
+/// Task row used by kanban status-change dispatch / redispatch / startup
+/// redispatch. The `board` column participates in the board-gated thread
+/// creation (src/boards.rs).
+#[derive(sqlx::FromRow)]
+struct KanbanDispatchRow {
+    id: String,
+    title: String,
+    body: Option<String>,
+    status: String,
+    channel_id: Option<String>,
+    profile: Option<String>,
+    template: Option<String>,
+    plan: Option<bool>,
+    workflow_id: Option<String>,
+    board: Option<String>,
+}
+
 pub(crate) async fn create_kanban_step_thread(
     pool: &PgPool,
     data_dir: &str,
@@ -1103,22 +1120,10 @@ pub(crate) async fn create_kanban_step_thread(
     skip_stale: bool,
 ) -> AppResult<Option<i64>> {
     // 1. Load the task detail.
-    #[derive(sqlx::FromRow)]
-    struct KanbanDispatchRow {
-        id: String,
-        title: String,
-        body: Option<String>,
-        status: String,
-        channel_id: Option<String>,
-        profile: Option<String>,
-        template: Option<String>,
-        plan: Option<bool>,
-        workflow_id: Option<String>,
-    }
     let task = match sql_forge!(
         KanbanDispatchRow,
         r#"
-        SELECT id, title, body, status, channel_id, profile, template, plan, workflow_id
+        SELECT id, title, body, status, channel_id, profile, template, plan, workflow_id, board
         FROM kanban_tasks WHERE id = :task_id
         "#,
         ( :task_id = task_id )
@@ -1130,16 +1135,35 @@ pub(crate) async fn create_kanban_step_thread(
         None => return Ok(None),
     };
 
+    // 1b. Board gate (feature-flagged on the presence of config/boards.yml).
+    //     Boards enabled + invalid board (NULL or not in the file) -> the
+    //     thread is created and IMMEDIATELY terminated as 'failed' with a
+    //     clear Error message (mirrors the no-channel failure path in
+    //     create_thread_with_cause). Valid boards inject their defaults
+    //     between the Kanban Task and the Channel in the resolution chain.
+    let board_cfg = match crate::boards::task_board(data_dir, task.board.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(board_err) => {
+            fail_kanban_thread_no_board(pool, data_dir, &task, status, &board_err).await?;
+            return Ok(None);
+        }
+    };
+
     // 2. Resolve the workflow role config and gate on role availability.
+    //    Workflow: Kanban Task wins, else the Board's workflow, else none.
     let role = crate::workflows::role_for_step(status);
-    let workflow = task.workflow_id.as_deref().and_then(|wf_id| {
+    let workflow_id = task
+        .workflow_id
+        .clone()
+        .or(board_cfg.as_ref().and_then(|b| b.workflow.clone()));
+    let workflow = workflow_id.as_deref().and_then(|wf_id| {
         let path = crate::config_path::config_path(data_dir, "workflows.yml");
         crate::workflows::WorkflowsFile::load(&path)
             .ok()
             .and_then(|f| f.workflows.get(wf_id).cloned())
     });
     let role_cfg = role.and_then(|r| workflow.as_ref().and_then(|wf| wf.resolve_role(r)));
-    if !kanban_step_actionable(status, task.workflow_id.as_deref(), role_cfg.is_some()) {
+    if !kanban_step_actionable(status, workflow_id.as_deref(), role_cfg.is_some()) {
         return Ok(None);
     }
 
@@ -1180,7 +1204,11 @@ pub(crate) async fn create_kanban_step_thread(
     }
 
     // 4. Resolve the effective channel, profile, plan and template.
-    let channel_id = match task.channel_id.as_deref() {
+    let channel_id = match task
+        .channel_id
+        .as_deref()
+        .or(board_cfg.as_ref().and_then(|b| b.channel.as_deref()))
+    {
         Some(cid) => {
             crate::channels_yaml::resolve_default_channel(Some(cid), "default_kanban_channel")
                 .unwrap_or_default()
@@ -1198,6 +1226,12 @@ pub(crate) async fn create_kanban_step_thread(
         .clone()
         .filter(|p| !p.trim().is_empty())
         .or_else(|| {
+            board_cfg
+                .as_ref()
+                .and_then(|b| b.profile.clone())
+                .filter(|p| !p.trim().is_empty())
+        })
+        .or_else(|| {
             channel.as_ref().and_then(|c| {
                 (!c.current_profile.trim().is_empty()).then(|| c.current_profile.clone())
             })
@@ -1214,11 +1248,14 @@ pub(crate) async fn create_kanban_step_thread(
                 .and_then(|wf| wf.defaults.plan_mode.as_deref())
         })
         .map(|mode| matches!(mode, "on"))
-        .or(task.plan);
+        .or(task.plan)
+        .or(board_cfg.as_ref().and_then(|b| b.plan));
     let resolved_template = resolve_kanban_thread_template(
         role_cfg.as_ref().and_then(|r| r.template.clone()),
         status == "running",
-        task.template.as_deref(),
+        task.template
+            .as_deref()
+            .or(board_cfg.as_ref().and_then(|b| b.template.as_deref())),
         channel.as_ref().and_then(|c| c.template.as_deref()),
     );
 
@@ -1242,7 +1279,7 @@ pub(crate) async fn create_kanban_step_thread(
         msg_subtype: Some(task.id.clone()),
         task_plan: plan,
         template: resolved_template,
-        workflow_id: task.workflow_id.clone(),
+        workflow_id: workflow_id.clone(),
         workflow_step: Some(status.to_string()),
         hook_caused: false,
     };
@@ -1281,6 +1318,179 @@ pub(crate) async fn create_kanban_step_thread(
     });
 
     Ok(Some(thread.id))
+}
+
+/// Invalid-board task handling (boards.yml feature enabled): create the
+/// workflow-role thread and IMMEDIATELY terminate it as 'failed' with a
+/// clear Error message, reusing the no-channel failure pattern. The task
+/// is never dispatched; every thread-creation attempt produces a doomed
+/// thread so the failure is auditable and surfaced truthfully.
+async fn fail_kanban_thread_no_board(
+    pool: &PgPool,
+    data_dir: &str,
+    task: &KanbanDispatchRow,
+    status: &str,
+    board_err: &str,
+) -> AppResult<()> {
+    // Resolve channel/profile WITHOUT the board (it is invalid): task ->
+    // channel -> global defaults.
+    let channel_id = match task.channel_id.as_deref() {
+        Some(cid) => {
+            crate::channels_yaml::resolve_default_channel(Some(cid), "default_kanban_channel")
+                .unwrap_or_default()
+        }
+        None => crate::channels_yaml::resolve_default_channel(None, "default_kanban_channel")
+            .unwrap_or_default(),
+    };
+    let channel = if channel_id.trim().is_empty() {
+        None
+    } else {
+        crate::db::channels::get_channel_by_id(pool, &channel_id).await?
+    };
+    let effective_profile = task
+        .profile
+        .clone()
+        .filter(|p| !p.trim().is_empty())
+        .or_else(|| {
+            channel.as_ref().and_then(|c| {
+                (!c.current_profile.trim().is_empty()).then(|| c.current_profile.clone())
+            })
+        })
+        .unwrap_or_else(crate::profile::default_profile_name);
+    let role = crate::workflows::role_for_step(status);
+    let workflow = task.workflow_id.as_deref().and_then(|wf_id| {
+        let path = crate::config_path::config_path(data_dir, "workflows.yml");
+        crate::workflows::WorkflowsFile::load(&path)
+            .ok()
+            .and_then(|f| f.workflows.get(wf_id).cloned())
+    });
+    let role_cfg = role.and_then(|r| workflow.as_ref().and_then(|wf| wf.resolve_role(r)));
+    let resolved_template = resolve_kanban_thread_template(
+        role_cfg.as_ref().and_then(|r| r.template.clone()),
+        status == "running",
+        task.template.as_deref(),
+        channel.as_ref().and_then(|c| c.template.as_deref()),
+    );
+    let params = ThreadCauseParams {
+        provider: None,
+        model: None,
+        task_id: Some(task.id.clone()),
+        schedule_task_id: None,
+        content: kanban_thread_content(&task.title, task.body.as_deref()),
+        external_id: None,
+        parent_external_id: None,
+        metadata: serde_json::json!({
+            "kanban_task_id": task.id,
+            "kanban_task_title": task.title,
+            "error": board_err,
+        }),
+        msg_type: "kanban".to_string(),
+        msg_subtype: Some(task.id.clone()),
+        task_plan: task.plan,
+        template: resolved_template,
+        workflow_id: task.workflow_id.clone(),
+        workflow_step: Some(status.to_string()),
+        hook_caused: false,
+    };
+    let (thread, _msg) = create_thread_with_cause(
+        pool,
+        data_dir,
+        "system",
+        &channel_id,
+        &effective_profile,
+        params,
+    )
+    .await?;
+
+    // Error message (msg_type='error', error_type=configuration) + terminal
+    // 'failed' — the same shape the builtin fail-thread produces.
+    let external_id = format!(
+        "validation-error:{}:{}",
+        thread.id,
+        chrono::Utc::now().timestamp()
+    );
+    sql_forge!(
+        r#"
+        INSERT INTO messages
+            (thread_id, role, content, thread_sequence, external_id, metadata,
+             msg_type, msg_subtype, iteration_number, duration_ms, token_usage)
+        VALUES
+            (:tid, 'system', :content, 1, :external_id,
+             :metadata::jsonb, 'error', :subtype, 0, 0, '{}'::jsonb)
+        "#,
+        (
+            :tid = thread.id,
+            :content = board_err,
+            :external_id = external_id.as_str(),
+            :metadata = serde_json::json!({ "error_type": "configuration" }),
+            :subtype = format!("board:{}", task.id),
+        )
+    )
+    .execute(pool)
+    .await?;
+
+    // Terminal write through the single choke point (status='failed',
+    // terminal=true, ended_at, iterations) + hooks.
+    set_thread_failed(pool, thread.id).await?;
+
+    // Audit the board rejection in kanban history (best-effort).
+    let _ = sql_forge!(
+        r#"
+        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
+        VALUES (:task_id, 'workflow', :initial, :initial, :comment)
+        "#,
+        (
+            :task_id = task.id.as_str(),
+            :initial = task.status.as_str(),
+            :comment = format!("Thread #{} failed: {}", thread.id, board_err),
+        )
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        tracing::warn!(
+            "[kanban dispatch] history insert for invalid-board thread #{} failed: {:?}",
+            thread.id,
+            e
+        )
+    });
+
+    Err(crate::error::Error::Message(board_err.to_string()))
+}
+
+/// Board validity guard for workflow-transition thread creators that do NOT
+/// go through `create_kanban_step_thread` (tester/reviewer step threads in
+/// kanban_updater). Boards disabled -> always Ok. Boards enabled -> Err(msg)
+/// when the task's board is NULL or unknown.
+pub async fn ensure_task_board_valid(
+    pool: &PgPool,
+    data_dir: &str,
+    task_id: &str,
+) -> Result<(), String> {
+    if !crate::boards::boards_enabled(data_dir) {
+        return Ok(());
+    }
+    let board: Option<String> = sql_forge!(
+        scalar Option<String>,
+        "SELECT board FROM kanban_tasks WHERE id = :id",
+        ( :id = task_id )
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("failed to load task board: {e}"))?;
+    match board {
+        None => Err("task has no board".to_string()),
+        Some(name) => {
+            let path = crate::config_path::config_path(data_dir, "boards.yml");
+            let file = crate::boards::BoardsFile::load(&path)
+                .map_err(|e| format!("failed to load boards.yml: {e}"))?;
+            if file.boards.contains_key(&name) {
+                Ok(())
+            } else {
+                Err(format!("task board '{name}' not found in boards.yml"))
+            }
+        }
+    }
 }
 
 /// Dispatch a kanban task for a target status: skip any stale active
