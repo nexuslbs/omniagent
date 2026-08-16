@@ -103,6 +103,13 @@ FROM debian:trixie-slim
 #     blocks bare pip on python3.13
 #   - python3-yaml: integration tests read config yml files (settings.yml)
 #   - nodejs: for JavaScript/Node.js MCP servers
+#   - npm: Debian's nodejs package does NOT ship npm; required by the
+#     install API's NodeJS dependency step (npm ci/install) for remote
+#     NodeJS MCP servers (reference servers: everything, filesystem, git).
+#     legacy-peer-deps is set globally because several MCP reference
+#     servers (e.g. @modelcontextprotocol/server-everything) ship zod v4
+#     peer dependencies that strict npm resolution rejects (observed
+#     HTTP 500 on install); the flag makes installs robust on reinstall.
 RUN apt-get update -qq && \
     apt-get install -y -qq \
       ca-certificates \
@@ -115,8 +122,10 @@ RUN apt-get update -qq && \
       python3-pip \
       python3-psycopg2 \
       python3-yaml \
-      nodejs && \
+      nodejs \
+      npm && \
     rm -rf /var/lib/apt/lists/* && \
+    npm config set legacy-peer-deps true && \
     git config --global --add safe.directory '*'
 
 # Copy Rust toolchain from builder for on-demand compilation of

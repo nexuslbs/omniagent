@@ -22,9 +22,13 @@ RUN cargo install cargo-expand --locked
 RUN cargo install sqlx-cli --locked
 
 # Dev tooling: nodejs + npm (test-js-tool MCP server, NodeJS reference MCP servers),
-# python3 + venv + pip (scripts/build.py; prepare.py lives in omni-deployer;
-# python3-venv enables hermetic `python3 -m venv` installs for Python MCP servers).
+# python3 + pip + venv (Python plugins/reference servers, hermetic install;
+# scripts/build.py; prepare.py lives in omni-deployer).
+# legacy-peer-deps global: MCP reference servers ship zod v4 peer deps that
+# strict npm resolution rejects (observed on mcp-everything install); makes
+# installs robust on reinstall.
 RUN apt-get update -qq && apt-get install -y -qq nodejs npm python3 python3-pip python3-venv && \
+    npm config set legacy-peer-deps true && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # psycopg2: integration tests (tests.py) read DB rows directly (workflow tests)
