@@ -1269,25 +1269,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mcp-server-actions"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "mcp-server-util",
- "omniagent",
- "parking_lot",
- "reqwest",
- "serde",
- "serde_json",
- "sql-forge",
- "sqlx",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "mcp-server-compose"
 version = "0.1.0"
 dependencies = [

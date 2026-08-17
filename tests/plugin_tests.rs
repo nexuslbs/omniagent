@@ -198,7 +198,7 @@ fn test_list_builtins_have_source_code() {
 fn test_list_bundled_exist() {
     let resp = api_get("/plugins");
     let data = resp["data"].as_array().expect("Expected data array");
-    for name in &["actions", "filesystem", "git", "skills"] {
+    for name in &["filesystem", "git", "skills"] {
         // Plugin may be listed as "bundled" or "built-in" depending on migration status
         let plugin = data.iter().find(|p| {
             p["name"] == *name && (p["source"] == "bundled" || p["source"] == "built-in")

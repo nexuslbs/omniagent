@@ -15,7 +15,6 @@ members = [
     "plugins/tools/hindsight",
     "plugins/tools/prompt",
     "plugins/tools/notes",
-    "plugins/tools/actions",
     "plugins/tools/fetch",
     "plugins/tools/filesystem",
     "plugins/tools/git",
