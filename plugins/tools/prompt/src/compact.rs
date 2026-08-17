@@ -35,7 +35,7 @@ fn is_read_type_tool(name: &str) -> bool {
         || name.starts_with("filesystem_list")
         || name.starts_with("filesystem_search")
         || name.starts_with("filesystem_info")
-        || name.starts_with("query_database")
+        || name.starts_with("search_database")
         || name.starts_with("search_messages")
         || name.starts_with("search_wiki")
         || name.starts_with("skills_view")

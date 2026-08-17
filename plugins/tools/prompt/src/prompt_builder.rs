@@ -60,7 +60,7 @@ fn build_dynamic_identity(tool_names: &[String]) -> String {
         parts.push("search (messages/wiki)");
     }
     if has_query {
-        parts.push("query_database (SQL)");
+        parts.push("search_database (SQL)");
     }
     if has_kanban {
         parts.push("kanban");
@@ -106,7 +106,7 @@ fn build_dynamic_identity(tool_names: &[String]) -> String {
             || name == "list_memories"
             || name == "review_memories"
             || name == "manage_memory"
-            || name == "get_metrics"
+            || name == "search_metrics"
             || name.starts_with("setup_")
             || name.starts_with("kanban_")
     };

@@ -816,6 +816,7 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
     registry.register(wait_task_tool());
     registry.register(cancel_task_tool());
     registry.register(read_task_logs_tool());
+    registry.register(omniagent_api_tool());
     registry.register(fail_thread_tool());
 
     tracing::info!(
@@ -861,6 +862,100 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
         std::mem::swap(&mut prev, &mut curr);
     }
     prev[b_len]
+}
+
+/// Build the `omniagent-api` tool: generic fetch-like HTTP client for the
+/// core omniagent API (localhost:8080). Replaces the cron/kanban plugin MCP
+/// tools with ONE generic tool: method + path + optional JSON body. Covers
+/// kanban task CRUD (/kanban/tasks...), schedule CRUD (/schedule... including
+/// DELETE /schedule/{id}), run-cron (/schedule/{id}/run), review
+/// (/kanban/tasks/{id}/review), plugins and actions endpoints.
+fn omniagent_api_tool() -> McpTool {
+    McpTool {
+        name: "builtin_omniagent-api".to_string(),
+        full_name: tool_qualify("builtin", "omniagent_api"),
+        description: "Call the core omniagent HTTP API (localhost:8080). Specify an HTTP method, an API path and an optional JSON body; returns the response body as text. Covers kanban task CRUD (/kanban/tasks...), schedule CRUD (/schedule, /schedule/{id} incl. DELETE), run-cron (/schedule/{id}/run), review (/kanban/tasks/{id}/review), plugins and actions endpoints. This replaces the old kanban_*/cron_* plugin tools.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "method": {
+                    "type": "string",
+                    "enum": ["GET", "POST", "PATCH", "DELETE"],
+                    "description": "HTTP method"
+                },
+                "path": {
+                    "type": "string",
+                    "description": "API path, e.g. /kanban/tasks, /schedule, /schedule/{id}, /schedule/{id}/run"
+                },
+                "body": {
+                    "type": "object",
+                    "description": "Optional JSON body for POST/PATCH requests"
+                }
+            },
+            "required": ["method", "path"]
+        }),
+        server_name: None,
+        timeout_secs: Some(30),
+        handler: std::sync::Arc::new(|args: Value, _ctx: crate::mcp::AppContext| {
+            Box::pin(async move {
+                let method = args
+                    .get("method")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_uppercase();
+                let path = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if method.is_empty() || path.is_empty() {
+                    return Ok(McpToolResult {
+                        call_id: String::new(),
+                        content: "Error: both 'method' and 'path' are required.".to_string(),
+                        is_error: true,
+                    });
+                }
+                let url = format!("http://localhost:8080{}", path);
+                let client = reqwest::Client::new();
+                let method_parsed = match method.as_str() {
+                    "GET" => reqwest::Method::GET,
+                    "POST" => reqwest::Method::POST,
+                    "PATCH" => reqwest::Method::PATCH,
+                    "DELETE" => reqwest::Method::DELETE,
+                    m => {
+                        return Ok(McpToolResult {
+                            call_id: String::new(),
+                            content: format!("Error: unsupported method '{}'", m),
+                            is_error: true,
+                        })
+                    }
+                };
+                let mut req = client.request(method_parsed, &url);
+                if let Some(body) = args.get("body") {
+                    if !body.is_null() {
+                        req = req.json(body);
+                    }
+                }
+                match req.send().await {
+                    Ok(resp) => {
+                        let status = resp.status().as_u16();
+                        let text = resp.text().await.unwrap_or_default();
+                        Ok(McpToolResult {
+                            call_id: String::new(),
+                            content: format!("HTTP {}\n{}", status, text),
+                            is_error: status >= 400,
+                        })
+                    }
+                    Err(e) => Ok(McpToolResult {
+                        call_id: String::new(),
+                        content: format!("Error calling omniagent API: {}", e),
+                        is_error: true,
+                    }),
+                }
+            })
+        }),
+    }
 }
 
 /// Builder for the builtin `fail-thread` tool (Phase 2): ends the current

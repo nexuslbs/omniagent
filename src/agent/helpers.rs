@@ -250,7 +250,7 @@ fn is_read_type_tool(name: &str) -> bool {
         || name.starts_with("filesystem_list")
         || name.starts_with("filesystem_search")
         || name.starts_with("filesystem_info")
-        || name.starts_with("query_database")
+        || name.starts_with("search_database")
         || name.starts_with("search_messages")
         || name.starts_with("search_wiki")
         || name.starts_with("skills_view")
@@ -572,7 +572,7 @@ pub fn build_message_metadata_block(messages: &[ChatMessage], offset: usize) -> 
         })
         .collect();
 
-    format!("==== Old Messages Compacted ====\nMessages {}–{} have been condensed. Query with query_database if full content is needed.\n{}\n",
+    format!("==== Old Messages Compacted ====\nMessages {}–{} have been condensed. Query with search_database if full content is needed.\n{}\n",
         offset,
         offset + messages.len() - 1,
         entries.join("\n")
