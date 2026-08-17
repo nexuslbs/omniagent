@@ -76,15 +76,15 @@ pub(crate) async fn handle_response(
         }
         let iter_summary = format!(
             "The iteration limit ({}/{}) was reached so the task may be incomplete. \
-             Summarize what was accomplished (including what the agent did and found) and what remains to be done. \
-             Inform the user they can request to continue.",
+             Write a reasonably brief summary (a few sentences to a short paragraph) — the reader needs the key \
+             accomplishments and remaining work. Inform the user they can request to continue.",
             current_iter, iter_limit,
         );
         summary_msgs.push(ChatMessage::system(&iter_summary));
 
         let summary_request = CompletionRequest {
             messages: summary_msgs,
-            max_tokens: cfg.config_snapshot().thread_summary_tokens,
+            max_tokens: cfg.config_snapshot().max_tokens,
             temperature: 0.3,
             stream: false,
             tools: None,
@@ -169,12 +169,12 @@ pub(crate) async fn handle_response(
                 digest
             )));
             let iter_summary = "The agent produced no final message, but tool activity was \
-                 recorded. Summarize what was accomplished (including what the agent did \
-                 and found) and what remains to be done.";
+                 recorded. Write a reasonably brief summary (a few sentences to a short \
+                 paragraph) — the reader needs the key accomplishments and remaining work.";
             summary_msgs.push(ChatMessage::system(iter_summary));
             let summary_request = CompletionRequest {
                 messages: summary_msgs,
-                max_tokens: cfg.config_snapshot().thread_summary_tokens,
+                max_tokens: cfg.config_snapshot().max_tokens,
                 temperature: 0.3,
                 stream: false,
                 tools: None,
@@ -310,13 +310,7 @@ pub(crate) async fn handle_response(
         saved
     };
     // Define final status before potential early return
-    let final_status = if *force_failed {
-        "failed"
-    } else if limit_reached {
-        "interrupted"
-    } else {
-        "completed"
-    };
+    let final_status = post_loop_final_status(*force_failed, limit_reached);
 
     // Post-loop subtask enforcement: if any subtasks remain pending/in_progress
     // after the tool-calling loop ends (regardless of why it ended), fail the thread.
@@ -341,13 +335,7 @@ pub(crate) async fn handle_response(
     }
 
     // Recompute final status after post-loop enforcement
-    let final_status = if *force_failed {
-        "failed"
-    } else if limit_reached {
-        "interrupted"
-    } else {
-        "completed"
-    };
+    let final_status = post_loop_final_status(*force_failed, limit_reached);
 
     queries::complete_thread(
         &cfg.pool,
@@ -406,6 +394,22 @@ pub(crate) async fn handle_response(
     crate::agent::summary_trigger::trigger_summary_and_cleanup(cfg, thread).await;
 
     Ok(saved)
+}
+
+/// Final thread status after the executor loop (pure, unit-tested).
+/// - `force_failed` (fail-thread tool, truncation fail-fast, empty-response
+///   exhaustion, subtask enforcement) → "failed": the task goes blocked (or
+///   review when `review_on_fail` is set) — it never advances forward.
+/// - iteration-limit interruption → "interrupted" (resumable).
+/// - otherwise → "completed".
+pub(crate) fn post_loop_final_status(force_failed: bool, limit_reached: bool) -> &'static str {
+    if force_failed {
+        "failed"
+    } else if limit_reached {
+        "interrupted"
+    } else {
+        "completed"
+    }
 }
 
 /// Maximum number of tool messages included in the tool-evidence digest.
@@ -535,5 +539,15 @@ mod tests {
         let stripped = strip_tool_messages(&msgs);
         assert_eq!(stripped.len(), 2);
         assert!(stripped.iter().all(|m| m.role != "tool"));
+    }
+
+    #[test]
+    fn post_loop_final_status_force_failed_wins() {
+        // The FailFast/empty-response/subtask-enforcement contract: any
+        // force_failed => "failed" regardless of limit_reached.
+        assert_eq!(post_loop_final_status(true, false), "failed");
+        assert_eq!(post_loop_final_status(true, true), "failed");
+        assert_eq!(post_loop_final_status(false, true), "interrupted");
+        assert_eq!(post_loop_final_status(false, false), "completed");
     }
 }

@@ -126,7 +126,7 @@ pub async fn process_thread(
             base_url,
             model: model_name_val,
             api_mode,
-            max_tokens: cfg.config_snapshot().max_tokens,
+            max_tokens: cfg.config_snapshot().max_tokens.unwrap_or(8192),
             temperature: cfg.config_snapshot().temperature,
             supports_reasoning: crate::llm::PROVIDER_METADATA
                 .read()

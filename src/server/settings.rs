@@ -182,7 +182,6 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "state_block_update_interval",
                 "kanban_dispatcher_interval",
                 "temperature",
-                "thread_summary_tokens",
                 "tokenizer_encoding",
                 "read_keep_last",
                 "read_excerpt_chars",
@@ -206,8 +205,6 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "prompt_compact_messages_tool",
                 "prompt_generate_tool",
                 "prompt_log_level",
-                "prompt_token_budget_hard",
-                "prompt_token_budget_soft",
                 "prompt_tool_excerpt_chars",
                 "prompt_total_excerpt_cap",
                 "prompt_read_excerpt_chars",
@@ -319,20 +316,20 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             "max_tokens".into(),
             SettingMeta {
                 field_type: "number".into(),
-                description: "Maximum tokens per LLM response".into(),
+                description: "Maximum tokens per LLM response (blank = provider default)".into(),
                 options: None,
                 readonly: false,
-                default: Some("32768".into()),
+                default: None,
             },
         ),
         (
             "max_tokens_on_truncation".into(),
             SettingMeta {
                 field_type: "number".into(),
-                description: "Output budget used when a response is truncated (finish_reason=length)".into(),
+                description: "Output budget used when a response is truncated (finish_reason=length; blank = provider default)".into(),
                 options: None,
                 readonly: false,
-                default: Some("16384".into()),
+                default: None,
             },
         ),
         (
@@ -444,16 +441,6 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 options: None,
                 readonly: false,
                 default: Some("15".into()),
-            },
-        ),
-        (
-            "thread_summary_tokens".into(),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Maximum tokens for per-thread end-of-execution summary".into(),
-                options: None,
-                readonly: false,
-                default: Some("2048".into()),
             },
         ),
         (
@@ -655,10 +642,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             // general category (default; matches state_block_update_interval)
             "kanban_dispatcher_interval" => "general",
             // memory category
-            "delete_after_days"
-            | "thread_summary_tokens"
-            | "memory_max_chars"
-            | "soul_max_chars" => "memory",
+            "delete_after_days" | "memory_max_chars" | "soul_max_chars" => "memory",
             // system : bootstrap from env
             "host" | "port" | "database_url" | "omni_dir" => "system",
             // everything else → general
@@ -758,7 +742,6 @@ fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
         "prompt_compact_messages_tool",
         "delete_after_days",
         "kanban_dispatcher_interval",
-        "thread_summary_tokens",
         "memory_max_chars",
         "soul_max_chars",
         "default_provider",
@@ -1018,7 +1001,7 @@ mod tests {
             .unwrap_or_else(|| panic!("max_tokens_on_truncation must be defined"));
         assert_eq!(meta.field_type, "number", "is a number");
         assert!(!meta.readonly, "is writable");
-        assert_eq!(meta.default.as_deref(), Some("16384"));
+        assert_eq!(meta.default, None);
         assert!(
             meta.description.contains("truncated"),
             "description mentions truncation: {}",

@@ -95,7 +95,7 @@ impl Agent {
             base_url: env_cfg.base_url,
             model: env_cfg.model,
             api_mode: env_cfg.api_mode,
-            max_tokens,
+            max_tokens: max_tokens.unwrap_or(8192),
             temperature,
             supports_reasoning: crate::llm::PROVIDER_METADATA
                 .read()

@@ -1089,7 +1089,7 @@ evaluate: if the task was completed, call the completion tool.",
 
         let plan_request = CompletionRequest {
             messages: vec![ChatMessage::system(&planning_prompt)],
-            max_tokens: 1024,
+            max_tokens: Some(1024),
             temperature: 0.3,
             stream: false,
             tools: None,

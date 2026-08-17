@@ -71,17 +71,15 @@ pub fn get_global() -> Option<&'static Arc<RwLock<AgentConfig>>> {
 pub struct AgentConfig {
     pub llm_api_key: String,
     pub default_provider: String,
-    pub max_tokens: u32,
+    pub max_tokens: Option<u32>,
     /// Output budget used when a response is truncated (finish_reason=length).
     /// Normal calls keep the small `max_tokens`; the retry escalates to this.
-    pub max_tokens_on_truncation: u32,
+    pub max_tokens_on_truncation: Option<u32>,
     pub temperature: f32,
     /// Max iterations for threads with no planning mode (complexity-based).
     pub max_iterations_no_plan: u32,
     /// Max iterations for threads with planning enabled.
     pub max_iterations_plan: u32,
-    /// Max tokens for the per-thread end-of-execution summary LLM call.
-    pub thread_summary_tokens: u32,
     /// Max retries for unfinished subtasks before marking the thread as failed.
     pub max_unfinished_subtask_retries: u32,
     /// Max consecutive LLM provider errors before the thread is marked failed.
@@ -219,17 +217,24 @@ impl AgentConfig {
             }
         };
 
+        // Empty/invalid numeric settings are treated as None (provider default).
+        let opt_u32 = |v: &str| -> Option<u32> {
+            let t = v.trim();
+            if t.is_empty() {
+                None
+            } else {
+                t.parse().ok()
+            }
+        };
+
         Ok(Self {
             llm_api_key: String::new(),
             default_provider: get("default_provider", "openai"),
-            max_tokens: get("max_tokens", "32768").parse().unwrap_or(32768),
-            max_tokens_on_truncation: get("max_tokens_on_truncation", "16384")
-                .parse()
-                .unwrap_or(16384),
+            max_tokens: opt_u32(&get("max_tokens", "")),
+            max_tokens_on_truncation: opt_u32(&get("max_tokens_on_truncation", "")),
             temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
             max_iterations_plan: get("max_iterations_plan", "120").parse().unwrap_or(120),
-            thread_summary_tokens: get("thread_summary_tokens", "2048").parse().unwrap_or(2048),
             max_unfinished_subtask_retries: get("max_unfinished_subtask_retries", "1")
                 .parse()
                 .unwrap_or(3),
@@ -321,17 +326,24 @@ impl AgentConfig {
             }
         };
 
+        // Empty/invalid numeric settings are treated as None (provider default).
+        let opt_u32 = |v: &str| -> Option<u32> {
+            let t = v.trim();
+            if t.is_empty() {
+                None
+            } else {
+                t.parse().ok()
+            }
+        };
+
         Ok(Self {
             llm_api_key: String::new(),
             default_provider: get("default_provider", "openai"),
-            max_tokens: get("max_tokens", "32768").parse().unwrap_or(32768),
-            max_tokens_on_truncation: get("max_tokens_on_truncation", "16384")
-                .parse()
-                .unwrap_or(16384),
+            max_tokens: opt_u32(&get("max_tokens", "")),
+            max_tokens_on_truncation: opt_u32(&get("max_tokens_on_truncation", "")),
             temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
             max_iterations_plan: get("max_iterations_plan", "120").parse().unwrap_or(120),
-            thread_summary_tokens: get("thread_summary_tokens", "2048").parse().unwrap_or(2048),
             max_unfinished_subtask_retries: get("max_unfinished_subtask_retries", "1")
                 .parse()
                 .unwrap_or(3),
@@ -412,12 +424,11 @@ mod tests {
         let cfg = AgentConfig {
             llm_api_key: "".to_string(),
             default_provider: "openai".to_string(),
-            max_tokens: 32768,
-            max_tokens_on_truncation: 16384,
+            max_tokens: Some(32768),
+            max_tokens_on_truncation: Some(16384),
             temperature: 0.7,
             max_iterations_no_plan: 30,
             max_iterations_plan: 120,
-            thread_summary_tokens: 2048,
             max_unfinished_subtask_retries: 1,
             provider_max_retries: 3,
             delete_after_days: 30,
@@ -455,8 +466,8 @@ mod tests {
             wiki_vectorization_interval_secs: 3600,
         };
         assert_eq!(cfg.default_provider, "openai");
-        assert_eq!(cfg.max_tokens, 32768);
-        assert_eq!(cfg.max_tokens_on_truncation, 16384);
+        assert_eq!(cfg.max_tokens, Some(32768));
+        assert_eq!(cfg.max_tokens_on_truncation, Some(16384));
         assert_eq!(cfg.temperature, 0.7);
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 3000);
@@ -472,17 +483,16 @@ mod tests {
 
     #[test]
     fn test_agent_config_complete_field_count() {
-        // AgentConfig has 37 fields. This test verifies all are present,
+        // AgentConfig has 36 fields. This test verifies all are present,
         // by constructing a minimal config and checking all fields are accessible.
         let cfg = AgentConfig {
             llm_api_key: String::new(),
             default_provider: String::new(),
-            max_tokens: 0,
-            max_tokens_on_truncation: 0,
+            max_tokens: None,
+            max_tokens_on_truncation: None,
             temperature: 0.0,
             max_iterations_no_plan: 0,
             max_iterations_plan: 0,
-            thread_summary_tokens: 0,
             max_unfinished_subtask_retries: 0,
             provider_max_retries: 0,
             delete_after_days: 0,
@@ -521,7 +531,7 @@ mod tests {
         };
         // Verify a few key fields are accessible
         assert_eq!(cfg.database_url, "postgres://localhost:5432/omniagent");
-        assert_eq!(cfg.max_tokens, 0);
+        assert_eq!(cfg.max_tokens, None);
         assert_eq!(cfg.temperature, 0.0);
     }
 

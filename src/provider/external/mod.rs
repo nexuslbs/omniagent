@@ -56,8 +56,8 @@ pub struct InitializeResult {
 pub struct CompleteParams {
     pub model: String,
     pub messages: Vec<serde_json::Value>,
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     #[serde(default)]
@@ -66,9 +66,6 @@ pub struct CompleteParams {
     pub tools: Option<Vec<serde_json::Value>>,
 }
 
-fn default_max_tokens() -> u32 {
-    4096
-}
 fn default_temperature() -> f32 {
     0.7
 }
