@@ -27,7 +27,6 @@ COPY plugins/tools/subtasks/Cargo.toml ./plugins/tools/subtasks/
 COPY plugins/tools/hindsight/Cargo.toml ./plugins/tools/hindsight/
 COPY plugins/tools/prompt/Cargo.toml ./plugins/tools/prompt/
 COPY plugins/tools/notes/Cargo.toml ./plugins/tools/notes/
-COPY plugins/tools/actions/Cargo.toml ./plugins/tools/actions/
 COPY plugins/tools/fetch/Cargo.toml ./plugins/tools/fetch/
 COPY plugins/tools/filesystem/Cargo.toml ./plugins/tools/filesystem/
 COPY plugins/tools/git/Cargo.toml ./plugins/tools/git/

@@ -846,7 +846,7 @@ fn build_plugin_detail(
                         if first_word.contains('/') || first_word.contains('\\') {
                             return true;
                         }
-                        // Bare binary names like "mcp-server-actions" or "python3" are NOT
+                        // Bare binary names like "mcp-server-ssh" or "python3" are NOT
                         // source code: they're either pre-compiled binaries or script runners.
                         // Known runners are checked by looking at the first word's characteristics:
                         // - Known script runners always have extensions or are well-known names
