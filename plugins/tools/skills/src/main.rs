@@ -29,6 +29,8 @@ fn handle_create_skill(args: Value, config: &Config, profile_name: &str) -> Resu
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'content'"))?;
     let category = args["category"].as_str().unwrap_or("general");
+    let tags = args["tags"].as_str().unwrap_or("");
+    let related_skills = args["related_skills"].as_str().unwrap_or("");
 
     // Validate name
     if name.is_empty() {
@@ -50,6 +52,12 @@ fn handle_create_skill(args: Value, config: &Config, profile_name: &str) -> Resu
     }
     if description.is_empty() {
         anyhow::bail!("Skill description must not be empty");
+    }
+    if description.chars().count() > 1024 {
+        anyhow::bail!(
+            "Skill description must be 1024 characters or less (got {} chars). Use the 'Use when <trigger>' convention to keep descriptions actionable.",
+            description.chars().count()
+        );
     }
     if content.is_empty() {
         anyhow::bail!("Skill content must not be empty");
@@ -74,8 +82,8 @@ fn handle_create_skill(args: Value, config: &Config, profile_name: &str) -> Resu
             .join(&profile)
             .join("skills")
     };
-    let skill_dir = skills_base.join(category);
-    let skill_path = skill_dir.join(format!("{}.md", normalized));
+    let skill_dir = skills_base.join(category).join(&normalized);
+    let skill_path = skill_dir.join("SKILL.md");
 
     // Check if already exists
     if skill_path.exists() {
@@ -95,11 +103,48 @@ fn handle_create_skill(args: Value, config: &Config, profile_name: &str) -> Resu
         )
     })?;
 
-    // Write the file
-    let file_content = format!(
-        "---\nname: {}\ndescription: \"{}\"\nversion: 0.1.0\nauthor: omniagent\n---\n\n{}",
-        normalized, description, content
+    // Write the file — Hermes-compatible SKILL.md with rich frontmatter:
+    // description follows the "Use when <trigger>..." convention (prepended
+    // when missing) so the prompt block renders an actionable trigger; license
+    // MIT; optional metadata.hermes tags / related_skills from args.
+    let use_when = if description.trim().to_lowercase().starts_with("use when") {
+        description.trim().to_string()
+    } else {
+        format!("Use when {}", description.trim())
+    };
+    let escaped_desc = use_when.replace('"', "\\\"");
+    let mut frontmatter = format!(
+        "---\nname: {}\ndescription: \"{}\"\nversion: 0.1.0\nauthor: omniagent\nlicense: MIT\n",
+        normalized, escaped_desc
     );
+    let tag_list: Vec<String> = tags
+        .split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let related_list: Vec<String> = related_skills
+        .split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if !tag_list.is_empty() || !related_list.is_empty() {
+        frontmatter.push_str("metadata:\n  hermes:\n");
+        if !tag_list.is_empty() {
+            frontmatter.push_str("    tags:\n");
+            for tag in &tag_list {
+                frontmatter.push_str(&format!("      - {}\n", tag));
+            }
+        }
+        if !related_list.is_empty() {
+            frontmatter.push_str("    related_skills:\n");
+            for rs in &related_list {
+                frontmatter.push_str(&format!("      - {}\n", rs));
+            }
+        }
+    }
+    frontmatter.push_str("---\n\n");
+
+    let file_content = format!("{}{}", frontmatter, content);
 
     let safe_path = skill_path.to_string_lossy().to_string();
     fs::write(&skill_path, &file_content)
@@ -551,7 +596,7 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "create_skill".to_string(),
                 description:
-                    "Create a new skill (SKILL.md file) for reusable procedures. Skills allow the agent to automate recurring task patterns. The skill is saved to the ACTIVE PROFILE's skills dir (<data_dir>/profiles/<profile>/skills/<category>/<name>.md) so it shows up in the agent's own 'Available skills' prompt; with no active profile it falls back to <data_dir>/skills/<category>/<name>.md. It will be available for future sessions."
+                    "Create a new skill (SKILL.md file) for reusable procedures. Skills allow the agent to automate recurring task patterns. The skill is saved to the ACTIVE PROFILE's skills dir in the Hermes layout (<data_dir>/profiles/<profile>/skills/<category>/<name>/SKILL.md) so it shows up in the agent's own 'Available skills' prompt; with no active profile it falls back to <data_dir>/skills/<category>/<name>/SKILL.md. Frontmatter follows Hermes conventions: description (max 1024 chars) is prefixed with 'Use when ' when missing, license is MIT, and optional comma-separated tags / related_skills land under metadata.hermes. It will be available for future sessions."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -571,6 +616,14 @@ async fn main() -> Result<()> {
                         "category": {
                             "type": "string",
                             "description": "Optional category for organizing (e.g., 'devops', 'data-science'). Default: 'general'"
+                        },
+                        "tags": {
+                            "type": "string",
+                            "description": "Optional comma-separated tags for the skill (stored under metadata.hermes.tags)"
+                        },
+                        "related_skills": {
+                            "type": "string",
+                            "description": "Optional comma-separated names of related skills (stored under metadata.hermes.related_skills)"
                         }
                     },
                     "required": ["name", "description", "content"]
@@ -760,6 +813,103 @@ mod tests {
         assert!(msg.contains("docker-compose-usage"));
         assert!(msg.contains("git-workflow"));
         assert!(msg.contains("workspace-development"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_skill_writes_hermes_dir_layout_with_frontmatter() {
+        let (cfg, dir) = test_config();
+        let (msg, is_error) = handle_create_skill(
+            serde_json::json!({
+                "name": "my-skill",
+                "description": "run the release build pipeline",
+                "content": "# My Skill\n\n1. Do the thing.\n",
+                "category": "devops",
+                "tags": "build, release",
+                "related_skills": "git-workflow",
+            }),
+            &cfg,
+            "omni",
+        )
+        .expect("create_skill should succeed");
+        assert!(!is_error, "msg: {}", msg);
+        let skill_file = dir
+            .join("profiles")
+            .join("omni")
+            .join("skills")
+            .join("devops")
+            .join("my-skill")
+            .join("SKILL.md");
+        assert!(skill_file.exists(), "SKILL.md missing: {msg}");
+        let content = fs::read_to_string(&skill_file).unwrap();
+        assert!(content.contains("description: \"Use when run the release build pipeline\""));
+        assert!(content.contains("license: MIT"));
+        assert!(content.contains("metadata:"));
+        assert!(content.contains("tags:"));
+        assert!(content.contains("- build"));
+        assert!(content.contains("- release"));
+        assert!(content.contains("related_skills:"));
+        assert!(content.contains("- git-workflow"));
+        assert!(content.contains("name: my-skill"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_skill_keeps_existing_use_when_prefix() {
+        let (cfg, dir) = test_config();
+        let (msg, is_error) = handle_create_skill(
+            serde_json::json!({
+                "name": "with-trigger",
+                "description": "Use when you need to deploy the stack",
+                "content": "body",
+            }),
+            &cfg,
+            "omni",
+        )
+        .expect("create_skill should succeed");
+        assert!(!is_error, "msg: {}", msg);
+        let skill_file = dir
+            .join("profiles")
+            .join("omni")
+            .join("skills")
+            .join("general")
+            .join("with-trigger")
+            .join("SKILL.md");
+        let content = fs::read_to_string(&skill_file).unwrap();
+        assert!(content.contains("description: \"Use when you need to deploy the stack\""));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_skill_rejects_description_over_1024_chars() {
+        let (cfg, dir) = test_config();
+        let long_desc = "x".repeat(1025);
+        let err = handle_create_skill(
+            serde_json::json!({"name": "too-long", "description": long_desc, "content": "body"}),
+            &cfg,
+            "omni",
+        )
+        .expect_err(">1024 char description must be rejected");
+        assert!(err.to_string().contains("1024"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_skill_rejects_duplicate_in_dir_layout() {
+        let (cfg, dir) = test_config();
+        handle_create_skill(
+            serde_json::json!({"name": "dup", "description": "first", "content": "a"}),
+            &cfg,
+            "omni",
+        )
+        .expect("first create should succeed");
+        let err = handle_create_skill(
+            serde_json::json!({"name": "dup", "description": "second", "content": "b"}),
+            &cfg,
+            "omni",
+        )
+        .expect_err("duplicate must be rejected");
+        assert!(err.to_string().contains("already exists"));
         let _ = fs::remove_dir_all(&dir);
     }
 }
