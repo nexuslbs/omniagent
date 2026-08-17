@@ -1185,25 +1185,105 @@ fn apply_workflow_mapping(
         _ => {}
     }
 }
+/// Extract the description of a skill for the "Available skills" prompt block.
+///
+/// Tool-created skills carry YAML frontmatter (first line `---`) with a
+/// `description:` field — prefer that so the prompt shows the real trigger
+/// instead of the raw `---` fence. Hand-written skills start with a
+/// `# Title` heading — fall back to the first meaningful line with the
+/// leading `#` stripped.
+fn extract_skill_description(content: &str) -> String {
+    if let Some(desc) = extract_frontmatter_field(content, "description") {
+        if !desc.trim().is_empty() {
+            return desc;
+        }
+    }
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line == "---" {
+            continue;
+        }
+        return line.trim_start_matches('#').trim().to_string();
+    }
+    "No description".to_string()
+}
+
+/// Extract a named field from YAML frontmatter (delimited by --- markers).
+/// Returns `None` if no frontmatter or field not found.
+fn extract_frontmatter_field(content: &str, field: &str) -> Option<String> {
+    let content = content.trim();
+    if !content.starts_with("---") {
+        return None;
+    }
+    let after_first = content.strip_prefix("---")?.trim_start();
+    let end = after_first.find("\n---")?;
+    let frontmatter = &after_first[..end];
+    for line in frontmatter.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix(&format!("{}:", field)) {
+            let value = value.trim();
+            let unquoted = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+                .unwrap_or(value);
+            return Some(unquoted.to_string());
+        }
+    }
+    None
+}
+
+/// Display name for a skill: the frontmatter `name:` when present (tool- and
+/// Hermes-created skills), otherwise the file stem / directory name.
+fn skill_display_name(content: &str, fallback: &str) -> String {
+    extract_frontmatter_field(content, "name")
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// List skills as `- <name>: <description>` lines for the prompt, reading from
+/// the PROFILE-scoped skills root (`{data_dir}/profiles/{profile}/skills`).
+///
+/// Both storage layouts are supported:
+///   - flat `<skills>/<name>.md` (hand-written skills; name = file stem)
+///   - Hermes-style `<skills>/<category>/<name>/SKILL.md` (name = dir name, or
+///     the frontmatter `name:` when present)
+///
+/// Descriptions come from the frontmatter `description:` field when present,
+/// falling back to the first `#`-stripped line.
 fn get_skills(data_dir: &str, profile_name: &str) -> Vec<String> {
     let skills_dir = format!("{}/profiles/{}/skills", data_dir, profile_name);
     let mut skills = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&skills_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            // Pattern A: flat <name>.md directly in the skills root.
+            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
                 if let Ok(content) = std::fs::read_to_string(&path) {
-                    let name = path
+                    let stem = path
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or("unknown");
-                    let first_line = content.lines().next().unwrap_or("").trim();
-                    let desc = if first_line.starts_with('#') {
-                        first_line.trim_start_matches('#').trim()
-                    } else {
-                        first_line
-                    };
+                    let name = skill_display_name(&content, stem);
+                    let desc = extract_skill_description(&content);
                     skills.push(format!("- {}: {}", name, desc));
+                }
+            }
+            // Pattern B: Hermes directory layout <category>/<name>/SKILL.md.
+            if path.is_dir() {
+                if let Ok(cat_entries) = std::fs::read_dir(&path) {
+                    for cat_entry in cat_entries.flatten() {
+                        let skill_file = cat_entry.path().join("SKILL.md");
+                        if !skill_file.is_file() {
+                            continue;
+                        }
+                        if let Ok(content) = std::fs::read_to_string(&skill_file) {
+                            let dir_name = cat_entry.file_name().to_string_lossy().to_string();
+                            let name = skill_display_name(&content, &dir_name);
+                            let desc = extract_skill_description(&content);
+                            skills.push(format!("- {}: {}", name, desc));
+                        }
+                    }
                 }
             }
         }
@@ -1339,7 +1419,7 @@ async fn handle_generate_full(
     let skills = get_skills(data_dir, profile_name);
     if !skills.is_empty() {
         context_blocks.push(format!(
-            "Available skills (read one with view_skill before acting when it matches the task):\n{}",
+            "Available skills (read one with view_skill before acting when it matches the task):\n{}\n\nAfter solving a non-trivial, repeatable task (3+ tool calls, reusable procedure), create a skill with create_skill so future threads reuse it.",
             skills.join("\n")
         ));
     }
@@ -2969,5 +3049,98 @@ mod token_counting_tests {
         assert!(notes_text.contains("FILE CONTENT"));
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod skills_block_tests {
+    use super::*;
+    use std::fs;
+
+    fn skill_test_dir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "prompt-skills-test-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let skills_dir = dir.join("profiles").join("omni").join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+        // Tool-created flat skill: frontmatter description (the old display bug).
+        fs::write(
+            skills_dir.join("frontmatter-skill.md"),
+            "---\nname: frontmatter-skill\ndescription: \"Use when testing frontmatter parsing\"\nversion: 0.1.0\nauthor: omniagent\nlicense: MIT\n---\n\n# Frontmatter Skill\n\nSteps here.\n",
+        )
+        .unwrap();
+        // Hand-written skill: # Title, no frontmatter.
+        fs::write(
+            skills_dir.join("handwritten.md"),
+            "# Handwritten Skill\n\nBody text.\n",
+        )
+        .unwrap();
+        // Hermes dir layout: <skills>/<category>/<name>/SKILL.md.
+        let hermes = skills_dir
+            .join("devops")
+            .join("hermes-style")
+            .join("SKILL.md");
+        fs::create_dir_all(hermes.parent().unwrap()).unwrap();
+        fs::write(
+            hermes,
+            "---\nname: hermes-style\ndescription: \"Use when following Hermes conventions\"\n---\n\n# Hermes Style\n\nBody.\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn get_skills_parses_frontmatter_description_not_first_line() {
+        let dir = skill_test_dir();
+        let skills = get_skills(dir.to_str().unwrap(), "omni");
+        let frontmatter = skills
+            .iter()
+            .find(|s| s.starts_with("- frontmatter-skill:"))
+            .expect("frontmatter skill listed");
+        assert!(
+            frontmatter.contains("Use when testing frontmatter parsing"),
+            "frontmatter description must be rendered: {frontmatter}"
+        );
+        assert!(
+            !frontmatter.contains("---"),
+            "raw fence leaked: {frontmatter}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_skills_falls_back_to_stripped_title_line() {
+        let dir = skill_test_dir();
+        let skills = get_skills(dir.to_str().unwrap(), "omni");
+        let hand = skills
+            .iter()
+            .find(|s| s.starts_with("- handwritten:"))
+            .expect("handwritten skill listed");
+        assert!(
+            hand.contains("Handwritten Skill"),
+            "title stripped of # must be rendered: {hand}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_skills_lists_hermes_dir_layout() {
+        let dir = skill_test_dir();
+        let skills = get_skills(dir.to_str().unwrap(), "omni");
+        let hermes = skills
+            .iter()
+            .find(|s| s.starts_with("- hermes-style:"))
+            .expect("dir-layout skill listed");
+        assert!(
+            hermes.contains("Use when following Hermes conventions"),
+            "dir-layout description must come from frontmatter: {hermes}"
+        );
+        assert_eq!(skills.len(), 3, "all three layouts listed: {skills:?}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
