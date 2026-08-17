@@ -16,14 +16,18 @@
 //!     model: claude-sonnet-4-5
 //!     plan_mode: on
 //!     retries: 2
+//!     auto_approve: false       # optional; default false
+//!     review_on_fail: false     # optional; default false
 //!     roles:
 //!       executor:               # REQUIRED role; template OPTIONAL
 //!         template: |
 //!           You are the executor...
-//!       tester:                 # optional role; template REQUIRED when present
+//!         mode: agent           # optional; 'agent' (default) | 'action'
+//!         action_id: noop       # required when mode == 'action'
+//!       tester:                 # optional role; template REQUIRED unless mode == 'action'
 //!         template: |
 //!           You are the tester...
-//!       reviewer:               # optional role; template REQUIRED when present
+//!       reviewer:               # optional role; template REQUIRED unless mode == 'action'
 //!         template: |
 //!           You are the reviewer...
 //! ```
@@ -32,8 +36,12 @@
 //! - workflow keys must be non-empty (`key == id == name`);
 //! - role keys must be exactly one of `executor` | `tester` | `reviewer`;
 //! - the `executor` role is required;
-//! - `tester` / `reviewer` templates are required when the role is present
-//!   (the `executor` template is optional).
+//! - `tester` / `reviewer` templates are required when the role is present,
+//!   UNLESS the role runs in `action` mode (`mode: action`) — action roles
+//!   dispatch a predefined action instead of an agent thread and need no
+//!   template (the `executor` template is optional in both modes);
+//! - `mode` must be `agent` (default) or `action`; any other value is rejected;
+//! - `mode: action` requires a non-blank `action_id`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -45,6 +53,11 @@ pub const EXECUTOR_ROLE: &str = "executor";
 pub const TESTER_ROLE: &str = "tester";
 pub const REVIEWER_ROLE: &str = "reviewer";
 pub const ROLE_KEYS: [&str; 3] = [EXECUTOR_ROLE, TESTER_ROLE, REVIEWER_ROLE];
+
+/// Role execution modes (workflow role `mode:` field).
+pub const MODE_AGENT: &str = "agent";
+pub const MODE_ACTION: &str = "action";
+pub const ROLE_MODES: [&str; 2] = [MODE_AGENT, MODE_ACTION];
 
 /// Thread step keys (`threads.workflow_step`): 'running' | 'testing' | 'review'.
 /// Step keys only — NEVER role names (N5).
@@ -75,10 +88,19 @@ pub struct WorkflowDefaults {
 
 /// A single role inside a workflow. `template` is the system prompt the role
 /// runs with; any other fields override the workflow-level defaults.
+///
+/// Role execution modes:
+/// - `agent` (default): the role runs as an agent thread with the template.
+/// - `action`: the role runs as a predefined action (`action_id`), no template
+///   needed. `action_id` is REQUIRED in this mode.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", default)]
 pub struct WorkflowRole {
     pub template: Option<String>,
+    /// Role execution mode: `agent` (default) | `action`. Absent = `agent`.
+    pub mode: Option<String>,
+    /// Predefined action id (from actions.yml) executed when `mode: action`.
+    pub action_id: Option<String>,
     #[serde(flatten)]
     pub overrides: WorkflowDefaults,
 }
@@ -93,6 +115,15 @@ pub struct Workflow {
     /// If true, execution counters (`workflow_state.executions`) are cleared
     /// when the task moves to review. Default: false.
     pub clear_executions_on_review: bool,
+
+    /// If true, a completed review auto-approves the task (no manual approval
+    /// needed). Default: false.
+    pub auto_approve: bool,
+
+    /// If true, a failed step routes the task back to review instead of
+    /// failing the thread. Default: false.
+    pub review_on_fail: bool,
+
     pub roles: BTreeMap<String, WorkflowRole>,
 }
 
@@ -167,13 +198,38 @@ impl WorkflowsFile {
                     message: format!("role '{EXECUTOR_ROLE}' is required"),
                 });
             }
-            for role in [TESTER_ROLE, REVIEWER_ROLE] {
-                if let Some(role_def) = workflow.roles.get(role) {
+            for (role_key, role_def) in &workflow.roles {
+                // Role mode: must be `agent` | `action` when present.
+                let mode = role_def.mode.as_deref().unwrap_or(MODE_AGENT);
+                if !ROLE_MODES.contains(&mode) {
+                    return Err(WorkflowConfigError::Invalid {
+                        key: key.clone(),
+                        message: format!(
+                            "role '{role_key}' has invalid mode '{mode}' (expected {})",
+                            ROLE_MODES.join(" | ")
+                        ),
+                    });
+                }
+                // Action mode: a non-blank action_id is required.
+                if mode == MODE_ACTION {
+                    let action_id = role_def.action_id.as_deref().unwrap_or("").trim();
+                    if action_id.is_empty() {
+                        return Err(WorkflowConfigError::Invalid {
+                            key: key.clone(),
+                            message: format!(
+                                "role '{role_key}' has mode 'action' but no action_id"
+                            ),
+                        });
+                    }
+                }
+                // tester / reviewer: template required UNLESS action mode.
+                if [TESTER_ROLE, REVIEWER_ROLE].contains(&role_key.as_str()) && mode != MODE_ACTION
+                {
                     let template = role_def.template.as_deref().unwrap_or("").trim();
                     if template.is_empty() {
                         return Err(WorkflowConfigError::Invalid {
                             key: key.clone(),
-                            message: format!("role '{role}' requires a non-empty template"),
+                            message: format!("role '{role_key}' requires a non-empty template"),
                         });
                     }
                 }
@@ -248,6 +304,11 @@ impl WorkflowsFile {
 #[serde(rename_all = "snake_case")]
 pub struct ResolvedWorkflowRole {
     pub template: Option<String>,
+    /// Role execution mode after resolution (`agent` | `action`), as written
+    /// on the role; absent means `agent`.
+    pub mode: Option<String>,
+    /// Predefined action id for `action`-mode roles.
+    pub action_id: Option<String>,
     pub profile: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -255,16 +316,30 @@ pub struct ResolvedWorkflowRole {
     pub retries: Option<u32>,
 }
 
+impl ResolvedWorkflowRole {
+    /// The effective role execution mode: the role's explicit `mode`, or
+    /// [`MODE_AGENT`] when absent.
+    pub fn effective_mode(&self) -> &'static str {
+        match self.mode.as_deref() {
+            Some(MODE_ACTION) => MODE_ACTION,
+            _ => MODE_AGENT,
+        }
+    }
+}
+
 impl Workflow {
     /// Resolve the effective settings for one role.
     ///
     /// Role-level overrides take precedence over workflow-level defaults
     /// (workflow_role > workflow_field). Returns `None` when the role is not
-    /// defined on the workflow.
+    /// defined on the workflow. `mode` / `action_id` are role-only and are
+    /// propagated as-is (they have no workflow-level counterpart).
     pub fn resolve_role(&self, role_key: &str) -> Option<ResolvedWorkflowRole> {
         let role = self.roles.get(role_key)?;
         Some(ResolvedWorkflowRole {
             template: role.template.clone(),
+            mode: role.mode.clone(),
+            action_id: role.action_id.clone(),
             profile: role
                 .overrides
                 .profile
@@ -287,6 +362,14 @@ impl Workflow {
                 .or_else(|| self.defaults.plan_mode.clone()),
             retries: role.overrides.retries.or(self.defaults.retries),
         })
+    }
+
+    /// Whether the given role runs as an action (`mode: action`) instead of an
+    /// agent thread. Absent / unknown roles are NOT actions.
+    pub fn role_is_action(&self, role_key: &str) -> bool {
+        self.resolve_role(role_key)
+            .map(|resolved| resolved.effective_mode() == MODE_ACTION)
+            .unwrap_or(false)
     }
 }
 
@@ -354,6 +437,25 @@ mod tests {
         }
     }
 
+    fn base_workflow() -> Workflow {
+        Workflow {
+            defaults: empty_defaults(),
+            clear_executions_on_review: false,
+            auto_approve: false,
+            review_on_fail: false,
+            roles: BTreeMap::new(),
+        }
+    }
+
+    fn role(template: Option<&str>) -> WorkflowRole {
+        WorkflowRole {
+            template: template.map(|s| s.to_string()),
+            mode: None,
+            action_id: None,
+            overrides: empty_defaults(),
+        }
+    }
+
     #[test]
     fn test_save_and_reload_roundtrip() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -387,11 +489,7 @@ mod tests {
     #[test]
     fn test_upsert_rejects_missing_executor_role() {
         let mut file = WorkflowsFile::default();
-        let wf = Workflow {
-            defaults: empty_defaults(),
-            clear_executions_on_review: false,
-            roles: BTreeMap::new(),
-        };
+        let wf = base_workflow();
         let err = file.upsert("no-executor", wf).expect_err("must fail");
         assert!(
             err.to_string().contains("executor"),
@@ -402,18 +500,8 @@ mod tests {
     #[test]
     fn test_upsert_rejects_tester_without_template() {
         let mut file = WorkflowsFile::default();
-        let mut wf = Workflow {
-            defaults: empty_defaults(),
-            clear_executions_on_review: false,
-            roles: BTreeMap::new(),
-        };
-        wf.roles.insert(
-            TESTER_ROLE.to_string(),
-            WorkflowRole {
-                template: None,
-                overrides: empty_defaults(),
-            },
-        );
+        let mut wf = base_workflow();
+        wf.roles.insert(TESTER_ROLE.to_string(), role(None));
         let err = file.upsert("no-template", wf).expect_err("must fail");
         assert!(
             err.to_string().contains("template"),
@@ -431,11 +519,7 @@ mod tests {
 
     #[test]
     fn test_resolve_role_precedence() {
-        let mut wf = Workflow {
-            defaults: empty_defaults(),
-            clear_executions_on_review: false,
-            roles: BTreeMap::new(),
-        };
+        let mut wf = base_workflow();
         wf.defaults.profile = Some("wf-profile".to_string());
         wf.defaults.provider = Some("wf-provider".to_string());
         wf.defaults.retries = Some(3);
@@ -443,6 +527,8 @@ mod tests {
             EXECUTOR_ROLE.to_string(),
             WorkflowRole {
                 template: Some("executor-template".to_string()),
+                mode: Some(MODE_ACTION.to_string()),
+                action_id: Some("my-action".to_string()),
                 overrides: WorkflowDefaults {
                     profile: Some("role-profile".to_string()),
                     ..empty_defaults()
@@ -458,6 +544,9 @@ mod tests {
         assert_eq!(resolved.provider.as_deref(), Some("wf-provider"));
         assert_eq!(resolved.retries, Some(3));
         assert_eq!(resolved.template.as_deref(), Some("executor-template"));
+        // mode/action_id propagate to the resolved role
+        assert_eq!(resolved.mode.as_deref(), Some(MODE_ACTION));
+        assert_eq!(resolved.action_id.as_deref(), Some("my-action"));
         // absent roles resolve to None
         assert!(wf.resolve_role(TESTER_ROLE).is_none());
     }
@@ -475,6 +564,8 @@ mod tests {
         // workflow-level defaults apply to roles without an override
         assert_eq!(executor.profile.as_deref(), Some("research-profile"));
         assert_eq!(executor.provider.as_deref(), Some("anthropic"));
+        // default mode is agent
+        assert_eq!(executor.effective_mode(), MODE_AGENT);
     }
 
     #[test]
@@ -724,6 +815,167 @@ workflows:
         assert!(file.workflows["default"].clear_executions_on_review);
         let out = serde_yaml::to_string(&file).expect("serialize");
         assert!(out.contains("clear_executions_on_review"));
+        let reparsed = WorkflowsFile::from_yaml(&out).expect("reparse");
+        assert_eq!(reparsed, file);
+    }
+
+    // ── Role mode (agent|action) ──
+
+    fn action_role(action_id: &str) -> WorkflowRole {
+        WorkflowRole {
+            template: None,
+            mode: Some(MODE_ACTION.to_string()),
+            action_id: Some(action_id.to_string()),
+            overrides: empty_defaults(),
+        }
+    }
+
+    #[test]
+    fn action_mode_executor_parses_and_validates() {
+        let yaml = r#"
+workflows:
+  auto-deploy:
+    roles:
+      executor:
+        mode: action
+        action_id: builtin_relevance_indexer
+      tester:
+        template: t
+      reviewer:
+        template: r
+"#;
+        let file = WorkflowsFile::from_yaml(yaml).expect("action-mode workflow parses");
+        let wf = &file.workflows["auto-deploy"];
+        assert!(wf.role_is_action(EXECUTOR_ROLE));
+        assert!(!wf.role_is_action(TESTER_ROLE));
+        let exec = wf.resolve_role(EXECUTOR_ROLE).expect("executor");
+        assert_eq!(exec.effective_mode(), MODE_ACTION);
+        assert_eq!(exec.action_id.as_deref(), Some("builtin_relevance_indexer"));
+    }
+
+    #[test]
+    fn action_mode_roles_do_not_require_template() {
+        let yaml = r#"
+workflows:
+  auto:
+    roles:
+      executor:
+        mode: action
+        action_id: noop
+      tester:
+        mode: action
+        action_id: noop
+      reviewer:
+        mode: action
+        action_id: noop
+"#;
+        // tester/reviewer have NO template but mode=action → valid.
+        let file =
+            WorkflowsFile::from_yaml(yaml).expect("action-mode tester/reviewer need no template");
+        assert_eq!(file.workflows.len(), 1);
+    }
+
+    #[test]
+    fn action_mode_missing_action_id_is_rejected() {
+        let yaml = r#"
+workflows:
+  auto:
+    roles:
+      executor:
+        mode: action
+"#;
+        let err = WorkflowsFile::from_yaml(yaml).expect_err("action without action_id must fail");
+        assert!(err.to_string().contains("action_id"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn action_mode_blank_action_id_is_rejected() {
+        let yaml = r#"
+workflows:
+  auto:
+    roles:
+      executor:
+        mode: action
+        action_id: "   "
+"#;
+        let err = WorkflowsFile::from_yaml(yaml).expect_err("blank action_id must fail");
+        assert!(err.to_string().contains("action_id"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn invalid_mode_value_is_rejected() {
+        let yaml = r#"
+workflows:
+  auto:
+    roles:
+      executor:
+        mode: turbo
+        action_id: x
+"#;
+        let err = WorkflowsFile::from_yaml(yaml).expect_err("invalid mode must fail");
+        assert!(err.to_string().contains("turbo"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn default_mode_is_agent_when_absent() {
+        let yaml = "workflows:\n  default:\n    roles:\n      executor:\n        template: t\n";
+        let file = WorkflowsFile::from_yaml(yaml).expect("parse");
+        let exec = file.workflows["default"]
+            .resolve_role(EXECUTOR_ROLE)
+            .expect("executor");
+        assert_eq!(exec.effective_mode(), MODE_AGENT);
+        assert!(!file.workflows["default"].role_is_action(EXECUTOR_ROLE));
+    }
+
+    #[test]
+    fn mode_and_action_round_trip_through_yaml() {
+        let yaml = r#"
+workflows:
+  auto:
+    auto_approve: true
+    review_on_fail: true
+    roles:
+      executor:
+        mode: action
+        action_id: noop
+"#;
+        let file = WorkflowsFile::from_yaml(yaml).expect("parse");
+        let out = serde_yaml::to_string(&file).expect("serialize");
+        assert!(out.contains("mode: action"));
+        assert!(out.contains("action_id: noop"));
+        let reparsed = WorkflowsFile::from_yaml(&out).expect("reparse");
+        assert_eq!(reparsed, file);
+    }
+
+    // ── auto_approve / review_on_fail ──
+
+    #[test]
+    fn auto_approve_and_review_on_fail_default_false() {
+        let yaml = "workflows:\n  default:\n    roles:\n      executor:\n        template: t\n";
+        let file = WorkflowsFile::from_yaml(yaml).expect("parse");
+        let wf = &file.workflows["default"];
+        assert!(!wf.auto_approve);
+        assert!(!wf.review_on_fail);
+    }
+
+    #[test]
+    fn auto_approve_and_review_on_fail_round_trip() {
+        let yaml = r#"
+workflows:
+  default:
+    auto_approve: true
+    review_on_fail: true
+    roles:
+      executor:
+        template: t
+"#;
+        let file = WorkflowsFile::from_yaml(yaml).expect("parse");
+        let wf = &file.workflows["default"];
+        assert!(wf.auto_approve);
+        assert!(wf.review_on_fail);
+        let out = serde_yaml::to_string(&file).expect("serialize");
+        assert!(out.contains("auto_approve: true"));
+        assert!(out.contains("review_on_fail: true"));
         let reparsed = WorkflowsFile::from_yaml(&out).expect("reparse");
         assert_eq!(reparsed, file);
     }
