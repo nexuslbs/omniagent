@@ -199,6 +199,25 @@ impl HooksEngine {
         Ok(row)
     }
 
+    /// Resolve the current message id for thread_started / thread_finished
+    /// events: the thread's last message (highest `messages.id`); when the
+    /// thread has no messages, the last message id in the DB; None when the
+    /// DB has no messages at all.
+    async fn resolve_current_message(&self, thread_id: i64) -> AppResult<Option<i64>> {
+        let row: Option<(Option<i64>,)> =
+            sqlx::query_as("SELECT MAX(id) FROM messages WHERE thread_id = $1")
+                .bind(thread_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        if let Some((Some(id),)) = row {
+            return Ok(Some(id));
+        }
+        let row: Option<(Option<i64>,)> = sqlx::query_as("SELECT MAX(id) FROM messages")
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.and_then(|(id,)| id))
+    }
+
     /// Load enabled hooks for an event from tasks.yml (parsed fresh on every
     /// event so file edits take effect without restart). Channel NAMEs are
     /// resolved to ids; unknown names → None (default channel semantics).
@@ -232,7 +251,7 @@ impl HooksEngine {
         &self,
         event: &str,
         thread_id: i64,
-        _message_id: i64,
+        message_id: i64,
     ) -> AppResult<()> {
         let Some(thread) = self.load_event_thread(thread_id).await? else {
             return Ok(()); // thread deleted: nothing to trigger on
@@ -242,6 +261,20 @@ impl HooksEngine {
             // every message inside them) must not trigger events.
             return Ok(());
         }
+        // Guard: threads (or messages from threads) with no channel or no
+        // profile never trigger hooks — return early, no hook is evaluated.
+        if !thread_has_channel_and_profile(&thread.channel_id, &thread.profile) {
+            return Ok(());
+        }
+
+        // `current_message`: new_message events carry the inserted message id;
+        // thread_started / thread_finished resolve the thread's last message
+        // (fallback: the last message id in the DB).
+        let current_message: Option<i64> = if event == EVENT_NEW_MESSAGE {
+            (message_id > 0).then_some(message_id)
+        } else {
+            self.resolve_current_message(thread_id).await?
+        };
 
         let hooks = self.load_enabled_hooks(event).await?;
         for hook in hooks {
@@ -253,7 +286,10 @@ impl HooksEngine {
             ) else {
                 continue; // out of scope: ignored by this hook
             };
-            if let Err(e) = self.record_and_maybe_trigger(&hook, &key, &thread).await {
+            if let Err(e) = self
+                .record_and_maybe_trigger(&hook, &key, &thread, current_message)
+                .await
+            {
                 error!(
                     "[hooks] hook '{}' ({}) event={} failed: {:#}",
                     hook.name, hook.id, hook.event, e
@@ -271,6 +307,7 @@ impl HooksEngine {
         hook: &HookRow,
         key: &str,
         thread: &EventThreadRow,
+        current_message: Option<i64>,
     ) -> AppResult<()> {
         let mut tx = self.pool.begin().await?;
         let counter_row: Option<(String,)> = sqlx::query_as(
@@ -284,10 +321,17 @@ impl HooksEngine {
         let mut counter: Value = counter_row
             .and_then(|(counter,)| serde_json::from_str(&counter).ok())
             .unwrap_or_else(default_counter);
+        // Pre-trigger meta: the ids of the PREVIOUS trigger. The event is
+        // delivered with these; this trigger's ids are persisted below.
+        let (last_thread, last_message) = meta_get(&counter);
         let new_value = counter_increment(&mut counter, &hook.scope, key);
         let should_trigger = new_value >= hook.count as i64;
         if should_trigger {
             counter_reset(&mut counter, &hook.scope, key);
+            // Persist this trigger's ids as the next `meta` — atomically with
+            // the counter reset (same tx). `meta` lives at the top level, so
+            // counter increments/resets never clobber it.
+            meta_update(&mut counter, Some(thread.id), current_message);
         }
 
         sqlx::query(
@@ -305,9 +349,19 @@ impl HooksEngine {
                 "[hooks] hook '{}' ({}) triggered: event={}, scope={}, key='{}'",
                 hook.name, hook.id, hook.event, hook.scope, key
             );
-            // Trigger AFTER commit so a failing trigger does not roll back the
-            // counter reset. Failures are logged, never propagated.
-            if let Err(e) = self.trigger(hook, thread).await {
+            // Build the event from the PRE-trigger meta (previous trigger's
+            // ids) + this trigger's ids, and deliver it to the execution
+            // target. Trigger AFTER commit so a failing trigger does not roll
+            // back the counter reset. Failures are logged, never propagated.
+            let event = build_event(
+                last_thread,
+                last_message,
+                Some(thread.id),
+                current_message,
+                &thread.channel_id,
+                &thread.profile,
+            );
+            if let Err(e) = self.trigger(hook, thread, &event).await {
                 error!(
                     "[hooks] hook '{}' ({}) trigger failed: {:#}",
                     hook.name, hook.id, e
@@ -320,20 +374,30 @@ impl HooksEngine {
     /// Execute the hook: agentic mode spawns a hook-caused thread; action mode
     /// executes the configured action. Returns the spawned thread id (agentic)
     /// or None (action).
-    async fn trigger(&self, hook: &HookRow, thread: &EventThreadRow) -> AppResult<Option<i64>> {
+    async fn trigger(
+        &self,
+        hook: &HookRow,
+        thread: &EventThreadRow,
+        event: &Value,
+    ) -> AppResult<Option<i64>> {
         match hook.mode.as_str() {
             MODE_ACTION => {
-                self.run_action(hook).await?;
+                self.run_action(hook, event).await?;
                 Ok(None)
             }
-            _ => self.run_agentic(hook, thread).await,
+            _ => self.run_agentic(hook, thread, event).await,
         }
     }
 
     /// Agentic mode: create a hook-caused agent thread (mirrors cron agentic
     /// jobs). The spawned thread is marked `hook_caused` so it never
     /// re-triggers hooks (infinite-loop protection).
-    async fn run_agentic(&self, hook: &HookRow, thread: &EventThreadRow) -> AppResult<Option<i64>> {
+    async fn run_agentic(
+        &self,
+        hook: &HookRow,
+        thread: &EventThreadRow,
+        event: &Value,
+    ) -> AppResult<Option<i64>> {
         // Resolution chain: hook's explicit channel -> triggering thread's
         // channel -> default_hook_channel -> '' (empty = the thread is
         // created and then failed with "no channel defined"; the record is
@@ -363,6 +427,11 @@ impl HooksEngine {
                 p
             }
         };
+        // The full event object is embedded as JSON in the spawned thread's
+        // prompt so the hook thread can react to what happened since the last
+        // trigger ("<hook prompt>\n\nEvent: <json>").
+        let event_json = serde_json::to_string(event).unwrap_or_default();
+        let prompt = format!("{}\n\nEvent: {}", prompt, event_json);
 
         let metadata = json!({
             "hook_id": hook.id,
@@ -412,7 +481,7 @@ impl HooksEngine {
 
     /// Action mode: resolve the action from actions.yml and execute it via the
     /// plugin registry (non-agentic, mirrors cron direct-action mode).
-    async fn run_action(&self, hook: &HookRow) -> AppResult<()> {
+    async fn run_action(&self, hook: &HookRow, event: &Value) -> AppResult<()> {
         let action_id = hook.action_id.clone().unwrap_or_default();
         if action_id.trim().is_empty() {
             return Err(Error::Message(format!(
@@ -420,7 +489,16 @@ impl HooksEngine {
                 hook.name, hook.id
             )));
         }
-        let tool_call: McpToolCall = crate::scheduler::resolve_action(&self.data_dir, &action_id)?;
+        let mut tool_call: McpToolCall =
+            crate::scheduler::resolve_action(&self.data_dir, &action_id)?;
+        // The event object is merged into the action's arguments under the
+        // well-known `event` key. Merge order: static `params` first, then the
+        // event — the event WINS on key collision (trigger-specific data).
+        if let Value::Object(args) = &mut tool_call.arguments {
+            args.insert("event".to_string(), event.clone());
+        } else {
+            tool_call.arguments = json!({ "event": event });
+        }
         let snapshot = self.plugin_manager.snapshot_registry().await;
         match snapshot.execute(&tool_call, self.app_context.clone()).await {
             Ok(result) => {
@@ -522,6 +600,60 @@ pub fn counter_reset(counter: &mut Value, scope: &str, key: &str) {
     counter_set(counter, scope, key, 0);
 }
 
+/// Read the `meta` section of a counter document — the ids of the last time
+/// the hook was triggered. Returns `(None, None)` before the first trigger.
+pub fn meta_get(counter: &Value) -> (Option<i64>, Option<i64>) {
+    let last_thread = counter["meta"]["last_thread"].as_i64();
+    let last_message = counter["meta"]["last_message"].as_i64();
+    (last_thread, last_message)
+}
+
+/// Write the `meta` section of a counter document. Both keys are ALWAYS
+/// written (null when the id is unknown). `meta` lives at the top level,
+/// alongside `global` / `channel` / `profile`, so the counter accessors
+/// (`counter_get` / `counter_set` / `counter_increment` / `counter_reset`)
+/// never touch it.
+pub fn meta_update(counter: &mut Value, last_thread: Option<i64>, last_message: Option<i64>) {
+    if let Value::Object(root) = counter {
+        root.insert(
+            "meta".to_string(),
+            json!({
+                "last_thread": last_thread,
+                "last_message": last_message,
+            }),
+        );
+    }
+}
+
+/// Build the event object delivered to a hook's execution target.
+///
+/// All six keys are ALWAYS present; unknown ids are serialized as `null`:
+/// on the first trigger `last_thread` / `last_message` are null; on a
+/// manual fire `current_thread` / `current_message` are null.
+pub fn build_event(
+    last_thread: Option<i64>,
+    last_message: Option<i64>,
+    current_thread: Option<i64>,
+    current_message: Option<i64>,
+    channel: &str,
+    profile: &str,
+) -> Value {
+    json!({
+        "last_thread": last_thread,
+        "last_message": last_message,
+        "current_thread": current_thread,
+        "current_message": current_message,
+        "channel": channel,
+        "profile": profile,
+    })
+}
+
+/// Guard: hooks must never be triggered by threads (or messages from
+/// threads) that have no channel or no profile.
+pub fn thread_has_channel_and_profile(channel_id: &str, profile: &str) -> bool {
+    !channel_id.trim().is_empty() && !profile.trim().is_empty()
+}
+
 // ── Manual fire (REST API: POST /hooks/{id}/fire) ───────────────────────────
 
 /// Manually trigger a hook by id (no counter increment / reset). Resolves the
@@ -576,7 +708,27 @@ pub async fn fire_hook_by_id(
         profile,
         hook_caused: false,
     };
-    engine.trigger(&hook, &thread_ctx).await
+    // Manual fire has no triggering thread/message: the event carries the last
+    // trigger context from the stored counter meta (if any) and null
+    // current_* ids. Manual fire does NOT write meta (no counter path).
+    let stored: Option<(String,)> =
+        sqlx::query_as("SELECT counter::text AS counter FROM hook_counters WHERE hook_key = $1")
+            .bind(&hook.id)
+            .fetch_optional(pool)
+            .await?;
+    let (last_thread, last_message) = stored
+        .and_then(|(c,)| serde_json::from_str::<Value>(&c).ok())
+        .map(|c| meta_get(&c))
+        .unwrap_or((None, None));
+    let event = build_event(
+        last_thread,
+        last_message,
+        None,
+        None,
+        &thread_ctx.channel_id,
+        &thread_ctx.profile,
+    );
+    engine.trigger(&hook, &thread_ctx, &event).await
 }
 
 // ── Unit tests (pure logic) ─────────────────────────────────────────────────
@@ -684,6 +836,7 @@ mod tests {
         counter_increment(&mut c, "channel", "channel1");
         counter_increment(&mut c, "channel", "channel2");
         counter_increment(&mut c, "profile", "omni");
+        // Before any trigger the counter document has NO `meta` section.
         assert_eq!(
             c,
             json!({
@@ -692,5 +845,97 @@ mod tests {
                 "profile": { "omni": 1 },
             })
         );
+        // After a trigger, `meta` carries the trigger's ids at the top level,
+        // alongside global/channel/profile — untouched by counter
+        // increments/resets.
+        meta_update(&mut c, Some(123), Some(456));
+        assert_eq!(c["meta"]["last_thread"], json!(123));
+        assert_eq!(c["meta"]["last_message"], json!(456));
+        counter_increment(&mut c, "global", "global");
+        counter_reset(&mut c, "global", "global");
+        assert_eq!(
+            c,
+            json!({
+                "global": 0,
+                "channel": { "channel1": 1, "channel2": 1 },
+                "profile": { "omni": 1 },
+                "meta": { "last_thread": 123, "last_message": 456 },
+            })
+        );
+    }
+
+    #[test]
+    fn meta_update_roundtrip() {
+        // No meta before any trigger.
+        let mut c = default_counter();
+        assert_eq!(meta_get(&c), (None, None));
+        // A trigger writes its ids; a later trigger overwrites them.
+        meta_update(&mut c, Some(11), Some(22));
+        assert_eq!(meta_get(&c), (Some(11), Some(22)));
+        meta_update(&mut c, Some(33), Some(44));
+        assert_eq!(meta_get(&c), (Some(33), Some(44)));
+        // Unknown message id → null in the persisted doc, None on read.
+        meta_update(&mut c, Some(55), None);
+        assert_eq!(meta_get(&c), (Some(55), None));
+        assert_eq!(c["meta"]["last_message"], Value::Null);
+        // Counter sections are untouched by meta writes.
+        counter_increment(&mut c, "global", "global");
+        assert_eq!(counter_get(&c, "global", "global"), 1);
+        assert_eq!(meta_get(&c), (Some(55), None));
+    }
+
+    #[test]
+    fn build_event_first_trigger() {
+        // First trigger: last_* unknown → null; current_* = trigger ids.
+        let e = build_event(None, None, Some(123), Some(456), "mattermost-abc", "omni");
+        assert_eq!(
+            e,
+            json!({
+                "last_thread": null,
+                "last_message": null,
+                "current_thread": 123,
+                "current_message": 456,
+                "channel": "mattermost-abc",
+                "profile": "omni",
+            })
+        );
+    }
+
+    #[test]
+    fn build_event_subsequent_trigger() {
+        // Subsequent trigger: last_* = previous trigger's ids.
+        let e = build_event(Some(100), Some(200), Some(123), Some(456), "ch", "omni");
+        assert_eq!(e["last_thread"], json!(100));
+        assert_eq!(e["last_message"], json!(200));
+        assert_eq!(e["current_thread"], json!(123));
+        assert_eq!(e["current_message"], json!(456));
+        assert_eq!(e["channel"], json!("ch"));
+        assert_eq!(e["profile"], json!("omni"));
+    }
+
+    #[test]
+    fn manual_fire_event_shape() {
+        // Manual fire: no triggering thread/message.
+        let e = build_event(Some(7), Some(8), None, None, "mattermost-x", "omni");
+        assert_eq!(
+            e,
+            json!({
+                "last_thread": 7,
+                "last_message": 8,
+                "current_thread": null,
+                "current_message": null,
+                "channel": "mattermost-x",
+                "profile": "omni",
+            })
+        );
+    }
+
+    #[test]
+    fn no_channel_or_profile_guard() {
+        assert!(!thread_has_channel_and_profile("", "omni"));
+        assert!(!thread_has_channel_and_profile("   ", "omni"));
+        assert!(!thread_has_channel_and_profile("mattermost-abc", ""));
+        assert!(!thread_has_channel_and_profile("mattermost-abc", "   "));
+        assert!(thread_has_channel_and_profile("mattermost-abc", "omni"));
     }
 }
