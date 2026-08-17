@@ -153,6 +153,11 @@ async fn run_server() -> AppResult<()> {
             Some(pool.clone()), // resolves $secret:NAME refs in MCP plugin configs
         ));
 
+    // Register the kanban action-mode runtime: workflow roles with
+    // mode: action execute actions.yml tools via the plugin manager
+    // (used by create_kanban_step_thread / step-thread creation).
+    omniagent::kanban_action::init(plugin_manager.clone(), ctx.clone());
+
     // Initialize the event-driven Hooks engine (isolated, fire-and-forget):
     // reads hooks from the DB and triggers agentic threads / actions on
     // thread_started / thread_finished / new_message events.
