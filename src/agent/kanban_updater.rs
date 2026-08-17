@@ -113,7 +113,6 @@ pub(crate) struct WorkflowPolicy {
     pub role_is_action: bool,
 }
 
-
 /// Resolve the routing policy for `step` from the task's workflow.
 pub(crate) fn workflow_policy(data_dir: &str, wf_id: Option<&str>, step: &str) -> WorkflowPolicy {
     let mut policy = WorkflowPolicy::default();
