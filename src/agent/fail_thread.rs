@@ -431,9 +431,14 @@ pub(crate) fn is_terminal_status(status: &str) -> bool {
     matches!(status, "blocked" | "done")
 }
 
-/// Normalize the tool's `workflow_step` argument to the F-matrix outcome.
+/// Normalize the tool's RAW `workflow_step` argument to the F-matrix outcome.
 /// STEP keys only: "" | "running" | "testing" | "blocked". Everything else
 /// (incl. `review` and role names) is INVALID → F4.
+///
+/// Callers must pass the RAW tool argument exactly ONCE. The output of this
+/// function is NOT a valid input: re-normalizing an already-normalized value
+/// turns `"executor"` (the F0 empty-default) into `"invalid"` (F4 → blocked)
+/// — the double-normalization bug that broke the empty `workflow_step`.
 pub(crate) fn normalize_workflow_step(workflow_step: Option<&str>) -> &'static str {
     match workflow_step.unwrap_or("") {
         "" => "executor",
@@ -676,26 +681,54 @@ fn route_fail_tool(
     has_wf: bool,
     has_executor_role: bool,
     has_tester_role: bool,
+    review_on_fail: bool,
 ) -> (Option<&'static str>, &'static str) {
+    // review_on_fail: only the REVIEWER may send the task to blocked. Any
+    // non-reviewer fail that would land on `blocked` (F0 no-workflow, F1/F2
+    // invalid caller/role, F3 explicit blocked, F4 invalid) routes to REVIEW
+    // instead — the reviewer decides. The reviewer caller (caller_step ==
+    // Some("review")) keeps the classic F0-F4 matrix, and explicit F1/F2
+    // destinations are honored for every caller (the flag only converts
+    // blocked-bound outcomes — and F0 — to review).
+    let is_reviewer = caller_step == Some("review");
+    // review_on_fail: only the REVIEWER may send the task to blocked.
+    //   - F3 explicit "blocked" and F4 invalid are BLOCK DECISIONS: a
+    //     non-reviewer caller's block request routes to review instead;
+    //     the reviewer caller keeps the blocked outcome.
+    //   - F1/F2 blocked-bounds (missing role / invalid caller) are NOT block
+    //     decisions — the caller was requesting a step the workflow cannot
+    //     fulfill — so the flag routes them to review for EVERY caller (the
+    //     reviewer decides what to do with the impossible request).
+    let blocked_or_review = |would_block: bool, block_decision: bool| {
+        if review_on_fail && would_block && (!is_reviewer || !block_decision) {
+            (None, "review")
+        } else {
+            (None, "blocked")
+        }
+    };
     match normalized {
-        // F0 — executor default (no metadata workflow_step): re-run the executor step.
+        // F0 — executor default (no metadata workflow_step): re-run the
+        // executor step; with review_on_fail a non-reviewer F0 goes to review
+        // (NOT executor re-run — the reviewer decides).
         "executor" => {
-            if has_wf {
-                (Some("running"), "running")
-            } else {
+            if !has_wf {
                 (None, "blocked")
+            } else if review_on_fail && !is_reviewer {
+                (None, "review")
+            } else {
+                (Some("running"), "running")
             }
         }
-        // F1 — a tester or reviewer thread requests executor rework.
-        // F1 — tester/reviewer requests executor rework, or the executor
-        // itself fails with an explicit 'running' target (R7 row-2: rerun it).
+        // F1 — a tester or reviewer thread requests executor rework, or the
+        // executor itself fails with an explicit 'running' target (R7 row-2:
+        // rerun it). Explicit destinations are honored even under the flag.
         "running" => {
             let valid_caller = matches!(
                 caller_step,
                 Some("testing") | Some("review") | Some("running")
             );
             if !has_wf || !valid_caller || !has_executor_role {
-                (None, "blocked")
+                blocked_or_review(true, false)
             } else {
                 (Some("running"), "running")
             }
@@ -704,15 +737,18 @@ fn route_fail_tool(
         "testing" => {
             let valid_caller = matches!(caller_step, Some("review"));
             if !has_wf || !valid_caller || !has_tester_role {
-                (None, "blocked")
+                blocked_or_review(true, false)
             } else {
                 (Some("testing"), "testing")
             }
         }
-        // F3 — explicit blocked target: blocked, no thread.
-        "blocked" => (None, "blocked"),
-        // F4 — any invalid value (incl. 'review', N6): blocked, no thread.
-        _ => (None, "blocked"),
+        // F3 — explicit blocked target: a BLOCK DECISION — only the
+        // reviewer may block under the flag; a non-reviewer blocked request
+        // routes to review.
+        "blocked" => blocked_or_review(true, true),
+        // F4 — any invalid value (incl. 'review', N6): a BLOCK DECISION —
+        // blocked for the reviewer, review for any non-reviewer under the flag.
+        _ => blocked_or_review(true, true),
     }
 }
 
@@ -813,6 +849,15 @@ pub(crate) async fn engine_transition(
     let has_reviewer_role = workflow
         .as_ref()
         .is_some_and(|w| w.roles.contains_key("reviewer"));
+    // Effective review_on_fail: auto_approve FORCES it off (auto_approve
+    // means there is no effective reviewer — failed / interrupted-at-limit /
+    // skipped executor-tester steps go directly to blocked).
+    let effective_review_on_fail = workflow
+        .as_ref()
+        .is_some_and(|w| w.review_on_fail && !w.auto_approve);
+    // auto_approve: failures are FINAL (no reviewer, no rework loop) — the
+    // fail matrix and the D7 review routing are both bypassed (→ blocked).
+    let auto_approve = workflow.as_ref().is_some_and(|w| w.auto_approve);
     let limit_for = |step: &str| -> u64 {
         match &workflow {
             Some(w) => retry_limit(w, role_for_step(step)),
@@ -827,41 +872,74 @@ pub(crate) async fn engine_transition(
     let mut increment = true;
     // Reason used in the kanban-history comment when the outcome is "blocked".
     let mut block_reason: &'static str = "blocked";
+    // Create a review thread (flag-routed review or D7 retry-limit review)
+    // when the workflow has a reviewer role; otherwise `review` is manual.
+    let mut review_thread = false;
 
     match &kind {
         RerunKind::FailTool { step } => {
-            let normalized = normalize_workflow_step(Some(step.as_str()));
-            let (target, status) = route_fail_tool(
-                normalized,
-                caller_step,
-                has_wf,
-                has_executor_role,
-                has_tester_role,
-            );
-            rerun_step = target.map(|s| s.to_string());
-            final_status = status.to_string();
-            block_reason = match normalized {
-                "executor" => "no workflow",
-                "running"
-                    if !matches!(
-                        caller_step,
-                        Some("testing") | Some("review") | Some("running")
-                    ) =>
-                {
-                    "invalid caller for workflow_step 'running'"
+            // `step` is ALREADY normalized by fail_thread_tool (F0-F4). Do
+            // NOT call normalize_workflow_step a second time — it turns its
+            // own output "executor" (the empty-workflow_step F0 default) into
+            // "invalid" (F4 → blocked): the double-normalization bug that
+            // broke the empty default (tester fail → blocked instead of
+            // executor re-run / review).
+            let normalized = step.as_str();
+            if auto_approve {
+                // auto_approve: every fail-thread outcome goes DIRECTLY to
+                // blocked — no executor re-run, no review (failures are
+                // final when there is no effective reviewer).
+                rerun_step = None;
+                final_status = "blocked".to_string();
+                block_reason = "auto_approve (failures are final)";
+            } else {
+                let (target, status) = route_fail_tool(
+                    normalized,
+                    caller_step,
+                    has_wf,
+                    has_executor_role,
+                    has_tester_role,
+                    effective_review_on_fail,
+                );
+                rerun_step = target.map(|s| s.to_string());
+                final_status = status.to_string();
+                if status == "review" {
+                    // review_on_fail: a non-reviewer fail routes to review —
+                    // mirror the D7 review-thread path (create a review thread
+                    // when the workflow has a reviewer role; otherwise the task
+                    // lands in `review` as a manual state).
+                    review_thread = has_reviewer_role;
+                    block_reason = "review_on_fail routing";
+                } else {
+                    block_reason = match normalized {
+                        "executor" => "no workflow",
+                        "running"
+                            if !matches!(
+                                caller_step,
+                                Some("testing") | Some("review") | Some("running")
+                            ) =>
+                        {
+                            "invalid caller for workflow_step 'running'"
+                        }
+                        "running" if !has_executor_role => "no executor role in workflow",
+                        "testing" if caller_step != Some("review") => {
+                            "invalid caller for workflow_step 'testing'"
+                        }
+                        "testing" if !has_tester_role => "no tester role in workflow",
+                        "blocked" => "workflow_step 'blocked'",
+                        _ => "invalid workflow_step",
+                    };
                 }
-                "running" if !has_executor_role => "no executor role in workflow",
-                "testing" if caller_step != Some("review") => {
-                    "invalid caller for workflow_step 'testing'"
-                }
-                "testing" if !has_tester_role => "no tester role in workflow",
-                "blocked" => "workflow_step 'blocked'",
-                _ => "invalid workflow_step",
-            };
+            }
         }
         RerunKind::Failed => {
             // Row 2: executor non-success terminal → re-run the executor step (F0).
-            if has_wf {
+            if auto_approve {
+                // auto_approve: failures are FINAL — blocked (no re-run;
+                // there is no reviewer to rework).
+                block_reason = "auto_approve (failed)";
+                final_status = "blocked".to_string();
+            } else if has_wf {
                 rerun_step = Some("running".to_string());
                 final_status = "running".to_string();
             } else {
@@ -893,7 +971,12 @@ pub(crate) async fn engine_transition(
         RerunKind::Skipped => {
             // R3: channel closure/deletion — re-schedule the same step with NO
             // retry consumed and the kanban status UNCHANGED (workflow or not).
-            if matches!(
+            if auto_approve {
+                // auto_approve: a skipped task is FINAL — blocked (no
+                // re-schedule; there is no reviewer to decide).
+                block_reason = "auto_approve (skipped)";
+                final_status = "blocked".to_string();
+            } else if matches!(
                 caller_step,
                 Some("running") | Some("testing") | Some("review")
             ) {
@@ -917,14 +1000,31 @@ pub(crate) async fn engine_transition(
     // `clear_executions_on_review` (D7) an executor/tester limit sends the
     // task to `review` instead of `blocked` and zeroes the running/testing
     // counters; the reviewer step is ALWAYS blocked (boundedness guarantee).
-    let mut review_thread = false;
+    // With `review_on_fail` a non-reviewer step at its limit also goes to
+    // review (the reviewer decides); auto_approve forces the flag off.
     if increment {
         if let Some(step) = rerun_step.as_deref() {
             if execution_count(&executions, step) >= limit_for(step) {
                 let clear_on_review = workflow
                     .as_ref()
                     .is_some_and(|w| w.clear_executions_on_review);
-                let outcome = guard_at_retry_limit(step, clear_on_review, has_reviewer_role);
+                let outcome = if auto_approve {
+                    // auto_approve: a step at its retry limit is FINAL —
+                    // blocked (the D7 clear-on-review routing is bypassed too).
+                    RetryGuard {
+                        final_status: "blocked",
+                        clear: false,
+                        review_thread: false,
+                    }
+                } else if effective_review_on_fail && matches!(step, "running" | "testing") {
+                    RetryGuard {
+                        final_status: "review",
+                        clear: clear_on_review,
+                        review_thread: has_reviewer_role,
+                    }
+                } else {
+                    guard_at_retry_limit(step, clear_on_review, has_reviewer_role)
+                };
                 rerun_step = None;
                 final_status = outcome.final_status.to_string();
                 block_reason = "retry limit reached";
@@ -979,6 +1079,25 @@ pub(crate) async fn engine_transition(
 
     // ---- Execute (one transaction) ------------------------------------------
     let initial_status = task.status.clone();
+    // NEW FINDING 1: carry the parent's failure reason (the fail-thread
+    // tool's Error-type message, or any earlier error) into the re-run /
+    // review thread's seq-0 cause message so the next step's prompt
+    // automatically shows WHY the previous step failed.
+    #[derive(sqlx::FromRow)]
+    struct ErrMsgRow {
+        content: String,
+    }
+    let fail_reason = sql_forge!(
+        ErrMsgRow,
+        "SELECT content FROM messages WHERE thread_id = :parent AND msg_type = 'error'
+         ORDER BY id DESC LIMIT 1",
+        ( :parent = thread.id )
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("select parent error message: {e}"))?
+    .map(|r| r.content)
+    .filter(|c| !c.is_empty());
     let new_thread_id: Option<i64> = if let Some(step) = rerun_step.as_deref() {
         #[derive(sqlx::FromRow)]
         struct IdRow {
@@ -1043,6 +1162,15 @@ pub(crate) async fn engine_transition(
                 thread.cause.clone()
             }
         });
+        // Prefix the parent's failure reason so the re-run thread's prompt
+        // carries the failure context (NEW FINDING 1).
+        let script_content = match fail_reason.as_deref() {
+            Some(reason) => format!(
+                "=== FAILED (thread #{}, step {}) ===\n{reason}\n\n{script_content}",
+                thread.id, step
+            ),
+            None => script_content,
+        };
         sql_forge!(
             "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
              VALUES (:tid, 'cause', :content, 0, 'kanban')",
@@ -1098,11 +1226,13 @@ pub(crate) async fn engine_transition(
         .map_err(|e| format!("insert review thread: {e}"))?;
         let new_id = new_thread.id;
 
-        // seq-0 cause message for the review thread (same task context).
-        let cause = if thread.cause.is_empty() {
-            "retry limit reached; review".to_string()
-        } else {
-            thread.cause.clone()
+        // seq-0 cause message for the review thread — carries the parent's
+        // failure reason when one exists (NEW FINDING 1).
+        let cause = match (fail_reason.as_deref(), thread.cause.as_str()) {
+            (Some(reason), "") => reason.to_string(),
+            (Some(reason), c) => format!("{reason}\n\n{c}"),
+            (None, "") => "retry limit reached; review".to_string(),
+            (None, c) => c.to_string(),
         };
         sql_forge!(
             "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
@@ -1122,8 +1252,8 @@ pub(crate) async fn engine_transition(
 
     let comment = match new_thread_id {
         Some(new_id) if review_thread => format!(
-            "Task failed in thread #{}. Retry limit reached; creating review thread #{}.",
-            thread.id, new_id
+            "Task failed in thread #{}. {}; creating review thread #{}.",
+            thread.id, block_reason, new_id
         ),
         Some(new_id) => match &kind {
             RerunKind::Interrupted => format!(
@@ -1230,11 +1360,12 @@ mod tests {
     #[test]
     fn route_fail_tool_f0_executor() {
         // F0 with workflow → re-run executor step.
-        let (step, status) = route_fail_tool("executor", Some("running"), true, true, true);
+        let (step, status) = route_fail_tool("executor", Some("running"), true, true, true, false);
         assert_eq!(step, Some("running"));
         assert_eq!(status, "running");
         // F0 without workflow → blocked.
-        let (step, status) = route_fail_tool("executor", Some("running"), false, false, false);
+        let (step, status) =
+            route_fail_tool("executor", Some("running"), false, false, false, false);
         assert_eq!(step, None);
         assert_eq!(status, "blocked");
     }
@@ -1242,45 +1373,129 @@ mod tests {
     #[test]
     fn route_fail_tool_f1_tester_reviewer_rework() {
         // Tester requests executor rework.
-        let (step, status) = route_fail_tool("running", Some("testing"), true, true, true);
+        let (step, status) = route_fail_tool("running", Some("testing"), true, true, true, false);
         assert_eq!(step, Some("running"));
         assert_eq!(status, "running");
         // Reviewer requests executor rework.
-        let (step, _) = route_fail_tool("running", Some("review"), true, true, true);
+        let (step, _) = route_fail_tool("running", Some("review"), true, true, true, false);
         assert_eq!(step, Some("running"));
         // Executor itself can request its own rework (R7 row-2 semantics).
-        let (step, status) = route_fail_tool("running", Some("running"), true, true, true);
+        let (step, status) = route_fail_tool("running", Some("running"), true, true, true, false);
         assert_eq!(step, Some("running"));
         assert_eq!(status, "running");
         // No executor role in workflow → blocked.
-        let (step, _) = route_fail_tool("running", Some("testing"), true, false, true);
+        let (step, _) = route_fail_tool("running", Some("testing"), true, false, true, false);
         assert_eq!(step, None);
         // Non-workflow task → blocked.
-        let (step, _) = route_fail_tool("running", Some("testing"), false, false, false);
+        let (step, _) = route_fail_tool("running", Some("testing"), false, false, false, false);
         assert_eq!(step, None);
     }
 
     #[test]
     fn route_fail_tool_f2_reviewer_retest() {
-        let (step, status) = route_fail_tool("testing", Some("review"), true, true, true);
+        let (step, status) = route_fail_tool("testing", Some("review"), true, true, true, false);
         assert_eq!(step, Some("testing"));
         assert_eq!(status, "testing");
         // Tester cannot request its own step.
-        let (step, _) = route_fail_tool("testing", Some("testing"), true, true, true);
+        let (step, _) = route_fail_tool("testing", Some("testing"), true, true, true, false);
         assert_eq!(step, None);
         // No tester role → blocked.
-        let (step, _) = route_fail_tool("testing", Some("review"), true, true, false);
+        let (step, _) = route_fail_tool("testing", Some("review"), true, true, false, false);
         assert_eq!(step, None);
     }
 
     #[test]
     fn route_fail_tool_f3_f4_blocked() {
-        let (step, status) = route_fail_tool("blocked", Some("review"), true, true, true);
+        let (step, status) = route_fail_tool("blocked", Some("review"), true, true, true, false);
         assert_eq!(step, None);
         assert_eq!(status, "blocked");
-        let (step, status) = route_fail_tool("invalid", Some("review"), true, true, true);
+        let (step, status) = route_fail_tool("invalid", Some("review"), true, true, true, false);
         assert_eq!(step, None);
         assert_eq!(status, "blocked");
+    }
+
+    #[test]
+    fn route_fail_tool_f0_review_on_fail_routes_review() {
+        // Flag true: a non-reviewer F0 (no workflow_step) goes to REVIEW —
+        // NOT executor re-run; the reviewer decides.
+        let (step, status) = route_fail_tool("executor", Some("testing"), true, true, true, true);
+        assert_eq!(step, None);
+        assert_eq!(status, "review");
+        let (step, status) = route_fail_tool("executor", Some("running"), true, true, true, true);
+        assert_eq!(step, None);
+        assert_eq!(status, "review");
+        // The reviewer caller keeps the classic F0 (executor re-run).
+        let (step, status) = route_fail_tool("executor", Some("review"), true, true, true, true);
+        assert_eq!(step, Some("running"));
+        assert_eq!(status, "running");
+        // Flag false: classic F0 re-run for non-reviewers.
+        let (step, status) = route_fail_tool("executor", Some("testing"), true, true, true, false);
+        assert_eq!(step, Some("running"));
+        assert_eq!(status, "running");
+    }
+
+    #[test]
+    fn route_fail_tool_blocked_restriction() {
+        // Flag true: ONLY the reviewer may send the task to blocked — a
+        // non-reviewer explicit 'blocked' routes to review instead.
+        let (step, status) = route_fail_tool("blocked", Some("testing"), true, true, true, true);
+        assert_eq!(step, None);
+        assert_eq!(status, "review");
+        // Reviewer explicit blocked + flag true → blocked (reviewer may block).
+        let (step, status) = route_fail_tool("blocked", Some("review"), true, true, true, true);
+        assert_eq!(step, None);
+        assert_eq!(status, "blocked");
+        // Flag false: blocked stays blocked for every caller.
+        let (step, status) = route_fail_tool("blocked", Some("testing"), true, true, true, false);
+        assert_eq!(step, None);
+        assert_eq!(status, "blocked");
+        // F1 blocked-bound (invalid caller) + flag true → review.
+        let (step, status) = route_fail_tool("running", Some("tester-x"), true, true, true, true);
+        assert_eq!(step, None);
+        assert_eq!(status, "review");
+        // F1 absent executor role + flag true → review.
+        let (step, status) = route_fail_tool("running", Some("testing"), true, false, true, true);
+        assert_eq!(step, None);
+        assert_eq!(status, "review");
+        // F2 absent tester role + flag true → review.
+        let (step, status) = route_fail_tool("testing", Some("review"), true, true, false, true);
+        assert_eq!(step, None);
+        assert_eq!(status, "review");
+    }
+
+    #[test]
+    fn route_fail_tool_invalid_f4_review_on_fail() {
+        // Flag true: F4 invalid from a non-reviewer → review; from the
+        // reviewer → blocked (unchanged).
+        let (step, status) = route_fail_tool("invalid", Some("testing"), true, true, true, true);
+        assert_eq!(step, None);
+        assert_eq!(status, "review");
+        let (step, status) = route_fail_tool("invalid", Some("review"), true, true, true, true);
+        assert_eq!(step, None);
+        assert_eq!(status, "blocked");
+        // Flag false → blocked (today's behavior).
+        let (step, status) = route_fail_tool("invalid", Some("testing"), true, true, true, false);
+        assert_eq!(step, None);
+        assert_eq!(status, "blocked");
+    }
+
+    #[test]
+    fn route_fail_tool_flag_keeps_explicit_destinations() {
+        // Flag true: explicit F1 (executor rework) and F2 (re-test) are
+        // honored — the flag only converts blocked-bound outcomes / F0.
+        let (step, status) = route_fail_tool("running", Some("testing"), true, true, true, true);
+        assert_eq!(step, Some("running"));
+        assert_eq!(status, "running");
+        let (step, status) = route_fail_tool("running", Some("review"), true, true, true, true);
+        assert_eq!(step, Some("running"));
+        assert_eq!(status, "running");
+        let (step, status) = route_fail_tool("testing", Some("review"), true, true, true, true);
+        assert_eq!(step, Some("testing"));
+        assert_eq!(status, "testing");
+        // F2 invalid caller (tester requesting its own step) + flag true → review.
+        let (step, status) = route_fail_tool("testing", Some("testing"), true, true, true, true);
+        assert_eq!(step, None);
+        assert_eq!(status, "review");
     }
 
     #[test]
@@ -2050,6 +2265,251 @@ mod tests_r8n_no_workflow_blocked {
         assert_eq!(task_status(&pool, &task_id).await, "running");
 
         cleanup(&pool, &task_id, &[parent.id, new_id]).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    // ── review_on_fail / double-normalization regression (fail-thread task) ──
+    /// Throwaway data_dir with a workflow carrying review_on_fail /
+    /// auto_approve flags (executor role only, retries 0 → retry limit 1).
+    fn temp_data_dir_flagged(
+        tag: &str,
+        review_on_fail: bool,
+        auto_approve: bool,
+    ) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rof-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        std::fs::write(
+            dir.join("config").join("workflows.yml"),
+            format!(
+                "workflows:\n  test-wf:\n    profile: test\n    provider: noop\n    model: noop\n    plan_mode: manual\n    retries: 0\n    clear_executions_on_review: false\n    review_on_fail: {}\n    auto_approve: {}\n    roles:\n      executor:\n        template: \"executor system prompt\"\n        provider: noop\n        model: noop\n",
+                if review_on_fail { "true" } else { "false" },
+                if auto_approve { "true" } else { "false" },
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn fail_tool_empty_step_reruns_executor() {
+        // Double-normalization regression: fail_thread_tool normalizes the
+        // empty workflow_step to "executor" (F0) and passes THAT value to
+        // engine_transition. engine_transition must NOT re-normalize it
+        // (re-normalizing turns "executor" → "invalid" → F4 → blocked).
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+        let data_dir = temp_data_dir("wf-f0", Some("test-wf"));
+        let task_id = format!("rof-f0-{}", std::process::id());
+        let parent = parent_thread(
+            setup(&pool, &task_id, Some("test-wf"), Some("running")).await,
+            task_id.clone(),
+            Some("running".to_string()),
+        );
+
+        let new_id = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent,
+            RerunKind::FailTool {
+                step: "executor".to_string(), // exactly what fail_thread_tool passes
+            },
+        )
+        .await
+        .expect("engine_transition should succeed")
+        .expect("F0 empty step must create an executor re-run thread");
+
+        let step: String = sql_forge!(
+            scalar String,
+            "SELECT workflow_step FROM threads WHERE id = :new_id",
+            ( :new_id = new_id )
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fetch rerun thread step");
+        assert_eq!(
+            step, "running",
+            "F0: empty workflow_step re-runs the executor step"
+        );
+        assert_eq!(task_status(&pool, &task_id).await, "running");
+
+        cleanup(&pool, &task_id, &[parent.id, new_id]).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn fail_tool_f0_review_on_fail_manual_review() {
+        // review_on_fail=true + executor F0 (no workflow_step) → task goes to
+        // REVIEW (manual state — no reviewer role in the workflow), NOT
+        // executor re-run and NOT blocked.
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+        let data_dir = temp_data_dir_flagged("f0-review", true, false);
+        let task_id = format!("rof-f0r-{}", std::process::id());
+        let parent = parent_thread(
+            setup(&pool, &task_id, Some("test-wf"), Some("running")).await,
+            task_id.clone(),
+            Some("running".to_string()),
+        );
+
+        let result = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent,
+            RerunKind::FailTool {
+                step: "executor".to_string(),
+            },
+        )
+        .await
+        .expect("engine_transition should succeed");
+
+        assert_eq!(
+            result, None,
+            "flag-routed review with no reviewer role creates NO thread"
+        );
+        assert_eq!(task_status(&pool, &task_id).await, "review");
+        let comment = latest_history_comment(&pool, &task_id).await;
+        assert!(
+            comment.contains("review"),
+            "unexpected kanban_history comment: {comment}"
+        );
+
+        cleanup(&pool, &task_id, &[parent.id]).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn fail_tool_auto_approve_forces_review_on_fail_false() {
+        // auto_approve=true + review_on_fail=true: the flag is FORCED off —
+        // an executor F0 fail behaves as review_on_fail=false (executor
+        // re-run), NOT review.
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+        let data_dir = temp_data_dir_flagged("f0-aa", true, true);
+        let task_id = format!("rof-aa-{}", std::process::id());
+        let parent = parent_thread(
+            setup(&pool, &task_id, Some("test-wf"), Some("running")).await,
+            task_id.clone(),
+            Some("running".to_string()),
+        );
+
+        let result = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent,
+            RerunKind::FailTool {
+                step: "executor".to_string(),
+            },
+        )
+        .await
+        .expect("engine_transition should succeed");
+
+        assert_eq!(
+            result, None,
+            "auto_approve: F0 fail must NOT create a re-run thread"
+        );
+        assert_eq!(
+            task_status(&pool, &task_id).await,
+            "blocked",
+            "auto_approve: executor/tester fail goes DIRECTLY to blocked"
+        );
+        let comment = latest_history_comment(&pool, &task_id).await;
+        assert!(
+            comment.contains("blocked"),
+            "unexpected kanban_history comment: {comment}"
+        );
+
+        cleanup(&pool, &task_id, &[parent.id]).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn fail_tool_reason_propagates_to_rerun_cause() {
+        // NEW FINDING 1: the re-run thread's seq-0 cause message must contain
+        // the parent's failure reason (msg_type='error'), so the next step's
+        // prompt automatically carries the failure context.
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+        let data_dir = temp_data_dir("wf-reason", Some("test-wf"));
+        let task_id = format!("rof-reason-{}", std::process::id());
+        let parent_id = setup(&pool, &task_id, Some("test-wf"), Some("testing")).await;
+        let parent = parent_thread(parent_id, task_id.clone(), Some("testing".to_string()));
+        // Parent's kanban script + an error message (the fail-thread reason).
+        sql_forge!(
+            "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
+             VALUES (:parent_id, 'user', 'the task script', 0, 'kanban')",
+            ( :parent_id = parent_id )
+        )
+        .execute(&pool)
+        .await
+        .expect("insert parent kanban message");
+        sql_forge!(
+            "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
+             VALUES (:parent_id, 'system', 'integration check failed: widget is broken', 1, 'error')",
+            ( :parent_id = parent_id )
+        )
+        .execute(&pool)
+        .await
+        .expect("insert parent error message");
+
+        let new_id = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent,
+            RerunKind::FailTool {
+                step: "executor".to_string(),
+            },
+        )
+        .await
+        .expect("engine_transition should succeed")
+        .expect("F0 must create a re-run thread");
+
+        let content: String = sql_forge!(
+            scalar String,
+            "SELECT content FROM messages WHERE thread_id = :new_id AND msg_type = 'kanban' ORDER BY id LIMIT 1",
+            ( :new_id = new_id )
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fetch rerun cause message");
+        assert!(
+            content.contains("widget is broken"),
+            "re-run cause must carry the parent failure reason, got: {content}"
+        );
+        assert!(
+            content.contains("the task script"),
+            "re-run cause must keep the parent kanban script, got: {content}"
+        );
+
+        cleanup(&pool, &task_id, &[parent_id, new_id]).await;
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 }
