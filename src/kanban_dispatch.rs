@@ -328,6 +328,45 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
 
     // 4. Mark the task running ("ready" was retired — see VALID_STATUSES; the
     //    executor would flip it to "running" on pickup anyway).
+    //
+    //    ACTION-MODE EXCEPTION: for an action-mode executor, step 3 ran the
+    //    action SYNCHRONOUSLY inside create_kanban_step_thread and the hook
+    //    already routed the task through the workflow matrix
+    //    (review/blocked/done/testing) via route_step_completion. Never
+    //    clobber that routed status back to `running` — the task would sit in
+    //    `running` forever with only a terminal action thread (GROUP 40-A).
+    //    Only mark `running` when the task is still `todo` (agent-mode
+    //    executor: the pending thread runs asynchronously).
+    let current_status: Option<String> = sql_forge!(
+        scalar String,
+        "SELECT status FROM kanban_tasks WHERE id = :task_id",
+        ( :task_id = picked.id.as_str() )
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| {
+        error!(
+            "[kanban/dispatch] failed to read status for task {}: {:?}",
+            picked.id, e
+        );
+        Error::Message(format!("Failed to read task status: {e}"))
+    })?;
+    if current_status.as_deref() != Some("todo") {
+        tracing::info!(
+            "[kanban/dispatch] task {} already transitioned by action-mode hook (status={}) — leaving as-is",
+            picked.id,
+            current_status.as_deref().unwrap_or("?")
+        );
+        return Ok(DispatchSummary {
+            dispatched: true,
+            task_id: Some(picked.id.clone()),
+            thread_id: Some(thread_id),
+            message: format!(
+                "Action-mode executor ran synchronously; task routed to {}",
+                current_status.as_deref().unwrap_or("unknown")
+            ),
+        });
+    }
     if let Err(e) = crate::db::kanban::update_kanban_task_status(pool, &picked.id, "running").await
     {
         error!(
