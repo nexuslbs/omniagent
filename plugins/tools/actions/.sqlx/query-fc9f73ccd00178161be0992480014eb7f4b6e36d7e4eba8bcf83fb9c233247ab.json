@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT cause FROM threads WHERE cause IS NOT NULL ORDER BY cause",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "cause",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "cause"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fc9f73ccd00178161be0992480014eb7f4b6e36d7e4eba8bcf83fb9c233247ab"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE threads SET status = 'processing', started_at = NOW() WHERE id = $1 AND status = 'pending' AND NOT terminal",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "226501d042ebee997d26984852cdf8b1e005b5b57ab19635df0c9a4713dee7ea"
+}

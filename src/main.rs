@@ -271,13 +271,21 @@ async fn run_server() -> AppResult<()> {
         cfg.port
     );
 
-    // Spawn old-message deletion task (daily cleanup)
+    // Spawn old-data deletion task (daily cleanup). delete_after_days == 0
+    // disables the cleanup entirely (0 = disabled: keep the loop alive but
+    // never delete anything).
     let pool_clean = pool.clone();
     let delete_after_days = cfg.delete_after_days;
     let cleanup_handle = tokio::spawn(async move {
+        if delete_after_days == 0 {
+            tracing::info!("Old-data cleanup disabled (delete_after_days=0)");
+        }
         let interval = tokio::time::Duration::from_secs(86400); // daily
         loop {
             tokio::time::sleep(interval).await;
+            if delete_after_days == 0 {
+                continue;
+            }
             let before = chrono::Utc::now() - chrono::Duration::days(delete_after_days as i64);
             // Delete old messages
             match db::types::delete_old_messages(&pool_clean, before).await {
@@ -305,6 +313,71 @@ async fn run_server() -> AppResult<()> {
                 }
                 Err(e) => tracing::error!("Failed to delete old summaries: {:?}", e),
             }
+            // Delete old threads (terminal only; their messages + subtasks are
+            // removed by delete_old_threads itself, FK-safe order).
+            match db::types::delete_old_threads(&pool_clean, before).await {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!(
+                            "Deleted {} threads older than {} days",
+                            count,
+                            delete_after_days
+                        );
+                    }
+                }
+                Err(e) => tracing::error!("Failed to delete old threads: {:?}", e),
+            }
+            // Delete old kanban history (no FK to kanban_tasks)
+            match db::types::delete_old_kanban_history(&pool_clean, before).await {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!(
+                            "Deleted {} kanban history rows older than {} days",
+                            count,
+                            delete_after_days
+                        );
+                    }
+                }
+                Err(e) => tracing::error!("Failed to delete old kanban history: {:?}", e),
+            }
+        }
+    });
+
+    // Spawn the in-process kanban dispatcher loop (kanban_dispatcher_interval
+    // seconds; 0 = disabled). This replaces the external cron/action trigger:
+    // dispatch runs inside the core process with NO HTTP round-trip. Logs only
+    // when a task was actually dispatched (or on error) to avoid 15s spam.
+    let pool_dispatch = pool.clone();
+    let data_dir_dispatch = data_dir.clone();
+    let dispatcher_interval = cfg.kanban_dispatcher_interval_secs;
+    let dispatcher_handle = tokio::spawn(async move {
+        if dispatcher_interval == 0 {
+            tracing::info!("Kanban dispatcher disabled (kanban_dispatcher_interval=0)");
+        }
+        let interval = tokio::time::Duration::from_secs(dispatcher_interval);
+        loop {
+            tokio::time::sleep(interval).await;
+            if dispatcher_interval == 0 {
+                continue;
+            }
+            match omniagent::kanban_dispatch::dispatch_todo_tasks(
+                &pool_dispatch,
+                &data_dir_dispatch,
+            )
+            .await
+            {
+                Ok(summary) => {
+                    if summary.dispatched {
+                        tracing::info!(
+                            "Kanban dispatcher: dispatched task {} (thread #{})",
+                            summary.task_id.as_deref().unwrap_or("?"),
+                            summary.thread_id.unwrap_or(0)
+                        );
+                    }
+                    // nothing dispatched: stay silent (avoid 15s spam)
+                }
+                Err(e) => tracing::error!("Kanban dispatcher error: {}", e),
+            }
         }
     });
 
@@ -326,6 +399,9 @@ async fn run_server() -> AppResult<()> {
         }
         _ = cleanup_handle => {
             tracing::info!("Cleanup finished");
+        }
+        _ = dispatcher_handle => {
+            tracing::info!("Kanban dispatcher loop finished");
         }
         _ = cron_handle => {
             tracing::info!("Cron scheduler finished");

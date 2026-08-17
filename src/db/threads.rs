@@ -1784,6 +1784,50 @@ pub async fn get_last_message(pool: &PgPool, thread_id: i64) -> AppResult<Option
     row.map(|r| r.try_into()).transpose()
 }
 
+/// Delete terminal threads (and their messages + subtasks) older than `before`.
+/// Non-terminal threads (pending/processing) are NEVER deleted, even when old.
+/// Handles the threads self-ref: children whose parent is being deleted get
+/// `parent_id = NULL` first so no FK violation and no orphaned pointer remains.
+/// Delete order: messages -> thread_subtasks -> threads (FK-safe).
+pub async fn delete_old_threads(
+    pool: &PgPool,
+    before: chrono::DateTime<chrono::Utc>,
+) -> AppResult<u64> {
+    use sqlx::Transaction;
+
+    let mut tx: Transaction<'_, sqlx::Postgres> = pool.begin().await?;
+    // 1. Messages of candidate threads (FK messages_thread_id_fkey).
+    sql_forge!(
+        "DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE terminal = true AND created_at < :cutoff)",
+        ( :cutoff = before )
+    )
+    .execute(&mut *tx)
+    .await?;
+    // 2. Subtasks of candidate threads (FK thread_subtasks_thread_id_fkey).
+    sql_forge!(
+        "DELETE FROM thread_subtasks WHERE thread_id IN (SELECT id FROM threads WHERE terminal = true AND created_at < :cutoff)",
+        ( :cutoff = before )
+    )
+    .execute(&mut *tx)
+    .await?;
+    // 3. Detach children whose parent is being deleted (threads_parent_id_fkey).
+    sql_forge!(
+        "UPDATE threads SET parent_id = NULL WHERE parent_id IN (SELECT id FROM threads WHERE terminal = true AND created_at < :cutoff)",
+        ( :cutoff = before )
+    )
+    .execute(&mut *tx)
+    .await?;
+    // 4. Delete the candidate threads.
+    let result = sql_forge!(
+        "DELETE FROM threads WHERE terminal = true AND created_at < :cutoff",
+        ( :cutoff = before )
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(result.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

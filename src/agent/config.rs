@@ -88,8 +88,11 @@ pub struct AgentConfig {
     /// The provider just returns the error; omniagent owns the retry policy.
     /// Default: 3.
     pub provider_max_retries: u32,
-    /// Days before old messages and summaries are deleted.
+    /// Days before old messages, summaries, threads and kanban history are deleted.
+    /// 0 disables the cleanup entirely.
     pub delete_after_days: u32,
+    /// Interval (seconds) between in-process kanban dispatcher runs (0 disables; default 15).
+    pub kanban_dispatcher_interval_secs: u64,
     /// MCP tool name for generating the LLM prompt (system prompt + context assembly).
     /// The tool is called by the executor before each LLM invocation to build
     /// the complete prompt from profile, memory, skills, thread context, etc.
@@ -232,6 +235,9 @@ impl AgentConfig {
                 .unwrap_or(3),
             provider_max_retries: get("provider_max_retries", "3").parse().unwrap_or(3),
             delete_after_days: get("delete_after_days", "30").parse().unwrap_or(30),
+            kanban_dispatcher_interval_secs: get("kanban_dispatcher_interval", "15")
+                .parse()
+                .unwrap_or(15),
             prompt_tool_name: get("prompt_generate_tool", "prompt_generate"),
             compact_messages_tool_name: get(
                 "prompt_compact_messages_tool",
@@ -331,6 +337,9 @@ impl AgentConfig {
                 .unwrap_or(3),
             provider_max_retries: get("provider_max_retries", "3").parse().unwrap_or(3),
             delete_after_days: get("delete_after_days", "30").parse().unwrap_or(30),
+            kanban_dispatcher_interval_secs: get("kanban_dispatcher_interval", "15")
+                .parse()
+                .unwrap_or(15),
             prompt_tool_name: get("prompt_generate_tool", "prompt_generate"),
             compact_messages_tool_name: get(
                 "prompt_compact_messages_tool",
@@ -412,6 +421,7 @@ mod tests {
             max_unfinished_subtask_retries: 1,
             provider_max_retries: 3,
             delete_after_days: 30,
+            kanban_dispatcher_interval_secs: 15,
             prompt_tool_name: "prompt_generate".to_string(),
             compact_messages_tool_name: "prompt_compact-messages".to_string(),
             char_budget_hard: 200000,
@@ -476,6 +486,7 @@ mod tests {
             max_unfinished_subtask_retries: 0,
             provider_max_retries: 0,
             delete_after_days: 0,
+            kanban_dispatcher_interval_secs: 0,
             prompt_tool_name: String::new(),
             compact_messages_tool_name: String::new(),
             char_budget_hard: 0,

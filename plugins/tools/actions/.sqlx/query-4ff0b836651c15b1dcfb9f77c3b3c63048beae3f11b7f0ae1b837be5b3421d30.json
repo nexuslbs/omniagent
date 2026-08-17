@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE kanban_tasks SET status = $1, thread_status = NULLIF($2, '')::text WHERE id = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4ff0b836651c15b1dcfb9f77c3b3c63048beae3f11b7f0ae1b837be5b3421d30"
+}
