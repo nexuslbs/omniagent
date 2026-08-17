@@ -211,7 +211,7 @@ pub(crate) async fn run_main_loop(
 
     let plan_content: Option<String> = if should_plan {
         let max_iter = 0; // one-shot, no refinement iterations
-        let max_tokens = cfg_snapshot.thread_summary_tokens; // configurable planning/summary token limit
+        let max_tokens = cfg_snapshot.max_tokens; // Option<u32>: None = provider default (planning shares the global output budget)
         let mut last_plan: Option<String> = None;
 
         'plan: {
@@ -254,7 +254,7 @@ pub(crate) async fn run_main_loop(
                  (e.g. a big file), note in the plan that it must be written in \
                  chunks via filesystem_write append=true — never let an output \
                  limit cause failure.",
-                max_tokens
+                fmt_output_budget(max_tokens)
             )));
             // Planning instruction as user message
             let tool_list = if tool_names.is_empty() {
@@ -535,14 +535,18 @@ Previous plan:\n{}",
     }
 
     // ── Truncation escalation (global max_tokens_on_truncation) ──
-    // Normal LLM calls use the small `max_tokens` budget. When the provider
-    // reports finish_reason=length (the output ceiling was hit), the retry
-    // uses the escalated budget `max_tokens_on_truncation` with the truncated
-    // reasoning preserved; a second consecutive truncation fails fast (no
-    // third retry). `None` = the current call is on the normal budget.
+    // Normal LLM calls use the configured `max_tokens` budget (None = no cap:
+    // the provider's own default applies — no max_tokens sent in the request).
+    // When the provider reports finish_reason=length (the output ceiling was
+    // hit), the retry uses the escalated budget `max_tokens_on_truncation`
+    // (also optional) with the truncated reasoning preserved; a second
+    // consecutive truncation fails fast (no third retry) and FORCES the
+    // thread to fail. With no caps configured anywhere, a truncation still
+    // retries once, then fails fast — the safety valve stays.
     let mut escalated_max_tokens: Option<u32> = None;
-    let base_max_tokens = cfg.config_snapshot().max_tokens;
-    let max_tokens_on_truncation = cfg.config_snapshot().max_tokens_on_truncation;
+    let mut truncation_escalated: bool = false;
+    let base_max_tokens: Option<u32> = cfg.config_snapshot().max_tokens;
+    let max_tokens_on_truncation: Option<u32> = cfg.config_snapshot().max_tokens_on_truncation;
 
     // Output-limit awareness: tell the model its per-response output ceiling so
     // it plans large deliverables (big file writes, long reports) in chunks
@@ -560,7 +564,7 @@ Previous plan:\n{}",
          filesystem_write (append=false), then append the remaining chunks with \
          append=true. Never abandon a task because of the output limit — chunk \
          the output instead.",
-        max_output_tokens
+        fmt_output_budget(max_output_tokens)
     )));
 
     // 5. Build tool definitions from the profile's allowed tools
@@ -934,12 +938,13 @@ Previous plan:\n{}",
                 .as_deref()
                 .map(|f| f == "length")
                 .unwrap_or(false);
-            match truncation_action(escalated_max_tokens.is_some(), truncated) {
+            match truncation_action(truncation_escalated, truncated) {
                 TruncationAction::Escalate => {
-                    escalated_max_tokens = Some(max_tokens_on_truncation);
+                    escalated_max_tokens = max_tokens_on_truncation;
+                    truncation_escalated = true;
                     info!(
                         "[executor] response truncated (finish_reason=length, attempt 1/2): retrying with escalated max_tokens={} (thread {})",
-                        max_tokens_on_truncation, thread.id,
+                        fmt_output_budget(max_tokens_on_truncation), thread.id,
                     );
                     // Reasoning-forward: preserve the truncated reasoning and
                     // any partial content, then nudge for a SHORTER response.
@@ -958,7 +963,7 @@ Previous plan:\n{}",
                              SPLIT the work across multiple calls: write the first chunk with filesystem_write \
                              (append=false), then append the remaining chunks with append=true. Never abandon a task \
                              because of the output limit — chunk the output instead.",
-                            max_tokens_on_truncation, base_max_tokens,
+                            fmt_output_budget(max_tokens_on_truncation), fmt_output_budget(base_max_tokens),
                         ),
                     );
                     // Don't consume the iteration budget for this retry overhead.
@@ -969,19 +974,24 @@ Previous plan:\n{}",
                 TruncationAction::FailFast => {
                     warn!(
                         "[executor] response truncated by token budget 2 consecutive times (including once with escalated max_tokens={}) for thread {}: giving up truthfully",
-                        max_tokens_on_truncation, thread.id,
+                        fmt_output_budget(max_tokens_on_truncation), thread.id,
                     );
                     final_content = format!(
                         "The response was truncated by the output token limit twice (attempt 2/2, including once with the escalated budget of {} tokens). Giving up truthfully.",
-                        max_tokens_on_truncation,
+                        fmt_output_budget(max_tokens_on_truncation),
                     );
                     final_tool_call = false;
+                    // Truncated twice: give up truthfully, but the thread MUST
+                    // fail (status "failed" → blocked / review_on_fail), never
+                    // complete and advance to the tester.
+                    force_failed = true;
                     break;
                 }
                 TruncationAction::Continue => {
                     // Successful (non-truncated) response: reset the escalation
                     // state so a later truncation escalates from the base budget.
                     escalated_max_tokens = None;
+                    truncation_escalated = false;
                 }
             }
 
@@ -1879,9 +1889,18 @@ fn truncation_action(escalated: bool, truncated: bool) -> TruncationAction {
 }
 
 /// Effective output budget for the current attempt: the escalated budget
-/// after a truncation, otherwise the normal `max_tokens`.
-fn effective_max_tokens(escalated: Option<u32>, base: u32) -> u32 {
-    escalated.unwrap_or(base)
+/// after a truncation, otherwise the normal `max_tokens`. `None` = no cap:
+/// the provider's own default output limit applies.
+fn effective_max_tokens(escalated: Option<u32>, base: Option<u32>) -> Option<u32> {
+    escalated.or(base)
+}
+
+/// Human-readable output budget for LLM-facing messages: the numeric cap,
+/// or "provider default" when no cap is configured (`None`).
+fn fmt_output_budget(max_tokens: Option<u32>) -> String {
+    max_tokens
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "provider default".to_string())
 }
 
 /// Messages appended for a truncation retry: preserved reasoning note (if
@@ -1929,9 +1948,35 @@ mod truncation_tests {
     }
 
     #[test]
+    fn failfast_contract_forces_failed_status() {
+        // Truncation FailFast contract: the base truncation escalates once, a
+        // second consecutive truncation fails fast — the executor loop sets
+        // force_failed=true so the thread's final status is "failed" (NOT
+        // "completed"). A failed executor thread goes blocked (or review with
+        // review_on_fail) — it never advances to the tester.
+        assert_eq!(truncation_action(false, true), TruncationAction::Escalate);
+        assert_eq!(truncation_action(true, true), TruncationAction::FailFast);
+        // Mirror of the post-loop status computation in handle_response:
+        // force_failed wins over everything (including limit_reached).
+        assert_eq!(
+            crate::agent::response_handler::post_loop_final_status(true, false),
+            "failed"
+        );
+        assert_eq!(
+            crate::agent::response_handler::post_loop_final_status(true, true),
+            "failed"
+        );
+        assert_ne!(
+            crate::agent::response_handler::post_loop_final_status(true, false),
+            "completed"
+        );
+    }
+
+    #[test]
     fn effective_budget_uses_escalated_value() {
-        assert_eq!(effective_max_tokens(None, 4096), 4096);
-        assert_eq!(effective_max_tokens(Some(16384), 4096), 16384);
+        assert_eq!(effective_max_tokens(None, Some(4096)), Some(4096));
+        assert_eq!(effective_max_tokens(Some(16384), None), Some(16384));
+        assert_eq!(effective_max_tokens(None, None), None);
     }
 
     #[test]

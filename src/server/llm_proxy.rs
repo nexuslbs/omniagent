@@ -17,8 +17,8 @@ pub struct LlmChatRequest {
     pub provider: String,
     pub model: String,
     pub messages: Vec<LlmMessage>,
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
 }
@@ -29,9 +29,6 @@ pub struct LlmMessage {
     pub content: String,
 }
 
-fn default_max_tokens() -> u32 {
-    4096
-}
 fn default_temperature() -> f32 {
     0.3
 }
@@ -83,7 +80,7 @@ pub(crate) async fn llm_chat_handler(
         base_url,
         model: model_name.clone(),
         api_mode,
-        max_tokens: body.max_tokens,
+        max_tokens: body.max_tokens.unwrap_or(8192),
         temperature: body.temperature,
         supports_reasoning: false,
     };

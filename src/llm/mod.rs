@@ -615,7 +615,7 @@ impl ChatMessage {
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
     pub messages: Vec<ChatMessage>,
-    pub max_tokens: u32,
+    pub max_tokens: Option<u32>,
     pub temperature: f32,
     pub stream: bool,
     /// Optional tool definitions (OpenAI function calling format).
@@ -1058,10 +1058,14 @@ impl LLMClient {
         let mut body = serde_json::json!({
             "model": self.config.model,
             "messages": request.messages,
-            "max_tokens": request.max_tokens,
             "temperature": request.temperature,
             "stream": request.stream,
         });
+        // max_tokens is optional: when None (not configured), the provider's
+        // own default output limit applies — no cap is sent in the request.
+        if let Some(mt) = request.max_tokens {
+            body["max_tokens"] = serde_json::Value::from(mt);
+        }
 
         if self.config.supports_reasoning {
             body["include_reasoning"] = serde_json::Value::Bool(true);
@@ -1262,9 +1266,13 @@ impl LLMClient {
         let mut body = serde_json::json!({
             "model": self.config.model,
             "messages": messages,
-            "max_tokens": request.max_tokens,
             "temperature": request.temperature,
         });
+        // max_tokens is optional: when None (not configured), the provider's
+        // own default output limit applies — no cap is sent in the request.
+        if let Some(mt) = request.max_tokens {
+            body["max_tokens"] = serde_json::Value::from(mt);
+        }
 
         if let Some(s) = system {
             body["system"] = serde_json::Value::String(s);
@@ -1274,7 +1282,7 @@ impl LLMClient {
         if self.config.provider.0 == "anthropic" {
             body["thinking"] = serde_json::json!({
                 "type": "enabled",
-                "budget_tokens": request.max_tokens.min(32000),
+                "budget_tokens": request.max_tokens.unwrap_or(32000),
             });
         }
 
@@ -1913,7 +1921,7 @@ mod tests {
         let client = LLMClient::new(config);
         let request = CompletionRequest {
             messages: vec![ChatMessage::user("hi")],
-            max_tokens: 128,
+            max_tokens: Some(128),
             temperature: 0.0,
             stream: false,
             tools: None,
