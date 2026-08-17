@@ -1345,20 +1345,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mcp-server-hindsight"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "mcp-server-util",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "mcp-server-kanban"
 version = "0.1.0"
 dependencies = [
@@ -1385,23 +1371,6 @@ dependencies = [
  "omniagent",
  "parking_lot",
  "reqwest",
- "serde",
- "serde_json",
- "sql-forge",
- "sqlx",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "mcp-server-metrics"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "mcp-server-util",
- "omniagent",
  "serde",
  "serde_json",
  "sql-forge",
@@ -1454,22 +1423,6 @@ dependencies = [
  "sql-forge",
  "sqlx",
  "tiktoken-rs",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "mcp-server-query"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "mcp-server-util",
- "omniagent",
- "serde",
- "serde_json",
- "sql-forge",
- "sqlx",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -2902,11 +2902,11 @@ mod token_counting_tests {
         let mut msgs = vec![user_msg("run the analysis")];
         for i in 0..4 {
             msgs.push(tool_call_msg(
-                "query_database",
+                "search_database",
                 &dense,
                 &format!("query {i}"),
             ));
-            msgs.push(tool_result("query_database", &dense));
+            msgs.push(tool_result("search_database", &dense));
         }
         msgs.push(assistant_msg("done"));
 

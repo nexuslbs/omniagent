@@ -2,7 +2,7 @@
   "name": "Search MCP Server",
   "id": "mcp-server-search",
   "version": "0.1.0",
-  "description": "Message and wiki search: search message history and wiki pages by keyword",
+  "description": "Merged search plugin (search + query + metrics): message/wiki keyword search, read-only SQL, thread/channel retrieval, agent metrics",
   "type": "mcp",
   "entrypoint": {
     "command": "mcp-server-search",
@@ -15,14 +15,14 @@
       "label": "Database URL",
       "type": "string",
       "default": "$env:DATABASE_URL",
-      "description": "PostgreSQL connection URL for message search"
+      "description": "PostgreSQL connection URL for message/DB search and metrics"
     },
     {
       "key": "omni_dir",
       "label": "OMNI_DIR",
       "type": "string",
       "default": "$env:OMNI_DIR",
-      "description": "Data directory for wiki file search"
+      "description": "Data directory for wiki file search and channels.yml"
     }
   ]
 }

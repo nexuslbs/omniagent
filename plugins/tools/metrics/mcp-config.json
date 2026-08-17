@@ -1,8 +1,0 @@
-{
-  "servers": [
-    {
-      "name": "metrics",
-      "transport": "stdio"
-    }
-  ]
-}

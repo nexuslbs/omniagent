@@ -22,7 +22,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,7 @@ pub fn schedule_router() -> Router<Arc<AppState>> {
         .route("/schedule", post(create_schedule_handler))
         .route("/schedule/{id}", patch(update_schedule_handler))
         .route("/schedule/{id}/toggle", patch(toggle_schedule_handler))
+        .route("/schedule/{id}", delete(delete_schedule_handler))
         .route("/schedule/{id}/threads", get(schedule_threads_handler))
         .route("/schedule/{id}/subtasks", get(schedule_subtasks_handler))
         .route("/schedule/{id}/run", post(run_schedule_handler))
@@ -792,6 +793,35 @@ async fn schedule_subtasks_handler(
     ok_json(SubtasksResponse { subtasks: entries })
 }
 
+/// DELETE /schedule/{id}: remove a schedule from tasks.yml.
+async fn delete_schedule_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match delete_schedule_from_tasks(&state.data_dir, &id) {
+        Ok(true) => ok_json(serde_json::json!({ "success": true, "deleted": id })),
+        Ok(false) => err_json(StatusCode::NOT_FOUND, "Job not found"),
+        Err(e) => {
+            error!("[schedule/{}] delete failed: {:?}", id, e);
+            err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to delete schedule from tasks.yml",
+            )
+        }
+    }
+}
+
+/// Delete a schedule from tasks.yml. Returns Ok(true) when removed,
+/// Ok(false) when the id does not exist (maps to HTTP 404).
+fn delete_schedule_from_tasks(data_dir: &str, id: &str) -> crate::error::AppResult<bool> {
+    let mut tasks = tasks_yaml::load_tasks(data_dir)?;
+    let removed = tasks.schedules.remove(id).is_some();
+    if removed {
+        tasks_yaml::save_tasks(data_dir, &tasks)?;
+    }
+    Ok(removed)
+}
+
 /// POST /schedule/{id}/run: manually trigger a schedule.
 ///
 /// Delegates to `crate::scheduler::fire_cron_job_by_id` (the same function
@@ -844,5 +874,41 @@ async fn run_schedule_handler(
                 })),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_tasks(data_dir: &str, yaml: &str) {
+        let config_dir = std::path::Path::new(data_dir).join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let mut f = std::fs::File::create(config_dir.join("tasks.yml")).unwrap();
+        f.write_all(yaml.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn delete_schedule_removes_from_tasks_yml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_str().unwrap();
+        write_tasks(
+            data_dir,
+            "schedules:\n  myjob:\n    enabled: true\n    cron: '0 9 * * *'\n    prompt: hello\n",
+        );
+        let removed = delete_schedule_from_tasks(data_dir, "myjob").unwrap();
+        assert!(removed);
+        let reloaded = tasks_yaml::load_tasks(data_dir).unwrap();
+        assert!(!reloaded.schedules.contains_key("myjob"));
+    }
+
+    #[test]
+    fn delete_schedule_unknown_id_returns_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().to_str().unwrap();
+        write_tasks(data_dir, "schedules: {}\n");
+        let removed = delete_schedule_from_tasks(data_dir, "nope").unwrap();
+        assert!(!removed);
     }
 }
