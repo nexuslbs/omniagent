@@ -2,7 +2,7 @@ use crate::agent::config::AgentContext;
 use crate::agent::fail_thread::{engine_transition, RerunKind};
 use crate::db::types as queries;
 use crate::db::types::{CreateThreadParams, Thread};
-use crate::workflows::WorkflowsFile;
+use crate::workflows::{WorkflowsFile, MODE_ACTION};
 use sql_forge::sql_forge;
 
 /// If the thread is linked to a kanban task, update its status based on
@@ -20,6 +20,15 @@ use sql_forge::sql_forge;
 /// - tester failure (`testing` step, any error — D5) → executor step: task
 ///   `running` + scheduled executor thread (consumes the executor retry
 ///   budget; the guard blocks the task at the limit — rows 8/9)
+///
+/// Role-mode + auto_approve extension (workflows.yml):
+/// - action-mode roles (executor/tester/reviewer) run actions.yml tools via
+///   `create_kanban_step_thread`/`run_action_role_step` instead of the agent
+///   loop; their terminal threads route through `route_step_completion`.
+/// - `auto_approve` workflows skip review entirely: review-bound outcomes go
+///   straight to `done` and `review_on_fail` is forced false.
+/// - `review_on_fail` workflows send failed executor/tester steps to review
+///   instead of blocked / executor re-run.
 pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_status: &str) {
     let Some(ref task_id) = thread.task_id else {
         return;
@@ -27,6 +36,19 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
 
     // Phase 3: non-success terminals → atomic engine transition.
     if matches!(final_status, "failed" | "interrupted" | "skipped") {
+        // review_on_fail: a hard-failed executor/tester step goes to review
+        // instead of blocked / executor re-run (auto_approve forces the flag
+        // off via workflow_policy). Interrupted/skipped keep the existing
+        // engine_transition retry guard unchanged.
+        if final_status == "failed" {
+            let step = thread.workflow_step.as_deref().unwrap_or("");
+            let wf_id = thread_workflow_id(&cfg.pool, thread.id).await;
+            let policy = workflow_policy(&cfg.ctx.data_dir, wf_id.as_deref(), step);
+            if policy.review_on_fail && matches!(step, "running" | "testing") {
+                route_step_completion(&cfg.pool, &cfg.ctx.data_dir, thread, true).await;
+                return;
+            }
+        }
         let kind = match final_status {
             "interrupted" => RerunKind::Interrupted,
             "skipped" => RerunKind::Skipped,
@@ -72,17 +94,73 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
         return;
     }
 
+    // Phase 4: completed agent threads → route through the same matrix used
+    // by terminal action-mode threads.
     let errored = last_tool_result_errored(&cfg.pool, thread.id).await;
-    let step = thread.workflow_step.as_deref().unwrap_or("");
-    let wf_id = thread_workflow_id(&cfg.pool, thread.id).await;
-    let has_reviewer = workflow_has_role(&cfg.ctx.data_dir, &wf_id, "reviewer");
+    route_step_completion(&cfg.pool, &cfg.ctx.data_dir, thread, errored).await;
+}
 
-    let has_tester = workflow_has_role(&cfg.ctx.data_dir, &wf_id, "tester");
-    match route_completed_thread(step, errored, has_reviewer, has_tester) {
+/// Workflow-level routing policy (workflows.yml), resolved for a step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct WorkflowPolicy {
+    /// `auto_approve: true` → reviewer role ignored; review-bound outcomes go
+    /// straight to `done`; `review_on_fail` forced false.
+    pub auto_approve: bool,
+    /// `review_on_fail: true` → failed executor/tester steps go to review
+    /// instead of blocked / executor re-run. Forced false under auto_approve.
+    pub review_on_fail: bool,
+    /// The CURRENT step's role runs in `mode: action`.
+    pub role_is_action: bool,
+}
+
+
+/// Resolve the routing policy for `step` from the task's workflow.
+pub(crate) fn workflow_policy(data_dir: &str, wf_id: Option<&str>, step: &str) -> WorkflowPolicy {
+    let mut policy = WorkflowPolicy::default();
+    let Some(wf_id) = wf_id else {
+        return policy;
+    };
+    let Ok(wfs) = WorkflowsFile::load(&crate::config_path::config_path(data_dir, "workflows.yml"))
+    else {
+        return policy;
+    };
+    if let Some(wf) = wfs.workflows.get(wf_id) {
+        policy.auto_approve = wf.auto_approve;
+        policy.review_on_fail = wf.review_on_fail && !wf.auto_approve;
+        if let Some(role) = crate::workflows::role_for_step(step) {
+            policy.role_is_action = wf.role_is_action(role);
+        }
+    }
+    policy
+}
+
+/// Route a completed (or terminal action-mode) workflow step thread to the
+/// next kanban column. Shared by:
+/// - `update_kanban_status` (agent-loop finalization),
+/// - the action-mode hook in `create_kanban_step_thread` (terminal action
+///   threads route synchronously — nobody else finalizes them),
+/// - the action-mode step-thread creation in `create_review_thread` /
+///   `create_testing_thread` (a terminal action thread must be routed).
+pub(crate) async fn route_step_completion(
+    pool: &sqlx::PgPool,
+    data_dir: &str,
+    thread: &Thread,
+    errored: bool,
+) {
+    let Some(ref task_id) = thread.task_id else {
+        return;
+    };
+
+    let step = thread.workflow_step.as_deref().unwrap_or("");
+    let wf_id = thread_workflow_id(pool, thread.id).await;
+    let has_reviewer = workflow_has_role(data_dir, &wf_id, "reviewer");
+    let has_tester = workflow_has_role(data_dir, &wf_id, "tester");
+    let policy = workflow_policy(data_dir, wf_id.as_deref(), step);
+    match route_completed_thread(step, errored, has_reviewer, has_tester, policy) {
         // R12: reviewer approves via normal completion + summary → done.
         CompletedRoute::Done => {
             let comment = format!("Reviewer approved (thread #{}). Task done.", thread.id);
-            match transition_with_comment(&cfg.pool, task_id, "done", None, &comment).await {
+            match transition_with_comment(pool, task_id, "done", None, &comment).await {
                 Ok(()) => tracing::info!(
                     "[workflow] reviewer approved (thread #{}) → task {} done",
                     thread.id,
@@ -98,7 +176,7 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
                 "Task blocked: review thread #{} completed with a failed tool result (inconclusive). Manual review required.",
                 thread.id
             );
-            match transition_with_comment(&cfg.pool, task_id, "blocked", None, &comment).await {
+            match transition_with_comment(pool, task_id, "blocked", None, &comment).await {
                 Ok(()) => tracing::info!(
                     "[workflow] inconclusive review (thread #{}) → task {} blocked",
                     thread.id,
@@ -109,96 +187,200 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
         }
         // Row 7: tester pass → review step, with a scheduled review thread.
         CompletedRoute::ReviewWithThread => {
-            match create_review_thread(&cfg.pool, &cfg.ctx.data_dir, thread).await {
-                Ok(Some(new_id)) => {
+            match create_review_thread(pool, data_dir, thread).await {
+                Ok(StepThreadOutcome::Pending { thread_id }) => {
                     let comment = format!(
-                        "Tester passed (thread #{}). Task in review — review thread #{new_id}.",
+                        "Tester passed (thread #{}). Task in review — review thread #{thread_id}.",
                         thread.id
                     );
                     match transition_with_comment(
-                    &cfg.pool,
-                    task_id,
-                    "review",
-                    Some("scheduled"),
-                    &comment,
-                )
-                .await
-                {
-                    Ok(()) => tracing::info!(
-                        "[workflow] tester passed (thread #{}) → task {} in review (review thread #{})",
-                        thread.id,
+                        pool,
                         task_id,
-                        new_id
-                    ),
-                    Err(e) => tracing::warn!(
-                        "[workflow] failed to move task {} to review: {}",
-                        task_id,
-                        e
-                    ),
+                        "review",
+                        Some("scheduled"),
+                        &comment,
+                    )
+                    .await
+                    {
+                        Ok(()) => tracing::info!(
+                            "[workflow] tester passed (thread #{}) → task {} in review (review thread #{})",
+                            thread.id,
+                            task_id,
+                            thread_id
+                        ),
+                        Err(e) => tracing::warn!(
+                            "[workflow] failed to move task {} to review: {}",
+                            task_id,
+                            e
+                        ),
+                    }
                 }
-                }
-                _ => {
+                Ok(StepThreadOutcome::Action { thread_id, errored }) => {
+                    // The reviewer role runs in action mode: the action already
+                    // executed synchronously. Record the task in review, then
+                    // route the terminal action outcome through the matrix
+                    // (reviewer action success → done, failure → blocked).
                     let comment = format!(
-                    "Tester passed (thread #{}). Task in review — review thread creation failed, manual review required.",
-                    thread.id
-                );
-                    match transition_with_comment(&cfg.pool, task_id, "review", None, &comment).await {
-                    Ok(()) => tracing::warn!(
-                        "[workflow] tester passed (thread #{}) but review thread creation failed; task {} in review (manual)",
-                        thread.id,
-                        task_id
-                    ),
-                    Err(e) => tracing::warn!(
-                        "[workflow] failed to move task {} to review: {}",
+                        "Tester passed (thread #{}). Task in review — review action executed (thread #{thread_id}).",
+                        thread.id
+                    );
+                    match transition_with_comment(
+                        pool,
                         task_id,
-                        e
-                    ),
+                        "review",
+                        Some("scheduled"),
+                        &comment,
+                    )
+                    .await
+                    {
+                        Ok(()) => tracing::info!(
+                            "[workflow] tester passed (thread #{}) → task {} in review (review action thread #{})",
+                            thread.id,
+                            task_id,
+                            thread_id
+                        ),
+                        Err(e) => tracing::warn!(
+                            "[workflow] failed to move task {} to review: {}",
+                            task_id,
+                            e
+                        ),
+                    }
+                    if let Ok(Some(action_thread)) =
+                        crate::db::threads::get_thread_by_id(pool, thread_id).await
+                    {
+                        Box::pin(route_step_completion(
+                            pool,
+                            data_dir,
+                            &action_thread,
+                            errored,
+                        ))
+                        .await;
+                    }
                 }
+                Ok(StepThreadOutcome::None) => {
+                    let comment = format!(
+                        "Tester passed (thread #{}). Task in review — review thread creation failed, manual review required.",
+                        thread.id
+                    );
+                    match transition_with_comment(pool, task_id, "review", None, &comment).await {
+                        Ok(()) => tracing::warn!(
+                            "[workflow] tester passed (thread #{}) but review thread creation failed; task {} in review (manual)",
+                            thread.id,
+                            task_id
+                        ),
+                        Err(e) => tracing::warn!(
+                            "[workflow] failed to move task {} to review: {}",
+                            task_id,
+                            e
+                        ),
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[workflow] tester passed (thread #{}) but review thread creation FAILED: {}; task {} in review (manual)",
+                        thread.id, e, task_id
+                    );
+                    let comment = format!(
+                        "Tester passed (thread #{}). Task in review — review thread creation failed: {}. Manual review required.",
+                        thread.id, e
+                    );
+                    match transition_with_comment(pool, task_id, "review", None, &comment).await {
+                        Ok(()) => tracing::warn!(
+                            "[workflow] tester passed (thread #{}) but review thread creation failed; task {} in review (manual)",
+                            thread.id,
+                            task_id
+                        ),
+                        Err(e2) => tracing::warn!(
+                            "[workflow] failed to move task {} to review: {}",
+                            task_id,
+                            e2
+                        ),
+                    }
                 }
             }
         }
         // R7-D4: executor success with a tester role → testing step thread, task → 'testing'.
         CompletedRoute::TestingWithThread => {
-            match create_testing_thread(&cfg.pool, &cfg.ctx.data_dir, thread).await {
-                Ok(Some(new_id)) => {
+            match create_testing_thread(pool, data_dir, thread).await {
+                Ok(StepThreadOutcome::Pending { thread_id }) => {
                     let comment = format!(
-                    "Executor done (thread #{}). Task in testing — tester step thread #{new_id}.",
-                    thread.id
-                );
+                        "Executor done (thread #{}). Task in testing — tester step thread #{thread_id}.",
+                        thread.id
+                    );
                     match transition_with_comment(
-                    &cfg.pool,
-                    task_id,
-                    "testing",
-                    Some("scheduled"),
-                    &comment,
-                )
-                .await
-                {
-                    Ok(()) => tracing::info!(
-                        "[workflow] executor done (thread #{}) -> task {} in testing (tester thread #{})",
-                        thread.id,
+                        pool,
                         task_id,
-                        new_id
-                    ),
-                    Err(e) => tracing::warn!(
-                        "[workflow] failed to move task {} to testing: {}",
-                        task_id,
-                        e
-                    ),
+                        "testing",
+                        Some("scheduled"),
+                        &comment,
+                    )
+                    .await
+                    {
+                        Ok(()) => tracing::info!(
+                            "[workflow] executor done (thread #{}) -> task {} in testing (tester thread #{})",
+                            thread.id,
+                            task_id,
+                            thread_id
+                        ),
+                        Err(e) => tracing::warn!(
+                            "[workflow] failed to move task {} to testing: {}",
+                            task_id,
+                            e
+                        ),
+                    }
                 }
+                Ok(StepThreadOutcome::Action { thread_id, errored }) => {
+                    // The tester role runs in action mode: the action already
+                    // executed synchronously. Record the task in testing, then
+                    // route the terminal action outcome through the matrix
+                    // (tester action success → review; failure → review).
+                    let comment = format!(
+                        "Executor done (thread #{}). Task in testing — testing action executed (thread #{thread_id}).",
+                        thread.id
+                    );
+                    match transition_with_comment(
+                        pool,
+                        task_id,
+                        "testing",
+                        Some("scheduled"),
+                        &comment,
+                    )
+                    .await
+                    {
+                        Ok(()) => tracing::info!(
+                            "[workflow] executor done (thread #{}) -> task {} in testing (tester action thread #{})",
+                            thread.id,
+                            task_id,
+                            thread_id
+                        ),
+                        Err(e) => tracing::warn!(
+                            "[workflow] failed to move task {} to testing: {}",
+                            task_id,
+                            e
+                        ),
+                    }
+                    if let Ok(Some(action_thread)) =
+                        crate::db::threads::get_thread_by_id(pool, thread_id).await
+                    {
+                        Box::pin(route_step_completion(
+                            pool,
+                            data_dir,
+                            &action_thread,
+                            errored,
+                        ))
+                        .await;
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
-                    "[workflow] executor done (thread #{}) but tester thread creation FAILED: {}; task {} in review (manual)",
-                    thread.id, e, task_id
-                );
+                        "[workflow] executor done (thread #{}) but tester thread creation FAILED: {}; task {} in review (manual)",
+                        thread.id, e, task_id
+                    );
                     let comment = format!(
-                    "Executor done (thread #{}). Task in review — tester thread creation failed: {}. Manual review required.",
-                    thread.id, e
-                );
-                    match transition_with_comment(&cfg.pool, task_id, "review", None, &comment)
-                        .await
-                    {
+                        "Executor done (thread #{}). Task in review — tester thread creation failed: {}. Manual review required.",
+                        thread.id, e
+                    );
+                    match transition_with_comment(pool, task_id, "review", None, &comment).await {
                         Ok(()) => {}
                         Err(e2) => tracing::warn!(
                             "[workflow] failed to move task {} to review: {}",
@@ -207,23 +389,23 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
                         ),
                     }
                 }
-                _ => {
+                Ok(StepThreadOutcome::None) => {
                     let comment = format!(
-                    "Executor done (thread #{}). Task in review — tester step skipped (no task_id). Manual review required.",
-                    thread.id
-                );
-                    match transition_with_comment(&cfg.pool, task_id, "review", None, &comment).await {
-                    Ok(()) => tracing::warn!(
-                        "[workflow] executor done (thread #{}) but tester thread creation failed; task {} in review (manual)",
-                        thread.id,
-                        task_id
-                    ),
-                    Err(e) => tracing::warn!(
-                        "[workflow] failed to move task {} to review: {}",
-                        task_id,
-                        e
-                    ),
-                }
+                        "Executor done (thread #{}). Task in review — tester step skipped (no task_id). Manual review required.",
+                        thread.id
+                    );
+                    match transition_with_comment(pool, task_id, "review", None, &comment).await {
+                        Ok(()) => tracing::warn!(
+                            "[workflow] executor done (thread #{}) but tester thread creation failed; task {} in review (manual)",
+                            thread.id,
+                            task_id
+                        ),
+                        Err(e) => tracing::warn!(
+                            "[workflow] failed to move task {} to review: {}",
+                            task_id,
+                            e
+                        ),
+                    }
                 }
             }
         }
@@ -233,7 +415,7 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
                 "Tester passed (thread #{}). Task in review (manual review — no reviewer role).",
                 thread.id
             );
-            match transition_with_comment(&cfg.pool, task_id, "review", None, &comment).await {
+            match transition_with_comment(pool, task_id, "review", None, &comment).await {
                 Ok(()) => tracing::info!(
                     "[workflow] tester passed (thread #{}) → task {} in review (manual)",
                     thread.id,
@@ -247,8 +429,11 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
             }
         }
         // D5: any test error → executor step (running + scheduled executor thread).
+        // Note: action-mode tester errors and review_on_fail route to review
+        // (handled by route_completed_thread); this arm is the agent-mode
+        // default D5 executor re-run.
         CompletedRoute::TesterErrorToExecutor => {
-            match engine_transition(&cfg.pool, &cfg.ctx.data_dir, thread, RerunKind::Failed).await {
+            match engine_transition(pool, data_dir, thread, RerunKind::Failed).await {
                 Ok(Some(new_id)) => tracing::info!(
                     "[workflow] tester error (thread #{}) → executor re-run thread #{}",
                     thread.id,
@@ -262,7 +447,7 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
                         "[workflow] tester error transition failed ({e}); falling back to blocked"
                     );
                     if let Err(e2) =
-                        queries::update_kanban_task_status(&cfg.pool, task_id, "blocked").await
+                        queries::update_kanban_task_status(pool, task_id, "blocked").await
                     {
                         tracing::warn!(
                             "[workflow] failed to block kanban task {}: {:?}",
@@ -275,8 +460,7 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
         }
         // Half-finished executor run — cannot promote to review.
         CompletedRoute::BlockedHalfFinished => {
-            if let Err(e) = queries::update_kanban_task_status(&cfg.pool, task_id, "blocked").await
-            {
+            if let Err(e) = queries::update_kanban_task_status(pool, task_id, "blocked").await {
                 tracing::warn!(
                     "[executor] Failed to update kanban task {} status: {:?}",
                     task_id,
@@ -306,21 +490,50 @@ pub(crate) enum CompletedRoute {
     TestingWithThread,
 }
 
-/// Map a completed thread's (workflow step, errored flag, reviewer role) to
-/// the kanban decision (spec §3 rows 7-17, R12, D5).
+/// Map a completed thread's (workflow step, errored flag, reviewer/tester
+/// roles, workflow policy) to the kanban decision (spec §3 rows 7-17, R12,
+/// D5 + role-mode/auto_approve/review_on_fail extension).
 pub(crate) fn route_completed_thread(
     step: &str,
     errored: bool,
     has_reviewer: bool,
     has_tester: bool,
+    policy: WorkflowPolicy,
 ) -> CompletedRoute {
     match (step, errored) {
+        // Reviewer step: success → done (R12); failure → blocked (inconclusive),
+        // in agent AND action modes.
         ("review", false) => CompletedRoute::Done,
         ("review", true) => CompletedRoute::BlockedInconclusiveReview,
+        // Tester pass → review step; auto_approve → done directly (reviewer
+        // role ignored).
+        ("testing", false) if policy.auto_approve => CompletedRoute::Done,
         ("testing", false) if has_reviewer => CompletedRoute::ReviewWithThread,
         ("testing", false) => CompletedRoute::ReviewManual,
+        // Tester failure: action-mode → review (user rule: NOT executor
+        // re-run); agent-mode review_on_fail → review; else D5 executor re-run.
+        ("testing", true) if policy.role_is_action || policy.review_on_fail => {
+            if has_reviewer {
+                CompletedRoute::ReviewWithThread
+            } else {
+                CompletedRoute::ReviewManual
+            }
+        }
         ("testing", true) => CompletedRoute::TesterErrorToExecutor,
+        // Executor pass → testing step when a tester exists; auto_approve
+        // with no tester → done directly; else manual review.
         ("running", false) if has_tester => CompletedRoute::TestingWithThread,
+        ("running", false) if policy.auto_approve => CompletedRoute::Done,
+        ("running", false) => CompletedRoute::ReviewManual,
+        // Executor failure: review_on_fail → review; else blocked (agent
+        // half-finished AND action-mode executor fail → blocked).
+        ("running", true) if policy.review_on_fail => {
+            if has_reviewer {
+                CompletedRoute::ReviewWithThread
+            } else {
+                CompletedRoute::ReviewManual
+            }
+        }
         (_, true) => CompletedRoute::BlockedHalfFinished,
         _ => CompletedRoute::ReviewManual,
     }
@@ -367,6 +580,18 @@ pub(crate) async fn transition_with_comment(
     .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+/// Outcome of creating a workflow step thread (testing/review).
+enum StepThreadOutcome {
+    /// A pending agent thread was created — the agent loop runs the step.
+    Pending { thread_id: i64 },
+    /// The step role runs in action mode: the action already executed
+    /// synchronously and the thread is terminal (system on success / failed
+    /// on error). The caller must route its outcome via `route_step_completion`.
+    Action { thread_id: i64, errored: bool },
+    /// No thread was created (step skipped / task_id missing / failure).
+    None,
 }
 
 /// Resolve the execution identity for a newly-created workflow step.
@@ -468,13 +693,14 @@ async fn task_description(pool: &sqlx::PgPool, task_id: &str) -> String {
 }
 
 /// Create a scheduled `review` thread for a passed tester thread (row 7).
+/// When the reviewer role is `mode: action`, the action runs synchronously
+/// instead and the outcome is returned as `StepThreadOutcome::Action`.
 /// Mirrors the thread creation in `engine_transition` (cause message seq-0).
 async fn create_review_thread(
     pool: &sqlx::PgPool,
     data_dir: &str,
     thread: &Thread,
-) -> Result<Option<i64>, String> {
-    let cause = thread.cause.clone();
+) -> Result<StepThreadOutcome, String> {
     let task_id = thread.task_id.clone().unwrap_or_default();
     // Board gate (feature-flagged): never create a review thread for an
     // invalid-board task (board NULL or not in boards.yml).
@@ -487,8 +713,13 @@ async fn create_review_thread(
                 task_id,
                 board_err
             );
-            return Ok(None);
+            return Ok(StepThreadOutcome::None);
         }
+    }
+    // Action-mode reviewer: run the action instead of a pending agent thread.
+    if let Some(outcome) = run_action_role_step(pool, data_dir, thread, "review", "reviewer").await
+    {
+        return Ok(outcome);
     }
     // Step threads carry the TASK DESCRIPTION in the cause message so the
     // prompt builder can place it as the SYSTEM prompt for reviewer threads
@@ -500,7 +731,7 @@ async fn create_review_thread(
         task_description(pool, &task_id).await
     };
     let cause_msg = if task_desc.is_empty() {
-        cause.clone()
+        thread.cause.clone()
     } else {
         format!("Workflow step: review. Task: {task_id}\n\n{task_desc}")
     };
@@ -513,7 +744,7 @@ async fn create_review_thread(
     let new_thread = crate::db::threads::create_thread(
         pool,
         "pending",
-        &cause,
+        &thread.cause,
         &thread.channel_id,
         &identity.0,
         CreateThreadParams {
@@ -545,7 +776,7 @@ async fn create_review_thread(
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(Some(new_id))
+    Ok(StepThreadOutcome::Pending { thread_id: new_id })
 }
 
 /// R7-D4: cause used for the testing step thread INSERT. `threads.cause` has
@@ -558,16 +789,19 @@ fn testing_step_cause(parent_cause: &str) -> String {
 }
 
 /// Create a scheduled `testing` step thread for a completed executor thread (R7-D4,
-/// spec §5). Mirrors `create_review_thread` with workflow_step='testing' and
-/// task_type='kanban' so the workflow test harness can find it.
+/// spec §5). When the tester role is `mode: action`, the action runs
+/// synchronously instead and the outcome is returned as
+/// `StepThreadOutcome::Action`. Mirrors `create_review_thread` with
+/// workflow_step='testing' and task_type='kanban' so the workflow test harness
+/// can find it.
 async fn create_testing_thread(
     pool: &sqlx::PgPool,
     data_dir: &str,
     thread: &Thread,
-) -> Result<Option<i64>, String> {
+) -> Result<StepThreadOutcome, String> {
     let task_id = match thread.task_id.clone() {
         Some(t) if !t.is_empty() => t,
-        _ => return Ok(None),
+        _ => return Ok(StepThreadOutcome::None),
     };
     // Board gate (feature-flagged): never create a testing thread for an
     // invalid-board task (board NULL or not in boards.yml).
@@ -579,7 +813,11 @@ async fn create_testing_thread(
             task_id,
             board_err
         );
-        return Ok(None);
+        return Ok(StepThreadOutcome::None);
+    }
+    // Action-mode tester: run the action instead of a pending agent thread.
+    if let Some(outcome) = run_action_role_step(pool, data_dir, thread, "testing", "tester").await {
+        return Ok(outcome);
     }
     let cause = testing_step_cause(&thread.cause);
     // The step thread's cause message carries the TASK DESCRIPTION (title +
@@ -630,7 +868,90 @@ async fn create_testing_thread(
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(Some(new_id))
+    Ok(StepThreadOutcome::Pending { thread_id: new_id })
+}
+
+/// Run a step role in action mode (mode: action): execute the actions.yml tool
+/// via the plugin manager and create the terminal kanban thread, mirroring the
+/// create_kanban_step_thread action hook. Returns `Some(outcome)` when the role
+/// is action-mode and the action executed (or failed to resolve); `None` when
+/// the role is agent-mode / runtime unavailable / no action_id — the caller
+/// falls back to a pending agent thread.
+async fn run_action_role_step(
+    pool: &sqlx::PgPool,
+    data_dir: &str,
+    thread: &Thread,
+    step: &str,
+    role: &str,
+) -> Option<StepThreadOutcome> {
+    let task_id = thread.task_id.as_deref()?;
+    let workflow_id = thread_workflow_id(pool, thread.id)
+        .await
+        .unwrap_or_default();
+    let role_cfg = if workflow_id.is_empty() {
+        None
+    } else {
+        let path = crate::config_path::config_path(data_dir, "workflows.yml");
+        crate::workflows::WorkflowsFile::load(&path)
+            .ok()
+            .and_then(|f| {
+                f.workflows
+                    .get(&workflow_id)
+                    .and_then(|w| w.resolve_role(role))
+            })
+    };
+    let role_cfg = role_cfg?;
+    if role_cfg.effective_mode() != MODE_ACTION {
+        return None;
+    }
+    let Some(action_id) = role_cfg.action_id.clone() else {
+        tracing::error!(
+            "[workflow] role '{}' has mode=action for step '{}' but no action_id (task {})",
+            role,
+            step,
+            task_id
+        );
+        return None;
+    };
+    let Some((plugin_manager, app_context)) = crate::kanban_action::runtime() else {
+        tracing::error!(
+            "[workflow] kanban_action runtime not initialized; cannot run action '{}' for step '{}' (task {})",
+            action_id,
+            step,
+            task_id
+        );
+        return None;
+    };
+    match crate::kanban_action::run_action_step(crate::kanban_action::ActionStepCtx {
+        pool,
+        data_dir,
+        plugin_manager,
+        app_context,
+        task_id,
+        channel_id: &thread.channel_id,
+        profile: &thread.profile,
+        plan: Some(thread.plan),
+        workflow_id: (!workflow_id.is_empty()).then_some(workflow_id.as_str()),
+        step,
+        role,
+        action_id: &action_id,
+    })
+    .await
+    {
+        Ok(outcome) => Some(StepThreadOutcome::Action {
+            thread_id: outcome.thread_id,
+            errored: outcome.errored,
+        }),
+        Err(e) => {
+            tracing::error!(
+                "[workflow] action step '{}' for task {} failed: {}",
+                step,
+                task_id,
+                e
+            );
+            None
+        }
+    }
 }
 
 /// True when the workflow referenced by the thread declares `role`.
@@ -687,16 +1008,38 @@ async fn last_tool_result_errored(pool: &sqlx::PgPool, thread_id: i64) -> bool {
 mod tests {
     use super::*;
 
+    fn agent() -> WorkflowPolicy {
+        WorkflowPolicy::default()
+    }
+    fn action() -> WorkflowPolicy {
+        WorkflowPolicy {
+            role_is_action: true,
+            ..WorkflowPolicy::default()
+        }
+    }
+    fn auto_approve() -> WorkflowPolicy {
+        WorkflowPolicy {
+            auto_approve: true,
+            ..WorkflowPolicy::default()
+        }
+    }
+    fn review_on_fail() -> WorkflowPolicy {
+        WorkflowPolicy {
+            review_on_fail: true,
+            ..WorkflowPolicy::default()
+        }
+    }
+
     #[test]
     fn route_completed_thread_reviewer_approve_goes_done() {
         // R12: reviewer approves via normal completion (clean) → done,
         // regardless of whether a reviewer role is declared (manual state).
         assert_eq!(
-            route_completed_thread("review", false, true, false),
+            route_completed_thread("review", false, true, false, agent()),
             CompletedRoute::Done
         );
         assert_eq!(
-            route_completed_thread("review", false, false, false),
+            route_completed_thread("review", false, false, false, agent()),
             CompletedRoute::Done
         );
     }
@@ -704,9 +1047,19 @@ mod tests {
     #[test]
     fn route_completed_thread_reviewer_half_finished_blocks() {
         // A review that completed with a failed final tool result is
-        // inconclusive — it cannot count as an approve (R12).
+        // inconclusive — it cannot count as an approve (R12). Also the
+        // action-mode reviewer failure → blocked (user rule).
         assert_eq!(
-            route_completed_thread("review", true, true, false),
+            route_completed_thread("review", true, true, false, agent()),
+            CompletedRoute::BlockedInconclusiveReview
+        );
+        assert_eq!(
+            route_completed_thread("review", true, true, false, action()),
+            CompletedRoute::BlockedInconclusiveReview
+        );
+        // review_on_fail does NOT send a failed review back to review.
+        assert_eq!(
+            route_completed_thread("review", true, true, false, review_on_fail()),
             CompletedRoute::BlockedInconclusiveReview
         );
     }
@@ -716,21 +1069,51 @@ mod tests {
         // Row 7: tester pass → review step (scheduled review thread when a
         // reviewer role exists, otherwise manual review with no thread).
         assert_eq!(
-            route_completed_thread("testing", false, true, false),
+            route_completed_thread("testing", false, true, false, agent()),
             CompletedRoute::ReviewWithThread
         );
         assert_eq!(
-            route_completed_thread("testing", false, false, false),
+            route_completed_thread("testing", false, false, false, agent()),
             CompletedRoute::ReviewManual
         );
     }
 
     #[test]
-    fn route_completed_thread_tester_error_goes_executor() {
-        // D5: any test error → executor step (running + scheduled thread).
+    fn route_completed_thread_tester_error_goes_executor_agent_mode() {
+        // D5 (agent mode, no flags): any test error → executor step.
         assert_eq!(
-            route_completed_thread("testing", true, false, false),
+            route_completed_thread("testing", true, false, false, agent()),
             CompletedRoute::TesterErrorToExecutor
+        );
+        assert_eq!(
+            route_completed_thread("testing", true, true, false, agent()),
+            CompletedRoute::TesterErrorToExecutor
+        );
+    }
+
+    #[test]
+    fn route_completed_thread_tester_error_goes_review_action_mode() {
+        // USER RULE: action-mode tester fail → review (NOT executor re-run).
+        assert_eq!(
+            route_completed_thread("testing", true, true, false, action()),
+            CompletedRoute::ReviewWithThread
+        );
+        assert_eq!(
+            route_completed_thread("testing", true, false, false, action()),
+            CompletedRoute::ReviewManual
+        );
+    }
+
+    #[test]
+    fn route_completed_thread_tester_error_goes_review_review_on_fail() {
+        // review_on_fail: agent-mode tester error → review (not re-run).
+        assert_eq!(
+            route_completed_thread("testing", true, true, false, review_on_fail()),
+            CompletedRoute::ReviewWithThread
+        );
+        assert_eq!(
+            route_completed_thread("testing", true, false, false, review_on_fail()),
+            CompletedRoute::ReviewManual
         );
     }
 
@@ -739,34 +1122,90 @@ mod tests {
         // Executor success without a tester role → review (manual); half-finished
         // executor runs are blocked.
         assert_eq!(
-            route_completed_thread("running", false, false, false),
+            route_completed_thread("running", false, false, false, agent()),
             CompletedRoute::ReviewManual
         );
         assert_eq!(
-            route_completed_thread("", false, false, false),
+            route_completed_thread("", false, false, false, agent()),
             CompletedRoute::ReviewManual
         );
         assert_eq!(
-            route_completed_thread("running", true, false, false),
+            route_completed_thread("running", true, false, false, agent()),
+            CompletedRoute::BlockedHalfFinished
+        );
+        // Action-mode executor fail → blocked (user rule).
+        assert_eq!(
+            route_completed_thread("running", true, false, false, action()),
+            CompletedRoute::BlockedHalfFinished
+        );
+        assert_eq!(
+            route_completed_thread("running", true, true, false, action()),
             CompletedRoute::BlockedHalfFinished
         );
     }
+
+    #[test]
+    fn route_completed_thread_executor_fail_review_on_fail_goes_review() {
+        // review_on_fail: failed executor step → review instead of blocked.
+        assert_eq!(
+            route_completed_thread("running", true, true, false, review_on_fail()),
+            CompletedRoute::ReviewWithThread
+        );
+        assert_eq!(
+            route_completed_thread("running", true, false, false, review_on_fail()),
+            CompletedRoute::ReviewManual
+        );
+    }
+
+    #[test]
+    fn route_completed_thread_auto_approve_goes_done() {
+        // auto_approve: reviewer ignored — tester pass and executor pass
+        // (without tester) go straight to done; review_on_fail forced false.
+        assert_eq!(
+            route_completed_thread("testing", false, true, false, auto_approve()),
+            CompletedRoute::Done
+        );
+        assert_eq!(
+            route_completed_thread("testing", false, false, false, auto_approve()),
+            CompletedRoute::Done
+        );
+        assert_eq!(
+            route_completed_thread("running", false, false, false, auto_approve()),
+            CompletedRoute::Done
+        );
+        // Executor failure under auto_approve → blocked (review_on_fail ignored).
+        assert_eq!(
+            route_completed_thread("running", true, true, false, auto_approve()),
+            CompletedRoute::BlockedHalfFinished
+        );
+        assert_eq!(
+            route_completed_thread("testing", true, true, false, auto_approve()),
+            CompletedRoute::TesterErrorToExecutor
+        );
+    }
+
     #[test]
     fn testing_step_route_r7d4() {
         // Executor success with a tester role → testing step thread; without → manual review.
         assert_eq!(
-            route_completed_thread("running", false, false, true),
+            route_completed_thread("running", false, false, true, agent()),
             CompletedRoute::TestingWithThread
         );
         assert_eq!(
-            route_completed_thread("running", false, true, true),
+            route_completed_thread("running", false, true, true, agent()),
             CompletedRoute::TestingWithThread
         );
         assert_eq!(
-            route_completed_thread("running", false, false, false),
+            route_completed_thread("running", false, false, false, agent()),
             CompletedRoute::ReviewManual
         );
+        // auto_approve with a tester: testing still runs.
+        assert_eq!(
+            route_completed_thread("running", false, true, true, auto_approve()),
+            CompletedRoute::TestingWithThread
+        );
     }
+
     #[test]
     fn testing_thread_cause_is_check_valid() {
         // R7-D4 regression: create_testing_thread binds threads.cause, which has

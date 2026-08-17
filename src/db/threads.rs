@@ -1259,6 +1259,109 @@ pub(crate) async fn create_kanban_step_thread(
         channel.as_ref().and_then(|c| c.template.as_deref()),
     );
 
+    // 4b. ACTION-MODE hook: when the resolved role declares `mode: action`,
+    //     execute the actions.yml tool via the plugin manager INSTEAD of
+    //     spawning the agent loop (mirrors hooks/schedule action modes).
+    //     The action thread is created TERMINAL (system on success / failed
+    //     on error) and the task routed through the workflow matrix
+    //     (kanban_updater::route_step_completion).
+    if let Some(role_key) = role {
+        let is_action = role_cfg
+            .as_ref()
+            .map(|r| r.effective_mode() == crate::workflows::MODE_ACTION)
+            .unwrap_or(false);
+        if is_action {
+            let Some(action_id) = role_cfg.as_ref().and_then(|r| r.action_id.clone()) else {
+                tracing::error!(
+                    "[workflow] role '{}' has mode=action for step '{}' but no action_id (task {})",
+                    role_key,
+                    status,
+                    task_id
+                );
+                return Ok(None);
+            };
+            let Some((plugin_manager, app_context)) = crate::kanban_action::runtime() else {
+                tracing::error!(
+                    "[workflow] kanban_action runtime unavailable; cannot run action '{}' for step '{}' (task {})",
+                    action_id, status, task_id
+                );
+                return Ok(None);
+            };
+            let outcome =
+                match crate::kanban_action::run_action_step(crate::kanban_action::ActionStepCtx {
+                    pool,
+                    data_dir,
+                    plugin_manager,
+                    app_context,
+                    task_id,
+                    channel_id: &channel_id,
+                    profile: &effective_profile,
+                    plan: Some(plan.unwrap_or(false)),
+                    workflow_id: workflow_id.as_deref(),
+                    step: status,
+                    role: role_key,
+                    action_id: &action_id,
+                })
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(e) => {
+                        tracing::error!(
+                            "[workflow] action step '{}' for task {} failed: {}",
+                            status,
+                            task_id,
+                            e
+                        );
+                        return Ok(None);
+                    }
+                };
+            // Audit + mark scheduled (mirrors step 6 below).
+            sql_forge!(
+                "UPDATE kanban_tasks SET thread_status = 'scheduled' WHERE id = :task_id",
+                ( :task_id = task_id )
+            )
+            .execute(pool)
+            .await?;
+            let comment = format!(
+                "Action-mode {} thread #{} created for step '{}' (action {})",
+                if outcome.errored { "failure" } else { "result" },
+                outcome.thread_id,
+                status,
+                action_id
+            );
+            let _ = sql_forge!(
+                r#"
+                INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
+                VALUES (:task_id, 'workflow', :initial, :to_status, :comment)
+                "#,
+                ( :task_id = task_id, :initial = &task.status, :to_status = &task.status, :comment = comment.as_str() )
+            )
+            .execute(pool)
+            .await
+            .map_err(|e| {
+                tracing::warn!(
+                    "[kanban dispatch] history insert for action thread #{} failed: {:?}",
+                    outcome.thread_id, e
+                )
+            });
+            // Route the terminal action outcome through the workflow matrix
+            // (action-mode: executor fail->blocked, tester fail->review,
+            // reviewer fail->blocked; successes follow the agent matrix).
+            if let Ok(Some(action_thread)) =
+                crate::db::threads::get_thread_by_id(pool, outcome.thread_id).await
+            {
+                crate::agent::kanban_updater::route_step_completion(
+                    pool,
+                    data_dir,
+                    &action_thread,
+                    outcome.errored,
+                )
+                .await;
+            }
+            return Ok(Some(outcome.thread_id));
+        }
+    }
+
     // 5. Create the thread via the single canonical creation path
     //    (create_thread_with_cause resolves provider/model from the workflow
     //    role via workflow_step; the role template is passed explicitly).
