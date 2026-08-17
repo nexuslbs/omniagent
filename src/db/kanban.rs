@@ -187,3 +187,19 @@ pub async fn update_kanban_task_thread_status(
     .await?;
     Ok(())
 }
+
+/// Delete kanban_history rows older than `before`. kanban_history has NO FK
+/// to kanban_tasks (`kanban_task_id` is plain text), so it can be pruned
+/// independently of the tasks themselves.
+pub async fn delete_old_kanban_history(
+    pool: &PgPool,
+    before: chrono::DateTime<chrono::Utc>,
+) -> AppResult<u64> {
+    let result = sql_forge!(
+        "DELETE FROM kanban_history WHERE created_at < :cutoff",
+        ( :cutoff = before )
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}

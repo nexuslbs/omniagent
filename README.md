@@ -410,7 +410,7 @@ VALUES ('cron_abc123', 'hourly-report', 'Hourly Report', '0 * * * *', 'Generate 
 | `schedule` | 5-field Linux cron expression (min hour day month weekday): the scheduler internally prepends `0` (second=0) for the `cron` crate |
 | `prompt` | The message content to execute |
 | `mode` | Execution mode: `agentic` (default), `direct`, or `action` |
-| `direct_task_type` | Task type for `direct` mode (e.g., `kanban_dispatcher`) |
+| `direct_task_type` | Task type for `direct` mode (e.g., a built-in action name) |
 | `action_id` | Action ID for `action` mode: references the `actions` table |
 | `template` | Optional template name; loaded from `profiles/<name>/templates/`. Falls back to channel's `template` if not set |
 | `enabled` | Whether the job is active |
@@ -504,15 +504,20 @@ VALUES ('task_abc123', 'Research topic', 'Find latest papers on...', 'todo', 1, 
 
 ### Kanban Dispatcher
 
-When a cron job is configured with `mode='direct'` and `direct_task_type='kanban_dispatcher'`, it acts as a **kanban dispatcher**. On each tick:
+The kanban dispatcher now runs **inside the core process**: a background loop
+calls the shared dispatch routine every `kanban_dispatcher_interval` seconds
+(default 15; `0` disables it — see `general:` in settings.yml). No external
+cron/action is required. On each tick:
 
 1. Queries all kanban tasks with `status = 'todo'`
 2. Orders them by `priority` (ascending, lower = higher priority), then by `position`
-3. Moves the first eligible task to `ready` status
-4. The task's `body` becomes the prompt for execution
-5. The task's `profile` field (or channel's current_profile) is used for resolution
+3. Applies the board gate, dependency gate and channel-busy gate, then starts
+   the first eligible task's executor thread (workflow_step `running`)
+4. The task's `profile` field (or channel's current_profile) is used for resolution
 
-This enables periodic task processing without human intervention: a cron job can drip-feed todo items into the agent's queue.
+The same routine is also exposed via `POST /kanban/dispatch` for manual/testing
+triggers. This enables periodic task processing without human intervention: the
+loop drip-feeds todo items into the agent's queue.
 
 ### Channel and Profile Assignment
 

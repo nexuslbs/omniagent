@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE kanban_tasks SET position = position - 1 WHERE status = $1 AND position > $2 AND position <= $3 AND id != $4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "286550768b960333c364ece6bb3b3bd0369b8384613979fb4c36e4b4ca48a6ba"
+}

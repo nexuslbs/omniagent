@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM kanban_tasks WHERE board = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "efd79f7976a605eb2cd1ead302074b4e9f55fe9f6f855d800ec222acaf4b3234"
+}

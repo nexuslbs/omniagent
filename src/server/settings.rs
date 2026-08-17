@@ -180,6 +180,7 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "old_message_char_budget",
                 "soul_max_chars",
                 "state_block_update_interval",
+                "kanban_dispatcher_interval",
                 "temperature",
                 "thread_summary_tokens",
                 "tokenizer_encoding",
@@ -429,10 +430,20 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             "delete_after_days".into(),
             SettingMeta {
                 field_type: "number".into(),
-                description: "Days before old messages and summaries are deleted".into(),
+                description: "Days before old messages, summaries, threads and kanban history are deleted (0 disables)".into(),
                 options: None,
                 readonly: false,
                 default: Some("30".into()),
+            },
+        ),
+        (
+            "kanban_dispatcher_interval".into(),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Interval (seconds) between in-process kanban dispatcher runs (0 disables; default 15)".into(),
+                options: None,
+                readonly: false,
+                default: Some("15".into()),
             },
         ),
         (
@@ -641,6 +652,8 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "max_unfinished_subtask_retries"
             | "temperature"
             | "tool_bg_secs" => "execution",
+            // general category (default; matches state_block_update_interval)
+            "kanban_dispatcher_interval" => "general",
             // memory category
             "delete_after_days"
             | "thread_summary_tokens"
@@ -744,6 +757,7 @@ fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
         "prompt_generate_tool",
         "prompt_compact_messages_tool",
         "delete_after_days",
+        "kanban_dispatcher_interval",
         "thread_summary_tokens",
         "memory_max_chars",
         "soul_max_chars",

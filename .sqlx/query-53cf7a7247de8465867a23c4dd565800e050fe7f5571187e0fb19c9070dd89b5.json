@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)\n             VALUES ($1, 'user', $2, 0, 'kanban')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "53cf7a7247de8465867a23c4dd565800e050fe7f5571187e0fb19c9070dd89b5"
+}

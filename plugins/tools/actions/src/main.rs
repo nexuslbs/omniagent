@@ -1,7 +1,7 @@
 //! mcp-server-actions — standalone MCP server for built-in action tools.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
-//! Tools: kanban_dispatcher, hindsight_populator, relevance_indexer,
+//! Tools: hindsight_populator, relevance_indexer,
 //!        setup_knowledge_pipeline
 //!
 //! Depends on the omniagent crate for tasks.yml helpers (setup_knowledge_pipeline
@@ -26,7 +26,6 @@ use tokio::sync::RwLock;
 struct Config {
     omni_dir: String,
     llm_provider: String,
-    omniagent_url: String,
 }
 
 impl Default for Config {
@@ -34,95 +33,12 @@ impl Default for Config {
         Self {
             omni_dir: "/opt/omni".to_string(),
             llm_provider: String::new(),
-            omniagent_url: String::new(),
         }
     }
 }
 
 fn default_profile_name() -> String {
     "omni".to_string()
-}
-
-// Tool: kanban_dispatcher
-// ---------------------------------------------------------------------------
-
-/// Normalize the core's `POST /kanban/dispatch` response into an MCP tool result.
-///
-/// The core replies with the standard ok_json/err_json shape:
-///   `{"success": true, "data": {"dispatched": bool, "task_id": .., "thread_id": .., "message": ..}}`
-///   `{"success": false, "error": "..."}`
-/// A bare data object (without the wrapper) is tolerated too.
-fn format_dispatch_summary(body: &Value) -> (String, bool) {
-    if body.get("success").and_then(|v| v.as_bool()) == Some(false) {
-        let err = body
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Core dispatch failed");
-        return (err.to_string(), true);
-    }
-    let data = body.get("data").filter(|d| d.is_object()).unwrap_or(body);
-    let dispatched = data
-        .get("dispatched")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let task_id = data.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
-    let thread_id = data.get("thread_id").and_then(|v| v.as_i64()).unwrap_or(0);
-    let message = data.get("message").and_then(|v| v.as_str()).unwrap_or({
-        if dispatched {
-            "Dispatched kanban task"
-        } else {
-            "No eligible kanban tasks to dispatch"
-        }
-    });
-    if !dispatched {
-        return (message.to_string(), false);
-    }
-    let summary = match (task_id.is_empty(), thread_id) {
-        (true, 0) => message.to_string(),
-        (false, 0) => format!("{} (task {})", message, task_id),
-        (true, tid) => format!("{} (thread {})", message, tid),
-        (false, tid) => format!("{} (task {}, thread {})", message, task_id, tid),
-    };
-    (summary, false)
-}
-
-/// Thin HTTP caller of the core's `POST /kanban/dispatch` endpoint.
-///
-/// All dispatch logic (dependency checks, thread creation, status updates,
-/// history) lives in the core; this plugin just forwards the request.
-async fn handle_kanban_dispatcher(
-    _pool: &PgPool,
-    _args: &Value,
-    config: &Config,
-) -> Result<(String, bool)> {
-    let base = if config.omniagent_url.is_empty() {
-        "http://localhost:8080".to_string()
-    } else {
-        config.omniagent_url.clone()
-    };
-    // Bounded outbound I/O: the dispatch call must NEVER hang indefinitely.
-    // A wedged core would otherwise leak this handler task forever (and with
-    // a blocking client, permanently block a runtime worker — the Aug 2026
-    // wedge). Connect timeout catches an unreachable core quickly; the total
-    // timeout bounds the whole call; the dispatcher cron then surfaces the
-    // error loudly instead of silently piling up hung calls.
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {}", e))?;
-    let resp = client
-        .post(format!("{}/kanban/dispatch", base))
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to call core dispatch API: {}", e))?;
-    let status = resp.status();
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("Bad response ({}): {}", status, e))?;
-    Ok(format_dispatch_summary(&body))
 }
 
 // ---------------------------------------------------------------------------
@@ -328,19 +244,6 @@ async fn main() -> Result<()> {
     let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
     let config: Arc<Mutex<Config>> = Arc::new(Mutex::new(Config::default()));
 
-    let p_kanban = pool.clone();
-    let c_kanban = config.clone();
-    let kanban_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
-        let p = p_kanban.clone();
-        let c = c_kanban.clone();
-        Box::pin(async move {
-            let guard = p.read().await;
-            let pool = guard.as_ref().expect("Pool not initialized").clone();
-            let config = c.lock().clone();
-            handle_kanban_dispatcher(&pool, &args, &config).await
-        })
-    });
-
     let p_hindsight = pool.clone();
     let c_hindsight = config.clone();
     let hindsight_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
@@ -381,18 +284,6 @@ async fn main() -> Result<()> {
     });
 
     let tools = vec![
-        McpToolEntry {
-            def: McpToolDef {
-                name: "kanban_dispatcher".to_string(),
-                description: "Process pending kanban tasks: move 'todo' tasks to 'ready' by creating threads and messages, respecting dependencies and ordering by priority and position.".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
-                }),
-            },
-            handler: kanban_handler,
-        },
         McpToolEntry {
             def: McpToolDef {
                 name: "hindsight_populator".to_string(),
@@ -470,11 +361,6 @@ async fn main() -> Result<()> {
                         cfg.llm_provider = prov.to_string();
                     }
                 }
-                if let Some(url) = params.get("omniagent_url").and_then(|v| v.as_str()) {
-                    if !url.is_empty() {
-                        cfg.omniagent_url = url.to_string();
-                    }
-                }
                 tokio::task::block_in_place(|| {
                     let rt = tokio::runtime::Handle::current();
                     let new_pool = rt
@@ -494,69 +380,4 @@ async fn main() -> Result<()> {
         },
     )
     .await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::format_dispatch_summary;
-    use serde_json::json;
-
-    #[test]
-    fn success_dispatched_summary() {
-        let body = json!({
-            "success": true,
-            "data": {
-                "dispatched": true,
-                "task_id": "task-abc",
-                "thread_id": 42,
-                "message": "Dispatched kanban task 'Build X' (task-abc) -> thread 42 (ready)"
-            }
-        });
-        let (msg, is_err) = format_dispatch_summary(&body);
-        assert!(!is_err);
-        assert!(msg.contains("task-abc"));
-        assert!(msg.contains("42"));
-    }
-
-    #[test]
-    fn success_nothing_eligible() {
-        let body = json!({"success": true, "data": {"dispatched": false}});
-        let (msg, is_err) = format_dispatch_summary(&body);
-        assert!(!is_err);
-        assert!(msg.contains("No eligible kanban tasks to dispatch"));
-    }
-
-    #[test]
-    fn success_no_thread_id() {
-        let body = json!({"success": true, "data": {"dispatched": true, "task_id": "t1"}});
-        let (msg, is_err) = format_dispatch_summary(&body);
-        assert!(!is_err);
-        assert!(msg.contains("t1"));
-    }
-
-    #[test]
-    fn failure_reports_error() {
-        let body = json!({"success": false, "error": "dispatch exploded"});
-        let (msg, is_err) = format_dispatch_summary(&body);
-        assert!(is_err);
-        assert_eq!(msg, "dispatch exploded");
-    }
-
-    #[test]
-    fn failure_missing_error_field() {
-        let body = json!({"success": false});
-        let (msg, is_err) = format_dispatch_summary(&body);
-        assert!(is_err);
-        assert!(msg.contains("Core dispatch failed"));
-    }
-
-    #[test]
-    fn bare_data_object_tolerated() {
-        // A raw data object without the ok_json wrapper also works.
-        let body = json!({"dispatched": true, "task_id": "t9", "thread_id": 7});
-        let (msg, is_err) = format_dispatch_summary(&body);
-        assert!(!is_err);
-        assert!(msg.contains("t9"));
-        assert!(msg.contains("7"));
-    }
 }

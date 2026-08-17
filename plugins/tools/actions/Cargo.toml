@@ -2,7 +2,7 @@
 name = "mcp-server-actions"
 version = "0.1.0"
 edition = "2021"
-description = "MCP server for built-in action tools — kanban_dispatcher, hindsight_populator, relevance_indexer, setup_knowledge_pipeline"
+description = "MCP server for built-in action tools — hindsight_populator, relevance_indexer, setup_knowledge_pipeline"
 
 [dependencies]
 mcp-server-util = { path = "../util" }
