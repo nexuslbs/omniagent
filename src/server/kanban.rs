@@ -33,6 +33,7 @@ use std::sync::Arc;
 use tracing::error;
 
 use super::{err_json, ok_json, AppState};
+use crate::boards::{boards_enabled, task_board};
 use crate::db::threads::{
     create_kanban_step_thread, dispatch_task_for_status, kanban_step_actionable,
 };
@@ -491,6 +492,47 @@ fn validate_status(status: &str) -> bool {
     VALID_STATUSES.contains(&status)
 }
 
+/// Validate the `board` value on task CREATE.
+///
+/// When boards are enabled (boards.yml present) the board is REQUIRED and
+/// must name an existing board — a board-less task would otherwise be
+/// silently skipped by the auto-dispatcher forever. When boards are disabled
+/// the field is inert and any value is accepted.
+fn validate_create_board(
+    data_dir: impl AsRef<std::path::Path>,
+    board: Option<&str>,
+) -> Result<(), String> {
+    if !boards_enabled(data_dir.as_ref()) {
+        return Ok(());
+    }
+    match board {
+        Some(b) if !b.trim().is_empty() => task_board(data_dir, Some(b.trim())).map(|_| ()),
+        _ => Err("board is required when boards are enabled (boards.yml present)".to_string()),
+    }
+}
+
+/// Validate the `board` field on task UPDATE.
+///
+/// When boards are enabled (boards.yml present) the resulting task must
+/// always carry a valid board: a missing field keeps the existing (already
+/// valid) board; an explicit clear (empty string) or an unknown board name is
+/// rejected. When boards are disabled the field is inert (clearing allowed).
+fn validate_update_board(
+    data_dir: impl AsRef<std::path::Path>,
+    board: Option<&str>,
+) -> Result<(), String> {
+    if !boards_enabled(data_dir.as_ref()) {
+        return Ok(());
+    }
+    match board {
+        None => Ok(()),
+        Some(b) if b.trim().is_empty() => {
+            Err("board cannot be cleared when boards are enabled (boards.yml present)".to_string())
+        }
+        Some(b) => task_board(data_dir, Some(b.trim())).map(|_| ()),
+    }
+}
+
 /// Get the next available position for a given status column.
 async fn next_position(pool: &sqlx::PgPool, status: &str) -> Result<i32, sqlx::Error> {
     let row: PosRow = sql_forge!(
@@ -642,6 +684,13 @@ async fn create_task_handler(
     let title = body.title.trim().to_string();
     if title.is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "Title is required");
+    }
+
+    // Board validation: when boards are enabled (boards.yml present), the
+    // board is required and must name an existing board — otherwise the
+    // auto-dispatcher silently skips the task forever (boards.rs).
+    if let Err(msg) = validate_create_board(&state.data_dir, body.board.as_deref()) {
+        return err_json(StatusCode::BAD_REQUEST, &msg);
     }
 
     let id = format!(
@@ -1097,6 +1146,13 @@ async fn update_task_handler(
                 &format!("Status must be one of: {}", VALID_STATUSES.join(", ")),
             );
         }
+    }
+
+    // Board validation: when boards are enabled, the resulting task must
+    // always carry a valid board — clearing (empty string) or setting an
+    // unknown board is rejected; a missing field keeps the existing board.
+    if let Err(msg) = validate_update_board(&state.data_dir, body.board.as_deref()) {
+        return err_json(StatusCode::BAD_REQUEST, &msg);
     }
 
     // 4. Ensure at least one field was provided
@@ -2402,6 +2458,62 @@ mod tests {
         assert!(!validate_status("invalid"));
         assert!(!validate_status(""));
         assert!(!validate_status("DONE"));
+    }
+
+    #[test]
+    fn test_validate_create_board_disabled_accepts_any() {
+        // boards.yml absent -> feature disabled: board optional/inert.
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(validate_create_board(dir.path(), None).is_ok());
+        assert!(validate_create_board(dir.path(), Some("")).is_ok());
+        assert!(validate_create_board(dir.path(), Some("anything")).is_ok());
+    }
+
+    #[test]
+    fn test_validate_create_board_enabled_requires_board() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = crate::boards::boards_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "boards:\n  main:\n    channel: kanban\n").unwrap();
+        // Missing/empty/whitespace -> "board is required".
+        let err = validate_create_board(dir.path(), None).unwrap_err();
+        assert!(err.contains("board is required"), "got: {err}");
+        let err = validate_create_board(dir.path(), Some("")).unwrap_err();
+        assert!(err.contains("board is required"), "got: {err}");
+        let err = validate_create_board(dir.path(), Some("   ")).unwrap_err();
+        assert!(err.contains("board is required"), "got: {err}");
+        // Unknown board -> not found in boards.yml.
+        let err = validate_create_board(dir.path(), Some("nope")).unwrap_err();
+        assert!(err.contains("not found in boards.yml"), "got: {err}");
+        // Valid board -> ok.
+        assert!(validate_create_board(dir.path(), Some("main")).is_ok());
+    }
+
+    #[test]
+    fn test_validate_update_board_disabled_allows_clear() {
+        // boards.yml absent -> clearing allowed, any value ok.
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(validate_update_board(dir.path(), None).is_ok());
+        assert!(validate_update_board(dir.path(), Some("")).is_ok());
+        assert!(validate_update_board(dir.path(), Some("anything")).is_ok());
+    }
+
+    #[test]
+    fn test_validate_update_board_enabled_blocks_clear_and_unknown() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = crate::boards::boards_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "boards:\n  main:\n    channel: kanban\n").unwrap();
+        // Field not sent -> keep existing board.
+        assert!(validate_update_board(dir.path(), None).is_ok());
+        // Explicit clear -> rejected.
+        let err = validate_update_board(dir.path(), Some("")).unwrap_err();
+        assert!(err.contains("cannot be cleared"), "got: {err}");
+        // Unknown board -> rejected.
+        let err = validate_update_board(dir.path(), Some("nope")).unwrap_err();
+        assert!(err.contains("not found in boards.yml"), "got: {err}");
+        // Valid board -> ok.
+        assert!(validate_update_board(dir.path(), Some("main")).is_ok());
     }
 
     #[test]
