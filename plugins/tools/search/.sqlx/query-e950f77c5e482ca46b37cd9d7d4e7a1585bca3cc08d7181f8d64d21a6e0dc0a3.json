@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, channel_id, task_id, status FROM threads WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "channel_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "task_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "task_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "status"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "e950f77c5e482ca46b37cd9d7d4e7a1585bca3cc08d7181f8d64d21a6e0dc0a3"
+}

@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH agent_responses AS (\n            SELECT m.id, t.channel_id, m.thread_id, m.created_at\n            FROM messages m\n            JOIN threads t ON t.id = m.thread_id\n            WHERE m.role = 'agent'\n              AND m.msg_type IN ('message', 'summary')\n              AND m.created_at >= $1\n              AND ($2 = '' OR t.profile = $3)\n        )\n        SELECT COUNT(DISTINCT m.id)::bigint\n        FROM messages m\n        JOIN threads t ON t.id = m.thread_id\n        INNER JOIN agent_responses a\n            ON t.channel_id = a.channel_id\n            AND m.thread_id = a.thread_id\n            AND m.created_at > a.created_at\n            AND m.created_at <= a.created_at + INTERVAL '5 minutes'\n        WHERE m.role = 'user'\n          AND (\n              LOWER(m.content) LIKE '%wrong%'\n              OR LOWER(m.content) LIKE '%incorrect%'\n              OR LOWER(m.content) LIKE '%that''s not%'\n              OR LOWER(m.content) LIKE '%actually%'\n              OR LOWER(m.content) LIKE '%no,%'\n              OR LOWER(m.content) LIKE '%not what%'\n              OR LOWER(m.content) LIKE '%try again%'\n          )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b75c120684396c04333eb7766a5a549bdac0b425452c2fc4fd63aea042c471e2"
+}
