@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)\n                         VALUES ($1, 'cause', $2, 0, 'cause')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "05ab01f3829ed471e11c189578ddfca5ee8dd3cc83a18d9d0ab15d92b004f420"
+}

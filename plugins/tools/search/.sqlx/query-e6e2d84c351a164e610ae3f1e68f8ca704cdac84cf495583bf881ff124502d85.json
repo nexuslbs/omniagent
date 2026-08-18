@@ -1,0 +1,108 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                id, role, content, msg_type, msg_subtype,\n                thread_id, thread_sequence,\n                COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\"\n            FROM messages\n            WHERE thread_id = $1\n            ORDER BY thread_sequence ASC, created_at ASC\n            LIMIT $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "content",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "content"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "msg_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "msg_type"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "msg_subtype",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "msg_subtype"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "thread_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "thread_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "thread_sequence",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "thread_sequence"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "e6e2d84c351a164e610ae3f1e68f8ca704cdac84cf495583bf881ff124502d85"
+}

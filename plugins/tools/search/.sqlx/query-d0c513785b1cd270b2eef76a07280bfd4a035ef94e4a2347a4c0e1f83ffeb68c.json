@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT status, archived\n                FROM kanban_tasks\n                WHERE id = $1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "archived",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "archived"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "d0c513785b1cd270b2eef76a07280bfd4a035ef94e4a2347a4c0e1f83ffeb68c"
+}

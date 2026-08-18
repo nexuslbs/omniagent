@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*)::bigint\n        FROM messages m\n        JOIN threads t ON t.id = m.thread_id\n        WHERE m.role = 'agent'\n          AND m.msg_type = 'tool_call'\n          AND m.msg_subtype IN ('search_messages', 'search_wiki')\n          AND m.created_at >= $1\n          AND ($2 = '' OR t.profile = $3)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ad08dc41c32d07c16884d51402b7e371431bfe2b4b947f198d9d8c463f47ffa0"
+}
