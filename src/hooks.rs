@@ -321,17 +321,24 @@ impl HooksEngine {
         let mut counter: Value = counter_row
             .and_then(|(counter,)| serde_json::from_str(&counter).ok())
             .unwrap_or_else(default_counter);
-        // Pre-trigger meta: the ids of the PREVIOUS trigger. The event is
-        // delivered with these; this trigger's ids are persisted below.
-        let (last_thread, last_message) = meta_get(&counter);
+        // Pre-trigger meta: the ids of the PREVIOUS trigger FOR THIS SCOPE
+        // KEY. The event is delivered with these; this trigger's ids are
+        // persisted below.
+        let (last_thread, last_message) = meta_get(&counter, &hook.scope, key);
         let new_value = counter_increment(&mut counter, &hook.scope, key);
         let should_trigger = new_value >= hook.count as i64;
         if should_trigger {
             counter_reset(&mut counter, &hook.scope, key);
-            // Persist this trigger's ids as the next `meta` — atomically with
-            // the counter reset (same tx). `meta` lives at the top level, so
-            // counter increments/resets never clobber it.
-            meta_update(&mut counter, Some(thread.id), current_message);
+            // Persist this trigger's ids as this scope key's next `meta` —
+            // atomically with the counter reset (same tx). `meta` is nested
+            // per scope key, so counter increments/resets never clobber it.
+            meta_update(
+                &mut counter,
+                &hook.scope,
+                key,
+                Some(thread.id),
+                current_message,
+            );
         }
 
         sqlx::query(
@@ -600,28 +607,56 @@ pub fn counter_reset(counter: &mut Value, scope: &str, key: &str) {
     counter_set(counter, scope, key, 0);
 }
 
-/// Read the `meta` section of a counter document — the ids of the last time
-/// the hook was triggered. Returns `(None, None)` before the first trigger.
-pub fn meta_get(counter: &Value) -> (Option<i64>, Option<i64>) {
-    let last_thread = counter["meta"]["last_thread"].as_i64();
-    let last_message = counter["meta"]["last_message"].as_i64();
+/// Read the per-scope-key `meta` section of a counter document — the ids of
+/// the last time the hook was triggered FOR THIS scope key. Returns
+/// `(None, None)` before the first trigger of that key.
+///
+/// `meta` is stored per scope key (`meta[scope][key]` for channel/profile
+/// scopes, a single `meta["global"]` entry for the global scope) so every
+/// profile/channel keeps its OWN last_thread/last_message — a trigger in one
+/// profile/channel must never leak its ids into another scope key's event.
+pub fn meta_get(counter: &Value, scope: &str, key: &str) -> (Option<i64>, Option<i64>) {
+    let entry = match scope {
+        SCOPE_CHANNEL | SCOPE_PROFILE => counter["meta"][scope].get(key),
+        _ => counter["meta"].get(SCOPE_GLOBAL),
+    };
+    let last_thread = entry.and_then(|e| e["last_thread"].as_i64());
+    let last_message = entry.and_then(|e| e["last_message"].as_i64());
     (last_thread, last_message)
 }
 
-/// Write the `meta` section of a counter document. Both keys are ALWAYS
-/// written (null when the id is unknown). `meta` lives at the top level,
-/// alongside `global` / `channel` / `profile`, so the counter accessors
-/// (`counter_get` / `counter_set` / `counter_increment` / `counter_reset`)
-/// never touch it.
-pub fn meta_update(counter: &mut Value, last_thread: Option<i64>, last_message: Option<i64>) {
+/// Write the per-scope-key `meta` section of a counter document. Both keys
+/// are ALWAYS written (null when the id is unknown). `meta` is nested per
+/// scope key (`meta[scope][key]` for channel/profile scopes, `meta["global"]`
+/// for the global scope), alongside `global` / `channel` / `profile`, so the
+/// counter accessors (`counter_get` / `counter_set` / `counter_increment` /
+/// `counter_reset`) never touch it.
+pub fn meta_update(
+    counter: &mut Value,
+    scope: &str,
+    key: &str,
+    last_thread: Option<i64>,
+    last_message: Option<i64>,
+) {
+    let entry = json!({
+        "last_thread": last_thread,
+        "last_message": last_message,
+    });
     if let Value::Object(root) = counter {
-        root.insert(
-            "meta".to_string(),
-            json!({
-                "last_thread": last_thread,
-                "last_message": last_message,
-            }),
-        );
+        let meta = root.entry("meta").or_insert_with(|| json!({}));
+        if let Value::Object(meta) = meta {
+            match scope {
+                SCOPE_CHANNEL | SCOPE_PROFILE => {
+                    let section = meta.entry(scope.to_string()).or_insert_with(|| json!({}));
+                    if let Value::Object(section) = section {
+                        section.insert(key.to_string(), entry);
+                    }
+                }
+                _ => {
+                    meta.insert(SCOPE_GLOBAL.to_string(), entry);
+                }
+            }
+        }
     }
 }
 
@@ -716,9 +751,17 @@ pub async fn fire_hook_by_id(
             .bind(&hook.id)
             .fetch_optional(pool)
             .await?;
+    // Manual fire reads the meta of the scope key the fired thread belongs
+    // to (per-scope-key meta); no key (out of scope) -> no last-trigger ids.
+    let fire_key = scope_key(
+        &hook.scope,
+        hook.target.as_deref(),
+        &thread_ctx.channel_name,
+        &thread_ctx.profile,
+    );
     let (last_thread, last_message) = stored
         .and_then(|(c,)| serde_json::from_str::<Value>(&c).ok())
-        .map(|c| meta_get(&c))
+        .and_then(|c| fire_key.as_deref().map(|k| meta_get(&c, &hook.scope, k)))
         .unwrap_or((None, None));
     let event = build_event(
         last_thread,
@@ -845,12 +888,12 @@ mod tests {
                 "profile": { "omni": 1 },
             })
         );
-        // After a trigger, `meta` carries the trigger's ids at the top level,
+        // After a trigger, `meta` carries the trigger's ids per scope key,
         // alongside global/channel/profile — untouched by counter
         // increments/resets.
-        meta_update(&mut c, Some(123), Some(456));
-        assert_eq!(c["meta"]["last_thread"], json!(123));
-        assert_eq!(c["meta"]["last_message"], json!(456));
+        meta_update(&mut c, "global", "global", Some(123), Some(456));
+        assert_eq!(c["meta"]["global"]["last_thread"], json!(123));
+        assert_eq!(c["meta"]["global"]["last_message"], json!(456));
         counter_increment(&mut c, "global", "global");
         counter_reset(&mut c, "global", "global");
         assert_eq!(
@@ -859,7 +902,7 @@ mod tests {
                 "global": 0,
                 "channel": { "channel1": 1, "channel2": 1 },
                 "profile": { "omni": 1 },
-                "meta": { "last_thread": 123, "last_message": 456 },
+                "meta": { "global": { "last_thread": 123, "last_message": 456 } },
             })
         );
     }
@@ -868,20 +911,45 @@ mod tests {
     fn meta_update_roundtrip() {
         // No meta before any trigger.
         let mut c = default_counter();
-        assert_eq!(meta_get(&c), (None, None));
+        assert_eq!(meta_get(&c, "global", "global"), (None, None));
         // A trigger writes its ids; a later trigger overwrites them.
-        meta_update(&mut c, Some(11), Some(22));
-        assert_eq!(meta_get(&c), (Some(11), Some(22)));
-        meta_update(&mut c, Some(33), Some(44));
-        assert_eq!(meta_get(&c), (Some(33), Some(44)));
+        meta_update(&mut c, "global", "global", Some(11), Some(22));
+        assert_eq!(meta_get(&c, "global", "global"), (Some(11), Some(22)));
+        meta_update(&mut c, "global", "global", Some(33), Some(44));
+        assert_eq!(meta_get(&c, "global", "global"), (Some(33), Some(44)));
         // Unknown message id → null in the persisted doc, None on read.
-        meta_update(&mut c, Some(55), None);
-        assert_eq!(meta_get(&c), (Some(55), None));
-        assert_eq!(c["meta"]["last_message"], Value::Null);
+        meta_update(&mut c, "global", "global", Some(55), None);
+        assert_eq!(meta_get(&c, "global", "global"), (Some(55), None));
+        assert_eq!(c["meta"]["global"]["last_message"], Value::Null);
         // Counter sections are untouched by meta writes.
         counter_increment(&mut c, "global", "global");
         assert_eq!(counter_get(&c, "global", "global"), 1);
-        assert_eq!(meta_get(&c), (Some(55), None));
+        assert_eq!(meta_get(&c, "global", "global"), (Some(55), None));
+    }
+
+    #[test]
+    fn meta_isolation_per_scope_key() {
+        // Per-profile hook (no target): each profile keeps its OWN meta —
+        // profile A's trigger must never leak ids into profile B's event.
+        let mut c = default_counter();
+        meta_update(&mut c, "profile", "omni", Some(11), Some(22));
+        meta_update(&mut c, "profile", "other", Some(33), Some(44));
+        assert_eq!(meta_get(&c, "profile", "omni"), (Some(11), Some(22)));
+        assert_eq!(meta_get(&c, "profile", "other"), (Some(33), Some(44)));
+        // Per-channel hook: same isolation between channels.
+        meta_update(&mut c, "channel", "ch1", Some(100), Some(200));
+        meta_update(&mut c, "channel", "ch2", Some(300), Some(400));
+        assert_eq!(meta_get(&c, "channel", "ch1"), (Some(100), Some(200)));
+        assert_eq!(meta_get(&c, "channel", "ch2"), (Some(300), Some(400)));
+        // Scopes are fully separate: no cross-scope leakage.
+        assert_eq!(meta_get(&c, "profile", "omni"), (Some(11), Some(22)));
+        assert_eq!(meta_get(&c, "channel", "ch1"), (Some(100), Some(200)));
+        assert_eq!(meta_get(&c, "global", "global"), (None, None));
+        // Counter increments/resets leave per-key meta untouched.
+        counter_increment(&mut c, "profile", "omni");
+        counter_reset(&mut c, "profile", "omni");
+        assert_eq!(meta_get(&c, "profile", "omni"), (Some(11), Some(22)));
+        assert_eq!(c["meta"]["profile"]["omni"]["last_thread"], json!(11));
     }
 
     #[test]
