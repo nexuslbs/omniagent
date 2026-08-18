@@ -452,6 +452,44 @@ pub(crate) async fn install_git_handler(
             .into_response();
     }
 
+    // Register remote MCP tools immediately when the plugin is already
+    // enabled in plugins.yml (e.g. the deploy env carries actions as an
+    // enabled remote plugin): install-git just cloned the source, so spawn
+    // the MCP server and register its tools right away — otherwise the
+    // plugin stays "error" (no tools in the registry) until a separate
+    // Install action fires the hot-reload. Fresh installs (no YAML entry
+    // yet) keep the old behavior: the separate Install action triggers it.
+    if yaml_type == plugins_yaml::PluginYamlType::Tool {
+        match plugins_yaml::get_entry(&state.data_dir, &yaml_type, &target_name) {
+            Ok(Some(entry)) if entry.enabled => {
+                info!(
+                    "install-git: plugin '{}' already enabled — hot-reloading MCP server to register tools",
+                    target_name
+                );
+                reload_tool_plugin(&state, &target_name).await;
+            }
+            Ok(Some(_entry)) => {
+                info!(
+                    "install-git: plugin '{}' cloned but disabled — tools will register on enable",
+                    target_name
+                );
+            }
+            Ok(None) => {
+                info!(
+                    "install-git: plugin '{}' cloned but not registered in plugins.yml — tools will register on Install",
+                    target_name
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "install-git: could not read plugins.yml entry for '{}': {:?}",
+                    target_name,
+                    e
+                );
+            }
+        }
+    }
+
     info!(
         "Successfully cloned git plugin '{}' (manifest name '{}') into .remote/",
         target_name, manifest.name
