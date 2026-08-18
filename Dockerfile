@@ -20,11 +20,8 @@ COPY plugins/tools/docker/Cargo.toml ./plugins/tools/docker/
 COPY plugins/tools/kanban/Cargo.toml ./plugins/tools/kanban/
 COPY plugins/tools/search/Cargo.toml ./plugins/tools/search/
 COPY plugins/tools/memory/Cargo.toml ./plugins/tools/memory/
-COPY plugins/tools/metrics/Cargo.toml ./plugins/tools/metrics/
-COPY plugins/tools/query/Cargo.toml ./plugins/tools/query/
 COPY plugins/tools/plugin-manager/Cargo.toml ./plugins/tools/plugin-manager/
 COPY plugins/tools/subtasks/Cargo.toml ./plugins/tools/subtasks/
-COPY plugins/tools/hindsight/Cargo.toml ./plugins/tools/hindsight/
 COPY plugins/tools/prompt/Cargo.toml ./plugins/tools/prompt/
 COPY plugins/tools/notes/Cargo.toml ./plugins/tools/notes/
 COPY plugins/tools/fetch/Cargo.toml ./plugins/tools/fetch/
