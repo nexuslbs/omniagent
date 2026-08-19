@@ -154,5 +154,13 @@ COPY --from=builder /build/target/release/db-migrations /usr/local/bin/db-migrat
 # strips target/ and node_modules/ from the build context.
 COPY --from=builder /build/plugins /app/plugins
 
+# Emit the API reference (route table) into the image so the running
+# agent can always locate it without the source (see skill omniagent-api).
+# Source file: api-reference.md at the repo root (docs/ is excluded from the
+# build context). Canonical path: /opt/omni/docs/api.md; /app/docs/api.md
+# fallback survives a fresh /opt/omni volume mount.
+COPY api-reference.md /opt/omni/docs/api.md
+COPY api-reference.md /app/docs/api.md
+
 EXPOSE 8080
 CMD ["omniagent"]

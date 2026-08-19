@@ -2,12 +2,20 @@
   "id": "mcp-server-fetch",
   "name": "Fetch MCP Server",
   "version": "0.1.0",
-  "description": "HTTP GET tool \u2014 fetch web pages and API responses",
+  "description": "HTTP tool \u2014 fetch web pages and API responses (GET by default; optional method gated by allow_unsafe_methods)",
   "type": "mcp",
   "entrypoint": {
     "command": "mcp-server-fetch",
     "args": [],
     "transport": "stdio"
   },
-  "config_schema": []
+  "config_schema": [
+    {
+      "key": "allow_unsafe_methods",
+      "label": "Allow Unsafe Methods",
+      "type": "boolean",
+      "default": "false",
+      "description": "When false (default), the fetch tool only allows safe/read-only HTTP methods (GET, HEAD, OPTIONS). When true, all HTTP methods (POST, PUT, PATCH, DELETE, etc.) are allowed. Configure per-plugin via the config endpoint (POST /api/plugins/tools/bundled/fetch/config with {\"config\":{\"allow_unsafe_methods\":\"true\"}}) or the plugins.yml `config:` map. The value reaches the plugin subprocess as the env var `allow_unsafe_methods`."
+    }
+  ]
 }

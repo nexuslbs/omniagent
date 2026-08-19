@@ -917,7 +917,10 @@ fn omniagent_api_tool() -> McpTool {
                     });
                 }
                 let url = format!("http://localhost:8080{}", path);
-                let client = reqwest::Client::new();
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
                 let method_parsed = match method.as_str() {
                     "GET" => reqwest::Method::GET,
                     "POST" => reqwest::Method::POST,
