@@ -1104,6 +1104,7 @@ struct KanbanDispatchRow {
     title: String,
     body: Option<String>,
     status: String,
+    archived: Option<bool>,
     channel_id: Option<String>,
     profile: Option<String>,
     template: Option<String>,
@@ -1123,7 +1124,7 @@ pub(crate) async fn create_kanban_step_thread(
     let task = match sql_forge!(
         KanbanDispatchRow,
         r#"
-        SELECT id, title, body, status, channel_id, profile, template, plan, workflow_id, board
+        SELECT id, title, body, status, archived, channel_id, profile, template, plan, workflow_id, board
         FROM kanban_tasks WHERE id = :task_id
         "#,
         ( :task_id = task_id )
@@ -1134,6 +1135,17 @@ pub(crate) async fn create_kanban_step_thread(
         Some(t) => t,
         None => return Ok(None),
     };
+
+    // 1a. ARCHIVED GATE: an archived task is never dispatched, regardless of
+    //     status. PATCH `archived:true` only flips the flag (it does NOT move
+    //     the status), so without this gate a status-change dispatch,
+    //     /redispatch or startup redispatch would still create a thread for
+    //     an archived task. The auto-dispatcher additionally excludes
+    //     archived tasks in its scan SQL (src/kanban_dispatch.rs); this gate
+    //     backstops every other dispatch path.
+    if task.archived.unwrap_or(false) {
+        return Ok(None);
+    }
 
     // 1b. Board gate (feature-flagged on the presence of config/boards.yml).
     //     Boards enabled + invalid board (NULL or not in the file) -> the
@@ -1657,6 +1669,7 @@ pub async fn skip_all_pending_threads(pool: &PgPool, data_dir: &str) -> AppResul
         SELECT t.id, t.status
         FROM kanban_tasks t
         WHERE t.status IN ('running', 'testing', 'review')
+          AND t.archived = false
           AND NOT EXISTS (
               SELECT 1 FROM threads th
               WHERE th.task_id = t.id AND th.status IN ('pending', 'processing')

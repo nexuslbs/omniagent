@@ -30,6 +30,11 @@ pub struct DispatchSummary {
 struct DispatchTaskRow {
     id: String,
     title: String,
+    /// Task status; the scan SQL already filters `status = 'todo'`.
+    status: String,
+    /// Archived flag (NULL = not archived). Archived tasks must NEVER be
+    /// dispatched — see `scan_row_eligible` and the scan SQL predicate.
+    archived: Option<bool>,
     /// Channel name (yml key) the task targets; needed to gate dispatch on
     /// the channel's active threads without a per-task detail fetch.
     channel_id: Option<String>,
@@ -37,6 +42,19 @@ struct DispatchTaskRow {
     /// present, NULL/unknown-board tasks are skipped by the eligibility
     /// scan (invalid-board tasks are never promoted/dispatched).
     board: Option<String>,
+}
+
+/// Dispatch-scan eligibility for a fetched candidate: `todo` AND not
+/// archived. Mirrors the scan SQL predicate (`WHERE status = :status AND
+/// archived = false`) so the archived exclusion is unit-testable without a
+/// DB. Archived tasks must NEVER be promoted/dispatched: PATCH
+/// `archived:true` only flips the flag (the task's status stays 'todo'), so
+/// without this exclusion an archived task would be picked up, promoted and
+/// its executor thread would run (observed 2026-08-18). NULL `archived`
+/// (legacy rows) counts as not archived, matching the app layer's
+/// `unwrap_or(false)` semantics.
+fn scan_row_eligible(status: &str, archived: Option<bool>) -> bool {
+    status == "todo" && !archived.unwrap_or(false)
 }
 
 #[derive(sqlx::FromRow)]
@@ -126,13 +144,18 @@ fn resolve_task_channel(task_channel: Option<&str>) -> String {
 /// eligible, and `Err` on internal failures (caller decides how to surface:
 /// HTTP error response or loop log).
 pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<DispatchSummary> {
-    // 1. Scan 'todo' tasks in priority order.
+    // 1. Scan 'todo' tasks in priority order. `archived = false` is REQUIRED:
+    //    PATCH `archived:true` only flips the flag (it does NOT move the
+    //    status), so an archived task left in `todo` must never be picked up
+    //    and promoted (observed 2026-08-18). The Rust-side
+    //    `scan_row_eligible` filter below backstops the SQL for NULL
+    //    `archived` rows.
     let tasks = match sql_forge!(
         DispatchTaskRow,
         r#"
-        SELECT id, title, channel_id, board
+        SELECT id, title, status, archived, channel_id, board
         FROM kanban_tasks
-        WHERE status = :status
+        WHERE status = :status AND archived = false
         ORDER BY priority ASC, position ASC
         "#,
         ( :status = "todo" )
@@ -146,6 +169,14 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
             return Err(Error::Message(format!("Failed to list todo tasks: {e}")));
         }
     };
+
+    // 1a. Archived gate (Rust-side backstop): archived candidates must never
+    //     be dispatched even if a NULL `archived` row slips past the SQL
+    //     predicate.
+    let tasks: Vec<DispatchTaskRow> = tasks
+        .into_iter()
+        .filter(|t| scan_row_eligible(&t.status, t.archived))
+        .collect();
 
     // 1b. Board gate (feature-flagged on the presence of config/boards.yml):
     //     when boards are enabled, tasks with no board or an unknown board
@@ -470,5 +501,27 @@ mod tests {
         assert_eq!(first_dispatchable_index(&mixed, &[0, 0]), Some(1));
         // All channels busy -> None (dispatch returns dispatched:false).
         assert_eq!(first_dispatchable_index(&free, &[1, 1, 1]), None);
+    }
+
+    #[test]
+    fn dispatch_scan_skips_archived_tasks() {
+        // Regression (2026-08-18): archived kanban tasks must never be
+        // promoted/dispatched. PATCH `archived:true` only flips the flag —
+        // the task's status stays 'todo' — so scan eligibility MUST exclude
+        // archived tasks. On the old scan SQL (`WHERE status = :status`
+        // only) this exact scenario promoted the archived task and ran its
+        // executor thread.
+        assert!(
+            !scan_row_eligible("todo", Some(true)),
+            "an archived 'todo' task must never be dispatch-eligible"
+        );
+        // Non-archived 'todo' tasks stay eligible (NULL archived = not
+        // archived, matching the app layer's unwrap_or(false) semantics).
+        assert!(scan_row_eligible("todo", Some(false)));
+        assert!(scan_row_eligible("todo", None));
+        // Only 'todo' is scanned; other statuses are never eligible here.
+        assert!(!scan_row_eligible("backlog", Some(false)));
+        assert!(!scan_row_eligible("running", Some(false)));
+        assert!(!scan_row_eligible("done", Some(false)));
     }
 }

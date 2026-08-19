@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT t.id, t.status\n        FROM kanban_tasks t\n        WHERE t.status IN ('running', 'testing', 'review')\n          AND NOT EXISTS (\n              SELECT 1 FROM threads th\n              WHERE th.task_id = t.id AND th.status IN ('pending', 'processing')\n          )\n        ",
+  "query": "\n        SELECT t.id, t.status\n        FROM kanban_tasks t\n        WHERE t.status IN ('running', 'testing', 'review')\n          AND t.archived = false\n          AND NOT EXISTS (\n              SELECT 1 FROM threads th\n              WHERE th.task_id = t.id AND th.status IN ('pending', 'processing')\n          )\n        ",
   "describe": {
     "columns": [
       {
@@ -34,5 +34,5 @@
       false
     ]
   },
-  "hash": "661b6830d4a239206812e7f0e5ddfdb8224c701ef132aea813b49b07b6a5e289"
+  "hash": "51c03a48dcc0d8e57ee01f233a17c5ef3efa22101b2996fc247d7e0691ec69bc"
 }
