@@ -238,207 +238,6 @@ pub fn upsert_system_message(messages: &mut Vec<ChatMessage>, marker: &str, cont
     messages.push(ChatMessage::user(&content));
 }
 
-/// Tools whose results ARE the agent's working memory (file contents, listings,
-/// search hits, query rows). These are preserved aggressively: the last
-/// `read_keep_last` (PruneConfig) are kept in full and older ones keep a
-/// generous excerpt (`read_excerpt_chars`). Zeroing them forces the agent to
-/// re-read the same files — the #1 budget killer (observed: thread 700 burned
-/// 117 docker_compose+sed windows of the SAME line ranges because prune zeroed
-/// every earlier read from context). All limits come from settings.yml.
-fn is_read_type_tool(name: &str) -> bool {
-    name.starts_with("filesystem_read")
-        || name.starts_with("filesystem_list")
-        || name.starts_with("filesystem_search")
-        || name.starts_with("filesystem_info")
-        || name.starts_with("search_database")
-        || name.starts_with("search_messages")
-        || name.starts_with("search_wiki")
-        || name.starts_with("skills_view")
-        || name.starts_with("git_status")
-        || name.starts_with("git_run-command")
-}
-
-/// Auto-note a read-type tool result into the thread's durable
-/// `auto-notes.md` before pruning removes it from context. The main loop
-/// re-injects `auto-notes.md` (tail, most recent first) every iteration, so
-/// the content survives compaction/pruning even when the model never calls
-/// `prompt_note-write` itself (observed: thread 700 wrote ZERO notes, then
-/// re-read the same file ranges 117 times because its context had been
-/// emptied). The model's own `notes.md` stays untouched — engine entries
-/// live in a separate file so they never crowd out hand-written notes.
-///
-/// Entries are appended with a `[engine:auto-note]` prefix and the file is
-/// capped at `auto_note_max_chars` (oldest entries dropped).
-fn auto_note_read(
-    dir: &std::path::Path,
-    tool: &str,
-    content: &str,
-    entry_chars: usize,
-    max_chars: usize,
-) {
-    if content.trim().is_empty() {
-        return;
-    }
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
-    }
-    let file = dir.join("auto-notes.md");
-    let entry = format!(
-        "## [engine:auto-note {tool}]\n{}\n",
-        content.chars().take(entry_chars).collect::<String>()
-    );
-    let existing = std::fs::read_to_string(&file).unwrap_or_default();
-    let mut merged = format!("{existing}{entry}");
-    // Cap: drop oldest auto-note blocks (only entries carrying the
-    // [engine:auto-note] marker are candidates — hand-written notes live in
-    // notes.md, a different file, so they are never touched here).
-    while merged.chars().count() > max_chars {
-        match merged.find("## [engine:auto-note") {
-            Some(idx) => {
-                let after = &merged[idx..];
-                let next = after.find("\n## [engine:auto-note").map(|i| i + 1);
-                match next {
-                    Some(end) => merged = format!("{}{}", &merged[..idx], &after[end..]),
-                    None => {
-                        // Only one auto-note block left and still over: trim its tail.
-                        let keep: String = after.chars().take(entry_chars).collect();
-                        merged = format!("{}{}", &merged[..idx], keep);
-                        break;
-                    }
-                }
-            }
-            None => break,
-        }
-    }
-    let _ = std::fs::write(&file, merged);
-}
-
-/// Pruning limits, all sourced from settings.yml — no hardcoded limits in
-/// code. `hard_budget` triggers a pruning pass; `soft_budget` is the target
-/// size compaction stops at. Read-type tool results (the agent's working
-/// memory) keep the last `read_keep_last` in full; older ones are excerpted
-/// to `read_excerpt_chars` and auto-noted into the thread's `auto-notes.md`
-/// (capped at `auto_note_max_chars`).
-#[derive(Debug, Clone, Copy)]
-pub struct PruneConfig {
-    pub hard_budget: usize,
-    pub soft_budget: usize,
-    pub read_keep_last: usize,
-    pub read_excerpt_chars: usize,
-    pub auto_note_max_chars: usize,
-    pub auto_note_entry_chars: usize,
-}
-
-pub fn prune_old_tool_results(
-    messages: &mut [ChatMessage],
-    current_iter: u32,
-    thread_dir: Option<&std::path::Path>,
-    cfg: PruneConfig,
-) {
-    // Budget gate: prune ONLY when the hard threshold is exceeded, then
-    // compact until the size drops below the soft threshold — keeping as
-    // much recent content as possible. (Previously this zeroed ALL old tool
-    // results at iteration 16+, which emptied the agent's memory of what it
-    // had read and caused the re-read death spiral: thread 700 burned 117
-    // docker_compose+sed windows of the SAME line ranges, zero commits.)
-    let current_size: usize = messages.iter().map(|m| m.content.len()).sum();
-    if current_size <= cfg.hard_budget {
-        return;
-    }
-
-    // WS-2: durable context dump — before this pass destroys/truncates any
-    // tool result bodies, append digests of the prune-window candidates.
-    if let Some(dir) = thread_dir {
-        let keep_from = messages
-            .iter()
-            .rposition(|m| m.role == "assistant" && m.tool_calls.is_some())
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        for msg in messages.iter().take(keep_from) {
-            if msg.role == "tool" && !msg.content.is_empty() {
-                let tool = msg.name.clone().unwrap_or_default();
-                crate::agent::context_dump::append(dir, current_iter, &tool, "", &msg.content);
-            }
-        }
-    }
-    // Find the index of the last assistant message with tool_calls: this
-    // marks the most recent turn boundary. Tool results after it are kept.
-    let last_tool_turn_idx = messages
-        .iter()
-        .rposition(|m| m.role == "assistant" && m.tool_calls.is_some());
-
-    let keep_from = last_tool_turn_idx.unwrap_or(0);
-
-    // Pass 1 (NEW → OLD): mark the LAST cfg.read_keep_last read-type tool results
-    // as "keep full" so the most recent reads always survive pruning.
-    let mut read_kept = 0usize;
-    let mut keep_read: Vec<usize> = Vec::new();
-    for idx in (0..keep_from).rev() {
-        if messages[idx].role != "tool" {
-            continue;
-        }
-        if is_read_type_tool(&messages[idx].name.clone().unwrap_or_default()) {
-            keep_read.push(idx);
-            read_kept += 1;
-            if read_kept >= cfg.read_keep_last {
-                break;
-            }
-        }
-    }
-
-    // Pass 2 (OLD → NEW): prune oldest first until the total size drops below
-    // the soft budget. Kept read results (most recent) are skipped.
-    for idx in 0..keep_from {
-        if messages[idx].role != "tool" {
-            continue;
-        }
-        if keep_read.contains(&idx) {
-            continue; // keep the most recent read results in full
-        }
-        let tool_name = messages[idx].name.clone().unwrap_or_default();
-        let is_read = is_read_type_tool(&tool_name);
-        // Auto-note read content BEFORE truncation so it survives in the
-        // durable auto-notes.md even after context pruning removes it.
-        if is_read {
-            if let Some(dir) = thread_dir {
-                auto_note_read(
-                    dir,
-                    &tool_name,
-                    &messages[idx].content,
-                    cfg.auto_note_entry_chars,
-                    cfg.auto_note_max_chars,
-                );
-            }
-            let total = messages[idx].content.chars().count();
-            if total > cfg.read_excerpt_chars {
-                let half = cfg.read_excerpt_chars / 2;
-                let head: String = messages[idx].content.chars().take(half).collect();
-                let tail: String = messages[idx]
-                    .content
-                    .chars()
-                    .rev()
-                    .take(half)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect();
-                messages[idx].content =
-                    format!("[Pruned tool result: was {total} chars] {head}\n...\n{tail}");
-            }
-        } else {
-            messages[idx].content = format!(
-                "[Tool result for `{}`: {} total chars, omitted]",
-                tool_name,
-                messages[idx].content.len()
-            );
-        }
-        let after_size: usize = messages.iter().map(|m| m.content.len()).sum();
-        if after_size <= cfg.soft_budget {
-            break;
-        }
-    }
-}
-
 /// Compact old assistant messages that contain tool_calls JSON.
 ///
 /// Replaces the full function arguments with a condensed reference
@@ -726,57 +525,39 @@ pub async fn enqueue_typing(
 
 #[cfg(test)]
 mod tests {
-    /// Test-only prune config builder (hardcoded values are fine in tests;
-    /// production limits come from settings.yml).
-    fn test_prune_cfg(hard: usize, soft: usize) -> super::PruneConfig {
-        super::PruneConfig {
-            hard_budget: hard,
-            soft_budget: soft,
-            read_keep_last: 3,
-            read_excerpt_chars: 2000,
-            auto_note_max_chars: 24_000,
-            auto_note_entry_chars: 3000,
-        }
-    }
-
-    #[test]
-    fn prune_dumps_digest_before_destroy() {
-        let tmp = std::env::temp_dir().join(format!("prune-dump-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let mut messages = vec![
-            ChatMessage::tool_result("call-1", "filesystem_read", &"x".repeat(20000)),
-            ChatMessage {
-                role: "assistant".to_string(),
-                content: "[tool calls]".to_string(),
-                tool_call_id: None,
-                tool_calls: Some(vec![]),
-                name: None,
-                reasoning_content: None,
-            },
-        ];
-        super::prune_old_tool_results(&mut messages, 7, Some(&tmp), test_prune_cfg(10_000, 5_000));
-        let dump_path = tmp.join("context-7.json");
-        let content = std::fs::read_to_string(&dump_path).unwrap_or_default();
-        assert!(
-            content.contains("filesystem_read"),
-            "dump missing tool name; content: {:?}",
-            &content[..content.len().min(200)]
-        );
-        for line in content.lines() {
-            let v: serde_json::Value =
-                serde_json::from_str(line).expect("dump line must be valid JSON");
-            assert!(v["tool"].as_str().is_some());
-            assert!(v["head"].as_str().is_some());
-            assert!(v["tail"].as_str().is_some());
-        }
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
 
     use crate::llm::{ChatMessage, ToolCallData, ToolCallFunction, Usage};
     use serde_json::json;
 
     use super::*;
+
+    // ─── shared test builders (also used by compact_old_assistant_messages tests) ───
+
+    fn make_tool_result(name: &str, content: &str) -> ChatMessage {
+        ChatMessage::tool_result("call_1", name, content)
+    }
+
+    fn make_assistant_with_calls(tool_names: &[&str]) -> ChatMessage {
+        let calls: Vec<ToolCallData> = tool_names
+            .iter()
+            .map(|name| ToolCallData {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: ToolCallFunction {
+                    name: name.to_string(),
+                    arguments: "{}".to_string(),
+                },
+            })
+            .collect();
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: "Using tools.".to_string(),
+            tool_call_id: None,
+            tool_calls: Some(calls),
+            name: None,
+            reasoning_content: None,
+        }
+    }
 
     // ─── merge_usage tests ───
 
@@ -942,195 +723,6 @@ mod tests {
             expected,
             result
         );
-    }
-
-    // ─── prune_old_tool_results tests ───
-
-    fn make_tool_result(name: &str, content: &str) -> ChatMessage {
-        ChatMessage::tool_result("call_1", name, content)
-    }
-
-    fn make_assistant_with_calls(tool_names: &[&str]) -> ChatMessage {
-        let calls: Vec<ToolCallData> = tool_names
-            .iter()
-            .map(|name| ToolCallData {
-                id: "call_1".to_string(),
-                call_type: "function".to_string(),
-                function: ToolCallFunction {
-                    name: name.to_string(),
-                    arguments: "{}".to_string(),
-                },
-            })
-            .collect();
-        ChatMessage {
-            role: "assistant".to_string(),
-            content: "Using tools.".to_string(),
-            tool_call_id: None,
-            tool_calls: Some(calls),
-            name: None,
-            reasoning_content: None,
-        }
-    }
-
-    #[test]
-    fn test_prune_old_tool_results_under_hard_budget_no_pruning() {
-        // Budget gate: when the total size is under the hard threshold,
-        // nothing is pruned regardless of iteration.
-        let mut msgs = vec![
-            ChatMessage::user("do something"),
-            make_assistant_with_calls(&["tool_a"]),
-            make_tool_result("tool_a", "a".repeat(2000).as_str()),
-            ChatMessage::assistant("Done."),
-        ];
-        let original_len = msgs.len();
-        let original_contents: Vec<String> = msgs.iter().map(|m| m.content.clone()).collect();
-        prune_old_tool_results(&mut msgs, 100, None, test_prune_cfg(1_000_000, 500_000));
-        // Same length and content unchanged (total size is well under hard)
-        assert_eq!(msgs.len(), original_len);
-        for (i, m) in msgs.iter().enumerate() {
-            assert_eq!(m.content, original_contents[i]);
-        }
-    }
-
-    #[test]
-    fn test_prune_old_tool_results_over_hard_compacts_to_soft() {
-        // When over the hard budget, old non-read results are pruned until
-        // the total drops below the soft budget.
-        let long_content = "a".repeat(2000);
-        let mut msgs = vec![
-            ChatMessage::user("do something"),
-            make_assistant_with_calls(&["tool_a"]),
-            make_tool_result("tool_a", &long_content),
-            make_assistant_with_calls(&["tool_b"]),
-            make_tool_result("tool_b", "short"),
-            ChatMessage::assistant("Done."),
-        ];
-        prune_old_tool_results(&mut msgs, 8, None, test_prune_cfg(1000, 500));
-
-        // tool_a result at index 2 is before keep_from (3) and over budget,
-        // so it gets truncated to a stub.
-        assert!(msgs[2].content.starts_with("[Tool result for `tool_a`"));
-        // tool_b result at index 4 is after keep_from, so it stays unchanged
-        assert_eq!(msgs[4].content, "short");
-        // Total size is back under the soft budget.
-        let total: usize = msgs.iter().map(|m| m.content.len()).sum();
-        assert!(total <= 500 + 500); // soft + slack for the new stub text
-    }
-
-    #[test]
-    fn test_prune_old_tool_results_non_tool_messages_unchanged() {
-        let mut msgs = vec![
-            ChatMessage::user("hello"),
-            ChatMessage::assistant("hi"),
-            ChatMessage::system("beep"),
-        ];
-        let original_len = msgs.len();
-        prune_old_tool_results(&mut msgs, 10, None, test_prune_cfg(10, 5));
-        assert_eq!(msgs.len(), original_len);
-    }
-
-    #[test]
-    fn test_prune_old_tool_results_no_assistant_with_calls() {
-        let mut msgs = vec![
-            ChatMessage::user("hello"),
-            make_tool_result("tool_a", "some result"),
-            ChatMessage::assistant("Done."),
-        ];
-        let original_len = msgs.len();
-        prune_old_tool_results(&mut msgs, 10, None, test_prune_cfg(10, 5));
-        // No assistant with tool_calls, so last_tool_turn_idx is None, keep_from = 0
-        // Nothing is before index 0, so nothing happens
-        assert_eq!(msgs.len(), original_len);
-    }
-
-    #[test]
-    fn test_prune_keeps_recent_read_results_in_full() {
-        // Read-type tool results in the last 3 positions before the current
-        // turn boundary must survive intact even when over budget.
-        let mut msgs = vec![
-            ChatMessage::user("read files"),
-            make_assistant_with_calls(&["filesystem_read"]),
-            make_tool_result("filesystem_read", "alpha content"),
-            make_assistant_with_calls(&["filesystem_read"]),
-            make_tool_result("filesystem_read", "beta content"),
-            make_assistant_with_calls(&["filesystem_read"]),
-            make_tool_result("filesystem_read", "gamma content"),
-            make_assistant_with_calls(&["docker_compose"]),
-            make_tool_result("docker_compose", "current turn output"),
-            ChatMessage::assistant("Done."),
-        ];
-        // Tiny budgets force pruning of everything before the last turn,
-        // but the three recent reads must be preserved in full.
-        prune_old_tool_results(&mut msgs, 30, None, test_prune_cfg(10, 5));
-        let contents: Vec<String> = msgs
-            .iter()
-            .filter(|m| m.role == "tool")
-            .map(|m| m.content.clone())
-            .collect();
-        assert!(contents.contains(&"alpha content".to_string()));
-        assert!(contents.contains(&"beta content".to_string()));
-        assert!(contents.contains(&"gamma content".to_string()));
-        assert!(contents.contains(&"current turn output".to_string()));
-    }
-
-    #[test]
-    fn test_prune_excerpts_old_read_results_over_budget() {
-        // Read results OLDER than the last 3 get a head+tail excerpt instead
-        // of a zero-content stub. FIVE reads in the window (indices 2, 4, 6,
-        // 8, 10): the 3 most recent survive in full, the 2 oldest are
-        // excerpted.
-        let long_read = "x".repeat(5000);
-        let mut msgs = vec![
-            ChatMessage::user("read old file"),
-            make_assistant_with_calls(&["filesystem_read"]),
-            make_tool_result("filesystem_read", &long_read),
-            make_assistant_with_calls(&["filesystem_read"]),
-            make_tool_result("filesystem_read", "recent read 1"),
-            make_assistant_with_calls(&["filesystem_read"]),
-            make_tool_result("filesystem_read", "recent read 2"),
-            make_assistant_with_calls(&["filesystem_read"]),
-            make_tool_result("filesystem_read", "recent read 3"),
-            make_assistant_with_calls(&["filesystem_read"]),
-            make_tool_result("filesystem_read", "recent read 4"),
-            ChatMessage::assistant("Done."),
-        ];
-        prune_old_tool_results(&mut msgs, 30, None, test_prune_cfg(100, 50));
-        // keep_from = index of last assistant with calls = 9. The oldest read
-        // at index 2 is pruned to an excerpt; the 3 most recent reads in the
-        // window (4, 6, 8) are kept intact, as is the current-turn read at 10.
-        let old = &msgs[2];
-        assert!(old
-            .content
-            .starts_with("[Pruned tool result: was 5000 chars]"));
-        assert!(old.content.contains("...\n"));
-        assert!(old.content.contains("xxxxx")); // head preserved
-        assert_eq!(msgs[4].content, "recent read 1");
-        assert_eq!(msgs[6].content, "recent read 2");
-        assert_eq!(msgs[8].content, "recent read 3");
-        assert_eq!(msgs[10].content, "recent read 4");
-    }
-
-    #[test]
-    fn test_prune_still_zeroes_old_non_read_results() {
-        // Non-read tools over budget get the zero-stub treatment (their
-        // content is not working memory).
-        let long_content = "y".repeat(3000);
-        let mut msgs = vec![
-            ChatMessage::user("run command"),
-            make_assistant_with_calls(&["docker_compose"]),
-            make_tool_result("docker_compose", &long_content),
-            make_assistant_with_calls(&["git_status"]),
-            make_tool_result("git_status", "short"),
-            ChatMessage::assistant("Done."),
-        ];
-        prune_old_tool_results(&mut msgs, 30, None, test_prune_cfg(100, 50));
-        // docker_compose is NOT a read-type tool (in the conservative list),
-        // so over budget it is zeroed to the stub label.
-        assert!(msgs[2]
-            .content
-            .starts_with("[Tool result for `docker_compose`"));
-        assert!(msgs[2].content.contains("omitted"));
-        assert_eq!(msgs[4].content, "short");
     }
 
     // ─── compact_old_assistant_messages tests ───

@@ -769,6 +769,8 @@ Previous plan:\n{}",
                     "current_iteration": current_iter,
                     "last_condense_iteration": last_condense_iteration,
                     "thread_dir": thread_dir,
+                    "soft_budget": cfg_snapshot.token_budget_soft,
+                    "hard_budget": cfg_snapshot.token_budget_hard,
                 }),
                 id: String::new(),
             };
@@ -835,24 +837,6 @@ Previous plan:\n{}",
             }
         }
 
-        // Layer 3: budget-driven tool result pruning. Runs every iteration
-        // but only prunes when the hard threshold is exceeded, compacting
-        // until the size drops below the soft threshold. Read-type results
-        // (filesystem_read etc.) are preserved + auto-noted so the agent
-        // never loses what it read (thread 700 re-read death spiral fix).
-        helpers::prune_old_tool_results(
-            &mut messages,
-            current_iter as u32,
-            Some(&thread_dir),
-            helpers::PruneConfig {
-                hard_budget: cfg_snapshot.token_budget_hard,
-                soft_budget: cfg_snapshot.token_budget_soft,
-                read_keep_last: cfg_snapshot.read_keep_last,
-                read_excerpt_chars: cfg_snapshot.read_excerpt_chars,
-                auto_note_max_chars: cfg_snapshot.auto_note_max_chars,
-                auto_note_entry_chars: cfg_snapshot.auto_note_entry_chars,
-            },
-        );
         // WS-4c: budget hint every iteration (anti-death-spiral backstop).
         helpers::upsert_system_message(
                 &mut messages,
@@ -865,7 +849,7 @@ Previous plan:\n{}",
                 ),
             );
         // WS-3: durable working notes survive compaction — injected every
-        // iteration AFTER condense+prune so notes are always in context.
+        // iteration AFTER condense so notes are always in context.
         if let Ok(notes_content) = std::fs::read_to_string(thread_dir.join("notes.md")) {
             let notes_total = notes_content.chars().count();
             let notes_content = if notes_total > 8192 {

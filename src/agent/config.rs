@@ -108,25 +108,13 @@ pub struct AgentConfig {
     /// (settings `sub_prompt_iteration_percent`; 0 disables the feature).
     pub sub_prompt_iteration_percent: u32,
 
-    /// Hard context budget (tokens): engine-level pruning runs ONLY when the
-    /// total context size exceeds this threshold. Sourced from the SAME
-    /// settings key as the prompt plugin (`prompt_token_budget_hard`) so the
-    /// two layers always agree — no hardcoded limits in code.
+    /// Hard context budget (tokens, global setting `prompt_token_budget_hard`):
+    /// passed to the prompt plugin's compact-messages tool as `hard_budget`.
+    /// The plugin compacts/prunes only when the context exceeds it.
     pub token_budget_hard: usize,
-    /// Soft context budget (tokens): pruning compacts until the total size
-    /// drops below this (`prompt_token_budget_soft`).
+    /// Soft context budget (tokens, global setting `prompt_token_budget_soft`):
+    /// passed to compact-messages as `soft_budget` — the reduction target.
     pub token_budget_soft: usize,
-    /// How many of the most recent read-type tool results are kept in full
-    /// by pruning (settings `read_keep_last`).
-    pub read_keep_last: usize,
-    /// Excerpt size (chars) kept for older read-type results (settings
-    /// `read_excerpt_chars`).
-    pub read_excerpt_chars: usize,
-    /// Cap for the thread's durable `auto-notes.md` (settings
-    /// `auto_note_max_chars`).
-    pub auto_note_max_chars: usize,
-    /// Per-entry cap for engine auto-notes (settings `auto_note_entry_chars`).
-    pub auto_note_entry_chars: usize,
 
     // When to insert prompts as messages (msg_type: "prompt") into the messages table.
     /// - "off": never insert
@@ -265,10 +253,6 @@ impl AgentConfig {
             token_budget_soft: get("prompt_token_budget_soft", "100000")
                 .parse()
                 .unwrap_or(100000),
-            read_keep_last: get("read_keep_last", "3").parse().unwrap_or(3),
-            read_excerpt_chars: get("read_excerpt_chars", "2000").parse().unwrap_or(2000),
-            auto_note_max_chars: get("auto_note_max_chars", "24000").parse().unwrap_or(24000),
-            auto_note_entry_chars: get("auto_note_entry_chars", "3000").parse().unwrap_or(3000),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
@@ -378,10 +362,6 @@ impl AgentConfig {
             token_budget_soft: get("prompt_token_budget_soft", "100000")
                 .parse()
                 .unwrap_or(100000),
-            read_keep_last: get("read_keep_last", "3").parse().unwrap_or(3),
-            read_excerpt_chars: get("read_excerpt_chars", "2000").parse().unwrap_or(2000),
-            auto_note_max_chars: get("auto_note_max_chars", "24000").parse().unwrap_or(24000),
-            auto_note_entry_chars: get("auto_note_entry_chars", "3000").parse().unwrap_or(3000),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
@@ -454,10 +434,6 @@ mod tests {
             sub_prompt_iteration_percent: 50,
             token_budget_hard: 500000,
             token_budget_soft: 100000,
-            read_keep_last: 3,
-            read_excerpt_chars: 2000,
-            auto_note_max_chars: 24000,
-            auto_note_entry_chars: 3000,
             prompt_log_level: "first".to_string(),
             tool_bg_secs: 30,
             database_url: "postgres://localhost:***@host:5432/db".to_string(),
@@ -520,10 +496,6 @@ mod tests {
             sub_prompt_iteration_percent: 0,
             token_budget_hard: 0,
             token_budget_soft: 0,
-            read_keep_last: 0,
-            read_excerpt_chars: 0,
-            auto_note_max_chars: 0,
-            auto_note_entry_chars: 0,
             prompt_log_level: String::new(),
             tool_bg_secs: 0,
             database_url: "postgres://localhost:5432/omniagent".to_string(),

@@ -50,28 +50,7 @@
       "label": "Tokenizer Encoding",
       "type": "string",
       "default": "",
-      "description": "Tokenizer encoding for budget calculations (e.g. 'cl100k_base'). Empty or invalid = tokens ≈ chars/4 fallback"
-    },
-    {
-      "key": "token_budget_soft",
-      "label": "Token Budget Soft",
-      "type": "integer",
-      "default": 200000,
-      "description": "Soft token budget: triggers condensation when exceeded and enough iterations have passed since last condense"
-    },
-    {
-      "key": "token_budget_hard",
-      "label": "Token Budget Hard",
-      "type": "integer",
-      "default": 350000,
-      "description": "Hard token budget: condensation/compaction triggers immediately when exceeded"
-    },
-    {
-      "key": "old_message_token_budget",
-      "label": "Old Message Token Budget",
-      "type": "integer",
-      "default": 100000,
-      "description": "Threshold for trimming old assistant messages during condensation (tokens; chars/4 fallback when no tokenizer)"
+      "description": "Tokenizer encoding for budget calculations (e.g. 'cl100k_base'). Empty or invalid = tokens \u2248 chars/4 fallback"
     },
     {
       "key": "condense_keep_turns",

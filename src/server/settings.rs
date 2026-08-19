@@ -163,16 +163,11 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "max_tokens",
                 "max_tokens_on_truncation",
                 "max_unfinished_subtask_retries",
-                "old_message_token_budget",
                 "soul_max_chars",
                 "state_block_update_interval",
                 "kanban_dispatcher_interval",
                 "temperature",
                 "tokenizer_encoding",
-                "read_keep_last",
-                "read_excerpt_chars",
-                "auto_note_max_chars",
-                "auto_note_entry_chars",
                 "sub_prompt_max_chars",
                 "sub_prompt_iteration_percent",
             ],
@@ -195,7 +190,6 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "prompt_log_level",
                 "prompt_tool_excerpt_chars",
                 "prompt_total_excerpt_cap",
-                "prompt_read_excerpt_chars",
             ],
         ),
         (
@@ -439,16 +433,6 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 options: None,
                 readonly: false,
                 default: Some("30".into()),
-            },
-        ),
-        (
-            "old_message_token_budget".into(),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Threshold for trimming old assistant messages during condensation, in tokens (chars/4 fallback when no tokenizer)".into(),
-                options: None,
-                readonly: false,
-                default: Some("100000".into()),
             },
         ),
         (
@@ -791,7 +775,6 @@ fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
         "prompt_log_level",
         "prompt_token_budget_hard",
         "prompt_token_budget_soft",
-        "old_message_token_budget",
         "sub_prompt_max_chars",
         "sub_prompt_iteration_percent",
         "platform_max_spawn_retries",
@@ -1129,16 +1112,15 @@ mod tests {
 
     #[test]
     fn token_budget_settings_are_writable_numbers_in_right_categories() {
-        // The prompt-plugin token budgets + old-message token threshold must
-        // be exposed by the settings API: number type + documented defaults,
-        // writable via PUT /settings, categorized under "prompt"/"general".
+        // The global prompt-plugin token budgets must be exposed by the
+        // settings API: number type + documented defaults, writable via
+        // PUT /settings, categorized under "prompt".
         let defs = get_all_setting_definitions();
         let by_name: std::collections::HashMap<&str, &SettingMeta> =
             defs.iter().map(|(n, m)| (n.as_str(), m)).collect();
         for (name, expected_default) in [
             ("prompt_token_budget_hard", "500000"),
             ("prompt_token_budget_soft", "100000"),
-            ("old_message_token_budget", "100000"),
         ] {
             let meta = by_name
                 .get(name)
@@ -1149,21 +1131,13 @@ mod tests {
         }
 
         let keys = writable_setting_keys();
-        for name in [
-            "prompt_token_budget_hard",
-            "prompt_token_budget_soft",
-            "old_message_token_budget",
-        ] {
+        for name in ["prompt_token_budget_hard", "prompt_token_budget_soft"] {
             assert!(keys.contains(name), "{name} must be writable");
         }
 
         let defs_with_value: Vec<(String, String, SettingMeta)> = defs
             .iter()
-            .filter(|(n, _)| {
-                n == "prompt_token_budget_hard"
-                    || n == "prompt_token_budget_soft"
-                    || n == "old_message_token_budget"
-            })
+            .filter(|(n, _)| n == "prompt_token_budget_hard" || n == "prompt_token_budget_soft")
             .map(|(n, m)| (n.clone(), String::new(), m.clone()))
             .collect();
         let cats = categorize_settings(defs_with_value);
@@ -1179,15 +1153,6 @@ mod tests {
         assert!(
             prompt_names.contains(&"prompt_token_budget_soft"),
             "soft in prompt: {prompt_names:?}"
-        );
-        let general = cats
-            .iter()
-            .find(|c| c.name == "general")
-            .unwrap_or_else(|| panic!("general category must exist"));
-        let general_names: Vec<&str> = general.settings.iter().map(|s| s.name.as_str()).collect();
-        assert!(
-            general_names.contains(&"old_message_token_budget"),
-            "old_message_token_budget in general: {general_names:?}"
         );
     }
 }

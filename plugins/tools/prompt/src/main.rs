@@ -43,9 +43,6 @@ pub struct PluginConfig {
     pub prompt_plan_max_tokens: usize,
     // Condense
     pub tokenizer_encoding: String,
-    pub token_budget_soft: usize,
-    pub token_budget_hard: usize,
-    pub old_msg_budget: usize,
     pub condense_keep_turns: usize,
     // Compact excerpts (plugin config, no hardcoded limits)
     pub tool_excerpt_chars: usize,
@@ -72,9 +69,6 @@ impl PluginConfig {
                     .to_string(),
             prompt_plan_max_tokens: 2048,
             tokenizer_encoding: String::new(),
-            token_budget_soft: 100000,
-            token_budget_hard: 200000,
-            old_msg_budget: 100000,
             condense_keep_turns: 4,
             tool_excerpt_chars: 800,
             total_excerpt_cap: 4000,
@@ -142,15 +136,6 @@ impl PluginConfig {
             }
             if let Some(v) = obj.get("compact_keep_step").and_then(&as_usize) {
                 cfg.compact_keep_step = v.max(1);
-            }
-            if let Some(v) = obj.get("token_budget_soft").and_then(&as_usize) {
-                cfg.token_budget_soft = v;
-            }
-            if let Some(v) = obj.get("token_budget_hard").and_then(&as_usize) {
-                cfg.token_budget_hard = v;
-            }
-            if let Some(v) = obj.get("old_message_token_budget").and_then(&as_usize) {
-                cfg.old_msg_budget = v;
             }
             if let Some(v) = obj.get("condense_keep_turns").and_then(&as_usize) {
                 cfg.condense_keep_turns = v.max(1);
@@ -1690,9 +1675,30 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // Real size measurement: tiktoken BPE tokens when a tokenizer encoding
     // is configured, chars/4 otherwise (and on tokenizer failure). The gate
     // always compares against the TOKEN budgets.
+    // Budgets arrive as REQUIRED tool params: the omniagent resolves the
+    // effective per-thread token budgets (model config > provider > global
+    // settings) and passes them in. The plugin stays agnostic of where the
+    // budgets come from — a custom prompt plugin may gate entirely
+    // differently as long as the interface stays the same.
     let current_size = measure_size(&messages, &cfg.tokenizer_encoding);
-    let hard_budget = cfg.token_budget_hard;
-    let soft_budget = cfg.token_budget_soft;
+    let hard_budget = match args["hard_budget"].as_u64() {
+        Some(v) => v as usize,
+        None => {
+            return Ok((
+                "Missing required argument: 'hard_budget' (token budget; the omniagent passes the resolved per-thread hard token budget)".to_string(),
+                true,
+            ))
+        }
+    };
+    let soft_budget = match args["soft_budget"].as_u64() {
+        Some(v) => v as usize,
+        None => {
+            return Ok((
+                "Missing required argument: 'soft_budget' (token budget; the omniagent passes the resolved per-thread soft token budget)".to_string(),
+                true,
+            ))
+        }
+    };
 
     let before = messages.len();
     // WS-2/WS-3: durable context dump + compaction event plumbing.
@@ -1770,92 +1776,6 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
 }
 
 // ---------------------------------------------------------------------------
-// Tool: prompt_condense (threshold-based context condensation)
-// ---------------------------------------------------------------------------
-
-async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bool)> {
-    let messages_arr = match args["messages"].as_array() {
-        Some(arr) => arr,
-        None => {
-            return Ok((
-                "Missing required argument: 'messages' (array of ChatMessage)".to_string(),
-                true,
-            ))
-        }
-    };
-
-    let mut messages: Vec<crate::chat_message::ChatMessage> =
-        match serde_json::from_value(serde_json::Value::Array(messages_arr.clone())) {
-            Ok(msgs) => msgs,
-            Err(e) => return Ok((format!("Failed to parse messages: {}", e), true)),
-        };
-
-    let before = messages.len();
-
-    // Read config from shared plugin config (set by configure message)
-    let current_size = measure_size(&messages, &cfg.tokenizer_encoding);
-    let soft_budget = cfg.token_budget_soft;
-    let hard_budget = cfg.token_budget_hard;
-    let target_budget = soft_budget.min(hard_budget);
-
-    let current_iteration = args["current_iteration"].as_i64().unwrap_or(0);
-    let last_condense_iteration = args["last_condense_iteration"].as_i64().unwrap_or(-1);
-    let state_interval: i64 = 5;
-
-    let needs_hard = current_size > hard_budget;
-    let needs_soft = !needs_hard
-        && current_size > soft_budget
-        && state_interval > 0
-        && (current_iteration - last_condense_iteration) >= state_interval;
-
-    let was_condensed = if needs_hard || needs_soft {
-        let condense_keep_turns = cfg.condense_keep_turns;
-        crate::compact::compact_old_assistant_messages(
-            &mut messages,
-            condense_keep_turns,
-            None,
-            current_iteration as u32,
-            &crate::compact::CompactSettings {
-                tool_excerpt_chars: cfg.tool_excerpt_chars,
-                total_excerpt_cap: cfg.total_excerpt_cap,
-                read_excerpt_chars: cfg.read_excerpt_chars,
-            },
-        );
-
-        let after_size: usize = measure_size(&messages, &cfg.tokenizer_encoding);
-
-        if after_size > target_budget {
-            let aggressive_keep = condense_keep_turns.saturating_sub(1);
-            crate::compact::compact_old_assistant_messages(
-                &mut messages,
-                aggressive_keep,
-                None,
-                current_iteration as u32,
-                &crate::compact::CompactSettings {
-                    tool_excerpt_chars: cfg.tool_excerpt_chars,
-                    total_excerpt_cap: cfg.total_excerpt_cap,
-                    read_excerpt_chars: cfg.read_excerpt_chars,
-                },
-            );
-        }
-        true
-    } else {
-        false
-    };
-
-    let after = messages.len();
-    let result = serde_json::json!({
-        "messages": messages,
-        "was_condensed": was_condensed,
-        "before_count": before,
-        "after_count": after,
-    });
-
-    Ok((
-        serde_json::to_string_pretty(&result).unwrap_or_else(|_| "Serialization error".to_string()),
-        false,
-    ))
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1980,10 +1900,15 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "prompt_compact-messages".to_string(),
                 description:
-                    "Compact old assistant messages in a conversation to save tokens. \
-                     Removes redundant assistant tool-call pairs from the middle of the \
-                     conversation while preserving system messages, the most recent messages, \
-                     and tool results. Returns the compacted message array."
+                    "Compact and prune a conversation to stay within token budgets. REQUIRES \
+                     'soft_budget'/'hard_budget' token params (resolved per-thread by the \
+                     omniagent; chars/4 fallback when no tokenizer). Compacts ONLY when the \
+                     hard budget is exceeded (null-contract otherwise): drains the oldest \
+                     tool-call turns into ONE frozen '=== Compaction Summary ===' block right \
+                     after the system prompt, keeps recent turns verbatim, excerpts older \
+                     read-type results and auto-notes them (auto-notes.md in thread_dir). The \
+                     returned messages array must keep the prefix byte-stable; only the tail \
+                     may change. Returns the compacted message array or null."
                     .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -1995,9 +1920,17 @@ async fn main() -> Result<()> {
                         "keep_recent": {
                             "type": "integer",
                             "description": "Number of most recent messages to always keep (default: 3)"
+                        },
+                        "soft_budget": {
+                            "type": "integer",
+                            "description": "Required soft token budget: the reduction target when the hard budget is exceeded"
+                        },
+                        "hard_budget": {
+                            "type": "integer",
+                            "description": "Required hard token budget: compaction/pruning triggers when the context exceeds it"
                         }
                     },
-                    "required": ["messages"]
+                    "required": ["messages", "soft_budget", "hard_budget"]
                 }),
             },
             handler: compact_handler,
@@ -2044,8 +1977,8 @@ async fn main() -> Result<()> {
                 let mut locked = cfg_c.write().await;
                 *locked = new_config.clone();
                 tracing::info!(
-                    "Prompt plugin configured: database_url set, tokenizer_encoding={:?}, token_budget_soft={}, token_budget_hard={}",
-                    locked.tokenizer_encoding, locked.token_budget_soft, locked.token_budget_hard
+                    "Prompt plugin configured: database_url set, tokenizer_encoding={:?}",
+                    locked.tokenizer_encoding
                 );
             });
         })
@@ -2741,11 +2674,9 @@ mod token_counting_tests {
         }
     }
 
-    fn compact_cfg(tokenizer: &str, hard: usize, soft: usize) -> PluginConfig {
+    fn compact_cfg(tokenizer: &str) -> PluginConfig {
         let mut cfg = PluginConfig::default();
         cfg.tokenizer_encoding = tokenizer.to_string();
-        cfg.token_budget_hard = hard;
-        cfg.token_budget_soft = soft;
         cfg
     }
 
@@ -2793,6 +2724,8 @@ mod token_counting_tests {
         cfg: &PluginConfig,
         keep_recent: usize,
         thread_dir: Option<&str>,
+        hard_budget: usize,
+        soft_budget: usize,
     ) -> serde_json::Value {
         let arr: Vec<serde_json::Value> = messages
             .iter()
@@ -2801,6 +2734,8 @@ mod token_counting_tests {
         let mut args = json!({
             "messages": arr,
             "keep_recent": keep_recent,
+            "soft_budget": soft_budget,
+            "hard_budget": hard_budget,
         });
         if let Some(dir) = thread_dir {
             args["thread_dir"] = json!(dir);
@@ -2884,8 +2819,8 @@ mod token_counting_tests {
 
         // Positive: real tokens over hard -> compaction fires and drains old
         // tool-result turns.
-        let cfg = compact_cfg("gpt-4", hard, hard / 2);
-        let out = run_compact(&msgs, &cfg, 2, None).await;
+        let cfg = compact_cfg("gpt-4");
+        let out = run_compact(&msgs, &cfg, 2, None, hard, hard / 2).await;
         assert_eq!(out["was_compacted"], true);
         let arr = out["messages"].as_array().expect("compacted array");
         assert!(
@@ -2894,8 +2829,8 @@ mod token_counting_tests {
         );
 
         // Negative control: budget above the real count -> no compaction.
-        let cfg2 = compact_cfg("gpt-4", real + 1000, real + 1000);
-        let out2 = run_compact(&msgs, &cfg2, 2, None).await;
+        let cfg2 = compact_cfg("gpt-4");
+        let out2 = run_compact(&msgs, &cfg2, 2, None, real + 1000, real + 1000).await;
         assert_eq!(out2["was_compacted"], false);
         assert!(
             out2["messages"].is_null(),
@@ -2921,8 +2856,8 @@ mod token_counting_tests {
         assert_eq!(estimated, chars_of(&msgs) / 4, "chars/4 fallback is exact");
 
         // Positive: estimate over hard -> compaction fires and drains turns.
-        let cfg = compact_cfg("", estimated / 2, estimated / 4);
-        let out = run_compact(&msgs, &cfg, 2, None).await;
+        let cfg = compact_cfg("");
+        let out = run_compact(&msgs, &cfg, 2, None, estimated / 2, estimated / 4).await;
         assert_eq!(out["was_compacted"], true);
         let arr = out["messages"].as_array().expect("compacted array");
         assert!(
@@ -2931,8 +2866,8 @@ mod token_counting_tests {
         );
 
         // Negative control: budget above the estimate -> no compaction.
-        let cfg2 = compact_cfg("", estimated + 1000, estimated + 1000);
-        let out2 = run_compact(&msgs, &cfg2, 2, None).await;
+        let cfg2 = compact_cfg("");
+        let out2 = run_compact(&msgs, &cfg2, 2, None, estimated + 1000, estimated + 1000).await;
         assert_eq!(out2["was_compacted"], false);
         assert!(
             out2["messages"].is_null(),
@@ -2956,8 +2891,8 @@ mod token_counting_tests {
 
         // Hard budget triggers; soft budget is HIGH so the kept recent
         // turns fit after the first pass (the point: keep_recent survives).
-        let cfg = compact_cfg("gpt-4", 100, 5000);
-        let out = run_compact(&msgs, &cfg, 2, None).await;
+        let cfg = compact_cfg("gpt-4");
+        let out = run_compact(&msgs, &cfg, 2, None, 100, 5000).await;
         assert_eq!(out["was_compacted"], true);
         let arr = out["messages"].as_array().expect("compacted array");
 
@@ -3024,8 +2959,8 @@ mod token_counting_tests {
         }
         msgs.push(assistant_msg("done"));
 
-        let cfg = compact_cfg("gpt-4", 100, 50);
-        let out = run_compact(&msgs, &cfg, 2, Some(&dir)).await;
+        let cfg = compact_cfg("gpt-4");
+        let out = run_compact(&msgs, &cfg, 2, Some(&dir), 100, 50).await;
         assert_eq!(out["was_compacted"], true);
 
         // WS-2/WS-3: durable context dump written with the drained read results.
@@ -3040,6 +2975,66 @@ mod token_counting_tests {
             .unwrap_or_else(|_| panic!("auto-notes missing: {}", notes_path.display()));
         assert!(notes_text.contains("[engine:auto-note filesystem_read]"));
         assert!(notes_text.contains("FILE CONTENT"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // (d) Budgets are REQUIRED params — missing them is an error (the
+    // omniagent always passes soft_budget/hard_budget).
+    #[tokio::test]
+    async fn compact_messages_requires_budget_params() {
+        let msgs = [user_msg("hi")];
+        let arr: Vec<serde_json::Value> = msgs
+            .iter()
+            .map(|m| serde_json::to_value(m).unwrap())
+            .collect();
+        let args = json!({ "messages": arr });
+        let (out, is_error) = handle_compact_messages(&args, &compact_cfg("gpt-4"))
+            .await
+            .unwrap();
+        assert!(is_error, "missing budget params must error");
+        assert!(
+            out.contains("hard_budget"),
+            "error mentions hard_budget: {out}"
+        );
+    }
+
+    // (e) Prune-inside-compact: with hard/soft budget PARAMS the tool drains
+    // old tool-result turns, keeps the recent ones verbatim, and read-type
+    // results in the drained region are auto-noted (thread_dir arg) — the
+    // thread-700 re-read death-spiral fix preserved inside compact-messages.
+    #[tokio::test]
+    async fn compact_prunes_and_auto_notes_via_budget_params() {
+        let tmp =
+            std::env::temp_dir().join(format!("prompt-compact-params-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let mut msgs = vec![user_msg("read the files")];
+        for i in 0..4 {
+            msgs.push(tool_call_msg(
+                "filesystem_read",
+                r#"{"path":"/etc/x"}"#,
+                &format!("reading {i}"),
+            ));
+            msgs.push(tool_result(
+                "filesystem_read",
+                &format!("CONTENT {i} ").repeat(40),
+            ));
+        }
+        msgs.push(assistant_msg("done"));
+
+        let out = run_compact(&msgs, &compact_cfg("gpt-4"), 2, tmp.to_str(), 200, 100).await;
+        assert_eq!(out["was_compacted"], true);
+        let arr = out["messages"].as_array().expect("compacted array");
+        assert!(arr.len() < msgs.len(), "old turns must be drained");
+
+        // Read results from the drained region survive via auto-notes.
+        let notes = std::fs::read_to_string(tmp.join("auto-notes.md")).unwrap_or_default();
+        assert!(
+            notes.contains("[engine:auto-note filesystem_read]"),
+            "auto-notes must preserve read content: {notes}"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
