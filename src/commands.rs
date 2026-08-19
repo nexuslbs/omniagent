@@ -149,12 +149,17 @@ pub fn format_model_status(provider: Option<&str>, model: Option<&str>) -> Strin
 // NewCommand: parsed result for `/new`
 // ---------------------------------------------------------------------------
 
-/// Parsed `/new` command (no arguments).
+/// Parsed `/new` command. Valid forms: `/new [name]`, `$new [name]`.
 #[derive(Debug, Clone)]
-pub struct NewCommand;
+pub struct NewCommand {
+    /// Optional channel name: `$new <name>` creates/updates a channel keyed
+    /// exactly `<name>`; absent -> the caller derives `{platform}-{first8}`.
+    pub name: Option<String>,
+}
 
 #[allow(dead_code)]
-/// Parse a `/new` command text. Valid form: `/new` (no arguments).
+/// Parse a `/new` command text. The optional first argument is the channel
+/// name (`/new`, `$new`, `/new mm-kanban`, `$new mm-kanban`).
 pub fn parse_new_command(input: &str) -> AppResult<NewCommand> {
     let trimmed = input.trim();
     let rest = trimmed
@@ -163,10 +168,16 @@ pub fn parse_new_command(input: &str) -> AppResult<NewCommand> {
         .or_else(|| trimmed.strip_prefix("$new"))
         .unwrap_or(trimmed)
         .trim();
-    if !rest.is_empty() {
-        err_msg!("Usage: /new (no arguments)");
-    }
-    Ok(NewCommand)
+    let name = if rest.is_empty() {
+        None
+    } else {
+        let parts: Vec<&str> = rest.split_whitespace().collect();
+        if parts.len() > 1 {
+            err_msg!("Usage: /new [name]");
+        }
+        Some(rest.to_string())
+    };
+    Ok(NewCommand { name })
 }
 
 // ---------------------------------------------------------------------------
@@ -253,17 +264,24 @@ pub fn parse_profile_command(input: &str) -> AppResult<ProfileCommand> {
 
 /// Execute `/new` for an external platform: creates a channel with
 /// resource_identifier = external_channel_id / platform resource identifier.
+/// When `name` is provided (non-empty) it is used VERBATIM as the channel
+/// key/name (e.g. `$new mm-kanban` -> key `mm-kanban`); otherwise the name
+/// is derived as `{platform}-{first8}` (backwards compat for bare `$new`).
 pub async fn handle_new_external(
     pool: &PgPool,
     platform: &str,
     resource_identifier: &str,
+    name: Option<&str>,
 ) -> AppResult<Channel> {
-    // Generate a name based on platform and resource
-    let name = format!(
-        "{}-{}",
-        platform,
-        resource_identifier.chars().take(8).collect::<String>()
-    );
+    // Use the explicit name when given; otherwise derive from platform+resource
+    let name = match name {
+        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+        _ => format!(
+            "{}-{}",
+            platform,
+            resource_identifier.chars().take(8).collect::<String>()
+        ),
+    };
     // Create channel (ON CONFLICT will update updated_at but return existing)
     let channel = crate::db::types::create_channel(
         pool,
@@ -402,19 +420,31 @@ mod tests {
     #[test]
     fn test_parse_new() {
         let cmd = parse_new_command("//new").unwrap();
-        assert!(matches!(cmd, NewCommand));
+        assert!(cmd.name.is_none());
     }
 
     #[test]
-    fn test_parse_new_with_args() {
-        let cmd = parse_new_command("//new foo");
+    fn test_parse_new_with_name() {
+        let cmd = parse_new_command("//new mm-kanban").unwrap();
+        assert_eq!(cmd.name.as_deref(), Some("mm-kanban"));
+
+        let cmd = parse_new_command("$new mm-kanban").unwrap();
+        assert_eq!(cmd.name.as_deref(), Some("mm-kanban"));
+
+        let cmd = parse_new_command("  $new  mm-kanban  ").unwrap();
+        assert_eq!(cmd.name.as_deref(), Some("mm-kanban"));
+    }
+
+    #[test]
+    fn test_parse_new_too_many_args() {
+        let cmd = parse_new_command("//new foo bar");
         assert!(cmd.is_err());
     }
 
     #[test]
     fn test_parse_new_whitespace() {
         let cmd = parse_new_command("  //new  ").unwrap();
-        assert!(matches!(cmd, NewCommand));
+        assert!(cmd.name.is_none());
     }
 
     // ── /channel tests ───────────────────────────────────────────────────

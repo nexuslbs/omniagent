@@ -790,10 +790,14 @@ impl Platform for ExternalPlatformClient {
 
                                                     // Handle $new or /new BEFORE channel lookup: creates a fresh channel
                                                     if inbound.text.starts_with("$new") || inbound.text.starts_with("//new") {
+                                                        let name = crate::commands::parse_new_command(&inbound.text)
+                                                            .ok()
+                                                            .and_then(|cmd| cmd.name);
                                                         let reply = match crate::commands::handle_new_external(
                                                             &pool,
                                                             &plugin_name,
                                                             &inbound.resource_identifier,
+                                                            name.as_deref(),
                                                         ).await {
                                                             Ok(ch) => format!(
                                                                 "Created new channel '{}' (id={}). You can now send messages.",
