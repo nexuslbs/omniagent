@@ -10,13 +10,7 @@
 //! - `GET /settings`: returns all settings with metadata, values resolved
 //! - `PUT /settings`: updates one or more values and writes to settings.yml
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::{get, put},
-    Json, Router,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -83,14 +77,6 @@ pub struct UpdateSettingsRequest {
 pub struct SettingUpdate {
     pub name: String,
     pub value: String,
-}
-
-/// Build the router for /settings endpoints using the shared AppState.
-#[allow(dead_code)]
-pub fn settings_router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/", get(get_settings_handler))
-        .route("/", put(update_settings_handler))
 }
 
 /// Path to the settings.yml file relative to data_dir.

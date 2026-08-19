@@ -31,32 +31,6 @@ pub async fn get_latest_summary(
     Ok(row)
 }
 
-/// Get the last N summaries for a channel (newest first).
-#[allow(dead_code)]
-pub async fn get_recent_summaries(
-    pool: &PgPool,
-    channel_id: &str,
-    limit: i64,
-) -> crate::error::AppResult<Vec<SummaryDb>> {
-    let rows: Vec<SummaryDb> = sql_forge!(
-        SummaryDb,
-        r#"
-        SELECT
-            id, channel_id, next_thread_id, content,
-            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
-        FROM summaries
-        WHERE channel_id = :channel_id
-        ORDER BY id DESC
-        LIMIT :limit
-        "#,
-        ( :channel_id = channel_id, :limit = limit )
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows)
-}
-
 /// Create a new summary record.
 pub async fn create_summary(
     pool: &PgPool,

@@ -1,9 +1,7 @@
 use sqlx::PgPool;
 
 use crate::channels_yaml::{self, ChannelDef, ChannelsFile};
-use crate::db::types::{
-    Channel, ChannelSeq0Message, ChannelStatus, CreateChannelParams, OldChannelInfo,
-};
+use crate::db::types::{Channel, ChannelSeq0Message, ChannelStatus, CreateChannelParams};
 use crate::error::{AppResult, Error};
 
 // ---------------------------------------------------------------------------
@@ -120,40 +118,6 @@ pub async fn get_channel_by_platform_and_resource(
         channels_yaml::get_by_platform_and_resource(platform, resource_identifier)?
             .map(|(name, def)| def_to_channel(&name, &def)),
     )
-}
-
-/// Update a channel's platform + resource_identifier by its name (yml key).
-///
-/// Used when a channel's connection changes (e.g., from telegram:chat1 to
-/// discord:server1). Returns the old platform and resource_identifier values
-/// so callers can notify the old platform that the channel is no longer
-/// active there.
-#[allow(dead_code)]
-pub async fn update_channel_platform(
-    _pool: &PgPool,
-    name: &str,
-    new_platform: &str,
-    new_resource_identifier: &str,
-    _new_external_id: &str,
-) -> AppResult<OldChannelInfo> {
-    let old = channels_yaml::get_by_name(name)?;
-    let old_platform = old.as_ref().and_then(|d| d.platform.clone());
-    let old_resource_identifier = old.as_ref().and_then(|d| d.resource_identifier.clone());
-
-    channels_yaml::update_channel(name, |existing| {
-        let mut d = existing
-            .cloned()
-            .ok_or_else(|| Error::Message(format!("Channel '{}' not found", name)))?;
-        d.platform = (!new_platform.is_empty()).then(|| new_platform.to_string());
-        d.resource_identifier =
-            (!new_resource_identifier.is_empty()).then(|| new_resource_identifier.to_string());
-        Ok(d)
-    })?;
-
-    Ok(OldChannelInfo {
-        old_platform,
-        old_resource_identifier,
-    })
 }
 
 /// Update a channel's provider and/or model by its name (yml key).

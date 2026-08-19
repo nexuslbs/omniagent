@@ -256,14 +256,6 @@ pub struct CreateChannelParams {
     pub resource_identifier: String,
 }
 
-/// Old channel info returned by `update_channel_platform`.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct OldChannelInfo {
-    pub old_platform: Option<String>,
-    pub old_resource_identifier: Option<String>,
-}
-
 /// Status info for a channel: open/closed, thread counts, config.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ChannelStatus {

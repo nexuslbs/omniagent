@@ -2910,7 +2910,7 @@ mod token_counting_tests {
     async fn compaction_triggers_on_chars_div_4_fallback_when_no_tokenizer() {
         let big = "x".repeat(200_000); // 200,000 chars == 50,000 tokens (chars/4)
         let mut msgs = vec![user_msg("run the analysis")];
-        for i in 0..4 {
+        for _ in 0..4 {
             msgs.push(tool_call_msg("search_database", "{}", &big));
             msgs.push(tool_result("search_database", &big));
         }
