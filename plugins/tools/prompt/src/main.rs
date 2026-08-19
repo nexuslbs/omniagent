@@ -43,8 +43,6 @@ pub struct PluginConfig {
     pub prompt_plan_max_tokens: usize,
     // Condense
     pub tokenizer_encoding: String,
-    pub char_budget_soft: usize,
-    pub char_budget_hard: usize,
     pub token_budget_soft: usize,
     pub token_budget_hard: usize,
     pub old_msg_budget: usize,
@@ -74,8 +72,6 @@ impl PluginConfig {
                     .to_string(),
             prompt_plan_max_tokens: 2048,
             tokenizer_encoding: String::new(),
-            char_budget_soft: 100000,
-            char_budget_hard: 200000,
             token_budget_soft: 100000,
             token_budget_hard: 200000,
             old_msg_budget: 100000,
@@ -129,12 +125,6 @@ impl PluginConfig {
             if let Some(v) = obj.get("tokenizer_encoding").and_then(|v| v.as_str()) {
                 cfg.tokenizer_encoding = v.to_string();
             }
-            if let Some(v) = obj.get("char_budget_soft").and_then(&as_usize) {
-                cfg.char_budget_soft = v;
-            }
-            if let Some(v) = obj.get("char_budget_hard").and_then(&as_usize) {
-                cfg.char_budget_hard = v;
-            }
             if let Some(v) = obj.get("tool_excerpt_chars").and_then(&as_usize) {
                 cfg.tool_excerpt_chars = v;
             }
@@ -159,7 +149,7 @@ impl PluginConfig {
             if let Some(v) = obj.get("token_budget_hard").and_then(&as_usize) {
                 cfg.token_budget_hard = v;
             }
-            if let Some(v) = obj.get("old_message_char_budget").and_then(&as_usize) {
+            if let Some(v) = obj.get("old_message_token_budget").and_then(&as_usize) {
                 cfg.old_msg_budget = v;
             }
             if let Some(v) = obj.get("condense_keep_turns").and_then(&as_usize) {
@@ -1589,35 +1579,18 @@ async fn handle_generate_full(
 // Real size measurement for the compaction gate (tiktoken BPE).
 // ---------------------------------------------------------------------------
 
-/// Unit of the size measurement returned by [`measure_size`]. The compaction
-/// gate compares against the TOKEN budgets only when the measurement is in
-/// real tokens; on tokenizer failure the measurement falls back to chars and
-/// the gate must use the CHAR budgets — never chars/4 against token budgets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SizeUnit {
-    Tokens,
-    Chars,
-}
-
-/// Measure the size of a message list for the compaction gate.
+/// Measure the size of a message list for the compaction gate. Always returns
+/// a TOKEN estimate — the single budget unit everywhere:
 ///
-/// When `tokenizer_encoding` is configured (e.g. "gpt-4" -> cl100k_base,
-/// "o200k_base"), the size is the REAL tiktoken BPE token count of the
-/// JSON-serialized message array — the same proven counter the core uses in
-/// src/agent/helpers.rs::count_tokens. This replaces the old chars/4 proxy,
-/// which made the token budgets 4x too lenient in chars: real long threads
-/// (thread 87: 845K chars peak, 25.5M input tokens) never crossed the hard
-/// budget, so the compaction gate stayed dead and context grew unbounded.
-///
-/// On tokenizer failure (bad encoding, tiktoken load error, serialize error)
-/// the measurement falls back to the CHAR size; the caller then compares
-/// against the CHAR budgets. Empty `tokenizer_encoding` always measures
-/// chars (the deployment does not use token budgets).
-fn measure_size(
-    items: &[crate::chat_message::ChatMessage],
-    tokenizer_encoding: &str,
-) -> (usize, SizeUnit) {
-    // Char measurement (the tokenizer-free path and the fallback).
+/// - When `tokenizer_encoding` is configured (e.g. "gpt-4" -> cl100k_base,
+///   "o200k_base"), the size is the REAL tiktoken BPE token count of the
+///   JSON-serialized message array (mirrors src/agent/helpers.rs::count_tokens).
+/// - When no tokenizer is configured (empty encoding) or it fails to load,
+///   the classic proxy applies: tokens ≈ chars/4 (chars measured 4x the token
+///   budget). This fallback is deterministic — a 200K-char context counts as
+///   50K tokens — so tests can assert on the exact math.
+fn measure_size(items: &[crate::chat_message::ChatMessage], tokenizer_encoding: &str) -> usize {
+    // Char measurement (base of the chars/4 fallback).
     let chars: usize = items
         .iter()
         .map(|m| {
@@ -1639,7 +1612,7 @@ fn measure_size(
         .sum();
 
     if tokenizer_encoding.is_empty() {
-        return (chars, SizeUnit::Chars);
+        return chars / 4;
     }
 
     // Real token count: serialize the array exactly as the API receives it,
@@ -1652,24 +1625,21 @@ fn measure_size(
                 "[prompt] Failed to serialize messages for token counting: {}",
                 e
             );
-            return (chars, SizeUnit::Chars);
+            return chars / 4;
         }
     };
     let bpe = match tiktoken_rs::get_bpe_from_model(tokenizer_encoding) {
         Ok(bpe) => bpe,
         Err(e) => {
             tracing::warn!(
-                "[prompt] Failed to load BPE encoding '{}': {}: falling back to char budget",
+                "[prompt] Failed to load BPE encoding '{}': {}: falling back to chars/4",
                 tokenizer_encoding,
                 e
             );
-            return (chars, SizeUnit::Chars);
+            return chars / 4;
         }
     };
-    (
-        bpe.encode_with_special_tokens(&json).len(),
-        SizeUnit::Tokens,
-    )
+    bpe.encode_with_special_tokens(&json).len()
 }
 
 // ---------------------------------------------------------------------------
@@ -1718,18 +1688,11 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // Erroring would discard the partial reduction and make every later
     // iteration repeat the same failed compaction forever.
     // Real size measurement: tiktoken BPE tokens when a tokenizer encoding
-    // is configured, chars otherwise (and on tokenizer failure). The budget
-    // compared against follows the measurement unit: token budgets for real
-    // tokens, char budgets for chars — never chars/4 against token budgets.
-    let (current_size, size_unit) = measure_size(&messages, &cfg.tokenizer_encoding);
-    let hard_budget = match size_unit {
-        SizeUnit::Tokens => cfg.token_budget_hard,
-        SizeUnit::Chars => cfg.char_budget_hard,
-    };
-    let soft_budget = match size_unit {
-        SizeUnit::Tokens => cfg.token_budget_soft,
-        SizeUnit::Chars => cfg.char_budget_soft,
-    };
+    // is configured, chars/4 otherwise (and on tokenizer failure). The gate
+    // always compares against the TOKEN budgets.
+    let current_size = measure_size(&messages, &cfg.tokenizer_encoding);
+    let hard_budget = cfg.token_budget_hard;
+    let soft_budget = cfg.token_budget_soft;
 
     let before = messages.len();
     // WS-2/WS-3: durable context dump + compaction event plumbing.
@@ -1766,7 +1729,7 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
                 dump_file = Some(df);
             }
             entries += outcome.dump_entries;
-            let after_size = measure_size(&messages, &cfg.tokenizer_encoding).0;
+            let after_size = measure_size(&messages, &cfg.tokenizer_encoding);
             if after_size <= soft_budget || keep == 0 {
                 break;
             }
@@ -1830,15 +1793,9 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
     let before = messages.len();
 
     // Read config from shared plugin config (set by configure message)
-    let (current_size, size_unit) = measure_size(&messages, &cfg.tokenizer_encoding);
-    let soft_budget = match size_unit {
-        SizeUnit::Tokens => cfg.token_budget_soft,
-        SizeUnit::Chars => cfg.char_budget_soft,
-    };
-    let hard_budget = match size_unit {
-        SizeUnit::Tokens => cfg.token_budget_hard,
-        SizeUnit::Chars => cfg.char_budget_hard,
-    };
+    let current_size = measure_size(&messages, &cfg.tokenizer_encoding);
+    let soft_budget = cfg.token_budget_soft;
+    let hard_budget = cfg.token_budget_hard;
     let target_budget = soft_budget.min(hard_budget);
 
     let current_iteration = args["current_iteration"].as_i64().unwrap_or(0);
@@ -1865,7 +1822,7 @@ async fn handle_condense(args: &Value, cfg: &PluginConfig) -> Result<(String, bo
             },
         );
 
-        let after_size: usize = measure_size(&messages, &cfg.tokenizer_encoding).0;
+        let after_size: usize = measure_size(&messages, &cfg.tokenizer_encoding);
 
         if after_size > target_budget {
             let aggressive_keep = condense_keep_turns.saturating_sub(1);
@@ -2087,8 +2044,8 @@ async fn main() -> Result<()> {
                 let mut locked = cfg_c.write().await;
                 *locked = new_config.clone();
                 tracing::info!(
-                    "Prompt plugin configured: database_url set, tokenizer_encoding={:?}, char_budget_soft={}, char_budget_hard={}",
-                    locked.tokenizer_encoding, locked.char_budget_soft, locked.char_budget_hard
+                    "Prompt plugin configured: database_url set, tokenizer_encoding={:?}, token_budget_soft={}, token_budget_hard={}",
+                    locked.tokenizer_encoding, locked.token_budget_soft, locked.token_budget_hard
                 );
             });
         })
@@ -2802,9 +2759,9 @@ mod token_counting_tests {
             .len()
     }
 
-    /// The OLD chars/4 proxy this task replaces (kept here to prove it is
-    /// dead: the gate must fire on the real count even when chars/4 would
-    /// stay under the budget).
+    /// The chars/4 fallback used when NO tokenizer is configured (chars
+    /// counted 4x the token budget). Real tiktoken counts differ from this
+    /// proxy on dense text — proven by the tests below.
     fn chars_4_proxy(messages: &[ChatMessage]) -> usize {
         chars_of(messages) / 4
     }
@@ -2854,9 +2811,10 @@ mod token_counting_tests {
         serde_json::from_str(&out).unwrap()
     }
 
-    // (a) The measurement uses REAL tiktoken tokens, not the chars/4 proxy.
+    // (a) The measurement is ALWAYS a token estimate: real tiktoken tokens
+    // when a tokenizer is configured, chars/4 otherwise (the fallback).
     #[test]
-    fn measure_uses_real_tiktoken_tokens_not_chars_proxy() {
+    fn measure_returns_real_tokens_or_chars_div_4_fallback() {
         let msgs = vec![
             user_msg("hello world"),
             tool_call_msg(
@@ -2868,34 +2826,32 @@ mod token_counting_tests {
         ];
 
         // Configured encoding -> real tokens, exactly matching tiktoken.
-        let (size, unit) = measure_size(&msgs, "gpt-4");
-        assert_eq!(unit, SizeUnit::Tokens);
+        let size = measure_size(&msgs, "gpt-4");
         assert_eq!(size, real_tokens(&msgs), "must be the real tiktoken count");
         assert!(size > 0);
 
-        // Meaningfully different from the chars/4 proxy (dense JSON args
+        // Meaningfully different from the chars/4 fallback (dense JSON args
         // tokenize far denser than 4 chars per token).
         assert!(
             (size as i64 - chars_4_proxy(&msgs) as i64).abs() > 10,
             "real token count must differ meaningfully from chars/4"
         );
 
-        // No encoding configured -> chars (token budgets not in use).
-        let (chars_size, chars_unit) = measure_size(&msgs, "");
-        assert_eq!(chars_unit, SizeUnit::Chars);
-        assert_eq!(chars_size, chars_of(&msgs));
+        // No encoding configured -> chars/4 token estimate (deterministic).
+        let chars_size = measure_size(&msgs, "");
+        assert_eq!(chars_size, chars_of(&msgs) / 4);
 
-        // Tokenizer failure -> char fallback, reported as Chars so the gate
-        // compares against the CHAR budgets (never chars/4 vs token budgets).
-        let (fallback_size, fallback_unit) = measure_size(&msgs, "nonexistent_encoding_xyz");
-        assert_eq!(fallback_unit, SizeUnit::Chars);
+        // Tokenizer failure -> the same chars/4 fallback (never a raw char
+        // size: the gate must keep comparing against token budgets).
+        let fallback_size = measure_size(&msgs, "nonexistent_encoding_xyz");
+        assert_eq!(fallback_size, chars_of(&msgs) / 4);
         assert_eq!(fallback_size, chars_size);
     }
 
-    // (b) Compaction triggers on the REAL token count — a case where the old
-    // chars/4 proxy would stay under the hard budget and never fire.
+    // (b) With a tokenizer configured, compaction gates on the REAL token
+    // count — a case where the chars/4 fallback would stay under the budget.
     #[tokio::test]
-    async fn compaction_triggers_on_real_token_count_where_chars_proxy_stays_dead() {
+    async fn compaction_triggers_on_real_token_count_when_tokenizer_configured() {
         // Digit-dense tool args/results tokenize ~1 token/char in cl100k_base,
         // so the REAL count dwarfs the chars/4 proxy.
         let dense = "1234567890".repeat(20_000); // 200,000 chars of digits
@@ -2939,6 +2895,43 @@ mod token_counting_tests {
 
         // Negative control: budget above the real count -> no compaction.
         let cfg2 = compact_cfg("gpt-4", real + 1000, real + 1000);
+        let out2 = run_compact(&msgs, &cfg2, 2, None).await;
+        assert_eq!(out2["was_compacted"], false);
+        assert!(
+            out2["messages"].is_null(),
+            "no compaction -> messages must be null"
+        );
+    }
+
+    // (b2) NO tokenizer -> the chars/4 fallback gates compaction: chars are
+    // measured 4x the token budget (a 200K-char context counts as 50K tokens),
+    // fully deterministic, so the gate fires exactly like the real-token path.
+    #[tokio::test]
+    async fn compaction_triggers_on_chars_div_4_fallback_when_no_tokenizer() {
+        let big = "x".repeat(200_000); // 200,000 chars == 50,000 tokens (chars/4)
+        let mut msgs = vec![user_msg("run the analysis")];
+        for i in 0..4 {
+            msgs.push(tool_call_msg("search_database", "{}", &big));
+            msgs.push(tool_result("search_database", &big));
+        }
+        msgs.push(assistant_msg("done"));
+
+        // No tokenizer configured -> measure_size returns the chars/4 estimate.
+        let estimated = measure_size(&msgs, "");
+        assert_eq!(estimated, chars_of(&msgs) / 4, "chars/4 fallback is exact");
+
+        // Positive: estimate over hard -> compaction fires and drains turns.
+        let cfg = compact_cfg("", estimated / 2, estimated / 4);
+        let out = run_compact(&msgs, &cfg, 2, None).await;
+        assert_eq!(out["was_compacted"], true);
+        let arr = out["messages"].as_array().expect("compacted array");
+        assert!(
+            arr.len() < msgs.len(),
+            "old tool-result turns must be drained"
+        );
+
+        // Negative control: budget above the estimate -> no compaction.
+        let cfg2 = compact_cfg("", estimated + 1000, estimated + 1000);
         let out2 = run_compact(&msgs, &cfg2, 2, None).await;
         assert_eq!(out2["was_compacted"], false);
         assert!(
