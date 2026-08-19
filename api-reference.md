@@ -57,7 +57,7 @@ docker exec <container> ls /opt/omni/docs
 |---|---|---|
 | GET /kanban/tasks | — | board tasks (flat list) |
 | GET /kanban/tasks/{id} | — | task detail |
-| POST /kanban/tasks | `{"title","status","board","profile","channel_id","priority",...}` | create task |
+| POST /kanban/tasks | `{"title","status","board","profile","channel","priority",...}` | create task |
 | PATCH /kanban/tasks/{id} | partial fields | update task |
 | PATCH /kanban/tasks/{id}/status | `{"status":"running"}` | change status (+ position shift) |
 | PATCH /kanban/tasks/{id}/position | `{"position":N}` | change position (cross-column) |
@@ -83,7 +83,7 @@ Common create-task body:
 
 ```json
 {"title": "Fix login bug", "status": "todo", "board": "default",
- "profile": "omni", "channel_id": 5, "priority": 10}
+ "profile": "omni", "channel": "kanban", "priority": 10}
 ```
 
 ## Schedule / cron
@@ -162,7 +162,7 @@ curl -s -X POST http://localhost:8080/api/plugins/tools/bundled/fetch/enable
 |---|---|
 | GET /channels | list channels |
 | GET /channels/{id} | channel detail |
-| PATCH /channels/{id} | update channel (e.g. current_provider/model) |
+| PATCH /channels/{id} | update channel (e.g. provider/model/profile) |
 | GET /channels/all | all channels (platforms router) |
 | GET /platforms | list platforms |
 | GET /platforms/{name}/channels | platform channels |
