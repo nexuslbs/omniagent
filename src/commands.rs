@@ -289,7 +289,6 @@ pub async fn handle_new_external(
             name,
             platform: platform.to_string(),
             external_id: resource_identifier.to_string(),
-            cause: "user".to_string(),
             resource_identifier: resource_identifier.to_string(),
         },
     )

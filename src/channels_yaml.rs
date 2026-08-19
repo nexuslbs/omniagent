@@ -15,12 +15,10 @@
 //! channels:
 //!   kanban:
 //!     resource_identifier: kanban
-//!     cause: system
 //!     profile: omni
 //!   mattermost-af66ardb:
 //!     platform: mattermost
 //!     resource_identifier: af66ardbd3dffe7gwxnokzi19c
-//!     cause: user
 //!     profile: omni
 //! ```
 //!
@@ -96,9 +94,6 @@ pub struct ChannelDef {
     /// Identifier of the resource within the platform (chat_id, session id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_identifier: Option<String>,
-    /// cause: user | cron | system | setup.
-    #[serde(default = "default_cause")]
-    pub cause: String,
     /// Bare profile name (legacy channels.current_profile).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -117,10 +112,6 @@ pub struct ChannelDef {
     pub plan: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
-}
-
-fn default_cause() -> String {
-    "system".to_string()
 }
 
 // ── Path / IO ───────────────────────────────────────────────────────────────
@@ -291,17 +282,11 @@ pub fn resolve_default_channel(explicit: Option<&str>, setting_name: &str) -> Op
 // ── Validation ──────────────────────────────────────────────────────────────
 
 /// Validate a channel definition (duplicate keys are impossible — the map
-/// key IS the name; cause must be one of the known values; platform-less
+/// key IS the name; platform-less
 /// channels are allowed = type 'cli').
-pub fn validate_channel(name: &str, def: &ChannelDef) -> Result<(), String> {
+pub fn validate_channel(name: &str, _def: &ChannelDef) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("channel name (yml key) must not be empty".to_string());
-    }
-    if !matches!(def.cause.as_str(), "user" | "cron" | "system" | "setup") {
-        return Err(format!(
-            "channel '{}': invalid cause '{}': must be one of user|cron|system|setup",
-            name, def.cause
-        ));
     }
     Ok(())
 }
@@ -317,16 +302,13 @@ mod tests {
 channels:
   kanban:
     resource_identifier: kanban
-    cause: system
     profile: omni
   cron:
     resource_identifier: cron
-    cause: system
     profile: omni
   mattermost-af66ardb:
     platform: mattermost
     resource_identifier: af66ardbd3dffe7gwxnokzi19c
-    cause: user
     profile: omni
     plan: true
 "#
@@ -338,7 +320,6 @@ channels:
         assert_eq!(file.channels.len(), 3);
         let k = &file.channels["kanban"];
         assert_eq!(k.platform, None, "platform-less system channel");
-        assert_eq!(k.cause, "system");
         assert_eq!(k.profile.as_deref(), Some("omni"));
         let m = &file.channels["mattermost-af66ardb"];
         assert_eq!(m.platform.as_deref(), Some("mattermost"));
@@ -381,7 +362,6 @@ channels:
             ChannelDef {
                 platform: Some("mattermost".to_string()),
                 resource_identifier: Some("rid-123".to_string()),
-                cause: "user".to_string(),
                 profile: Some("omni".to_string()),
                 plan: Some(false),
                 ..Default::default()
@@ -392,7 +372,6 @@ channels:
         assert_eq!(loaded.channels.len(), 1);
         let c = &loaded.channels["test-channel"];
         assert_eq!(c.platform.as_deref(), Some("mattermost"));
-        assert_eq!(c.cause, "user");
         assert_eq!(c.plan, Some(false));
     }
 
@@ -405,7 +384,6 @@ channels:
         update_channel("cli-new", |existing| {
             assert!(existing.is_none());
             Ok(ChannelDef {
-                cause: "user".to_string(),
                 profile: Some("omni".to_string()),
                 ..Default::default()
             })
@@ -420,24 +398,11 @@ channels:
         .expect("mutate");
         let loaded = load_channels().expect("reload");
         assert!(loaded.channels["cli-new"].closed.unwrap_or(false));
-        assert_eq!(loaded.channels["cli-new"].cause, "user");
     }
 
     #[test]
     fn validation_rules() {
-        assert!(validate_channel(
-            "ok",
-            &ChannelDef {
-                cause: "system".to_string(),
-                ..Default::default()
-            }
-        )
-        .is_ok());
-        let bad_cause = ChannelDef {
-            cause: "bogus".to_string(),
-            ..Default::default()
-        };
-        assert!(validate_channel("x", &bad_cause).is_err());
+        assert!(validate_channel("ok", &ChannelDef::default()).is_ok());
         assert!(validate_channel("", &ChannelDef::default()).is_err());
     }
 
@@ -459,13 +424,7 @@ channels:
     }
 
     fn seed_platformless_channel(name: &str) {
-        update_channel(name, |_| {
-            Ok(ChannelDef {
-                cause: "system".to_string(),
-                ..Default::default()
-            })
-        })
-        .expect("seed channel");
+        update_channel(name, |_| Ok(ChannelDef::default())).expect("seed channel");
     }
 
     fn write_settings_yml(content: &str) {

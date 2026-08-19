@@ -250,7 +250,6 @@ pub struct CreateChannelParams {
     pub name: String,
     pub platform: String,
     pub external_id: String,
-    pub cause: String,
     pub resource_identifier: String,
 }
 
@@ -303,7 +302,6 @@ pub struct Channel {
     /// Legacy alias: kept for backward compatibility.  Same value as
     /// `resource_identifier` when platform is set.
     pub external_id: Option<String>,
-    pub cause: String,
     pub current_profile: String,
     pub current_model: Option<String>,
     pub current_provider: Option<String>,
@@ -324,7 +322,6 @@ impl Default for Channel {
             platform: None,
             resource_identifier: None,
             external_id: None,
-            cause: String::new(),
             current_profile: String::new(),
             current_model: None,
             current_provider: None,

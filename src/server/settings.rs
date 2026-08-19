@@ -965,10 +965,7 @@ mod tests {
     fn enrich_channel_options_builds_from_channel_store() {
         ensure_global_data_dir();
         crate::channels_yaml::update_channel("settings-enrich-test", |_| {
-            Ok(crate::channels_yaml::ChannelDef {
-                cause: "system".to_string(),
-                ..Default::default()
-            })
+            Ok(crate::channels_yaml::ChannelDef::default())
         })
         .expect("seed channel into channels.yml");
         let mut meta = SettingMeta {

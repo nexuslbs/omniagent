@@ -11,7 +11,7 @@
 //! - `PATCH /channels/{id}`: update runtime fields (current_profile /
 //!   current_provider / current_model / closed / readonly / plan / template) —
 //!   persisted atomically to channels.yml. Definition fields
-//!   (platform / resource_identifier / cause) are NOT editable via the API;
+//!   (platform / resource_identifier) are NOT editable via the API;
 //!   they change only by editing the yml (or via the `update_channel_platform`
 //!   identity-change path used when a plugin's resource identifier changes).
 //!
@@ -56,7 +56,6 @@ pub struct ChannelEntry {
     pub platform: Option<String>,
     pub resource_identifier: Option<String>,
     pub external_id: Option<String>,
-    pub cause: String,
     pub closed: bool,
     pub current_profile: String,
     pub current_provider: Option<String>,
@@ -80,7 +79,6 @@ impl From<Channel> for ChannelEntry {
             // external_id was always equal to resource_identifier; derive for
             // response compatibility (NOT stored in the yml).
             external_id: rid,
-            cause: c.cause,
             closed: c.closed,
             current_profile: c.current_profile,
             current_provider: c.current_provider,

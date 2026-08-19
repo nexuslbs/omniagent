@@ -9,7 +9,7 @@
 //! - search_database: free-form SELECT SQL (read-only)
 //! - search_thread_messages: all messages from a thread
 //! - search_channel_prompts: all seq-0 (prompt) messages from a channel
-//! - search_channels: list channels (id, name, platform, cause)
+//! - search_channels: list channels (id, name, platform)
 //! - search_metrics: agent metrics (token usage, latency, groundedness, ...)
 
 use anyhow::Result;
@@ -705,11 +705,10 @@ async fn handle_search_channels(_pool: &PgPool, args: &Value) -> Result<(String,
     let mut lines = vec![format!("[search_channels] {} channel(s):", channels.len())];
     for (name, def) in channels.into_iter().take(limit) {
         lines.push(format!(
-            "#{} {} (platform: {}, cause: {})",
+            "#{} {} (platform: {})",
             name,
             name,
-            def.platform.as_deref().unwrap_or(""),
-            def.cause
+            def.platform.as_deref().unwrap_or("")
         ));
     }
     Ok((lines.join("\n"), false))
@@ -1342,7 +1341,7 @@ to the CURRENT channel; pass channel_id for a different one."
         McpToolEntry {
             def: McpToolDef {
                 name: "search_channels".to_string(),
-                description: "List all channels with their id, name, platform and cause. \
+                description: "List all channels with their id, name, platform. \
 Use to discover channel_id values needed by channel-scoped tools (search_channel-prompts, \
 search_messages)."
                     .to_string(),

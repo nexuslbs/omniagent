@@ -25,7 +25,6 @@ fn def_to_channel(name: &str, def: &ChannelDef) -> Channel {
         // external_id is NOT a stored yml field — it was always equal to
         // resource_identifier at every creation site; derive for compat.
         external_id: (!rid.is_empty()).then_some(rid),
-        cause: def.cause.clone(),
         current_profile: profile,
         current_model: def.model.clone(),
         current_provider: def.provider.clone(),
@@ -96,7 +95,6 @@ pub async fn create_channel(_pool: &PgPool, p: CreateChannelParams) -> AppResult
         d.platform = (!p.platform.is_empty()).then(|| p.platform.clone());
         d.resource_identifier =
             (!p.resource_identifier.is_empty()).then(|| p.resource_identifier.clone());
-        d.cause = p.cause.clone();
         // Runtime fields: keep existing values on conflict (like the old
         // ON CONFLICT DO UPDATE which only rewrote resource_identifier and
         // reopened the channel); set the default profile on first creation.

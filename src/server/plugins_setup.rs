@@ -584,7 +584,6 @@ pub(crate) async fn setup_plugin_handler(
                         platform: name.clone(),
                         external_id: channel_id.to_string(),
                         resource_identifier: channel_id.to_string(),
-                        cause: "setup".to_string(),
                     },
                 )
                 .await

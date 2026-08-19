@@ -2149,7 +2149,6 @@ mod tests {
             platform: None,
             resource_identifier: None,
             external_id: None,
-            cause: "test".to_string(),
             current_profile: "omni".to_string(),
             current_model: model.map(|s| s.to_string()),
             current_provider: provider.map(|s| s.to_string()),
