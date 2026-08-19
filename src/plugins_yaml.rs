@@ -1520,7 +1520,7 @@ pub fn get_plugin(
             .parent()
             .and_then(|p| p.to_str());
 
-        return Ok(Some(build_plugin_detail(
+        let mut detail = build_plugin_detail(
             manifest,
             source,
             yaml_entry,
@@ -1528,7 +1528,19 @@ pub fn get_plugin(
             plugin_dir,
             data_dir,
             false, // get_plugin always returns the primary (is_duplicated=false)
-        )));
+        );
+        // models.yml overlay (same as list_plugins): `models` list wins over
+        // the plugin's default_model enum for provider selectors.
+        if pt == &PluginYamlType::Provider {
+            if let Some(models) = crate::models_yaml::models_for_provider(data_dir, &detail.name) {
+                for field in detail.config_schema.iter_mut() {
+                    if field.key == "default_model" {
+                        field.allowed_values = Some(models.clone());
+                    }
+                }
+            }
+        }
+        return Ok(Some(detail));
     }
 
     // Not found via discovery: check YAML entries directly (YAML-only entry with no disk source)

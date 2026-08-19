@@ -92,19 +92,13 @@ impl PluginFlag {
     }
 }
 
-/// Skip serializing the default `plugin: true` (keeps files concise; `false`/name
-/// are always written).
-fn is_default_plugin(flag: &PluginFlag) -> bool {
-    matches!(flag, PluginFlag::Bool(true))
-}
-
 /// A single provider override/definition in models.yml.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderOverride {
     /// `true`/name -> use the provider plugin (plugins.yml); `false` -> builtin support.
     /// Same name as an existing provider plugin OVERRIDES it (plugin still used
     /// behind the scenes for transport; selectors + defs come from models.yml).
-    #[serde(default, skip_serializing_if = "is_default_plugin")]
+    #[serde(default)]
     pub plugin: PluginFlag,
     /// Replaces `default_model.allowed_values` in selectors (the models list).
     #[serde(default, skip_serializing_if = "Option::is_none")]
