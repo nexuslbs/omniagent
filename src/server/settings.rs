@@ -608,7 +608,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 description: "Hard token budget for the prompt plugin: compaction triggers immediately when the conversation size exceeds it (tokens; chars/4 fallback when no tokenizer)".into(),
                 options: None,
                 readonly: false,
-                default: Some("100000".into()),
+                default: Some("500000".into()),
             },
         ),
         (
@@ -618,7 +618,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 description: "Soft token budget for the prompt plugin: the reduction target when the hard budget is exceeded (tokens; chars/4 fallback when no tokenizer)".into(),
                 options: None,
                 readonly: false,
-                default: Some("50000".into()),
+                default: Some("100000".into()),
             },
         ),
         // ── Group 2 settings ──
@@ -1150,8 +1150,8 @@ mod tests {
         let by_name: std::collections::HashMap<&str, &SettingMeta> =
             defs.iter().map(|(n, m)| (n.as_str(), m)).collect();
         for (name, expected_default) in [
-            ("prompt_token_budget_hard", "100000"),
-            ("prompt_token_budget_soft", "50000"),
+            ("prompt_token_budget_hard", "500000"),
+            ("prompt_token_budget_soft", "100000"),
             ("old_message_token_budget", "100000"),
         ] {
             let meta = by_name
@@ -1185,8 +1185,7 @@ mod tests {
             .iter()
             .find(|c| c.name == "prompt")
             .unwrap_or_else(|| panic!("prompt category must exist"));
-        let prompt_names: Vec<&str> =
-            prompt.settings.iter().map(|s| s.name.as_str()).collect();
+        let prompt_names: Vec<&str> = prompt.settings.iter().map(|s| s.name.as_str()).collect();
         assert!(
             prompt_names.contains(&"prompt_token_budget_hard"),
             "hard in prompt: {prompt_names:?}"
@@ -1199,8 +1198,7 @@ mod tests {
             .iter()
             .find(|c| c.name == "general")
             .unwrap_or_else(|| panic!("general category must exist"));
-        let general_names: Vec<&str> =
-            general.settings.iter().map(|s| s.name.as_str()).collect();
+        let general_names: Vec<&str> = general.settings.iter().map(|s| s.name.as_str()).collect();
         assert!(
             general_names.contains(&"old_message_token_budget"),
             "old_message_token_budget in general: {general_names:?}"

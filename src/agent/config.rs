@@ -108,14 +108,14 @@ pub struct AgentConfig {
     /// (settings `sub_prompt_iteration_percent`; 0 disables the feature).
     pub sub_prompt_iteration_percent: u32,
 
-    /// Hard context budget (chars): engine-level pruning runs ONLY when the
+    /// Hard context budget (tokens): engine-level pruning runs ONLY when the
     /// total context size exceeds this threshold. Sourced from the SAME
-    /// settings key as the prompt plugin (`prompt_char_budget_hard`) so the
+    /// settings key as the prompt plugin (`prompt_token_budget_hard`) so the
     /// two layers always agree — no hardcoded limits in code.
-    pub char_budget_hard: usize,
-    /// Soft context budget (chars): pruning compacts until the total size
-    /// drops below this (`prompt_char_budget_soft`).
-    pub char_budget_soft: usize,
+    pub token_budget_hard: usize,
+    /// Soft context budget (tokens): pruning compacts until the total size
+    /// drops below this (`prompt_token_budget_soft`).
+    pub token_budget_soft: usize,
     /// How many of the most recent read-type tool results are kept in full
     /// by pruning (settings `read_keep_last`).
     pub read_keep_last: usize,
@@ -259,10 +259,10 @@ impl AgentConfig {
             sub_prompt_iteration_percent: get("sub_prompt_iteration_percent", "50")
                 .parse()
                 .unwrap_or(50),
-            char_budget_hard: get("prompt_char_budget_hard", "200000")
+            token_budget_hard: get("prompt_token_budget_hard", "500000")
                 .parse()
-                .unwrap_or(200000),
-            char_budget_soft: get("prompt_char_budget_soft", "100000")
+                .unwrap_or(500000),
+            token_budget_soft: get("prompt_token_budget_soft", "100000")
                 .parse()
                 .unwrap_or(100000),
             read_keep_last: get("read_keep_last", "3").parse().unwrap_or(3),
@@ -372,10 +372,10 @@ impl AgentConfig {
             sub_prompt_iteration_percent: get("sub_prompt_iteration_percent", "50")
                 .parse()
                 .unwrap_or(50),
-            char_budget_hard: get("prompt_char_budget_hard", "200000")
+            token_budget_hard: get("prompt_token_budget_hard", "500000")
                 .parse()
-                .unwrap_or(200000),
-            char_budget_soft: get("prompt_char_budget_soft", "100000")
+                .unwrap_or(500000),
+            token_budget_soft: get("prompt_token_budget_soft", "100000")
                 .parse()
                 .unwrap_or(100000),
             read_keep_last: get("read_keep_last", "3").parse().unwrap_or(3),
@@ -452,8 +452,8 @@ mod tests {
             compact_messages_tool_name: "prompt_compact-messages".to_string(),
             sub_prompt_max_chars: 4000,
             sub_prompt_iteration_percent: 50,
-            char_budget_hard: 200000,
-            char_budget_soft: 100000,
+            token_budget_hard: 500000,
+            token_budget_soft: 100000,
             read_keep_last: 3,
             read_excerpt_chars: 2000,
             auto_note_max_chars: 24000,
@@ -518,8 +518,8 @@ mod tests {
             compact_messages_tool_name: String::new(),
             sub_prompt_max_chars: 0,
             sub_prompt_iteration_percent: 0,
-            char_budget_hard: 0,
-            char_budget_soft: 0,
+            token_budget_hard: 0,
+            token_budget_soft: 0,
             read_keep_last: 0,
             read_excerpt_chars: 0,
             auto_note_max_chars: 0,

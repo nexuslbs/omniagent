@@ -587,7 +587,7 @@ pub fn build_message_metadata_block(messages: &[ChatMessage], offset: usize) -> 
 ///    comprise >90% of it, the task cannot meaningfully proceed: return an error.
 /// 3. Keep the last N full assistant→tool cycles verbatim.
 /// 4. Replace everything before that with a compact metadata block.
-/// 5. Trim old messages until old_message_char_budget is satisfied.
+/// 5. Trim old messages until old_message_token_budget is satisfied.
 ///
 /// Returns the condensed message list, or an error if the always-keep portion
 /// is too large to leave room for context.
