@@ -239,22 +239,22 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
         INSERT INTO messages (
             thread_id, role, content, thread_sequence, external_id,
             metadata, embedding, summary_text, is_summary,
-            msg_type, msg_subtype, iteration_number,
+            msg_type, msg_subtype, original_thread_id, iteration_number,
             duration_ms, token_usage, channel_id
         )
         VALUES (:thread_id, :role, :content, :thread_sequence, NULLIF(:external_id, '')::text,
             :metadata, NULLIF(:embedding, '')::text, NULLIF(:summary_text, '')::text, :is_summary,
-            :msg_type, NULLIF(:msg_subtype, '')::text, :iteration_number,
+            :msg_type, NULLIF(:msg_subtype, '')::text, NULLIF(:original_thread_id, -1::bigint)::bigint, :iteration_number,
             :duration_ms, COALESCE(NULLIF(:token_usage, '')::jsonb, '{}'::jsonb),
             (SELECT channel_id FROM threads WHERE id = :thread_id))
         RETURNING
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
-            msg_type, msg_subtype, iteration_number,
+            msg_type, msg_subtype, original_thread_id, iteration_number,
             duration_ms, token_usage::text AS "token_usage",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         "#,
-        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :iteration_number = msg.iteration_number, :duration_ms = msg.duration_ms, :token_usage = &msg.token_usage.to_string() )
+        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :original_thread_id = msg.original_thread_id.unwrap_or(-1i64), :iteration_number = msg.iteration_number, :duration_ms = msg.duration_ms, :token_usage = &msg.token_usage.to_string() )
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -725,6 +725,7 @@ pub async fn create_thread_with_cause(
         embedding: None,
         summary_text: None,
         is_summary: false,
+        original_thread_id: None,
         msg_type: p.msg_type.clone(),
         msg_subtype: p.msg_subtype,
         iteration_number: 0,
@@ -1702,7 +1703,7 @@ pub async fn get_cause_message(pool: &PgPool, thread_id: i64) -> AppResult<Optio
         SELECT
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
-            msg_type, msg_subtype, iteration_number,
+            msg_type, msg_subtype, original_thread_id, iteration_number,
             duration_ms, token_usage::text AS "token_usage",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages
@@ -1884,7 +1885,7 @@ pub async fn get_last_message(pool: &PgPool, thread_id: i64) -> AppResult<Option
         SELECT
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
-            msg_type, msg_subtype, iteration_number,
+            msg_type, msg_subtype, original_thread_id, iteration_number,
             duration_ms, token_usage::text AS "token_usage",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages
@@ -2284,4 +2285,102 @@ mod tests {
             "Title\n\nBody"
         );
     }
+}
+
+#[allow(clippy::items_after_test_module)]
+/// List PENDING user threads whose prompt should be appended into the running
+/// thread as a sub-prompt (feature: sub-prompts).
+///
+/// Match condition (per feature spec): same channel + same profile +
+/// cause='user' + status='pending' + NOT terminal, AND
+/// (pending.parent_id IS NOT DISTINCT FROM running.parent_id   -- same parent
+///  context as the running thread, incl. both NULL = same top-level
+///  OR pending.parent_id = running.id)                          -- child of the
+///  running thread). Ordered by id ASC (oldest first).
+pub async fn list_appendable_pending_threads(
+    pool: &PgPool,
+    channel_id: &str,
+    profile: &str,
+    running_thread_id: i64,
+) -> AppResult<Vec<Thread>> {
+    let rows: Vec<ThreadDb> = sql_forge!(
+        ThreadDb,
+        r#"
+        SELECT
+            id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,
+            input_tokens, cached_tokens, output_tokens, duration_ms,
+            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at",
+            COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "started_at",
+            COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "ended_at",
+            terminal,
+            plan,
+            parent_id,
+            iterations,
+            workflow_step,
+            template
+        FROM threads t
+        WHERE t.channel_id = :channel_id
+          AND t.profile = :profile
+          AND t.cause = 'user'
+          AND t.status = 'pending'
+          AND NOT t.terminal
+          AND t.id <> :running_thread_id
+          AND (t.parent_id IS NOT DISTINCT FROM (SELECT parent_id FROM threads WHERE id = :running_thread_id)
+               OR t.parent_id = :running_thread_id)
+        ORDER BY t.id ASC
+        "#,
+        ( :channel_id = channel_id, :profile = profile, :running_thread_id = running_thread_id )
+    )
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter().map(|r| r.try_into()).collect()
+}
+
+#[allow(clippy::items_after_test_module)]
+/// Mark a pending thread 'skipped' after its prompt was appended as a
+/// sub-prompt into a running thread (feature: sub-prompts).
+///
+/// Uses the single terminal choke point (mark_thread_terminal) so
+/// terminal=true is always set with 'skipped'. When the skipped thread is
+/// linked to a kanban task, the task's thread_status is cleared and a history
+/// entry records the skip (best-effort, mirrors skip_channel_threads).
+pub async fn mark_thread_skipped_for_sub_prompt(pool: &PgPool, pending_id: i64) -> AppResult<u64> {
+    let result = mark_thread_terminal(pool, pending_id, "skipped").await?;
+    if result > 0 {
+        crate::hooks::fire_thread_finished(pending_id);
+        #[derive(sqlx::FromRow)]
+        struct TaskRow {
+            task_id: Option<String>,
+        }
+        let t: Option<TaskRow> = sql_forge!(
+            TaskRow,
+            "SELECT task_id FROM threads WHERE id = :id",
+            ( :id = pending_id )
+        )
+        .fetch_optional(pool)
+        .await?;
+        if let Some(task_id) = t.and_then(|r| r.task_id) {
+            let _ = sql_forge!(
+                "UPDATE kanban_tasks SET thread_status = NULL WHERE id = :task_id",
+                ( :task_id = task_id.as_str() )
+            )
+            .execute(pool)
+            .await;
+            let comment = format!(
+                "Thread #{} skipped (prompt appended as sub-prompt to running thread)",
+                pending_id
+            );
+            let _ = sql_forge!(
+                r#"
+                INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
+                VALUES (:task_id, 'workflow', '', '', :comment)
+                "#,
+                ( :task_id = task_id.as_str(), :comment = comment.as_str() )
+            )
+            .execute(pool)
+            .await;
+        }
+    }
+    Ok(result)
 }

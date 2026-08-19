@@ -122,6 +122,8 @@ pub struct MessageDb {
     pub is_summary: bool,
     pub msg_type: String,
     pub msg_subtype: Option<String>,
+    #[sqlx(default)]
+    pub original_thread_id: Option<i64>,
     pub created_at: Option<String>,
     pub iteration_number: i32,
     pub duration_ms: i32,
@@ -149,6 +151,7 @@ impl TryFrom<MessageDb> for Message {
             is_summary: db.is_summary,
             msg_type: db.msg_type,
             msg_subtype: db.msg_subtype,
+            original_thread_id: db.original_thread_id,
             created_at: db
                 .created_at
                 .as_deref()
@@ -351,6 +354,7 @@ pub struct Message {
     pub is_summary: bool,
     pub msg_type: String,
     pub msg_subtype: Option<String>,
+    pub original_thread_id: Option<i64>,
     pub created_at: DateTime<Utc>,
     pub iteration_number: i32,
     pub duration_ms: i32,
@@ -371,6 +375,7 @@ pub struct MessageNew {
     pub is_summary: bool,
     pub msg_type: String,
     pub msg_subtype: Option<String>,
+    pub original_thread_id: Option<i64>,
     pub iteration_number: i32,
     pub duration_ms: i32,
     pub token_usage: serde_json::Value,

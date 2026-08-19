@@ -255,6 +255,16 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await
     .ok();
 
+    // -- Sub-prompts: append pending user prompts to a running thread ------
+    // messages.original_thread_id: the pending thread id whose prompt was
+    // appended into this (running) thread as a sub-prompt and which was then
+    // marked skipped. NULL for ordinary messages. msg_subtype carries the
+    // same id as a human-readable reference (per feature spec).
+    sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS original_thread_id BIGINT")
+        .execute(pool)
+        .await
+        .ok();
+
     tracing::info!(
         "[migration] Schema v5: messages.channel_id + seq-0 external_id dedup index added"
     );

@@ -286,6 +286,7 @@ async fn create_action_thread(
         embedding: None,
         summary_text: None,
         is_summary: false,
+        original_thread_id: None,
         msg_type: "tool-result".to_string(),
         msg_subtype: None,
         iteration_number: 0,

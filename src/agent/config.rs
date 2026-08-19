@@ -101,6 +101,13 @@ pub struct AgentConfig {
     /// Default: "prompt_compact-messages".
     pub compact_messages_tool_name: String,
 
+    /// Cumulative char budget for appended sub-prompts per running thread
+    /// (settings `sub_prompt_max_chars`; 0 disables appends).
+    pub sub_prompt_max_chars: usize,
+    /// Max percent of LLM-call iterations that may look for sub-prompts
+    /// (settings `sub_prompt_iteration_percent`; 0 disables the feature).
+    pub sub_prompt_iteration_percent: u32,
+
     /// Hard context budget (chars): engine-level pruning runs ONLY when the
     /// total context size exceeds this threshold. Sourced from the SAME
     /// settings key as the prompt plugin (`prompt_char_budget_hard`) so the
@@ -248,6 +255,10 @@ impl AgentConfig {
                 "prompt_compact_messages_tool",
                 "prompt_compact-messages",
             ),
+            sub_prompt_max_chars: get("sub_prompt_max_chars", "4000").parse().unwrap_or(4000),
+            sub_prompt_iteration_percent: get("sub_prompt_iteration_percent", "50")
+                .parse()
+                .unwrap_or(50),
             char_budget_hard: get("prompt_char_budget_hard", "200000")
                 .parse()
                 .unwrap_or(200000),
@@ -357,6 +368,10 @@ impl AgentConfig {
                 "prompt_compact_messages_tool",
                 "prompt_compact-messages",
             ),
+            sub_prompt_max_chars: get("sub_prompt_max_chars", "4000").parse().unwrap_or(4000),
+            sub_prompt_iteration_percent: get("sub_prompt_iteration_percent", "50")
+                .parse()
+                .unwrap_or(50),
             char_budget_hard: get("prompt_char_budget_hard", "200000")
                 .parse()
                 .unwrap_or(200000),
@@ -435,6 +450,8 @@ mod tests {
             kanban_dispatcher_interval_secs: 15,
             prompt_tool_name: "prompt_generate".to_string(),
             compact_messages_tool_name: "prompt_compact-messages".to_string(),
+            sub_prompt_max_chars: 4000,
+            sub_prompt_iteration_percent: 50,
             char_budget_hard: 200000,
             char_budget_soft: 100000,
             read_keep_last: 3,
@@ -483,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_agent_config_complete_field_count() {
-        // AgentConfig has 36 fields. This test verifies all are present,
+        // AgentConfig has 38 fields. This test verifies all are present,
         // by constructing a minimal config and checking all fields are accessible.
         let cfg = AgentConfig {
             llm_api_key: String::new(),
@@ -499,6 +516,8 @@ mod tests {
             kanban_dispatcher_interval_secs: 0,
             prompt_tool_name: String::new(),
             compact_messages_tool_name: String::new(),
+            sub_prompt_max_chars: 0,
+            sub_prompt_iteration_percent: 0,
             char_budget_hard: 0,
             char_budget_soft: 0,
             read_keep_last: 0,

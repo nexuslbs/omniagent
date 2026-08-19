@@ -187,6 +187,8 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "read_excerpt_chars",
                 "auto_note_max_chars",
                 "auto_note_entry_chars",
+                "sub_prompt_max_chars",
+                "sub_prompt_iteration_percent",
             ],
         ),
         (
@@ -400,6 +402,26 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 options: None,
                 readonly: false,
                 default: Some("prompt_compact-messages".into()),
+            },
+        ),
+        (
+            "sub_prompt_max_chars".into(),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Cumulative char budget for sub-prompts appended into a running thread from pending user prompts (0 disables appends)".into(),
+                options: None,
+                readonly: false,
+                default: Some("4000".into()),
+            },
+        ),
+        (
+            "sub_prompt_iteration_percent".into(),
+            SettingMeta {
+                field_type: "number".into(),
+                description: "Max percent of LLM-call iterations that may look for pending sub-prompts (0 disables the feature; 100 = every call)".into(),
+                options: None,
+                readonly: false,
+                default: Some("50".into()),
             },
         ),
         // ── Memory & Retention ──
@@ -641,6 +663,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "tool_bg_secs" => "execution",
             // general category (default; matches state_block_update_interval)
             "kanban_dispatcher_interval" => "general",
+            "sub_prompt_max_chars" | "sub_prompt_iteration_percent" => "general",
             // memory category
             "delete_after_days" | "memory_max_chars" | "soul_max_chars" => "memory",
             // system : bootstrap from env
@@ -748,6 +771,8 @@ fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
         "max_inline_file_kb",
         "tool_bg_secs",
         "prompt_log_level",
+        "sub_prompt_max_chars",
+        "sub_prompt_iteration_percent",
         "platform_max_spawn_retries",
         "default_profile",
         "default_cli_channel",
@@ -1030,6 +1055,54 @@ mod tests {
         assert!(
             names.contains(&"max_tokens"),
             "max_tokens in execution: {names:?}"
+        );
+    }
+
+    #[test]
+    fn sub_prompt_settings_are_writable_numbers_in_general() {
+        // Both sub-prompt settings must be exposed by the settings API:
+        // defined with a number type + documented defaults, writable via
+        // PUT /settings, and categorized under "general".
+        let defs = get_all_setting_definitions();
+        let by_name: std::collections::HashMap<&str, &SettingMeta> =
+            defs.iter().map(|(n, m)| (n.as_str(), m)).collect();
+        for (name, expected_default) in [
+            ("sub_prompt_max_chars", "4000"),
+            ("sub_prompt_iteration_percent", "50"),
+        ] {
+            let meta = by_name
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} must be defined"));
+            assert_eq!(meta.field_type, "number", "{name} is a number");
+            assert!(!meta.readonly, "{name} is writable");
+            assert_eq!(meta.default.as_deref(), Some(expected_default));
+        }
+
+        let keys = writable_setting_keys();
+        assert!(keys.contains("sub_prompt_max_chars"), "max_chars writable");
+        assert!(
+            keys.contains("sub_prompt_iteration_percent"),
+            "percent writable"
+        );
+
+        let defs_with_value: Vec<(String, String, SettingMeta)> = defs
+            .iter()
+            .filter(|(n, _)| n == "sub_prompt_max_chars" || n == "sub_prompt_iteration_percent")
+            .map(|(n, m)| (n.clone(), String::new(), m.clone()))
+            .collect();
+        let cats = categorize_settings(defs_with_value);
+        let general = cats
+            .iter()
+            .find(|c| c.name == "general")
+            .unwrap_or_else(|| panic!("general category must exist"));
+        let names: Vec<&str> = general.settings.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"sub_prompt_max_chars"),
+            "sub_prompt_max_chars in general: {names:?}"
+        );
+        assert!(
+            names.contains(&"sub_prompt_iteration_percent"),
+            "sub_prompt_iteration_percent in general: {names:?}"
         );
     }
 }

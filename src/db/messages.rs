@@ -18,22 +18,22 @@ pub async fn create_message(pool: &PgPool, msg: &MessageNew) -> AppResult<Messag
         INSERT INTO messages (
             thread_id, role, content, thread_sequence, external_id,
             metadata, embedding, summary_text, is_summary,
-            msg_type, msg_subtype, iteration_number,
+            msg_type, msg_subtype, original_thread_id, iteration_number,
             duration_ms, token_usage, channel_id
         )
         VALUES (:thread_id, :role, :content, :thread_sequence, NULLIF(:external_id, '')::text,
             :metadata, NULLIF(:embedding, '')::text, NULLIF(:summary_text, '')::text, :is_summary,
-            :msg_type, NULLIF(:msg_subtype, '')::text, :iteration_number,
+            :msg_type, NULLIF(:msg_subtype, '')::text, NULLIF(:original_thread_id, -1::bigint)::bigint, :iteration_number,
             :duration_ms, COALESCE(NULLIF(:token_usage, '')::jsonb, '{}'::jsonb),
             (SELECT channel_id FROM threads WHERE id = :thread_id))
         RETURNING
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
-            msg_type, msg_subtype, iteration_number,
+            msg_type, msg_subtype, original_thread_id, iteration_number,
             duration_ms, token_usage::text AS "token_usage",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         "#,
-        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :iteration_number = msg.iteration_number, :duration_ms = msg.duration_ms, :token_usage = &msg.token_usage.to_string() )
+        ( :thread_id = msg.thread_id, :role = &msg.role, :content = &msg.content, :thread_sequence = msg.thread_sequence, :external_id = msg.external_id.as_deref().unwrap_or(""), :metadata = &metadata_val, :embedding = msg.embedding.as_deref().unwrap_or(""), :summary_text = msg.summary_text.as_deref().unwrap_or(""), :is_summary = msg.is_summary, :msg_type = &msg.msg_type, :msg_subtype = msg.msg_subtype.as_deref().unwrap_or(""), :original_thread_id = msg.original_thread_id.unwrap_or(-1i64), :iteration_number = msg.iteration_number, :duration_ms = msg.duration_ms, :token_usage = &msg.token_usage.to_string() )
     )
     .fetch_one(pool)
     .await?;
@@ -56,7 +56,7 @@ pub async fn get_recent_thread_messages(
         SELECT
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
-            msg_type, msg_subtype, iteration_number,
+            msg_type, msg_subtype, original_thread_id, iteration_number,
             duration_ms, token_usage::text AS "token_usage",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages
@@ -87,7 +87,7 @@ pub async fn search_messages_text(
         SELECT
             m.id, m.thread_id, m.role, m.content, m.thread_sequence, m.external_id,
             m.metadata::text AS "metadata", m.embedding, m.summary_text, m.is_summary,
-            m.msg_type, m.msg_subtype, m.iteration_number,
+            m.msg_type, m.msg_subtype, m.original_thread_id, m.iteration_number,
             m.duration_ms, m.token_usage::text AS "token_usage",
             COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages m
@@ -197,7 +197,7 @@ pub async fn search_messages_semantic(
         SELECT
             m.id, m.thread_id, m.role, m.content, m.thread_sequence, m.external_id,
             m.metadata::text AS "metadata", m.embedding, m.summary_text, m.is_summary,
-            m.msg_type, m.msg_subtype, m.iteration_number,
+            m.msg_type, m.msg_subtype, m.original_thread_id, m.iteration_number,
             m.duration_ms, m.token_usage::text AS "token_usage",
             COALESCE(TO_CHAR(m.created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages m
@@ -281,6 +281,7 @@ pub async fn get_latest_seq0_message(
             embedding: None,
             summary_text: None,
             is_summary: false,
+            original_thread_id: None,
             msg_type: String::new(),
             msg_subtype: None,
             created_at: chrono::Utc::now(),
@@ -313,7 +314,7 @@ pub async fn get_thread_messages(pool: &PgPool, thread_id: i64) -> AppResult<Vec
         SELECT
             id, thread_id, role, content, thread_sequence, external_id,
             metadata::text AS "metadata", embedding, summary_text, is_summary,
-            msg_type, msg_subtype, iteration_number,
+            msg_type, msg_subtype, original_thread_id, iteration_number,
             duration_ms, token_usage::text AS "token_usage",
             COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US"Z"'), '') AS "created_at"
         FROM messages
@@ -326,4 +327,41 @@ pub async fn get_thread_messages(pool: &PgPool, thread_id: i64) -> AppResult<Vec
     .await?;
 
     Ok(rows)
+}
+
+/// Insert a `sub_cause` message recording that a pending thread's prompt was
+/// appended into the running thread as a sub-prompt (feature: sub-prompts).
+///
+/// role='sub_cause', msg_type='sub_cause', msg_subtype=<pending_thread_id>
+/// (human-readable reference), original_thread_id=<pending_thread_id>,
+/// content=<the appended prompt>, thread_id=<running thread id>.
+pub async fn insert_sub_cause_message(
+    pool: &PgPool,
+    running_thread_id: i64,
+    pending_thread_id: i64,
+    prompt_content: &str,
+    iteration: i32,
+) -> AppResult<Message> {
+    let seq = crate::db::types::get_max_thread_sequence(pool, running_thread_id).await? + 1;
+    let msg = MessageNew {
+        thread_id: running_thread_id,
+        role: "sub_cause".to_string(),
+        content: prompt_content.to_string(),
+        thread_sequence: seq,
+        external_id: None,
+        metadata: serde_json::json!({
+            "sub_prompt": true,
+            "source_thread_id": pending_thread_id,
+        }),
+        embedding: None,
+        summary_text: None,
+        is_summary: false,
+        msg_type: "sub_cause".to_string(),
+        msg_subtype: Some(pending_thread_id.to_string()),
+        original_thread_id: Some(pending_thread_id),
+        iteration_number: iteration,
+        duration_ms: 0,
+        token_usage: serde_json::json!({}),
+    };
+    create_message(pool, &msg).await
 }

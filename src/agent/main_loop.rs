@@ -313,6 +313,7 @@ Previous plan:\n{}",
                     embedding: None,
                     summary_text: None,
                     is_summary: false,
+                    original_thread_id: None,
                     msg_type: "prompt".to_string(),
                     msg_subtype: Some("plan".to_string()),
                     iteration_number: 0,
@@ -393,6 +394,7 @@ Previous plan:\n{}",
                             embedding: None,
                             summary_text: None,
                             is_summary: false,
+                            original_thread_id: None,
                             msg_type: "plan".to_string(),
                             msg_subtype: Some("markdown".to_string()),
                             iteration_number: 1,
@@ -615,6 +617,11 @@ Previous plan:\n{}",
     // This prevents aggressive condensation on every Nth iteration even when
     // the last condense just happened.
     let mut last_condense_iteration: i32 = 0;
+    // Sub-prompts (feature): cumulative char budget + exhaustion flag for
+    // appended pending user prompts, scoped to this thread run (persisted
+    // across iterations of the same run).
+    let mut used_sub_prompt_chars: usize = 0;
+    let mut sub_prompts_exhausted: bool = false;
 
     // WS-4b: engine-level read guard — (tool, args-hash) -> (iteration, len)
     // for read-only tools. Cleared whenever a state-changing tool runs.
@@ -630,6 +637,113 @@ Previous plan:\n{}",
                 "This is your last turn. You must provide your final answer now. \
                  Do not request additional tool calls.",
             ));
+        }
+
+        // ── Sub-prompts: append pending user prompts to this running thread ──
+        // When a channel has a user task RUNNING and there are PENDING user
+        // tasks for the same channel/profile/parent-context (or children of
+        // this thread), their prompts are appended to THIS thread's full
+        // prompt — BEFORE the condense call so compaction never drops them.
+        // Each pending thread is marked skipped and a sub_cause message
+        // records the original thread id (messages.original_thread_id).
+        // Gates: iteration-percent (feature enabled when > 0; lookups only
+        // within the first N% of the iteration budget) + cumulative char
+        // budget (sub_prompt_max_chars per running thread).
+        let sub_prompt_enabled =
+            cfg_snapshot.sub_prompt_iteration_percent > 0 && cfg_snapshot.sub_prompt_max_chars > 0;
+        if sub_prompt_enabled
+            && !sub_prompts_exhausted
+            && thread.cause == "user"
+            && sub_prompt_gate_ok(
+                current_iter,
+                iter_limit,
+                cfg_snapshot.sub_prompt_iteration_percent,
+            )
+        {
+            match queries::list_appendable_pending_threads(
+                &cfg.pool,
+                &thread.channel_id,
+                &thread.profile,
+                thread.id,
+            )
+            .await
+            {
+                Ok(pending) => {
+                    for pt in pending {
+                        if used_sub_prompt_chars >= cfg_snapshot.sub_prompt_max_chars {
+                            sub_prompts_exhausted = true;
+                            break;
+                        }
+                        // Read the pending thread's cause (seq-0) prompt.
+                        let prompt_text = match queries::get_thread_messages(&cfg.pool, pt.id).await
+                        {
+                            Ok(msgs) => msgs
+                                .iter()
+                                .find(|m| m.thread_sequence == 0)
+                                .map(|m| m.content.clone())
+                                .unwrap_or_default(),
+                            Err(e) => {
+                                warn!(
+                                    "[sub-prompt] Failed to read cause of pending thread #{}: {:?}",
+                                    pt.id, e
+                                );
+                                continue;
+                            }
+                        };
+                        if prompt_text.trim().is_empty() {
+                            continue;
+                        }
+                        let appended = format!(
+                            "=== Sub-Prompt (from thread #{}, appended) ===\n{}",
+                            pt.id, prompt_text
+                        );
+                        let next_used = used_sub_prompt_chars + appended.chars().count();
+                        if next_used > cfg_snapshot.sub_prompt_max_chars {
+                            sub_prompts_exhausted = true;
+                            break;
+                        }
+                        // Record the sub_cause message (msg_type='sub_cause',
+                        // msg_subtype + original_thread_id = pending id) and
+                        // mark the pending thread skipped (terminal choke point).
+                        if let Err(e) = queries::insert_sub_cause_message(
+                            &cfg.pool,
+                            thread.id,
+                            pt.id,
+                            &appended,
+                            current_iter,
+                        )
+                        .await
+                        {
+                            warn!(
+                                "[sub-prompt] Failed to record sub_cause for thread #{}: {:?}",
+                                pt.id, e
+                            );
+                            continue;
+                        }
+                        if let Err(e) =
+                            queries::mark_thread_skipped_for_sub_prompt(&cfg.pool, pt.id).await
+                        {
+                            warn!(
+                                "[sub-prompt] Failed to mark pending thread #{} skipped: {:?}",
+                                pt.id, e
+                            );
+                        }
+                        // Push into the in-memory prompt BEFORE condensation.
+                        messages.push(ChatMessage::user(&appended));
+                        used_sub_prompt_chars = next_used;
+                        info!(
+                                "[sub-prompt] Appended prompt from pending thread #{} to running thread #{} ({} chars)",
+                                pt.id, thread.id, appended.chars().count(),
+                            );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                            "[sub-prompt] Failed to list appendable pending threads for thread #{}: {:?}",
+                            thread.id, e
+                        );
+                }
+            }
         }
 
         // ── Context management: call condense tool ──
@@ -847,6 +961,7 @@ Previous plan:\n{}",
                 embedding: None,
                 summary_text: None,
                 is_summary: false,
+                original_thread_id: None,
                 msg_type: "prompt".to_string(),
                 msg_subtype: Some(prompt_subtype.to_string()),
                 iteration_number: current_iter,
@@ -1256,6 +1371,7 @@ Previous plan:\n{}",
             embedding: None,
             summary_text: None,
             is_summary: false,
+            original_thread_id: None,
             msg_type: tool_msg_type.to_string(),
             msg_subtype: None,
             iteration_number: current_iter,
@@ -1610,6 +1726,7 @@ Previous plan:\n{}",
                     embedding: None,
                     summary_text: None,
                     is_summary: false,
+                    original_thread_id: None,
                     msg_type: "tool-result".to_string(),
                     msg_subtype: Some(qualified_name.clone()),
                     iteration_number: iter_num,
@@ -1819,6 +1936,7 @@ Review the tool results above to see what was attempted and what remains."
                 embedding: None,
                 summary_text: None,
                 is_summary: false,
+                original_thread_id: None,
                 msg_type: "reasoning".to_string(),
                 msg_subtype: None,
                 iteration_number: current_iter,
@@ -2010,5 +2128,47 @@ mod truncation_tests {
         assert_eq!(msgs[0].role, "assistant");
         assert_eq!(msgs[0].content, "half of a sentence");
         assert!(msgs[1].content.contains("attempt 1/2"));
+    }
+}
+
+/// Iteration-percent gate for sub-prompt lookups: lookups only happen while
+/// the current iteration is within the first `percent`% of the iteration
+/// budget (`current_iter * 100 <= iter_limit * percent`). percent=0 disables
+/// the feature at the call site (the gate is never consulted).
+#[allow(dead_code)]
+#[allow(clippy::items_after_test_module)]
+pub(crate) fn sub_prompt_gate_ok(current_iter: i32, iter_limit: i32, percent: u32) -> bool {
+    if percent == 0 {
+        return false;
+    }
+    current_iter * 100 <= iter_limit * percent as i32
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod sub_prompt_gate_tests {
+    use super::*;
+
+    #[test]
+    fn gate_allows_early_iterations_only() {
+        // percent=50, iter_limit=300: lookups allowed while current_iter <= 150.
+        assert!(sub_prompt_gate_ok(1, 300, 50));
+        assert!(sub_prompt_gate_ok(150, 300, 50));
+        assert!(!sub_prompt_gate_ok(151, 300, 50));
+        assert!(!sub_prompt_gate_ok(300, 300, 50));
+    }
+
+    #[test]
+    fn gate_100_checks_every_call() {
+        assert!(sub_prompt_gate_ok(1, 300, 100));
+        assert!(sub_prompt_gate_ok(300, 300, 100));
+        assert!(sub_prompt_gate_ok(1, 30, 100));
+    }
+
+    #[test]
+    fn gate_zero_disables() {
+        // percent=0 disables the feature entirely.
+        assert!(!sub_prompt_gate_ok(1, 300, 0));
+        assert!(!sub_prompt_gate_ok(0, 300, 0));
     }
 }
