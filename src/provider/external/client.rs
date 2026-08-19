@@ -22,6 +22,9 @@ pub struct ExternalProviderClient {
     name: String,
     command: String,
     args: Vec<String>,
+    /// Working directory for the subprocess (the plugin install dir).
+    /// Relative entrypoint args resolve against this, not the process CWD.
+    current_dir: Option<String>,
     process: Arc<StdMutex<Option<Child>>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     stdout: Arc<Mutex<Option<ChildStdout>>>,
@@ -31,11 +34,12 @@ pub struct ExternalProviderClient {
 }
 
 impl ExternalProviderClient {
-    pub fn new(name: &str, command: &str, args: &[String]) -> Self {
+    pub fn new(name: &str, command: &str, args: &[String], current_dir: Option<String>) -> Self {
         Self {
             name: name.to_string(),
             command: command.to_string(),
             args: args.to_vec(),
+            current_dir,
             process: Arc::new(StdMutex::new(None)),
             stdin: Arc::new(Mutex::new(None)),
             stdout: Arc::new(Mutex::new(None)),
@@ -47,11 +51,17 @@ impl ExternalProviderClient {
 
     /// Spawn the subprocess and perform initialize handshake.
     pub async fn start(&self) -> AppResult<()> {
-        let mut child = Command::new(&self.command)
-            .args(&self.args)
+        let mut cmd = Command::new(&self.command);
+        cmd.args(&self.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
+        // Relative entrypoint args resolve against the plugin install dir,
+        // not the omniagent process CWD.
+        if let Some(dir) = &self.current_dir {
+            cmd.current_dir(dir);
+        }
+        let mut child = cmd
             .spawn()
             .ctx(format!("Failed to spawn provider plugin '{}'", self.name))?;
 

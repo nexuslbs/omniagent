@@ -89,6 +89,43 @@ struct ReloadPluginInfo {
     status: String,
     /// Entrypoint command (loaded lazily from plugin.json for providers).
     entrypoint: Option<(String, Vec<String>)>,
+    /// Provider plugin install dir: used as the subprocess CWD so relative
+    /// entrypoint args resolve against the plugin dir, not the process CWD.
+    current_dir: Option<String>,
+}
+
+/// Resolve provider entrypoint args against the plugin install dir.
+///
+/// Mirrors the platform loader (src/platform/external/mod.rs): flags (start
+/// with '-') and absolute paths pass through unchanged; relative args are
+/// joined against the plugin's install dir and used when the candidate file
+/// exists, otherwise the arg is kept verbatim. Legacy absolute args (written
+/// before relative-arg support) under `legacy_prefix` — e.g. remote providers
+/// whose plugin.json was authored against the old bundled dir — are rewritten
+/// to `install_dir` as a compatibility fallback.
+fn resolve_provider_args(
+    args: &[String],
+    install_dir: &str,
+    legacy_prefix: Option<&str>,
+) -> Vec<String> {
+    args.iter()
+        .map(|arg| {
+            if let Some(prefix) = legacy_prefix {
+                if arg.starts_with(prefix) {
+                    return arg.replace(prefix, install_dir);
+                }
+            }
+            if arg.starts_with('-') || std::path::Path::new(arg).is_absolute() {
+                return arg.clone();
+            }
+            let candidate = std::path::Path::new(install_dir).join(arg);
+            if candidate.exists() {
+                candidate.to_string_lossy().to_string()
+            } else {
+                arg.clone()
+            }
+        })
+        .collect()
 }
 
 /// Read plugin state directly from plugins.yml (no filesystem discovery).
@@ -116,81 +153,77 @@ fn read_plugins_from_yaml(data_dir: &str) -> Result<Vec<ReloadPluginInfo>, Strin
             for (name, entry) in entries.iter() {
                 let status = if entry.enabled { "enabled" } else { "disabled" };
                 // Load entrypoint lazily only for providers (needed to start them)
-                let entrypoint = if *type_name == "provider" {
-                    let manifest_path = match entry.source.as_str() {
-                        "built-in" => format!("/app/plugins/{}/{}/plugin.json", type_dir, name),
-                        "bundled" => {
-                            format!("{}/plugins/{}/{}/plugin.json", data_dir, type_dir, name)
-                        }
+                let (entrypoint, current_dir) = if *type_name == "provider" {
+                    // Install dir: where the plugin actually lives. Relative
+                    // entrypoint args resolve against this.
+                    let (manifest_path, install_dir, legacy_prefix) = match entry.source.as_str() {
+                        "built-in" => (
+                            format!("/app/plugins/{}/{}/plugin.json", type_dir, name),
+                            format!("/app/plugins/{}/{}", type_dir, name),
+                            None,
+                        ),
+                        "bundled" => (
+                            format!("{}/plugins/{}/{}/plugin.json", data_dir, type_dir, name),
+                            format!("{}/plugins/{}/{}", data_dir, type_dir, name),
+                            None,
+                        ),
                         "remote" => {
                             let remote = crate::plugins_yaml::get_remote_plugin(
-                                data_dir,
-                                &crate::plugins_yaml::PluginYamlType::Provider,
-                                name,
-                            ).ok_or_else(|| format!(
-                                "Remote provider '{}' has no entry in remote.yml. The plugin was registered with source=remote but no remote.yml entry exists. Expected an entry under 'providers' section. Re-register the plugin or update remote.yml manually.",
-                                name
-                            ))?;
-                            let subpath = remote.path.as_deref().unwrap_or("");
-                            format!(
-                                "{}/plugins/{}/.remote/{}/{}/plugin.json",
-                                data_dir, type_dir, name, subpath
-                            )
-                        }
-                        _ => format!("{}/plugins/{}/{}/plugin.json", data_dir, type_dir, name),
-                    };
-                    if let Ok(manifest) = crate::plugin::load_manifest(&manifest_path) {
-                        // For remote providers, resolve args paths to the install location
-                        if entry.source == "remote" {
-                            let resolved_args: Option<Vec<String>> = if let Some(remote) =
-                                crate::plugins_yaml::get_remote_plugin(
                                     data_dir,
                                     &crate::plugins_yaml::PluginYamlType::Provider,
                                     name,
-                                ) {
-                                let subpath = remote.path.as_deref().unwrap_or("");
-                                let base_dir = format!(
-                                    "{}/plugins/{}/.remote/{}/{}",
-                                    data_dir, type_dir, name, subpath
-                                );
-                                // Extract the last segment of subpath as the old bundled dir name
-                                let bundled_dir = subpath.rsplit('/').next().unwrap_or("");
-                                let old_prefix =
-                                    format!("{}/plugins/{}/{}", data_dir, type_dir, bundled_dir);
-                                manifest.entrypoint.as_ref().map(|ep| {
-                                    ep.args
-                                        .iter()
-                                        .map(|a| {
-                                            if a.starts_with(&old_prefix) {
-                                                a.replace(&old_prefix, &base_dir)
-                                            } else {
-                                                a.clone()
-                                            }
-                                        })
-                                        .collect()
-                                })
-                            } else {
-                                manifest.entrypoint.as_ref().map(|ep| ep.args.clone())
-                            };
-                            if let Some(args) = resolved_args {
-                                manifest.entrypoint.map(|ep| (ep.command, args))
-                            } else {
+                                ).ok_or_else(|| format!(
+                                    "Remote provider '{}' has no entry in remote.yml. The plugin was registered with source=remote but no remote.yml entry exists. Expected an entry under 'providers' section. Re-register the plugin or update remote.yml manually.",
+                                    name
+                                ))?;
+                            let subpath = remote.path.as_deref().unwrap_or("");
+                            let install_dir = format!(
+                                "{}/plugins/{}/.remote/{}/{}",
+                                data_dir, type_dir, name, subpath
+                            );
+                            // Legacy absolute entrypoint args were authored
+                            // against the pre-remote bundled dir:
+                            // `{data_dir}/plugins/{type}/{last-subpath-segment}`.
+                            let bundled_dir = subpath.rsplit('/').next().unwrap_or("");
+                            let legacy_prefix = if bundled_dir.is_empty() {
                                 None
-                            }
-                        } else {
-                            manifest.entrypoint.map(|ep| (ep.command, ep.args))
+                            } else {
+                                Some(format!("{}/plugins/{}/{}", data_dir, type_dir, bundled_dir))
+                            };
+                            (
+                                format!("{}/plugin.json", install_dir),
+                                install_dir,
+                                legacy_prefix,
+                            )
                         }
+                        _ => (
+                            format!("{}/plugins/{}/{}/plugin.json", data_dir, type_dir, name),
+                            format!("{}/plugins/{}/{}", data_dir, type_dir, name),
+                            None,
+                        ),
+                    };
+                    if let Ok(manifest) = crate::plugin::load_manifest(&manifest_path) {
+                        let entrypoint = manifest.entrypoint.map(|ep| {
+                            let args = resolve_provider_args(
+                                &ep.args,
+                                &install_dir,
+                                legacy_prefix.as_deref(),
+                            );
+                            (ep.command, args)
+                        });
+                        (entrypoint, Some(install_dir))
                     } else {
-                        None
+                        (None, None)
                     }
                 } else {
-                    None
+                    (None, None)
                 };
                 plugins.push(ReloadPluginInfo {
                     name: name.clone(),
                     plugin_type: type_name.to_string(),
                     status: status.to_string(),
                     entrypoint,
+                    current_dir,
                 });
             }
         }
@@ -295,14 +328,18 @@ pub(crate) async fn reload_plugins(
                 if should_start {
                     if let Some((cmd, args)) = &plugin.entrypoint {
                         tracing::info!(
-                            "Reload: starting provider '{}' with cmd={} args={:?}",
+                            "Reload: starting provider '{}' with cmd={} args={:?} current_dir={:?}",
                             name,
                             cmd,
-                            args
+                            args,
+                            plugin.current_dir
                         );
                         let client = Arc::new(
                             crate::provider::external::client::ExternalProviderClient::new(
-                                name, cmd, args,
+                                name,
+                                cmd,
+                                args,
+                                plugin.current_dir.clone(),
                             ),
                         );
                         match client.start().await {
@@ -346,4 +383,61 @@ pub(crate) async fn reload_plugins(
     }
 
     Ok((started, stopped, errors))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_provider_args;
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("omni-prov-args-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_resolve_provider_args_relative_existing() {
+        let dir = tmp_dir("rel");
+        let client = dir.join("client.py");
+        std::fs::write(&client, b"").unwrap();
+
+        let args = vec![
+            "client.py".to_string(),
+            "-v".to_string(),
+            "/abs/path.py".to_string(),
+            "missing.py".to_string(),
+        ];
+        let resolved = resolve_provider_args(&args, dir.to_str().unwrap(), None);
+        assert_eq!(resolved[0], client.to_string_lossy().to_string());
+        assert_eq!(resolved[1], "-v");
+        assert_eq!(resolved[2], "/abs/path.py");
+        assert_eq!(resolved[3], "missing.py");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_provider_args_legacy_prefix_rewrite() {
+        let dir = tmp_dir("legacy");
+        let legacy_prefix = "/opt/omni/plugins/providers/noop-full";
+        let args = vec![
+            format!("{}/client.py", legacy_prefix),
+            "other.py".to_string(),
+        ];
+        let resolved = resolve_provider_args(&args, dir.to_str().unwrap(), Some(legacy_prefix));
+        assert_eq!(resolved[0], format!("{}/client.py", dir.to_str().unwrap()));
+        // Relative arg that does not exist in the install dir passes through.
+        assert_eq!(resolved[1], "other.py");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_provider_args_flags_and_abs_pass_through() {
+        let dir = tmp_dir("passthrough");
+        let args = vec!["--model".to_string(), "x".to_string(), "/a/b".to_string()];
+        let resolved = resolve_provider_args(&args, dir.to_str().unwrap(), None);
+        assert_eq!(resolved, args);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

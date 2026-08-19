@@ -28,8 +28,21 @@ impl ProviderRegistry {
 
     /// Create and register a new provider client.
     /// The client is NOT started yet — call `start()` on the returned Arc.
-    pub fn register(&mut self, name: &str, command: &str, args: &[String]) {
-        let client = Arc::new(ExternalProviderClient::new(name, command, args));
+    /// `current_dir` is the plugin install dir: relative entrypoint args
+    /// resolve against it (the subprocess CWD), not the omniagent process CWD.
+    pub fn register(
+        &mut self,
+        name: &str,
+        command: &str,
+        args: &[String],
+        current_dir: Option<String>,
+    ) {
+        let client = Arc::new(ExternalProviderClient::new(
+            name,
+            command,
+            args,
+            current_dir,
+        ));
         self.clients.insert(name.to_string(), client);
     }
 
@@ -86,14 +99,14 @@ mod tests {
     #[test]
     fn test_register_and_has_provider() {
         let mut registry = ProviderRegistry::new();
-        registry.register("test-provider", "echo", &["hello".to_string()]);
+        registry.register("test-provider", "echo", &["hello".to_string()], None);
         assert!(registry.has_provider("test-provider"));
     }
 
     #[test]
     fn test_register_and_get_cloned() {
         let mut registry = ProviderRegistry::new();
-        registry.register("test-provider", "echo", &["hello".to_string()]);
+        registry.register("test-provider", "echo", &["hello".to_string()], None);
         let client = registry.get_cloned("test-provider");
         assert!(client.is_some());
     }
@@ -107,7 +120,7 @@ mod tests {
     #[test]
     fn test_remove_removes_provider() {
         let mut registry = ProviderRegistry::new();
-        registry.register("test-provider", "echo", &["hello".to_string()]);
+        registry.register("test-provider", "echo", &["hello".to_string()], None);
         assert!(registry.has_provider("test-provider"));
         registry.remove("test-provider");
         assert!(!registry.has_provider("test-provider"));
@@ -116,8 +129,8 @@ mod tests {
     #[test]
     fn test_double_register_replaces() {
         let mut registry = ProviderRegistry::new();
-        registry.register("p1", "echo", &["a".to_string()]);
-        registry.register("p1", "cat", &["b".to_string()]);
+        registry.register("p1", "echo", &["a".to_string()], None);
+        registry.register("p1", "cat", &["b".to_string()], None);
         assert!(registry.has_provider("p1"));
         assert!(registry.get_cloned("p1").is_some());
     }
@@ -125,7 +138,7 @@ mod tests {
     #[test]
     fn test_register_arc() {
         let mut registry = ProviderRegistry::new();
-        let client = Arc::new(ExternalProviderClient::new("p1", "echo", &[]));
+        let client = Arc::new(ExternalProviderClient::new("p1", "echo", &[], None));
         registry.register_arc("p1", client);
         assert!(registry.has_provider("p1"));
         assert!(registry.get_cloned("p1").is_some());
