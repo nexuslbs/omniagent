@@ -277,6 +277,9 @@ fn build_provider_metadata() -> HashMap<String, ProviderMetadata> {
             map.insert(name.clone(), meta);
         }
     }
+    // models.yml overrides (config/models.yml): provider-level fields override
+    // plugin metadata; plugin-less providers (builtin chat/anthropic) are added.
+    crate::models_yaml::apply_provider_overrides(&data_dir, &mut map);
     map
 }
 
@@ -330,6 +333,22 @@ pub fn resolve_provider_api_mode(provider_name: &str) -> String {
         .get(provider_name)
         .map(|m| m.api_mode.clone())
         .unwrap_or_else(|| "chat_completions".to_string())
+}
+
+/// Resolve the effective API mode for (provider, model): models.yml
+/// `model_config.<model>.api_mode` first, else the provider-level mode
+/// (models.yml provider api_mode, else plugin manifest / prefix match).
+pub fn resolve_model_api_mode_effective(provider_name: &str, model_name: &str) -> ApiMode {
+    let data_dir = std::env::var("OMNI_DIR").unwrap_or_default();
+    if let Some(mode) =
+        crate::models_yaml::resolve_model_api_mode(&data_dir, provider_name, model_name)
+    {
+        return match mode.as_str() {
+            "anthropic_messages" => ApiMode::AnthropicMessages,
+            _ => ApiMode::ChatCompletions,
+        };
+    }
+    ApiMode::resolve(provider_name, model_name)
 }
 
 // ---------------------------------------------------------------------------

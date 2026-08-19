@@ -16,6 +16,7 @@ pub mod kanban_action;
 pub mod kanban_dispatch;
 pub mod llm;
 pub mod mcp;
+pub mod models_yaml;
 pub mod platform;
 pub mod plugin;
 pub mod plugins_yaml;

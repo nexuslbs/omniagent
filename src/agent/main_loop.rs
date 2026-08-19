@@ -202,6 +202,20 @@ pub(crate) async fn run_main_loop(
     // Snapshot config once for consistency across planning and main loop.
     let cfg_snapshot = cfg.config_snapshot();
 
+    // Per-thread (provider+model) effective config from models.yml:
+    // model_config > provider > global settings (token budgets, max_tokens).
+    let eff_model_cfg = crate::models_yaml::resolve_effective(
+        &cfg.ctx.data_dir,
+        &per_thread_llm.config.provider.0,
+        &per_thread_llm.config.model,
+        &crate::models_yaml::ModelGlobalDefaults {
+            token_budget_soft: cfg_snapshot.token_budget_soft,
+            token_budget_hard: cfg_snapshot.token_budget_hard,
+            max_tokens: cfg_snapshot.max_tokens,
+            max_tokens_on_truncation: cfg_snapshot.max_tokens_on_truncation,
+        },
+    );
+
     // Whether subtask tools are enabled for the main loop
     let enable_subtasks = should_plan;
     // Pre-read prompt log level for consistency across planning and main loop
@@ -211,7 +225,7 @@ pub(crate) async fn run_main_loop(
 
     let plan_content: Option<String> = if should_plan {
         let max_iter = 0; // one-shot, no refinement iterations
-        let max_tokens = cfg_snapshot.max_tokens; // Option<u32>: None = provider default (planning shares the global output budget)
+        let max_tokens = eff_model_cfg.max_tokens; // Option<u32>: None = provider default (planning shares the global output budget)
         let mut last_plan: Option<String> = None;
 
         'plan: {
@@ -547,8 +561,8 @@ Previous plan:\n{}",
     // retries once, then fails fast — the safety valve stays.
     let mut escalated_max_tokens: Option<u32> = None;
     let mut truncation_escalated: bool = false;
-    let base_max_tokens: Option<u32> = cfg.config_snapshot().max_tokens;
-    let max_tokens_on_truncation: Option<u32> = cfg.config_snapshot().max_tokens_on_truncation;
+    let base_max_tokens: Option<u32> = eff_model_cfg.max_tokens;
+    let max_tokens_on_truncation: Option<u32> = eff_model_cfg.max_tokens_on_truncation;
 
     // Output-limit awareness: tell the model its per-response output ceiling so
     // it plans large deliverables (big file writes, long reports) in chunks
@@ -769,8 +783,8 @@ Previous plan:\n{}",
                     "current_iteration": current_iter,
                     "last_condense_iteration": last_condense_iteration,
                     "thread_dir": thread_dir,
-                    "soft_budget": cfg_snapshot.token_budget_soft,
-                    "hard_budget": cfg_snapshot.token_budget_hard,
+                    "soft_budget": eff_model_cfg.token_budget_soft,
+                    "hard_budget": eff_model_cfg.token_budget_hard,
                 }),
                 id: String::new(),
             };

@@ -71,6 +71,12 @@ async fn run_server() -> AppResult<()> {
     // Ensure the config/ subdir exists (root-level yml config files live there).
     config_path::ensure_config_dir(&data_dir);
 
+    // Provider/model overrides via config/models.yml: fail loud on a malformed
+    // file (absent/empty is fine — zero behavior change).
+    if let Err(e) = omniagent::models_yaml::load_models_file(&data_dir) {
+        return Err(Error::Message(format!("config/models.yml: {}", e)));
+    }
+
     // Channels live in {data_dir}/config/channels.yml (no DB table). Set the
     // global data dir so the yml store is reachable from every channel query.
     omniagent::channels_yaml::set_data_dir(&data_dir);

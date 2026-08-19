@@ -95,30 +95,56 @@ pub async fn process_thread(
     let model_name_val = model_name.clone().unwrap_or_default();
     let per_thread_llm = {
         let base_url = crate::llm::resolve_default_base_url(&provider_name_val);
-        let api_mode = crate::llm::ApiMode::resolve(&provider_name_val, &model_name_val);
-        let api_key = match crate::plugins_yaml::get_plugin(
+        // Effective API mode: models.yml model_config.<model>.api_mode first,
+        // else provider-level (models.yml api_mode / plugin manifest).
+        let api_mode =
+            crate::llm::resolve_model_api_mode_effective(&provider_name_val, &model_name_val);
+        // Per-thread effective config from models.yml (model > provider > settings).
+        let model_defaults = crate::models_yaml::ModelGlobalDefaults {
+            token_budget_soft: cfg.config_snapshot().token_budget_soft,
+            token_budget_hard: cfg.config_snapshot().token_budget_hard,
+            max_tokens: cfg.config_snapshot().max_tokens,
+            max_tokens_on_truncation: cfg.config_snapshot().max_tokens_on_truncation,
+        };
+        let eff_cfg = crate::models_yaml::resolve_effective(
             &cfg.ctx.data_dir,
             &provider_name_val,
-            &crate::plugins_yaml::PluginYamlType::Provider,
-        ) {
-            Ok(Some(mut detail)) => {
-                crate::plugins_yaml::resolve_config_refs(&mut detail.resolved_env, &cfg.pool).await;
-                detail
-                    .resolved_env
-                    .get("api_key")
-                    .filter(|s| !s.is_empty())
-                    .cloned()
-                    .or_else(|| {
-                        detail
-                            .config
-                            .get("api_key")
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.is_empty())
-                            .map(crate::plugins_yaml::resolve_config_value)
-                    })
-                    .unwrap_or_default()
-            }
-            _ => String::new(),
+            &model_name_val,
+            &model_defaults,
+        );
+        let api_key = match crate::models_yaml::resolve_models_api_key(
+            &cfg.ctx.data_dir,
+            &provider_name_val,
+            &cfg.pool,
+        )
+        .await
+        {
+            Some(k) if !k.is_empty() => k,
+            _ => match crate::plugins_yaml::get_plugin(
+                &cfg.ctx.data_dir,
+                &provider_name_val,
+                &crate::plugins_yaml::PluginYamlType::Provider,
+            ) {
+                Ok(Some(mut detail)) => {
+                    crate::plugins_yaml::resolve_config_refs(&mut detail.resolved_env, &cfg.pool)
+                        .await;
+                    detail
+                        .resolved_env
+                        .get("api_key")
+                        .filter(|s| !s.is_empty())
+                        .cloned()
+                        .or_else(|| {
+                            detail
+                                .config
+                                .get("api_key")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.is_empty())
+                                .map(crate::plugins_yaml::resolve_config_value)
+                        })
+                        .unwrap_or_default()
+                }
+                _ => String::new(),
+            },
         };
         let llm_cfg = LLMConfig {
             provider: ProviderId::new(&provider_name_val),
@@ -126,13 +152,9 @@ pub async fn process_thread(
             base_url,
             model: model_name_val,
             api_mode,
-            max_tokens: cfg.config_snapshot().max_tokens.unwrap_or(8192),
+            max_tokens: eff_cfg.max_tokens.unwrap_or(8192),
             temperature: cfg.config_snapshot().temperature,
-            supports_reasoning: crate::llm::PROVIDER_METADATA
-                .read()
-                .get(&provider_name_val)
-                .map(|m| m.supports_reasoning)
-                .unwrap_or(false),
+            supports_reasoning: eff_cfg.supports_reasoning,
         };
         LLMClient::new(llm_cfg)
     };

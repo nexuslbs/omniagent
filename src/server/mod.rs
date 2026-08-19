@@ -17,6 +17,7 @@ pub(crate) mod kanban;
 pub(crate) mod llm_proxy;
 pub(crate) mod memory;
 pub(crate) mod messages;
+pub(crate) mod models;
 pub(crate) mod overview;
 pub(crate) mod platforms;
 pub(crate) mod schedule;
@@ -203,6 +204,11 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         .route("/api/context/{channel_name}", get(context_preview_handler))
         // ── Plugin management routes ──
         .route("/api/plugins/ping", get(|| async { "pong" }))
+        // ── Models (config/models.yml) API ──
+        .route(
+            "/api/models",
+            get(models::get_models_handler).put(models::put_models_handler),
+        )
         .route("/api/plugins/check-state", get(diagnostic::check_state))
         .route("/api/plugins/check-db", get(diagnostic::check_db))
         .route(

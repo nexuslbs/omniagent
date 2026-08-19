@@ -1315,6 +1315,76 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
         }
     }
 
+    // ── models.yml overlay + plugin-less providers ──
+    // models.yml `models` list wins over the plugin's default_model enum for
+    // provider selectors (user spec). Apply to every provider detail.
+    for detail in results.iter_mut() {
+        if let Some(models) = crate::models_yaml::models_for_provider(data_dir, &detail.name) {
+            for field in detail.config_schema.iter_mut() {
+                if field.key == "default_model" {
+                    field.allowed_values = Some(models.clone());
+                }
+            }
+        }
+    }
+
+    // Plugin-less providers from models.yml (builtin chat/anthropic support):
+    // synthetic entries so the dashboard provider list + model selectors work
+    // without a plugin on disk or a plugins.yml entry.
+    if let Ok(mfile) = crate::models_yaml::load_models_file(data_dir) {
+        for (name, ov) in &mfile.providers {
+            if ov.plugin.is_true() {
+                continue;
+            }
+            if results.iter().any(|r| r.name == *name) {
+                continue;
+            }
+            let manifest = crate::plugin::PluginManifest {
+                name: name.clone(),
+                version: "0.1.0".to_string(),
+                plugin_type: crate::plugin::PluginType::Provider,
+                description: Some(
+                    "Plugin-less provider from models.yml (builtin chat_completions/anthropic)"
+                        .to_string(),
+                ),
+                entrypoint: None,
+                capabilities: None,
+                config_schema: vec![crate::plugin::ConfigSchemaField {
+                    key: "default_model".to_string(),
+                    label: "Default model".to_string(),
+                    field_type: crate::plugin::FieldType::Enum,
+                    required: false,
+                    secret: false,
+                    description: Some(format!("Models for {} (models.yml)", name)),
+                    default: ov.default_model.clone().map(serde_json::Value::String),
+                    allowed_values: ov.models.clone(),
+                    min: None,
+                    max: None,
+                    format: None,
+                    refresh_url: ov.refresh_url.clone(),
+                    depends_on: None,
+                }],
+                env: std::collections::HashMap::new(),
+                default_base_url: ov.default_base_url.clone(),
+                api_mode: ov.api_mode.clone(),
+                api_modes: None,
+            };
+            let mut detail = build_plugin_detail(
+                &manifest,
+                "models.yml",
+                None,
+                Some(name),
+                None,
+                data_dir,
+                false,
+            );
+            detail.status = "enabled".to_string();
+            detail.has_source_code = false;
+            detail.needs_build = false;
+            results.push(detail);
+        }
+    }
+
     // Sort by name for deterministic ordering
     results.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(results)
@@ -1578,6 +1648,20 @@ pub fn get_enabled_providers(data_dir: &str) -> AppResult<Vec<(String, String)>>
     }
 
     providers.sort_by(|a, b| a.0.cmp(&b.0));
+    // Plugin-less providers defined in models.yml (builtin chat/anthropic
+    // support): they have no plugin / plugins.yml entry, so add them here so
+    // provider selects + thread config see them.
+    if let Ok(mfile) = crate::models_yaml::load_models_file(data_dir) {
+        for (name, ov) in &mfile.providers {
+            if ov.plugin.is_true() {
+                continue;
+            }
+            if !providers.iter().any(|(n, _)| n == name) {
+                providers.push((name.clone(), format!("{} (models.yml, builtin)", name)));
+            }
+        }
+    }
+    providers.sort();
     Ok(providers)
 }
 
@@ -1748,66 +1832,65 @@ pub async fn refresh_plugin_models(
     name: &str,
     pt: &PluginYamlType,
 ) -> AppResult<Option<PluginDetail>> {
-    let detail = get_plugin(data_dir, name, pt)?
-        .ok_or_else(|| Error::Message(format!("Plugin '{}' not found", name)))?;
+    // REWORKED (task 16): the dashboard refresh button now writes models.yml —
+    // it NEVER mutates the plugin's config_schema or DYNAMIC_ENUM_CACHE. The
+    // plugin manifest stays byte-identical; only the models.yml entry changes
+    // (absent -> plugin:true + models:[fetched]; present -> models updated).
+    // Works for plugin-backed AND plugin-less providers with a refresh_url.
+    if *pt != PluginYamlType::Provider {
+        return Ok(None);
+    }
 
-    // Re-parse config_schema from the manifest to get mutable fields
-    let manifest_value = &detail.manifest;
-    let mut config_schema: Vec<ConfigSchemaField> = manifest_value["config_schema"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| serde_json::from_value::<ConfigSchemaField>(v.clone()).ok())
-                .collect::<Vec<_>>()
+    // Refresh URL: models.yml `refresh_url` first, else the plugin manifest's
+    // default_model config_schema refresh_url (fallback for providers not yet
+    // in models.yml — the refresh button still works for them).
+    let refresh_url = crate::models_yaml::models_refresh_url(data_dir, name).or_else(|| {
+        get_plugin(data_dir, name, pt).ok().flatten().and_then(|d| {
+            d.manifest
+                .get("config_schema")
+                .and_then(|schema| schema.as_array())
+                .and_then(|arr| {
+                    arr.iter()
+                        .find(|f| f.get("key").and_then(|k| k.as_str()) == Some("default_model"))
+                        .and_then(|f| f.get("refresh_url"))
+                        .and_then(|u| u.as_str())
+                        .map(|u| u.to_string())
+                })
         })
-        .unwrap_or_default();
+    });
+    let refresh_url = refresh_url
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| Error::Message(format!("Provider '{}' has no refresh_url", name)))?;
 
-    let mut had_refresh = false;
-
-    for field in config_schema.iter_mut() {
-        let refresh_url = match &field.refresh_url {
-            Some(url) if !url.is_empty() => url.clone(),
-            _ => continue,
-        };
-        had_refresh = true;
-
-        // Resolve API key from the provider's resolved plugin config
-        let api_key = detail
-            .config
-            .get("api_key")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string());
-
-        match fetch_enum_values(&refresh_url, api_key.as_deref()).await {
-            Ok(values) => {
-                field.allowed_values = Some(values.clone());
-                let mut cache = crate::plugin::DYNAMIC_ENUM_CACHE.lock();
-                cache.insert(
-                    refresh_url,
-                    crate::plugin::DynamicEnumEntry {
-                        values,
-                        fetched_at: std::time::Instant::now(),
-                    },
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to refresh dynamic enum from {}: {:#}",
-                    refresh_url,
-                    e
-                );
-            }
-        }
-    }
-
-    if had_refresh {
-        let mut result = detail;
-        result.config_schema = config_schema;
-        Ok(Some(result))
+    // API key: models.yml api_key ($env:/$secret: expansion) first, else the
+    // plugin's resolved api_key (same expansion path as plugins.yml).
+    let api_key = if let Some(raw) = crate::models_yaml::models_api_key_raw(data_dir, name) {
+        Some(crate::plugins_yaml::resolve_config_value(&raw))
     } else {
-        Ok(None)
-    }
+        get_plugin(data_dir, name, pt).ok().flatten().and_then(|d| {
+            d.resolved_env
+                .get("api_key")
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .or_else(|| {
+                    d.config
+                        .get("api_key")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(crate::plugins_yaml::resolve_config_value)
+                })
+        })
+    };
+
+    // Fetch the remote models list (OpenAI /v1/models format) and UPSERT into
+    // models.yml. Plugin config_schema / DYNAMIC_ENUM_CACHE are NOT touched.
+    let models = fetch_enum_values(&refresh_url, api_key.as_deref()).await?;
+    crate::models_yaml::upsert_provider_models(data_dir, name, models)?;
+
+    // Rebuild provider metadata so selectors pick up the new models list.
+    crate::llm::refresh_provider_metadata();
+
+    get_plugin(data_dir, name, pt)
 }
 
 // ---------------------------------------------------------------------------
