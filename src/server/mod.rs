@@ -759,9 +759,9 @@ async fn status_handler(
                 "platform": status.platform,
                 "closed": status.closed,
                 "handler_running": has_handler,
-                "current_profile": status.current_profile,
-                "current_model": status.current_model,
-                "current_provider": status.current_provider,
+                "profile": status.current_profile,
+                "model": status.current_model,
+                "provider": status.current_provider,
                 "pending_threads": status.pending_threads,
                 "processing_threads": status.processing_threads,
             }))

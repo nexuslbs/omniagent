@@ -47,7 +47,7 @@ const VALID_STATUSES: &[&str] = &[
     "backlog", "todo", "running", "testing", "review", "blocked", "done",
 ];
 
-/// Sentinel used for optional integer fields (channel_id, priority) to
+/// Sentinel used for optional integer fields (channel, priority) to
 /// signal "keep existing value" inside a static UPDATE statement.
 const IGNORE_INT: i64 = -999_999;
 
@@ -167,13 +167,13 @@ struct CreateTaskRequest {
     title: String,
     body: Option<String>,
     assignee: Option<String>,
-    channel_id: Option<String>,
+    channel: Option<String>,
     profile: Option<String>,
     priority: Option<i32>,
     status: Option<String>,
     template: Option<String>,
     plan: Option<bool>,
-    workflow_id: Option<String>,
+    workflow: Option<String>,
     board: Option<String>,
 }
 
@@ -194,14 +194,14 @@ struct UpdateTaskRequest {
     title: Option<String>,
     body: Option<String>,
     assignee: Option<String>,
-    channel_id: Option<String>,
+    channel: Option<String>,
     profile: Option<String>,
     priority: Option<i32>,
     status: Option<String>,
     archived: Option<bool>,
     template: Option<String>,
     plan: Option<bool>,
-    workflow_id: Option<String>,
+    workflow: Option<String>,
     board: Option<String>,
 }
 
@@ -340,12 +340,12 @@ struct KanbanTaskEntry {
     priority: i32,
     position: i32,
     assignee: Option<String>,
-    channel_id: Option<String>,
+    channel: Option<String>,
     profile: Option<String>,
     archived: bool,
     template: Option<String>,
     plan: Option<bool>,
-    workflow_id: Option<String>,
+    workflow: Option<String>,
     board: Option<String>,
     created_at: Option<String>,
     updated_at: Option<String>,
@@ -377,7 +377,7 @@ struct KanbanThreadEntry {
     created_at: Option<String>,
     metadata: Option<serde_json::Value>,
     thread_status: Option<String>,
-    channel_name: Option<String>,
+    channel: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -429,12 +429,12 @@ fn task_row_to_entry(r: KanbanTaskRow) -> KanbanTaskEntry {
         priority: r.priority.unwrap_or(0),
         position: r.position.unwrap_or(0),
         assignee: r.assignee,
-        channel_id: r.channel_id,
+        channel: r.channel_id,
         profile: r.profile,
         archived: r.archived.unwrap_or(false),
         template: r.template,
         plan: r.plan,
-        workflow_id: r.workflow_id,
+        workflow: r.workflow_id,
         board: r.board,
         created_at: r
             .created_at
@@ -737,12 +737,12 @@ async fn create_task_handler(
           :assignee = body.assignee.as_deref().unwrap_or(""),
           :status = &task_status,
           :priority = task_priority,
-          :channel_id = body.channel_id.as_deref().unwrap_or(""),
+          :channel_id = body.channel.as_deref().unwrap_or(""),
           :profile = body.profile.as_deref().unwrap_or(""),
           :position = next_pos,
           :template = body.template.as_deref().unwrap_or(""),
           :plan = body.plan.unwrap_or(false),
-            :workflow_id = body.workflow_id.as_deref().unwrap_or(""),
+            :workflow_id = body.workflow.as_deref().unwrap_or(""),
             :board = body.board.as_deref().unwrap_or(""),
     )
     )
@@ -1118,16 +1118,16 @@ async fn update_task_handler(
     };
 
     // Workflow definitions are immutable while an execution is active.
-    if body.workflow_id.is_some()
+    if body.workflow.is_some()
         && matches!(
             before.status.as_deref(),
             Some("running" | "testing" | "review")
         )
-        && body.workflow_id.as_deref() != before.workflow_id.as_deref()
+        && body.workflow.as_deref() != before.workflow_id.as_deref()
     {
         return err_json(
             StatusCode::BAD_REQUEST,
-            "workflow_id cannot be changed while the task is active",
+            "workflow cannot be changed while the task is active",
         );
     }
 
@@ -1158,14 +1158,14 @@ async fn update_task_handler(
     // 4. Ensure at least one field was provided
     let has_fields = body.title.is_some()
         || body.body.is_some()
-        || body.channel_id.is_some()
+        || body.channel.is_some()
         || body.profile.is_some()
         || body.priority.is_some()
         || body.status.is_some()
         || body.archived.is_some()
         || body.template.is_some()
         || body.plan.is_some()
-        || body.workflow_id.is_some()
+        || body.workflow.is_some()
         || body.board.is_some()
         || body.assignee.is_some();
 
@@ -1199,14 +1199,14 @@ async fn update_task_handler(
           :assignee = body.assignee.as_deref().unwrap_or(""),
           :ign_str = IGNORE_STR,
           :ign_channel = IGNORE_STR,
-          :channel_id = body.channel_id.as_deref().unwrap_or(IGNORE_STR),
+          :channel_id = body.channel.as_deref().unwrap_or(IGNORE_STR),
           :profile = body.profile.as_deref().unwrap_or(""),
           :priority = body.priority.map(|v| v as i64).unwrap_or(IGNORE_INT),
           :status = body.status.as_deref().unwrap_or(""),
           :archived = body.archived.unwrap_or(before.archived.unwrap_or(false)),
           :template = body.template.as_deref().unwrap_or(""),
           :plan = body.plan.or(before.plan).unwrap_or(false),
-          :workflow_id = body.workflow_id.as_deref().unwrap_or(""),
+          :workflow_id = body.workflow.as_deref().unwrap_or(""),
           :board = body.board.as_deref().unwrap_or(""),
     )
     )
@@ -1515,7 +1515,7 @@ async fn list_threads_handler(
                 .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
             metadata: r.metadata,
             thread_status: r.thread_status,
-            channel_name: r.channel_name,
+            channel: r.channel_name,
         })
         .collect();
 
@@ -2394,18 +2394,18 @@ mod tests {
     }
 
     #[test]
-    fn test_create_task_request_deserializes_workflow_id() {
-        let json = r#"{"title": "T", "workflow_id": "wf-x"}"#;
+    fn test_create_task_request_deserializes_workflow() {
+        let json = r#"{"title": "T", "workflow": "wf-x"}"#;
         let req: CreateTaskRequest =
             serde_json::from_str(json).expect("deserialize CreateTaskRequest");
-        assert_eq!(req.workflow_id.as_deref(), Some("wf-x"));
+        assert_eq!(req.workflow.as_deref(), Some("wf-x"));
         let empty: CreateTaskRequest =
             serde_json::from_str(r#"{"title": "T"}"#).expect("deserialize w/o wf");
-        assert!(empty.workflow_id.is_none());
+        assert!(empty.workflow.is_none());
     }
 
     #[test]
-    fn test_task_row_to_entry_preserves_workflow_id() {
+    fn test_task_row_to_entry_preserves_workflow() {
         let row = KanbanTaskRow {
             id: "task-1".to_string(),
             title: "Test Task".to_string(),
@@ -2425,7 +2425,7 @@ mod tests {
             updated_at: None,
         };
         let entry = task_row_to_entry(row);
-        assert_eq!(entry.workflow_id.as_deref(), Some("wf-x"));
+        assert_eq!(entry.workflow.as_deref(), Some("wf-x"));
     }
 
     #[test]

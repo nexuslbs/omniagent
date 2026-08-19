@@ -8,15 +8,15 @@
 //!
 //! - `GET  /channels`      : list all channels
 //! - `GET  /channels/{id}` : get single channel detail (id == name)
-//! - `PATCH /channels/{id}`: update runtime fields (current_profile /
-//!   current_provider / current_model / closed / readonly / plan / template) —
+//! - `PATCH /channels/{id}`: update runtime fields (profile /
+//!   provider / model / closed / readonly / plan / template) —
 //!   persisted atomically to channels.yml. Definition fields
 //!   (platform / resource_identifier) are NOT editable via the API;
 //!   they change only by editing the yml (or via the `update_channel_platform`
 //!   identity-change path used when a plugin's resource identifier changes).
 //!
-//! Response shape keeps the legacy `current_*` names + `plan` for dashboard
-//! compatibility (the yml itself uses bare `profile`/`model`/`provider`).
+//! Response shape uses the yml's bare `profile`/`provider`/`model` names
+//! (the `current_*` DB columns are mapped at the yml boundary).
 
 use axum::{
     extract::{Path, State},
@@ -57,9 +57,9 @@ pub struct ChannelEntry {
     pub resource_identifier: Option<String>,
     pub external_id: Option<String>,
     pub closed: bool,
-    pub current_profile: String,
-    pub current_provider: Option<String>,
-    pub current_model: Option<String>,
+    pub profile: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
     pub readonly: bool,
     pub plan: bool,
     pub template: Option<String>,
@@ -80,9 +80,9 @@ impl From<Channel> for ChannelEntry {
             // response compatibility (NOT stored in the yml).
             external_id: rid,
             closed: c.closed,
-            current_profile: c.current_profile,
-            current_provider: c.current_provider,
-            current_model: c.current_model,
+            profile: c.current_profile,
+            provider: c.current_provider,
+            model: c.current_model,
             readonly: c.readonly,
             plan: c.plan,
             template: c.template,
@@ -137,9 +137,9 @@ async fn get_channel_handler(
 #[derive(Debug, Deserialize)]
 pub struct UpdateChannelRequest {
     pub name: Option<String>,
-    pub current_profile: Option<String>,
-    pub current_provider: Option<String>,
-    pub current_model: Option<String>,
+    pub profile: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
     pub closed: Option<bool>,
     pub readonly: Option<bool>,
     pub plan: Option<bool>,
@@ -194,13 +194,13 @@ async fn update_channel_handler(
                 ));
             }
         }
-        if let Some(profile) = body.current_profile.as_deref() {
+        if let Some(profile) = body.profile.as_deref() {
             d.profile = (!profile.trim().is_empty()).then(|| profile.to_string());
         }
-        if let Some(provider) = body.current_provider.as_deref() {
+        if let Some(provider) = body.provider.as_deref() {
             d.provider = (!provider.trim().is_empty()).then(|| provider.to_string());
         }
-        if let Some(model) = body.current_model.as_deref() {
+        if let Some(model) = body.model.as_deref() {
             d.model = (!model.trim().is_empty()).then(|| model.to_string());
         }
         if let Some(closed) = body.closed {

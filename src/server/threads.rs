@@ -38,7 +38,7 @@ pub fn threads_router() -> Router<Arc<AppState>> {
 pub struct ThreadsQueryParams {
     pub status: Option<String>,
     pub cause: Option<String>,
-    pub channel_id: Option<String>,
+    pub channel: Option<String>,
     pub id: Option<i64>,
     pub parent_id: Option<i64>,
     pub limit: Option<i64>,
@@ -48,8 +48,7 @@ pub struct ThreadsQueryParams {
 #[derive(Debug, Serialize)]
 pub struct ThreadEntry {
     pub id: i64,
-    pub channel_id: String,
-    pub channel_name: Option<String>,
+    pub channel: String,
     pub status: Option<String>,
     pub cause: Option<String>,
     pub profile: Option<String>,
@@ -179,7 +178,7 @@ async fn list_threads_handler(
         "#,
         ( :status = &status,
           :cause = &cause,
-          :channel_id = params.channel_id.as_deref().unwrap_or(""),
+          :channel_id = params.channel.as_deref().unwrap_or(""),
           :id = params.id.unwrap_or(0),
           :parent_id = params.parent_id.unwrap_or(0) )
     )
@@ -234,7 +233,7 @@ async fn list_threads_handler(
         "#,
         ( :status = &status,
           :cause = &cause,
-          :channel_id = params.channel_id.as_deref().unwrap_or(""),
+          :channel_id = params.channel.as_deref().unwrap_or(""),
           :id = params.id.unwrap_or(0),
           :parent_id = params.parent_id.unwrap_or(0),
           :limit_val = limit,
@@ -265,8 +264,7 @@ async fn list_threads_handler(
                 .unwrap_or(false);
             ThreadEntry {
                 id: r.id,
-                channel_id: r.channel_id,
-                channel_name: r.channel_name,
+                channel: r.channel_id,
                 status: r.status,
                 cause: r.cause,
                 profile: r.profile,

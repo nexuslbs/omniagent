@@ -7,8 +7,8 @@
 //! git-tracked source of truth); every handler reads/writes it (parsed fresh
 //! per request). The only runtime state is the per-hook JSON counter in the
 //! `hook_counters` table, surfaced through the `counter` response field.
-//! The API response shape is unchanged (id = yml key, name = key, plus the
-//! legacy field names) so the dashboard keeps working.
+//! The API response shape mirrors tasks.yml (id = yml key, name = key, and the
+//! bare yml field names such as `channel`/`profile`/`plan`).
 //!
 //! - `GET    /hooks`            : list hooks (optional ?event= / ?enabled=)
 //! - `GET    /hooks/{id}`       : single hook detail
@@ -68,7 +68,7 @@ struct HookResponse {
     prompt: Option<String>,
     action_id: Option<String>,
     profile: Option<String>,
-    channel_id: Option<String>,
+    channel: Option<String>,
     plan: Option<bool>,
     template: Option<String>,
     enabled: bool,
@@ -80,7 +80,7 @@ impl HookResponse {
     fn from_def(
         key: &str,
         def: &HookDef,
-        channel_id: Option<String>,
+        channel: Option<String>,
         counter: serde_json::Value,
     ) -> Self {
         let plan = def.plan();
@@ -97,7 +97,7 @@ impl HookResponse {
             prompt: def.prompt.clone(),
             action_id: def.action.clone(),
             profile: def.profile.clone(),
-            channel_id,
+            channel,
             plan,
             template: def.template.clone(),
             enabled: def.enabled,
@@ -134,7 +134,7 @@ struct CreateHookRequest {
     #[serde(default)]
     profile: Option<String>,
     #[serde(default)]
-    channel_id: Option<String>,
+    channel: Option<String>,
     #[serde(default)]
     plan: Option<bool>,
     #[serde(default)]
@@ -166,7 +166,7 @@ struct UpdateHookRequest {
     #[serde(default)]
     profile: Option<String>,
     #[serde(default)]
-    channel_id: Option<String>,
+    channel: Option<String>,
     #[serde(default)]
     plan: Option<bool>,
     #[serde(default)]
@@ -262,9 +262,9 @@ async fn list_hooks_handler(
     let mut data: Vec<HookResponse> = Vec::with_capacity(keys.len());
     for key in keys {
         let def = &tasks.hooks[key];
-        let channel_id = tasks_yaml::resolve_channel_id(&state.pool, def.channel.as_deref()).await;
+        let channel = tasks_yaml::resolve_channel_id(&state.pool, def.channel.as_deref()).await;
         let counter = counters.get(key).cloned().unwrap_or_else(default_counter);
-        data.push(HookResponse::from_def(key, def, channel_id, counter));
+        data.push(HookResponse::from_def(key, def, channel, counter));
     }
     ok_json(data)
 }
@@ -285,10 +285,9 @@ async fn get_hook_handler(
     };
     match tasks.hooks.get(&id) {
         Some(def) => {
-            let channel_id =
-                tasks_yaml::resolve_channel_id(&state.pool, def.channel.as_deref()).await;
+            let channel = tasks_yaml::resolve_channel_id(&state.pool, def.channel.as_deref()).await;
             let counter = load_counter(&state.pool, &id).await;
-            ok_json(HookResponse::from_def(&id, def, channel_id, counter))
+            ok_json(HookResponse::from_def(&id, def, channel, counter))
         }
         None => err_json(StatusCode::NOT_FOUND, "Hook not found"),
     }
@@ -329,7 +328,7 @@ async fn create_hook_handler(
     }
     def.plan = body.plan;
     def.enabled = body.enabled.unwrap_or(true);
-    def.channel = tasks_yaml::channel_name_for_id(&state.pool, body.channel_id).await;
+    def.channel = tasks_yaml::channel_name_for_id(&state.pool, body.channel).await;
 
     if let Err(err) = tasks_yaml::validate_hook(&id, &def) {
         return err_json(StatusCode::BAD_REQUEST, &err);
@@ -414,7 +413,7 @@ async fn update_hook_handler(
             Some(action_id)
         };
     }
-    if let Some(cid) = body.channel_id {
+    if let Some(cid) = body.channel {
         if cid.trim().is_empty() {
             def.channel = None;
         } else {

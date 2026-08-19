@@ -58,7 +58,7 @@ pub struct MessagesFiltersResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct EventsQueryParams {
-    pub channel_id: Option<String>,
+    pub channel: Option<String>,
     pub thread_id: Option<String>,
     pub role: Option<String>,
     pub provider: Option<String>,
@@ -87,7 +87,7 @@ pub struct MessageEventEntry {
     #[serde(rename = "subtype")]
     pub msg_subtype: Option<String>,
     pub iteration_number: Option<i32>,
-    pub channel_id: Option<String>,
+    pub channel: Option<String>,
     pub status: Option<String>,
     pub profile: Option<String>,
     pub provider: Option<String>,
@@ -96,7 +96,6 @@ pub struct MessageEventEntry {
     pub thread_input_tokens: Option<i64>,
     pub thread_output_tokens: Option<i64>,
     pub thread_cached_tokens: Option<i64>,
-    pub channel_name: Option<String>,
     pub processing_time_ms: Option<i64>,
     pub token_usage: Option<serde_json::Value>,
 }
@@ -355,7 +354,7 @@ async fn events_handler(
 
     // Coalesce optional params to empty string: the WHERE clause pattern
     // `(:param = '' OR ...)` short-circuits when the param is empty.
-    let channel_id = params.channel_id.unwrap_or_default();
+    let channel = params.channel.unwrap_or_default();
     let thread_id = params.thread_id.unwrap_or_default();
     let role = params.role.unwrap_or_default();
     let provider = params.provider.unwrap_or_default();
@@ -388,7 +387,7 @@ async fn events_handler(
           AND (:seq0 != 'true' OR m.thread_sequence = 0)
           AND (:subtype_pattern = '' OR m.msg_subtype LIKE :subtype_pattern)
         "#,
-        ( :channel_id = &channel_id,
+        ( :channel_id = &channel,
           :thread_id = &thread_id,
           :thread_int = thread_int,
           :role = &role,
@@ -457,7 +456,7 @@ async fn events_handler(
             ORDER BY m.id DESC
             LIMIT :limit_val OFFSET :offset_val
             "#,
-            ( :channel_id = &channel_id,
+            ( :channel_id = &channel,
               :thread_id = &thread_id,
               :thread_int = thread_int,
               :role = &role,
@@ -522,7 +521,7 @@ async fn events_handler(
             ORDER BY m.id ASC
             LIMIT :limit_val OFFSET :offset_val
             "#,
-            ( :channel_id = &channel_id,
+            ( :channel_id = &channel,
               :thread_id = &thread_id,
               :thread_int = thread_int,
               :role = &role,
@@ -593,7 +592,7 @@ async fn events_handler(
                 msg_type: r.msg_type,
                 msg_subtype: r.msg_subtype,
                 iteration_number: r.iteration_number,
-                channel_id: r.channel_id,
+                channel: r.channel_id,
                 status: r.status,
                 profile: r.profile,
                 provider: r.provider,
@@ -602,7 +601,6 @@ async fn events_handler(
                 thread_input_tokens: r.thread_input_tokens,
                 thread_output_tokens: r.thread_output_tokens,
                 thread_cached_tokens: r.thread_cached_tokens,
-                channel_name: r.channel_name,
                 processing_time_ms: proc_time,
                 token_usage: r.msg_token_usage.as_ref().and_then(|s| {
                     let v: serde_json::Value = serde_json::from_str(s).ok()?;

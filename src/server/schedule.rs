@@ -4,8 +4,8 @@
 //! file; every handler reads/writes it (parsed fresh per request, so edits to
 //! the file take effect immediately). The API response shape is unchanged so
 //! the dashboard keeps working: `id` = yml key, `name` = key, and the legacy
-//! field names (schedule/prompt/enabled/active/mode/action_id/profile/
-//! channel_id/template/plan/...) are preserved. `last_run`/`next_run`/
+//! field names (cron/prompt/enabled/active/mode/action_id/profile/
+//! channel/template/plan/...) are preserved. `last_run`/`next_run`/
 //! `created_at` no longer exist and are returned as null/empty; runs are
 //! observable via the threads view (`GET /schedule/{id}/threads`).
 //!
@@ -60,7 +60,7 @@ pub struct JobEntry {
     pub id: String,
     pub name: String,
     pub display_name: String,
-    pub schedule: String,
+    pub cron: String,
     pub prompt_preview: String,
     pub prompt: Option<String>,
     pub skills: Vec<String>,
@@ -69,8 +69,7 @@ pub struct JobEntry {
     pub mode: Option<String>,
     pub action_id: Option<String>,
     pub action_name: Option<String>,
-    pub channel_id: Option<String>,
-    pub channel_name: Option<String>,
+    pub channel: Option<String>,
     pub profile: Option<String>,
     pub last_run: Option<String>,
     pub next_run: Option<String>,
@@ -101,7 +100,7 @@ pub struct ScheduleThread {
     pub created_at: Option<String>,
     pub metadata: Option<String>,
     pub thread_status: Option<String>,
-    pub channel_name: Option<String>,
+    pub channel: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -181,10 +180,10 @@ pub struct ListScheduleQuery {
 pub struct CreateScheduleRequest {
     pub name: Option<String>,
     pub display_name: Option<String>,
-    pub schedule: Option<String>,
+    pub cron: Option<String>,
     pub prompt: Option<String>,
     pub active: Option<bool>,
-    pub channel_id: Option<String>,
+    pub channel: Option<String>,
     pub profile: Option<String>,
     pub mode: Option<String>,
     pub action_id: Option<String>,
@@ -198,11 +197,11 @@ pub struct CreateScheduleRequest {
 pub struct UpdateScheduleRequest {
     pub name: Option<String>,
     pub display_name: Option<String>,
-    pub schedule: Option<String>,
+    pub cron: Option<String>,
     pub prompt: Option<String>,
     pub active: Option<bool>,
     pub enabled: Option<bool>,
-    pub channel_id: Option<String>,
+    pub channel: Option<String>,
     pub profile: Option<String>,
     pub mode: Option<String>,
     pub action_id: Option<String>,
@@ -298,7 +297,7 @@ async fn schedule_to_entry(
     key: &str,
     def: &ScheduleDef,
 ) -> JobEntry {
-    let channel_id = tasks_yaml::resolve_channel_id(pool, def.channel.as_deref()).await;
+    let channel = tasks_yaml::resolve_channel_id(pool, def.channel.as_deref()).await;
     let prompt_preview = def
         .prompt
         .as_deref()
@@ -322,7 +321,7 @@ async fn schedule_to_entry(
         id: key.to_string(),
         name: key.to_string(),
         display_name: def.display_name.clone().unwrap_or_else(|| key.to_string()),
-        schedule: def.cron.clone(),
+        cron: def.cron.clone(),
         prompt_preview,
         prompt: def.prompt.clone(),
         skills: parse_skills(def.skills.clone()),
@@ -331,8 +330,7 @@ async fn schedule_to_entry(
         mode: Some(def.mode()),
         action_id,
         action_name,
-        channel_id,
-        channel_name: def.channel.clone(),
+        channel,
         profile: def.profile.clone(),
         last_run: None,
         next_run: None,
@@ -415,14 +413,14 @@ async fn create_schedule_handler(
     Json(body): Json<CreateScheduleRequest>,
 ) -> impl IntoResponse {
     let name = body.name.as_deref().unwrap_or("");
-    let schedule_val = body.schedule.as_deref().unwrap_or("");
+    let cron_val = body.cron.as_deref().unwrap_or("");
 
-    if name.is_empty() || schedule_val.is_empty() {
+    if name.is_empty() || cron_val.is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "Name and schedule are required");
     }
 
     // Validate 5-field cron format
-    if let Some(err) = validate_cron(schedule_val) {
+    if let Some(err) = validate_cron(cron_val) {
         return err_json(StatusCode::BAD_REQUEST, &err);
     }
 
@@ -451,10 +449,10 @@ async fn create_schedule_handler(
     };
 
     // Channel: id → NAME for the yml (unknown id → no channel = default).
-    let channel_name = tasks_yaml::channel_name_for_id(&state.pool, body.channel_id).await;
+    let channel_name = tasks_yaml::channel_name_for_id(&state.pool, body.channel).await;
 
     let mut def = ScheduleDef {
-        cron: schedule_val.to_string(),
+        cron: cron_val.to_string(),
         prompt: body.prompt.clone().filter(|p| !p.trim().is_empty()),
         channel: channel_name,
         profile: body.profile.clone().filter(|p| !p.trim().is_empty()),
@@ -509,7 +507,7 @@ async fn update_schedule_handler(
     };
 
     // Validate cron if being updated
-    if let Some(ref sched) = body.schedule {
+    if let Some(ref sched) = body.cron {
         if let Some(err) = validate_cron(sched) {
             return err_json(StatusCode::BAD_REQUEST, &err);
         }
@@ -563,7 +561,7 @@ async fn update_schedule_handler(
             def.action = Some(action_id);
         }
     }
-    if let Some(cid) = body.channel_id {
+    if let Some(cid) = body.channel {
         if cid.trim().is_empty() {
             def.channel = None;
         } else {
@@ -727,7 +725,7 @@ async fn schedule_threads_handler(
             created_at: r.created_at.map(|dt| fmt_ts(&dt)),
             metadata: r.metadata.and_then(|s| serde_json::from_str(&s).ok()),
             thread_status: r.thread_status,
-            channel_name: r.channel_name,
+            channel: r.channel_name,
         })
         .collect();
 

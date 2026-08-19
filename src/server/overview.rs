@@ -97,7 +97,7 @@ struct TopToolRow {
 #[derive(Serialize)]
 struct OverviewEntry {
     id: i64,
-    channel_id: String,
+    channel: String,
     thread_id: i64,
     content_preview: String,
     status: String,
@@ -107,7 +107,6 @@ struct OverviewEntry {
     /// total_tokens (input + output) mapped to completion_tokens
     completion_tokens: i64,
     created_at: String,
-    channel_name: String,
     thread_count: i64,
     model: Option<String>,
 }
@@ -213,7 +212,7 @@ async fn overview_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
         .into_iter()
         .map(|r| OverviewEntry {
             id: r.id,
-            channel_id: r.channel_id,
+            channel: r.channel_id,
             thread_id: r.thread_id,
             content_preview: r.content_preview.unwrap_or_default(),
             status: r.status.unwrap_or_default(),
@@ -224,7 +223,6 @@ async fn overview_handler(State(state): State<Arc<AppState>>) -> impl IntoRespon
                 .created_at
                 .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
                 .unwrap_or_default(),
-            channel_name: r.channel_name.unwrap_or_default(),
             thread_count: r.thread_count.unwrap_or(0),
             model: r.model,
         })
@@ -412,7 +410,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
                 let completion = r.total_tokens.map(|v| v as i64).unwrap_or(0);
                 OverviewEntry {
                     id: r.id,
-                    channel_id: r.channel_id,
+                    channel: r.channel_id,
                     thread_id: r.thread_id,
                     content_preview: r.content_preview.unwrap_or_default(),
                     status: r.status.unwrap_or_default(),
@@ -423,7 +421,6 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
                         .created_at
                         .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
                         .unwrap_or_default(),
-                    channel_name: r.channel_name.unwrap_or_default(),
                     thread_count: r.thread_count.unwrap_or(0),
                     model: r.model,
                 }

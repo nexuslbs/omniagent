@@ -80,7 +80,7 @@ pub struct MessageSearchEntry {
     pub created_at: String,
     pub msg_type: Option<String>,
     pub msg_subtype: Option<String>,
-    pub channel_id: Option<String>,
+    pub channel: Option<String>,
     pub status: Option<String>,
     pub profile: Option<String>,
     pub provider: Option<String>,
@@ -89,7 +89,6 @@ pub struct MessageSearchEntry {
     pub thread_input_tokens: Option<i32>,
     pub thread_output_tokens: Option<i32>,
     pub thread_cached_tokens: Option<i32>,
-    pub channel_name: Option<String>,
     pub processing_time_ms: Option<i32>,
     pub token_usage: Option<serde_json::Value>,
 }
@@ -401,7 +400,7 @@ async fn search_handler(
             created_at: fmt_ts(&r.created_at),
             msg_type: r.msg_type,
             msg_subtype: r.msg_subtype,
-            channel_id: r.channel_id,
+            channel: r.channel_id,
             status: r.status,
             profile: r.profile,
             provider: r.provider,
@@ -410,7 +409,6 @@ async fn search_handler(
             thread_input_tokens: r.thread_input_tokens,
             thread_output_tokens: r.thread_output_tokens,
             thread_cached_tokens: r.thread_cached_tokens,
-            channel_name: r.channel_name,
             processing_time_ms: r.processing_time_ms,
             token_usage: parse_token_usage(r.token_usage),
         })
