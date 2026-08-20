@@ -13,7 +13,14 @@ use crate::error::{AppResult, Error};
 // ---------------------------------------------------------------------------
 
 fn def_to_channel(name: &str, def: &ChannelDef) -> Channel {
-    let profile = def.profile.clone().unwrap_or_default();
+    // Resolve identity fields (profile/provider/model) AT LOAD TIME with
+    // fallback — the loader returns resolved data, never shallow yml fields.
+    // A channels.yml edit (e.g. switching a channel's provider) therefore
+    // takes effect on the very next load, with no restart and no cache.
+    let resolved = crate::resolution::resolve_channel_identity(
+        crate::channels_yaml::data_dir().unwrap_or_default(),
+        def,
+    );
     let rid = def.resource_identifier.clone().unwrap_or_default();
     Channel {
         id: name.to_string(),
@@ -23,9 +30,9 @@ fn def_to_channel(name: &str, def: &ChannelDef) -> Channel {
         // external_id is NOT a stored yml field — it was always equal to
         // resource_identifier at every creation site; derive for compat.
         external_id: (!rid.is_empty()).then_some(rid),
-        current_profile: profile,
-        current_model: def.model.clone(),
-        current_provider: def.provider.clone(),
+        current_profile: resolved.profile,
+        current_model: resolved.model,
+        current_provider: resolved.provider,
         readonly: def.readonly.unwrap_or(false),
         closed: def.closed.unwrap_or(false),
         plan: def.plan.unwrap_or(true),

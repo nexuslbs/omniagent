@@ -420,7 +420,34 @@ struct CreateTaskResponse {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn task_row_to_entry(r: KanbanTaskRow) -> KanbanTaskEntry {
+fn task_row_to_entry(data_dir: &str, r: KanbanTaskRow) -> KanbanTaskEntry {
+    // Resolve the task's fallback fields (task → board → channel → global)
+    // AT LOAD TIME: the API hands out resolved channel/workflow/profile/plan/
+    // template — never the shallow row (board-based tasks carry NULLs even
+    // though the board defines their effective values). On an invalid board
+    // (boards.yml present + unknown board) dispatch fails loudly elsewhere;
+    // here we log and fall back to the raw row so the API stays displayable.
+    let resolved = match crate::resolution::resolve_task_defaults(
+        data_dir,
+        &crate::resolution::TaskFallbackFields {
+            board: r.board.as_deref(),
+            workflow_id: r.workflow_id.as_deref(),
+            channel_id: r.channel_id.as_deref(),
+            profile: r.profile.as_deref(),
+            plan: r.plan,
+            template: r.template.as_deref(),
+        },
+    ) {
+        Ok(res) => Some(res),
+        Err(e) => {
+            tracing::warn!(
+                "[kanban/tasks] resolve_task_defaults failed for {} (shallow fallback): {}",
+                r.id,
+                e
+            );
+            None
+        }
+    };
     KanbanTaskEntry {
         id: r.id,
         title: r.title,
@@ -429,12 +456,26 @@ fn task_row_to_entry(r: KanbanTaskRow) -> KanbanTaskEntry {
         priority: r.priority.unwrap_or(0),
         position: r.position.unwrap_or(0),
         assignee: r.assignee,
-        channel: r.channel_id,
-        profile: r.profile,
+        channel: resolved
+            .as_ref()
+            .map(|res| res.channel_id.clone())
+            .filter(|c| !c.is_empty())
+            .or_else(|| r.channel_id.clone()),
+        profile: resolved
+            .as_ref()
+            .map(|res| res.profile.clone())
+            .filter(|p| !p.is_empty())
+            .or_else(|| r.profile.clone()),
         archived: r.archived.unwrap_or(false),
-        template: r.template,
-        plan: r.plan,
-        workflow: r.workflow_id,
+        template: resolved
+            .as_ref()
+            .and_then(|res| res.template.clone())
+            .or_else(|| r.template.clone()),
+        plan: resolved.as_ref().and_then(|res| res.plan).or(r.plan),
+        workflow: resolved
+            .as_ref()
+            .and_then(|res| res.workflow_id.clone())
+            .or_else(|| r.workflow_id.clone()),
         board: r.board,
         created_at: r
             .created_at
@@ -592,7 +633,10 @@ async fn list_tasks_handler(
         }
     };
 
-    let entries: Vec<KanbanTaskEntry> = rows.into_iter().map(task_row_to_entry).collect();
+    let entries: Vec<KanbanTaskEntry> = rows
+        .into_iter()
+        .map(|r| task_row_to_entry(&state.data_dir, r))
+        .collect();
     ok_json(entries)
 }
 
@@ -629,7 +673,7 @@ async fn get_task_handler(
         }
     };
 
-    ok_json(task_row_to_entry(row))
+    ok_json(task_row_to_entry(&state.data_dir, row))
 }
 
 // ---------------------------------------------------------------------------
@@ -2493,7 +2537,8 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let entry = task_row_to_entry(row);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let entry = task_row_to_entry(dir.path().to_str().unwrap(), row);
         assert_eq!(entry.workflow.as_deref(), Some("wf-x"));
     }
 
@@ -2605,7 +2650,8 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let entry = task_row_to_entry(row);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let entry = task_row_to_entry(dir.path().to_str().unwrap(), row);
         assert_eq!(entry.id, "task-1");
         assert_eq!(entry.priority, 3);
         assert_eq!(entry.position, 1);
@@ -2632,7 +2678,8 @@ mod tests {
             created_at: None,
             updated_at: None,
         };
-        let entry = task_row_to_entry(row);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let entry = task_row_to_entry(dir.path().to_str().unwrap(), row);
         assert_eq!(entry.priority, 0);
         assert_eq!(entry.position, 0);
         assert!(!entry.archived);

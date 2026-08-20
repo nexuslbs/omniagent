@@ -233,6 +233,95 @@ pub fn resolve_channel(
     }
 }
 
+/// Resolved channel identity: the channel's effective profile/provider/model
+/// with fallbacks applied AT LOAD TIME (channels.yml → profile registry →
+/// global default provider). Every channel loader hands out these resolved
+/// values — never shallow/empty yml fields that still need resolution.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolvedChannelIdentity {
+    /// Effective profile name (yml `profile` → default profile).
+    pub profile: String,
+    /// Effective provider (yml `provider` → resolved profile's provider →
+    /// global default provider). `None` = no provider anywhere.
+    pub provider: Option<String>,
+    /// Effective model (yml `model` → profile model when the channel does
+    /// not pin a provider → the provider's default model).
+    pub model: Option<String>,
+}
+
+/// Resolve a channel definition's identity fields with fallback, AT LOAD
+/// TIME. The chain mirrors `crate::db::threads::resolve_thread_identity`'s
+/// channel tier (provider: channel → profile → global; model resolved at the
+/// same tier as the provider) so a channel loaded through this resolver
+/// reproduces exactly what thread creation would resolve — and a channels.yml
+/// edit (e.g. switching a channel's provider) takes effect on the NEXT load,
+/// with no restart and no boot-time cache.
+pub fn resolve_channel_identity(data_dir: &str, def: &ChannelDef) -> ResolvedChannelIdentity {
+    let profile = def
+        .profile
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(crate::profile::default_profile_name);
+
+    let profile_data = crate::profile::ProfileRegistry::new(data_dir)
+        .get(&profile)
+        .cloned();
+
+    let provider = def
+        .provider
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            profile_data
+                .as_ref()
+                .and_then(|p| p.provider.as_deref())
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            let prov = crate::agent::config::get_global()
+                .map(|g| g.read().default_provider.clone())
+                .unwrap_or_default();
+            (!prov.trim().is_empty()).then_some(prov)
+        });
+
+    let model = def
+        .model
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            // When the channel pins a provider but no model, the profile's
+            // model is NOT used (channel tier semantics: provider default).
+            if def
+                .provider
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            {
+                None
+            } else {
+                profile_data
+                    .as_ref()
+                    .and_then(|p| p.model.as_deref())
+                    .filter(|s| !s.trim().is_empty())
+                    .map(str::to_string)
+            }
+        })
+        .or_else(|| {
+            provider
+                .as_deref()
+                .and_then(crate::llm::resolve_default_model)
+        });
+
+    ResolvedChannelIdentity {
+        profile,
+        provider,
+        model,
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 3 — Per-thread provider/model (resolved once at thread creation)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -311,6 +400,69 @@ mod tests {
         assert_eq!(resolved.channel_id, "kanban");
         assert_eq!(resolved.profile, "omni");
         assert_eq!(resolved.plan, Some(true));
+    }
+
+    #[test]
+    fn resolve_channel_identity_passes_through_yml_fields() {
+        let dir = temp_data_dir(
+            None,
+            Some(
+                r#"
+channels:
+  mm-kanban:
+    profile: omni
+    provider: opencode-go
+    model: opencode-mini
+"#,
+            ),
+            None,
+        );
+        let def = channel_def_from(&dir, "mm-kanban").expect("channel present");
+        let r = resolve_channel_identity(&dir, &def);
+        assert_eq!(r.profile, "omni");
+        assert_eq!(r.provider.as_deref(), Some("opencode-go"));
+        assert_eq!(r.model.as_deref(), Some("opencode-mini"));
+    }
+
+    #[test]
+    fn resolve_channel_identity_falls_back_to_default_profile() {
+        // Channel without identity fields: profile falls back to the default
+        // profile name; provider falls back to the profile registry (absent
+        // here) → None.
+        let dir = temp_data_dir(None, Some("channels:\n  bare:\n    platform: cli\n"), None);
+        let def = channel_def_from(&dir, "bare").expect("channel present");
+        let r = resolve_channel_identity(&dir, &def);
+        assert_eq!(r.profile, crate::profile::default_profile_name());
+        // Provider falls back to the resolved profile's provider (the default
+        // profile ships deepseek) — the loader returns resolved data, never
+        // None while a default profile exists.
+        let profile_name = crate::profile::default_profile_name();
+        let expected = crate::profile::ProfileRegistry::new(&dir)
+            .get(&profile_name)
+            .and_then(|p| p.provider.clone());
+        assert_eq!(r.provider, expected);
+    }
+
+    #[test]
+    fn resolve_channel_identity_preserves_wf_test_pins() {
+        // Regression guard 83f461b: the wf-test channel pins noop /
+        // test-tool-caller — the resolver must preserve the channel override.
+        let dir = temp_data_dir(
+            None,
+            Some(
+                r#"
+channels:
+  wf-test:
+    provider: noop
+    model: test-tool-caller
+"#,
+            ),
+            None,
+        );
+        let def = channel_def_from(&dir, "wf-test").expect("channel present");
+        let r = resolve_channel_identity(&dir, &def);
+        assert_eq!(r.provider.as_deref(), Some("noop"));
+        assert_eq!(r.model.as_deref(), Some("test-tool-caller"));
     }
 
     #[test]
