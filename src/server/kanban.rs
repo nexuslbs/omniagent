@@ -2188,6 +2188,7 @@ fn resolve_workflow_reset(
 struct WorkflowResetRow {
     id: String,
     workflow_id: Option<String>,
+    board: Option<String>,
     workflow_state: Option<serde_json::Value>,
 }
 
@@ -2202,7 +2203,7 @@ async fn reset_workflow_executions_handler(
 ) -> impl IntoResponse {
     let row = match sql_forge!(
         WorkflowResetRow,
-        r#"SELECT id, workflow_id, workflow_state
+        r#"SELECT id, workflow_id, board, workflow_state
            FROM kanban_tasks
            WHERE id = :id"#,
         ( :id = &id )
@@ -2222,7 +2223,30 @@ async fn reset_workflow_executions_handler(
         Some(row) => row,
         None => return err_json(StatusCode::NOT_FOUND, "task not found"),
     };
-    let (should_reset, cleared) = resolve_workflow_reset(&row.workflow_id, &row.workflow_state);
+    // Resolve the task's effective workflow ONCE at load (task → board): a
+    // board task has raw NULL workflow_id but inherits the board's workflow,
+    // so the reset decision must use the RESOLVED workflow_id.
+    let resolved = match crate::resolution::resolve_task_defaults(
+        &state.data_dir,
+        &crate::resolution::TaskFallbackFields {
+            board: row.board.as_deref(),
+            workflow_id: row.workflow_id.as_deref(),
+            channel_id: None,
+            profile: None,
+            plan: None,
+            template: None,
+        },
+    ) {
+        Ok(r) => r,
+        Err(board_err) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("cannot resolve task defaults: {board_err}"),
+            );
+        }
+    };
+    let (should_reset, cleared) =
+        resolve_workflow_reset(&resolved.workflow_id, &row.workflow_state);
     if !should_reset {
         return ok_json(serde_json::json!({
             "reset": false,
@@ -2298,10 +2322,11 @@ async fn redispatch_handler(
     struct RedispatchTaskRow {
         status: String,
         workflow_id: Option<String>,
+        board: Option<String>,
     }
     let task = match sql_forge!(
         RedispatchTaskRow,
-        r#"SELECT status, workflow_id FROM kanban_tasks WHERE id = :id"#,
+        r#"SELECT status, workflow_id, board FROM kanban_tasks WHERE id = :id"#,
         ( :id = &id )
     )
     .fetch_optional(&state.pool)
@@ -2315,11 +2340,38 @@ async fn redispatch_handler(
         }
     };
 
+    // 1a. Resolve the task's effective defaults ONCE at load (task → board →
+    //     channel → global settings) — the universal resolution pattern. The
+    //     role gate below must use the RESOLVED workflow_id: a board task has
+    //     raw NULL workflow_id but inherits the board's workflow.
+    let resolved = match crate::resolution::resolve_task_defaults(
+        &state.data_dir,
+        &crate::resolution::TaskFallbackFields {
+            board: task.board.as_deref(),
+            workflow_id: task.workflow_id.as_deref(),
+            channel_id: None,
+            profile: None,
+            plan: None,
+            template: None,
+        },
+    ) {
+        Ok(r) => r,
+        Err(board_err) => {
+            // Fail-loud invalid board: redispatch cannot determine the
+            // workflow (mirrors create_kanban_step_thread's doomed-thread
+            // failure) → no role to run.
+            return ok_json(serde_json::json!({
+                "redispatch": false,
+                "reason": format!("cannot resolve task defaults: {board_err}"),
+            }));
+        }
+    };
+    let workflow_id = resolved.workflow_id;
+
     // 2. Role gate: only workflow columns map to a role thread. `running`
     //    always; `testing`/`review` only when the workflow defines the role.
     let role_present = match load_workflows_file(&state) {
-        Ok(file) => task
-            .workflow_id
+        Ok(file) => workflow_id
             .as_deref()
             .and_then(|wf_id| file.workflows.get(wf_id))
             .and_then(|wf| {
@@ -2328,7 +2380,7 @@ async fn redispatch_handler(
             .is_some(),
         Err(_) => false,
     };
-    if !kanban_step_actionable(&task.status, task.workflow_id.as_deref(), role_present) {
+    if !kanban_step_actionable(&task.status, workflow_id.as_deref(), role_present) {
         return ok_json(serde_json::json!({
             "redispatch": false,
             "reason": format!("status '{}' has no role to run", task.status),
