@@ -121,16 +121,15 @@ async fn channel_active_thread_count(pool: &PgPool, channel_id: &str) -> Result<
 
 /// Resolve the effective channel NAME for a task: the explicit task channel
 /// wins (even when unknown — the caller then fails the thread with "channel
-/// not found"), else the `default_kanban_channel` setting, else "".
-fn resolve_task_channel(task_channel: Option<&str>) -> String {
-    match task_channel {
-        Some(id) => {
-            crate::channels_yaml::resolve_default_channel(Some(id), "default_kanban_channel")
-                .unwrap_or_default()
-        }
-        None => crate::channels_yaml::resolve_default_channel(None, "default_kanban_channel")
-            .unwrap_or_default(),
-    }
+/// not found"), else the board's channel, else the `default_kanban_channel`
+/// setting, else "". Shared resolver (src/resolution.rs) — no per-consumer
+/// fallback logic.
+fn resolve_task_channel(data_dir: &str, task_channel: Option<&str>, board_channel: Option<&str>) -> String {
+    crate::resolution::effective_channel_name(
+        data_dir,
+        task_channel.filter(|s| !s.trim().is_empty()).or(board_channel),
+        "default_kanban_channel",
+    )
 }
 
 /// Run ONE dispatch pass: promote the highest-priority eligible `todo` task
@@ -287,14 +286,16 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
             channel_active_counts.push(0);
             continue;
         }
-        let channel_id = resolve_task_channel(task.channel_id.as_deref().or_else(|| {
+        let channel_id = resolve_task_channel(
+            data_dir,
+            task.channel_id.as_deref(),
             boards_file.as_ref().and_then(|file| {
                 task.board
                     .as_deref()
                     .and_then(|b| file.boards.get(b))
                     .and_then(|cfg| cfg.channel.as_deref())
-            })
-        }));
+            }),
+        );
         let active = match channel_active_thread_count(pool, &channel_id).await {
             Ok(n) => n,
             Err(e) => {

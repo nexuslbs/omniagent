@@ -214,7 +214,8 @@ struct ReviewTaskRow {
     workflow_state: Option<String>,
     channel_id: Option<String>,
     profile: Option<String>,
-    plan: bool,
+    plan: Option<bool>,
+    board: Option<String>,
 }
 
 /// Apply a MANUAL/API review decision to a kanban task. This is the shared
@@ -258,7 +259,7 @@ pub async fn manual_review_decision(
 
     let task: Option<ReviewTaskRow> = sql_forge!(
         ReviewTaskRow,
-        "SELECT status, workflow_id, CAST(workflow_state AS text) AS workflow_state, channel_id, profile, plan
+        "SELECT status, workflow_id, CAST(workflow_state AS text) AS workflow_state, channel_id, profile, plan, board
          FROM kanban_tasks WHERE id = :task_id FOR UPDATE",
         ( :task_id = task_id )
     )
@@ -281,19 +282,37 @@ pub async fn manual_review_decision(
         });
     }
 
+    // Resolve the task's effective defaults ONCE at load (task → board →
+    // channel → global settings). Board-based tasks carry NULL
+    // workflow_id/channel_id/profile/plan — the board (boards.yml) supplies
+    // the effective values. Fail-loud on invalid boards (mirrors
+    // create_kanban_step_thread semantics).
+    let resolved = crate::resolution::resolve_task_defaults(
+        data_dir,
+        &crate::resolution::TaskFallbackFields {
+            board: task.board.as_deref(),
+            workflow_id: task.workflow_id.as_deref(),
+            channel_id: task.channel_id.as_deref(),
+            profile: task.profile.as_deref(),
+            plan: task.plan,
+            template: None,
+        },
+    )
+    .map_err(err_str)?;
+
     // Workflow config: role presence + retry budgets (workflows.yml).
     let wfs = crate::workflows::WorkflowsFile::load(&crate::config_path::config_path(
         data_dir,
         "workflows.yml",
     ))
     .map_err(err_str)?;
-    let wf = task
+    let wf = resolved
         .workflow_id
         .as_deref()
         .and_then(|id| wfs.workflows.get(id))
         .cloned()
         .unwrap_or_default();
-    let has_wf = task.workflow_id.is_some();
+    let has_wf = resolved.workflow_id.is_some();
     let has_executor_role = wf.roles.contains_key("executor");
     let has_tester_role = wf.roles.contains_key("tester");
 
@@ -329,7 +348,7 @@ pub async fn manual_review_decision(
         let plan = match role_cfg.as_ref().and_then(|r| r.plan_mode.as_deref()) {
             Some("on") => true,
             Some("off") => false,
-            _ => task.plan,
+            _ => resolved.plan.unwrap_or(false),
         };
         let template = role_cfg.as_ref().and_then(|r| r.template.clone());
         // Single canonical INSERT (create_thread). Note: threads.cause has
@@ -340,8 +359,8 @@ pub async fn manual_review_decision(
             &mut *tx,
             "pending",
             "system",
-            task.channel_id.as_deref().unwrap_or(""),
-            task.profile.as_deref().unwrap_or(""),
+            resolved.channel_id.as_str(),
+            resolved.profile.as_str(),
             CreateThreadParams {
                 provider: role_cfg.as_ref().and_then(|r| r.provider.clone()),
                 model: role_cfg.as_ref().and_then(|r| r.model.clone()),
@@ -349,7 +368,7 @@ pub async fn manual_review_decision(
                 schedule_task_id: None,
                 plan,
                 parent_id: None,
-                workflow_id: task.workflow_id.clone(),
+                workflow_id: resolved.workflow_id.clone(),
                 workflow_step: Some(step.to_string()),
                 template,
                 hook_caused: false,
@@ -802,11 +821,12 @@ pub(crate) async fn engine_transition(
         workflow_id: Option<String>,
         workflow_state: Option<serde_json::Value>,
         caller_step: Option<String>,
+        board: Option<String>,
     }
 
     let task = sql_forge!(
         TaskRow,
-        "SELECT kt.status, kt.workflow_id, kt.workflow_state,
+        "SELECT kt.status, kt.workflow_id, kt.workflow_state, kt.board,
                 t.workflow_step AS caller_step
          FROM kanban_tasks kt
          LEFT JOIN threads t ON t.id = :thread_id
@@ -827,7 +847,23 @@ pub(crate) async fn engine_transition(
         return Ok(None);
     }
 
-    let wf_id = task.workflow_id.as_deref();
+    // Resolve the task's effective defaults ONCE at load (task → board).
+    // Board-based tasks carry NULL workflow_id; the board supplies it — this
+    // is the fail-routing bug fix (reviewer reject on a board task must
+    // rework, not block).
+    let resolved = crate::resolution::resolve_task_defaults(
+        data_dir,
+        &crate::resolution::TaskFallbackFields {
+            board: task.board.as_deref(),
+            workflow_id: task.workflow_id.as_deref(),
+            channel_id: None,
+            profile: None,
+            plan: None,
+            template: None,
+        },
+    )
+    .map_err(|e| format!("resolve task defaults: {e}"))?;
+    let wf_id = resolved.workflow_id.as_deref();
     let has_wf = wf_id.is_some();
     let caller_step = task.caller_step.as_deref();
     let mut executions = task.workflow_state.unwrap_or_else(|| serde_json::json!({}));

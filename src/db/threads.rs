@@ -1148,14 +1148,25 @@ pub(crate) async fn create_kanban_step_thread(
         return Ok(None);
     }
 
-    // 1b. Board gate (feature-flagged on the presence of config/boards.yml).
-    //     Boards enabled + invalid board (NULL or not in the file) -> the
-    //     thread is created and IMMEDIATELY terminated as 'failed' with a
-    //     clear Error message (mirrors the no-channel failure path in
-    //     create_thread_with_cause). Valid boards inject their defaults
-    //     between the Kanban Task and the Channel in the resolution chain.
-    let board_cfg = match crate::boards::task_board(data_dir, task.board.as_deref()) {
-        Ok(cfg) => cfg,
+    // 1b. Resolve the task's effective defaults ONCE at load (task → board →
+    //     channel → global settings) — the universal resolution pattern. The
+    //     board gate is part of the resolution: boards.yml present + invalid
+    //     board (NULL or not in the file) fails LOUD here, and the thread is
+    //     created and IMMEDIATELY terminated as 'failed' with a clear Error
+    //     message (mirrors the no-channel failure path in
+    //     create_thread_with_cause).
+    let resolved = match crate::resolution::resolve_task_defaults(
+        data_dir,
+        &crate::resolution::TaskFallbackFields {
+            board: task.board.as_deref(),
+            workflow_id: task.workflow_id.as_deref(),
+            channel_id: task.channel_id.as_deref(),
+            profile: task.profile.as_deref(),
+            plan: task.plan,
+            template: task.template.as_deref(),
+        },
+    ) {
+        Ok(r) => r,
         Err(board_err) => {
             fail_kanban_thread_no_board(pool, data_dir, &task, status, &board_err).await?;
             return Ok(None);
@@ -1163,12 +1174,9 @@ pub(crate) async fn create_kanban_step_thread(
     };
 
     // 2. Resolve the workflow role config and gate on role availability.
-    //    Workflow: Kanban Task wins, else the Board's workflow, else none.
+    //    Workflow: resolved (task → board), then the role config.
     let role = crate::workflows::role_for_step(status);
-    let workflow_id = task
-        .workflow_id
-        .clone()
-        .or(board_cfg.as_ref().and_then(|b| b.workflow.clone()));
+    let workflow_id = resolved.workflow_id.clone();
     let workflow = workflow_id.as_deref().and_then(|wf_id| {
         let path = crate::config_path::config_path(data_dir, "workflows.yml");
         crate::workflows::WorkflowsFile::load(&path)
@@ -1216,42 +1224,17 @@ pub(crate) async fn create_kanban_step_thread(
         }
     }
 
-    // 4. Resolve the effective channel, profile, plan and template.
-    let channel_id = match task
-        .channel_id
-        .as_deref()
-        .or(board_cfg.as_ref().and_then(|b| b.channel.as_deref()))
-    {
-        Some(cid) => {
-            crate::channels_yaml::resolve_default_channel(Some(cid), "default_kanban_channel")
-                .unwrap_or_default()
-        }
-        None => crate::channels_yaml::resolve_default_channel(None, "default_kanban_channel")
-            .unwrap_or_default(),
-    };
+    // 4. Effective channel/profile/plan come from the resolved task defaults
+    //    (task → board → channel → global settings), computed once at load.
+    let channel_id = resolved.channel_id.clone();
     let channel = if channel_id.trim().is_empty() {
         None
     } else {
         crate::db::channels::get_channel_by_id(pool, &channel_id).await?
     };
-    let effective_profile = task
-        .profile
-        .clone()
-        .filter(|p| !p.trim().is_empty())
-        .or_else(|| {
-            board_cfg
-                .as_ref()
-                .and_then(|b| b.profile.clone())
-                .filter(|p| !p.trim().is_empty())
-        })
-        .or_else(|| {
-            channel.as_ref().and_then(|c| {
-                (!c.current_profile.trim().is_empty()).then(|| c.current_profile.clone())
-            })
-        })
-        .unwrap_or_else(crate::profile::default_profile_name);
+    let effective_profile = resolved.profile.clone();
     // Plan budget: role plan_mode ('on'/'off') wins; fall back to the
-    // workflow defaults, then the task column.
+    // workflow defaults, then the resolved task/board plan.
     let plan = role_cfg
         .as_ref()
         .and_then(|r| r.plan_mode.as_deref())
@@ -1261,14 +1244,11 @@ pub(crate) async fn create_kanban_step_thread(
                 .and_then(|wf| wf.defaults.plan_mode.as_deref())
         })
         .map(|mode| matches!(mode, "on"))
-        .or(task.plan)
-        .or(board_cfg.as_ref().and_then(|b| b.plan));
+        .or(resolved.plan);
     let resolved_template = resolve_kanban_thread_template(
         role_cfg.as_ref().and_then(|r| r.template.clone()),
         status == "running",
-        task.template
-            .as_deref()
-            .or(board_cfg.as_ref().and_then(|b| b.template.as_deref())),
+        resolved.template.as_deref(),
         channel.as_ref().and_then(|c| c.template.as_deref()),
     );
 
