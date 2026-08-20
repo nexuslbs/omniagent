@@ -22,10 +22,62 @@ use omniagent::{agent, config_path, db, hooks, mcp, platform, profile, scheduler
 pub(crate) type PlatformRestartSignals =
     Arc<Mutex<HashMap<String, (Arc<AtomicU64>, Arc<AtomicBool>, Arc<Notify>)>>>;
 
+fn print_usage() {
+    println!(
+        "OmniAgent {} — autonomous agent system with Postgres, pgvector, MCP tools.",
+        env!("CARGO_PKG_VERSION")
+    );
+    println!();
+    println!("USAGE:");
+    println!("    omniagent [OPTIONS]");
+    println!();
+    println!("OPTIONS:");
+    println!("    -h, --help     Print this help message and exit");
+    println!("    -V, --version  Print version and exit");
+    println!();
+    println!("With no arguments, starts the server.");
+}
+
+/// Parse CLI args. Returns `None` if the server should boot, or an exit code
+/// if the process should terminate immediately (--version/--help/unknown).
+fn parse_args() -> Result<Option<i32>, String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    for arg in &args {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                println!("omniagent {}", env!("CARGO_PKG_VERSION"));
+                return Ok(Some(0));
+            }
+            "--help" | "-h" => {
+                print_usage();
+                return Ok(Some(0));
+            }
+            _ => {
+                return Err(format!("unknown argument: {}", arg));
+            }
+        }
+    }
+    Ok(None)
+}
+
 #[tokio::main]
 async fn main() -> AppResult<()> {
     // Load .env file if present
     dotenvy::dotenv().ok();
+
+    // CLI arg handling BEFORE booting the server. A second process invoked
+    // with `--version` (e.g. `docker exec ... omniagent --version`) must print
+    // and exit — it must NEVER reach run_server() and run destructive startup
+    // recovery against a live instance.
+    match parse_args() {
+        Ok(Some(code)) => std::process::exit(code),
+        Ok(None) => {}
+        Err(msg) => {
+            eprintln!("error: {}", msg);
+            eprintln!("Try 'omniagent --help' for more information.");
+            std::process::exit(2);
+        }
+    }
 
     run_server().await
 }
@@ -57,6 +109,33 @@ async fn run_server() -> AppResult<()> {
     // Connect to PostgreSQL
     let pool = db::connect(&cfg.database_url).await?;
     tracing::info!("Connected to PostgreSQL");
+
+    // ── SINGLE-INSTANCE GUARD: acquire the Postgres advisory lock on a
+    // DEDICATED connection BEFORE any startup recovery runs. If another live
+    // instance already owns the database, refuse to start with a clear error
+    // and exit non-zero — with NO DB writes (no skip, no redispatch, no
+    // migration side effects). The lock is session-scoped: it auto-releases
+    // when this process dies (crash/restart), so a restart acquires it
+    // immediately. Keys are per-database, so omnistable and omnidev (separate
+    // postgres) never contend; a second container/process pointed at the SAME
+    // database is exactly the case that must be rejected.
+    let (acquired, _lock_conn) = db::try_acquire_advisory_lock(&cfg.database_url).await?;
+    if !acquired {
+        tracing::error!(
+            "Another omniagent instance is already running against this database \
+             (advisory lock key {} is held). Refusing to start to avoid marking \
+             live threads skipped. If this is a stale lock from a crashed \
+             process, it will be released automatically by Postgres.",
+            db::ADVISORY_LOCK_KEY
+        );
+        eprintln!(
+            "error: another omniagent instance is already running against this database. \
+             Refusing to start (advisory lock key {} held).",
+            db::ADVISORY_LOCK_KEY
+        );
+        std::process::exit(1);
+    }
+    tracing::info!("Advisory lock acquired: sole owner of this database");
 
     // Run migrations
     db::migrations::run(&pool)
@@ -210,6 +289,9 @@ async fn run_server() -> AppResult<()> {
     }
 
     // ── STARTUP: Skip pending/processing messages BEFORE spawning any concurrent tasks ──
+    // SAFE to run here because the advisory lock (acquired above) proves the
+    // previous owner is dead — so `processing` => orphaned is a valid
+    // assumption again, restoring the original restart-recovery semantics.
     match agent::skip_on_startup(&pool, &data_dir).await {
         Ok(skipped) => {
             if skipped > 0 {
