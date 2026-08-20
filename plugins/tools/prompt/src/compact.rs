@@ -25,6 +25,19 @@ pub struct CompactSettings {
     /// Per-result excerpt for read-type tools: generous head+tail so the
     /// agent still sees what it learned.
     pub read_excerpt_chars: usize,
+    /// Hard cap (chars) on the frozen `=== Compaction Summary ===` block.
+    /// The block is a STRICT SUPERSET: every compaction appends the newly
+    /// drained entries to it and it is never itself drained (system role).
+    /// Without a cap, a long thread compacts forever: once the preamble,
+    /// block, and recent tail together exceed the hard token budget,
+    /// compaction can never reduce the size below the trigger, so it runs
+    /// on EVERY iteration and each run appends MORE entries — an unbounded
+    /// death spiral (observed live: thread 1726, 162 compactions in 300
+    /// iterations, block grew 66K → 357K chars). When the block exceeds
+    /// this cap, the OLDEST entries are pruned (newest kept), so the block
+    /// stays bounded and compaction can actually bring the context under
+    /// the trigger.
+    pub max_summary_chars: usize,
 }
 /// Tools whose results ARE the agent's working memory (file contents,
 /// listings, search hits). When compaction must drain them, keep a much
@@ -250,20 +263,28 @@ pub fn compact_old_assistant_messages(
         Some(idx) => {
             // Frozen block exists: append VERBATIM (strict superset). The
             // already-frozen text keeps its exact bytes; only new entries
-            // are added at the end.
+            // are added at the end. Then bound the block: if it exceeds the
+            // configured cap, drop the OLDEST entries (newest kept) so a
+            // long thread cannot spiral into compaction-on-every-iteration
+            // (the block would otherwise grow forever — thread 1726 grew
+            // 66K → 357K chars over 162 compactions).
             messages[idx].content = format!("{}\n{}", messages[idx].content, joined_entries);
+            prune_summary_block(&mut messages[idx].content, settings.max_summary_chars);
             messages.drain(drain_start..drain_end);
         }
         None => {
             // First compaction: create the block at the head of the drained
             // region — immediately after the never-touched preamble — and
             // remove the drained span (shifted by the insertion).
+            let mut block_content = format!(
+                "{}\nFrozen prefix block: older conversation turns were compacted into this summary, oldest first. Everything before this block is the fixed preamble; everything after is the live conversation. Recover destroyed read results from auto-notes.md / context-*.json dumps.\n{}",
+                COMPACTION_SUMMARY_MARKER, joined_entries
+            );
+            // A single first compaction can drain a huge span; bound it too.
+            prune_summary_block(&mut block_content, settings.max_summary_chars);
             let block = ChatMessage {
                 role: "system".to_string(),
-                content: format!(
-                    "{}\nFrozen prefix block: older conversation turns were compacted into this summary, oldest first. Everything before this block is the fixed preamble; everything after is the live conversation. Recover destroyed read results from auto-notes.md / context-*.json dumps.\n{}",
-                    COMPACTION_SUMMARY_MARKER, joined_entries
-                ),
+                content: block_content,
                 tool_call_id: None,
                 tool_calls: None,
                 name: None,
@@ -276,6 +297,72 @@ pub fn compact_old_assistant_messages(
     outcome
 }
 
+/// Bound the frozen `=== Compaction Summary ===` block to `max_chars`.
+///
+/// The header (marker + explanation lines, everything before the first
+/// `- [` entry) is always preserved byte-for-byte. Among the entries, the
+/// NEWEST ones are kept and the OLDEST are dropped until the block fits the
+/// cap. Dropped entries are not lost — every drained tool result was already
+/// persisted to the durable `context-<iter>.json` dump (and read-type
+/// results to `auto-notes.md`), so the block is only a bounded in-context
+/// digest. Without this cap the block is a strict superset that grows on
+/// every compaction and can never be reduced, which keeps the context
+/// permanently over the hard budget → compaction fires every iteration and
+/// each firing grows the block further (the observed 300-iteration death
+/// spiral on thread 1726: 162 compactions, block 66K → 357K chars).
+fn prune_summary_block(content: &mut String, max_chars: usize) {
+    if content.chars().count() <= max_chars {
+        return;
+    }
+    // Header = everything before the first entry line ("- [").
+    let header_end = content.find("\n- [").map(|i| i + 1).unwrap_or(0);
+    let header = content[..header_end].to_string();
+    let entries = &content[header_end..];
+    // Reserve headroom for the prune notice appended below.
+    let budget = max_chars.saturating_sub(header.chars().count() + 64);
+
+    // Group entry lines: a line starting with "- [" begins a new entry.
+    let mut entry_list: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for line in entries.lines() {
+        if line.starts_with("- [") && !cur.is_empty() {
+            entry_list.push(std::mem::take(&mut cur));
+        }
+        if cur.is_empty() {
+            cur.push_str(line);
+        } else {
+            cur.push('\n');
+            cur.push_str(line);
+        }
+    }
+    if !cur.is_empty() {
+        entry_list.push(cur);
+    }
+
+    // Keep the NEWEST entries that fit within the budget.
+    let mut kept: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for entry in entry_list.iter().rev() {
+        let cost = entry.chars().count() + 1; // +1 for the separating newline
+        if used + cost > budget {
+            break;
+        }
+        used += cost;
+        kept.push(entry.clone());
+    }
+    kept.reverse();
+    if kept.is_empty() {
+        // Nothing fits — still keep the single newest entry so the block
+        // carries SOME context (bounded by one entry).
+        kept.push(entry_list.last().cloned().unwrap_or_default());
+    }
+    *content = format!(
+        "{}{}\n[older entries pruned — see context-*.json dumps]",
+        header,
+        kept.join("\n")
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +373,7 @@ mod tests {
             tool_excerpt_chars: 800,
             total_excerpt_cap: 4000,
             read_excerpt_chars: 2000,
+            max_summary_chars: 200_000,
         }
     }
 
@@ -544,5 +632,82 @@ mod tests {
         assert!(notes_text.contains("FILE CONTENT"));
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // (6) Regression: the frozen block must stay BOUNDED under repeated
+    // compaction (death-spiral guard). Thread 1726 compacted 162 times in
+    // 300 iterations; without a cap the block grew 66K → 357K chars and the
+    // context stayed permanently over the hard budget, so compaction fired
+    // on EVERY iteration. With a small max_summary_chars, repeated
+    // compactions must keep the block <= cap while preserving the NEWEST
+    // entries (oldest pruned).
+    #[test]
+    fn repeated_compaction_keeps_frozen_block_bounded() {
+        let small = CompactSettings {
+            tool_excerpt_chars: 800,
+            total_excerpt_cap: 4000,
+            read_excerpt_chars: 2000,
+            max_summary_chars: 5000,
+        };
+
+        // 30 turns -> plenty of drainable material for many compactions.
+        // Tool results are LARGE (like real filesystem_read output), so each
+        // drained entry costs ~read_excerpt_chars (2000) in the block — the
+        // realistic pressure that overflowed the 5000-char cap.
+        let mut msgs = vec![user_msg("start")];
+        for i in 0..30 {
+            msgs.push(tool_call_msg("filesystem_read", &format!("reading {i}")));
+            msgs.push(tool_result(
+                "filesystem_read",
+                &format!("RESULT {i} ").repeat(120),
+            ));
+        }
+        msgs.push(assistant_msg("final answer"));
+
+        // Compact 20 times, growing the tail by 1 turn each time (mimics
+        // the iteration loop appending new tool calls between compactions).
+        for iter in 0..20 {
+            let outcome = compact_old_assistant_messages(&mut msgs, 2, None, 7 + iter, &small);
+            // Keep_recent=2: every call drains the OLDEST tail turn (1 tool
+            // message) as long as the tail has more than 2 turns — the
+            // spiral precondition.
+            if iter > 0 {
+                assert_eq!(outcome.removed, 1, "drain must still happen at iter {iter}");
+            }
+            msgs.push(tool_call_msg("filesystem_read", &format!("reading after {iter}")));
+            msgs.push(tool_result(
+                "filesystem_read",
+                &format!("RESULT after {iter} ").repeat(120),
+            ));
+        }
+
+        // The block must be bounded by the cap (plus the single-entry
+        // fallback slack when no entry pair fits — never multiple entries).
+        let pos = summary_pos(&msgs);
+        let block_chars = msgs[pos].content.chars().count();
+        assert!(
+            block_chars <= 5000 + 4000,
+            "frozen block must stay bounded (was {block_chars} chars)"
+        );
+
+        // The NEWEST drained content must be preserved; the OLDEST must be
+        // pruned once the cap is exceeded. (At iter 19 the drained turn is
+        // "after 17" — the two most recent turns stay in the live tail.)
+        let block = &msgs[pos].content;
+        assert!(
+            block.contains("RESULT after 16") || block.contains("RESULT after 17"),
+            "newest entries must be kept in the block"
+        );
+        assert!(
+            !block.contains("RESULT 0") || !block.contains("RESULT 1"),
+            "oldest entries must be pruned once the cap is exceeded"
+        );
+        assert!(
+            block.contains("older entries pruned"),
+            "prune notice must be present"
+        );
+
+        // The live tail survives verbatim.
+        assert!(msgs.iter().any(|m| m.content.contains("RESULT after 19")));
     }
 }

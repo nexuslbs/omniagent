@@ -51,6 +51,10 @@ pub struct PluginConfig {
     pub compact_keep_recent: usize,
     pub compact_max_passes: usize,
     pub compact_keep_step: usize,
+    /// Hard cap (chars) on the frozen compaction summary block; oldest
+    /// entries are pruned when exceeded (death-spiral guard, see
+    /// compact.rs::prune_summary_block).
+    pub max_summary_chars: usize,
     // Prompt builder
     pub memory_max_chars: usize,
     pub soul_max_chars: usize,
@@ -76,6 +80,7 @@ impl PluginConfig {
             compact_keep_recent: 3,
             compact_max_passes: 3,
             compact_keep_step: 1,
+            max_summary_chars: 50_000,
             memory_max_chars: 5000,
             soul_max_chars: 1000,
         }
@@ -136,6 +141,9 @@ impl PluginConfig {
             }
             if let Some(v) = obj.get("compact_keep_step").and_then(&as_usize) {
                 cfg.compact_keep_step = v.max(1);
+            }
+            if let Some(v) = obj.get("max_summary_chars").and_then(&as_usize) {
+                cfg.max_summary_chars = v.max(1);
             }
             if let Some(v) = obj.get("condense_keep_turns").and_then(&as_usize) {
                 cfg.condense_keep_turns = v.max(1);
@@ -1729,6 +1737,7 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
                     tool_excerpt_chars: cfg.tool_excerpt_chars,
                     total_excerpt_cap: cfg.total_excerpt_cap,
                     read_excerpt_chars: cfg.read_excerpt_chars,
+                    max_summary_chars: cfg.max_summary_chars,
                 },
             );
             if let Some(df) = outcome.dump_file {
