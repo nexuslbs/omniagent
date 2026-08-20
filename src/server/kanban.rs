@@ -710,6 +710,23 @@ async fn create_task_handler(
 
     let task_priority = body.priority.unwrap_or(0);
 
+    // Resolve the effective `plan` AT CREATE (spec: thread creation resolves
+    // plan/profile/provider/model from the board). `kanban_tasks.plan` is
+    // `BOOLEAN NOT NULL DEFAULT false` — storing `body.plan.unwrap_or(false)`
+    // for a board task WITHOUT an explicit plan would materialize `false` and
+    // SHADOW the board's `plan: true` at dispatch/review time (the raw
+    // Some(false) beats the board in resolve_task_defaults, so
+    // create_kanban_step_thread / manual_review_decision would create
+    // no-plan threads). An explicit task plan still wins over the board.
+    let task_plan = match body.plan {
+        Some(p) => p,
+        None => crate::boards::task_board(&state.data_dir, body.board.as_deref())
+            .ok()
+            .flatten()
+            .and_then(|b| b.plan)
+            .unwrap_or(false),
+    };
+
     // Get max position for this status
     let next_pos = match next_position(&state.pool, &task_status).await {
         Ok(pos) => pos,
@@ -741,7 +758,7 @@ async fn create_task_handler(
           :profile = body.profile.as_deref().unwrap_or(""),
           :position = next_pos,
           :template = body.template.as_deref().unwrap_or(""),
-          :plan = body.plan.unwrap_or(false),
+          :plan = task_plan,
             :workflow_id = body.workflow.as_deref().unwrap_or(""),
             :board = body.board.as_deref().unwrap_or(""),
     )
