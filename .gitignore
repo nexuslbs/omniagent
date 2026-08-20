@@ -52,3 +52,10 @@ plugins/.remote/
 /omniagent
 /omniagent.new
 mcp-server-memory
+
+# smoke-test / task artifacts
+.g46-omni/
+.g46dbg/
+.smoke-*/
+.taskm-*.py
+.taskm-*.patch
