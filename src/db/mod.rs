@@ -39,7 +39,9 @@ pub const ADVISORY_LOCK_KEY: i64 = 72700123;
 /// The lock is session-scoped: it is released automatically when the returned
 /// connection closes (crash, container stop, graceful exit), so a restart never
 /// leaves a stale lock behind.
-pub async fn try_acquire_advisory_lock(database_url: &str) -> AppResult<(bool, sqlx::PgConnection)> {
+pub async fn try_acquire_advisory_lock(
+    database_url: &str,
+) -> AppResult<(bool, sqlx::PgConnection)> {
     // A dedicated connection (NOT the pool) so the session-level lock is held
     // for the process lifetime. Pool checkouts are recycled and would drop the
     // session lock the moment the checkout is returned.
