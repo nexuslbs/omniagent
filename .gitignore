@@ -53,9 +53,17 @@ plugins/.remote/
 /omniagent.new
 mcp-server-memory
 
-# smoke-test / task artifacts
+# smoke-test / task scratch artifacts — NEVER commit these
 .g46-omni/
 .g46dbg/
 .smoke-*/
+.taskj-*
+.taskk-*
+.taskl-*
 .taskm-*.py
 .taskm-*.patch
+.task*.patch
+patch_clobber.py
+*.rej
+*.orig
+*_mod*.py
