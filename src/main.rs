@@ -42,22 +42,23 @@ fn print_usage() {
 /// if the process should terminate immediately (--version/--help/unknown).
 fn parse_args() -> Result<Option<i32>, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    for arg in &args {
-        match arg.as_str() {
-            "--version" | "-V" => {
-                println!("omniagent {}", env!("CARGO_PKG_VERSION"));
-                return Ok(Some(0));
-            }
-            "--help" | "-h" => {
-                print_usage();
-                return Ok(Some(0));
-            }
-            _ => {
-                return Err(format!("unknown argument: {}", arg));
-            }
+    // Only the FIRST argument is meaningful. The incident trigger was a single
+    // `--version` (or any) arg passed via docker exec; we must never reach
+    // run_server() for it. Extra args beyond the first are ignored.
+    let Some(arg) = args.first() else {
+        return Ok(None);
+    };
+    match arg.as_str() {
+        "--version" | "-V" => {
+            println!("omniagent {}", env!("CARGO_PKG_VERSION"));
+            Ok(Some(0))
         }
+        "--help" | "-h" => {
+            print_usage();
+            Ok(Some(0))
+        }
+        _ => Err(format!("unknown argument: {}", arg)),
     }
-    Ok(None)
 }
 
 #[tokio::main]
