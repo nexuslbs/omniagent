@@ -124,10 +124,16 @@ async fn channel_active_thread_count(pool: &PgPool, channel_id: &str) -> Result<
 /// not found"), else the board's channel, else the `default_kanban_channel`
 /// setting, else "". Shared resolver (src/resolution.rs) — no per-consumer
 /// fallback logic.
-fn resolve_task_channel(data_dir: &str, task_channel: Option<&str>, board_channel: Option<&str>) -> String {
+fn resolve_task_channel(
+    data_dir: &str,
+    task_channel: Option<&str>,
+    board_channel: Option<&str>,
+) -> String {
     crate::resolution::effective_channel_name(
         data_dir,
-        task_channel.filter(|s| !s.trim().is_empty()).or(board_channel),
+        task_channel
+            .filter(|s| !s.trim().is_empty())
+            .or(board_channel),
         "default_kanban_channel",
     )
 }

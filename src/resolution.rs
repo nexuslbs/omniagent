@@ -148,7 +148,12 @@ pub fn resolve_task_defaults(
         .template
         .filter(|s| !s.is_empty())
         .map(str::to_string)
-        .or_else(|| board_cfg.as_ref().and_then(|b| b.template.clone()).filter(|s| !s.is_empty()));
+        .or_else(|| {
+            board_cfg
+                .as_ref()
+                .and_then(|b| b.template.clone())
+                .filter(|s| !s.is_empty())
+        });
 
     Ok(ResolvedTaskDefaults {
         workflow_id,
@@ -189,7 +194,11 @@ pub struct ResolvedChannel {
 ///
 /// data_dir-parameterized mirror of `channels_yaml::resolve_default_channel`
 /// so resolvers are testable without the process-global data dir.
-pub fn effective_channel_name(data_dir: &str, explicit: Option<&str>, setting_name: &str) -> String {
+pub fn effective_channel_name(
+    data_dir: &str,
+    explicit: Option<&str>,
+    setting_name: &str,
+) -> String {
     if let Some(name) = explicit.map(str::trim).filter(|n| !n.is_empty()) {
         return name.to_string();
     }
@@ -419,7 +428,10 @@ mod tests {
             },
         )
         .expect("valid board");
-        assert_eq!(resolved.channel_id, "kanban", "default setting fills channel");
+        assert_eq!(
+            resolved.channel_id, "kanban",
+            "default setting fills channel"
+        );
         assert_eq!(resolved.profile, "omni", "channel profile fallback");
         // Unknown default → "" (fail-with-record at thread creation).
         let dir2 = temp_data_dir(
@@ -519,14 +531,19 @@ mod tests {
             Some("channels:\n  kanban:\n"),
             Some("kanban:\n  default_kanban_channel: missing\n"),
         );
-        assert_eq!(effective_channel_name(&dir2, None, "default_kanban_channel"), "");
+        assert_eq!(
+            effective_channel_name(&dir2, None, "default_kanban_channel"),
+            ""
+        );
     }
 
     #[test]
     fn resolve_channel_carries_field_fallbacks() {
         let dir = temp_data_dir(
             None,
-            Some("channels:\n  kanban:\n    profile: omni\n    provider: openai\n    model: gpt-4\n"),
+            Some(
+                "channels:\n  kanban:\n    profile: omni\n    provider: openai\n    model: gpt-4\n",
+            ),
             None,
         );
         let ch = resolve_channel(&dir, Some("kanban"), "default_kanban_channel");
