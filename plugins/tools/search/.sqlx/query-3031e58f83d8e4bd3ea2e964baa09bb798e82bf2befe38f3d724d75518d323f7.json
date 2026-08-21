@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id, thread_id, role, content, thread_sequence, external_id,\n            metadata::text AS \"metadata\", embedding, summary_text, is_summary,\n            msg_type, msg_subtype, iteration_number,\n            duration_ms, token_usage::text AS \"token_usage\",\n            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\"\n        FROM messages\n        WHERE thread_id = $1\n        ORDER BY thread_sequence DESC, id DESC\n        LIMIT 1\n        ",
+  "query": "\n        SELECT\n            id, thread_id, role, content, thread_sequence, external_id,\n            metadata::text AS \"metadata\", embedding, summary_text, is_summary,\n            msg_type, msg_subtype, original_thread_id, iteration_number,\n            duration_ms, token_usage::text AS \"token_usage\",\n            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\"\n        FROM messages\n        WHERE thread_id = $1 AND role = 'cause'\n        ORDER BY thread_sequence ASC, id ASC\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
@@ -132,6 +132,17 @@
       },
       {
         "ordinal": 12,
+        "name": "original_thread_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "original_thread_id"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
         "name": "iteration_number",
         "type_info": "Int4",
         "origin": {
@@ -142,7 +153,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "duration_ms",
         "type_info": "Int4",
         "origin": {
@@ -153,13 +164,13 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "token_usage",
         "type_info": "Text",
         "origin": "Expression"
       },
       {
-        "ordinal": 15,
+        "ordinal": 16,
         "name": "created_at",
         "type_info": "Text",
         "origin": "Expression"
@@ -183,11 +194,12 @@
       false,
       false,
       true,
+      true,
       false,
       false,
       null,
       null
     ]
   },
-  "hash": "c46aedafa5ef8ac10760444312f1194de656d004831cdfb1eb14597f5905a273"
+  "hash": "3031e58f83d8e4bd3ea2e964baa09bb798e82bf2befe38f3d724d75518d323f7"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, workflow_id, workflow_state\n           FROM kanban_tasks\n           WHERE id = $1",
+  "query": "SELECT id, workflow_id, board, workflow_state\n           FROM kanban_tasks\n           WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,17 @@
       },
       {
         "ordinal": 2,
+        "name": "board",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "board"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
         "name": "workflow_state",
         "type_info": "Jsonb",
         "origin": {
@@ -45,8 +56,9 @@
     "nullable": [
       false,
       true,
+      true,
       true
     ]
   },
-  "hash": "9e266ebec10c329aaa6a3593fd3113737b58030de8a810ca805d8af2bc1fd84a"
+  "hash": "645297fd3916f78b612c30eba3ea61e636365531b8b73a0072d4e96b90ca2696"
 }

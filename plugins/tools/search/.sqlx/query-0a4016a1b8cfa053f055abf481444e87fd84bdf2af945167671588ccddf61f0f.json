@@ -1,38 +1,38 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, title, channel_id, board\n        FROM kanban_tasks\n        WHERE status = $1\n        ORDER BY priority ASC, position ASC\n        ",
+  "query": "SELECT kt.status, kt.workflow_id, kt.workflow_state, kt.board,\n                t.workflow_step AS caller_step\n         FROM kanban_tasks kt\n         LEFT JOIN threads t ON t.id = $1\n         WHERE kt.id = $2\n         FOR UPDATE OF kt",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "id",
+        "name": "status",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "kanban_tasks",
-            "name": "id"
+            "name": "status"
           }
         }
       },
       {
         "ordinal": 1,
-        "name": "title",
+        "name": "workflow_id",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "kanban_tasks",
-            "name": "title"
+            "name": "workflow_id"
           }
         }
       },
       {
         "ordinal": 2,
-        "name": "channel_id",
-        "type_info": "Text",
+        "name": "workflow_state",
+        "type_info": "Jsonb",
         "origin": {
           "Table": {
             "table": "kanban_tasks",
-            "name": "channel_id"
+            "name": "workflow_state"
           }
         }
       },
@@ -46,19 +46,32 @@
             "name": "board"
           }
         }
+      },
+      {
+        "ordinal": 4,
+        "name": "caller_step",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "threads",
+            "name": "workflow_step"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
+        "Int8",
         "Text"
       ]
     },
     "nullable": [
       false,
-      false,
+      true,
+      true,
       true,
       true
     ]
   },
-  "hash": "17bc72224ebfb341ed30eaaa2dfc0604e8e9e5ccb2135a91bb8af76c773123bd"
+  "hash": "0a4016a1b8cfa053f055abf481444e87fd84bdf2af945167671588ccddf61f0f"
 }

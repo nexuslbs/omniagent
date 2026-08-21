@@ -1,10 +1,32 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT status, workflow_id, CAST(workflow_state AS text) AS workflow_state, channel_id, profile, plan\n         FROM kanban_tasks WHERE id = $1 FOR UPDATE",
+  "query": "\n        SELECT id, title, status, archived, channel_id, board\n        FROM kanban_tasks\n        WHERE status = $1 AND archived = false\n        ORDER BY priority ASC, position ASC\n        ",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
+        "name": "id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
         "name": "status",
         "type_info": "Text",
         "origin": {
@@ -15,24 +37,18 @@
         }
       },
       {
-        "ordinal": 1,
-        "name": "workflow_id",
-        "type_info": "Text",
+        "ordinal": 3,
+        "name": "archived",
+        "type_info": "Bool",
         "origin": {
           "Table": {
             "table": "kanban_tasks",
-            "name": "workflow_id"
+            "name": "archived"
           }
         }
       },
       {
-        "ordinal": 2,
-        "name": "workflow_state",
-        "type_info": "Text",
-        "origin": "Expression"
-      },
-      {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "channel_id",
         "type_info": "Text",
         "origin": {
@@ -43,24 +59,13 @@
         }
       },
       {
-        "ordinal": 4,
-        "name": "profile",
+        "ordinal": 5,
+        "name": "board",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "kanban_tasks",
-            "name": "profile"
-          }
-        }
-      },
-      {
-        "ordinal": 5,
-        "name": "plan",
-        "type_info": "Bool",
-        "origin": {
-          "Table": {
-            "table": "kanban_tasks",
-            "name": "plan"
+            "name": "board"
           }
         }
       }
@@ -72,12 +77,12 @@
     },
     "nullable": [
       false,
+      false,
+      false,
+      false,
       true,
-      null,
-      true,
-      true,
-      false
+      true
     ]
   },
-  "hash": "6c07528e7bc7883cdf557bc87ddef549a27b0486f2a6770b14dc2f8d9938685c"
+  "hash": "620757f102567dd4899dac7c459c5c7fffcd2b1afb99f826f057c607e1821873"
 }
