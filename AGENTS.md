@@ -587,3 +587,81 @@ The Remove handler (`delete_plugin_handler`) follows strict source-based rules (
 - **Provider and platform removal** works identically: the handler detects `yaml_type` from YAML entry or disk location.
 
 **`list_plugins` filter change:** Any `enabled: false` YAML entry now suppresses ALL sources for that plugin name (removed source-matching requirement). This handles mismatched source types where YAML says `bundled` but disk source is `built-in`.
+
+## Kanban Boards & Role-Based Workflows (recent architecture)
+
+Kanban is driven by **boards** (`config/boards.yml`, optional — feature-gated on file presence) and **role-based workflows** (`config/workflows.yml`).
+
+### workflows.yml
+
+Each workflow defines the role lifecycle of a task. Roles run in sequence; each role creates a thread in its step:
+
+```yaml
+omniagent-dev:
+  auto_approve: false          # true = skip review approval (executor-only workflows)
+  review_on_fail: false        # true = testing failure routes to review, not back to executor
+  clear_executions_on_review: true
+  retries: 3                   # per-role default
+  roles:
+    executor: { template: dev-executor, mode: agent, action_id: null, plan_mode: on, retries: 9 }
+    tester:    { template: dev-tester,    mode: agent, plan_mode: on }
+    reviewer:  { template: dev-reviewer,  mode: agent, plan_mode: on }
+```
+
+- `mode: agent` runs a prompt template; `mode: action` runs a registered action by `action_id`.
+- Task steps are recorded in `task_executions`; `clear_executions_on_review` wipes them when a task returns to review.
+- Review verdicts via `POST /kanban/tasks/{id}/review` (approve / request changes). Reviewer rejects use `fail-thread` with `workflow_step="running"` to route the task back to a fresh executor thread.
+- `auto_approve: true` + executor-only roles = self-contained dev-executor workflow (no tester/reviewer).
+
+### boards.yml
+
+- When `boards.yml` is present, task create/edit **requires** a valid board (API rejects missing/invalid board).
+- Boards define defaults resolved **at load time** (task → board → channel → global settings): channel, workflow, plan, template, provider/model. Loaders return resolved data, never shallow values — do not re-resolve at execution time.
+- The dispatcher enforces the **board gate** (per-board in-flight limits) and **channel-busy gate**, and **never dispatches archived tasks** (archived guard in the dispatch SQL).
+
+## Event Hooks (`src/hooks.rs`)
+
+Hooks are event-driven, fire-and-forget, and isolated from the triggering work (their failures never break the main flow):
+
+- `thread_started` (fires after a thread is created, not for delegate messages)
+- `thread_finished` (fires on every terminal transition)
+- `new_message` (fires on message insert)
+
+Hooks are delivered to the hooks channel (configured via `default_hook_channel` / channel `hooks` entries). See `config/tasks.yml` in omni-stack for the builtin hook task templates.
+
+## Context Budgets (token-only, prompt plugin owns them)
+
+- Budgets are **global settings** in `settings.yml`: `prompt_token_budget_soft` (100000) / `prompt_token_budget_hard` (500000). There are NO char budgets in core.
+- The **prompt plugin's `compact-messages` tool owns compaction**: it receives soft/hard budget params at call time (resolved per provider/model; `chars/4` fallback when no tokenizer is available) and performs pruning (`prune_old_tool_results`) inside compaction.
+- Core no longer has budget/prune logic — do NOT reintroduce char budgets or prune-elsewhere logic.
+- `AgentConfig` fields are `token_budget_hard/soft` (read from those settings keys).
+
+## models.yml Overrides
+
+`config/models.yml` (in OMNI_DIR; absent = no behavior change):
+- `providers.<name>.plugin: false` → plugin-less provider (no plugin code needed; builtin chat_completions/anthropic support).
+- `providers.<name>.models` → replaces the plugin's `default_model.allowed_values` in selectors.
+- Per-model `model_config.<model>` overrides take highest precedence. Budget precedence: `model_config.<model> > providers.<name> > global settings`.
+
+## API Field-Name Parity (HARD RULE)
+
+The HTTP API and YAML configs use the **same property names**: `channel`, `workflow`, `cron`, `board`, `provider`, `model` — NOT `channel_id`, `workflow_id`, `current_*`, or `schedule`. When adding/renaming API fields, keep YML parity; tests in omni-deployer `scripts/tests.py` (GROUP 39/46/47) assert this.
+
+## Single-Instance Guard
+
+`main.rs` acquires a **Postgres advisory lock** (`db::try_acquire_advisory_lock`, session-scoped) before startup cleanup. A second instance against the same database refuses to start rather than marking live threads skipped (zombie-executor bug). Do not remove or reorder this guard relative to `skip_on_startup`.
+
+## Builtin `omniagent-api` Tool
+
+The agent exposes its own HTTP API as the builtin MCP tool `omniagent-api` (internal self-fetch, no host/port config). It replaced the `kanban_*` / `cron_*` plugin tools. The `fetch` plugin gates unsafe HTTP methods via `allow_unsafe_methods` config.
+
+## Verification Gates (before push)
+
+```bash
+cargo fmt
+cargo check
+cargo clippy -- -D warnings
+cargo test --workspace --release
+```
+
+When a migration/query changes, regenerate the offline SQLx cache (`.sqlx/`) so `SQLX_OFFLINE` builds pass. Never commit scratch files (`*.patch`, `.task*`) — see repo hygiene rules.

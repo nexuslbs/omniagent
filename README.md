@@ -6,6 +6,11 @@ Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP too
 
 | **Hindsight Memory** | Persistent cross-session memory via omniagent-hindsight, with automatic population from new messages and semantic recall in context assembly |
 | **Hindsight Populator** | Background action (deactivated by default) that retains messages into hindsight every 15 minutes. Activate via `UPDATE cron_jobs SET active = true WHERE id = 'hindsight_populator'`. Cron schedules use standard 5-field Linux format (minute hour day month weekday: the leading seconds field is not used). |
+| **Kanban Boards & Workflows** | Role-based kanban workflows (executor → tester → reviewer) from `config/workflows.yml`, board defaults from `config/boards.yml` (feature-gated on file presence), board/dependency/channel-busy gates in the dispatcher, `auto_approve`, `review_on_fail` |
+| **Event Hooks** | Event-driven hooks fired fire-and-forget, isolated from the triggering work: `thread_started`, `thread_finished`, `new_message` — delivered to the hooks channel (Dashboard Hooks page) |
+| **Token Context Budgets** | Token-only budgets (`prompt_token_budget_soft/hard`, default 100000/500000) owned by the prompt plugin's `compact-messages` tool; `chars/4` fallback when no tokenizer is available |
+| **models.yml Overrides** | `config/models.yml` provides plugin-less provider definitions + provider/model/token-budget overrides (`model_config.<model> > providers.<name> > global settings`) |
+| **Builtin `omniagent-api`** | Internal self-API fetch MCP tool (no host/scheme/port needed) replacing the old `kanban_*` / `cron_*` plugin tools; the kanban/cron API uses YML property names (`channel`, `workflow`, `cron`, `provider`, `model`) |
 | **Plugin Config References** | Config values support `$secret:name` (load from secrets DB) and `$env:VAR_NAME` (load from env var) prefixes: keeps secrets out of YAML, single source of truth for shared config. |
 
 ### 🧠 Context Builder & Grounding
@@ -23,166 +28,89 @@ Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP too
 
 ### 💾 Memory Promotion
 - **3 MCP tools** (`promote_to_memory`, `list_memories`, `review_memories`)
-- YAML frontmatter with `confidence`, `source_message_ids`, `source_tool_outputs`, `created_at`, `expires_at`, `last_verified_at`
-- 30-day default expiry with review workflow
+- YAML frontmatter
 
 ### 🔄 Dynamic Enum Refresh (`refresh_url`)
-
-Provider plugins can define a `refresh_url` on `enum` type `config_schema` fields to dynamically fetch model options from an external API at runtime, rather than relying on a static `allowed_values` list.
-
-**How it works:**
-
-1. **Plugin definition**: a `ConfigSchemaField` with `type: "enum"` and a `refresh_url` pointing to an OpenAI-compatible `/v1/models` endpoint:
-   ```json
-   { "key": "default_model", "label": "Default Model", "type": "enum", "refresh_url": "https://api.deepseek.com/v1/models" }
-   ```
-
-2. **On-demand refresh**: `POST /api/plugins/{name}/refresh-models` fetches models from the URL, parses `{data: [{id: "model-name"}, ...]}` responses, and updates an in-memory cache.
-
-3. **In-memory cache**: `DYNAMIC_ENUM_CACHE` (Mutex\<HashMap\<String, DynamicEnumEntry\>\>) with a 5-minute TTL. Cache is checked when enriching plugin data for API responses (`enrich_plugin()`).
-
-4. **API key resolution**: for authenticated endpoints, the key is resolved from the provider's resolved plugin config (`detail.config.api_key`), sent as a `Bearer` token.
-
-5. **Graceful fallback**: if the fetch fails, existing `allowed_values` are preserved (either hardcoded fallbacks in `plugin.json` or the previous cache entry).
-
-**Currently used by:**
-- **deepseek**: `refresh_url: "https://api.deepseek.com/v1/models"` with static fallback `["deepseek-v4-flash", "deepseek-v3", "deepseek-r1"]`
-- **opencode-go**: `refresh_url: "https://opencode.ai/zen/go/v1/models"` (no static fallback)
+- Providers can declare a `refresh_url` in their plugin manifest or `models.yml` to fetch live enum options (models, etc.)
+- Refreshed on demand via the dashboard / providers API; enums cached with metadata (`fetched_at`, `etag`)
 
 ### 🪪 Plugin Config References (`$secret:` / `$env:`)
 
-Plugin config fields can reference values from external sources instead of storing them directly in the YAML file. This keeps secrets out of version control and provides a single source of truth for shared values (URLs, API endpoints, etc.).
+Config values in `plugins.yml` (and other YAML configs) support two reference prefixes:
 
-**Prefix syntax:**
-- `$secret:name`: load from the `/secrets` page (DB-backed), e.g. `$secret:my_api_key`
-- `$env:VAR_NAME`: load from environment variable, e.g. `$env:DEEPSEEK_API_KEY`
+| Prefix | Source | Example |
+|--------|--------|---------|
+| `$secret:name` | Secrets DB table (`/secrets` page) | `$secret:my_telegram_token` |
+| `$env:VAR_NAME` | Process environment variable | `$env:OPENCODE_GO_API_KEY` |
 
-**Where it works:**
-Any string or secret field in platform/tool/provider config forms. The prefix is resolved at config consumption time:
-- `$env:` is resolved during `build_plugin_detail()`: synchronous env var lookup
-- `$secret:` is resolved in the HTTP handler: async DB query against the `secrets` table
-
-**Example YAML:**
-```yaml
-telegram:
-  enabled: true
-  config:
-    bot_token: "$secret:my_telegram_token"
-    polling_interval: 30
-```
-
-The actual token value lives in the `/secrets` page, not the YAML file.
-
-**Example env var reference:**
-```yaml
-opencode-go:
-  enabled: true
-  config:
-    api_key: "$env:OPENCODE_GO_API_KEY"
-```
-
-The value is read from the process environment at runtime.
-
-**Dashboard UI:**
-Every string and secret config field has a 🔗 toggle button. Click it to switch to reference mode: choose between "Secret" (load from secrets DB) or "Env Var" (load from env var), then enter the name.
+The YAML file stores the reference string, never the resolved value. The agent resolves references at runtime, so secrets stay out of version control and shared values have a single source of truth.
 
 ### 🔌 Plugin System (MCP Tools, Platforms, Providers)
 
-OmniAgent has a three-source plugin system:
+The plugin system has **three sources**:
 
-- **Built-in** (`/app/plugins/{type}/{name}/`): workspace member crates compiled as part of omniagent
-- **Bundled** (`{workspace_dir}/plugins/{type}/{name}/`): standalone crates shipped with omni-stack
-- **Remote** (`{data_dir}/plugins/{type}/.remote/{name}/`): git-cloned plugins from external repos
+| Source | Location | Description |
+|--------|----------|-------------|
+| **Built-in** | `/app/plugins/{type}/{name}/` | Workspace crates inside the omniagent image (cron, kanban, memory, metrics, plugin-manager, query, search, subtasks, hindsight, prompt, wiki, ...) |
+| **Bundled** | `plugins/{type}/{name}/` (omni-stack fork) | Standalone crates added by forked repos, same layout as built-in with a `plugin.json` manifest |
+| **Remote** | `plugins/{type}/.remote/{name}/` | Git-cloned from external repositories via `install-git` / Download (Update) |
 
-Each plugin has a **type** (mcp/tool, platform, provider) and a **category** determined by YAML config and disk state. At most one source can be enabled per plugin name: enabling a different source overwrites the YAML entry.
+**Plugin identity is the composite key `[type + source + name]`** — never look up by name alone. Action handlers derive type+source from the URL path (HARD RULE, see AGENTS.md).
 
-**Key rules:**
-- Builtin tools are disabled by default: must be explicitly added to YAML with `enabled: true` and `builtin: true`
-- If YAML has a tool without `builtin: true`, the builtin source is ignored in favor of the bundled/remote one
-- Builtin plugins with no YAML entry appear as disabled: Enable creates a YAML entry with `builtin: true`
-- Erroneous binary-only bundled copies (cron, kanban, memory, etc.) show as duplicated with a yellow badge
-- Install/Reinstall automatically falls back to the builtin source if the bundled dir has no source code
-
-Managed via the Dashboard UI (/tools, /platforms, /providers pages), YAML files, and REST API.
-
-For full internal documentation, see [AGENTS.md](AGENTS.md).
+The dashboard Tools page shows plugins from all sources; YAML presence/`builtin: true` flags determine the primary source. Plugin state (enabled/disabled, config) lives in `plugins.yml`; installs compile + register, uninstall removes binary + disables, update re-clones from git + recompiles.
 
 ### 🔌 MCP External Servers
-- **stdio transport**: spawn subprocesses, JSON-RPC 2.0 over stdin/stdout
-- **HTTP transport**: connect to remote MCP servers via HTTP POST
-- **Circuit breaker**: automatic disable after N consecutive failures
-- **Dynamic tool registry**: external tools auto-merge with built-in tools at startup
-- Configured via `MCP_SERVERS_CONFIG` env var or `<data_dir>/config/mcp-servers.json`
+
+External MCP servers are configured via `MCP_SERVERS_CONFIG` (a JSON file listing server name, command, args, and env). They appear as tool sources in the MCP registry and the dashboard Tools page.
 
 ### 📋 Thread Subtasks
 
-Thread subtasks enable the LLM to decompose a complex request into trackable sub-items. Subtasks are stored in the `thread_subtasks` table and managed via the `manage_subtasks` MCP tool.
-
-**Tool: `manage_subtasks`**
-- Actions: `add`, `list`, `update`, `delete`, `get_counts`
-- Each subtask has: `id`, `thread_id`, `description`, `status` (pending/completed/cancelled), `priority`
-- Returns structured JSON with `current_subtask`, counts per status, and full subtask list
-
-**Current Subtask Logic:**
-- The first pending subtask (ordered by `priority DESC`, `created_at ASC`) is the "current" subtask
-- When all subtasks are completed/cancelled, `current_subtask` is `null`
-- This drives the prompt injection: only the current subtask is prominently displayed
-
-**Prompt Injection:**
-- When subtasks exist, a `[Thread Subtasks]` section is injected into the system prompt (NeverTrim tier)
-- Shows current subtask with status emoji, and remaining subtask count
-- Only injected when there are active (non-cancelled) subtasks: empty threads see no section
-
-**Override Pattern:**
-- To redefine a thread's subtasks, delete all existing ones (`action: delete` for each) then add new ones
-- Bulk updates supported via SQL-level operations (e.g., mark all as completed)
+- **Subtasks MCP tool**: manage a subtask list per thread (create, update, complete, cancel) with statuses `pending / completed / cancelled / error`
+- Subtask state is included in context assembly at the NeverTrim tier
+- Failed subtasks can be retried (bounded by `max_unfinished_subtask_retries`)
 
 ### Requirements
 
-- Docker & Docker Compose
-- An LLM API key (OpenCode Go, OpenAI, Anthropic, or DeepSeek)
+- Rust (stable) + PostgreSQL 16 with pgvector
+- Qdrant (optional, for wiki/message vector search)
 
 ### Setup
 
-The omniagent binary runs as part of the **omni-stack** Docker Compose stack.
-See [nexuslbs/omni-stack](https://github.com/nexuslbs/omni-stack) for deployment instructions.
-
-For local development outside Docker:
 ```bash
+cargo build --release
 cp .env.example .env
-# Edit .env with at minimum DATABASE_URL and LLM_PROVIDER
-cargo run
 ```
-
-The binary reads `.env` automatically via `dotenvy`.
 
 ### Verify
 
 ```bash
-curl http://localhost:8080/health
+# Edit .env with at minimum DATABASE_URL and LLM_PROVIDER
+cargo run
 # → ok
+curl http://localhost:8080/health
 ```
-
-> **Note:** omniagent has no docker-compose.yml of its own. All Docker Compose configuration lives in [nexuslbs/omni-stack](https://github.com/nexuslbs/omni-stack).
 
 ## Channels
 
-Channels represent communication endpoints. Each channel has its own state, profile, and model configuration. The agent processes messages **sequentially within a channel** but **in parallel across channels**.
+Channels represent communication endpoints (Telegram, Mattermost, API, cron, kanban). Each channel has its own profile, provider, model, and planning-mode configuration. Messages are processed sequentially within a channel, in parallel across channels.
+
+On the Mattermost platform, the `$new` command creates/updates a channel by that name: `$new <name>` — the optional first argument names the channel instead of prompting.
 
 ### Channel Fields
 
 | Field | Description |
 |-------|-------------|
-|| `name` | Human-readable channel name |
-|| `platform` | Platform identifier (e.g., `telegram`, `api`, `cron`) |
-|| `external_id` | Platform-specific address (chat ID, channel name, etc.) |
-|| `resource_identifier` | Canonical resource address: used in (platform, resource_identifier) unique constraint |
-|| `current_profile` | Profile to use for message processing |
-|| `current_provider` | Provider override for this channel |
-|| `current_model` | Model override for this channel |
-|| `closed` | Boolean (default `false`). A closed channel retains history but **won't process new messages** |
-|| `readonly` | Boolean (default `false`). Protects the channel from deletion |
-|| `template` | Optional template name; loaded from `profiles/<name>/templates/` and injected into **every user message** seq-0 prompt. Also acts as **default template** for Cron/Kanban tasks in this channel (task-level templates take priority) |
+| `name` | Unique channel name (the stable identifier used everywhere: API, `threads.channel_id`, config files) |
+| `platform` | `mattermost`, `telegram`, `api`, `cron`, `cli` (platform-less = `cli`: never delivers externally) |
+| `external_id` | Platform-specific resource identifier |
+| `cause` | How messages are created: `user`, `cron`, `kanban`, `api`, ... |
+| `current_profile` | Default profile for the channel |
+| `current_provider` | Overrides the profile's provider |
+| `current_model` | Overrides the profile's model |
+| `planning_mode` | Default planning mode for threads in this channel |
+| `template` | Optional template name injected into every user message's prompt (also the default template for cron/kanban tasks in this channel) |
+| `readonly` | Protects the channel from deletion (e.g. the default cron channel) |
+| `closed` | Stops processing new messages (they remain pending) while retaining history |
 
 ### Creating a Channel
 
@@ -251,13 +179,19 @@ The effective provider and model for each request are resolved in this order:
 
 **Model resolution depends on where the provider came from:**
 
-- **Provider from channel** → the model is taken from the channel's `current_model`, **or** the provider plugin's `default_model` if the channel has no model set. The profile's model is **ignored** at this level.
-- **Provider from profile** → the model is taken from the profile's `model`, **or** the provider plugin's `default_model` if the profile has no model set. The channel's model is **ignored** at this level.
-- **Provider from `LLM_PROVIDER` env var** → the model is always the provider plugin's `default_model`. Both channel and profile models are **ignored**.
+- **Provider from channel** → the model is taken from the channel's `current_model`, **or** the provider's `default_model` if the channel has no model set. The profile's model is **ignored** at this level.
+- **Provider from profile** → the model is taken from the profile's `model`, **or** the provider's `default_model` if the profile has no model set. The channel's model is **ignored** at this level.
+- **Provider from `LLM_PROVIDER` env var** → the model is always the provider's `default_model`. Both channel and profile models are **ignored**.
 - **No model resolved at any level** → the agent returns an error.
 
 **API key resolution:**
-The API key is read from the `{PROVIDER}_API_KEY` environment variable matching the resolved provider name (e.g. `DEEPSEEK_API_KEY` for deepseek, `OPENCODE_GO_API_KEY` for opencode-go). There is no generic fallback: the correct key must be set for the active provider.
+The API key is read from the `{PROVIDER}_API_KEY` environment variable matching the resolved provider name (e.g. `DEEPSEEK_API_KEY` for deepseek, `OPENCODE_GO_API_KEY` for opencode-go). `models.yml` provider entries can also declare `api_key: "$env:..."` / `"$secret:..."`. There is no generic fallback: the correct key must be set for the active provider.
+
+**models.yml overrides (`config/models.yml`):** at startup the agent loads provider/model overrides from `models.yml` (absent/empty = zero behavior change):
+- `providers.<name>.plugin: false` defines a **plugin-less provider** using builtin chat_completions/anthropic support (no plugin code needed)
+- `providers.<name>.models` replaces the plugin's `default_model.allowed_values` in selectors (Channels page, Providers page, `/models` page)
+- Provider-level fields (`api_mode`, `supports_reasoning`, `default_base_url`, `refresh_url`, `default_model`, `api_key`, `token_budget_*`, `max_tokens*`) override the plugin config
+- `model_config.<model>` per-model overrides take **highest precedence** — for each of soft/hard token budgets: `model_config.<model> > providers.<name> > global settings`
 
 **Summary table:**
 
@@ -271,632 +205,222 @@ The API key is read from the `{PROVIDER}_API_KEY` environment variable matching 
 
 ### Sequential Per Channel, Parallel Across Channels
 
-The agent runs a **supervisor loop** that:
-1. Lists all channels from the database
-2. Spawns a dedicated `channel_handler` task for each channel that isn't already running
-3. Each `channel_handler` independently polls its channel for pending messages
-4. Within a channel, messages are processed one at a time (FIFO order)
-5. Across channels, processing happens in parallel
-
-```
-┌─────────────────────────────────────────────────┐
-│  Supervisor Loop (every 5 sec)                   │
-│                                                   │
-│  ├── Channel A ── handler ── msg₁ ── msg₂ ── ... │
-│  ├── Channel B ── handler ── msg₁ ── msg₂ ── ... │
-│  ├── Channel C ── handler ── msg₁ ── msg₂ ── ... │
-│  └── cron/kanban ── handler ── msg₁ ── msg₂ ... │
-└─────────────────────────────────────────────────┘
-```
+Messages in a channel are processed sequentially (one thread at a time), and channels run in parallel. Each channel's processing loop:
+1. Picks the next pending message for the channel (FIFO by seq).
+2. Creates a thread if one isn't running.
+3. Runs the agent loop (prompt assembly → LLM → tool calls) until the thread terminates.
+4. Marks the thread terminal (completed/failed) and moves on.
 
 ### Message Lifecycle
 
-```
-User inserts a message (status = pending)
-  │
-  ▼
-Agent picks it up, marks as processing
-  │
-  ├─ LLM responds with text → saved as msg_type='message'
-  ├─ LLM includes reasoning → saved as msg_type='reasoning' (separate row)
-  ├─ LLM plans next step → saved as msg_type='plan'
-  ├─ LLM calls tools in parallel → saved as msg_type='multi-tool'
-  └─ LLM calls tools → tool executed, result fed back, loop continues
-  │
-  ▼
-Prompt marked as completed, processing_time_ms and token_usage set
-```
+1. A message is inserted with `status = 'pending'`.
+2. The dispatcher (channel loop) picks it up, creates a thread, and marks the message `processing`.
+3. The agent runs; each iteration appends messages (`prompt`, `response`, `reasoning`, `tool`, `tool_output`, `iteration`, ...).
+4. On terminal transition the thread is marked `completed`/`failed` and event hooks fire (`thread_finished`).
+5. Seq-0 message is the user prompt; `read_keep_last`/`read_excerpt_chars` control how much context is retained for long threads.
 
 ### Message Types
 
-| `msg_type` | Description |
-|------------|-------------|
-| `message` | Standard user or assistant message |
-| `Cause` | User-initiated seq-0 message (cause thread root). `msg_subtype` = platform name (e.g., `mattermost`) |
-| `cron` | Cron-triggered seq-0 message. `msg_subtype` = cron job name |
-| `kanban` | Kanban-triggered seq-0 message. `msg_subtype` = kanban task ID |
-| `tool` | Tool invocation |
-| `tool_result` | Tool execution result |
-| `reasoning` | LLM reasoning/thinking content |
-| `summary` | Thread summary |
-| `plan` | LLM planning or reasoning step |
-| `multi-tool` | Parallel tool calls from the LLM |
-| `error` | Processing error (see `msg_subtype` for error codes) |
+| Type | Description |
+|------|-------------|
+| `prompt` | The assembled prompt sent to the LLM |
+| `response` | The LLM's text response |
+| `reasoning` | LLM reasoning content (when supported) |
+| `tool` | A tool invocation request |
+| `tool_output` | The tool result |
+| `iteration` | Iteration boundary marker |
+| `delegate_result` | Delegated subtask output |
+| `skill` | Skill attachment/context |
 
 ### Error Subtypes
 
-| `msg_subtype` | Description |
-|---------------|-------------|
-| `no-profile` | Profile field is empty |
-| `no-provider` | Provider field is empty |
-| `no-model` | Model field is empty |
-| `invalid-profile` | Profile does not exist in the registry |
+Failures carry a subtype for diagnostics: `provider_error`, `tool_error`, `context_overflow`, `rate_limit`, `auth_error`, `timeout`, `no_channel`, `invalid_request`, etc. The Dashboard Messages page filters on subtype.
 
 ### Per-Message Timing and Token Usage
 
-Each message stores its own timing and token data:
-
-- **`processing_time_ms`**: Wall-clock time spent processing this message (stored per-message, not thread-level)
-- **`token_usage`**: JSONB object with:
-  - `prompt_tokens`: tokens in the prompt
-  - `completion_tokens`: tokens in the completion
-  - `cached_tokens`: tokens served from cache (if supported by provider)
-  - `reasoning_tokens`: tokens used for reasoning/thinking (if supported)
-
-```json
-{
-  "prompt_tokens": 1523,
-  "completion_tokens": 412,
-  "cached_tokens": 0,
-  "reasoning_tokens": 89
-}
-```
+Each message records timing (created/finished) and token usage (prompt_tokens, completion_tokens, total_tokens) — the Dashboard Overview charts aggregate these.
 
 ### Startup Cleanup
 
-On startup, the agent runs `skip_on_startup()` which marks all messages with status `pending` or `processing` as `skipped`. This prevents messages from being stuck indefinitely after a container restart.
+On startup the agent marks stale `processing` threads as `failed` (`skip_on_startup`) so a crash doesn't leave threads stuck forever. A **Postgres advisory lock** (session-scoped, `db::try_acquire_advisory_lock`) guarantees only ONE instance runs against a database at a time: a second instance refuses to start ("advisory lock key held") instead of racing the cleanup and marking live threads skipped (the fix for the zombie-executor duplicate-thread bug).
 
 ### Profile Resolution at Message Time
 
-When a message is created (seq-0), the `provider` and `model` fields are **stamped** on the message using this resolution chain:
-
-1. **Message** `profile` field (highest priority): set per-message for cron/kanban tasks
-2. **Channel** `current_provider` / `current_model` / `current_profile`
-3. **Profile** `provider` / `model` (if set in the profile)
-4. **Environment variable** `LLM_PROVIDER` (model comes from provider plugin's `default_model`)
-5. **Built-in defaults** `opencode-go` / `deepseek-v4-flash`
-
-This happens at creation time for:
-- **User messages**: provider/model are stamped when the message is inserted
-- **Cron jobs**: provider/model are resolved and stamped by the cron scheduler
-- **Kanban tasks**: when a task is moved to 'ready' status, provider/model are resolved and stamped
+The channel's `current_profile` (or the message's explicit profile) is resolved at message time; a channel can switch profiles between messages.
 
 ### Provider/Model Validation at Execution Time
 
-When the agent picks up a pending message for processing, it **validates** the stamped fields before calling the LLM:
-
-1. `profile` must be non-empty → fails with `msg_type='error'`, `msg_subtype='no-profile'`
-2. Profile must exist in the registry → fails with `msg_subtype='invalid-profile'`
-3. `provider` must be set and non-empty → fails with `msg_subtype='no-provider'`
-4. `model` must be set and non-empty → fails with `msg_subtype='no-model'`
-
-If validation fails, an error message is inserted into the thread and the original message is marked as `failed`. The agent uses **only** the stamped values: no fallback chain is run during execution.
-
-For **cron jobs**: profile comes from the cron job's `profile` field, or the channel's `current_profile` if NULL
-For **kanban tasks**: profile comes from the task's `profile` field, or the channel's `current_profile` if NULL
-For **user messages**: profile comes from the channel's `current_profile` at message creation time
+Provider/model are validated at execution time against the resolution chain above. Unknown provider/model → thread fails with a clear error; the Dashboard surfaces it.
 
 ## Cron Jobs
 
-Cron jobs are scheduled tasks that execute on a recurring schedule. Each job can target a specific channel and profile.
+Cron jobs are stored in the `cron_jobs` table and driven by the scheduler. They dispatch messages to a channel on schedule, creating threads with cause `cron`.
 
 ### Creating a Cron Job
 
 ```sql
--- Via MCP tool (recommended)
--- Use the create_cron_job tool with optional channel_id and profile params
-
--- Or directly in SQL:
-INSERT INTO cron_jobs (id, name, display_name, schedule, prompt, channel_id, profile)
-VALUES ('cron_abc123', 'hourly-report', 'Hourly Report', '0 * * * *', 'Generate the hourly report', 1, 'research');
+INSERT INTO cron_jobs (id, name, schedule, channel_id, prompt, active)
+VALUES ('job-1', 'daily-report', '0 9 * * *', 'cron-default', 'Write the daily report', true);
 ```
 
 ### Fields
 
 | Field | Description |
 |-------|-------------|
-| `channel_id` | Channel to fire in (NULL = default cron channel) |
-| `profile` | Profile to use (NULL = channel's current_profile) |
-| `schedule` | 5-field Linux cron expression (min hour day month weekday): the scheduler internally prepends `0` (second=0) for the `cron` crate |
-| `prompt` | The message content to execute |
-| `mode` | Execution mode: `agentic` (default), `direct`, or `action` |
-| `direct_task_type` | Task type for `direct` mode (e.g., a built-in action name) |
-| `action_id` | Action ID for `action` mode: references the `actions` table |
-| `template` | Optional template name; loaded from `profiles/<name>/templates/`. Falls back to channel's `template` if not set |
-| `enabled` | Whether the job is active |
-| `active` | Whether the job is currently claimed by a scheduler |
+| `name` | Unique job name |
+| `schedule` | 5-field cron (minute hour day month weekday — no leading seconds field) |
+| `channel` | Destination channel |
+| `prompt` | Prompt template for the dispatched message |
+| `mode` | Execution mode |
+| `active` | Whether the job is currently scheduled |
 
 ### Execution Modes
 
-- **`agentic`** (default): Normal cron agent execution: the prompt is sent to the LLM for processing, with full tool access and reasoning. When `template` is set, the template content is injected as a "Task Template" block before the prompt.
-- **`action`**: Executes a registered action from the `actions` table (user-defined or built-in). The action's MCP tool is called with its saved parameters. No LLM call is made: the action runs as a direct Rust function or MCP tool invocation. Optional `silent` mode suppresses thread creation on success (only creates error threads).
+- **message**: dispatch a normal message to the channel (default)
+- **run**: run a registered action (e.g. `hindsight_populator`)
 
 ### Cron Planning Mode
 
-Cron jobs support the same planning modes as channels, selectable from the dashboard UI:
-
-| Value | Resolution | Use Case |
-|-------|-----------|----------|
-| Empty (Default) | Complexity-based classification | Simple prompts don't waste tokens on planning |
-| `prompt_only` | No planning or subtasks | Scripted prompts that don't need decomposition |
-| `auto_plan` | Single planning step | Moderate prompts needing one planning pass |
-| `auto_subtasks` | Full subtask decomposition | Complex multi-step pipelines (e.g., Knowledge Pipeline) |
-
-Cron planning mode has **highest priority** in the resolution chain: cron job → channel → kanban → default.
-
-The planning mode is resolved at thread creation time via `resolve_thread_planning_mode_with_content()` and stamped on `threads.planning_mode`. For backward compatibility, the `max_plan` value is still accepted and resolves to the maximum plan mode enabled globally.
+Cron-dispatched threads can run in planning mode; the channel's `planning_mode` field is the default.
 
 ### Knowledge Pipeline
 
-The Knowledge Pipeline is a periodic maintenance cron that runs 6 steps:
-
-1. **Per-channel summarization**: cross-thread summaries for channels with enough new completed threads
-2. **Wiki/skill update from messages**: groups completed threads by profile, extracts durable knowledge, updates wiki pages and skills
-3. **Wiki relevance indexing**: scores wiki files by recency and reference count, updates `relevant-index.md`
-4. **Skill relevance indexing**: same scoring for skill files, writes `relevant-skills-index.md`
-5. **Hindsight population**: batch-retains new messages into omniagent-hindsight (skipped if disabled)
-6. **Hindsight consolidation**: triggers the consolidation pipeline (skipped if disabled)
-
-**Setup:** Run the `Setup Knowledge Pipeline` action (built-in, idempotent). Creates a cron job with:
-- Schedule: `0 */6 * * *` (every 6 hours, configurable)
-- Mode: `agentic`
-- Planning mode: `max_plan` (enables subtask decomposition)
-- Instruction file: `knowledge-pipeline.md` (templates in `profiles/<name>/templates/`)
-
-The template is loaded from `<data_dir>/profiles/<profile>/templates/knowledge-pipeline.md` (where `<profile>` is the configured default profile name (default: `"omni"`)) and injected as a task template into the agent's prompt. Sub-task mode (`auto_subtasks`) ensures each step is tracked; errors on individual steps don't abort the entire pipeline (use the `error` subtask status).
+A cron job (`knowledge-pipeline`) performs periodic maintenance: summarize channels, update wiki/skills from threads, run relevance indexing, populate hindsight.
 
 ### Scheduler
 
-The cron scheduler runs as a background tokio task, polling every 30 seconds. When a job is due:
-1. The job is atomically claimed (with stale-lock detection after 10 minutes)
-2. The target channel is resolved (job's channel_id or default cron channel)
-3. The profile is resolved (job's profile or channel's current_profile)
-4. A pending seq-0 system message is inserted with `msg_type='cron'`
-5. The message's `profile` field is set to the resolved profile
-6. The job's timestamps are updated
-
-Concurrency is enforced at the DB level: `UPDATE ... WHERE NOT running` ensures only one scheduler instance fires each job.
+The scheduler ticks every `kanban_dispatcher_interval` (15s default) and dispatches due cron jobs + kanban tasks.
 
 ## Kanban Tasks
 
-Kanban tasks provide a structured workflow. Tasks can be assigned to channels and when moved to 'ready' status, they trigger execution.
+Kanban tasks are project-management items dispatched to channels with cause `kanban`. They are stored in the `kanban_tasks` table and driven by **boards** (`config/boards.yml`) and **role-based workflows** (`config/workflows.yml`).
 
 ### Creating a Kanban Task
 
 ```sql
--- Via MCP tool (recommended)
--- Use the create_kanban_task tool with optional channel_id and profile params
-
--- Or directly in SQL:
-INSERT INTO kanban_tasks (id, title, body, status, channel_id, profile)
-VALUES ('task_abc123', 'Research topic', 'Find latest papers on...', 'todo', 1, 'research');
+INSERT INTO kanban_tasks (id, title, body, board, workflow_id, status)
+VALUES ('task-1', 'Fix login bug', 'Details...', 'omnidev', 'omniagent-dev', 'todo');
 ```
+
+Via the API (field names match the YML properties — `channel`, `workflow`, `board`, not `channel_id`/`workflow_id`):
+
+```bash
+curl -X POST localhost:8080/kanban/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"...","body":"...","board":"omnidev","workflow":"omniagent-dev"}'
+```
+
+### Boards (`config/boards.yml`)
+
+Boards are optional (feature-gated on file presence). When `boards.yml` is present:
+- Task create/edit **requires** a valid board (API rejects missing/invalid board).
+- The board defines defaults resolved AT LOAD TIME: task → board → channel → global settings (channels, workflows, templates, provider/model, planning mode). Loaders return resolved data, never shallow values.
+- The board has a workflow (`workflow_id`), plan, and provider/model defaults for tasks on that board.
+
+### Workflows (`config/workflows.yml`)
+
+Workflows define the **role-based lifecycle** of a task — which roles run in which order, with what template/mode/provider/model:
+
+```yaml
+omniagent-dev:
+  auto_approve: false        # require explicit review approval
+  review_on_fail: false      # testing failure routes to review (not directly back to executor)
+  clear_executions_on_review: true
+  retries: 3                 # global default per role
+  roles:
+    executor:
+      template: dev-executor
+      mode: agent            # agent | action
+      action_id: null        # used when mode: action
+      plan_mode: on
+      retries: 9
+    tester:
+      template: dev-tester
+      mode: agent
+      plan_mode: on
+    reviewer:
+      template: dev-reviewer
+      mode: agent
+      plan_mode: on
+```
+
+- **Roles**: each role (executor/tester/reviewer/...) runs in sequence, creating a thread in the role's step. `mode: agent` runs a prompt template; `mode: action` runs a registered action by `action_id`.
+- **auto_approve**: when true, the workflow skips review approval (executor-only tasks like this one).
+- **review_on_fail**: when true, a failed testing step routes to review instead of straight back to executor.
+- Each task execution records its steps in `task_executions`; `clear_executions_on_review` wipes them when a task returns to review so re-reviews start clean.
 
 ### Task Lifecycle
 
-1. Task is created (typically in `backlog` or `todo` status)
-2. Task is updated to `ready` status
-3. The system automatically creates a pending seq-0 message in the task's channel
-4. The agent picks up the message and processes it
-5. After completion, the task can be moved to `review` or `done`
+```
+todo → running (executor) → review → testing → done
+        ↑______________________|  (review_on_fail=false: test fail → executor)
+        ↑__________________|        (review_on_fail=true:  test fail → review)
+```
+
+Review can push a task back to running with a verdict (approve/request changes) via `POST /kanban/tasks/{id}/review`.
 
 ### Statuses
 
-| Status | Description |
-|--------|-------------|
-| `backlog` | Not yet prioritized |
-| `todo` | Ready to be worked on |
-| `ready` | Triggers execution (creates a pending message) |
-| `running` | Currently being executed |
-| `review` | Waiting for review/approval |
-| `done` | Completed |
-| `blocked` | Blocked by something |
+| Status | Meaning |
+|--------|---------|
+| `todo` | Not yet started |
+| `running` | A workflow step is executing |
+| `review` | Awaiting reviewer verdict |
+| `testing` | Awaiting tester verification |
+| `done` | Completed and approved |
+| `blocked` | Stopped (e.g. repeated workflow failures) |
 
 ### Kanban Dispatcher
 
-The kanban dispatcher now runs **inside the core process**: a background loop
-calls the shared dispatch routine every `kanban_dispatcher_interval` seconds
-(default 15; `0` disables it — see `general:` in settings.yml). No external
-cron/action is required. On each tick:
-
-1. Queries all kanban tasks with `status = 'todo'`
-2. Orders them by `priority` (ascending, lower = higher priority), then by `position`
-3. Applies the board gate, dependency gate and channel-busy gate, then starts
-   the first eligible task's executor thread (workflow_step `running`)
-4. The task's `profile` field (or channel's current_profile) is used for resolution
-
-The same routine is also exposed via `POST /kanban/dispatch` for manual/testing
-triggers. This enables periodic task processing without human intervention: the
-loop drip-feeds todo items into the agent's queue.
+The dispatcher scans for dispatchable tasks every `kanban_dispatcher_interval` seconds and:
+- Starts `todo` tasks on their board's workflow when the board/execution gates allow.
+- **Board gate**: boards with in-flight task limits stop further dispatches until a task finishes.
+- **Channel-busy gate**: a task whose channel is busy waits rather than queueing behind live work.
+- **Archived-task guard**: archived tasks are NEVER dispatched (the dispatch SQL excludes them — an archived task can't come back to life).
+- Dispatches create threads with cause `kanban` on the task's channel (resolved via the board chain).
 
 ### Channel and Profile Assignment
 
-Each kanban task can specify:
-- `channel_id`: Which channel to execute in (NULL = default cron channel)
-- `profile`: Which profile to use (NULL = channel's current_profile at execution time)
-
-When a task is updated to `ready` status, the system:
-1. Resolves the target channel (task's channel_id or default cron channel)
-2. Resolves the profile (task's profile or channel's current_profile)
-3. Creates a pending seq-0 message with `msg_type='kanban'` and `msg_subtype=<task_id>`
-4. The agent processes the message like any other pending message
+Tasks without an explicit channel resolve through: task → board → `default_kanban_channel` setting → the kanban channel. Provider/model/template/plan_mode resolve the same way at load time (never at execution).
 
 ## Memory Management
 
-Memory files are loaded from the profile's memory directory and included in context assembly during the **NeverTrim** priority tier.
-
 ### Location
 
-```
-$OMNI_DIR/profiles/<name>/memories/
-  MEMORY.md      # Core memory file
-  SOUL.md        # Identity/persona file
-```
+- Agent memories live in the data dir: `memories/MEMORY.md`, `memories/USER.md`, plus per-profile memory directories.
+- Wiki content (long-term, human-readable) lives in the profile wiki directory.
+- Promoted memories (validated facts) are stored as markdown files under the wiki `Memory/Promoted/` with YAML frontmatter (provenance, confidence, expiry).
 
 ### Memory Configuration
 
-These values are configured through the prompt plugin's YAML config (in `tools.yml`), not environment variables. They are documented here for reference:
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `memory_max_chars` | `5000` | Maximum characters in MEMORY.md |
-| `user_max_chars` | `1000` | Maximum characters for user-specific memory |
-| `planning_mode` | `auto_plan` | Global planning mode: `prompt_only`, `auto_plan`, `auto_subtasks` |
-| `planning_complexity_simple_max_chars` | `60` | Max chars for "simple" (greeting) classification |
-| `planning_complexity_standard_max_chars` | `200` | Max chars for "standard" classification: above this triggers complex planning |
-| `planning_complexity_keywords` | (built-in list) | Comma-separated keywords that trigger complex planning |
-
-## Planning Mode
-
-Planning mode controls how the agent approaches a thread: whether it plans ahead, creates subtasks, or responds immediately. The mode is resolved **at thread creation time** and stamped on the `threads.planning_mode` column.
-
-### Mode Values
-
-| Mode | Description |
-|------|-------------|
-| `prompt_only` | No planning: LLM responds directly. Used for simple/quick interactions. |
-| `auto_plan` | The LLM gets a planning step before responding. A single plan is created and executed. |
-| `auto_subtasks` | Full subtask-based planning. The LLM decomposes the task into subtasks, then works through them sequentially with tool access. |
-| `always` | Legacy alias for `auto_subtasks` (normalized at resolution time). |
-
-### Priority Chain
-
-The planning mode is resolved in this order (first non-empty wins):
-
-1. **Task/Job `planning_mode`**: for cron jobs (`cron_jobs.planning_mode`). When non-empty, it overrides everything below. Can be `prompt_only`, `auto_plan`, `auto_subtasks`, or empty (→ complexity-based default).
-2. **Channel `planning_mode`**: set on the `channels` table. Override for an entire channel.
-3. **Kanban tasks**: always resolve to the max plan mode currently available (`max_plan` logic based on global `PLANNING_MODE`). Kanban tasks never go through complexity classification.
-4. **User / Cron default**: classified by prompt **complexity** (see below). Falls through to the global `PLANNING_MODE` env var.
-
-### Complexity Classification
-
-For user messages and cron jobs without an explicit mode, the system classifies the prompt content:
-
-```
-char_len < SIMPLE_MAX (60) OR word_count ≤ 3 + greetings  →  prompt_only
-char_len > STANDARD_MAX (200) OR action keywords present   →  auto_subtasks
-otherwise                                                  →  auto_plan (via PLANNING_MODE)
-```
-
-**Simple messages** (short, greetings, confirmations: "hi", "ok", "thanks", "done", thumbs up) → `prompt_only`: no planning overhead.
-
-**Complex messages** (action keywords: "implement", "refactor", "redesign", "migrate", "multi-step", "fix bug" OR character count > 200) → `auto_subtasks`: full decomposition.
-
-**Standard messages** (everything else) → uses the global `PLANNING_MODE` env var (default `auto_plan`)
-
-### Max Iterations Per Mode
-
-Each planning mode maps to a different iteration limit (how many LLM tool-calling rounds allowed):
-
-| Mode | Config Field | Default |
-|------|-------------|---------|
-| `prompt_only` / unset | `max_iterations_no_plan` | 5 |
-| `auto_plan` | `max_iterations_simple_plan` | 10 |
-| `auto_subtasks` / `always` | `max_iterations_complex_plan` | 25 |
-
-These are configured via the profile's `AgentConfig` block, not env vars.
-
-Memory files in the `memories/` directory are loaded and included in every context assembly at the highest priority (NeverTrim tier), ensuring they are always present in the system prompt regardless of token budget constraints.
-
-## Stopping and Resuming
-
-### `POST /stop/{channel_id}`
-
-Stop processing for a specific channel:
-
-```bash
-curl -X POST http://localhost:8080/stop/1
-```
-
-This will:
-1. Mark all **pending** and **processing** messages in the channel as `skipped`
-2. Cancel the channel's processing task
-3. The supervisor will not respawn a handler for this channel until resumed
-
-### `GET /resume/{channel_id}`
-
-Resume processing for a stopped channel:
-
-```bash
-curl http://localhost:8080/resume/1
-```
-
-This will:
-1. The supervisor will detect the channel is no longer stopped
-2. A fresh handler will be spawned in idle state
-3. New pending messages will be processed immediately
-
-### Behavior
-
-- Messages created **before** the stop are skipped
-- Messages created **after** the stop remain pending and will be processed when resumed
-- The channel handler restarts fresh: no state is carried over from before the stop
-- If the executor was in the middle of processing a message when `/stop` was called, that message is also marked as skipped
-
-## Configuration Reference
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OMNI_DIR` | `/opt/omni` | Profile and tools directory |
-| `DATABASE_URL` | `postgres://omniagent:***@postgres:5432/omniagent` | PostgreSQL connection string |
-| `QDRANT_URL` | `http://localhost:6333` | Qdrant endpoint |
-| `LLM_API_KEY` | N/A | API key for LLM provider |
-| `LLM_PROVIDER` | `opencode-go` | Provider: `opencode-go`, `openai`, `anthropic`, `deepseek` |
-| `DEEPSEEK_API_KEY` | N/A | DeepSeek-specific API key |
-| `DEEPSEEK_BASE_URL` | *default* | DeepSeek API endpoint base URL |
-| `MAX_TOKENS` | `4096` | Max response tokens |
-| `TEMPERATURE` | `0.7` | Sampling temperature |
-| `MAX_ITERATIONS_NO_PLAN` | `5` | Max agent turns for `prompt_only` mode |
-| `MAX_ITERATIONS_SIMPLE_PLAN` | `10` | Max agent turns for `auto_plan` mode |
-| `MAX_ITERATIONS_COMPLEX_PLAN` | `25` | Max agent turns for `auto_subtasks` mode |
-| `HOST` | `0.0.0.0` | HTTP bind address |
-| `PORT` | `8080` | HTTP port |
-| `DELETE_AFTER_DAYS` | `30` | Message retention period |
-| `SUMMARY_WINDOW` | `10` | Half-window size for channel summarization |
-| `CHANNEL_SUMMARY_TOKENS` | `4096` | Max tokens for channel-level summary generation |
-| `THREAD_SUMMARY_TOKENS` | `2048` | Max tokens for per-thread end-of-execution summary |
-| `MCP_SERVERS_CONFIG` | N/A | External MCP servers config file path |
-| `VECTORIZE_MESSAGES` | `false` | Enable message embedding generation |
-| `VECTORIZE_WIKI` | `false` | Enable wiki embedding generation |
-| `MEMORY_MAX_CHARS` | `5000` | Max characters in MEMORY.md |
-| `USER_MAX_CHARS` | `1000` | Max characters for user memory |
-
-### Settings Organization
-
-Environment variables are organized into categories:
-
-| Category | Variables |
-|----------|-----------|
-| **General** | `HOST`, `PORT`, `OMNI_DIR`, `QDRANT_URL`, `DELETE_AFTER_DAYS`, `MAX_ITERATIONS`, `MCP_SERVERS_CONFIG` |
-| **LLM** | `LLM_API_KEY`, `LLM_PROVIDER`, `MAX_TOKENS`, `TEMPERATURE`, `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` |
-| **Memory** | `MEMORY_MAX_CHARS`, `USER_MAX_CHARS` |
-| **Retrieval** | `VECTORIZE_MESSAGES`, `VECTORIZE_WIKI` |
-
-## API Endpoints
-
-### `GET /health`
-
-Health check. Returns `ok` with status 200.
-
-### `POST /stop/{channel_id}`
-
-Stop processing for a channel. All pending and processing messages are marked as `skipped`.
-
-### `POST /resume/{channel_id}`
-
-Resume processing for a stopped channel.
-
-### `GET /prompt/{channel_name}`
-
-Show the raw system prompt that would be used for a given channel (for debugging).
-
-### `POST /prompt-preview/{channel_name}`
-
-Preview the assembled system prompt with a custom prompt and plan. Useful for testing context assembly without inserting a message.
-
-```bash
-curl -X POST http://localhost:8080/prompt-preview/my-channel \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "What is the weather?", "plan": false}'
-```
-
-Returns:
-```json
-{
-  "system_prompt": "...",
-  "messages": [{ "role": "user", "content": "What is the weather?" }],
-  "plan": false
-}
-```
-
-### `GET /settings`
-
-Returns all configuration settings with metadata, organized by category.
-
-```bash
-curl http://localhost:8080/settings
-```
-
-Response:
-```json
-{
-  "General": [
-    {
-      "name": "HOST",
-      "value": "0.0.0.0",
-      "type": "string",
-      "description": "HTTP bind address",
-      "options": null,
-      "readonly": true,
-      "default": "0.0.0.0"
-    },
-    ...
-  ],
-  "LLM": [ ... ],
-  "Memory": [ ... ],
-  "Retrieval": [ ... ]
-}
-```
-
-Read-only settings (`HOST`, `PORT`, `QDRANT_URL`) are marked with `readonly: true` and cannot be modified via the API.
-
-### `PUT /settings`
-
-Update one or more settings. Writes changes back to the `.env` file.
-
-```bash
-curl -X PUT http://localhost:8080/settings \
-  -H "Content-Type: application/json" \
-  -d '{"updates": [{"name": "MAX_TOKENS", "value": "8192"}]}'
-```
-
-- Returns `200` with the updated settings list on success
-- Returns `403` if attempting to modify a read-only setting
-- Returns `404` if a setting name is not recognized
-
-## Sending Messages
-
-Messages are inserted directly into the database. The agent polls for `pending` messages every second.
-
-```sql
-INSERT INTO messages (channel_id, thread_id, thread_sequence, role, content, status, msg_type, iteration_count, profile)
-VALUES (1, 1, 0, 'user', 'Your prompt here', 'pending', 'message', 0, 'default');
-```
-
-### Message Fields
-
-| Field | Description |
-|-------|-------------|
-| `profile` | Profile to use for processing (overrides channel's current_profile) |
-| `msg_type` | Type: `message`, `cron`, `kanban`, `tool`, `tool_result`, `reasoning`, `summary`, `plan`, `multi-tool`, `error` |
-| `msg_subtype` | For kanban/cron: stores the task/job ID. For errors: error code (`no-profile`, `no-provider`, `no-model`) |
-| `processing_time_ms` | Wall-clock time spent processing the message |
-| `token_usage` | JSONB: `{prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens}` |
-
-## CLI Commands
-
-### `/usage`
-
-Reads from the `threads` table to display token usage per channel and totals:
-
-```bash
-# Display token usage summary
-cargo run -- /usage
-```
-
-Output shows:
-- Token usage per channel (prompt + completion + cached + reasoning tokens)
-- Total token usage across all channels
-- Helps with cost tracking and monitoring
-
-## Data Directory Structure
-
-Persistent data lives under `OMNI_DIR` (default `/opt/omni`):
-
-```
-$OMNI_DIR/
-  profiles/
-    omni/                     # Default profile (name configured in settings)
-      memories/         # Memory files (MEMORY.md, SOUL.md)
-      skills/           # Practical wiki (reusable knowledge)
-      wiki/             # Wiki content (long-term memory in human-readable format)
-        Memory/
-          Promoted/     # Promoted long-term memories
-  config/
-    mcp-servers.json    # External MCP server config (optional)
-  tools/                # MCP tool definitions
-```
-
-## Architecture Diagram
-
-```
-┌──────────────┐     ┌────────────────┐     ┌────────────┐
-│   Messages   │────>│   OmniAgent    │────>│    LLM     │
-│ (PostgreSQL) │     │    (Rust)      │     │  Provider  │
-└──────────────┘     │                │     └────────────┘
-                     │  ┌──────────┐  │
-┌──────────────┐     │  │   MCP    │  │
-│   Qdrant     │<────│  │  Tools   │  │
-│  (Vectors)   │     │  └──────────┘  │
-└──────────────┘     └────────────────┘
-```
-
-Messages flow: **PG → Agent → LLM → (tool calls loop) → PG**
-
-## Docker Compose
-
-The Docker Compose configuration for running omniagent in production or development lives in [nexuslbs/omni-stack](https://github.com/nexuslbs/omni-stack).
-
-For local development outside Docker:
-```bash
-cargo run
-```
-
-The binary reads `.env` automatically via `dotenvy`.
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| Messages stay `pending` | Channel stopped or agent not running | Check `GET /health`, resume channel |
-|| LLM call fails | API key missing or invalid | Check provider plugin config in `providers.yml` |
-| Processing stuck at `processing` | Container restarted mid-call | On restart, pending/processing messages are marked as skipped |
-| No model configured | Profile + channel both lack model | Set `current_model` on channel or `model` on profile |
-| Tools returning errors | Path outside data directory | Ensure file paths are under `OMNI_DIR` |
-| Settings write fails with 403 | Attempted to modify read-only setting | `HOST`, `PORT`, `QDRANT_URL` are read-only |
-
-## Internal Docs
-
-For detailed internal architecture, see [AGENTS.md](AGENTS.md).
-
-## Testing
-
-### Test Environment Setup
-
-The system uses PostgreSQL for all state. Test data is injected via direct SQL:
-
-```bash
-# Insert a test thread with cause message
-docker compose exec postgres psql -U omniagent -d omniagent
-```
-
-### Thread Lifecycle Tests
-
-| Test | Setup | Expected |
-|------|-------|----------|
-| **Single channel, all causes** | 3 threads (user/system for cron/kanban) → same channel → set pending | Processed **sequentially** (one after another). All complete |
-| **Different channels (parallelism)** | 3 threads in 3 different channels → set pending | Processed at the **same second**: each channel handler runs independently |
-| **Stop/Resume** | Start a thread → `curl stop/<id>` → verify `skipped` → `resume` → new message | Stopped thread = `skipped`. New thread after resume picks up immediately |
-| **Empty provider** | Thread with `provider=''` | **failed** with clear error: "provider is not set" |
-| **Empty model** | Thread with `model=''` | **failed** with clear error: "model is not set" |
-| **Nonexistent profile** | Thread with `profile='nonexistent'` | Falls back to **default** profile (intentional feature) |
-
-### Verification Commands
-
-```bash
-# Watch processing in real-time
-docker compose logs -f omniagent | grep -E "Processing|completed|summary|failed"
-
-# Query thread state
-docker compose exec postgres psql -U omniagent -d omniagent -c "
-SELECT t.id, t.status, t.cause, c.name as ch,
-       (SELECT count(*) FROM messages m WHERE m.thread_id = t.id) as msg_count
-FROM threads t JOIN channels c ON t.channel_id = c.id
-WHERE t.channel_id = <ch_id> ORDER BY t.id;"
-
-# Stop/Resume API
-curl http://localhost:8080/stop/<channel_id>
-curl http://localhost:8080/resume/<channel_id>"
-```
+`settings.yml` → `memory:` block:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `memory_max_chars` | 5000 | Cap for MEMORY.md |
+| `vectorize_messages` | true | Enable message embedding for semantic recall |
+| `messages_vectorization_method` | `local` | `local` (sentence-transformers) or provider-based |
+| `messages_vectorization_interval` | 5 | Seconds between vectorization batches |
+| `vectorize_wiki` | false | Enable wiki embedding |
+| `wiki_vectorization_interval` | 3600 | Seconds between wiki re-vectorization |
+
+## HTTP API
+
+The agent exposes an HTTP API on port 8080 (see `api-reference.md` for the full surface). Field names in the API follow the YML property names (`channel`, `workflow`, `cron`, `provider`, `model` — not `channel_id`/`workflow_id`/`current_*`).
+
+| Area | Endpoints |
+|------|-----------|
+| Health | `GET /health` |
+| Threads | `GET /threads`, `GET /threads/{id}` |
+| Messages | `GET /messages`, `GET /messages/{id}` |
+| Channels | `GET/POST/PATCH /channels`, `GET /channels/{name}` |
+| Profiles | `GET /profiles` |
+| Cron | `GET/POST /schedule`, `GET/PATCH/DELETE /schedule/{id}`, `POST /schedule/{id}/run` |
+| Kanban | `GET/POST /kanban/tasks`, `GET/PATCH/DELETE /kanban/tasks/{id}`, `POST /kanban/tasks/{id}/review`, `GET/POST /kanban/boards` (when boards.yml present) |
+| Plugins | `GET /plugins`, `POST /plugins/{type}/{source}/{name}/install`, `DELETE /plugins/{type}/{source}/{name}`, `POST .../enable` / `disable` / `reinstall` / `download` |
+| Models | `GET /models` (models.yml overrides) |
+| Secrets | `GET/POST /secrets`, `DELETE /secrets/{name}` |
+
+### Builtin `omniagent-api` Tool
+
+The agent exposes its own API to itself as the MCP tool `omniagent-api` (builtin): it fetches `http://localhost:8080/...` internally — no host/scheme/port configuration needed. It replaced the old `kanban_*` / `cron_*` plugin tools; the plugin's `fetch` tool gates unsafe methods via the `allow_unsafe_methods` config.
