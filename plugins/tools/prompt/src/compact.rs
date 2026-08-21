@@ -674,7 +674,10 @@ mod tests {
             if iter > 0 {
                 assert_eq!(outcome.removed, 1, "drain must still happen at iter {iter}");
             }
-            msgs.push(tool_call_msg("filesystem_read", &format!("reading after {iter}")));
+            msgs.push(tool_call_msg(
+                "filesystem_read",
+                &format!("reading after {iter}"),
+            ));
             msgs.push(tool_result(
                 "filesystem_read",
                 &format!("RESULT after {iter} ").repeat(120),
