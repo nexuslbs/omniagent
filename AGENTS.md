@@ -664,4 +664,4 @@ cargo clippy -- -D warnings
 cargo test --workspace --release
 ```
 
-When a migration/query changes, regenerate the offline SQLx cache (`.sqlx/`) so `SQLX_OFFLINE` builds pass. Never commit scratch files (`*.patch`, `.task*`) — see repo hygiene rules.
+When a migration/query changes, regenerate the offline SQLx cache (`.sqlx/`) so `SQLX_OFFLINE` builds pass. Never commit scratch files (`*.patch`, `.task*`, `.push*`, `.smoke*`, `.g4x-*`, `_run_*.py`, `apply_*.py`) — scratch helper/driver scripts belong ONLY in `OMNI_DIR/data/scripts/` or `omni-stack/data/scripts/` (both gitignored, never versioned); never create them inside the repo tree.
