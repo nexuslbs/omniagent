@@ -1,0 +1,12 @@
+{
+  "name": "noop",
+  "version": "1.0.0",
+  "type": "provider",
+  "description": "Test provider — built-in fake responses without HTTP calls or API keys",
+  "default_base_url": "http://noop-provider:9090/v1",
+  "api_mode": "chat_completions",
+  "config_schema": [
+    { "key": "default_model", "label": "Default Model", "type": "enum", "default": "test-model-1", "allowed_values": ["test-model-1", "test-model-2"] }
+  ],
+  "env": {}
+}
