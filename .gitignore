@@ -52,6 +52,8 @@ plugins/.remote/
 /omniagent
 /omniagent.new
 mcp-server-memory
+/mcp-server-*
+plugins/tools/*/mcp-server-*
 
 # smoke-test / task scratch artifacts — NEVER commit these
 .g46-omni/
