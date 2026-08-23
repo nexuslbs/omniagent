@@ -352,7 +352,9 @@ async fn handle_code_exec(args: Value) -> AppResult<McpToolResult> {
     };
 
     let mut cmd = build_run_command(&toolbox, &language, &args_json, timeout);
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -443,8 +445,14 @@ mod tests {
                 matches!(expected, Value::Object(_)),
                 "type mismatch for {raw}: {v}"
             );
-            assert!(v.is_array() || v.is_string() || v.is_number() || v.is_boolean() || v.is_null()
-                || v.is_object());
+            assert!(
+                v.is_array()
+                    || v.is_string()
+                    || v.is_number()
+                    || v.is_boolean()
+                    || v.is_null()
+                    || v.is_object()
+            );
             assert_eq!(logs, vec!["some log line".to_string()]);
         }
         // Exact value equality for a dict round-trip.
@@ -501,7 +509,9 @@ mod tests {
         let long: Vec<String> = (0..100_000).map(|i| format!("line {i}")).collect();
         let arr = logs_array(&long);
         assert!(arr.len() < long.len());
-        assert!(arr.iter().any(|v| v.as_str() == Some("[... logs truncated ...]")));
+        assert!(arr
+            .iter()
+            .any(|v| v.as_str() == Some("[... logs truncated ...]")));
     }
 
     #[test]
