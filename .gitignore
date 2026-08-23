@@ -34,7 +34,6 @@ Thumbs.db
 # ── Runtime-only: temp, logs ──
 *.log
 tmp/
-profiles/default/tmp/
 
 # ── Eliminated struct — workspace root, each plugin has own Cargo.toml ──
 /Cargo.toml

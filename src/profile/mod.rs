@@ -102,7 +102,7 @@ impl Profile {
     }
 }
 
-/// Read the default profile name from the global config, falling back to "default".
+/// Read the default profile name from the global config, falling back to "omni".
 pub fn default_profile_name() -> String {
     crate::agent::config::get_global()
         .map(|g| g.read().default_profile.clone())
@@ -162,12 +162,38 @@ impl ProfileRegistry {
     }
 
     /// Ensure the default profile exists.
+    ///
+    /// Inserts the in-memory default Profile when missing, and materializes
+    /// `{data_dir}/profiles/{default}/config.json` on disk when it does NOT
+    /// exist (the repo ships no profiles dir — the runtime data dir owns it).
+    /// An existing config.json is never overwritten.
     fn ensure_default(&mut self) {
         if !self.profiles.contains_key(&self.default_profile) {
             self.profiles.insert(
                 self.default_profile.clone(),
                 Profile::default(&self.default_profile),
             );
+        }
+        let dir: PathBuf = [&self.data_dir, "profiles", &self.default_profile]
+            .iter()
+            .collect();
+        let config_path = dir.join("config.json");
+        if config_path.exists() {
+            return;
+        }
+        if let Err(e) = fs::create_dir_all(&dir) {
+            tracing::warn!("profile: failed to create {}: {e}", dir.display());
+            return;
+        }
+        match fs::write(&config_path, r#"{"allowed_tools": []}"#) {
+            Ok(()) => tracing::info!(
+                "profile: created default profile config {}",
+                config_path.display()
+            ),
+            Err(e) => tracing::warn!(
+                "profile: failed to write {}: {e}",
+                config_path.display()
+            ),
         }
     }
 
@@ -225,5 +251,31 @@ mod tests {
         let default_name = crate::profile::default_profile_name();
         assert!(registry.get(&default_name).is_some());
         assert!(registry.list_names().contains(&default_name));
+    }
+
+    #[test]
+    fn test_ensure_default_materializes_config() {
+        let dir = std::env::temp_dir().join(format!("omniagent-profile-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // Missing profile dir: registry auto-creates {data}/profiles/{default}/config.json
+        let registry = ProfileRegistry::new(dir.to_str().unwrap());
+        let default_name = registry.default_profile.clone();
+        let config_path = dir
+            .join("profiles")
+            .join(&default_name)
+            .join("config.json");
+        assert!(config_path.exists(), "config.json should be auto-created");
+        assert_eq!(
+            fs::read_to_string(&config_path).unwrap(),
+            r#"{"allowed_tools": []}"#
+        );
+        // Existing config.json is never overwritten
+        fs::write(&config_path, r#"{"allowed_tools": ["filesystem_read"]}"#).unwrap();
+        let _registry2 = ProfileRegistry::new(dir.to_str().unwrap());
+        assert_eq!(
+            fs::read_to_string(&config_path).unwrap(),
+            r#"{"allowed_tools": ["filesystem_read"]}"#
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
