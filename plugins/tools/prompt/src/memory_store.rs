@@ -64,7 +64,12 @@ fn format_thousands(n: usize) -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryStore {
-    memories_dir: PathBuf,
+    /// Profile directory root (`profiles/<profile>`). The canonical memory
+    /// file lives AT THE ROOT (`profiles/<profile>/MEMORY.md`) — SOUL.md is
+    /// removed and USER.md is never read. The legacy `memories/MEMORY.md`
+    /// duplicate is a transitional copy that the next release drops; it is
+    /// not read by the prompt builder.
+    profile_dir: PathBuf,
     profile_path: Option<String>,
     snapshot: HashMap<String, String>,
 }
@@ -72,25 +77,23 @@ pub struct MemoryStore {
 impl MemoryStore {
     pub fn new(base_path: &str) -> Self {
         Self {
-            memories_dir: PathBuf::from(base_path).join("memories"),
+            profile_dir: PathBuf::from(base_path),
             profile_path: Some(base_path.to_string()),
             snapshot: HashMap::new(),
         }
     }
 
     pub fn load_from_disk(&mut self) {
-        let _ = fs::create_dir_all(&self.memories_dir);
+        let _ = fs::create_dir_all(&self.profile_dir);
 
-        let memory_entries = self.read_file(&self.memories_dir.join("MEMORY.md"));
-        let user_entries = self.read_file(&self.memories_dir.join("USER.md"));
+        let memory_entries = self.read_file(&self.profile_dir.join("MEMORY.md"));
 
-        let memory_path = self.memories_dir.join("MEMORY.md");
+        let memory_path = self.profile_dir.join("MEMORY.md");
         let (memory_hash, hash_valid) = if memory_path.exists() {
             match fs::read_to_string(&memory_path) {
                 Ok(raw) => {
                     let hash = format!("{:x}", Sha256::digest(raw.as_bytes()));
-                    let expected =
-                        Self::read_expected_hash(&self.memories_dir.join("MEMORY.md.sha256"));
+                    let expected = Self::read_expected_hash(&self.profile_dir.join("MEMORY.md.sha256"));
                     let valid = expected.as_ref().is_none_or(|e| e == &hash);
                     (Some(hash), valid)
                 }
@@ -118,16 +121,6 @@ impl MemoryStore {
             },
         );
 
-        self.snapshot.insert(
-            "user_entries".to_string(),
-            if user_entries.is_empty() {
-                "(no user profile)".to_string()
-            } else {
-                let chars = user_entries.len();
-                format!("{} chars", format_thousands(chars))
-            },
-        );
-
         if let Some(hash) = &memory_hash {
             self.snapshot
                 .insert("memory_hash".to_string(), hash.clone());
@@ -137,7 +130,6 @@ impl MemoryStore {
 
         self.snapshot
             .insert("memory_raw".to_string(), memory_entries);
-        self.snapshot.insert("user_raw".to_string(), user_entries);
     }
 
     pub fn get_snapshot(&self, key: &str) -> Option<&String> {
@@ -149,17 +141,6 @@ impl MemoryStore {
             .get("memory_raw")
             .map(|s| s.as_str())
             .unwrap_or("")
-    }
-
-    pub fn get_user_raw(&self) -> &str {
-        self.snapshot
-            .get("user_raw")
-            .map(|s| s.as_str())
-            .unwrap_or("")
-    }
-
-    pub fn memories_dir(&self) -> &Path {
-        &self.memories_dir
     }
 
     fn read_file(&self, path: &Path) -> String {

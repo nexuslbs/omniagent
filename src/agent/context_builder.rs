@@ -10,7 +10,6 @@ use sql_forge::sql_forge;
 pub(crate) struct PromptParts {
     pub system: String,
     pub memory: String,
-    pub soul: String,
     pub context: String,
     pub user: String,
     pub plan: bool,
@@ -76,7 +75,6 @@ pub(crate) async fn build_prompt_context(
         PromptParts {
             system: parsed["system"].as_str().unwrap_or("").to_string(),
             memory: parsed["memory"].as_str().unwrap_or("").to_string(),
-            soul: parsed["soul"].as_str().unwrap_or("").to_string(),
             context: parsed["context"].as_str().unwrap_or("").to_string(),
             user: parsed["user"].as_str().unwrap_or("").to_string(),
             plan: parsed

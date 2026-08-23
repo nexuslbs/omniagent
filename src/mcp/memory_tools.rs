@@ -17,8 +17,8 @@ fn resolve_profile(_ctx: &AppContext, args: &Value) -> String {
     args["profile"].as_str().unwrap_or(&default).to_string()
 }
 
-fn memories_dir(ctx: &AppContext, profile: &str) -> String {
-    format!("{}/profiles/{}/memories", ctx.data_dir, profile)
+fn profile_dir(ctx: &AppContext, profile: &str) -> String {
+    format!("{}/profiles/{}", ctx.data_dir, profile)
 }
 
 // ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ fn manage_memory_tool() -> McpTool {
     McpTool {
         name: "manage_memory".to_string(),
         full_name: crate::mcp::tool_qualify("builtin", "manage_memory"),
-        description: "Manage persistent memory entries (MEMORY.md and USER.md). \
+        description: "Manage persistent memory entries (MEMORY.md). \
                       Actions: 'add' (prepend entry), 'remove' (entries matching substring), \
                       'clean' (remove all entries). \
                       The memory section is injected into the system prompt on every session. \
@@ -41,8 +41,8 @@ fn manage_memory_tool() -> McpTool {
             "properties": {
                 "target": {
                     "type": "string",
-                    "enum": ["memory", "user"],
-                    "description": "Which file to manage: 'memory' (MEMORY.md: agent notes) or 'user' (USER.md: user profile)"
+                    "enum": ["memory"],
+                    "description": "Which file to manage: 'memory' (MEMORY.md: agent notes)"
                 },
                 "action": {
                     "type": "string",
@@ -66,10 +66,9 @@ fn manage_memory_tool() -> McpTool {
             Box::pin(async move {
                 let target = match args["target"].as_str() {
                     Some("memory") => "MEMORY.md",
-                    Some("user") => "USER.md",
                     Some(t) => return Ok(McpToolResult {
                         call_id: String::new(),
-                        content: format!("Invalid target '{}'. Must be 'memory' or 'user'", t),
+                        content: format!("Invalid target '{}'. Must be 'memory'", t),
                         is_error: true,
                     }),
                     None => return Ok(McpToolResult {
@@ -89,7 +88,7 @@ fn manage_memory_tool() -> McpTool {
                 };
 
                 let profile = resolve_profile(&ctx, &args);
-                let dir = memories_dir(&ctx, &profile);
+                let dir = profile_dir(&ctx, &profile);
                 let path = std::path::Path::new(&dir).join(target);
 
                 std::fs::create_dir_all(&dir).ok();

@@ -57,7 +57,6 @@ pub struct PluginConfig {
     pub max_summary_chars: usize,
     // Prompt builder
     pub memory_max_chars: usize,
-    pub soul_max_chars: usize,
 }
 
 impl PluginConfig {
@@ -82,7 +81,6 @@ impl PluginConfig {
             compact_keep_step: 1,
             max_summary_chars: 50_000,
             memory_max_chars: 5000,
-            soul_max_chars: 1000,
         }
     }
 
@@ -151,9 +149,6 @@ impl PluginConfig {
             if let Some(v) = obj.get("memory_max_chars").and_then(&as_usize) {
                 cfg.memory_max_chars = v;
             }
-            if let Some(v) = obj.get("soul_max_chars").and_then(&as_usize) {
-                cfg.soul_max_chars = v;
-            }
         }
         cfg
     }
@@ -162,7 +157,6 @@ impl PluginConfig {
     fn builder_config(&self) -> prompt_builder::PromptBuilderConfig {
         prompt_builder::PromptBuilderConfig {
             memory_max_chars: self.memory_max_chars,
-            soul_max_chars: self.soul_max_chars,
         }
     }
 }
@@ -1319,21 +1313,18 @@ async fn handle_generate_full(
         &cfg.builder_config(),
     );
 
-    // all_parts contains: [identity, tool_guidance, profile_hint, (system_message?), platform_hint?, memory_section, user_profile_section]
-    // We need to split into: system (identity + guidance + profile), memory, soul (system_message)
+    // all_parts contains: [identity, tool_guidance, profile_hint, (system_message?),
+    // platform_hint?, memory_section]. Split into: system (identity + guidance +
+    // profile + optional system message), memory. SOUL.md/USER.md support is
+    // removed: the memory section (root MEMORY.md) may include anything that
+    // could have lived in SOUL.md.
     let mut system_parts = Vec::new();
     let mut memory_text = String::new();
-    let mut soul_text = String::new();
 
     for part in &all_parts {
-        if part.starts_with("## MEMORY") || part.starts_with("## USER PROFILE") {
+        if part.starts_with("## MEMORY") {
             memory_text.push_str(part);
             memory_text.push('\n');
-        } else if system_message.is_some()
-            && !system_message.unwrap().is_empty()
-            && part == system_message.unwrap()
-        {
-            soul_text = part.clone();
         } else {
             system_parts.push(part.clone());
         }
@@ -1341,11 +1332,6 @@ async fn handle_generate_full(
 
     let mut system = system_parts.join("\n\n");
     let memory = memory_text.trim().to_string();
-    let soul = if soul_text.is_empty() {
-        String::new()
-    } else {
-        soul_text
-    };
 
     // 2. Build context blocks (thread messages, summaries, skills)
     let mut context_blocks: Vec<String> = Vec::new();
@@ -1556,7 +1542,6 @@ async fn handle_generate_full(
     let result = serde_json::json!({
         "system": system,
         "memory": memory,
-        "soul": soul,
         "context": context,
         "user": user,
         "plan": plan,

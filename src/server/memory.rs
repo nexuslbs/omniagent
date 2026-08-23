@@ -5,8 +5,8 @@
 //!
 //! - `GET /memory/stats`  : aggregate counts (threads, messages, vectors)
 //! - `GET /memory/search` : full-text search over message content
-//! - `GET /memory/text/{profile}/{type}` : read MEMORY.md/USER.md file
-//! - `POST /memory/upload/{profile}/{type}` : write MEMORY.md/USER.md file
+//! - `GET /memory/text/{profile}/{type}` : read the MEMORY.md file
+//! - `POST /memory/upload/{profile}/{type}` : write the MEMORY.md file
 
 use axum::{
     extract::{Path, Query, State},
@@ -423,21 +423,17 @@ async fn search_handler(
 // Helper: resolve memory file path
 // ---------------------------------------------------------------------------
 
-/// Resolve the file path for a memory type (memory → MEMORY.md, soul → USER.md).
+/// Resolve the file path for a memory type (memory → MEMORY.md).
+/// The canonical file lives at the profile root (`profiles/<profile>/MEMORY.md`);
+/// a legacy global memories directory is still honored as a fallback.
 /// First tries profile-specific path, then falls back to global memories directory.
 fn resolve_memory_path(data_dir: &str, profile: &str, mem_type: &str) -> Result<String, String> {
     let file_name = match mem_type {
         "memory" => "MEMORY.md",
-        "soul" => "USER.md",
-        _ => {
-            return Err(format!(
-                "Type must be 'memory' or 'soul', got '{}'",
-                mem_type
-            ))
-        }
+        _ => return Err(format!("Type must be 'memory', got '{}'", mem_type)),
     };
 
-    let profile_path = format!("{}/profiles/{}/memories/{}", data_dir, profile, file_name);
+    let profile_path = format!("{}/profiles/{}/{}", data_dir, profile, file_name);
     let global_path = format!("{}/memories/{}", data_dir, file_name);
 
     // Check profile-specific path first
@@ -455,7 +451,7 @@ fn resolve_memory_path(data_dir: &str, profile: &str, mem_type: &str) -> Result<
 // Handler: POST /memory/edit/{profile}/{type}
 // ---------------------------------------------------------------------------
 
-/// Edit the MEMORY.md or USER.md file for a given profile.
+/// Edit the MEMORY.md file for a given profile.
 /// Accepts JSON: { "content": "..." }
 /// Creates the directory and file if they don't exist.
 async fn edit_handler(
@@ -465,16 +461,11 @@ async fn edit_handler(
 ) -> impl IntoResponse {
     let file_name = match mem_type.as_str() {
         "memory" => "MEMORY.md",
-        "soul" => "USER.md",
-        _ => {
-            return err_json(
-                StatusCode::BAD_REQUEST,
-                &format!("Type must be 'memory' or 'soul', got '{}'", mem_type),
-            )
-        }
+        _ => return err_json(StatusCode::BAD_REQUEST,
+            &format!("Type must be 'memory', got '{}'", mem_type)),
     };
 
-    let dest_dir = format!("{}/profiles/{}/memories", state.data_dir, profile);
+    let dest_dir = format!("{}/profiles/{}", state.data_dir, profile);
     let dest_path = format!("{}/{}", dest_dir, file_name);
 
     // Ensure directory exists
@@ -515,7 +506,7 @@ async fn edit_handler(
 // Handler: GET /memory/text/{profile}/{type}
 // ---------------------------------------------------------------------------
 
-/// Read the MEMORY.md or USER.md file for a given profile.
+/// Read the MEMORY.md file for a given profile.
 /// Falls back to global memories directory if profile-specific file doesn't exist.
 async fn text_handler(
     State(state): State<Arc<AppState>>,
@@ -545,7 +536,7 @@ async fn text_handler(
 // Handler: POST /memory/upload/{profile}/{type}
 // ---------------------------------------------------------------------------
 
-/// Upload content to MEMORY.md or USER.md for a given profile.
+/// Upload content to MEMORY.md for a given profile.
 /// Accepts JSON: { "content": "..." }
 async fn upload_handler(
     State(state): State<Arc<AppState>>,
@@ -554,16 +545,11 @@ async fn upload_handler(
 ) -> impl IntoResponse {
     let file_name = match mem_type.as_str() {
         "memory" => "MEMORY.md",
-        "soul" => "USER.md",
-        _ => {
-            return err_json(
-                StatusCode::BAD_REQUEST,
-                &format!("Type must be 'memory' or 'soul', got '{}'", mem_type),
-            )
-        }
+        _ => return err_json(StatusCode::BAD_REQUEST,
+            &format!("Type must be 'memory', got '{}'", mem_type)),
     };
 
-    let dest_dir = format!("{}/profiles/{}/memories", state.data_dir, profile);
+    let dest_dir = format!("{}/profiles/{}", state.data_dir, profile);
     let dest_path = format!("{}/{}", dest_dir, file_name);
 
     // Ensure directory exists

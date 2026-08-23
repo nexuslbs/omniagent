@@ -1,4 +1,4 @@
-//! System prompt assembly: identity, tool guidance, memory, user profile.
+//! System prompt assembly: identity, tool guidance, memory.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,14 +15,12 @@ use crate::memory_store::MemoryStore;
 #[derive(Debug, Clone)]
 pub struct PromptBuilderConfig {
     pub memory_max_chars: usize,
-    pub soul_max_chars: usize,
 }
 
 impl Default for PromptBuilderConfig {
     fn default() -> Self {
         Self {
             memory_max_chars: 5_000,
-            soul_max_chars: 1_000,
         }
     }
 }
@@ -97,7 +95,7 @@ fn build_dynamic_identity(tool_names: &[String]) -> String {
             || name.starts_with("create_skill")
             || name.starts_with("list_skills")
             || name == "plugin_manager"
-            || name == "list_plugins"
+            || name == "list_tools_details"
             || name == "list_tool_details"
             || name == "compose"
             || name.starts_with("hindsight_")
@@ -201,7 +199,7 @@ and they will be sent as native photos."),
     }
 }
 
-// ── Memory / profile readings ───────────────────────────────────
+// ── Memory readings ─────────────────────────────────────────────
 
 fn read_memory_section(memory_store: &MemoryStore, memory_max_chars: usize) -> String {
     let raw = memory_store.get_memory_raw();
@@ -220,24 +218,6 @@ fn read_memory_section(memory_store: &MemoryStore, memory_max_chars: usize) -> S
             "## MEMORY (your personal notes) [{} chars]",
             raw.chars().count()
         )
-    };
-    format!("{header}\n{truncated}")
-}
-
-fn read_user_profile_section(memory_store: &MemoryStore, soul_max_chars: usize) -> String {
-    let raw = memory_store.get_user_raw();
-    if raw.is_empty() {
-        return String::new();
-    }
-    let truncated = truncate_content(raw, soul_max_chars);
-    let header = if raw.len() > soul_max_chars {
-        format!(
-            "## USER PROFILE (who the user is) [TRUNCATED: showing first {} of {} chars]",
-            soul_max_chars,
-            raw.len()
-        )
-    } else {
-        format!("## USER PROFILE (who the user is) [{} chars]", raw.len())
     };
     format!("{header}\n{truncated}")
 }
@@ -321,11 +301,6 @@ pub fn build_system_prompt_parts(
         parts.push(memory_section);
     }
 
-    let user_section = read_user_profile_section(memory_store, config.soul_max_chars);
-    if !user_section.is_empty() {
-        parts.push(user_section);
-    }
-
     parts
 }
 
@@ -383,13 +358,9 @@ Previous plan:\n{}",
 
     let memory_info = {
         let memory_raw = memory_store.get_memory_raw();
-        let user_raw = memory_store.get_user_raw();
         let mut parts = Vec::new();
         if !memory_raw.is_empty() {
             parts.push(format!("MEMORY: {} chars", memory_raw.len()));
-        }
-        if !user_raw.is_empty() {
-            parts.push(format!("USER PROFILE: {} chars", user_raw.len()));
         }
         if parts.is_empty() {
             String::new()

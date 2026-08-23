@@ -236,9 +236,6 @@ pub(crate) async fn run_main_loop(
             if !prompt_parts.memory.is_empty() {
                 planning_messages.push(ChatMessage::system(&prompt_parts.memory));
             }
-            if !prompt_parts.soul.is_empty() {
-                planning_messages.push(ChatMessage::system(&prompt_parts.soul));
-            }
             if !prompt_parts.context.is_empty() {
                 planning_messages.push(ChatMessage::system(&format!(
                     "=== Context ===\n{}",
@@ -494,9 +491,6 @@ Previous plan:\n{}",
     let mut messages = vec![ChatMessage::system(&prompt_parts.system)];
     if !prompt_parts.memory.is_empty() {
         messages.push(ChatMessage::system(&prompt_parts.memory));
-    }
-    if !prompt_parts.soul.is_empty() {
-        messages.push(ChatMessage::system(&prompt_parts.soul));
     }
 
     // Inject task template FIRST (right after system prompt): highest instruction priority

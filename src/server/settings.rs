@@ -163,7 +163,6 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "max_tokens",
                 "max_tokens_on_truncation",
                 "max_unfinished_subtask_retries",
-                "soul_max_chars",
                 "state_block_update_interval",
                 "kanban_dispatcher_interval",
                 "temperature",
@@ -415,16 +414,6 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
-            "soul_max_chars".into(),
-            SettingMeta {
-                field_type: "number".into(),
-                description: "Max characters for SOUL.md in the system prompt".into(),
-                options: None,
-                readonly: false,
-                default: Some("1000".into()),
-            },
-        ),
-        (
             "delete_after_days".into(),
             SettingMeta {
                 field_type: "number".into(),
@@ -656,7 +645,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             "kanban_dispatcher_interval" => "general",
             "sub_prompt_max_chars" | "sub_prompt_iteration_percent" => "general",
             // memory category
-            "delete_after_days" | "memory_max_chars" | "soul_max_chars" => "memory",
+            "delete_after_days" | "memory_max_chars" => "memory",
             // system : bootstrap from env
             "host" | "port" | "database_url" | "omni_dir" => "system",
             // everything else → general
@@ -757,7 +746,6 @@ fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
         "delete_after_days",
         "kanban_dispatcher_interval",
         "memory_max_chars",
-        "soul_max_chars",
         "default_provider",
         "max_inline_file_kb",
         "tool_bg_secs",

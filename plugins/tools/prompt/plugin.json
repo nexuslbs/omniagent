@@ -39,13 +39,6 @@
       "description": "Maximum characters for the memory section in the system prompt"
     },
     {
-      "key": "soul_max_chars",
-      "label": "Soul (User Profile) Max Chars",
-      "type": "integer",
-      "default": 1000,
-      "description": "Maximum characters for the user profile section in the system prompt"
-    },
-    {
       "key": "tokenizer_encoding",
       "label": "Tokenizer Encoding",
       "type": "string",

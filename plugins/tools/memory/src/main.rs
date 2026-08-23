@@ -414,15 +414,14 @@ async fn handle_manage(data_dir: &str, args: &Value, profile_name: &str) -> Resu
         profile_name.trim().to_string()
     };
 
-    let memories_dir = format!("{}/profiles/{}/memories", data_dir, profile);
-    let dir_path = std::path::Path::new(&memories_dir);
+    let profile_dir = format!("{}/profiles/{}", data_dir, profile);
+    let dir_path = std::path::Path::new(&profile_dir);
     std::fs::create_dir_all(dir_path)
-        .map_err(|e| anyhow::anyhow!("Failed to create memories directory: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to create profile directory: {}", e))?;
 
     let filename = match target {
         "memory" => "MEMORY.md",
-        "user" => "USER.md",
-        _ => anyhow::bail!("Invalid target '{}'. Must be 'memory' or 'user'", target),
+        _ => anyhow::bail!("Invalid target '{}'. Must be 'memory'", target),
     };
     let filepath = dir_path.join(filename);
 
@@ -782,7 +781,7 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "manage_memory".to_string(),
                 description:
-                    "Manage profile memory files (MEMORY.md and USER.md). Supports add, remove, and clean \
+                    "Manage profile memory files (MEMORY.md). Supports add, remove, and clean \
                      operations on the agent's persistent memory entries. Use on explicit user request only. \
                      'add' prepends a new entry, 'remove' deletes entries matching a substring, \
                      'clean' clears all entries."
@@ -792,8 +791,8 @@ async fn main() -> Result<()> {
                     "properties": {
                         "target": {
                             "type": "string",
-                            "enum": ["memory", "user"],
-                            "description": "Which file: 'memory' for MEMORY.md, 'user' for USER.md"
+                            "enum": ["memory"],
+                            "description": "Which file: 'memory' for MEMORY.md"
                         },
                         "action": {
                             "type": "string",

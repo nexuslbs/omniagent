@@ -817,14 +817,9 @@ async fn prompt_handler(
     };
 
     let profile_path = format!("{}/profiles/{}", state.data_dir, profile_name);
-    let memories_dir = std::path::Path::new(&profile_path).join("memories");
-    let memory_raw = if memories_dir.join("MEMORY.md").exists() {
-        std::fs::read_to_string(memories_dir.join("MEMORY.md")).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let user_raw = if memories_dir.join("USER.md").exists() {
-        std::fs::read_to_string(memories_dir.join("USER.md")).unwrap_or_default()
+    let memory_path = std::path::Path::new(&profile_path).join("MEMORY.md");
+    let memory_raw = if memory_path.exists() {
+        std::fs::read_to_string(memory_path).unwrap_or_default()
     } else {
         String::new()
     };
@@ -852,19 +847,13 @@ async fn prompt_handler(
     segments.push(format!("You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice. HONESTY RULE: if you cannot complete the task, your final summary MUST clearly state that you gave up and why, and what remains undone — NEVER claim the task was completed unless every requested step was actually done and verified."));
     segments.push(format!("Active Hermes profile: {profile_name}."));
 
-    // Volatile tier: memory/soul placeholders
+    // Volatile tier: memory placeholder
     let separator = "═".repeat(46);
     let mut locked_entries: Vec<String> = Vec::new();
 
     if !memory_raw.is_empty() {
         locked_entries.push(format!(
             "{}\n## MEMORY (your personal notes)\n{}\n\n<<memory>>",
-            separator, separator
-        ));
-    }
-    if !user_raw.is_empty() {
-        locked_entries.push(format!(
-            "{}\n## USER PROFILE (who the user is)\n{}\n\n<<soul>>",
             separator, separator
         ));
     }
