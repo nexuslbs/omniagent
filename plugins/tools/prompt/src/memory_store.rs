@@ -93,7 +93,8 @@ impl MemoryStore {
             match fs::read_to_string(&memory_path) {
                 Ok(raw) => {
                     let hash = format!("{:x}", Sha256::digest(raw.as_bytes()));
-                    let expected = Self::read_expected_hash(&self.profile_dir.join("MEMORY.md.sha256"));
+                    let expected =
+                        Self::read_expected_hash(&self.profile_dir.join("MEMORY.md.sha256"));
                     let valid = expected.as_ref().is_none_or(|e| e == &hash);
                     (Some(hash), valid)
                 }

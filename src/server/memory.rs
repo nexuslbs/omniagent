@@ -461,8 +461,12 @@ async fn edit_handler(
 ) -> impl IntoResponse {
     let file_name = match mem_type.as_str() {
         "memory" => "MEMORY.md",
-        _ => return err_json(StatusCode::BAD_REQUEST,
-            &format!("Type must be 'memory', got '{}'", mem_type)),
+        _ => {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                &format!("Type must be 'memory', got '{}'", mem_type),
+            )
+        }
     };
 
     let dest_dir = format!("{}/profiles/{}", state.data_dir, profile);
@@ -545,8 +549,12 @@ async fn upload_handler(
 ) -> impl IntoResponse {
     let file_name = match mem_type.as_str() {
         "memory" => "MEMORY.md",
-        _ => return err_json(StatusCode::BAD_REQUEST,
-            &format!("Type must be 'memory', got '{}'", mem_type)),
+        _ => {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                &format!("Type must be 'memory', got '{}'", mem_type),
+            )
+        }
     };
 
     let dest_dir = format!("{}/profiles/{}", state.data_dir, profile);

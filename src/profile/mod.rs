@@ -190,10 +190,7 @@ impl ProfileRegistry {
                 "profile: created default profile config {}",
                 config_path.display()
             ),
-            Err(e) => tracing::warn!(
-                "profile: failed to write {}: {e}",
-                config_path.display()
-            ),
+            Err(e) => tracing::warn!("profile: failed to write {}: {e}", config_path.display()),
         }
     }
 
@@ -255,15 +252,13 @@ mod tests {
 
     #[test]
     fn test_ensure_default_materializes_config() {
-        let dir = std::env::temp_dir().join(format!("omniagent-profile-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("omniagent-profile-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         // Missing profile dir: registry auto-creates {data}/profiles/{default}/config.json
         let registry = ProfileRegistry::new(dir.to_str().unwrap());
         let default_name = registry.default_profile.clone();
-        let config_path = dir
-            .join("profiles")
-            .join(&default_name)
-            .join("config.json");
+        let config_path = dir.join("profiles").join(&default_name).join("config.json");
         assert!(config_path.exists(), "config.json should be auto-created");
         assert_eq!(
             fs::read_to_string(&config_path).unwrap(),
