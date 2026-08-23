@@ -2,6 +2,7 @@ use crate::agent::config::AgentContext;
 use crate::agent::context_builder::PromptParts;
 use crate::agent::helpers;
 use crate::agent::response_handler::handle_response;
+use crate::agent::tool_result_pruner::{is_context_length_error, prune_messages, PruneParams};
 use crate::db::types as queries;
 use crate::db::types::{Channel, Message, MessageNew, Thread};
 use crate::err_msg;
@@ -203,6 +204,11 @@ pub(crate) async fn run_main_loop(
 
     // Snapshot config once for consistency across planning and main loop.
     let cfg_snapshot = cfg.config_snapshot();
+
+    // Deterministic tool-result pruning thresholds (task 2): shrinks
+    // over-budget tool results to a bounded head/middle/tail preview before
+    // LLM calls (assembly), summaries, and provider context-length retries.
+    let prune_params = PruneParams::from_config(&cfg_snapshot);
 
     // Per-thread (provider+model) effective config from models.yml:
     // model_config > provider > global settings (token budgets, max_tokens).
@@ -973,6 +979,23 @@ Previous plan:\n{}",
 
         // ── LLM completion call ──
 
+        // Deterministic tool-result pruning (task 2): shrink over-budget tool
+        // results to a bounded head/middle/tail preview BEFORE this LLM call so
+        // the request never pays for huge dumps. Pure slicing (zero LLM cost);
+        // spill locators (task 1) are preserved and tool-CALL messages are
+        // never touched, so the tool-call/result pairing stays intact.
+        let prune_report = prune_messages(&mut messages, &prune_params);
+        if !prune_report.is_empty() {
+            info!(
+                "[prune] Pre-LLM prune for thread {}: {} result(s) pruned, {} chars -> {} (saved {})",
+                thread.id,
+                prune_report.entries.len(),
+                prune_report.chars_before,
+                prune_report.chars_after,
+                prune_report.chars_saved(),
+            );
+        }
+
         let request = CompletionRequest {
             messages: messages.clone(),
             max_tokens: effective_max_tokens(escalated_max_tokens, base_max_tokens),
@@ -989,6 +1012,21 @@ Previous plan:\n{}",
             Ok(resp) => resp,
             Err(e) => {
                 error!("LLM call failed: {:?}", e);
+                // Task-3 hook: on a provider context-length error, prune
+                // over-budget tool results so the retry's context fits
+                // (deterministic, zero LLM cost). Task 3 builds the retry
+                // policy on top of this hook.
+                if is_context_length_error(&format!("{:?}", e)) {
+                    let prune_report = prune_messages(&mut messages, &prune_params);
+                    info!(
+                        "[prune] Context-length error: pruned {} result(s) for thread {} ({} chars -> {}, saved {})",
+                        prune_report.entries.len(),
+                        thread.id,
+                        prune_report.chars_before,
+                        prune_report.chars_after,
+                        prune_report.chars_saved(),
+                    );
+                }
                 llm_error_retries += 1;
                 if llm_error_retries >= llm_max_retries {
                     warn!(

@@ -24,6 +24,7 @@ pub mod plugin_manager;
 pub(crate) mod response_handler;
 pub mod summary_trigger;
 pub mod task_registry;
+pub(crate) mod tool_result_pruner;
 
 use parking_lot::RwLock;
 use sql_forge::sql_forge;

@@ -146,6 +146,15 @@ pub struct AgentConfig {
     /// Directory for spilled oversized tool results, session-scoped per thread.
     /// Default: `{OMNI_DIR}/data/spill`.
     pub spill_dir: String,
+    /// Tool-result pruning (task 2): max chars kept from the HEAD of an
+    /// over-budget tool result in the pruned preview (default 12000).
+    pub prune_head_chars: usize,
+    /// Tool-result pruning: max chars kept from the TAIL of an over-budget
+    /// tool result in the pruned preview (default 8000).
+    pub prune_tail_chars: usize,
+    /// Tool-result pruning: results with at most this many chars are left
+    /// untouched (default 20000, the head+tail preview budget).
+    pub prune_min_chars: usize,
     /// Default profile name (used at login / session start).
     pub default_profile: String,
 
@@ -280,6 +289,9 @@ impl AgentConfig {
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
             max_inline_chars: get("max_inline_chars", "50000").parse().unwrap_or(50000),
             spill_dir: get("spill_dir", &format!("{}/data/spill", data_dir)),
+            prune_head_chars: get("prune_head_chars", "12000").parse().unwrap_or(12000),
+            prune_tail_chars: get("prune_tail_chars", "8000").parse().unwrap_or(8000),
+            prune_min_chars: get("prune_min_chars", "20000").parse().unwrap_or(20000),
             default_profile: get("default_profile", "omni"),
 
             // Vectorization — defaults match settings.yml so the worker is
@@ -391,6 +403,9 @@ impl AgentConfig {
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
             max_inline_chars: get("max_inline_chars", "50000").parse().unwrap_or(50000),
             spill_dir: get("spill_dir", &format!("{}/data/spill", data_dir)),
+            prune_head_chars: get("prune_head_chars", "12000").parse().unwrap_or(12000),
+            prune_tail_chars: get("prune_tail_chars", "8000").parse().unwrap_or(8000),
+            prune_min_chars: get("prune_min_chars", "20000").parse().unwrap_or(20000),
             default_profile: get("default_profile", "omni"),
 
             // Vectorization (same defaults as from_env; values come from settings.yml)
@@ -455,6 +470,9 @@ mod tests {
             max_inline_file_kb: 500,
             max_inline_chars: 50000,
             spill_dir: "/tmp/spill".to_string(),
+            prune_head_chars: 12000,
+            prune_tail_chars: 8000,
+            prune_min_chars: 20000,
             default_profile: "custom".to_string(),
             vectorize_messages: true,
             messages_vectorization_method: "local".to_string(),
@@ -519,6 +537,9 @@ mod tests {
             max_inline_file_kb: 0,
             max_inline_chars: 0,
             spill_dir: String::new(),
+            prune_head_chars: 0,
+            prune_tail_chars: 0,
+            prune_min_chars: 0,
             default_profile: String::new(),
             vectorize_messages: false,
             messages_vectorization_method: String::new(),

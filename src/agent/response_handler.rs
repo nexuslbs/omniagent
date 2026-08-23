@@ -45,6 +45,28 @@ pub(crate) async fn handle_response(
         }
     }
 
+    // -- Deterministic tool-result pruning before summary generation (task 2) --
+    // Shrink over-budget tool results to a bounded head/middle/tail preview so
+    // the summary paths (digest + LLM call) never pay for huge dumps. Spill
+    // locators (task 1) are preserved; pure slicing, zero LLM cost. The
+    // original `messages` slice is not mutated - the summary paths below use
+    // the pruned copy.
+    let (pruned_messages, prune_report) = crate::agent::tool_result_pruner::prune_messages_owned(
+        messages,
+        &crate::agent::tool_result_pruner::PruneParams::from_config(&cfg.config_snapshot()),
+    );
+    if !prune_report.is_empty() {
+        info!(
+            "[prune] Pre-summary prune for thread {}: {} result(s) pruned, {} chars -> {} (saved {})",
+            thread.id,
+            prune_report.entries.len(),
+            prune_report.chars_before,
+            prune_report.chars_after,
+            prune_report.chars_saved(),
+        );
+    }
+    let messages: &[ChatMessage] = &pruned_messages;
+
     let agent_elapsed_ms = start_time.elapsed().as_millis() as i32;
     let is_empty_response = final_content.trim().is_empty();
 
