@@ -407,23 +407,6 @@ async fn handle_code_exec(args: Value) -> AppResult<McpToolResult> {
 mod tests {
     use super::*;
 
-    fn run_capture(program: &str) -> Value {
-        // Round-trip through the real runner logic against a local interpreter.
-        // (Used only by tests that have python3/node available; the pure parse
-        // tests below cover the contract without an interpreter.)
-        let mut child = std::process::Command::new("python3")
-            .arg("-c")
-            .arg(program)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let _ = child.stdin.take().unwrap().write_all(program.as_bytes());
-        let out = child.wait_with_output().unwrap();
-        serde_json::from_slice(&out.stdout).unwrap_or(Value::Null)
-    }
-
     #[test]
     fn parse_ok_typed_roundtrip_all_types() {
         // dict / list / str / int / bool / null
