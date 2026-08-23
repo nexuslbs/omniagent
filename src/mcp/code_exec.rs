@@ -139,6 +139,12 @@ fn build_run_command(
 ) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("docker");
     cmd.arg("exec").arg("-i").arg(toolbox);
+    // busybox `timeout` = hard container-side kill (SIGTERM preempts busy
+    // loops, so even a JS `while(true){}` that starves its event loop — and
+    // thus the runner's own setTimeout guard — cannot outlive the limit).
+    // The runner still installs its own in-process timer as a redundant
+    // guard for the common (non-starvation) case.
+    cmd.arg("timeout").arg(timeout_secs.to_string());
     if language == "python" {
         cmd.arg(RUNNER_PY);
     } else {
@@ -504,6 +510,7 @@ mod tests {
         assert!(repr.contains(RUNNER_PY));
         assert!(repr.contains("\"{\\\"a\\\":1}\""));
         assert!(repr.contains("\"30\""));
+        assert!(repr.contains("\"timeout\""));
 
         let cmd_js = build_run_command("omnidev-toolbox-1", "js", "null", 10);
         let repr_js = format!("{cmd_js:?}");
