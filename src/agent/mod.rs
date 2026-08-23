@@ -22,6 +22,7 @@ pub mod helpers;
 pub mod kanban_updater;
 pub(crate) mod main_loop;
 pub mod plugin_manager;
+pub(crate) mod prompt_sections;
 pub(crate) mod response_handler;
 pub mod summary_trigger;
 pub mod task_registry;

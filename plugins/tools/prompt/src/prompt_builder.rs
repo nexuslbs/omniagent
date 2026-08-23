@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::memory_store::MemoryStore;
 
-// ── Plugin config ──────────────────────────────────────────────
+// ── Plugin config ──────────────────────────────────────────────────────
 //
 // Config values are provided by the omniagent via the configure message
 // at startup. Plugins never read env vars for config. Users can use
@@ -25,7 +25,7 @@ impl Default for PromptBuilderConfig {
     }
 }
 
-// ── Stable identity / guidance texts ────────────────────────────
+// ── Stable identity / guidance texts ────────────────────────────────────
 
 fn build_dynamic_identity(tool_names: &[String]) -> String {
     let _has_filesystem = tool_names.iter().any(|n| n.starts_with("filesystem"));
@@ -199,7 +199,7 @@ and they will be sent as native photos."),
     }
 }
 
-// ── Memory readings ─────────────────────────────────────────────
+// ── Memory readings ─────────────────────────────────────────────────────
 
 fn read_memory_section(memory_store: &MemoryStore, memory_max_chars: usize) -> String {
     let raw = memory_store.get_memory_raw();
@@ -244,7 +244,7 @@ pub fn truncate_content_pub(content: &str, max_chars: usize) -> String {
     truncate_content(content, max_chars)
 }
 
-// ── Prompt building ─────────────────────────────────────────────
+// ── Prompt building ─────────────────────────────────────────────────────
 
 /// Build the full system prompt string from all tiers.
 pub fn build_system_prompt(
@@ -275,33 +275,70 @@ pub fn build_system_prompt_parts(
     tool_names: &[String],
     config: &PromptBuilderConfig,
 ) -> Vec<String> {
-    let mut parts = Vec::new();
+    build_system_prompt_sections(
+        memory_store,
+        platform,
+        system_message,
+        profile_name,
+        tool_names,
+        config,
+    )
+    .into_iter()
+    .map(|(_, _, text)| text)
+    .collect()
+}
 
-    // Tier 1: Stable
-    let identity = build_dynamic_identity(tool_names);
-    parts.push(identity);
-    parts.push(TOOL_GUIDANCE.to_string());
-    let profile_hint = build_active_profile_hint(profile_name);
-    parts.push(profile_hint);
+/// Ordered, named system-prompt sections — `(name, order, text)` triples.
+///
+/// Task 9 contract: when the plugin config sets `emit_sections`, these are
+/// returned to the omniagent core as `sections: [{name, order, text}]`, which
+/// assembles the system prompt sorted by ascending `order` with per-thread
+/// scope shadowing. The EMISSION ORDER (push order) is identical to
+/// `build_system_prompt_parts` so the legacy joined rendering stays
+/// byte-identical; the `order` values follow the convention (identity -100,
+/// deployment/persona 0, tool guidance 100-199, channel/platform 200+,
+/// memory last).
+pub fn build_system_prompt_sections(
+    memory_store: &MemoryStore,
+    platform: &str,
+    system_message: Option<&str>,
+    profile_name: &str,
+    tool_names: &[String],
+    config: &PromptBuilderConfig,
+) -> Vec<(String, i64, String)> {
+    let mut sections: Vec<(String, i64, String)> = Vec::new();
 
-    // Tier 2: Context / optional system message
+    // Tier 1: Stable (identity -100, tool guidance 100, profile/persona 0)
+    sections.push((
+        "identity".to_string(),
+        -100,
+        build_dynamic_identity(tool_names),
+    ));
+    sections.push(("tool_guidance".to_string(), 100, TOOL_GUIDANCE.to_string()));
+    sections.push((
+        "profile".to_string(),
+        0,
+        build_active_profile_hint(profile_name),
+    ));
+
+    // Tier 2: Context / optional system message (deployment persona)
     if let Some(msg) = system_message {
         if !msg.is_empty() {
-            parts.push(msg.to_string());
+            sections.push(("deployment".to_string(), 10, msg.to_string()));
         }
     }
 
-    // Tier 3: Volatile
+    // Tier 3: Volatile (platform 200, memory last)
     if let Some(hint) = build_platform_hint(platform) {
-        parts.push(hint.to_string());
+        sections.push(("platform".to_string(), 200, hint.to_string()));
     }
 
     let memory_section = read_memory_section(memory_store, config.memory_max_chars);
     if !memory_section.is_empty() {
-        parts.push(memory_section);
+        sections.push(("memory".to_string(), 300, memory_section));
     }
 
-    parts
+    sections
 }
 
 #[derive(Debug, Clone)]
@@ -378,7 +415,7 @@ Previous plan:\n{}",
     format!("{context}{memory_info}{user_msg}")
 }
 
-// ── Subtask types ──────────────────────────────────────────────
+// ── Subtask types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SubtaskStatus {
@@ -412,7 +449,7 @@ pub fn format_subtask_section(subtasks: &[ThreadSubtask], thread_id: i64) -> Opt
     Some(lines.join("\n"))
 }
 
-// ── Return type for build_system_prompt_parts ───────────────────
+// ── Return type for build_system_prompt_parts ───────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct PromptParts {
@@ -422,5 +459,86 @@ pub struct PromptParts {
 impl PromptParts {
     pub fn join(&self) -> String {
         self.parts.join("\n\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sections_and_parts_are_byte_identical() {
+        let store = MemoryStore::new(".");
+        let sections = build_system_prompt_sections(
+            &store,
+            "mattermost",
+            Some("system override"),
+            "omni",
+            &["fetch".to_string(), "filesystem_read".to_string()],
+            &PromptBuilderConfig::default(),
+        );
+        let parts = build_system_prompt_parts(
+            &store,
+            "mattermost",
+            Some("system override"),
+            "omni",
+            &["fetch".to_string(), "filesystem_read".to_string()],
+            &PromptBuilderConfig::default(),
+        );
+        // Same push order → same joined text (legacy byte-identical).
+        assert_eq!(
+            sections
+                .iter()
+                .map(|(_, _, t)| t.clone())
+                .collect::<Vec<_>>(),
+            parts
+        );
+    }
+
+    #[test]
+    fn sections_carry_names_and_orders() {
+        let store = MemoryStore::new(".");
+        let sections = build_system_prompt_sections(
+            &store,
+            "telegram",
+            None,
+            "omni",
+            &[],
+            &PromptBuilderConfig::default(),
+        );
+        let names: Vec<&str> = sections.iter().map(|(n, _, _)| n.as_str()).collect();
+        // identity, tool_guidance, profile, platform (no system_message, no memory)
+        assert_eq!(
+            names,
+            vec!["identity", "tool_guidance", "profile", "platform"]
+        );
+        let identity = &sections[0];
+        assert_eq!(identity.0, "identity");
+        assert_eq!(identity.1, -100);
+        assert!(identity.2.contains("You are OmniAgent"));
+        assert_eq!(sections[1].1, 100, "tool guidance 100-199");
+        assert_eq!(sections[2].1, 0, "profile/persona 0");
+        assert_eq!(sections[3].1, 200, "platform 200+");
+    }
+
+    #[test]
+    fn sections_include_deployment_and_memory_when_present() {
+        let store = MemoryStore::new(".");
+        let sections = build_system_prompt_sections(
+            &store,
+            "cli",
+            Some("custom deployment msg"),
+            "omni",
+            &[],
+            &PromptBuilderConfig::default(),
+        );
+        let names: Vec<&str> = sections.iter().map(|(n, _, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["identity", "tool_guidance", "profile", "deployment"]
+        );
+        assert_eq!(sections[3].0, "deployment");
+        assert_eq!(sections[3].1, 10);
+        assert_eq!(sections[3].2, "custom deployment msg");
     }
 }

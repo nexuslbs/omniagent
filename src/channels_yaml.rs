@@ -28,6 +28,9 @@
 //!   `current_profile` / `current_model` / `current_provider`. The API keeps
 //!   exposing `current_*` for dashboard compatibility; the loader maps.
 //! - `plan` (bool) — the single channel-level plan override.
+//! - `prompt_sections` — channel-scoped ordered prompt sections (task 9):
+//!   `[{name, order, text}]` that SHADOW plugin-global sections with the
+//!   same name for threads of this channel (scope shadowing, per-thread).
 //! - NO `metadata`, NO `external_id` (derived from `resource_identifier`),
 //!   NO `created_at`/`updated_at` (no runtime clock in a
 //!   static file).
@@ -45,6 +48,7 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::prompt_sections::PromptSection;
 use crate::config_path::config_path;
 use crate::error::{AppResult, Error};
 
@@ -112,6 +116,10 @@ pub struct ChannelDef {
     pub plan: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// Channel-scoped ordered prompt sections (task 9): shadow plugin-global
+    /// sections with the same name for threads of this channel only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_sections: Option<Vec<PromptSection>>,
 }
 
 // ── Path / IO ───────────────────────────────────────────────────────────────
@@ -331,6 +339,30 @@ channels:
     }
 
     #[test]
+    fn parse_channel_scoped_prompt_sections() {
+        let yaml = r#"
+channels:
+  dev:
+    profile: omni
+    prompt_sections:
+      - name: persona
+        order: 0
+        text: "You are the dev channel agent."
+      - name: platform
+        order: 200
+        text: "Channel-scoped platform note."
+"#;
+        let file: ChannelsFile = serde_yaml::from_str(yaml).expect("parse");
+        let dev = &file.channels["dev"];
+        let sections = dev.prompt_sections.as_ref().expect("sections present");
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].name, "persona");
+        assert_eq!(sections[0].order, 0);
+        assert_eq!(sections[0].text, "You are the dev channel agent.");
+        assert_eq!(sections[1].order, 200);
+    }
+
+    #[test]
     fn missing_file_is_empty() {
         let dir = std::env::temp_dir().join(format!("channelsyml-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -364,6 +396,7 @@ channels:
                 resource_identifier: Some("rid-123".to_string()),
                 profile: Some("omni".to_string()),
                 plan: Some(false),
+                prompt_sections: Some(vec![PromptSection::new("persona", 0, "scoped")]),
                 ..Default::default()
             },
         );
@@ -373,6 +406,12 @@ channels:
         let c = &loaded.channels["test-channel"];
         assert_eq!(c.platform.as_deref(), Some("mattermost"));
         assert_eq!(c.plan, Some(false));
+        let sections = c
+            .prompt_sections
+            .as_ref()
+            .expect("sections survive roundtrip");
+        assert_eq!(sections[0].name, "persona");
+        assert_eq!(sections[0].text, "scoped");
     }
 
     #[test]

@@ -57,6 +57,13 @@ pub struct PluginConfig {
     pub max_summary_chars: usize,
     // Prompt builder
     pub memory_max_chars: usize,
+    /// Task 9: when true, `prompt_generate` returns an ordered `sections`
+    /// array (`[{name, order, text}]`) INSTEAD of the flat `system`/`memory`
+    /// fields; the omniagent core assembles the system prompt from the
+    /// sections (sorted by `order`, per-thread scope shadowing,
+    /// `{{variable}}` interpolation). Default false = legacy byte-identical
+    /// flat-field rendering.
+    pub emit_sections: bool,
 }
 
 impl PluginConfig {
@@ -81,6 +88,7 @@ impl PluginConfig {
             compact_keep_step: 1,
             max_summary_chars: 50_000,
             memory_max_chars: 5000,
+            emit_sections: false,
         }
     }
 
@@ -148,6 +156,12 @@ impl PluginConfig {
             }
             if let Some(v) = obj.get("memory_max_chars").and_then(&as_usize) {
                 cfg.memory_max_chars = v;
+            }
+            if let Some(v) = obj.get("emit_sections") {
+                cfg.emit_sections = v
+                    .as_bool()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<bool>().ok()))
+                    .unwrap_or(false);
             }
         }
         cfg
@@ -1303,8 +1317,12 @@ async fn handle_generate_full(
     let mut memory_store = crate::memory_store::MemoryStore::new(&base_path);
     memory_store.load_from_disk();
 
-    // Use build_system_prompt_parts to get separated tiers
-    let all_parts = crate::prompt_builder::build_system_prompt_parts(
+    // Task 9: ordered, named system-prompt sections. build_system_prompt_parts
+    // derives from build_system_prompt_sections (identical push order), so the
+    // legacy joined rendering stays byte-identical. When `emit_sections` is
+    // set, the sections array is returned INSTEAD of the flat system/memory
+    // fields; the omniagent core assembles the system prompt from it.
+    let named_sections = crate::prompt_builder::build_system_prompt_sections(
         &memory_store,
         platform,
         system_message,
@@ -1312,6 +1330,10 @@ async fn handle_generate_full(
         &tool_names,
         &cfg.builder_config(),
     );
+    let all_parts: Vec<String> = named_sections
+        .iter()
+        .map(|(_, _, text)| text.clone())
+        .collect();
 
     // all_parts contains: [identity, tool_guidance, profile_hint, (system_message?),
     // platform_hint?, memory_section]. Split into: system (identity + guidance +
@@ -1539,13 +1561,34 @@ async fn handle_generate_full(
         }
     };
 
-    let result = serde_json::json!({
-        "system": system,
-        "memory": memory,
-        "context": context,
-        "user": user,
-        "plan": plan,
-    });
+    let result = if cfg.emit_sections {
+        // Task 9: ordered/scoped sections contract. The core assembles the
+        // system prompt from these (sorted by `order`, per-thread scope
+        // shadowing, `{{variable}}` interpolation); no flat system/memory
+        // fields are emitted in this mode.
+        serde_json::json!({
+            "sections": named_sections
+                .iter()
+                .map(|(name, order, text)| serde_json::json!({
+                    "name": name,
+                    "order": order,
+                    "text": text,
+                }))
+                .collect::<Vec<_>>(),
+            "context": context,
+            "user": user,
+            "plan": plan,
+        })
+    } else {
+        // Legacy contract: byte-identical flat fields (no `sections` key).
+        serde_json::json!({
+            "system": system,
+            "memory": memory,
+            "context": context,
+            "user": user,
+            "plan": plan,
+        })
+    };
 
     Ok((
         serde_json::to_string_pretty(&result).unwrap_or_else(|_| "Serialization error".to_string()),
