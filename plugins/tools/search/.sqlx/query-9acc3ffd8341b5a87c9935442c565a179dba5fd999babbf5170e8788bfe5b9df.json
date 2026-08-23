@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, title, body, status, priority, assignee, profile, template, archived, position, channel_id, plan, created_at, updated_at\n        FROM kanban_tasks\n        WHERE id = $1\n        ",
+  "query": "\n        SELECT\n            id, title, body, status, priority, position, assignee,\n            channel_id, profile, archived, template, plan, workflow_id, board,\n            goal_phase, goal_blocked_code, goal_blocked_message, goal_max_rounds,\n            goal_revision,\n            created_at, updated_at\n        FROM kanban_tasks\n        WHERE (($1 OR archived = false)\n           OR (NOT $2 AND archived = false))\n          AND ($3 = '' OR board = $4)\n        ORDER BY position ASC, created_at DESC\n        ",
   "describe": {
     "columns": [
       {
@@ -60,50 +60,6 @@
       },
       {
         "ordinal": 5,
-        "name": "assignee",
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "kanban_tasks",
-            "name": "assignee"
-          }
-        }
-      },
-      {
-        "ordinal": 6,
-        "name": "profile",
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "kanban_tasks",
-            "name": "profile"
-          }
-        }
-      },
-      {
-        "ordinal": 7,
-        "name": "template",
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "kanban_tasks",
-            "name": "template"
-          }
-        }
-      },
-      {
-        "ordinal": 8,
-        "name": "archived",
-        "type_info": "Bool",
-        "origin": {
-          "Table": {
-            "table": "kanban_tasks",
-            "name": "archived"
-          }
-        }
-      },
-      {
-        "ordinal": 9,
         "name": "position",
         "type_info": "Int4",
         "origin": {
@@ -114,13 +70,57 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 6,
+        "name": "assignee",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "assignee"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
         "name": "channel_id",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "kanban_tasks",
             "name": "channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "profile",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "profile"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "archived",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "archived"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "template",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "template"
           }
         }
       },
@@ -137,6 +137,83 @@
       },
       {
         "ordinal": 12,
+        "name": "workflow_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "workflow_id"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "board",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "board"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "goal_phase",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "goal_phase"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "goal_blocked_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "goal_blocked_code"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "goal_blocked_message",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "goal_blocked_message"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "goal_max_rounds",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "goal_max_rounds"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "goal_revision",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "goal_revision"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -147,7 +224,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 20,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -160,6 +237,9 @@
     ],
     "parameters": {
       "Left": [
+        "Bool",
+        "Bool",
+        "Text",
         "Text"
       ]
     },
@@ -172,7 +252,14 @@
       true,
       true,
       true,
+      true,
       false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
       true,
       true,
       false,
@@ -180,5 +267,5 @@
       true
     ]
   },
-  "hash": "1eda926ae7baa59cd0ca8e645768b3a2f945b6da677411137b00b7b2717f04d9"
+  "hash": "9acc3ffd8341b5a87c9935442c565a179dba5fd999babbf5170e8788bfe5b9df"
 }

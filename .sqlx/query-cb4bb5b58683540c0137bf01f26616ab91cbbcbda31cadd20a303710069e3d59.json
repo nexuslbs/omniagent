@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id, title, body, status, priority, position, assignee,\n            channel_id, profile, archived, template, plan, workflow_id, board,\n            created_at, updated_at\n        FROM kanban_tasks\n        WHERE (($1 OR archived = false)\n           OR (NOT $2 AND archived = false))\n          AND ($3 = '' OR board = $4)\n        ORDER BY position ASC, created_at DESC\n        ",
+  "query": "\n        SELECT\n            id, title, body, status, priority, position, assignee,\n            channel_id, profile, archived, template, plan, workflow_id, board,\n            goal_phase, goal_blocked_code, goal_blocked_message, goal_max_rounds,\n            goal_revision,\n            created_at, updated_at\n        FROM kanban_tasks\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -159,6 +159,61 @@
       },
       {
         "ordinal": 14,
+        "name": "goal_phase",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "goal_phase"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "goal_blocked_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "goal_blocked_code"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "goal_blocked_message",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "goal_blocked_message"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "goal_max_rounds",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "goal_max_rounds"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "goal_revision",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "goal_revision"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -169,7 +224,7 @@
         }
       },
       {
-        "ordinal": 15,
+        "ordinal": 20,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -182,9 +237,6 @@
     ],
     "parameters": {
       "Left": [
-        "Bool",
-        "Bool",
-        "Text",
         "Text"
       ]
     },
@@ -204,8 +256,13 @@
       true,
       true,
       true,
+      true,
+      true,
+      true,
+      false,
+      true,
       true
     ]
   },
-  "hash": "670ad8314cb3dd5c439d5fcb448a09d61cb84e435eccbb5f5cf144e77d1eebb7"
+  "hash": "cb4bb5b58683540c0137bf01f26616ab91cbbcbda31cadd20a303710069e3d59"
 }

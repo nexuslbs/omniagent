@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id, title, body, status, priority, position, assignee,\n            channel_id, profile, archived, template, plan, workflow_id, board,\n            created_at, updated_at\n        FROM kanban_tasks\n        WHERE id = $1\n        ",
+  "query": "\n        SELECT id, title, body, status, priority, assignee, profile, template, archived, position, channel_id, plan,\n               goal_phase, goal_blocked_code, goal_blocked_message, goal_max_rounds, goal_revision,\n               created_at, updated_at\n        FROM kanban_tasks\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -60,17 +60,6 @@
       },
       {
         "ordinal": 5,
-        "name": "position",
-        "type_info": "Int4",
-        "origin": {
-          "Table": {
-            "table": "kanban_tasks",
-            "name": "position"
-          }
-        }
-      },
-      {
-        "ordinal": 6,
         "name": "assignee",
         "type_info": "Text",
         "origin": {
@@ -81,18 +70,7 @@
         }
       },
       {
-        "ordinal": 7,
-        "name": "channel_id",
-        "type_info": "Text",
-        "origin": {
-          "Table": {
-            "table": "kanban_tasks",
-            "name": "channel_id"
-          }
-        }
-      },
-      {
-        "ordinal": 8,
+        "ordinal": 6,
         "name": "profile",
         "type_info": "Text",
         "origin": {
@@ -103,7 +81,18 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 7,
+        "name": "template",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "template"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "archived",
         "type_info": "Bool",
         "origin": {
@@ -114,13 +103,24 @@
         }
       },
       {
+        "ordinal": 9,
+        "name": "position",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "position"
+          }
+        }
+      },
+      {
         "ordinal": 10,
-        "name": "template",
+        "name": "channel_id",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "kanban_tasks",
-            "name": "template"
+            "name": "channel_id"
           }
         }
       },
@@ -137,28 +137,61 @@
       },
       {
         "ordinal": 12,
-        "name": "workflow_id",
+        "name": "goal_phase",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "kanban_tasks",
-            "name": "workflow_id"
+            "name": "goal_phase"
           }
         }
       },
       {
         "ordinal": 13,
-        "name": "board",
+        "name": "goal_blocked_code",
         "type_info": "Text",
         "origin": {
           "Table": {
             "table": "kanban_tasks",
-            "name": "board"
+            "name": "goal_blocked_code"
           }
         }
       },
       {
         "ordinal": 14,
+        "name": "goal_blocked_message",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "goal_blocked_message"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "goal_max_rounds",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "goal_max_rounds"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "goal_revision",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "kanban_tasks",
+            "name": "goal_revision"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -169,7 +202,7 @@
         }
       },
       {
-        "ordinal": 15,
+        "ordinal": 18,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -194,15 +227,18 @@
       true,
       true,
       true,
-      true,
-      false,
-      true,
       false,
       true,
       true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
       true,
       true
     ]
   },
-  "hash": "ae24b58365f3f32acb48fd62122f8ab4c1c3a3a673fdcfcad714d7fe2f41520a"
+  "hash": "141e4ea24af55f2cb9c14f8d4894e3261cbd7bc524f864779fc42c62fc369544"
 }

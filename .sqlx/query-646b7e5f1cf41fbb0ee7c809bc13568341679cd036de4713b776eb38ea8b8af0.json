@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE kanban_tasks SET\n            status = $1,\n            goal_phase = CASE WHEN $2 = 'blocked' THEN 'blocked' ELSE goal_phase END,\n            goal_blocked_code = CASE WHEN $3 = 'blocked'\n                THEN COALESCE(NULLIF(goal_blocked_code, ''), 'unspecified')\n                ELSE goal_blocked_code END,\n            goal_blocked_message = CASE WHEN $4 = 'blocked'\n                THEN COALESCE(goal_blocked_message, '')\n                ELSE goal_blocked_message END,\n            goal_revision = CASE WHEN $5 = 'blocked' THEN goal_revision + 1 ELSE goal_revision END,\n            updated_at = NOW()\n        WHERE id = $6\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "646b7e5f1cf41fbb0ee7c809bc13568341679cd036de4713b776eb38ea8b8af0"
+}
