@@ -1,5 +1,6 @@
 use crate::agent::config::AgentContext;
 use crate::agent::context_builder::PromptParts;
+use crate::agent::context_compactor::{compact_oldest_segment, should_force_compact};
 use crate::agent::helpers;
 use crate::agent::response_handler::handle_response;
 use crate::agent::tool_result_pruner::{is_context_length_error, prune_messages, PruneParams};
@@ -628,6 +629,19 @@ Previous plan:\n{}",
         }
     };
     let mut llm_error_retries: u32 = 0;
+    // Task 3: bounded forced-compaction retries on provider context-length
+    // errors (the death-spiral recovery). When the accumulated thread history
+    // exceeds the model's context window, pruning tool results (task 2) is not
+    // enough — force a summary compaction of the OLDEST segment and retry.
+    // Bounded per thread by `max_compaction_retries` (default 2) so a hopeless
+    // thread fails honestly instead of looping forever. Both counters reset on
+    // a successful tool-calling response (see below).
+    let max_compaction_retries = cfg_snapshot.max_compaction_retries;
+    let mut compaction_retries_used: u32 = 0;
+    // True after the FIRST context-length overflow already retried once with
+    // pruned tool results: a second overflow means pruning is exhausted, so
+    // escalate to summary compaction.
+    let mut pruned_for_overflow: bool = false;
     // Track when condensation last occurred so soft-budget triggers use
     // iteration-since-last-condense rather than a fixed modulo schedule.
     // This prevents aggressive condensation on every Nth iteration even when
@@ -1012,10 +1026,17 @@ Previous plan:\n{}",
             Ok(resp) => resp,
             Err(e) => {
                 error!("LLM call failed: {:?}", e);
-                // Task-3 hook: on a provider context-length error, prune
-                // over-budget tool results so the retry's context fits
-                // (deterministic, zero LLM cost). Task 3 builds the retry
-                // policy on top of this hook.
+                // Task 3: context-overflow recovery (kill the death spiral).
+                // A provider context-length error (input too long) can never be
+                // fixed by retrying the SAME oversized context — the thread
+                // would just die after exhausting retries. Recovery, bounded by
+                // max_compaction_retries:
+                //   (a) prune over-budget tool results (task 2, zero LLM cost),
+                //   (b) if pruning is exhausted (nothing to prune, or a pruned
+                //       retry already overflowed again) FORCE a summary
+                //       compaction of the OLDEST segment of the thread and
+                //       retry with the compacted context,
+                //   (c) once the compaction budget is spent, fail honestly.
                 if is_context_length_error(&format!("{:?}", e)) {
                     let prune_report = prune_messages(&mut messages, &prune_params);
                     info!(
@@ -1026,6 +1047,61 @@ Previous plan:\n{}",
                         prune_report.chars_after,
                         prune_report.chars_saved(),
                     );
+                    if should_force_compact(
+                        !prune_report.is_empty(),
+                        pruned_for_overflow,
+                        compaction_retries_used,
+                        max_compaction_retries,
+                    ) {
+                        pruned_for_overflow = false;
+                        match compact_oldest_segment(per_thread_llm, &mut messages, thread.id).await
+                        {
+                            Ok(Some(report)) => {
+                                compaction_retries_used += 1;
+                                info!(
+                                    "[compact] Forced compaction for thread {} (attempt {}/{}): shadowed {} message(s) ({} chars -> {}, est. {} tokens saved; summary model call)",
+                                    thread.id,
+                                    compaction_retries_used,
+                                    max_compaction_retries,
+                                    report.msgs_compacted,
+                                    report.chars_before,
+                                    report.chars_after,
+                                    report.est_tokens_saved(),
+                                );
+                                // The compacted retry must not consume the
+                                // iteration budget (mirrors the truncation
+                                // escalation path) and is not a provider error.
+                                current_iter -= 1;
+                                tokio::time::sleep(backoff_delay(1).await).await;
+                                continue;
+                            }
+                            Ok(None) => {
+                                warn!(
+                                    "[compact] Context-length error for thread {} but no compactable range (tiny thread); falling through to provider retry",
+                                    thread.id
+                                );
+                            }
+                            Err(ce) => {
+                                warn!(
+                                    "[compact] Summary generation failed for thread {}: {}; falling through to provider retry",
+                                    thread.id, ce
+                                );
+                            }
+                        }
+                    } else if !prune_report.is_empty() && !pruned_for_overflow {
+                        // First overflow and pruning reduced the context: give
+                        // the pruned retry a chance before escalating.
+                        pruned_for_overflow = true;
+                        info!(
+                            "[prune] Context-length error for thread {}: pruned tool results, retrying before summary compaction",
+                            thread.id
+                        );
+                    } else {
+                        warn!(
+                            "[compact] Context-length error for thread {}: compaction unavailable or budget exhausted ({} used / max {}) — will fail honestly",
+                            thread.id, compaction_retries_used, max_compaction_retries
+                        );
+                    }
                 }
                 llm_error_retries += 1;
                 if llm_error_retries >= llm_max_retries {
@@ -1033,10 +1109,17 @@ Previous plan:\n{}",
                         "[executor] LLM provider failed {} consecutive time(s) (max {}) for thread {}: {:?}; marking thread failed",
                         llm_error_retries, llm_max_retries, thread.id, e,
                     );
-                    final_content = format!(
-                        "The LLM provider returned an error {} consecutive times (max {}). Last error: {}. The thread was marked as failed.",
-                        llm_error_retries, llm_max_retries, e,
-                    );
+                    final_content = if is_context_length_error(&format!("{:?}", e)) {
+                        format!(
+                            "The thread's accumulated context exceeded the model's context window, and {} forced compaction(s) (max {}) could not bring it under the limit. Last error: {}. The thread was marked as failed.",
+                            compaction_retries_used, max_compaction_retries, e,
+                        )
+                    } else {
+                        format!(
+                            "The LLM provider returned an error {} consecutive times (max {}). Last error: {}. The thread was marked as failed.",
+                            llm_error_retries, llm_max_retries, e,
+                        )
+                    };
                     force_failed = true;
                     break;
                 }
@@ -1363,8 +1446,12 @@ Previous plan:\n{}",
         }
 
         // We have tool calls: add assistant message with tool_calls
-        // A tool-calling response is correct: reset the consecutive-error counter.
+        // A tool-calling response is correct: reset the consecutive-error counter
+        // and the task-3 compaction budget (a healthy thread is never compacted;
+        // each overflow chain gets its own bounded compaction budget).
         llm_error_retries = 0;
+        compaction_retries_used = 0;
+        pruned_for_overflow = false;
         final_tool_call = true;
         let mut assistant_msg = ChatMessage::assistant("");
         assistant_msg.tool_calls = Some(response.tool_calls.clone());

@@ -155,6 +155,10 @@ pub struct AgentConfig {
     /// Tool-result pruning: results with at most this many chars are left
     /// untouched (default 20000, the head+tail preview budget).
     pub prune_min_chars: usize,
+    /// Max forced summary-compaction retries per thread on provider
+    /// context-length errors (the death-spiral recovery). 0 disables forced
+    /// compaction. Default: 2.
+    pub max_compaction_retries: u32,
     /// Default profile name (used at login / session start).
     pub default_profile: String,
 
@@ -292,6 +296,7 @@ impl AgentConfig {
             prune_head_chars: get("prune_head_chars", "12000").parse().unwrap_or(12000),
             prune_tail_chars: get("prune_tail_chars", "8000").parse().unwrap_or(8000),
             prune_min_chars: get("prune_min_chars", "20000").parse().unwrap_or(20000),
+            max_compaction_retries: get("max_compaction_retries", "2").parse().unwrap_or(2),
             default_profile: get("default_profile", "omni"),
 
             // Vectorization — defaults match settings.yml so the worker is
@@ -406,6 +411,7 @@ impl AgentConfig {
             prune_head_chars: get("prune_head_chars", "12000").parse().unwrap_or(12000),
             prune_tail_chars: get("prune_tail_chars", "8000").parse().unwrap_or(8000),
             prune_min_chars: get("prune_min_chars", "20000").parse().unwrap_or(20000),
+            max_compaction_retries: get("max_compaction_retries", "2").parse().unwrap_or(2),
             default_profile: get("default_profile", "omni"),
 
             // Vectorization (same defaults as from_env; values come from settings.yml)
@@ -473,6 +479,7 @@ mod tests {
             prune_head_chars: 12000,
             prune_tail_chars: 8000,
             prune_min_chars: 20000,
+            max_compaction_retries: 2,
             default_profile: "custom".to_string(),
             vectorize_messages: true,
             messages_vectorization_method: "local".to_string(),
@@ -492,6 +499,7 @@ mod tests {
         assert_eq!(cfg.default_provider, "openai");
         assert_eq!(cfg.max_tokens, Some(32768));
         assert_eq!(cfg.max_tokens_on_truncation, Some(16384));
+        assert_eq!(cfg.max_compaction_retries, 2);
         assert_eq!(cfg.temperature, 0.7);
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 3000);
@@ -507,7 +515,7 @@ mod tests {
 
     #[test]
     fn test_agent_config_complete_field_count() {
-        // AgentConfig has 38 fields. This test verifies all are present,
+        // AgentConfig has 39 fields. This test verifies all are present,
         // by constructing a minimal config and checking all fields are accessible.
         let cfg = AgentConfig {
             llm_api_key: String::new(),
@@ -540,6 +548,7 @@ mod tests {
             prune_head_chars: 0,
             prune_tail_chars: 0,
             prune_min_chars: 0,
+            max_compaction_retries: 0,
             default_profile: String::new(),
             vectorize_messages: false,
             messages_vectorization_method: String::new(),
