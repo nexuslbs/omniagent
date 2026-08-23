@@ -215,7 +215,6 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
         (
             "channels",
             vec![
-                "default_cli_channel",
                 "default_schedule_channel",
                 "default_hook_channel",
                 "default_kanban_channel",
@@ -474,16 +473,6 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
         // API keys are now managed per-provider via the Providers page,
         // not settings.yml.
         // ── Default channels (selects over channels.yml) ──
-        (
-            "default_cli_channel".into(),
-            SettingMeta {
-                field_type: "select".into(),
-                description: "Default channel for CLI tool calls with no explicit channel (platform-less channel = cli)".into(),
-                options: None,
-                readonly: false,
-                default: Some("".into()),
-            },
-        ),
         (
             "default_schedule_channel".into(),
             SettingMeta {
@@ -779,7 +768,6 @@ fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
         "sub_prompt_iteration_percent",
         "platform_max_spawn_retries",
         "default_profile",
-        "default_cli_channel",
         "default_schedule_channel",
         "default_hook_channel",
         "default_kanban_channel",
@@ -834,7 +822,6 @@ pub async fn get_settings_handler(State(state): State<Arc<AppState>>) -> Json<Se
 
     // Enrich default_*_channel options with the channels from channels.yml
     for tool_key in [
-        "default_cli_channel",
         "default_schedule_channel",
         "default_hook_channel",
         "default_kanban_channel",
@@ -963,7 +950,6 @@ mod tests {
         let by_name: std::collections::HashMap<&str, &SettingMeta> =
             defs.iter().map(|(n, m)| (n.as_str(), m)).collect();
         for (name, expected_default) in [
-            ("default_cli_channel", ""),
             ("default_schedule_channel", "cron"),
             ("default_hook_channel", ""),
             ("default_kanban_channel", "kanban"),
@@ -981,7 +967,6 @@ mod tests {
     fn default_channel_keys_are_in_writable_whitelist() {
         let keys = writable_setting_keys();
         for name in [
-            "default_cli_channel",
             "default_schedule_channel",
             "default_hook_channel",
             "default_kanban_channel",

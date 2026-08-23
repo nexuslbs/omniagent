@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added — Default channel settings
 
-- Four new writable select settings — `default_cli_channel`, `default_schedule_channel`,
+- Three writable select settings — `default_schedule_channel`,
   `default_hook_channel`, `default_kanban_channel` — each a select over the channels
   defined in channels.yml (any platform; a platform-less channel is type `cli`).
 - The `kanban`/`cron`/`hook` channel platforms are gone; a channel with no `platform`
@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Threads resolve their channel via: explicit channel -> default-*_channel setting -> ''.
   A thread with no channel is still inserted (record kept for audit) and then marked
   failed with "no channel defined".
+
+### Removed — `default_cli_channel` setting
+
+- The `default_cli_channel` setting was removed: the binary has no CLI session mode
+  (only `--version`/`--help` args then server boot), and the only `/mcp/execute`
+  caller (dashboard read-only `search_database`) never creates sessions, so the
+  setting had no live consumer. CLI-platform tool calls with no explicit channel
+  keep the previous behavior: no channel (empty `channel_id`).
 
 Workflow-based role assignment (implementation phases 0a, 0–7 of the
 `WorkflowImplementation` plan). Kanban tasks are now routed through a

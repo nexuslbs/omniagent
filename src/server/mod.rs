@@ -1216,16 +1216,6 @@ async fn execute_mcp_tool_handler(
     ctx.current_platform
         .get_or_insert_with(|| "cli".to_string());
 
-    // Default channel for CLI tool calls: when the caller did not provide a
-    // channel, fall back to the `default_cli_channel` setting (a select over
-    // the existing channels). Unknown/empty setting -> None (no channel).
-    if ctx.current_channel_id.is_none() {
-        if let Some(ch) = crate::channels_yaml::resolve_default_channel(None, "default_cli_channel")
-        {
-            ctx.current_channel_id = Some(ch);
-        }
-    }
-
     match state
         .plugin_manager
         .snapshot_registry()
