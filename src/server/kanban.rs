@@ -77,6 +77,8 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
         .route("/kanban/tasks", post(create_task_handler))
         // 5. Change status
         .route("/kanban/tasks/{id}/status", patch(change_status_handler))
+        // 5b. Goal state: phase + typed blocked reason + round cap (CAS)
+        .route("/kanban/tasks/{id}/goal", patch(update_goal_handler))
         // 6. Change position
         .route(
             "/kanban/tasks/{id}/position",
@@ -181,6 +183,28 @@ struct CreateTaskRequest {
 struct ChangeStatusRequest {
     status: String,
     position: Option<i32>,
+    /// Typed blocked code written when the status transitions to `blocked`
+    /// (stable kebab-case, e.g. provider-unavailable, design-conflict,
+    /// user-blocked). Falls back to the existing code / 'unspecified'.
+    goal_blocked_code: Option<String>,
+    /// Human-readable blocked message written on a `blocked` transition.
+    goal_blocked_message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoalUpdateRequest {
+    /// Desired goal phase: active | paused | blocked | complete.
+    phase: Option<String>,
+    /// Stable machine-routable blocked code (lowercase kebab-case), e.g.
+    /// provider-unavailable, design-conflict, user-blocked.
+    blocked_code: Option<String>,
+    /// Human-readable blocked message (free text).
+    blocked_message: Option<String>,
+    /// Optional cap on goal rounds (>= 1).
+    max_rounds: Option<i32>,
+    /// CAS guard: when set, the update only applies if the task's current
+    /// goal_revision equals this value; otherwise 409 Conflict is returned.
+    expected_revision: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,6 +254,11 @@ struct KanbanTaskRow {
     plan: Option<bool>,
     workflow_id: Option<String>,
     board: Option<String>,
+    goal_phase: Option<String>,
+    goal_blocked_code: Option<String>,
+    goal_blocked_message: Option<String>,
+    goal_max_rounds: Option<i32>,
+    goal_revision: Option<i32>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -347,6 +376,11 @@ struct KanbanTaskEntry {
     plan: Option<bool>,
     workflow: Option<String>,
     board: Option<String>,
+    goal_phase: Option<String>,
+    goal_blocked_code: Option<String>,
+    goal_blocked_message: Option<String>,
+    goal_max_rounds: Option<i32>,
+    goal_revision: Option<i32>,
     created_at: Option<String>,
     updated_at: Option<String>,
 }
@@ -477,6 +511,11 @@ fn task_row_to_entry(data_dir: &str, r: KanbanTaskRow) -> KanbanTaskEntry {
             .and_then(|res| res.workflow_id.clone())
             .or_else(|| r.workflow_id.clone()),
         board: r.board,
+        goal_phase: r.goal_phase,
+        goal_blocked_code: r.goal_blocked_code,
+        goal_blocked_message: r.goal_blocked_message,
+        goal_max_rounds: r.goal_max_rounds,
+        goal_revision: r.goal_revision,
         created_at: r
             .created_at
             .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
@@ -611,6 +650,8 @@ async fn list_tasks_handler(
         SELECT
             id, title, body, status, priority, position, assignee,
             channel_id, profile, archived, template, plan, workflow_id, board,
+            goal_phase, goal_blocked_code, goal_blocked_message, goal_max_rounds,
+            goal_revision,
             created_at, updated_at
         FROM kanban_tasks
         WHERE ((:show_archived_bool OR archived = false)
@@ -654,6 +695,8 @@ async fn get_task_handler(
         SELECT
             id, title, body, status, priority, position, assignee,
             channel_id, profile, archived, template, plan, workflow_id, board,
+            goal_phase, goal_blocked_code, goal_blocked_message, goal_max_rounds,
+            goal_revision,
             created_at, updated_at
         FROM kanban_tasks
         WHERE id = :id
@@ -965,6 +1008,47 @@ async fn change_status_handler(
         );
     }
 
+    // 4b. Goal state: a transition INTO `blocked` writes the typed blocked
+    //     reason (code + message) and bumps the goal CAS revision. A provided
+    //     code wins; otherwise an existing typed code is preserved, falling
+    //     back to the stable 'unspecified' code. The message falls back to the
+    //     existing prose (or ''). Transitions OUT of `blocked` leave goal
+    //     state untouched — resume eligibility is decided by the dispatcher
+    //     from goal_phase/goal_blocked_code; an explicit goal PATCH clears it.
+    if body.status == "blocked" && old_status != body.status {
+        let blocked_code = body
+            .goal_blocked_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .unwrap_or("");
+        let blocked_message = body.goal_blocked_message.as_deref().unwrap_or("");
+        if let Err(e) = sql_forge!(
+            r#"
+            UPDATE kanban_tasks SET
+                goal_phase = 'blocked',
+                goal_blocked_code = COALESCE(NULLIF(:code, '')::text, goal_blocked_code, 'unspecified'),
+                goal_blocked_message = COALESCE(NULLIF(:message, '')::text, goal_blocked_message),
+                goal_revision = goal_revision + 1,
+                updated_at = NOW()
+            WHERE id = :id
+            "#,
+            ( :id = &id, :code = blocked_code, :message = blocked_message )
+        )
+        .execute(&state.pool)
+        .await
+        {
+            error!(
+                "[kanban/tasks/{}/status] goal write on blocked failed: {:?}",
+                id, e
+            );
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to update task goal state",
+            );
+        }
+    }
+
     // 5. History: only if status actually changed
     if old_status != body.status {
         if let Err(e) = sql_forge!(
@@ -1006,6 +1090,111 @@ async fn change_status_handler(
         "dispatched": dispatched_thread.is_some(),
         "thread_id": dispatched_thread,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// 5b. PATCH /kanban/tasks/{id}/goal: Set goal state (phase + typed blocked
+//     reason + round cap) with CAS
+// ---------------------------------------------------------------------------
+
+/// Goal phases (mirrors VALID_GOAL_PHASES in src/db/kanban.rs + the DB CHECK).
+const VALID_GOAL_PHASES: &[&str] = &["active", "paused", "blocked", "complete"];
+
+fn validate_goal_phase(phase: &str) -> bool {
+    VALID_GOAL_PHASES.contains(&phase)
+}
+
+/// Stable machine-routable blocked code: non-empty, lowercase kebab-case
+/// (lowercase ASCII letters/digits, single internal hyphens, max 64 chars).
+fn validate_goal_code(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+    let mut prev_dash = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+            return false;
+        }
+        if b == b'-' {
+            if prev_dash || i == 0 || i == bytes.len() - 1 {
+                return false;
+            }
+            prev_dash = true;
+        } else {
+            prev_dash = false;
+        }
+    }
+    true
+}
+
+async fn update_goal_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<GoalUpdateRequest>,
+) -> impl IntoResponse {
+    if let Some(ref phase) = body.phase {
+        if !validate_goal_phase(phase) {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "goal phase must be one of: {}",
+                    VALID_GOAL_PHASES.join(", ")
+                ),
+            );
+        }
+    }
+    if let Some(ref code) = body.blocked_code {
+        if !code.trim().is_empty() && !validate_goal_code(code.trim()) {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                "goal blocked_code must be lowercase kebab-case (e.g. provider-unavailable, design-conflict, user-blocked)",
+            );
+        }
+    }
+    if let Some(m) = body.max_rounds {
+        if m < 1 {
+            return err_json(StatusCode::BAD_REQUEST, "goal max_rounds must be >= 1");
+        }
+    }
+    if body.phase.is_none()
+        && body.blocked_code.is_none()
+        && body.blocked_message.is_none()
+        && body.max_rounds.is_none()
+    {
+        return err_json(StatusCode::BAD_REQUEST, "No goal fields to update");
+    }
+
+    let patch = crate::db::kanban::GoalPatch {
+        phase: body.phase,
+        blocked_code: body
+            .blocked_code
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty()),
+        blocked_message: body.blocked_message,
+        max_rounds: body.max_rounds,
+        expected_revision: body.expected_revision,
+    };
+
+    match crate::db::kanban::update_kanban_task_goal(&state.pool, &id, &patch).await {
+        Ok(crate::db::kanban::GoalUpdateResult::Updated { revision }) => {
+            ok_json(serde_json::json!({ "success": true, "goal_revision": revision }))
+        }
+        Ok(crate::db::kanban::GoalUpdateResult::Conflict { current_revision }) => err_json(
+            StatusCode::CONFLICT,
+            &format!(
+                "goal revision conflict: expected {}, current is {current_revision}",
+                patch.expected_revision.unwrap_or(-1)
+            ),
+        ),
+        Err(e) => {
+            error!("[kanban/tasks/{}/goal] update failed: {:?}", id, e);
+            err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to update task goal",
+            )
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2534,6 +2723,11 @@ mod tests {
             plan: None,
             workflow_id: Some("wf-x".to_string()),
             board: None,
+            goal_phase: None,
+            goal_blocked_code: None,
+            goal_blocked_message: None,
+            goal_max_rounds: None,
+            goal_revision: None,
             created_at: None,
             updated_at: None,
         };
@@ -2647,6 +2841,11 @@ mod tests {
             plan: None,
             workflow_id: None,
             board: None,
+            goal_phase: None,
+            goal_blocked_code: None,
+            goal_blocked_message: None,
+            goal_max_rounds: None,
+            goal_revision: None,
             created_at: None,
             updated_at: None,
         };
@@ -2675,6 +2874,11 @@ mod tests {
             plan: None,
             workflow_id: None,
             board: None,
+            goal_phase: None,
+            goal_blocked_code: None,
+            goal_blocked_message: None,
+            goal_max_rounds: None,
+            goal_revision: None,
             created_at: None,
             updated_at: None,
         };
@@ -2776,5 +2980,34 @@ mod tests {
         assert_eq!(entry.priority, 0);
         assert_eq!(entry.status, None);
         assert_eq!(entry.created_at, None);
+    }
+
+    #[test]
+    fn test_validate_goal_phase() {
+        for p in ["active", "paused", "blocked", "complete"] {
+            assert!(validate_goal_phase(p), "phase {p} must be valid");
+        }
+        assert!(!validate_goal_phase(""));
+        assert!(!validate_goal_phase("Blocked"));
+        assert!(!validate_goal_phase("blocked!"));
+        assert!(!validate_goal_phase("in_progress"));
+    }
+
+    #[test]
+    fn test_validate_goal_code() {
+        // Valid kebab-case codes.
+        assert!(validate_goal_code("provider-unavailable"));
+        assert!(validate_goal_code("design-conflict"));
+        assert!(validate_goal_code("user-blocked"));
+        assert!(validate_goal_code("a1-b2"));
+        // Invalid: empty, uppercase, spaces, leading/trailing/double
+        // hyphens, too long.
+        assert!(!validate_goal_code(""));
+        assert!(!validate_goal_code("User-blocked"));
+        assert!(!validate_goal_code("user blocked"));
+        assert!(!validate_goal_code("-user-blocked"));
+        assert!(!validate_goal_code("user-blocked-"));
+        assert!(!validate_goal_code("user--blocked"));
+        assert!(!validate_goal_code(&"x".repeat(65)));
     }
 }

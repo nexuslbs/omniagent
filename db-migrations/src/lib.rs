@@ -427,6 +427,50 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         "[migration] Terminal status invariant: threads backfilled + CHECK constraint chk_thread_terminal_status added"
     );
 
+    // ── Goal state machine (durable phase + typed blocked reason + round cap) ──
+    // Per-task goal state (omnidev task 4): goal_phase
+    // (active/paused/blocked/complete), a stable machine-routable
+    // goal_blocked_code (kebab-case) + human goal_blocked_message, an optional
+    // goal_max_rounds cap, and a CAS revision counter (goal_revision). All
+    // columns are NULL except goal_revision (NOT NULL DEFAULT 0) — a task with
+    // NULL goal_phase has no goal state (zero behavior change for tasks that
+    // never use goals). Goals are strictly per-task state: the sequential
+    // per-channel dispatch model (threads.status gate in kanban_dispatch.rs)
+    // is untouched.
+    sqlx::query("ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS goal_phase TEXT")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS goal_blocked_code TEXT")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS goal_blocked_message TEXT")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS goal_max_rounds INT")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query(
+        "ALTER TABLE kanban_tasks ADD COLUMN IF NOT EXISTS goal_revision INT NOT NULL DEFAULT 0",
+    )
+    .execute(pool)
+    .await
+    .ok();
+    // goal_phase CHECK (idempotent DO block, matching the
+    // chk_kanban_tasks_thread_status pattern).
+    sqlx::query(
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_kanban_tasks_goal_phase') THEN ALTER TABLE kanban_tasks ADD CONSTRAINT chk_kanban_tasks_goal_phase CHECK (goal_phase IS NULL OR goal_phase IN ('active', 'paused', 'blocked', 'complete')); END IF; END $$;",
+    )
+    .execute(pool)
+    .await
+    .ok();
+    tracing::info!(
+        "[migration] Schema v8: goal state columns (kanban_tasks.goal_phase/goal_blocked_code/goal_blocked_message/goal_max_rounds/goal_revision) + chk_kanban_tasks_goal_phase CHECK"
+    );
+
     Ok(())
 }
 

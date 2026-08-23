@@ -42,6 +42,13 @@ struct DispatchTaskRow {
     /// present, NULL/unknown-board tasks are skipped by the eligibility
     /// scan (invalid-board tasks are never promoted/dispatched).
     board: Option<String>,
+    /// Goal machine phase (NULL = no goal state). Resume-eligibility input:
+    /// a task blocked with the typed code `user-blocked` is never
+    /// auto-redispatched (see goal_resume_eligible).
+    goal_phase: Option<String>,
+    /// Stable machine-routable blocked code (e.g. user-blocked,
+    /// provider-unavailable). NULL when the task is not goal-blocked.
+    goal_blocked_code: Option<String>,
 }
 
 /// Dispatch-scan eligibility for a fetched candidate: `todo` AND not
@@ -55,6 +62,18 @@ struct DispatchTaskRow {
 /// `unwrap_or(false)` semantics.
 fn scan_row_eligible(status: &str, archived: Option<bool>) -> bool {
     status == "todo" && !archived.unwrap_or(false)
+}
+
+/// Goal resume-eligibility filter: a task whose goal machine is blocked with
+/// the typed code `user-blocked` is NEVER auto-dispatched — even when its
+/// kanban status is moved back to `todo` — manual review (and an explicit
+/// goal clear via PATCH /kanban/tasks/{id}/goal) is required first. Other
+/// blocked codes (e.g. provider-unavailable) stay dispatch-eligible: they
+/// represent transient conditions that may clear on their own. This is a
+/// per-task eligibility filter (like the board gate): the sequential
+/// per-channel gate (channel_active_thread_count) is untouched.
+fn goal_resume_eligible(goal_phase: Option<&str>, goal_blocked_code: Option<&str>) -> bool {
+    !(goal_phase == Some("blocked") && goal_blocked_code == Some("user-blocked"))
 }
 
 #[derive(sqlx::FromRow)]
@@ -158,7 +177,8 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
     let tasks = match sql_forge!(
         DispatchTaskRow,
         r#"
-        SELECT id, title, status, archived, channel_id, board
+        SELECT id, title, status, archived, channel_id, board,
+               goal_phase, goal_blocked_code
         FROM kanban_tasks
         WHERE status = :status AND archived = false
         ORDER BY priority ASC, position ASC
@@ -215,6 +235,16 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
             .collect(),
         None => tasks,
     };
+
+    // 1c. Goal resume-eligibility gate (per-task filter, like the board
+    //     gate): a task whose goal machine is blocked with the typed code
+    //     `user-blocked` is never auto-dispatched — even when its status is
+    //     moved back to `todo`, manual review + an explicit goal clear is
+    //     required first. Does NOT touch the sequential per-channel gate.
+    let tasks: Vec<DispatchTaskRow> = tasks
+        .into_iter()
+        .filter(|t| goal_resume_eligible(t.goal_phase.as_deref(), t.goal_blocked_code.as_deref()))
+        .collect();
 
     // 2. Resolve dependency state for each candidate.
     let mut all_deps: Vec<Vec<DepState>> = Vec::with_capacity(tasks.len());
@@ -530,5 +560,40 @@ mod tests {
         assert!(!scan_row_eligible("backlog", Some(false)));
         assert!(!scan_row_eligible("running", Some(false)));
         assert!(!scan_row_eligible("done", Some(false)));
+    }
+
+    #[test]
+    fn dispatch_goal_resume_eligibility() {
+        // No goal state -> eligible (zero behavior change for non-goal tasks).
+        assert!(goal_resume_eligible(None, None));
+        // Active/paused/complete phases -> eligible.
+        assert!(goal_resume_eligible(Some("active"), None));
+        assert!(goal_resume_eligible(Some("paused"), Some("user-blocked")));
+        assert!(goal_resume_eligible(
+            Some("complete"),
+            Some("provider-unavailable")
+        ));
+        // Blocked with a transient code (or no code) -> eligible: the
+        // sequential per-channel gate alone decides dispatch.
+        assert!(goal_resume_eligible(
+            Some("blocked"),
+            Some("provider-unavailable")
+        ));
+        assert!(goal_resume_eligible(Some("blocked"), None));
+        // Blocked + user-blocked -> NEVER auto-redispatched.
+        assert!(!goal_resume_eligible(Some("blocked"), Some("user-blocked")));
+    }
+
+    #[test]
+    fn dispatch_goal_filter_preserves_channel_gate() {
+        // Goal state is per-task state: it never changes the channel-busy
+        // gate, so the sequential-per-channel invariant holds. A channel
+        // with a queued/running thread still blocks dispatch regardless of
+        // any candidate's goal state...
+        assert_eq!(active_thread_count(&["pending"]), 1);
+        assert_eq!(active_thread_count(&["processing"]), 1);
+        // ...and first_dispatchable_index still honors the channel gate.
+        assert_eq!(first_dispatchable_index(&[vec![]], &[1]), None);
+        assert_eq!(first_dispatchable_index(&[vec![]], &[0]), Some(0));
     }
 }
