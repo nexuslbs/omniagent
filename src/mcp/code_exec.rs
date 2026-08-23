@@ -357,7 +357,6 @@ async fn handle_code_exec(args: Value) -> AppResult<McpToolResult> {
         .stderr(Stdio::piped());
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt;
         // Own process group so `kill -KILL -<pid>` reaps the whole tree.
         cmd.process_group(0);
     }
@@ -410,32 +409,29 @@ mod tests {
     #[test]
     fn parse_ok_typed_roundtrip_all_types() {
         // dict / list / str / int / bool / null
-        for (raw, expected) in [
-            ("{\"a\":1,\"b\":[1,2]}", Value::Object),
-            ("[1,2,3]", Value::Array),
-            ("\"hi\"", Value::String),
-            ("42", Value::Number),
-            ("true", Value::Bool),
-            ("null", Value::Null),
+        for (raw, kind) in [
+            ("{\"a\":1,\"b\":[1,2]}", "object"),
+            ("[1,2,3]", "array"),
+            ("\"hi\"", "string"),
+            ("42", "number"),
+            ("true", "boolean"),
+            ("null", "null"),
         ] {
             let stdout = format!("some log line\n{OK_MARKER}{raw}\n");
             let (ok, err, logs) = parse_runner_output(&stdout);
             assert!(ok.is_some(), "expected ok value for {raw}");
             assert!(err.is_none(), "no err for {raw}");
             let v = ok.unwrap();
-            assert_eq!(
-                v.is_object(),
-                matches!(expected, Value::Object(_)),
-                "type mismatch for {raw}: {v}"
-            );
-            assert!(
-                v.is_array()
-                    || v.is_string()
-                    || v.is_number()
-                    || v.is_boolean()
-                    || v.is_null()
-                    || v.is_object()
-            );
+            let is_kind = match kind {
+                "object" => v.is_object(),
+                "array" => v.is_array(),
+                "string" => v.is_string(),
+                "number" => v.is_number(),
+                "boolean" => v.is_boolean(),
+                "null" => v.is_null(),
+                other => panic!("bad kind {other}"),
+            };
+            assert!(is_kind, "type mismatch for {raw}: {v}");
             assert_eq!(logs, vec!["some log line".to_string()]);
         }
         // Exact value equality for a dict round-trip.
@@ -525,7 +521,7 @@ mod tests {
         let r = res.unwrap();
         assert!(!r.is_error);
         assert!(r.content.contains("\"ok\": false"));
-        assert!(r.content.contains("ruby"));
+        assert!(r.content.contains("invalid `language`"));
 
         let res = futures::executor::block_on(handle_code_exec(json!({
             "language": "python",
@@ -585,6 +581,7 @@ mod tests {
         let pid = child.id().expect("child pid");
         let mut guard = KillOnDrop::new(child);
         guard.kill();
+        drop(guard); // reap the killed child (tokio Child Drop try_waits)
         assert!(
             wait_for_exit(pid, Duration::from_secs(5)).await,
             "child must be dead after explicit kill (pid {pid} still alive)"
