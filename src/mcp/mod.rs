@@ -32,6 +32,190 @@ pub fn truncate_content(content: &str, max_chars: usize) -> String {
 
 /// Default maximum output size for tool results (50K chars).
 pub const DEFAULT_MAX_TOOL_OUTPUT_CHARS: usize = 50_000;
+/// Default maximum chars of a tool result kept inline in the `tool-result`
+/// message (settings `max_inline_chars`). Larger results are spilled to
+/// `{OMNI_DIR}/data/spill` (full content on disk) and the message carries a
+/// bounded preview + locator instead. Same default as
+/// `DEFAULT_MAX_TOOL_OUTPUT_CHARS`.
+pub const DEFAULT_MAX_INLINE_CHARS: usize = 50_000;
+
+/// Result of spilling an oversized tool result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpilledOutput {
+    /// Content to inline in the tool-result message: the original text when
+    /// under the threshold, otherwise a bounded head/tail preview + locator.
+    pub inline: String,
+    /// Path of the spill file when the content was spilled, else `None`.
+    pub spill_path: Option<std::path::PathBuf>,
+}
+
+/// Head chars kept in a spill preview for a given inline budget (3/5).
+pub fn spill_preview_head_chars(max_inline_chars: usize) -> usize {
+    max_inline_chars * 3 / 5
+}
+
+/// Tail chars kept in a spill preview for a given inline budget (2/5).
+pub fn spill_preview_tail_chars(max_inline_chars: usize) -> usize {
+    max_inline_chars * 2 / 5
+}
+
+/// Longest UTF-8-safe prefix of `s` that fits in `max_bytes`.
+fn utf8_safe_prefix(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Sanitize a filename segment for spill files: keep `[A-Za-z0-9._-]`,
+/// replace everything else with `_`, collapse `..`, strip leading/trailing
+/// dots/underscores, cap at 80 chars. Never returns an empty string and never
+/// produces a path separator or `..` traversal.
+pub fn sanitize_spill_segment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut last_underscore = false;
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            out.push(c);
+            last_underscore = false;
+        } else if !last_underscore {
+            out.push('_');
+            last_underscore = true;
+        }
+    }
+    let out = out.replace("..", "_");
+    let out = out.trim_matches('.').trim_matches('_').to_string();
+    let out = if out.is_empty() {
+        "result".to_string()
+    } else {
+        out
+    };
+    if out.len() > 80 {
+        out[..80].to_string()
+    } else {
+        out
+    }
+}
+
+/// Compose the bounded preview that replaces an oversized tool result inline:
+/// head + tail (UTF-8 safe) plus an explicit locator line the model can feed
+/// to `filesystem_read` to recover the full output.
+pub fn compose_spill_preview(
+    content: &str,
+    max_inline_chars: usize,
+    spill_path: &std::path::Path,
+) -> String {
+    let head_chars = spill_preview_head_chars(max_inline_chars);
+    let tail_chars = spill_preview_tail_chars(max_inline_chars);
+    let total = content.len();
+    let head = utf8_safe_prefix(content, head_chars);
+    let mut tail_start = total.saturating_sub(tail_chars);
+    while tail_start < total && !content.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let tail = &content[tail_start..];
+    // Guard: if head+tail already covers everything, don't duplicate it.
+    if head.len() + tail.len() >= total {
+        return content.to_string();
+    }
+    let omitted = total - head.len() - tail.len();
+    format!(
+        "{head}\n\n[... {omitted} chars omitted — see full output below ...]\n\n{tail}\n\n[full output: {}]",
+        spill_path.display()
+    )
+}
+
+/// Write `content` to `path` with exclusive creation (`wx`): fails if the file
+/// already exists and never follows symlinks. Permissions 0600 on unix.
+fn write_spill_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(content.as_bytes())?;
+    f.sync_all().ok();
+    Ok(())
+}
+
+/// Spill an oversized tool result to a session-scoped file.
+///
+/// When `content` exceeds `max_inline_chars` chars the FULL text is persisted
+/// to `{spill_root}/{thread_id}/{call_id}-{tool}.txt` (exclusive create, 0600)
+/// and the returned inline content is a bounded head/tail preview + locator.
+/// Under the threshold the content is returned unchanged. Any write failure
+/// degrades to the classic inline truncation so the message is never lost.
+pub fn spill_tool_result(
+    content: &str,
+    thread_id: i64,
+    call_id: &str,
+    tool_name: &str,
+    spill_root: &std::path::Path,
+    max_inline_chars: usize,
+) -> SpilledOutput {
+    if content.len() <= max_inline_chars {
+        return SpilledOutput {
+            inline: content.to_string(),
+            spill_path: None,
+        };
+    }
+    let thread_dir = spill_root.join(thread_id.to_string());
+    if let Err(e) = std::fs::create_dir_all(&thread_dir) {
+        tracing::warn!(
+            "spill: cannot create spill dir {} ({e}); falling back to inline truncation",
+            thread_dir.display()
+        );
+        return SpilledOutput {
+            inline: truncate_content(content, max_inline_chars),
+            spill_path: None,
+        };
+    }
+    let safe_call = sanitize_spill_segment(call_id);
+    let safe_tool = sanitize_spill_segment(tool_name);
+    let base_name = format!("{safe_call}-{safe_tool}");
+    let mut path = thread_dir.join(format!("{base_name}.txt"));
+    let mut written = false;
+    for attempt in 0..8 {
+        match write_spill_file(&path, content) {
+            Ok(()) => {
+                written = true;
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                path = thread_dir.join(format!("{base_name}-{}.txt", attempt + 1));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "spill: cannot write {} ({e}); falling back to inline truncation",
+                    path.display()
+                );
+                return SpilledOutput {
+                    inline: truncate_content(content, max_inline_chars),
+                    spill_path: None,
+                };
+            }
+        }
+    }
+    if !written {
+        tracing::warn!("spill: could not allocate a unique spill file for {base_name}");
+        return SpilledOutput {
+            inline: truncate_content(content, max_inline_chars),
+            spill_path: None,
+        };
+    }
+    SpilledOutput {
+        inline: compose_spill_preview(content, max_inline_chars, &path),
+        spill_path: Some(path),
+    }
+}
 
 pub mod external;
 pub mod task_tools;
@@ -1319,5 +1503,147 @@ mod tests {
         // Allowed with non-matching name
         let allowed = registry.allowed(&["read".to_string()]);
         assert!(allowed.is_empty());
+    }
+
+    // ─── tool-result spill tests ───
+
+    fn spill_test_root(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "omniagent-spill-test-{}-{}",
+            std::process::id(),
+            sanitize_spill_segment(name)
+        ))
+    }
+
+    #[test]
+    fn test_sanitize_spill_segment() {
+        assert_eq!(sanitize_spill_segment("filesystem_read"), "filesystem_read");
+        assert_eq!(sanitize_spill_segment("call_abc-123"), "call_abc-123");
+        // Path traversal / separators / spaces are neutralized
+        assert_eq!(sanitize_spill_segment("../../etc/passwd"), "etc_passwd");
+        assert_eq!(sanitize_spill_segment("a b:c"), "a_b_c");
+        assert_eq!(sanitize_spill_segment("..."), "result");
+        assert_eq!(sanitize_spill_segment(""), "result");
+        // Long names are capped to a single safe segment
+        let long = "x".repeat(200);
+        assert_eq!(sanitize_spill_segment(&long).len(), 80);
+    }
+
+    #[test]
+    fn test_spill_under_threshold_unchanged() {
+        let root = spill_test_root("under_threshold");
+        let _ = std::fs::remove_dir_all(&root);
+        let content = "y".repeat(100);
+        let out = spill_tool_result(&content, 7, "call_1", "filesystem_read", &root, 500);
+        assert_eq!(out.inline, content);
+        assert!(out.spill_path.is_none());
+        assert!(
+            !root.exists(),
+            "no spill dir should be created under threshold"
+        );
+    }
+
+    #[test]
+    fn test_spill_over_threshold_writes_full_file() {
+        let root = spill_test_root("over_threshold");
+        let _ = std::fs::remove_dir_all(&root);
+        let content: String = (0..5000)
+            .map(|i| format!("line {i}: {:08x}\n", i * 31))
+            .collect();
+        assert!(content.len() > 1000);
+        let out = spill_tool_result(&content, 7, "call_abc", "search_database", &root, 1000);
+        let path = out.spill_path.expect("spill path expected");
+        assert!(path.starts_with(&root));
+        let path_str = path.to_string_lossy();
+        assert!(
+            path_str.contains("/7/"),
+            "session-scoped per thread id: {path_str}"
+        );
+        assert!(path_str.ends_with(".txt"));
+        assert!(path_str.contains("call_abc"));
+        assert!(path_str.contains("search_database"));
+        // Full content on disk, unchanged
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, content);
+        // Preview: bounded, contains head, tail and the locator
+        let inline = &out.inline;
+        assert!(inline.len() < content.len());
+        assert!(inline.contains(&content[..200]), "head present");
+        assert!(
+            inline.contains(&content[content.len() - 200..]),
+            "tail present"
+        );
+        assert!(inline.contains(&format!("[full output: {}]", path.display())));
+        assert!(inline.contains("omitted"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_spill_preview_composition_and_bounds() {
+        let max_inline = 10_000;
+        assert_eq!(
+            spill_preview_head_chars(max_inline) + spill_preview_tail_chars(max_inline),
+            max_inline
+        );
+        let content = "a".repeat(100_000);
+        let path = std::path::Path::new("/tmp/x/1/call-foo.txt");
+        let preview = compose_spill_preview(&content, max_inline, path);
+        assert!(preview.contains("[full output: /tmp/x/1/call-foo.txt]"));
+        // head + tail + overhead stays bounded
+        assert!(preview.len() < max_inline + 200);
+        assert!(preview.contains("aaaaa"));
+        assert!(preview.contains("omitted"));
+        // Under threshold → content returned verbatim (no duplication)
+        let small = "b".repeat(5_000);
+        assert_eq!(compose_spill_preview(&small, max_inline, path), small);
+    }
+
+    #[test]
+    fn test_spill_filename_has_no_secret_or_traversal() {
+        let root = spill_test_root("filename_safe");
+        let _ = std::fs::remove_dir_all(&root);
+        let content = "z".repeat(2000);
+        let evil_tool = "../../ghp_ABCDEF_secret_token";
+        let out = spill_tool_result(&content, 42, "call:weird/../id", evil_tool, &root, 500);
+        let path = out.spill_path.expect("spilled");
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(!name.contains('/'), "no separators in filename: {name}");
+        assert!(!name.contains(".."), "no traversal in filename: {name}");
+        assert!(!name.contains(':'), "no colons in filename: {name}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_spill_collision_gets_unique_suffix() {
+        let root = spill_test_root("collision");
+        let _ = std::fs::remove_dir_all(&root);
+        let content = "c".repeat(2000);
+        let first = spill_tool_result(&content, 1, "call_x", "tool", &root, 500);
+        let second = spill_tool_result(&content, 1, "call_x", "tool", &root, 500);
+        let p1 = first.spill_path.expect("first spilled");
+        let p2 = second.spill_path.expect("second spilled");
+        assert_ne!(p1, p2, "collision must produce a unique file");
+        assert!(p1.exists());
+        assert!(p2.exists());
+        assert_eq!(std::fs::read_to_string(&p1).unwrap(), content);
+        assert_eq!(std::fs::read_to_string(&p2).unwrap(), content);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_spill_multibyte_utf8_preview() {
+        let content = "héllo wörld — ".repeat(5000);
+        let max_inline = 1000;
+        let path = std::path::Path::new("/tmp/x/1/call.txt");
+        let preview = compose_spill_preview(&content, max_inline, path);
+        assert!(preview.contains("[full output: /tmp/x/1/call.txt]"));
+        assert!(preview.len() < content.len());
+        // Round-trip via spill keeps full fidelity even with multi-byte content
+        let root = spill_test_root("multibyte");
+        let _ = std::fs::remove_dir_all(&root);
+        let out = spill_tool_result(&content, 3, "call_ü", "tool", &root, max_inline);
+        let p = out.spill_path.expect("spilled");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), content);
+        std::fs::remove_dir_all(&root).ok();
     }
 }

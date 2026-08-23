@@ -7,7 +7,9 @@ use crate::db::types::{Channel, Message, MessageNew, Thread};
 use crate::err_msg;
 use crate::error::AppResult;
 use crate::llm::{ChatMessage, CompletionRequest, LLMClient, Usage};
-use crate::mcp::{truncate_content, McpToolCall, McpToolResult, DEFAULT_MAX_TOOL_OUTPUT_CHARS};
+use crate::mcp::{
+    spill_tool_result, truncate_content, McpToolCall, McpToolResult, DEFAULT_MAX_TOOL_OUTPUT_CHARS,
+};
 use futures::FutureExt;
 use std::time::Duration;
 use tokio::task::JoinSet;
@@ -1479,6 +1481,10 @@ Previous plan:\n{}",
             // Snapshot bg threshold BEFORE entering the spawned closure (cfg ref issue)
             let bg_threshold_secs = cfg.config_snapshot().tool_bg_secs;
             let bg_threshold = std::time::Duration::from_secs(bg_threshold_secs);
+            // Snapshot spill config BEFORE entering the spawned closure (cfg ref issue)
+            let spill_cfg = cfg.config_snapshot();
+            let spill_root = std::path::PathBuf::from(spill_cfg.spill_dir);
+            let max_inline_chars = spill_cfg.max_inline_chars;
             let is_multi_tool = tool_count > 1;
 
             // --- Phase 1.5: Self-restart guard (P2 #6) ---
@@ -1685,9 +1691,19 @@ Previous plan:\n{}",
 
                 let (output, is_error) = match &result {
                     Ok(res) => {
-                        let truncated =
-                            truncate_content(&res.content, DEFAULT_MAX_TOOL_OUTPUT_CHARS);
-                        (truncated, false)
+                        // Tool-result spill: oversized results (> max_inline_chars)
+                        // are persisted in full to a session-scoped spill file and
+                        // replaced inline by a preview + locator so the model can
+                        // recover the full output via filesystem_read.
+                        let spilled = spill_tool_result(
+                            &res.content,
+                            tid,
+                            &tc_id,
+                            &tool_name,
+                            &spill_root,
+                            max_inline_chars,
+                        );
+                        (spilled.inline, false)
                     }
                     Err(e) => (format!("Error executing tool '{}': {}", tool_name, e), true),
                 };

@@ -139,6 +139,13 @@ pub struct AgentConfig {
     pub platform_max_spawn_retries: u32,
     /// Max inline file KB for attachments.
     pub max_inline_file_kb: u32,
+    /// Max chars of a tool result kept inline in the `tool-result` message.
+    /// Larger results are spilled in full to `spill_dir` and replaced inline
+    /// by a bounded preview + locator the model can read back. Default: 50000.
+    pub max_inline_chars: usize,
+    /// Directory for spilled oversized tool results, session-scoped per thread.
+    /// Default: `{OMNI_DIR}/data/spill`.
+    pub spill_dir: String,
     /// Default profile name (used at login / session start).
     pub default_profile: String,
 
@@ -271,6 +278,8 @@ impl AgentConfig {
                 .ctx("PORT must be a valid number")?,
             platform_max_spawn_retries: get("platform_max_spawn_retries", "3").parse().unwrap_or(3),
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
+            max_inline_chars: get("max_inline_chars", "50000").parse().unwrap_or(50000),
+            spill_dir: get("spill_dir", &format!("{}/data/spill", data_dir)),
             default_profile: get("default_profile", "omni"),
 
             // Vectorization — defaults match settings.yml so the worker is
@@ -380,6 +389,8 @@ impl AgentConfig {
                 .ctx("PORT must be a valid number")?,
             platform_max_spawn_retries: get("platform_max_spawn_retries", "3").parse().unwrap_or(3),
             max_inline_file_kb: get("max_inline_file_kb", "100").parse().unwrap_or(100),
+            max_inline_chars: get("max_inline_chars", "50000").parse().unwrap_or(50000),
+            spill_dir: get("spill_dir", &format!("{}/data/spill", data_dir)),
             default_profile: get("default_profile", "omni"),
 
             // Vectorization (same defaults as from_env; values come from settings.yml)
@@ -442,6 +453,8 @@ mod tests {
             port: 3000,
             platform_max_spawn_retries: 10,
             max_inline_file_kb: 500,
+            max_inline_chars: 50000,
+            spill_dir: "/tmp/spill".to_string(),
             default_profile: "custom".to_string(),
             vectorize_messages: true,
             messages_vectorization_method: "local".to_string(),
@@ -504,6 +517,8 @@ mod tests {
             port: 0,
             platform_max_spawn_retries: 0,
             max_inline_file_kb: 0,
+            max_inline_chars: 0,
+            spill_dir: String::new(),
             default_profile: String::new(),
             vectorize_messages: false,
             messages_vectorization_method: String::new(),
