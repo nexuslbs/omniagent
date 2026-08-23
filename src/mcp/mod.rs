@@ -217,6 +217,7 @@ pub fn spill_tool_result(
     }
 }
 
+pub mod code_exec;
 pub mod external;
 pub mod task_tools;
 
@@ -1002,6 +1003,7 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
     registry.register(read_task_logs_tool());
     registry.register(omniagent_api_tool());
     registry.register(fail_thread_tool());
+    registry.register(crate::mcp::code_exec::code_exec_tool());
 
     tracing::info!(
         "MCP registry initialized with {} tools (external + built-in)",
