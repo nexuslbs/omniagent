@@ -76,6 +76,33 @@ fn goal_resume_eligible(goal_phase: Option<&str>, goal_blocked_code: Option<&str
     !(goal_phase == Some("blocked") && goal_blocked_code == Some("user-blocked"))
 }
 
+/// Same-channel active-task claim: a non-archived task in `running` /
+/// `testing` / `review` claims its resolved channel for dispatch purposes ONLY
+/// when it carries a live thread_status (`scheduled` = a thread is queued,
+/// `running` = the thread is processing). A task whose thread_status is
+/// empty/NULL (e.g. a manual review with no auto thread) does NOT occupy the
+/// channel with a live thread and must NOT block a `todo` task from
+/// dispatching. Mirrors the scan SQL predicate in `dispatch_todo_tasks`
+/// (status IN running/testing/review AND archived = false) so the exclusion
+/// is unit-testable without a DB; NULL `archived` (legacy rows) counts as not
+/// archived, matching `scan_row_eligible`.
+fn active_task_claims_channel(
+    status: &str,
+    thread_status: Option<&str>,
+    archived: Option<bool>,
+) -> bool {
+    !archived.unwrap_or(false)
+        && matches!(status, "running" | "testing" | "review")
+        && matches!(thread_status, Some("scheduled") | Some("running"))
+}
+
+/// Whether the candidate `todo` task's resolved channel is claimed by another
+/// active task (see `active_task_claims_channel`): same resolved channel
+/// string. Tasks on different channels are never affected.
+fn channel_claimed(candidate_channel: &str, claimed_channels: &[String]) -> bool {
+    claimed_channels.iter().any(|c| c == candidate_channel)
+}
+
 #[derive(sqlx::FromRow)]
 struct DispatchDependencyRow {
     depends_on_id: String,
@@ -85,6 +112,22 @@ struct DispatchDependencyRow {
 struct DispatchDepStatusRow {
     status: String,
     archived: Option<bool>,
+}
+
+/// Row for the same-channel active-task scan (step 1d): non-archived tasks in
+/// `running`/`testing`/`review`. `thread_status` (NULL | 'scheduled' |
+/// 'running') decides whether the task actually occupies its channel with a
+/// live/auto thread (see `active_task_claims_channel`).
+#[derive(sqlx::FromRow)]
+struct DispatchActiveTaskRow {
+    id: String,
+    status: String,
+    archived: Option<bool>,
+    /// Channel name (yml key) the task targets; resolved the same way as the
+    /// candidate's channel (task -> board -> default).
+    channel_id: Option<String>,
+    board: Option<String>,
+    thread_status: Option<String>,
 }
 
 /// A dependency's dispatch-relevant state: `None` when the dependency row is
@@ -101,17 +144,23 @@ fn deps_satisfied(deps: &[DepState]) -> bool {
     })
 }
 
-/// Index of the first task that is BOTH dependency-eligible AND whose channel
-/// has no active (queued/running) thread. `channel_active_counts[i]` is the
-/// number of active threads on candidate i's channel (0 = free to dispatch).
+/// Index of the first task that is dependency-eligible, whose channel has no
+/// active (queued/running) thread, AND whose channel is not claimed by
+/// another active task. `channel_active_counts[i]` is the number of active
+/// threads on candidate i's channel (0 = free to dispatch);
+/// `channel_claimed[i]` is whether candidate i's resolved channel is claimed
+/// by another non-archived running/testing/review task with a live
+/// thread_status (see `active_task_claims_channel`).
 fn first_dispatchable_index(
     task_deps: &[Vec<DepState>],
     channel_active_counts: &[i64],
+    channel_claimed: &[bool],
 ) -> Option<usize> {
     task_deps
         .iter()
         .zip(channel_active_counts)
-        .position(|(deps, &active)| deps_satisfied(deps) && active == 0)
+        .zip(channel_claimed)
+        .position(|((deps, &active), &claimed)| deps_satisfied(deps) && active == 0 && !claimed)
 }
 
 /// Number of ACTIVE (queued/running) threads on a channel.
@@ -160,9 +209,10 @@ fn resolve_task_channel(
 /// Run ONE dispatch pass: promote the highest-priority eligible `todo` task
 /// to `running` and start a thread for it. A task is eligible when every
 /// non-archived dependency is `done` AND its channel has no active
-/// (queued/running) thread — the channel gate lets the current task's full
-/// workflow (executor -> tester -> reviewer -> done) finish before the next
-/// task on the same channel begins.
+/// (queued/running) thread AND its channel is not claimed by another active
+/// task — the channel gates let the current task's full workflow
+/// (executor -> tester -> reviewer -> done) finish before the next task on
+/// the same channel begins.
 ///
 /// Returns `dispatched: false` (with a reason message) when nothing is
 /// eligible, and `Err` on internal failures (caller decides how to surface:
@@ -246,6 +296,52 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
         .filter(|t| goal_resume_eligible(t.goal_phase.as_deref(), t.goal_blocked_code.as_deref()))
         .collect();
 
+    // 1d. Same-channel active-task scan (task-level gate): non-archived tasks
+    //     in `running`/`testing`/`review` whose thread_status is live
+    //     ('scheduled' = thread queued, 'running' = thread processing) claim
+    //     their resolved channel — a `todo` candidate on that channel must NOT
+    //     be dispatched while the predecessor's workflow still has a live
+    //     thread. This closes the window the threads-table gate alone misses
+    //     (e.g. between an executor finishing and its testing/review thread
+    //     spawning, or while a review thread still occupies the channel).
+    //     Tasks with empty/NULL thread_status (manual review, no auto thread)
+    //     are IGNORED — they do not occupy the channel. Archived tasks never
+    //     count. Channels are resolved with the same task -> board -> default
+    //     resolution used for the candidates (resolve_task_channel).
+    let active_tasks = match sql_forge!(
+        DispatchActiveTaskRow,
+        r#"
+        SELECT id, status, archived, channel_id, board, thread_status
+        FROM kanban_tasks
+        WHERE status IN ('running', 'testing', 'review') AND archived = false
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("[kanban/dispatch] failed to list active tasks: {:?}", e);
+            return Err(Error::Message(format!("Failed to list active tasks: {e}")));
+        }
+    };
+    let claimed_channels: Vec<String> = active_tasks
+        .iter()
+        .filter(|t| active_task_claims_channel(&t.status, t.thread_status.as_deref(), t.archived))
+        .map(|t| {
+            resolve_task_channel(
+                data_dir,
+                t.channel_id.as_deref(),
+                boards_file.as_ref().and_then(|file| {
+                    t.board
+                        .as_deref()
+                        .and_then(|b| file.boards.get(b))
+                        .and_then(|cfg| cfg.channel.as_deref())
+                }),
+            )
+        })
+        .collect();
+
     // 2. Resolve dependency state for each candidate.
     let mut all_deps: Vec<Vec<DepState>> = Vec::with_capacity(tasks.len());
     for task in &tasks {
@@ -311,15 +407,22 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
     // terminal gate would block dispatch on that channel forever). Skipping a
     // busy channel lets the in-flight task's full workflow (executor ->
     // tester -> reviewer -> done) finish before the next task on the same
-    // channel begins. Pick the first task that is BOTH dependency-eligible
-    // AND channel-free.
+    // channel begins.
+    //
+    // 2c. Same-channel active-task gate (task-level, see step 1d): skip
+    // candidates whose resolved channel is claimed by another non-archived
+    // running/testing/review task with a live thread_status. Pick the first
+    // task that is dependency-eligible, channel-free AND not claimed.
     let mut channel_active_counts: Vec<i64> = Vec::with_capacity(tasks.len());
+    let mut channel_claimed_flags: Vec<bool> = Vec::with_capacity(tasks.len());
     let mut busy_channel: Option<(String, i64)> = None;
+    let mut claimed_channel: Option<String> = None;
     for (i, task) in tasks.iter().enumerate() {
         // A dependency-blocked candidate can never be picked; its channel
-        // state is irrelevant (0 keeps the index alignment).
+        // state is irrelevant (0/false keeps the index alignment).
         if !deps_satisfied(&all_deps[i]) {
             channel_active_counts.push(0);
+            channel_claimed_flags.push(false);
             continue;
         }
         let channel_id = resolve_task_channel(
@@ -345,29 +448,40 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
             }
         };
         if busy_channel.is_none() && active > 0 {
-            busy_channel = Some((channel_id, active));
+            busy_channel = Some((channel_id.clone(), active));
+        }
+        let claimed = channel_claimed(&channel_id, &claimed_channels);
+        if claimed_channel.is_none() && claimed {
+            claimed_channel = Some(channel_id);
         }
         channel_active_counts.push(active);
+        channel_claimed_flags.push(claimed);
     }
 
-    let picked = match first_dispatchable_index(&all_deps, &channel_active_counts)
-        .and_then(|i| tasks.get(i))
-    {
-        Some(task) => task,
-        None => {
-            return Ok(DispatchSummary {
-                dispatched: false,
-                task_id: None,
-                thread_id: None,
-                message: match busy_channel {
-                    Some((channel_id, active)) => {
-                        format!("Channel busy: {channel_id} has {active} active thread(s)")
-                    }
-                    None => "No eligible kanban tasks".to_string(),
-                },
-            });
-        }
-    };
+    let picked =
+        match first_dispatchable_index(&all_deps, &channel_active_counts, &channel_claimed_flags)
+            .and_then(|i| tasks.get(i))
+        {
+            Some(task) => task,
+            None => {
+                return Ok(DispatchSummary {
+                    dispatched: false,
+                    task_id: None,
+                    thread_id: None,
+                    message: match busy_channel {
+                        Some((channel_id, active)) => {
+                            format!("Channel busy: {channel_id} has {active} active thread(s)")
+                        }
+                        None => match claimed_channel {
+                            Some(channel_id) => format!(
+                                "Channel claimed by active task: {channel_id} has a live thread"
+                            ),
+                            None => "No eligible kanban tasks".to_string(),
+                        },
+                    },
+                });
+            }
+        };
 
     // 3. Start the executor thread via the shared status-dispatch path (the
     //    same code as status-change dispatch and /redispatch): it skips any
@@ -461,11 +575,14 @@ mod tests {
         // A task whose dependency is still 'todo' is not eligible -> no dispatch.
         let blocked = vec![Some(("todo".to_string(), Some(false)))];
         assert!(!deps_satisfied(&blocked));
-        assert_eq!(first_dispatchable_index(&[blocked], &[0]), None);
+        assert_eq!(first_dispatchable_index(&[blocked], &[0], &[false]), None);
 
         // Missing dependency rows also block.
         assert!(!deps_satisfied(&[None]));
-        assert_eq!(first_dispatchable_index(&[vec![None]], &[0]), None);
+        assert_eq!(
+            first_dispatchable_index(&[vec![None]], &[0], &[false]),
+            None
+        );
     }
 
     #[test]
@@ -478,11 +595,17 @@ mod tests {
             vec![],
         ];
         // All channels free -> same result as the old dep-only picker.
-        assert_eq!(first_dispatchable_index(&task_deps, &[0, 0, 0]), Some(1));
+        assert_eq!(
+            first_dispatchable_index(&task_deps, &[0, 0, 0], &[false, false, false]),
+            Some(1)
+        );
 
         // All blocked -> None (dispatched: false).
         let all_blocked = vec![vec![Some(("todo".to_string(), Some(false)))], vec![None]];
-        assert_eq!(first_dispatchable_index(&all_blocked, &[0, 0]), None);
+        assert_eq!(
+            first_dispatchable_index(&all_blocked, &[0, 0], &[false, false]),
+            None
+        );
 
         // Archived dependencies never block, regardless of status.
         let archived = vec![
@@ -526,18 +649,36 @@ mod tests {
         let free = vec![vec![], vec![], vec![]];
         // (a)+(b): first candidate's channel has a queued/running thread ->
         // skipped in favor of the next channel-free candidate.
-        assert_eq!(first_dispatchable_index(&free, &[1, 0]), Some(1));
-        assert_eq!(first_dispatchable_index(&free, &[2, 0]), Some(1));
+        assert_eq!(
+            first_dispatchable_index(&free, &[1, 0], &[false, false]),
+            Some(1)
+        );
+        assert_eq!(
+            first_dispatchable_index(&free, &[2, 0], &[false, false]),
+            Some(1)
+        );
         // (c): only terminal threads on the channels -> first candidate wins.
-        assert_eq!(first_dispatchable_index(&free, &[0, 0, 0]), Some(0));
+        assert_eq!(
+            first_dispatchable_index(&free, &[0, 0, 0], &[false, false, false]),
+            Some(0)
+        );
         // (d): a skipped thread is NOT counted -> channel free, dispatched.
-        assert_eq!(first_dispatchable_index(&free, &[0, 1]), Some(0));
+        assert_eq!(
+            first_dispatchable_index(&free, &[0, 1], &[false, false]),
+            Some(0)
+        );
         // A dependency-blocked candidate is skipped even when its channel is
         // free; the first free dep-eligible candidate is picked.
         let mixed = vec![vec![Some(("todo".to_string(), Some(false)))], vec![]];
-        assert_eq!(first_dispatchable_index(&mixed, &[0, 0]), Some(1));
+        assert_eq!(
+            first_dispatchable_index(&mixed, &[0, 0], &[false, false]),
+            Some(1)
+        );
         // All channels busy -> None (dispatch returns dispatched:false).
-        assert_eq!(first_dispatchable_index(&free, &[1, 1, 1]), None);
+        assert_eq!(
+            first_dispatchable_index(&free, &[1, 1, 1], &[false, false, false]),
+            None
+        );
     }
 
     #[test]
@@ -593,7 +734,128 @@ mod tests {
         assert_eq!(active_thread_count(&["pending"]), 1);
         assert_eq!(active_thread_count(&["processing"]), 1);
         // ...and first_dispatchable_index still honors the channel gate.
-        assert_eq!(first_dispatchable_index(&[vec![]], &[1]), None);
-        assert_eq!(first_dispatchable_index(&[vec![]], &[0]), Some(0));
+        assert_eq!(first_dispatchable_index(&[vec![]], &[1], &[false]), None);
+        assert_eq!(first_dispatchable_index(&[vec![]], &[0], &[false]), Some(0));
+    }
+
+    #[test]
+    fn dispatch_active_task_claims_channel() {
+        // running/testing/review with a LIVE thread_status ('scheduled' =
+        // thread queued, 'running' = thread processing) claim their channel.
+        for status in ["running", "testing", "review"] {
+            assert!(active_task_claims_channel(
+                status,
+                Some("scheduled"),
+                Some(false)
+            ));
+            assert!(active_task_claims_channel(
+                status,
+                Some("running"),
+                Some(false)
+            ));
+        }
+        // A task with empty/NULL thread_status (manual review / no auto
+        // thread) never claims the channel -> the todo task CAN dispatch.
+        for status in ["running", "testing", "review"] {
+            assert!(!active_task_claims_channel(status, None, Some(false)));
+            assert!(!active_task_claims_channel(status, Some(""), Some(false)));
+        }
+        // Archived tasks never count, even with a live thread_status.
+        assert!(!active_task_claims_channel(
+            "running",
+            Some("scheduled"),
+            Some(true)
+        ));
+        assert!(!active_task_claims_channel(
+            "review",
+            Some("running"),
+            Some(true)
+        ));
+        // NULL archived (legacy rows) counts as not archived.
+        assert!(active_task_claims_channel(
+            "running",
+            Some("scheduled"),
+            None
+        ));
+        // Only running/testing/review statuses are in the scan.
+        assert!(!active_task_claims_channel(
+            "todo",
+            Some("scheduled"),
+            Some(false)
+        ));
+        assert!(!active_task_claims_channel(
+            "done",
+            Some("scheduled"),
+            Some(false)
+        ));
+        assert!(!active_task_claims_channel(
+            "blocked",
+            Some("scheduled"),
+            Some(false)
+        ));
+        assert!(!active_task_claims_channel(
+            "backlog",
+            Some("scheduled"),
+            Some(false)
+        ));
+    }
+
+    #[test]
+    fn dispatch_blocked_by_same_channel_active_task() {
+        // A todo candidate whose channel is claimed by another active task
+        // (running/testing/review + live thread_status) is NOT dispatched —
+        // even when the channel has no queued/running thread (the
+        // threads-table gate alone would miss the window where the
+        // predecessor's thread_status is still live).
+        assert_eq!(first_dispatchable_index(&[vec![]], &[0], &[true]), None);
+        // ...and when both gates fire.
+        assert_eq!(first_dispatchable_index(&[vec![]], &[1], &[true]), None);
+        // The claimed gate is per-candidate: a later candidate on a free,
+        // unclaimed channel is still picked.
+        let free = vec![vec![], vec![]];
+        assert_eq!(
+            first_dispatchable_index(&free, &[0, 0], &[true, false]),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn dispatch_allowed_when_no_same_channel_claim() {
+        // No active task on the candidate's channel -> dispatched.
+        assert_eq!(first_dispatchable_index(&[vec![]], &[0], &[false]), Some(0));
+        // Full chain: same-channel task with NULL/empty thread_status (manual
+        // review) -> not claimed -> todo dispatched.
+        let manual_review_claimed = vec![active_task_claims_channel("review", None, Some(false))];
+        assert_eq!(
+            first_dispatchable_index(&[vec![]], &[0], &manual_review_claimed),
+            Some(0)
+        );
+        // Different channels never interact: candidate on chan-a, active task
+        // on chan-b.
+        assert!(!channel_claimed("chan-a", &["chan-b".to_string()]));
+        assert!(channel_claimed("chan-a", &["chan-a".to_string()]));
+        assert!(!channel_claimed("chan-a", &[]));
+    }
+
+    #[test]
+    fn dispatch_archived_tasks_never_claim() {
+        // Archived tasks are ignored by the claim scan (SQL predicate + Rust
+        // backstop): they never block a todo candidate, and their
+        // thread_status never counts as a live channel claim.
+        assert!(!active_task_claims_channel(
+            "running",
+            Some("scheduled"),
+            Some(true)
+        ));
+        assert!(!active_task_claims_channel(
+            "testing",
+            Some("running"),
+            Some(true)
+        ));
+        assert!(!active_task_claims_channel(
+            "review",
+            Some("scheduled"),
+            Some(true)
+        ));
     }
 }
