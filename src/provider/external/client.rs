@@ -7,7 +7,7 @@
 
 use crate::error::{AppResult, Error, ErrorContext};
 use crate::provider::external::{
-    build_complete_request, build_initialize_request, CompleteParams, CompleteResult,
+    build_complete_request, build_initialize_request, parse_usage, CompleteParams, CompleteResult,
     ProviderResponse,
 };
 use parking_lot::Mutex as StdMutex;
@@ -233,24 +233,10 @@ impl ExternalProviderClient {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
-                let usage = result
-                    .get("usage")
-                    .map(|u| crate::provider::external::UsageResult {
-                        prompt_tokens: u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0)
-                            as u32,
-                        completion_tokens: u
-                            .get("completion_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32,
-                        cached_tokens: u
-                            .get("cached_tokens")
-                            .and_then(|v| v.as_u64())
-                            .map(|v| v as u32),
-                        reasoning_tokens: u
-                            .get("reasoning_tokens")
-                            .and_then(|v| v.as_u64())
-                            .map(|v| v as u32),
-                    });
+                // Usage parsing accepts every cache-field naming convention
+                // (cached_tokens / prompt_cache_hit_tokens / anthropic cache
+                // fields) — see provider::external::parse_usage.
+                let usage = result.get("usage").and_then(parse_usage);
                 let finish_reason = result
                     .get("finish_reason")
                     .and_then(|v| v.as_str())

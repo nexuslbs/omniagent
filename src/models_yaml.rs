@@ -30,8 +30,8 @@
 //! Precedence (per user spec): for EACH of soft/hard token budget INDEPENDENTLY —
 //!   1. `model_config.<model>` budget;
 //!   2. else provider-level budget (`providers.<name>` soft/hard);
-//!   3. else GLOBAL settings budget (`prompt_token_budget_soft` default 100000 /
-//!      `prompt_token_budget_hard` default 500000 from settings.yml).
+//!   3. else GLOBAL settings budget (`prompt_token_budget_soft` default 120000 /
+//!      `prompt_token_budget_hard` default 200000 from settings.yml).
 //!
 //! `max_tokens` / `max_tokens_on_truncation` follow the same chain (model > provider > settings).
 //!

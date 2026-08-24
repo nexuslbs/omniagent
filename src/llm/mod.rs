@@ -2001,3 +2001,44 @@ mod tests {
         );
     }
 }
+#[cfg(test)]
+mod usage_parse_tests {
+    use super::*;
+
+    // Cache-hit accounting: the OpenAI-compatible usage object must parse the
+    // DeepSeek `prompt_cache_hit_tokens` field into `cached_tokens` (serde
+    // alias) — this is the field the threads-table cached_tokens column is
+    // fed from via merge_usage + complete_thread.
+    #[test]
+    fn usage_parses_deepseek_prompt_cache_hit_tokens() {
+        let json = r#"{
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "prompt_cache_hit_tokens": 900,
+            "prompt_cache_miss_tokens": 100
+        }"#;
+        let u: Usage = serde_json::from_str(json).unwrap();
+        assert_eq!(u.prompt_tokens, 1000);
+        assert_eq!(u.completion_tokens, 50);
+        assert_eq!(u.cached_tokens, Some(900));
+    }
+
+    #[test]
+    fn usage_parses_cached_tokens_directly() {
+        let json = r#"{"prompt_tokens": 10, "completion_tokens": 2, "cached_tokens": 7}"#;
+        let u: Usage = serde_json::from_str(json).unwrap();
+        assert_eq!(u.cached_tokens, Some(7));
+    }
+
+    #[test]
+    fn usage_missing_cache_fields_yields_none() {
+        // The observed opencode-go gateway usage omits cache fields entirely:
+        // cached_tokens must be None (never a wrong number) — the threads
+        // table then records 0, which is exactly the reported symptom.
+        let json = r#"{"prompt_tokens": 250000, "completion_tokens": 1000}"#;
+        let u: Usage = serde_json::from_str(json).unwrap();
+        assert_eq!(u.prompt_tokens, 250000);
+        assert_eq!(u.completion_tokens, 1000);
+        assert_eq!(u.cached_tokens, None);
+    }
+}

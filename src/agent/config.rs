@@ -117,9 +117,13 @@ pub struct AgentConfig {
     /// Hard context budget (tokens, global setting `prompt_token_budget_hard`):
     /// passed to the prompt plugin's compact-messages tool as `hard_budget`.
     /// The plugin compacts/prunes only when the context exceeds it.
+    /// Default: 200000 (was 500000 — the old default let a thread's context
+    /// grow to ~250K tokens per call before compaction ever fired, which is
+    /// why threads resubmitted huge uncached contexts on every call).
     pub token_budget_hard: usize,
     /// Soft context budget (tokens, global setting `prompt_token_budget_soft`):
     /// passed to compact-messages as `soft_budget` — the reduction target.
+    /// Default: 120000.
     pub token_budget_soft: usize,
 
     // When to insert prompts as messages (msg_type: "prompt") into the messages table.
@@ -274,12 +278,12 @@ impl AgentConfig {
             sub_prompt_iteration_percent: get("sub_prompt_iteration_percent", "50")
                 .parse()
                 .unwrap_or(50),
-            token_budget_hard: get("prompt_token_budget_hard", "500000")
+            token_budget_hard: get("prompt_token_budget_hard", "200000")
                 .parse()
-                .unwrap_or(500000),
-            token_budget_soft: get("prompt_token_budget_soft", "100000")
+                .unwrap_or(200000),
+            token_budget_soft: get("prompt_token_budget_soft", "120000")
                 .parse()
-                .unwrap_or(100000),
+                .unwrap_or(120000),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
@@ -390,12 +394,12 @@ impl AgentConfig {
             sub_prompt_iteration_percent: get("sub_prompt_iteration_percent", "50")
                 .parse()
                 .unwrap_or(50),
-            token_budget_hard: get("prompt_token_budget_hard", "500000")
+            token_budget_hard: get("prompt_token_budget_hard", "200000")
                 .parse()
-                .unwrap_or(500000),
-            token_budget_soft: get("prompt_token_budget_soft", "100000")
+                .unwrap_or(200000),
+            token_budget_soft: get("prompt_token_budget_soft", "120000")
                 .parse()
-                .unwrap_or(100000),
+                .unwrap_or(120000),
 
             prompt_log_level: get("prompt_log_level", "first"),
 
@@ -473,8 +477,8 @@ mod tests {
             compact_messages_tool_name: "prompt_compact-messages".to_string(),
             sub_prompt_max_chars: 4000,
             sub_prompt_iteration_percent: 50,
-            token_budget_hard: 500000,
-            token_budget_soft: 100000,
+            token_budget_hard: 200000,
+            token_budget_soft: 120000,
             prompt_log_level: "first".to_string(),
             tool_bg_secs: 30,
             database_url: "postgres://localhost:***@host:5432/db".to_string(),
@@ -521,6 +525,11 @@ mod tests {
         );
         assert_eq!(cfg.max_inline_file_kb, 500);
         assert_eq!(cfg.platform_max_spawn_retries, 10);
+        // Token budgets: bounded defaults (compaction fires well before the
+        // provider window instead of never — the old 500K hard budget let
+        // per-call contexts reach ~250K tokens with zero proactive compaction).
+        assert_eq!(cfg.token_budget_hard, 200000);
+        assert_eq!(cfg.token_budget_soft, 120000);
     }
 
     #[test]

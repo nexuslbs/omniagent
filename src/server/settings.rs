@@ -551,7 +551,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 description: "Hard token budget for the prompt plugin: compaction triggers immediately when the conversation size exceeds it (tokens; chars/4 fallback when no tokenizer)".into(),
                 options: None,
                 readonly: false,
-                default: Some("500000".into()),
+                default: Some("200000".into()),
             },
         ),
         (
@@ -561,7 +561,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 description: "Soft token budget for the prompt plugin: the reduction target when the hard budget is exceeded (tokens; chars/4 fallback when no tokenizer)".into(),
                 options: None,
                 readonly: false,
-                default: Some("100000".into()),
+                default: Some("120000".into()),
             },
         ),
         // ── Group 2 settings ──
@@ -1088,8 +1088,8 @@ mod tests {
         let by_name: std::collections::HashMap<&str, &SettingMeta> =
             defs.iter().map(|(n, m)| (n.as_str(), m)).collect();
         for (name, expected_default) in [
-            ("prompt_token_budget_hard", "500000"),
-            ("prompt_token_budget_soft", "100000"),
+            ("prompt_token_budget_hard", "200000"),
+            ("prompt_token_budget_soft", "120000"),
         ] {
             let meta = by_name
                 .get(name)
