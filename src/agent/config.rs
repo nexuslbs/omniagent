@@ -75,6 +75,12 @@ pub struct AgentConfig {
     /// Output budget used when a response is truncated (finish_reason=length).
     /// Normal calls keep the small `max_tokens`; the retry escalates to this.
     pub max_tokens_on_truncation: Option<u32>,
+    /// Max consecutive finish_reason=length truncation retries per thread
+    /// before giving up truthfully. Each retry demands a progressively
+    /// SHORTER response (or multi-part emission) with a reasoning-aware nudge,
+    /// so a recoverable output truncation never fails the thread outright.
+    /// Default: 3.
+    pub max_truncation_retries: u32,
     pub temperature: f32,
     /// Max iterations for threads with no planning mode (complexity-based).
     pub max_iterations_no_plan: u32,
@@ -247,6 +253,7 @@ impl AgentConfig {
             default_provider: get("default_provider", ""),
             max_tokens: opt_u32(&get("max_tokens", "")),
             max_tokens_on_truncation: opt_u32(&get("max_tokens_on_truncation", "")),
+            max_truncation_retries: get("max_truncation_retries", "3").parse().unwrap_or(3),
             temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
             max_iterations_plan: get("max_iterations_plan", "120").parse().unwrap_or(120),
@@ -362,6 +369,7 @@ impl AgentConfig {
             default_provider: get("default_provider", ""),
             max_tokens: opt_u32(&get("max_tokens", "")),
             max_tokens_on_truncation: opt_u32(&get("max_tokens_on_truncation", "")),
+            max_truncation_retries: get("max_truncation_retries", "3").parse().unwrap_or(3),
             temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
             max_iterations_plan: get("max_iterations_plan", "120").parse().unwrap_or(120),
@@ -453,6 +461,7 @@ mod tests {
             default_provider: String::new(),
             max_tokens: Some(32768),
             max_tokens_on_truncation: Some(16384),
+            max_truncation_retries: 3,
             temperature: 0.7,
             max_iterations_no_plan: 30,
             max_iterations_plan: 120,
@@ -499,6 +508,7 @@ mod tests {
         assert_eq!(cfg.default_provider, "");
         assert_eq!(cfg.max_tokens, Some(32768));
         assert_eq!(cfg.max_tokens_on_truncation, Some(16384));
+        assert_eq!(cfg.max_truncation_retries, 3);
         assert_eq!(cfg.max_compaction_retries, 2);
         assert_eq!(cfg.temperature, 0.7);
         assert_eq!(cfg.host, "127.0.0.1");
@@ -515,13 +525,14 @@ mod tests {
 
     #[test]
     fn test_agent_config_complete_field_count() {
-        // AgentConfig has 39 fields. This test verifies all are present,
+        // AgentConfig has 40 fields. This test verifies all are present,
         // by constructing a minimal config and checking all fields are accessible.
         let cfg = AgentConfig {
             llm_api_key: String::new(),
             default_provider: String::new(),
             max_tokens: None,
             max_tokens_on_truncation: None,
+            max_truncation_retries: 0,
             temperature: 0.0,
             max_iterations_no_plan: 0,
             max_iterations_plan: 0,

@@ -876,19 +876,27 @@ Previous plan:\n{}",
         messages.push(ChatMessage::user(&prompt_parts.user));
     }
 
-    // ── Truncation escalation (global max_tokens_on_truncation) ──
+    // ── Truncation recovery (finish_reason=length) ──
     // Normal LLM calls use the configured `max_tokens` budget (None = no cap:
     // the provider's own default applies — no max_tokens sent in the request).
     // When the provider reports finish_reason=length (the output ceiling was
-    // hit), the retry uses the escalated budget `max_tokens_on_truncation`
-    // (also optional) with the truncated reasoning preserved; a second
-    // consecutive truncation fails fast (no third retry) and FORCES the
-    // thread to fail. With no caps configured anywhere, a truncation still
-    // retries once, then fails fast — the safety valve stays.
+    // hit) the thread RECOVERS: it retries a bounded number of times
+    // (`max_truncation_retries`, default 3) with an escalating nudge that
+    // demands a progressively SHORTER response (or multi-part emission) — NOT
+    // "continue where you left off", which regenerates the same oversized
+    // output. The retry budget is per-thread and resets whenever the model
+    // produces a valid (non-truncated) response, so in-progress tool work is
+    // never discarded and a later truncation gets fresh recovery attempts.
+    // Only after the budget is exhausted does the thread give up truthfully
+    // (surfacing exactly what was trimmed) — a recoverable output truncation
+    // never trips the stuck/empty-thread safety valve below.
     let mut escalated_max_tokens: Option<u32> = None;
-    let mut truncation_escalated: bool = false;
+    // Per-thread truncation-recovery counter: incremented on each recovery
+    // retry, reset on any valid (non-truncated) response.
+    let mut truncation_retries_used: u32 = 0;
     let base_max_tokens: Option<u32> = eff_model_cfg.max_tokens;
     let max_tokens_on_truncation: Option<u32> = eff_model_cfg.max_tokens_on_truncation;
+    let max_truncation_retries = cfg_snapshot.max_truncation_retries;
 
     // Output-limit awareness: tell the model its per-response output ceiling so
     // it plans large deliverables (big file writes, long reports) in chunks
@@ -1478,32 +1486,59 @@ Previous plan:\n{}",
 
         // Check for tool calls
         if response.tool_calls.is_empty() {
-            // ── Truncation escalation (global max_tokens_on_truncation) ──
+            // ── Truncation recovery (finish_reason=length) ──
             // finish_reason=length means the provider hit the output ceiling
-            // before the model could emit its action/answer (e.g. reasoning
-            // consumed the whole budget). First truncation → retry ONCE with
-            // the escalated budget (max_tokens_on_truncation), preserving the
-            // truncated reasoning so the model does NOT re-derive it. Second
-            // consecutive truncation → fail fast (give up truthfully; no
-            // third retry with the same budget).
+            // before the model could emit its action/answer. This is a
+            // RECOVERABLE condition, not a stuck/empty thread: retry a bounded
+            // number of times (max_truncation_retries, default 3) with an
+            // escalating nudge that demands a progressively SHORTER response
+            // (or multi-part emission) — never "continue where you left off",
+            // which regenerates the same oversized output. Reasoning-only
+            // truncation (content empty, reasoning consumed the budget) drops
+            // the reasoning and demands a thinking-free response, because
+            // reasoning models restart their chain on each retry and would
+            // re-trigger length. Only when the retry budget is exhausted does
+            // the thread give up truthfully (surfacing exactly what was
+            // trimmed). The stuck/empty-thread safety valve below never fires
+            // on a recoverable truncation.
             let truncated = response
                 .finish_reason
                 .as_deref()
                 .map(|f| f == "length")
                 .unwrap_or(false);
-            match truncation_action(truncation_escalated, truncated) {
-                TruncationAction::Escalate => {
-                    escalated_max_tokens = max_tokens_on_truncation;
-                    truncation_escalated = true;
+            let content_empty = response.content.trim().is_empty();
+            let has_reasoning = response
+                .reasoning
+                .as_ref()
+                .map(|r| !r.trim().is_empty())
+                .unwrap_or(false);
+            match truncation_action(
+                truncated,
+                truncation_retries_used,
+                max_truncation_retries,
+                content_empty,
+                has_reasoning,
+            ) {
+                TruncationAction::Retry { attempt, kind } => {
+                    truncation_retries_used += 1;
+                    if escalated_max_tokens.is_none() {
+                        escalated_max_tokens = max_tokens_on_truncation;
+                    }
                     info!(
-                        "[executor] response truncated (finish_reason=length, attempt 1/2): retrying with escalated max_tokens={} (thread {})",
-                        fmt_output_budget(max_tokens_on_truncation), thread.id,
+                        "[executor] response truncated (finish_reason=length, attempt {}/{}): retrying with shorter-response nudge (kind={:?}, max_tokens={}) (thread {})",
+                        attempt, max_truncation_retries, kind,
+                        fmt_output_budget(escalated_max_tokens), thread.id,
                     );
-                    // Reasoning-forward: preserve the truncated reasoning and
-                    // any partial content, then nudge for a SHORTER response.
+                    // Reasoning-aware recovery: preserve truncated reasoning +
+                    // partial content (content truncation), or drop the
+                    // budget-eating reasoning (reasoning-only truncation);
+                    // then nudge for a SHORTER response, escalating per retry.
                     messages.extend(truncation_retry_messages(
                         response.reasoning.as_deref(),
                         &response.content,
+                        attempt,
+                        max_truncation_retries,
+                        kind,
                     ));
                     // The Output Limit hint must match the real ceiling on
                     // the retry, not the original small budget.
@@ -1516,7 +1551,7 @@ Previous plan:\n{}",
                              SPLIT the work across multiple calls: write the first chunk with filesystem_write \
                              (append=false), then append the remaining chunks with append=true. Never abandon a task \
                              because of the output limit — chunk the output instead.",
-                            fmt_output_budget(max_tokens_on_truncation), fmt_output_budget(base_max_tokens),
+                            fmt_output_budget(escalated_max_tokens), fmt_output_budget(base_max_tokens),
                         ),
                     );
                     // Don't consume the iteration budget for this retry overhead.
@@ -1524,30 +1559,47 @@ Previous plan:\n{}",
                     tokio::time::sleep(backoff_delay(1).await).await;
                     continue;
                 }
-                TruncationAction::FailFast => {
+                TruncationAction::GiveUp => {
+                    let reasoning_chars = response
+                        .reasoning
+                        .as_ref()
+                        .map(|r| r.chars().count())
+                        .unwrap_or(0);
+                    let content_chars = response.content.chars().count();
                     warn!(
-                        "[executor] response truncated by token budget 2 consecutive times (including once with escalated max_tokens={}) for thread {}: giving up truthfully",
-                        fmt_output_budget(max_tokens_on_truncation), thread.id,
+                        "[executor] response truncated after {} recovery retry(ies) (max {}) for thread {}: giving up truthfully (last truncation: {} content chars, {} reasoning chars)",
+                        truncation_retries_used, max_truncation_retries, thread.id,
+                        content_chars, reasoning_chars,
                     );
-                    final_content = format!(
-                        "The response was truncated by the output token limit twice (attempt 2/2, including once with the escalated budget of {} tokens). Giving up truthfully.",
-                        fmt_output_budget(max_tokens_on_truncation),
-                    );
-                    final_tool_call = false;
-                    // Truncated twice: give up truthfully, but the thread MUST
+                    // Give up truthfully: surface exactly what was trimmed.
+                    // In-progress tool work is preserved in the thread history
+                    // (messages/DB) — only the final response was lost, so the
+                    // step can be resumed rather than redone. The thread MUST
                     // fail (status "failed" → blocked / review_on_fail), never
                     // complete and advance to the tester.
+                    final_content = format!(
+                        "The response was truncated by the output token limit after {} recovery retries (max {}), \
+                         even with progressively shorter-response retries and an escalated budget of {} tokens. \
+                         Last truncated response: {} content chars, {} reasoning chars. \
+                         In-progress tool work up to this point is preserved in the thread history; only the \
+                         final response was lost. Giving up truthfully.",
+                        truncation_retries_used,
+                        max_truncation_retries,
+                        fmt_output_budget(escalated_max_tokens),
+                        content_chars,
+                        reasoning_chars,
+                    );
+                    final_tool_call = false;
                     force_failed = true;
                     break;
                 }
                 TruncationAction::Continue => {
-                    // Successful (non-truncated) response: reset the escalation
-                    // state so a later truncation escalates from the base budget.
+                    // Successful (non-truncated) response: reset the recovery
+                    // state so a later truncation retries from the base budget.
                     escalated_max_tokens = None;
-                    truncation_escalated = false;
+                    truncation_retries_used = 0;
                 }
             }
-
             // Subtask enforcement: only when subtask mode is active
             if enable_subtasks {
                 // Check if all subtasks are completed/cancelled before allowing final answer
@@ -1775,6 +1827,10 @@ Previous plan:\n{}",
         llm_error_retries = 0;
         compaction_retries_used = 0;
         pruned_for_overflow = false;
+        // A successful tool round is a healthy response: reset the truncation
+        // recovery state too, so a later truncation gets fresh retries instead
+        // of inheriting stale escalation (in-progress tool work is preserved).
+        truncation_retries_used = 0;
         final_tool_call = true;
         let mut assistant_msg = ChatMessage::assistant("");
         assistant_msg.tool_calls = Some(response.tool_calls.clone());
@@ -2419,26 +2475,67 @@ Review the tool results above to see what was attempted and what remains."
 // ── Truncation escalation helpers (pure, unit-tested) ─────────────────────
 
 /// Cap for the preserved reasoning note injected on a truncation retry
-/// (reasoning-forward: the model must NOT re-derive the chain).
+/// (reasoning-forward: the model must NOT re-derive the chain). Only applied
+/// for CONTENT truncation — reasoning-only truncation drops the reasoning
+/// entirely (it IS the overflow cause).
 const PRESERVED_REASONING_CHARS: usize = 16000;
 
-/// Action to take for one LLM response based on truncation + escalation state.
+/// Classification of a truncated (finish_reason=length) response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TruncationAction {
-    /// Response not truncated: proceed normally and reset the escalation state.
-    Continue,
-    /// First truncation: retry once with the escalated budget + preserved reasoning.
-    Escalate,
-    /// Second consecutive truncation: fail fast (no third retry).
-    FailFast,
+enum TruncationKind {
+    /// Partial content was produced (content non-empty); reasoning may or may
+    /// not be present. Recovery preserves the partial content + reasoning.
+    ContentTruncated,
+    /// The output budget was consumed ENTIRELY by reasoning (content empty).
+    /// Recovery must NOT preserve the reasoning — it caused the overflow, and
+    /// reasoning models restart their chain on each retry, regenerating the
+    /// same oversized thought and re-triggering length. The retry instead
+    /// demands a thinking-free response so the budget frees up.
+    ReasoningOnly,
 }
 
-/// Pure decision function: (is_escalated, is_truncated) → action.
-fn truncation_action(escalated: bool, truncated: bool) -> TruncationAction {
-    match (escalated, truncated) {
-        (_, false) => TruncationAction::Continue,
-        (false, true) => TruncationAction::Escalate,
-        (true, true) => TruncationAction::FailFast,
+/// Action to take for one LLM response based on truncation + recovery state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TruncationAction {
+    /// Response not truncated: proceed normally and reset the recovery state.
+    Continue,
+    /// Truncated and recovery retries remain: retry with an escalating
+    /// shorter-response nudge. `attempt` is 1-based (1..=max_retries).
+    Retry { attempt: u32, kind: TruncationKind },
+    /// Truncated and the per-thread retry budget is exhausted: give up
+    /// truthfully (surfacing exactly what was trimmed), never loop forever.
+    GiveUp,
+}
+
+/// Pure decision function. A recoverable length truncation NEVER fails the
+/// thread outright: it retries (bounded by `max_retries`) with escalating
+/// shorter-response nudges. Only when the retry budget is exhausted does it
+/// GiveUp — and even then the give-up reports precisely what was trimmed and
+/// preserves the thread's in-progress tool work. The stuck/empty-thread
+/// safety valve lives in the empty-content / reasoning-only voluntary-stop
+/// paths BELOW the truncation branch, so a recoverable truncation (which is
+/// classified Retry/GiveUp here) never trips it.
+fn truncation_action(
+    truncated: bool,
+    retries_used: u32,
+    max_retries: u32,
+    content_empty: bool,
+    has_reasoning: bool,
+) -> TruncationAction {
+    if !truncated {
+        return TruncationAction::Continue;
+    }
+    if retries_used >= max_retries {
+        return TruncationAction::GiveUp;
+    }
+    let kind = if content_empty && has_reasoning {
+        TruncationKind::ReasoningOnly
+    } else {
+        TruncationKind::ContentTruncated
+    };
+    TruncationAction::Retry {
+        attempt: retries_used + 1,
+        kind,
     }
 }
 
@@ -2457,26 +2554,66 @@ fn fmt_output_budget(max_tokens: Option<u32>) -> String {
         .unwrap_or_else(|| "provider default".to_string())
 }
 
-/// Messages appended for a truncation retry: preserved reasoning note (if
-/// any), any partial content, and the SHORTER-answer nudge.
-fn truncation_retry_messages(reasoning: Option<&str>, content: &str) -> Vec<ChatMessage> {
+/// Messages appended for a truncation retry: preserved reasoning note (only
+/// for CONTENT truncation; reasoning-only truncation drops the reasoning
+/// because it IS the overflow), any partial content, and an ESCALATING
+/// shorter-response nudge. Each retry demands a smaller output (attempt 1:
+/// SHORTER; attempt 2: MUCH SHORTER + multi-part emission across turns;
+/// attempt 3+: EXTREMELY condensed) so the loop converges instead of
+/// regenerating the same oversized response.
+fn truncation_retry_messages(
+    reasoning: Option<&str>,
+    content: &str,
+    attempt: u32,
+    max_retries: u32,
+    kind: TruncationKind,
+) -> Vec<ChatMessage> {
     let mut msgs = Vec::new();
-    if let Some(r) = reasoning {
-        if !r.trim().is_empty() {
-            msgs.push(ChatMessage::system(&format!(
-                "=== Preserved Reasoning (from truncated response) ===\n{}",
-                truncate_content(r, PRESERVED_REASONING_CHARS),
-            )));
+    match kind {
+        TruncationKind::ContentTruncated => {
+            if let Some(r) = reasoning {
+                if !r.trim().is_empty() {
+                    msgs.push(ChatMessage::system(&format!(
+                        "=== Preserved Reasoning (from truncated response) ===\n{}",
+                        truncate_content(r, PRESERVED_REASONING_CHARS),
+                    )));
+                }
+            }
+            if !content.is_empty() {
+                msgs.push(ChatMessage::assistant(content));
+            }
+        }
+        TruncationKind::ReasoningOnly => {
+            // Nothing preserved: the reasoning consumed the whole budget and
+            // produced no content. Preserving it would re-derive the chain.
         }
     }
-    if !content.is_empty() {
-        msgs.push(ChatMessage::assistant(content));
-    }
-    msgs.push(ChatMessage::system(
-        "[System] Your previous response was cut off by the token limit (attempt 1/2). \
-         The reasoning above is preserved. Produce a SHORTER response now: emit a single \
-         small tool call or a concise final answer. Do NOT regenerate the long reasoning chain.",
-    ));
+    let nudge = match (attempt, kind) {
+        (_, TruncationKind::ReasoningOnly) => format!(
+            "[System] Your previous response was cut off by the token limit: your REASONING consumed the entire output budget and produced no content (attempt {attempt}/{max_retries}). \
+             Do NOT think out loud — SKIP reasoning entirely and emit your response directly: a single small tool call, or a concise final answer."
+        ),
+        (1, TruncationKind::ContentTruncated) => format!(
+            "[System] Your previous response was cut off by the token limit (attempt 1/{max_retries}). \
+             The reasoning above is preserved. Produce a SHORTER response now: emit a single small \
+             tool call or a concise final answer. Do NOT regenerate the long reasoning chain."
+        ),
+        (2, TruncationKind::ContentTruncated) => format!(
+            "[System] Your previous response was again cut off by the token limit (attempt 2/{max_retries}). \
+             Produce a MUCH SHORTER, condensed response: strip all elaboration and emit only the essential \
+             next action (one small tool call) or a terse final answer. If the deliverable cannot fit in a \
+             single response, emit it in PARTS across successive turns: write each part with a tool call \
+             (filesystem_write append=true, notes_note-append), keeping every response small, then close \
+             with a concise answer."
+        ),
+        _ => format!(
+            "[System] Your responses keep hitting the token limit (attempt {attempt}/{max_retries}). \
+             Produce an EXTREMELY condensed response: at most a few lines. Emit one minimal tool call or a \
+             one-paragraph final answer. If the deliverable is large, deliver it in PARTS via successive \
+             small tool calls — never one oversized block."
+        ),
+    };
+    msgs.push(ChatMessage::system(&nudge));
     msgs
 }
 
@@ -2485,33 +2622,105 @@ mod truncation_tests {
     use super::*;
 
     #[test]
-    fn first_truncation_escalates() {
-        assert_eq!(truncation_action(false, true), TruncationAction::Escalate);
+    fn not_truncated_continues() {
+        assert_eq!(
+            truncation_action(false, 0, 3, false, false),
+            TruncationAction::Continue
+        );
+        // A non-truncated response with empty content + reasoning is the
+        // voluntary-stop case handled by the safety valve BELOW the truncation
+        // branch — never classified as a truncation.
+        assert_eq!(
+            truncation_action(false, 3, 3, true, true),
+            TruncationAction::Continue
+        );
     }
 
     #[test]
-    fn second_consecutive_truncation_fails_fast() {
-        assert_eq!(truncation_action(true, true), TruncationAction::FailFast);
-        // No third retry: escalate (1/2) → fail-fast (2/2), loop ends.
+    fn truncated_retries_with_escalating_attempt() {
+        assert_eq!(
+            truncation_action(true, 0, 3, false, true),
+            TruncationAction::Retry {
+                attempt: 1,
+                kind: TruncationKind::ContentTruncated,
+            }
+        );
+        assert_eq!(
+            truncation_action(true, 1, 3, false, false),
+            TruncationAction::Retry {
+                attempt: 2,
+                kind: TruncationKind::ContentTruncated,
+            }
+        );
+        assert_eq!(
+            truncation_action(true, 2, 3, true, true),
+            TruncationAction::Retry {
+                attempt: 3,
+                kind: TruncationKind::ReasoningOnly,
+            }
+        );
     }
 
     #[test]
-    fn successful_response_resets_escalation() {
-        assert_eq!(truncation_action(true, false), TruncationAction::Continue);
-        assert_eq!(truncation_action(false, false), TruncationAction::Continue);
+    fn reasoning_only_classified_when_content_empty() {
+        // content empty + reasoning present -> ReasoningOnly (budget consumed by thinking)
+        assert_eq!(
+            truncation_action(true, 0, 3, true, true),
+            TruncationAction::Retry {
+                attempt: 1,
+                kind: TruncationKind::ReasoningOnly,
+            }
+        );
+        // content empty + NO reasoning -> ContentTruncated (nothing to preserve)
+        assert_eq!(
+            truncation_action(true, 0, 3, true, false),
+            TruncationAction::Retry {
+                attempt: 1,
+                kind: TruncationKind::ContentTruncated,
+            }
+        );
     }
 
     #[test]
-    fn failfast_contract_forces_failed_status() {
-        // Truncation FailFast contract: the base truncation escalates once, a
-        // second consecutive truncation fails fast — the executor loop sets
-        // force_failed=true so the thread's final status is "failed" (NOT
-        // "completed"). A failed executor thread goes blocked (or review with
-        // review_on_fail) — it never advances to the tester.
-        assert_eq!(truncation_action(false, true), TruncationAction::Escalate);
-        assert_eq!(truncation_action(true, true), TruncationAction::FailFast);
-        // Mirror of the post-loop status computation in handle_response:
-        // force_failed wins over everything (including limit_reached).
+    fn retry_budget_is_bounded_give_up_not_infinite() {
+        // max_retries=3: attempts 1..=3 retry, the 4th consecutive truncation
+        // gives up — bounded, never an infinite loop.
+        assert!(matches!(
+            truncation_action(true, 0, 3, false, false),
+            TruncationAction::Retry { .. }
+        ));
+        assert!(matches!(
+            truncation_action(true, 1, 3, false, false),
+            TruncationAction::Retry { .. }
+        ));
+        assert!(matches!(
+            truncation_action(true, 2, 3, false, false),
+            TruncationAction::Retry { .. }
+        ));
+        assert_eq!(
+            truncation_action(true, 3, 3, false, false),
+            TruncationAction::GiveUp
+        );
+        // Zero retries configured: first truncation gives up immediately.
+        assert_eq!(
+            truncation_action(true, 0, 0, false, false),
+            TruncationAction::GiveUp
+        );
+        // Never loops: retries_used >= max always gives up.
+        assert_eq!(
+            truncation_action(true, 5, 3, false, false),
+            TruncationAction::GiveUp
+        );
+    }
+
+    #[test]
+    fn giveup_contract_forces_failed_status() {
+        // GiveUp contract: the executor loop sets force_failed=true so the
+        // thread's final status is "failed" (NOT "completed") — a failed
+        // executor thread goes blocked (or review with review_on_fail), it
+        // never advances to the tester. This is NOT the old bare "3x length ->
+        // truthful fail": GiveUp only fires after escalating shorter-response
+        // retries were attempted, and the give-up surfaces what was trimmed.
         assert_eq!(
             crate::agent::response_handler::post_loop_final_status(true, false),
             "failed"
@@ -2535,7 +2744,13 @@ mod truncation_tests {
 
     #[test]
     fn retry_messages_preserve_reasoning_and_nudge_short() {
-        let msgs = truncation_retry_messages(Some("think step by step"), "partial");
+        let msgs = truncation_retry_messages(
+            Some("think step by step"),
+            "partial",
+            1,
+            3,
+            TruncationKind::ContentTruncated,
+        );
         assert_eq!(msgs[0].role, "system");
         assert!(msgs[0].content.contains("Preserved Reasoning"));
         assert!(msgs[0].content.contains("think step by step"));
@@ -2543,27 +2758,95 @@ mod truncation_tests {
         assert_eq!(msgs[1].content, "partial");
         let nudge = &msgs[2];
         assert_eq!(nudge.role, "system");
-        assert!(nudge.content.contains("attempt 1/2"));
+        assert!(nudge.content.contains("attempt 1/3"));
         assert!(nudge.content.contains("SHORTER"));
         assert!(nudge.content.contains("Do NOT regenerate"));
     }
 
     #[test]
     fn retry_messages_skip_empty_reasoning() {
-        let msgs = truncation_retry_messages(Some("   "), "partial");
+        let msgs = truncation_retry_messages(
+            Some("   "),
+            "partial",
+            1,
+            3,
+            TruncationKind::ContentTruncated,
+        );
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "assistant");
         assert_eq!(msgs[0].content, "partial");
-        assert!(msgs[1].content.contains("attempt 1/2"));
+        assert!(msgs[1].content.contains("attempt 1/3"));
     }
 
     #[test]
     fn retry_messages_include_partial_content() {
-        let msgs = truncation_retry_messages(None, "half of a sentence");
+        let msgs = truncation_retry_messages(
+            None,
+            "half of a sentence",
+            1,
+            3,
+            TruncationKind::ContentTruncated,
+        );
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "assistant");
         assert_eq!(msgs[0].content, "half of a sentence");
-        assert!(msgs[1].content.contains("attempt 1/2"));
+        assert!(msgs[1].content.contains("attempt 1/3"));
+    }
+
+    #[test]
+    fn retry_messages_escalate_to_parts_on_second_attempt() {
+        let msgs = truncation_retry_messages(None, "", 2, 3, TruncationKind::ContentTruncated);
+        assert_eq!(msgs.len(), 1); // no reasoning, no partial content
+        let nudge = &msgs[0];
+        assert!(nudge.content.contains("attempt 2/3"));
+        assert!(nudge.content.contains("MUCH SHORTER"));
+        assert!(nudge.content.contains("PARTS"));
+        assert!(nudge.content.contains("filesystem_write append=true"));
+    }
+
+    #[test]
+    fn retry_messages_extreme_condensation_on_third_attempt() {
+        let msgs = truncation_retry_messages(None, "", 3, 3, TruncationKind::ContentTruncated);
+        let nudge = &msgs[0];
+        assert!(nudge.content.contains("attempt 3/3"));
+        assert!(nudge.content.contains("EXTREMELY condensed"));
+    }
+
+    #[test]
+    fn reasoning_only_retry_drops_reasoning_and_demands_no_thinking() {
+        // Reasoning-only truncation: the reasoning IS the problem — it must
+        // NOT be preserved (preserving it re-triggers the same oversized chain
+        // on the retry) and the nudge must demand a thinking-free response.
+        let msgs = truncation_retry_messages(
+            Some("huge reasoning chain"),
+            "",
+            1,
+            3,
+            TruncationKind::ReasoningOnly,
+        );
+        assert_eq!(msgs.len(), 1);
+        let nudge = &msgs[0];
+        assert!(!nudge.content.contains("Preserved Reasoning"));
+        assert!(!nudge.content.contains("huge reasoning chain"));
+        assert!(nudge.content.contains("SKIP reasoning"));
+        assert!(nudge.content.contains("attempt 1/3"));
+    }
+
+    #[test]
+    fn recoverable_truncation_never_trips_voluntary_stop_path() {
+        // The safety valve (stuck/empty thread) must NOT fire on a recoverable
+        // truncation: every truncated response is classified Retry (or GiveUp
+        // after the budget) — never Continue. Continue is reserved for
+        // genuinely non-truncated responses, the only input that reaches the
+        // reasoning-only voluntary-stop terminal below the truncation branch.
+        assert!(!matches!(
+            truncation_action(true, 0, 3, true, true),
+            TruncationAction::Continue
+        ));
+        assert_eq!(
+            truncation_action(false, 0, 3, true, true),
+            TruncationAction::Continue
+        );
     }
 }
 
