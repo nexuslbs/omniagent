@@ -125,8 +125,12 @@ pub fn parse_usage(value: &serde_json::Value) -> Option<UsageResult> {
         .or_else(|| num("cache_read_input_tokens"))
         .or_else(|| num("cache_creation_input_tokens"));
     Some(UsageResult {
-        prompt_tokens: num("prompt_tokens").or_else(|| num("input_tokens")).unwrap_or(0),
-        completion_tokens: num("completion_tokens").or_else(|| num("output_tokens")).unwrap_or(0),
+        prompt_tokens: num("prompt_tokens")
+            .or_else(|| num("input_tokens"))
+            .unwrap_or(0),
+        completion_tokens: num("completion_tokens")
+            .or_else(|| num("output_tokens"))
+            .unwrap_or(0),
         cached_tokens: cached,
         reasoning_tokens: num("reasoning_tokens"),
     })
