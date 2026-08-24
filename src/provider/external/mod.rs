@@ -95,6 +95,7 @@ pub struct UsageResult {
     /// different names depending on their API surface:
     /// - OpenAI-compatible / DeepSeek: `cached_tokens` or `prompt_cache_hit_tokens`
     /// - Anthropic: `cache_read_input_tokens` / `cache_creation_input_tokens`
+    ///
     /// The serde aliases cover deserialization; the manual `parse_usage`
     /// helper covers the JSON-lines subprocess path (which extracts fields
     /// by key name rather than via serde).
