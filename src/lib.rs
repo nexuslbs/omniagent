@@ -21,6 +21,7 @@ pub mod platform;
 pub mod plugin;
 pub mod plugins_yaml;
 pub mod profile;
+pub mod profiles_yaml;
 pub mod provider;
 pub mod resolution;
 pub mod safety;

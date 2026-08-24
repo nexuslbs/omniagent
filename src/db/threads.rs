@@ -108,11 +108,16 @@ pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> AppResult<()> {
 /// Priority order (highest first):
 /// 1. Task/Cron explicit setting (`task_plan`)
 /// 2. Channel setting (`channel_plan`)
-/// 3. None (let the plugin decide at runtime)
+/// 3. Profile setting (`profile_plan` — profiles.yml `plan`)
+/// 4. None (let the plugin decide at runtime)
 ///
 /// Returns `None` when no explicit preference is set: the plugin
 /// will decide based on its own config (max chars, keywords, etc.).
-pub fn resolve_thread_plan(channel_plan: Option<bool>, task_plan: Option<bool>) -> Option<bool> {
+pub fn resolve_thread_plan(
+    channel_plan: Option<bool>,
+    task_plan: Option<bool>,
+    profile_plan: Option<bool>,
+) -> Option<bool> {
     // 1. Task/Cron explicit setting (highest priority)
     if let Some(val) = task_plan {
         return Some(val);
@@ -121,7 +126,11 @@ pub fn resolve_thread_plan(channel_plan: Option<bool>, task_plan: Option<bool>) 
     if let Some(val) = channel_plan {
         return Some(val);
     }
-    // 3. None: plugin decides at runtime
+    // 3. Profile setting (profiles.yml `plan`)
+    if let Some(val) = profile_plan {
+        return Some(val);
+    }
+    // 4. None: plugin decides at runtime
     None
 }
 
@@ -627,7 +636,10 @@ pub async fn create_thread_with_cause(
     let channel_plan_from_column: Option<bool> =
         crate::db::channels::get_channel_plan(pool, channel_id).await?;
     let channel_plan = channel_plan_from_column;
-    let plan = resolve_thread_plan(channel_plan, p.task_plan).unwrap_or(false); // false = placeholder, plugin may override at runtime
+    let profile_plan = crate::profile::ProfileRegistry::new(data_dir)
+        .get(profile)
+        .and_then(|p| p.plan);
+    let plan = resolve_thread_plan(channel_plan, p.task_plan, profile_plan).unwrap_or(false); // false = placeholder, plugin may override at runtime
 
     // 4. Resolve provider/model/profile once, at thread creation.
     // Workflow role overrides are applied here so every thread creator shares
@@ -1064,12 +1076,14 @@ fn resolve_kanban_thread_template(
     is_running: bool,
     task_template: Option<&str>,
     channel_template: Option<&str>,
+    profile_template: Option<&str>,
 ) -> Option<String> {
     role_template.or_else(|| {
         is_running.then(|| {
             task_template
                 .filter(|t| !t.is_empty())
                 .or_else(|| channel_template.filter(|t| !t.is_empty()))
+                .or_else(|| profile_template.filter(|t| !t.is_empty()))
                 .unwrap_or("dev-development")
                 .to_string()
         })
@@ -1245,11 +1259,15 @@ pub(crate) async fn create_kanban_step_thread(
         })
         .map(|mode| matches!(mode, "on"))
         .or(resolved.plan);
+    let profile_template = crate::profile::ProfileRegistry::new(data_dir)
+        .get(&effective_profile)
+        .and_then(|p| p.template.clone());
     let resolved_template = resolve_kanban_thread_template(
         role_cfg.as_ref().and_then(|r| r.template.clone()),
         status == "running",
         resolved.template.as_deref(),
         channel.as_ref().and_then(|c| c.template.as_deref()),
+        profile_template.as_deref(),
     );
 
     // 4b. ACTION-MODE hook: when the resolved role declares `mode: action`,
@@ -1461,11 +1479,15 @@ async fn fail_kanban_thread_no_board(
             .and_then(|f| f.workflows.get(wf_id).cloned())
     });
     let role_cfg = role.and_then(|r| workflow.as_ref().and_then(|wf| wf.resolve_role(r)));
+    let profile_template = crate::profile::ProfileRegistry::new(data_dir)
+        .get(&effective_profile)
+        .and_then(|p| p.template.clone());
     let resolved_template = resolve_kanban_thread_template(
         role_cfg.as_ref().and_then(|r| r.template.clone()),
         status == "running",
         task.template.as_deref(),
         channel.as_ref().and_then(|c| c.template.as_deref()),
+        profile_template.as_deref(),
     );
     let params = ThreadCauseParams {
         provider: None,
@@ -2178,23 +2200,34 @@ mod tests {
 
     #[test]
     fn profile_provider_used_when_channel_has_none() {
-        // No channel override → fall back to the profile's provider.
-        let data_dir = std::env::temp_dir().to_str().unwrap().to_string();
+        // No channel override → fall back to the profile's provider, sourced
+        // from profiles.yml (config.json is no longer read).
+        let data_dir = std::env::temp_dir().join(format!("threads-profile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(data_dir.join("config")).unwrap();
+        std::fs::write(
+            data_dir.join("config").join("profiles.yml"),
+            "profiles:\n  omni:\n    provider: opencode-go\n    model: deepseek-v4-flash\n",
+        )
+        .unwrap();
         let ch = test_channel(None, None);
-        let identity =
-            resolve_thread_identity(&data_dir, "omni", Some(&ch), None, None, None, None)
-                .expect("identity must resolve from profile");
-        // The omni profile on disk may not exist in the temp dir; the
-        // registry falls back to the default profile (deepseek). Either way
-        // the provider must come from the profile tier, NOT be empty, and
-        // NOT come from a channel override (there is none).
-        assert!(
-            !identity.provider.is_empty(),
-            "provider must resolve from profile"
+        let identity = resolve_thread_identity(
+            data_dir.to_str().unwrap(),
+            "omni",
+            Some(&ch),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("identity must resolve from profile");
+        assert_eq!(
+            identity.provider, "opencode-go",
+            "provider must come from the profile tier (profiles.yml)"
         );
-        assert!(
-            !identity.model.is_empty(),
-            "model must resolve from profile"
+        assert_eq!(
+            identity.model, "deepseek-v4-flash",
+            "model must come from the profile tier (profiles.yml)"
         );
     }
 
@@ -2226,31 +2259,53 @@ mod tests {
                 Some("dev-tester".to_string()),
                 false,
                 Some("t"),
-                Some("c")
+                Some("c"),
+                None
             ),
             Some("dev-tester".to_string())
         );
         // Running without a role template: task -> channel -> dev-development.
         assert_eq!(
-            resolve_kanban_thread_template(None, true, Some("task-tpl"), Some("channel-tpl")),
+            resolve_kanban_thread_template(None, true, Some("task-tpl"), Some("channel-tpl"), None),
             Some("task-tpl".to_string())
         );
         assert_eq!(
-            resolve_kanban_thread_template(None, true, None, Some("channel-tpl")),
+            resolve_kanban_thread_template(None, true, None, Some("channel-tpl"), None),
             Some("channel-tpl".to_string())
         );
         assert_eq!(
-            resolve_kanban_thread_template(None, true, Some(""), Some("")),
+            resolve_kanban_thread_template(None, true, Some(""), Some(""), None),
             Some("dev-development".to_string())
         );
         assert_eq!(
-            resolve_kanban_thread_template(None, true, None, None),
+            resolve_kanban_thread_template(None, true, None, None, None),
             Some("dev-development".to_string())
+        );
+        // Profile template fills the tier between channel and dev-development.
+        assert_eq!(
+            resolve_kanban_thread_template(None, true, None, None, Some("profile-tpl")),
+            Some("profile-tpl".to_string())
+        );
+        assert_eq!(
+            resolve_kanban_thread_template(
+                None,
+                true,
+                None,
+                Some("channel-tpl"),
+                Some("profile-tpl")
+            ),
+            Some("channel-tpl".to_string())
         );
         // Step threads (testing/review) without a role template stay None —
         // same as kanban_updater's step-thread creation.
         assert_eq!(
-            resolve_kanban_thread_template(None, false, Some("task-tpl"), Some("channel-tpl")),
+            resolve_kanban_thread_template(
+                None,
+                false,
+                Some("task-tpl"),
+                Some("channel-tpl"),
+                None
+            ),
             None
         );
     }

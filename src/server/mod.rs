@@ -20,6 +20,7 @@ pub(crate) mod messages;
 pub(crate) mod models;
 pub(crate) mod overview;
 pub(crate) mod platforms;
+pub(crate) mod profiles;
 pub(crate) mod schedule;
 mod secrets;
 pub(crate) mod settings;
@@ -248,6 +249,8 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         .merge(memory::memory_router())
         // ── Platforms API routes ──
         .merge(platforms::platforms_router())
+        // ── Profiles API routes (config/profiles.yml) ──
+        .merge(profiles::profiles_router())
         // ── Kanban API routes ──
         .merge(kanban::kanban_router())
         // ── Schedule API routes (replaces dashboard schedule.ts) ──

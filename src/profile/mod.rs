@@ -1,17 +1,32 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+
+use crate::profiles_yaml::ProfileDef;
 
 /// A profile defines the model, provider, data paths, and allowed tools
 /// for a given context (channel or direct prompt).
+///
+/// Profiles are DECLARED by `{data_dir}/config/profiles.yml` — a
+/// `profiles/<name>/` directory with no matching YAML entry is ignored; a
+/// YAML entry without a directory is a valid existing profile. The legacy
+/// `profiles/<name>/config.json` stays on disk (backward compat) but is no
+/// longer read.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
     pub name: String,
-    /// Default model for this profile (e.g. "deepseek-v4-flash")
+    /// Default model for this profile (e.g. "deepseek-v4-flash"). None →
+    /// resolves to the provider's default model / global default.
     pub model: Option<String>,
-    /// Default provider for this profile (e.g. "opencode-go")
+    /// Default provider for this profile (e.g. "opencode-go"). None → falls
+    /// through to the global default_provider at resolution time.
     pub provider: Option<String>,
+    /// Profile-level plan override (bool). Tier: channel.plan → profile.plan
+    /// → None (plugin decides at runtime).
+    pub plan: Option<bool>,
+    /// Profile-level thread template. Tier: channel.template →
+    /// profile.template → "dev-development" (running steps).
+    pub template: Option<String>,
     /// Base API URL override for this profile
     pub base_url: Option<String>,
     /// API key override for this profile
@@ -20,7 +35,7 @@ pub struct Profile {
     pub max_tokens: Option<u32>,
     /// Temperature for this profile
     pub temperature: Option<f32>,
-    /// List of allowed MCP tool names for this profile
+    /// List of allowed MCP tool names for this profile (from profiles.yml)
     pub allowed_tools: Vec<String>,
     /// Whether automatic retrieval is enabled for this profile
     pub auto_retrieval_enabled: bool,
@@ -36,8 +51,11 @@ pub struct Profile {
 /// Default context budget for profiles that don't specify one.
 pub const PROMPT_BUDGET_DEFAULT: usize = 15_000;
 
-/// Schema for profiles/<name>/config.json
+/// Legacy schema for `profiles/<name>/config.json` — KEPT for backward
+/// compat only (the file stays on disk, untouched, but is NOT read for
+/// resolution anymore).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ProfileConfig {
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -45,17 +63,22 @@ pub struct ProfileConfig {
 }
 
 impl Profile {
-    /// Create a default profile with the given name.
+    /// Create a default profile with the given name (in-memory fallback used
+    /// when no profiles.yml declares the profile). Provider/model are the
+    /// historical built-ins; a declared-but-empty YAML entry overrides them
+    /// to `None` (fall through to the global default_provider).
     pub fn default(name: &str) -> Self {
         Self {
             name: name.to_string(),
             model: Some("deepseek-v4-flash".to_string()),
             provider: Some("deepseek".to_string()),
+            plan: None,
+            template: None,
             base_url: None,
             api_key: None,
             max_tokens: None,
             temperature: None,
-            allowed_tools: Vec::new(), // Tools come from profile config.json or dashboard UI
+            allowed_tools: Vec::new(), // Tools come from profiles.yml / dashboard UI
             auto_retrieval_enabled: true,
             retrieval_aggressiveness: 2,
             grounding_required: false,
@@ -63,15 +86,38 @@ impl Profile {
         }
     }
 
-    /// Load a profile config from `<data_dir>/profiles/<name>/config.json`.
-    /// Returns None if the file doesn't exist or can't be read.
+    /// Build a `Profile` from a `profiles.yml` definition. YAML-absent
+    /// fields stay `None` (so an entry that omits `provider`/`model` falls
+    /// through to the global `default_provider` — never to the in-memory
+    /// built-ins). Non-YAML runtime defaults (retrieval/grounding/budget)
+    /// take the `Profile::default` values.
+    pub fn from_def(name: &str, def: &ProfileDef) -> Self {
+        let mut p = Profile::default(name);
+        p.provider = def.provider.clone();
+        p.model = def.model.clone();
+        p.plan = def.plan;
+        p.template = def.template.clone();
+        p.base_url = def.base_url.clone();
+        p.api_key = def.api_key.clone();
+        p.max_tokens = def.max_tokens;
+        p.temperature = def.temperature;
+        p.allowed_tools = def.allowed_tools.clone().unwrap_or_default();
+        p
+    }
+
+    /// Load a profile config from `<data_dir>/profiles/<name>/config.json`
+    /// (LEGACY — no longer consulted for resolution; kept for backward
+    /// compat and tests).
+    #[allow(dead_code)]
     pub fn load_config(data_dir: &str, name: &str) -> Option<ProfileConfig> {
-        let path: PathBuf = [data_dir, "profiles", name, "config.json"].iter().collect();
+        let path: std::path::PathBuf = [data_dir, "profiles", name, "config.json"].iter().collect();
         let content = fs::read_to_string(&path).ok()?;
         serde_json::from_str(&content).ok()
     }
 
-    /// Apply a ProfileConfig on top of the default: fields from config override defaults.
+    /// Apply a legacy ProfileConfig on top of the default (LEGACY — only
+    /// used by tests; the YAML store is the resolution source now).
+    #[allow(dead_code)]
     pub fn with_config(mut self, config: ProfileConfig) -> Self {
         if let Some(p) = config.provider {
             self.provider = Some(p);
@@ -111,6 +157,11 @@ pub fn default_profile_name() -> String {
 
 /// The profile configuration loaded from the data directory.
 /// Maps profile names to their configurations.
+///
+/// A profile is DECLARED iff it has an entry in `config/profiles.yml`. The
+/// filesystem `profiles/<name>/` directories are NOT scanned as a source of
+/// truth: a dir without a YAML entry is ignored; a YAML entry without a dir
+/// is a valid existing profile.
 #[derive(Debug, Clone)]
 pub struct ProfileRegistry {
     pub profiles: HashMap<String, Profile>,
@@ -120,7 +171,7 @@ pub struct ProfileRegistry {
 }
 
 impl ProfileRegistry {
-    /// Create a new registry, scanning the data directory for profiles.
+    /// Create a new registry, sourcing profiles from `config/profiles.yml`.
     pub fn new(data_dir: &str) -> Self {
         let default = default_profile_name();
         let mut registry = Self {
@@ -128,69 +179,54 @@ impl ProfileRegistry {
             default_profile: default.clone(),
             data_dir: data_dir.to_string(),
         };
-        registry.scan_filesystem();
+        registry.scan_yaml();
         registry.ensure_default();
         registry
     }
 
-    /// Scan the filesystem for profile directories and load config.json.
-    fn scan_filesystem(&mut self) {
-        let profiles_dir: PathBuf = [&self.data_dir, "profiles"].iter().collect();
-        if !profiles_dir.exists() {
-            return;
-        }
-        let entries = match fs::read_dir(&profiles_dir) {
-            Ok(e) => e,
-            Err(_) => return,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
+    /// Scan `{data_dir}/config/profiles.yml` for declared profiles. A
+    /// malformed file is logged and treated as empty (background readers
+    /// must not crash; API callers see the error through the yml loaders).
+    fn scan_yaml(&mut self) {
+        let file = match crate::profiles_yaml::load_profiles_from(&self.data_dir) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("[profile] profiles.yml load failed, treating as empty: {e}");
+                return;
             }
-            let name = match path.file_name().and_then(|s| s.to_str()) {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
-            let profile = if let Some(config) = Profile::load_config(&self.data_dir, &name) {
-                Profile::default(&name).with_config(config)
-            } else {
-                Profile::default(&name)
-            };
-            self.profiles.insert(name, profile);
+        };
+        for (name, def) in file.profiles {
+            self.profiles
+                .insert(name.clone(), Profile::from_def(&name, &def));
         }
     }
 
-    /// Ensure the default profile exists.
+    /// Ensure the default profile is DECLARED.
     ///
-    /// Inserts the in-memory default Profile when missing, and materializes
-    /// `{data_dir}/profiles/{default}/config.json` on disk when it does NOT
-    /// exist (the repo ships no profiles dir — the runtime data dir owns it).
-    /// An existing config.json is never overwritten.
+    /// When the default profile has no entry in `config/profiles.yml`, the
+    /// in-memory default is inserted AND the entry is upserted into
+    /// `config/profiles.yml` (atomic write under the save lock) so the
+    /// default profile is declared on disk — this is the startup
+    /// auto-create. It NEVER creates or touches anything under
+    /// `profiles/` — no `create_dir_all`, no `config.json` write. An
+    /// existing legacy `profiles/<default>/config.json` is left alone.
     fn ensure_default(&mut self) {
-        if !self.profiles.contains_key(&self.default_profile) {
-            self.profiles.insert(
-                self.default_profile.clone(),
-                Profile::default(&self.default_profile),
+        if self.profiles.contains_key(&self.default_profile) {
+            return;
+        }
+        self.profiles.insert(
+            self.default_profile.clone(),
+            Profile::from_def(&self.default_profile, &ProfileDef::default()),
+        );
+        if let Err(e) =
+            crate::profiles_yaml::update_profile_in(&self.data_dir, &self.default_profile, |_| {
+                Ok(ProfileDef::default())
+            })
+        {
+            tracing::warn!(
+                "profile: failed to declare default profile '{}' in profiles.yml: {e}",
+                self.default_profile
             );
-        }
-        let dir: PathBuf = [&self.data_dir, "profiles", &self.default_profile]
-            .iter()
-            .collect();
-        let config_path = dir.join("config.json");
-        if config_path.exists() {
-            return;
-        }
-        if let Err(e) = fs::create_dir_all(&dir) {
-            tracing::warn!("profile: failed to create {}: {e}", dir.display());
-            return;
-        }
-        match fs::write(&config_path, r#"{"allowed_tools": []}"#) {
-            Ok(()) => tracing::info!(
-                "profile: created default profile config {}",
-                config_path.display()
-            ),
-            Err(e) => tracing::warn!("profile: failed to write {}: {e}", config_path.display()),
         }
     }
 
@@ -209,7 +245,7 @@ impl ProfileRegistry {
             .expect("Default profile must exist")
     }
 
-    /// List all profile names (filesystem directories).
+    /// List all declared profile names (profiles.yml entries), sorted.
     pub fn list_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.profiles.keys().cloned().collect();
         names.sort();
@@ -221,13 +257,27 @@ impl ProfileRegistry {
 mod tests {
     use super::*;
 
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "profile-mod-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t")
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        dir
+    }
+
     #[test]
     fn test_default_profile_starts_empty() {
         let p = Profile::default("test");
         assert!(
             p.allowed_tools.is_empty(),
-            "Default profile should have no tools — they come from profile config.json"
+            "Default profile should have no tools — they come from profiles.yml"
         );
+        assert_eq!(p.plan, None);
+        assert_eq!(p.template, None);
     }
 
     #[test]
@@ -243,34 +293,147 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_empty_data_dir() {
-        let registry = ProfileRegistry::new("/tmp/nonexistent");
-        let default_name = crate::profile::default_profile_name();
-        assert!(registry.get(&default_name).is_some());
-        assert!(registry.list_names().contains(&default_name));
+    fn test_from_def_absent_fields_stay_none() {
+        // A YAML entry that omits provider/model must NOT inherit the
+        // in-memory built-ins (falls through to global default_provider).
+        let p = Profile::from_def("omni", &ProfileDef::default());
+        assert_eq!(p.provider, None, "absent provider stays None");
+        assert_eq!(p.model, None, "absent model stays None");
+        assert_eq!(p.plan, None);
+        assert_eq!(p.template, None);
+        assert!(p.allowed_tools.is_empty());
     }
 
     #[test]
-    fn test_ensure_default_materializes_config() {
-        let dir =
-            std::env::temp_dir().join(format!("omniagent-profile-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        // Missing profile dir: registry auto-creates {data}/profiles/{default}/config.json
+    fn test_from_def_applies_fields() {
+        let p = Profile::from_def(
+            "research",
+            &ProfileDef {
+                provider: Some("opencode-go".to_string()),
+                model: Some("deepseek-v4-flash".to_string()),
+                plan: Some(true),
+                template: Some("researcher".to_string()),
+                allowed_tools: Some(vec!["search_messages".to_string()]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(p.provider.as_deref(), Some("opencode-go"));
+        assert_eq!(p.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(p.plan, Some(true));
+        assert_eq!(p.template.as_deref(), Some("researcher"));
+        assert_eq!(p.allowed_tools, vec!["search_messages".to_string()]);
+    }
+
+    #[test]
+    fn test_registry_empty_data_dir_declares_default_without_profiles_dir() {
+        // Startup auto-create: no profiles.yml, no profiles/ dir → the
+        // default profile is declared IN profiles.yml and NOTHING is created
+        // under profiles/ (no dir, no config.json).
+        let dir = std::env::temp_dir().join(format!("profile-reg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir); // NO config/ dir at all
         let registry = ProfileRegistry::new(dir.to_str().unwrap());
         let default_name = registry.default_profile.clone();
-        let config_path = dir.join("profiles").join(&default_name).join("config.json");
-        assert!(config_path.exists(), "config.json should be auto-created");
-        assert_eq!(
-            fs::read_to_string(&config_path).unwrap(),
-            r#"{"allowed_tools": []}"#
-        );
-        // Existing config.json is never overwritten
-        fs::write(&config_path, r#"{"allowed_tools": ["filesystem_read"]}"#).unwrap();
-        let _registry2 = ProfileRegistry::new(dir.to_str().unwrap());
-        assert_eq!(
-            fs::read_to_string(&config_path).unwrap(),
-            r#"{"allowed_tools": ["filesystem_read"]}"#
+        assert!(registry.get(&default_name).is_some());
+        assert!(registry.list_names().contains(&default_name));
+        // profiles.yml now declares the default profile...
+        let yml_path = dir.join("config").join("profiles.yml");
+        assert!(yml_path.exists(), "profiles.yml should be auto-created");
+        let file = crate::profiles_yaml::load_profiles_from(dir.to_str().unwrap()).unwrap();
+        assert!(file.profiles.contains_key(&default_name));
+        // ...but NOTHING under profiles/ exists.
+        assert!(
+            !dir.join("profiles").exists(),
+            "startup auto-create must NOT touch the profiles/ directory"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_yaml_entry_without_dir_is_existing_profile() {
+        // A profiles.yml entry with NO profiles/<name>/ directory → the
+        // profile exists and resolves (acceptance criterion).
+        let dir = temp_dir("yaml-only");
+        std::fs::write(
+            dir.join("config").join("profiles.yml"),
+            "profiles:\n  omni:\n    provider: opencode-go\n    model: deepseek-v4-flash\n    plan: true\n    template: dev-development\n    allowed_tools:\n      - filesystem_read\n",
+        )
+        .unwrap();
+        let registry = ProfileRegistry::new(dir.to_str().unwrap());
+        let p = registry.get("omni").expect("yaml-only profile resolves");
+        assert_eq!(p.provider.as_deref(), Some("opencode-go"));
+        assert_eq!(p.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(p.plan, Some(true));
+        assert_eq!(p.template.as_deref(), Some("dev-development"));
+        assert_eq!(p.allowed_tools, vec!["filesystem_read".to_string()]);
+        assert!(
+            !dir.join("profiles").exists(),
+            "no directory needed for a yaml-declared profile"
+        );
+    }
+
+    #[test]
+    fn test_dir_without_yaml_entry_is_ignored() {
+        // A profiles/<name>/ directory with NO yml entry → ignored: not
+        // listed, not resolvable (falls back to the default profile).
+        let dir = temp_dir("dir-only");
+        std::fs::create_dir_all(dir.join("profiles").join("ghost")).unwrap();
+        std::fs::write(
+            dir.join("profiles").join("ghost").join("config.json"),
+            r#"{"provider": "openai", "model": "gpt-4"}"#,
+        )
+        .unwrap();
+        let registry = ProfileRegistry::new(dir.to_str().unwrap());
+        assert!(
+            !registry.list_names().contains(&"ghost".to_string()),
+            "dir without yml entry must be ignored"
+        );
+        assert_eq!(
+            registry.get("ghost").unwrap().name,
+            registry.default_profile
+        );
+        // The legacy config.json stays on disk untouched.
+        assert!(
+            dir.join("profiles")
+                .join("ghost")
+                .join("config.json")
+                .exists(),
+            "legacy config.json files are NOT removed"
+        );
+    }
+
+    #[test]
+    fn test_existing_config_json_left_untouched() {
+        // Backward compat: an existing profiles/<default>/config.json is
+        // neither read for resolution nor modified.
+        let dir = temp_dir("legacy");
+        std::fs::create_dir_all(dir.join("profiles").join("omni")).unwrap();
+        let cfg =
+            r#"{"provider": "openai", "model": "gpt-4", "allowed_tools": ["filesystem_read"]}"#;
+        std::fs::write(dir.join("profiles").join("omni").join("config.json"), cfg).unwrap();
+        // profiles.yml declares omni WITHOUT provider/model → config.json is
+        // NOT consulted (provider stays None, falls through to global).
+        std::fs::write(
+            dir.join("config").join("profiles.yml"),
+            "profiles:\n  omni:\n    allowed_tools: []\n",
+        )
+        .unwrap();
+        let registry = ProfileRegistry::new(dir.to_str().unwrap());
+        let p = registry.get("omni").expect("resolves from yml");
+        assert_eq!(p.provider, None, "config.json must NOT be read");
+        assert_eq!(p.model, None, "config.json must NOT be read");
+        assert_eq!(
+            fs::read_to_string(dir.join("profiles").join("omni").join("config.json")).unwrap(),
+            cfg,
+            "config.json content must be unchanged"
+        );
+    }
+
+    #[test]
+    fn test_registry_get_falls_back_to_default() {
+        let dir = temp_dir("fallback");
+        let registry = ProfileRegistry::new(dir.to_str().unwrap());
+        let default_name = registry.default_profile.clone();
+        assert!(registry.get("no-such-profile").is_some());
+        assert_eq!(registry.get("no-such-profile").unwrap().name, default_name);
     }
 }

@@ -160,6 +160,7 @@ async fn run_server() -> AppResult<()> {
     // Channels live in {data_dir}/config/channels.yml (no DB table). Set the
     // global data dir so the yml store is reachable from every channel query.
     omniagent::channels_yaml::set_data_dir(&data_dir);
+    omniagent::profiles_yaml::set_data_dir(&data_dir);
 
     let default_profile = profile::default_profile_name();
     tracing::info!("Default profile: {}", default_profile);

@@ -247,6 +247,11 @@ pub struct ResolvedChannelIdentity {
     /// Effective model (yml `model` → profile model when the channel does
     /// not pin a provider → the provider's default model).
     pub model: Option<String>,
+    /// Effective plan (yml `plan` → profile `plan`). `None` = the plugin
+    /// decides at runtime.
+    pub plan: Option<bool>,
+    /// Effective template (yml `template` → profile `template`).
+    pub template: Option<String>,
 }
 
 /// Resolve a channel definition's identity fields with fallback, AT LOAD
@@ -315,10 +320,29 @@ pub fn resolve_channel_identity(data_dir: &str, def: &ChannelDef) -> ResolvedCha
                 .and_then(crate::llm::resolve_default_model)
         });
 
+    let plan = def
+        .plan
+        .or_else(|| profile_data.as_ref().and_then(|p| p.plan));
+
+    let template = def
+        .template
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            profile_data
+                .as_ref()
+                .and_then(|p| p.template.as_deref())
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string)
+        });
+
     ResolvedChannelIdentity {
         profile,
         provider,
         model,
+        plan,
+        template,
     }
 }
 
