@@ -5,7 +5,7 @@ Communicates via JSON-lines over stdin/stdout. No api_mode dependency on omniage
 
 Protocol:
   1. Agent → Plugin: {"id": 1, "method": "initialize", "params": {}}
-     Plugin → Agent: {"id": 1, "result": {"name": "noop-full", "models": ["test-model-1", "test-model-2"]}}
+     Plugin → Agent: {"id": 1, "result": {"name": "noop-full", "models": ["test-model-1", "test-model-2", "test-truncate"]}}
   2. Agent → Plugin: {"id": 2, "method": "complete", "params": {"model": "...", "messages": [...]}}
      Plugin → Agent: {"id": 2, "result": {"content": "...", "usage": {...}}}
 """
@@ -20,7 +20,7 @@ def handle_initialize(req_id):
         "id": req_id,
         "result": {
             "name": "noop-full",
-            "models": ["test-model-1", "test-model-2"],
+            "models": ["test-model-1", "test-model-2", "test-truncate"],
         },
     }
 
@@ -28,6 +28,31 @@ def handle_initialize(req_id):
 def handle_complete(req_id, params):
     model = params.get("model", "test-model-1")
     messages = params.get("messages", [])
+
+    if model == "test-truncate":
+        # Regression fixture for the workflow-routing truncation fix (Part 2):
+        # simulate a response cut off by the output budget — prose with NO tool
+        # call and finish_reason="length". A truncated response must NOT be
+        # treated as a completed step / final answer (live incident
+        # task_18cea6054b6e6e73/thread 135: reviewer cut mid-sentence → task
+        # wrongly advanced to done).
+        return {
+            "id": req_id,
+            "result": {
+                "content": (
+                    "This response was truncated by the output token limit. "
+                    "The agent intended to emit a routing tool call but was cut "
+                    "off mid-emission (finish_reason=length)."
+                ),
+                "reasoning": None,
+                "tool_calls": [],
+                "finish_reason": "length",
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                },
+            },
+        }
 
     # Extract last user message to quote
     user_msg = ""
@@ -64,7 +89,7 @@ def handle_list_models(req_id):
     return {
         "id": req_id,
         "result": {
-            "models": ["test-model-1", "test-model-2"],
+            "models": ["test-model-1", "test-model-2", "test-truncate"],
         },
     }
 
