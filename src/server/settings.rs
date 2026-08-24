@@ -449,14 +449,9 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             SettingMeta {
                 field_type: "select".into(),
                 description: "Default LLM provider backend for channels without an explicit provider".into(),
-                options: Some(vec![
-                    SettingOption { id: "opencode-go".into(), name: "opencode-go".into() },
-                    SettingOption { id: "openai".into(), name: "openai".into() },
-                    SettingOption { id: "anthropic".into(), name: "anthropic".into() },
-                    SettingOption { id: "deepseek".into(), name: "deepseek".into() },
-                ]),
+                options: None, // options come from dynamically loaded provider plugins (enrich_provider_options)
                 readonly: false,
-                default: Some("opencode-go".into()),
+                default: None, // no vendor-name default in core: operator configures settings.yml
             },
         ),
         // API keys are now managed per-provider via the Providers page,
@@ -695,11 +690,12 @@ pub(crate) async fn resolve_setting_values(map: &mut HashMap<String, String>, po
 }
 
 /// Enrich default_provider setting options with dynamically loaded provider plugins.
-/// Reads enabled providers from providers.yml.
+/// Reads enabled providers from providers.yml. There is NO static vendor
+/// list in core: with no plugins loaded the options stay empty (None).
 fn enrich_provider_options(meta: &mut SettingMeta, data_dir: &str) {
     let providers = match plugins_yaml::get_enabled_providers(data_dir) {
         Ok(rows) if !rows.is_empty() => rows,
-        _ => return, // Fall back to hardcoded options
+        _ => return, // No plugins loaded: leave options empty (operator configures settings.yml)
     };
 
     meta.options = Some(

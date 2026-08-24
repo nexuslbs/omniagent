@@ -87,11 +87,11 @@ pub struct ProfilesFile {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProfileDef {
-    /// Default provider for this profile (e.g. "opencode-go"). Omitted →
-    /// falls through to the global `default_provider` at resolution time.
+    /// Default provider for this profile. Omitted → falls through to the
+    /// global `default_provider` at resolution time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// Default model for this profile (e.g. "deepseek-v4-flash").
+    /// Default model for this profile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Profile-level plan override (bool). Tier: channel.plan → profile.plan

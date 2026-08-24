@@ -15,11 +15,11 @@ use crate::profiles_yaml::ProfileDef;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
     pub name: String,
-    /// Default model for this profile (e.g. "deepseek-v4-flash"). None →
-    /// resolves to the provider's default model / global default.
+    /// Default model for this profile. None → resolves to the provider's
+    /// default model / global default.
     pub model: Option<String>,
-    /// Default provider for this profile (e.g. "opencode-go"). None → falls
-    /// through to the global default_provider at resolution time.
+    /// Default provider for this profile. None → falls through to the global
+    /// default_provider at resolution time.
     pub provider: Option<String>,
     /// Profile-level plan override (bool). Tier: channel.plan → profile.plan
     /// → None (plugin decides at runtime).
@@ -64,14 +64,15 @@ pub struct ProfileConfig {
 
 impl Profile {
     /// Create a default profile with the given name (in-memory fallback used
-    /// when no profiles.yml declares the profile). Provider/model are the
-    /// historical built-ins; a declared-but-empty YAML entry overrides them
-    /// to `None` (fall through to the global default_provider).
+    /// when no profiles.yml declares the profile). Provider/model are
+    /// neutral (`None`): resolution falls through to the global
+    /// `default_provider` / the provider's default model — never to a
+    /// hardcoded vendor name.
     pub fn default(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            model: Some("deepseek-v4-flash".to_string()),
-            provider: Some("deepseek".to_string()),
+            model: None,
+            provider: None,
             plan: None,
             template: None,
             base_url: None,
@@ -278,6 +279,8 @@ mod tests {
         );
         assert_eq!(p.plan, None);
         assert_eq!(p.template, None);
+        assert_eq!(p.provider, None, "no vendor-name provider default in core");
+        assert_eq!(p.model, None, "no vendor-name model default in core");
     }
 
     #[test]

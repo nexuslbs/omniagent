@@ -80,6 +80,11 @@ pub struct CompleteResult {
     pub tool_calls: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<UsageResult>,
+    /// Provider finish reason (e.g. "stop", "length", "tool_calls").
+    /// `length` signals the response was truncated by the output budget —
+    /// the model may not have finished emitting its action or answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

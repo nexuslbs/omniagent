@@ -251,11 +251,16 @@ impl ExternalProviderClient {
                             .and_then(|v| v.as_u64())
                             .map(|v| v as u32),
                     });
+                let finish_reason = result
+                    .get("finish_reason")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 Ok(CompleteResult {
                     content,
                     reasoning,
                     tool_calls,
                     usage,
+                    finish_reason,
                 })
             }
             ProviderResponse::Error { id: _, error } => Err(Error::Message(format!(

@@ -493,7 +493,7 @@ impl LLMConfig {
 /// Per-provider concurrency throttler using semaphores.
 ///
 /// Limits how many concurrent LLM API requests can be in-flight for a
-/// given provider name (e.g. "deepseek", "anthropic", "openai").
+/// given provider name.
 ///
 /// Pre-populated from [`PROVIDER_METADATA`] at construction time so that
 /// every known provider gets its own semaphore. Unknown providers fall
@@ -979,6 +979,17 @@ impl LLMClient {
     pub async fn completion(&self, request: CompletionRequest) -> AppResult<CompletionResponse> {
         let start = std::time::Instant::now();
 
+        // Use-site validation: an empty provider is a valid *resolution*
+        // terminal state (profile.provider → settings default_provider →
+        // None), but it cannot be *consumed*. Fail loudly instead of
+        // silently substituting a hardcoded vendor name.
+        if self.config.provider.0.is_empty() {
+            return Err(Error::Message(
+                "no LLM provider configured: set settings.yml default_provider or a profile/channel provider"
+                    .into(),
+            ));
+        }
+
         // Check if this provider is an external subprocess provider
         let provider_name = &self.config.provider.0;
         // Try external completion: clone Arc first, drop registry guard, then call complete
@@ -1031,7 +1042,7 @@ impl LLMClient {
                                     reasoning_tokens: u.reasoning_tokens,
                                 }),
                                 duration_ms: start.elapsed().as_millis() as u64,
-                                finish_reason: None,
+                                finish_reason: result.finish_reason.clone(),
                             })
                         }
                         Err(e) => {
@@ -1394,6 +1405,34 @@ impl LLMClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_completion_rejects_empty_provider() {
+        // An empty provider is a valid *resolution* terminal state, but it
+        // must NOT be consumable: completion() fails loudly instead of
+        // silently substituting a hardcoded vendor name.
+        let config = LLMConfig {
+            provider: ProviderId::new(""),
+            api_mode: ApiMode::ChatCompletions,
+            api_key: String::new(),
+            base_url: String::new(),
+            model: String::new(),
+            max_tokens: 8192,
+            temperature: 0.7,
+            supports_reasoning: false,
+        };
+        let client = LLMClient::new(config);
+        let request = CompletionRequest {
+            messages: vec![],
+            max_tokens: Some(100),
+            temperature: 0.0,
+            stream: false,
+            tools: None,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt.block_on(client.completion(request)).unwrap_err();
+        assert!(err.to_string().contains("no LLM provider configured"));
+    }
 
     // ── resolve_llm_api_key ─────────────────────────────────────────────────
 

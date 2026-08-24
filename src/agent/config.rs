@@ -244,7 +244,7 @@ impl AgentConfig {
 
         Ok(Self {
             llm_api_key: String::new(),
-            default_provider: get("default_provider", "openai"),
+            default_provider: get("default_provider", ""),
             max_tokens: opt_u32(&get("max_tokens", "")),
             max_tokens_on_truncation: opt_u32(&get("max_tokens_on_truncation", "")),
             temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
@@ -359,7 +359,7 @@ impl AgentConfig {
 
         Ok(Self {
             llm_api_key: String::new(),
-            default_provider: get("default_provider", "openai"),
+            default_provider: get("default_provider", ""),
             max_tokens: opt_u32(&get("max_tokens", "")),
             max_tokens_on_truncation: opt_u32(&get("max_tokens_on_truncation", "")),
             temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
@@ -450,7 +450,7 @@ mod tests {
         // Test that AgentConfig can be constructed with typical defaults.
         let cfg = AgentConfig {
             llm_api_key: "".to_string(),
-            default_provider: "openai".to_string(),
+            default_provider: String::new(),
             max_tokens: Some(32768),
             max_tokens_on_truncation: Some(16384),
             temperature: 0.7,
@@ -496,7 +496,7 @@ mod tests {
             wiki_vectorization_api_model: None,
             wiki_vectorization_interval_secs: 3600,
         };
-        assert_eq!(cfg.default_provider, "openai");
+        assert_eq!(cfg.default_provider, "");
         assert_eq!(cfg.max_tokens, Some(32768));
         assert_eq!(cfg.max_tokens_on_truncation, Some(16384));
         assert_eq!(cfg.max_compaction_retries, 2);
@@ -597,7 +597,7 @@ mod tests {
                 .unwrap_or_else(|| default.to_string())
         };
 
-        assert_eq!(get("default_provider", "openai"), "custom");
+        assert_eq!(get("default_provider", ""), "custom");
         assert_eq!(get("nonexistent", "fallback"), "fallback");
         assert_eq!(get("max_tokens", "32768"), "32768");
     }

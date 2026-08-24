@@ -172,6 +172,329 @@ mod plan_extract_tests {
     }
 }
 
+// ── Phase 1.5: Self-restart guard (P2 #6) ─────────────────────────────────
+// An agent must never tear down the container it runs inside: a
+// `docker compose restart/down/stop/rm/kill` against its OWN compose
+// project kills its own thread (thread 488 self-kill). The guard resolves
+// the docker-authoritative compose PROJECT NAME of both sides — the agent's
+// own container (`com.docker.compose.project` label via `docker inspect`)
+// and the target project (`docker compose ... config --format json` →
+// `.name`, the exact resolution compose itself performs) — and blocks a
+// destructive verb ONLY when the two names are EQUAL. `up` is NEVER blocked
+// for any project, and other projects (e.g. the omnidev dev stack) are
+// always manageable. Resolution is DELEGATED to docker/compose; compose's
+// precedence chain (name:, COMPOSE_PROJECT_NAME, --project-name, multiple
+// -f files, project-directory) is never reimplemented here.
+
+/// Destructive compose verbs that would tear down a running project.
+/// `up` is deliberately absent: bringing containers up is never destructive.
+const DESTRUCTIVE_COMPOSE_VERBS: &[&str] = &["restart", "down", "stop", "rm", "kill"];
+
+/// Pure decision: block iff the verb is destructive AND both project names
+/// resolved AND they are equal. `up`/any other verb → never blocked; an
+/// unresolvable name on either side → never blocked (cannot prove self-kill).
+fn guard_blocks(verb: &str, self_project: Option<&str>, target_project: Option<&str>) -> bool {
+    if !DESTRUCTIVE_COMPOSE_VERBS.contains(&verb) {
+        return false;
+    }
+    match (self_project, target_project) {
+        (Some(s), Some(t)) => s == t,
+        _ => false,
+    }
+}
+
+/// Extract the compose verb (first whitespace-separated token of `command`).
+fn compose_verb(args: &serde_json::Value) -> Option<&str> {
+    let cmd = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
+    let verb = cmd.split_whitespace().next().unwrap_or("");
+    if verb.is_empty() {
+        None
+    } else {
+        Some(verb)
+    }
+}
+
+/// Build the delegated `docker compose ... config --format json` invocation
+/// that resolves the TARGET project's effective name exactly as compose does.
+fn build_target_config_cmd(
+    project_dir: &str,
+    compose_files: &[String],
+    env_file: Option<&str>,
+) -> Vec<String> {
+    let mut cmd = vec![
+        "compose".to_string(),
+        "--project-directory".to_string(),
+        project_dir.to_string(),
+    ];
+    for f in compose_files {
+        cmd.push("-f".to_string());
+        cmd.push(f.clone());
+    }
+    if let Some(env) = env_file {
+        cmd.push("--env-file".to_string());
+        cmd.push(env.to_string());
+    }
+    cmd.push("config".to_string());
+    cmd.push("--format".to_string());
+    cmd.push("json".to_string());
+    cmd
+}
+
+/// Build the delegated `docker inspect` invocation that reads the agent's OWN
+/// compose project name from the `com.docker.compose.project` label.
+fn build_self_inspect_cmd(container_id: &str) -> Vec<String> {
+    vec![
+        "inspect".to_string(),
+        container_id.to_string(),
+        "--format".to_string(),
+        "{{index .Config.Labels \"com.docker.compose.project\"}}".to_string(),
+    ]
+}
+
+/// Resolve the agent's own compose project name (authoritative label).
+async fn resolve_self_project() -> Option<String> {
+    // In a container $HOSTNAME is the container ID.
+    let cid = std::env::var("HOSTNAME").ok()?;
+    let out = tokio::process::Command::new("docker")
+        .args(build_self_inspect_cmd(&cid))
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if name.is_empty() || name.contains("Error") {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// Resolve the TARGET project's effective name by delegating to compose
+/// (`config --format json` → `.name`). Fallback: a RUNNING project's
+/// containers carry the `com.docker.compose.project` label — read it via
+/// `docker ps` filtered by the project's working_dir label.
+async fn resolve_target_project(
+    project_dir: &str,
+    compose_files: &[String],
+    env_file: Option<&str>,
+) -> Option<String> {
+    let out = tokio::process::Command::new("docker")
+        .args(build_target_config_cmd(
+            project_dir,
+            compose_files,
+            env_file,
+        ))
+        .output()
+        .await
+        .ok()?;
+    if out.status.success() {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+            if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+    }
+    // Fallback: match the running project by its working_dir label.
+    let filter = format!(
+        "label=com.docker.compose.project.working_dir={}",
+        project_dir
+    );
+    let out = tokio::process::Command::new("docker")
+        .args(vec![
+            "ps".to_string(),
+            "-a".to_string(),
+            "--filter".to_string(),
+            filter,
+            "--format".to_string(),
+            "{{json .Labels}}".to_string(),
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if let Ok(labels) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(name) = labels
+                .get("com.docker.compose.project")
+                .and_then(|n| n.as_str())
+            {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Evaluate the Phase 1.5 guard for one docker_compose tool call. Returns the
+/// block message when the call would tear down the agent's own project.
+async fn self_restart_guard_block(args_json: &str) -> Option<String> {
+    let args: serde_json::Value = serde_json::from_str(args_json).ok()?;
+    let verb = compose_verb(&args)?;
+    // `up` (and any non-destructive verb) is NEVER blocked — skip the
+    // resolution overhead entirely.
+    if !DESTRUCTIVE_COMPOSE_VERBS.contains(&verb) {
+        return None;
+    }
+    let project_dir = args
+        .get("project_dir")
+        .and_then(|p| p.as_str())
+        .unwrap_or("");
+    if project_dir.is_empty() {
+        return None;
+    }
+    let compose_files: Vec<String> = match args.get("compose_file") {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let env_file = args.get("env_file").and_then(|e| e.as_str());
+    let self_project = resolve_self_project().await;
+    let target_project = resolve_target_project(project_dir, &compose_files, env_file).await;
+    if guard_blocks(verb, self_project.as_deref(), target_project.as_deref()) {
+        Some(format!(
+            "Blocked: docker_compose '{verb}' targets compose project '{target}' — the project this agent runs inside (self project '{self_name}'). \
+             Tearing down your own container kills this thread. Only Hermes may restart the stack. \
+             You may manage OTHER compose projects (e.g. the omnidev dev stack) freely; `up` is never blocked.",
+            target = target_project.as_deref().unwrap_or("?"),
+            self_name = self_project.as_deref().unwrap_or("?"),
+        ))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod self_restart_guard_tests {
+    use super::*;
+
+    #[test]
+    fn blocks_when_self_equals_target() {
+        assert!(guard_blocks(
+            "restart",
+            Some("omnistable"),
+            Some("omnistable")
+        ));
+        assert!(guard_blocks("down", Some("omnidev"), Some("omnidev")));
+        assert!(guard_blocks("stop", Some("omnistable"), Some("omnistable")));
+        assert!(guard_blocks("rm", Some("omnistable"), Some("omnistable")));
+        assert!(guard_blocks("kill", Some("omnistable"), Some("omnistable")));
+    }
+
+    #[test]
+    fn allows_different_projects() {
+        // An omnistable agent MUST be able to manage the omnidev dev stack.
+        assert!(!guard_blocks(
+            "restart",
+            Some("omnistable"),
+            Some("omnidev")
+        ));
+        assert!(!guard_blocks("down", Some("omnidev"), Some("omnistable")));
+        assert!(!guard_blocks("stop", Some("omnistable"), Some("omnidev")));
+    }
+
+    #[test]
+    fn up_is_never_blocked() {
+        assert!(!guard_blocks("up", Some("omnistable"), Some("omnistable")));
+        assert!(!guard_blocks("up", Some("omnistable"), Some("omnidev")));
+        assert!(!guard_blocks("up", None, None));
+    }
+
+    #[test]
+    fn unresolvable_names_are_never_blocked() {
+        // Cannot prove self-kill → allow (the compose call itself will fail
+        // if the project does not exist).
+        assert!(!guard_blocks("restart", None, Some("omnistable")));
+        assert!(!guard_blocks("restart", Some("omnistable"), None));
+        assert!(!guard_blocks("restart", None, None));
+    }
+
+    #[test]
+    fn non_destructive_verbs_never_block() {
+        assert!(!guard_blocks("ps", Some("omnistable"), Some("omnistable")));
+        assert!(!guard_blocks(
+            "logs",
+            Some("omnistable"),
+            Some("omnistable")
+        ));
+        assert!(!guard_blocks(
+            "exec",
+            Some("omnistable"),
+            Some("omnistable")
+        ));
+    }
+
+    #[test]
+    fn resolution_is_delegated_to_compose_config() {
+        // The guard must NOT reimplement compose's precedence chain: the
+        // target name comes from `docker compose ... config --format json`
+        // and the self name from the docker-inspect label.
+        let cmd = build_target_config_cmd(
+            "/opt/workspace/omni-stack",
+            &[
+                "docker-compose.yml".to_string(),
+                "docker-compose.dev.yml".to_string(),
+            ],
+            Some("/opt/workspace/omni-deployer/omnidev.env"),
+        );
+        assert_eq!(
+            cmd,
+            vec![
+                "compose",
+                "--project-directory",
+                "/opt/workspace/omni-stack",
+                "-f",
+                "docker-compose.yml",
+                "-f",
+                "docker-compose.dev.yml",
+                "--env-file",
+                "/opt/workspace/omni-deployer/omnidev.env",
+                "config",
+                "--format",
+                "json",
+            ]
+        );
+        let inspect = build_self_inspect_cmd("abc123");
+        assert_eq!(inspect[0], "inspect");
+        assert_eq!(inspect[1], "abc123");
+        assert!(inspect[3].contains("com.docker.compose.project"));
+    }
+
+    #[test]
+    fn effective_name_differs_from_project_dir_basename() {
+        // `docker compose config` resolves the REAL project name (which may
+        // differ from the project-dir basename due to `name:`,
+        // COMPOSE_PROJECT_NAME, --project-name, or -f overrides). Delegation
+        // means the guard compares docker-authoritative names, never paths.
+        let cmd = build_target_config_cmd("/opt/workspace/omni-stack", &[], None);
+        assert!(cmd.contains(&"config".to_string()));
+        assert!(cmd.contains(&"--format".to_string()));
+        assert!(cmd.contains(&"json".to_string()));
+        // The only path that appears is the delegated --project-directory
+        // argument; there is no path-derived project-name logic.
+        assert_eq!(cmd.iter().filter(|c| c.contains("omni-stack")).count(), 1);
+    }
+
+    #[test]
+    fn verb_parsed_from_command_arg() {
+        let args = serde_json::json!({"command": "restart", "project_dir": "/p"});
+        assert_eq!(compose_verb(&args), Some("restart"));
+        let args = serde_json::json!({"command": "up -d", "project_dir": "/p"});
+        assert_eq!(compose_verb(&args), Some("up"));
+        let args = serde_json::json!({});
+        assert_eq!(compose_verb(&args), None);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_main_loop(
     cfg: &AgentContext,
@@ -1613,39 +1936,19 @@ Previous plan:\n{}",
             let is_multi_tool = tool_count > 1;
 
             // --- Phase 1.5: Self-restart guard (P2 #6) ---
-            // An agent must never restart the container it runs inside: a
-            // `docker compose restart/down/stop/rm/up` against its own stack
-            // kills its own thread (thread 488 self-kill). Block destructive
-            // verbs that target the omni stack directory (where the agent's
-            // own compose project lives).
+            // An agent must never tear down the container it runs inside: a
+            // `docker compose restart/down/stop/rm/kill` against its OWN
+            // compose project kills its own thread (thread 488 self-kill).
+            // The guard resolves the authoritative compose PROJECT NAME of
+            // both sides (self: docker-inspect label; target: `docker compose
+            // config --format json` -> `.name`) and blocks a destructive verb
+            // ONLY when the two names are EQUAL. `up` is NEVER blocked for
+            // any project; other projects (e.g. the omnidev dev stack) are
+            // always manageable.
             let mut self_restart_block: Option<String> = None;
             if tool_name == "docker_compose" {
-                if let Ok(args_val) =
-                    serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                {
-                    let cmd = args_val
-                        .get("command")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("");
-                    let verb = cmd.split_whitespace().next().unwrap_or("");
-                    if matches!(verb, "restart" | "down" | "stop" | "rm" | "kill" | "up") {
-                        let target_project = args_val
-                            .get("project_dir")
-                            .and_then(|p| p.as_str())
-                            .unwrap_or("");
-                        // The omni stack is the agent's own runtime: its compose
-                        // project files live under an omni-stack directory.
-                        let targets_own_stack = target_project.contains("omni-stack");
-                        if targets_own_stack {
-                            self_restart_block = Some(format!(
-                                "Blocked: docker_compose '{verb}' targets the omni-stack (project_dir '{target_project}') \
-                                 you run inside. Restarting your own container kills this thread. Only Hermes may restart the stack.",
-                            ));
-                        }
-                    }
-                }
+                self_restart_block = self_restart_guard_block(&tc.function.arguments).await;
             }
-
             let self_restart_block_for_task = self_restart_block.clone();
             let panic_idx = idx;
             let panic_tc_id = tc_id.clone();
