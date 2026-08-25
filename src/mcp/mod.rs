@@ -848,7 +848,7 @@ fn read_attached_file_tool() -> McpTool {
 /// catalog on AppContext, avoiding the cost of serializing the registry each call.
 fn list_tool_details_tool() -> McpTool {
     McpTool {
-        name: "list_tool_details".to_string(),
+        name: "builtin_list-tool-details".to_string(),
         full_name: tool_qualify("builtin", "list_tool_details"),
         description: "Get the full definition (description, input schema / expected parameters) for a specific tool by name. Use this when a tool call returns an error about missing or invalid parameters: call this first to see the correct parameter names and types before retrying.".to_string(),
         input_schema: serde_json::json!({

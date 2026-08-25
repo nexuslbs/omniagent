@@ -29,26 +29,15 @@ impl Default for PromptBuilderConfig {
 
 fn build_dynamic_identity(tool_names: &[String]) -> String {
     let _has_filesystem = tool_names.iter().any(|n| n.starts_with("filesystem"));
-    let has_fetch = tool_names.iter().any(|n| n == "fetch");
+    let has_fetch = tool_names.iter().any(|n| n.starts_with("fetch_"));
     let has_search = tool_names.iter().any(|n| n.starts_with("search_"));
-    let has_query = tool_names.iter().any(|n| n.starts_with("query_"));
+    let has_query = tool_names.iter().any(|n| n == "search_database");
     let has_kanban = tool_names.iter().any(|n| n.starts_with("kanban"));
     let has_cron = tool_names.iter().any(|n| n.starts_with("cron"));
-    let has_git = tool_names.iter().any(|n| {
-        n.starts_with("commit")
-            || n.starts_with("create_github")
-            || n.starts_with("clone_repo")
-            || n == "status"
-    });
-    let has_subtasks = tool_names
-        .iter()
-        .any(|n| n.starts_with("subtasks_") || n.starts_with("manage_subtask"));
-    let has_skills = tool_names
-        .iter()
-        .any(|n| n.starts_with("create_skill") || n.starts_with("list_skills"));
-    let has_plugin = tool_names
-        .iter()
-        .any(|n| n == "plugin_manager" || n == "list_plugins");
+    let has_git = tool_names.iter().any(|n| n.starts_with("git_"));
+    let has_subtasks = tool_names.iter().any(|n| n.starts_with("subtasks_"));
+    let has_skills = tool_names.iter().any(|n| n.starts_with("skills_"));
+    let has_plugin = tool_names.iter().any(|n| n.starts_with("plugin-manager_"));
 
     let mut parts: Vec<&str> = vec!["filesystem (read/write/list)"];
     if has_fetch {
@@ -81,32 +70,14 @@ fn build_dynamic_identity(tool_names: &[String]) -> String {
 
     let is_categorized = |name: &str| -> bool {
         name.starts_with("filesystem")
-            || name == "fetch"
+            || name.starts_with("fetch_")
             || name.starts_with("search_")
-            || name.starts_with("query_")
             || name.starts_with("kanban")
             || name.starts_with("cron")
-            || name.starts_with("commit")
-            || name.starts_with("create_github")
-            || name.starts_with("clone_repo")
-            || name == "status"
-            || name.starts_with("manage_subtask")
+            || name.starts_with("git_")
             || name.starts_with("subtasks_")
-            || name.starts_with("create_skill")
-            || name.starts_with("list_skills")
-            || name == "plugin_manager"
-            || name == "list_tools_details"
-            || name == "list_tool_details"
-            || name == "compose"
-            || name.starts_with("hindsight_")
-            || name.starts_with("docker_")
-            || name == "promote_to_memory"
-            || name == "list_memories"
-            || name == "review_memories"
-            || name == "manage_memory"
-            || name == "search_metrics"
-            || name.starts_with("setup_")
-            || name.starts_with("kanban_")
+            || name.starts_with("skills_")
+            || name.starts_with("plugin-manager_")
     };
     let extra: Vec<&str> = tool_names
         .iter()

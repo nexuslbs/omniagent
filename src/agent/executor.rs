@@ -193,7 +193,21 @@ pub async fn process_thread(
         }
     }
 
-    let tool_names: Vec<String> = cfg.plugin_manager.all_tool_names().await;
+    // Tool names surfaced to the prompt must be the SAME set the
+    // function-calling schema exposes: the profile's allowed tools, filtered
+    // to what is actually registered, using FULL names. Previously this used
+    // the unfiltered registry (short `t.name`), so the prompt advertised
+    // tools the model could not call (e.g. code_exec) — and names that did
+    // not match the schema (builtin_code-exec). Always full names, except
+    // plugin-internal references.
+    let tool_names: Vec<String> = cfg
+        .plugin_manager
+        .snapshot_registry()
+        .await
+        .allowed(&prof.allowed_tools)
+        .iter()
+        .map(|t| t.full_name.clone())
+        .collect();
 
     let (prompt_parts, template_section) =
         build_prompt_context(cfg, thread, cause_msg, &channel, &profile_name, &tool_names).await?;

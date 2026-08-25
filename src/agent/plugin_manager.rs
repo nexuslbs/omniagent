@@ -101,7 +101,7 @@ impl PluginManager for LegacyPluginManager {
             .await
             .all()
             .iter()
-            .map(|t| t.name.clone())
+            .map(|t| t.full_name.clone())
             .collect()
     }
 
@@ -204,7 +204,7 @@ async fn actor_loop(mut registry: McpRegistry, mut rx: mpsc::UnboundedReceiver<P
                 let _ = resp.send(snapshot);
             }
             PluginCommand::AllToolNames { resp } => {
-                let names = registry.all().iter().map(|t| t.name.clone()).collect();
+                let names = registry.all().iter().map(|t| t.full_name.clone()).collect();
                 let _ = resp.send(names);
             }
             PluginCommand::InitializeSingleServer {
@@ -396,7 +396,9 @@ mod tests {
 
         let names = mgr.all_tool_names().await;
         assert_eq!(names.len(), 1);
-        assert_eq!(names[0], "tool_c");
+        // all_tool_names returns FULL names (always-full-name rule):
+        // tool_c's full_name is "server2_tool-c".
+        assert_eq!(names[0], "server2_tool-c");
     }
 
     #[tokio::test]
