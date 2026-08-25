@@ -837,7 +837,7 @@ async fn prompt_handler(
         .await
         .all()
         .iter()
-        .map(|t| t.full_name.clone())
+        .map(|t| t.name.clone())
         .collect();
     let mut segments: Vec<String> = Vec::new();
 
@@ -932,7 +932,7 @@ async fn prompt_preview_handler(
         .await
         .all()
         .iter()
-        .map(|t| t.full_name.clone())
+        .map(|t| t.name.clone())
         .collect();
     let tool_list = if tool_names.is_empty() {
         String::new()
@@ -1131,7 +1131,9 @@ async fn list_mcp_tools_handler(State(state): State<Arc<AppState>>) -> Json<serd
         .iter()
         .map(|t| {
             serde_json::json!({
-                "full_name": t.full_name,
+                "name": t.name,
+                // Back-compat alias: older dashboard code reads "full_name".
+                "full_name": t.name,
                 "description": t.description,
                 "input_schema": t.input_schema,
                 "server_name": t.server_name,
@@ -1350,7 +1352,7 @@ async fn call_prompt_context(
         .await
         .all()
         .iter()
-        .map(|t| t.full_name.clone())
+        .map(|t| t.name.clone())
         .collect();
     let mcp_call = McpToolCall {
         id: "preview-context".to_string(),

@@ -28,72 +28,14 @@ impl Default for PromptBuilderConfig {
 // ── Stable identity / guidance texts ────────────────────────────────────
 
 fn build_dynamic_identity(tool_names: &[String]) -> String {
-    let _has_filesystem = tool_names.iter().any(|n| n.starts_with("filesystem"));
-    let has_fetch = tool_names.iter().any(|n| n.starts_with("fetch_"));
-    let has_search = tool_names.iter().any(|n| n.starts_with("search_"));
-    let has_query = tool_names.iter().any(|n| n == "search_database");
-    let has_kanban = tool_names.iter().any(|n| n.starts_with("kanban"));
-    let has_cron = tool_names.iter().any(|n| n.starts_with("cron"));
-    let has_git = tool_names.iter().any(|n| n.starts_with("git_"));
-    let has_subtasks = tool_names.iter().any(|n| n.starts_with("subtasks_"));
-    let has_skills = tool_names.iter().any(|n| n.starts_with("skills_"));
-    let has_plugin = tool_names.iter().any(|n| n.starts_with("plugin-manager_"));
-
-    let mut parts: Vec<&str> = vec!["filesystem (read/write/list)"];
-    if has_fetch {
-        parts.push("fetch (HTTP)");
-    }
-    if has_search {
-        parts.push("search (messages/wiki)");
-    }
-    if has_query {
-        parts.push("search_database (SQL)");
-    }
-    if has_kanban {
-        parts.push("kanban");
-    }
-    if has_cron {
-        parts.push("cron");
-    }
-    if has_git {
-        parts.push("git");
-    }
-    if has_subtasks {
-        parts.push("manage_subtasks");
-    }
-    if has_skills {
-        parts.push("skills");
-    }
-    if has_plugin {
-        parts.push("plugin_manager");
-    }
-
-    let is_categorized = |name: &str| -> bool {
-        name.starts_with("filesystem")
-            || name.starts_with("fetch_")
-            || name.starts_with("search_")
-            || name.starts_with("kanban")
-            || name.starts_with("cron")
-            || name.starts_with("git_")
-            || name.starts_with("subtasks_")
-            || name.starts_with("skills_")
-            || name.starts_with("plugin-manager_")
-    };
-    let extra: Vec<&str> = tool_names
-        .iter()
-        .map(|s| s.as_str())
-        .filter(|n| !is_categorized(n))
-        .collect();
-    if !extra.is_empty() {
-        for e in &extra {
-            parts.push(e);
-        }
-    }
-
-    let tool_list = if parts.is_empty() {
-        tool_names.join(", ")
+    // Generic tool listing: names come from the plugin registry, ALREADY
+    // fully qualified (builtin_* / {server}_{tool}). This function must NOT
+    // know any specific tool or plugin name — the registry provides the
+    // names, and every name is the full name. No short-name knowledge here.
+    let tool_list = if tool_names.is_empty() {
+        "no tools available".to_string()
     } else {
-        parts.join(", ")
+        tool_names.join(", ")
     };
 
     format!("You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice. HONESTY RULE: if you cannot complete the task, your final summary MUST clearly state that you gave up and why, and what remains undone — NEVER claim the task was completed unless every requested step was actually done and verified. NEVER end a turn with only thinking and no action: a response with no tool call is treated as the end of the task, so every turn MUST end with either tool calls or a final answer. If you have finished thinking, immediately emit your next tool call or your final answer — never stop after reasoning alone.")

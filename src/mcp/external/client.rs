@@ -195,7 +195,6 @@ pub trait McpServerClient: Send + Sync {
 
             result.push(McpTool {
                 name: prefixed_name.clone(),
-                full_name: prefixed_name.clone(),
                 description,
                 input_schema: schema,
                 server_name: Some(server_name.clone()),

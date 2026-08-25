@@ -72,7 +72,7 @@ pub(crate) async fn list_plugins_handler(State(state): State<Arc<AppState>>) -> 
                         server_tools
                             .entry(sn.as_str())
                             .or_default()
-                            .push(t.full_name.clone());
+                            .push(t.name.clone());
                     }
                 }
                 for detail in details.iter_mut() {

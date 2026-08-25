@@ -206,7 +206,7 @@ pub async fn process_thread(
         .await
         .allowed(&prof.allowed_tools)
         .iter()
-        .map(|t| t.full_name.clone())
+        .map(|t| t.name.clone())
         .collect();
 
     let (prompt_parts, template_section) =

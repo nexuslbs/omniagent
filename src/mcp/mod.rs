@@ -354,11 +354,13 @@ pub fn tool_qualify(server: &str, tool_name: &str) -> String {
 /// A registered MCP tool.
 #[derive(Clone)]
 pub struct McpTool {
+    /// The canonical tool name — ALWAYS the fully-qualified name:
+    /// `builtin_{tool}` for built-ins, `{server}_{tool}` for external MCP
+    /// tools (see `tool_qualify`). There is deliberately NO separate short
+    /// name: every surface (prompt, schema, registry, API) uses this single
+    /// name. The only place that may know a plugin-internal short form is
+    /// the tool's own handler (which by construction knows its plugin).
     pub name: String,
-    /// Fully-qualified tool name for display/API purposes.
-    /// Same as `name` for built-in tools; for external tools this is
-    /// the `{server}_{tool}` formatted name from `tool_qualify()`.
-    pub full_name: String,
     pub description: String,
     pub input_schema: Value,
     pub server_name: Option<String>,
@@ -372,6 +374,31 @@ pub struct McpTool {
     /// killed by an invisible clock the agent didn't set.
     pub timeout_secs: Option<u64>,
     pub handler: McpToolHandler,
+}
+
+impl McpTool {
+    /// Build a built-in tool. `short_name` is the plugin-internal name
+    /// (e.g. "poll_task"); the canonical `name` is ALWAYS derived via
+    /// `tool_qualify("builtin", short_name)` → `builtin_poll-task`. Only
+    /// this constructor knows the builtin prefix — callers pass the short
+    /// form and the full name is never hardcoded. This is the ONLY place a
+    /// short name is acceptable: it is immediately qualified.
+    pub fn builtin(
+        short_name: &str,
+        description: String,
+        input_schema: Value,
+        timeout_secs: Option<u64>,
+        handler: McpToolHandler,
+    ) -> Self {
+        Self {
+            name: tool_qualify("builtin", short_name),
+            description,
+            input_schema,
+            server_name: None,
+            timeout_secs,
+            handler,
+        }
+    }
 }
 
 /// Registry of all available MCP tools.
@@ -395,13 +422,13 @@ impl McpRegistry {
 
     /// Register a tool.
     pub fn register(&mut self, tool: McpTool) {
-        self.tools.insert(tool.full_name.clone(), tool);
+        self.tools.insert(tool.name.clone(), tool);
     }
 
     /// Register multiple tools at once (for batch loading from a server).
     pub fn register_all(&mut self, tools: Vec<McpTool>) {
         for tool in tools {
-            self.tools.insert(tool.full_name.clone(), tool);
+            self.tools.insert(tool.name.clone(), tool);
         }
     }
 
@@ -440,15 +467,16 @@ impl McpRegistry {
         let mut tools: Vec<&McpTool> = self
             .tools
             .values()
-            .filter(|t| allowed_names.contains(&t.full_name))
+            .filter(|t| allowed_names.contains(&t.name))
             .collect();
         tools.sort_by_key(|t| Self::tool_priority(&t.name));
         tools
     }
 
     /// Get the qualified name for a tool.
-    /// External tools already have `server_name.name` as their registry key,
-    /// so it's returned as-is. Built-in tools have no prefix.
+    /// Tool names are ALWAYS fully qualified (builtin_* / {server}_{tool}),
+    /// so a name is returned as-is. Kept for callers that expect a
+    /// qualification step; there is no short-name form anymore.
     pub fn qualified_name(&self, name: &str) -> String {
         name.to_string()
     }
@@ -538,7 +566,7 @@ impl McpRegistry {
                 serde_json::json!({
                     "type": "function",
                     "function": {
-                        "name": tool.full_name,
+                        "name": tool.name,
                         "description": tool.description,
                         "parameters": tool.input_schema,
                     }
@@ -556,7 +584,7 @@ impl McpRegistry {
                 serde_json::json!({
                     "type": "function",
                     "function": {
-                        "name": tool.full_name,
+                        "name": tool.name,
                         "description": tool.description,
                         "parameters": tool.input_schema,
                     }
@@ -569,8 +597,7 @@ impl McpRegistry {
 /// Build the `poll-task` tool: check the status of a background task.
 fn poll_task_tool() -> McpTool {
     McpTool {
-        name: "builtin_poll-task".to_string(),
-        full_name: tool_qualify("builtin", "poll_task"),
+        name: tool_qualify("builtin", "poll_task"),
         description: "Check the status of a previously started background tool task. Returns the task's current status (running/completed/failed/cancelled), elapsed time, and result if done.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -593,8 +620,7 @@ fn poll_task_tool() -> McpTool {
 /// Build the `wait-task` tool: wait for a background task to complete.
 fn wait_task_tool() -> McpTool {
     McpTool {
-        name: "builtin_wait-task".to_string(),
-        full_name: tool_qualify("builtin", "wait_task"),
+        name: tool_qualify("builtin", "wait_task"),
         description: "Wait for a background tool task to complete, with a configurable timeout. Polls every 500ms and returns the result when done, or a timeout status if the task doesn't finish in time.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -631,8 +657,7 @@ fn wait_task_tool() -> McpTool {
 /// Build the `cancel-task` tool: cancel a running background task.
 fn cancel_task_tool() -> McpTool {
     McpTool {
-        name: "builtin_cancel-task".to_string(),
-        full_name: tool_qualify("builtin", "cancel_task"),
+        name: tool_qualify("builtin", "cancel_task"),
         description: "Cancel a running background task. The task's abort signal is sent and it will stop as soon as possible. Use when the task is no longer needed.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -655,8 +680,7 @@ fn cancel_task_tool() -> McpTool {
 /// Build the `read-task-logs` tool: stream log output from a background task.
 fn read_task_logs_tool() -> McpTool {
     McpTool {
-        name: "builtin_read-task-logs".to_string(),
-        full_name: tool_qualify("builtin", "read_task_logs"),
+        name: tool_qualify("builtin", "read_task_logs"),
         description: "Read intermediate log output from a running or completed background task. Supports cursor-based pagination for long logs.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -690,8 +714,7 @@ fn read_attached_file_tool() -> McpTool {
     use base64::{engine::general_purpose, Engine};
 
     McpTool {
-        name: "builtin_read-attached-file".to_string(),
-        full_name: tool_qualify("builtin", "read_attached_file"),
+        name: tool_qualify("builtin", "read_attached_file"),
         description: "Read the content of an attached file from a platform channel (e.g. Mattermost). \
                       Use this when a file is mentioned in a message but its content was not inlined \
                       (because it exceeds the inline size limit). Provide the `file_id` and optionally \
@@ -848,8 +871,7 @@ fn read_attached_file_tool() -> McpTool {
 /// catalog on AppContext, avoiding the cost of serializing the registry each call.
 fn list_tool_details_tool() -> McpTool {
     McpTool {
-        name: "builtin_list-tool-details".to_string(),
-        full_name: tool_qualify("builtin", "list_tool_details"),
+        name: tool_qualify("builtin", "list_tool_details"),
         description: "Get the full definition (description, input schema / expected parameters) for a specific tool by name. Use this when a tool call returns an error about missing or invalid parameters: call this first to see the correct parameter names and types before retrying.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1058,8 +1080,7 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
 /// (/kanban/tasks/{id}/review), plugins and actions endpoints.
 fn omniagent_api_tool() -> McpTool {
     McpTool {
-        name: "builtin_omniagent-api".to_string(),
-        full_name: tool_qualify("builtin", "omniagent_api"),
+        name: tool_qualify("builtin", "omniagent_api"),
         description: "Call the core omniagent HTTP API (localhost:8080). Specify an HTTP method, an API path and an optional JSON body; returns the response body as text. Covers kanban task CRUD (/kanban/tasks...), schedule CRUD (/schedule, /schedule/{id} incl. DELETE), run-cron (/schedule/{id}/run), review (/kanban/tasks/{id}/review), plugins and actions endpoints. This replaces the old kanban_*/cron_* plugin tools.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1152,8 +1173,7 @@ fn omniagent_api_tool() -> McpTool {
 /// metadata.workflow_step kanban transition (spec §8 N1, §3 F0-F4).
 fn fail_thread_tool() -> McpTool {
     McpTool {
-        name: "builtin_fail-thread".to_string(),
-        full_name: tool_qualify("builtin", "fail_thread"),
+        name: tool_qualify("builtin", "fail_thread"),
         description: "End the current thread as FAILED with an Error-type last message and apply the metadata.workflow_step kanban transition. workflow_step accepts STEP keys only: \"running\", \"testing\", \"blocked\" (empty string = executor default). Any other value (e.g. \"review\" or role names) is invalid and blocks the task.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1333,14 +1353,14 @@ mod tests {
     }
 
     fn make_tool(name: &str, server: Option<&str>, timeout: Option<u64>) -> McpTool {
-        let full_name = if let Some(srv) = server {
+        // name IS the full name (the only name): qualify it like real tools.
+        let qualified = if let Some(srv) = server {
             tool_qualify(srv, name)
         } else {
             name.to_string()
         };
         McpTool {
-            name: name.to_string(),
-            full_name,
+            name: qualified.clone(),
             description: format!("Tool: {}", name),
             input_schema: json!({"type": "object", "properties": {}}),
             server_name: server.map(|s| s.to_string()),
@@ -1359,7 +1379,7 @@ mod tests {
     fn test_registry_register_and_get() {
         let mut registry = McpRegistry::new();
         let tool = make_tool("read", None, Some(30));
-        let name = tool.full_name.clone();
+        let name = tool.name.clone();
         registry.register(tool);
         assert!(registry.get(&name).is_some());
         assert_eq!(registry.get(&name).unwrap().name, "read");
@@ -1484,12 +1504,12 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_allowed_filters_by_full_name() {
+    fn test_registry_allowed_filters_by_name() {
         let mut registry = McpRegistry::new();
-        // Register a tool with a specific full_name, but test allowed with that full_name
+        // name IS the full name (the only name): "fs_read" is the qualified
+        // tool name, matching how real tools are registered.
         let tool = McpTool {
-            name: "read".to_string(),
-            full_name: "fs_read".to_string(),
+            name: "fs_read".to_string(),
             description: "Read tool".to_string(),
             input_schema: json!({"type": "object", "properties": {}}),
             server_name: Some("fs".to_string()),
@@ -1498,7 +1518,7 @@ mod tests {
         };
         registry.register(tool);
 
-        // Allowed with matching full_name
+        // Allowed with matching full name
         let allowed = registry.allowed(&["fs_read".to_string()]);
         assert_eq!(allowed.len(), 1);
 

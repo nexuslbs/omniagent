@@ -52,8 +52,7 @@ const RUNNER_JS: &str = "/usr/bin/code_exec_runner_js";
 /// Build the `code_exec` tool.
 pub fn code_exec_tool() -> McpTool {
     McpTool {
-        name: "builtin_code-exec".to_string(),
-        full_name: tool_qualify("builtin", "code_exec"),
+        name: tool_qualify("builtin", "code_exec"),
         description: "Run a model-written program in the toolbox sandbox container (NOT in-process) and get a TYPED JSON result back. \
             Input: `language` (\"python\" or \"js\"), `program` (source text; top-level `return` and `await` are allowed), \
             optional `args` (JSON object passed to the program as its `args` parameter), optional `timeout_secs` (default 120, max 600). \

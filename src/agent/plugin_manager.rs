@@ -101,7 +101,7 @@ impl PluginManager for LegacyPluginManager {
             .await
             .all()
             .iter()
-            .map(|t| t.full_name.clone())
+            .map(|t| t.name.clone())
             .collect()
     }
 
@@ -204,7 +204,7 @@ async fn actor_loop(mut registry: McpRegistry, mut rx: mpsc::UnboundedReceiver<P
                 let _ = resp.send(snapshot);
             }
             PluginCommand::AllToolNames { resp } => {
-                let names = registry.all().iter().map(|t| t.full_name.clone()).collect();
+                let names = registry.all().iter().map(|t| t.name.clone()).collect();
                 let _ = resp.send(names);
             }
             PluginCommand::InitializeSingleServer {
@@ -314,9 +314,9 @@ mod tests {
     }
 
     fn make_test_tool(name: &str) -> McpTool {
+        // name IS the full name (the only name).
         McpTool {
             name: name.to_string(),
-            full_name: name.to_string(),
             description: "test".to_string(),
             input_schema: json!({"type": "object"}),
             server_name: None,
@@ -374,17 +374,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_server_tools() {
-        let mut tool_a = make_test_tool("tool_a");
+        // name IS the full name (the only name): tool_c's name is its
+        // fully-qualified "server2_tool-c".
+        let mut tool_a = make_test_tool("server1_tool-a");
         tool_a.server_name = Some("server1".to_string());
-        tool_a.full_name = "server1_tool-a".to_string();
 
-        let mut tool_b = make_test_tool("tool_b");
+        let mut tool_b = make_test_tool("server1_tool-b");
         tool_b.server_name = Some("server1".to_string());
-        tool_b.full_name = "server1_tool-b".to_string();
 
-        let mut tool_c = make_test_tool("tool_c");
+        let mut tool_c = make_test_tool("server2_tool-c");
         tool_c.server_name = Some("server2".to_string());
-        tool_c.full_name = "server2_tool-c".to_string();
 
         let mgr = make_test_manager();
         mgr.register_tools(vec![tool_a, tool_b, tool_c]).await;
@@ -396,8 +395,6 @@ mod tests {
 
         let names = mgr.all_tool_names().await;
         assert_eq!(names.len(), 1);
-        // all_tool_names returns FULL names (always-full-name rule):
-        // tool_c's full_name is "server2_tool-c".
         assert_eq!(names[0], "server2_tool-c");
     }
 

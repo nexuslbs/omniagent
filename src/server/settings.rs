@@ -829,7 +829,7 @@ pub async fn get_settings_handler(State(state): State<Arc<AppState>>) -> Json<Se
             let mut options: Vec<SettingOption> = mcp_tools
                 .iter()
                 .map(|t| {
-                    let id = t.full_name.clone();
+                    let id = t.name.clone();
                     SettingOption {
                         id: id.clone(),
                         name: id,
