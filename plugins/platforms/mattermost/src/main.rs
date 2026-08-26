@@ -1062,10 +1062,6 @@ struct SetupParams {
 /// Operational config received via configure message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PluginConfig {
-    #[serde(default = "default_agent_host")]
-    host: String,
-    #[serde(default = "default_agent_port")]
-    port: String,
     #[serde(default = "default_server_url")]
     server_url: String,
     #[serde(default)]
@@ -1106,22 +1102,13 @@ struct PluginConfig {
 impl PluginConfig {
     /// Base URL of the omniagent HTTP API, used to resolve/store secrets.
     ///
-    /// The `host` config carries the agent's BIND address (the HOST env
-    /// default is `0.0.0.0`). A bind address is not a connect target, so
-    /// wildcard values (`0.0.0.0`, `::`) - and empty values - are
-    /// translated to `localhost` for connecting, with port defaulting to
-    /// `8080`.
+    /// The API is accessed inside the container, so the connection is always
+    /// fixed to `http://localhost:8080`. The legacy `host`/`port` config
+    /// fields were removed from the schema: `HOST` is a bind address (never
+    /// a connect target) and `PORT` falls back to 8080, so they were never
+    /// user-configurable in practice.
     fn agent_api_base(&self) -> String {
-        let host = match self.host.as_str() {
-            "" | "0.0.0.0" | "::" => "localhost",
-            h => h,
-        };
-        let port = if self.port.is_empty() {
-            "8080"
-        } else {
-            &self.port
-        };
-        format!("http://{}:{}", host, port)
+        "http://localhost:8080".to_string()
     }
 }
 
@@ -1131,14 +1118,6 @@ fn default_connection_mode() -> String {
 
 fn default_polling_interval() -> u64 {
     15
-}
-
-fn default_agent_host() -> String {
-    "localhost".to_string()
-}
-
-fn default_agent_port() -> String {
-    "8080".to_string()
 }
 
 fn default_server_url() -> String {
@@ -3768,39 +3747,29 @@ mod tests {
     use parking_lot::Mutex;
     use std::sync::Arc;
 
-    /// Deserialize a PluginConfig with only the given host (all other
-    /// fields fall back to their serde defaults).
-    fn cfg_with_host(host: &str) -> PluginConfig {
-        serde_json::from_str::<PluginConfig>(&serde_json::json!({ "host": host }).to_string())
-            .unwrap()
+    /// Deserialize a PluginConfig that still carries the legacy `host`/
+    /// `port` keys (all other fields fall back to their serde defaults).
+    /// serde ignores unknown keys, so legacy configs deserialize cleanly.
+    fn cfg_with_legacy_host_port() -> PluginConfig {
+        serde_json::from_str::<PluginConfig>(
+            &serde_json::json!({ "host": "agent.internal", "port": "9000" }).to_string(),
+        )
+        .unwrap()
     }
 
     #[test]
-    fn agent_api_base_connects_via_localhost_for_bind_addresses() {
-        // Bind wildcards (the agent HOST default is 0.0.0.0) are not
-        // connect targets - they must become localhost.
+    fn agent_api_base_is_fixed_to_localhost_8080() {
+        // The omniagent HTTP API is accessed inside the container: the
+        // connection is always http://localhost:8080, regardless of any
+        // legacy host/port config keys (ignored by serde).
         assert_eq!(
-            cfg_with_host("0.0.0.0").agent_api_base(),
+            cfg_with_legacy_host_port().agent_api_base(),
             "http://localhost:8080"
         );
-        assert_eq!(
-            cfg_with_host("::").agent_api_base(),
-            "http://localhost:8080"
-        );
-        // Empty host (serde fallback when config omitted) → localhost
-        assert_eq!(cfg_with_host("").agent_api_base(), "http://localhost:8080");
-    }
-
-    #[test]
-    fn agent_api_base_honors_explicit_host_and_port() {
-        let mut cfg = cfg_with_host("agent.internal");
-        assert_eq!(cfg.agent_api_base(), "http://agent.internal:8080");
-        cfg.port = "9000".to_string();
-        assert_eq!(cfg.agent_api_base(), "http://agent.internal:9000");
-        // Explicit port with wildcard host still resolves host to localhost
-        let mut wild = cfg_with_host("0.0.0.0");
-        wild.port = "9000".to_string();
-        assert_eq!(wild.agent_api_base(), "http://localhost:9000");
+        // A config with no host/port keys at all also resolves to localhost.
+        let plain: PluginConfig =
+            serde_json::from_str(r#"{"server_url":"http://mattermost:8065"}"#).unwrap();
+        assert_eq!(plain.agent_api_base(), "http://localhost:8080");
     }
 
     // ── set_agent_secret status-code tests ───────────────────────────────────

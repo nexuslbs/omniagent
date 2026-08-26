@@ -15,22 +15,6 @@
   },
   "config_schema": [
     {
-      "key": "host",
-      "label": "Agent API Host",
-      "type": "string",
-      "required": false,
-      "default": "$env:HOST",
-      "description": "Host of the omniagent HTTP API (used to resolve/store secrets). Resolves the HOST env var (agent default 0.0.0.0 - a bind address, treated as localhost when connecting), then localhost."
-    },
-    {
-      "key": "port",
-      "label": "Agent API Port",
-      "type": "string",
-      "required": false,
-      "default": "$env:PORT",
-      "description": "Port of the omniagent HTTP API (used to resolve/store secrets). Falls back to the PORT env var, then 8080."
-    },
-    {
       "key": "server_url",
       "label": "Mattermost Server URL",
       "type": "string",
