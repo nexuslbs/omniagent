@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added - Tool-name canonicalization (d2648f1, 1afabef)
+
+- Tools expose a single canonical full name; the `name`/`full_name` duality is
+  dropped and the model always sees full tool names (Lucas rule).
+- `prompt_generate` / `prompt_compact-messages` remain the default tool names
+  (config-overridable settings `prompt_generate_tool` /
+  `compact_messages_tool_name`).
+
+### Changed - Token cost accounting + bounded budgets (28549fd)
+
+- Cache-hit usage accounting fixed (prompt cache hit/miss tokens parsed for
+  DeepSeek-style usage payloads); token budgets bounded (200K/120K defaults)
+  with rustfmt-clean fallback parsing.
+
+### Added - Truncation recovery (6504cf2, 59a682b, 5eb98dc)
+
+- Retry shorter instead of failing after 3x truncation; truncation-aware step
+  routing; project-name self-restart guard; no hardcoded provider/plugin
+  defaults (all config-driven); `test-truncate` noop-full model added for the
+  Part 2 truncation regression test.
+
+### Added - Dispatcher channel-claim guard (ada41e9)
+
+- The dispatcher does not dispatch a `todo` task onto a channel already
+  claimed by an active task.
+
+### Changed - Profiles source of truth (c133e25, 8f4a64e, 7db63bc)
+
+- `config/profiles.yml` is the source of truth for profiles; a default profile
+  `config.json` is auto-created at startup (profiles/ dir dropped from repo);
+  SOUL.md/USER.md support removed in favor of a single root MEMORY.md.
+
+### Added - Scoped/ordered prompt sections (f6157a3)
+
+- Prompt assembly supports scoped, ordered prompt sections (system prompt
+  builder).
+
+### Added - code_exec MCP tool (cb72db3, 462914f)
+
+- Run model-written programs in the toolbox container with typed JSON returns;
+  hard container-side timeout via busybox `timeout` wrapper.
+
+### Added - Durable goal state machine (5e2e9e8)
+
+- Goal state machine with phase + typed blocked reason + round cap (CAS),
+  backed by goal-state queries (offline cache refreshed).
+
+### Changed - Context overflow handling (88af0b1, 43d7f0b, 3eb2f2e)
+
+- Forced compaction + retry on context overflow (kill the death spiral);
+  deterministic tool-result pruning (head/middle/tail) before summarization;
+  oversized tool results spill to disk with preview + locator.
+
+### Changed - Resolution at load time (100c9d2)
+
+- Channel identity + task defaults resolve AT LOAD TIME (loaders return
+  resolved data, never shallow values).
+
+### Chore - Repo hygiene (a923360, 0cd275f)
+
+- Removed committed MCP-server build artifacts from tracking (gitignored, built
+  by Dockerfile); removed unused `default_cli_channel` setting.
+
 ### Changed - Planning normalized to a single `plan` bool
 
 - The legacy `planning_mode` string duplicate is gone everywhere: DB columns

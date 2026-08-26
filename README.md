@@ -78,13 +78,13 @@ External MCP servers are configured via `MCP_SERVERS_CONFIG` (a JSON file listin
 
 ```bash
 cargo build --release
-cp .env.example .env
+# no .env file needed; configure via env vars (see below)
 ```
 
 ### Verify
 
 ```bash
-# Edit .env with at minimum DATABASE_URL and LLM_PROVIDER
+# Configure DATABASE_URL and LLM_PROVIDER as environment variables
 cargo run
 # → ok
 curl http://localhost:8080/health
