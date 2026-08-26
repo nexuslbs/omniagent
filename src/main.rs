@@ -24,7 +24,7 @@ pub(crate) type PlatformRestartSignals =
 
 fn print_usage() {
     println!(
-        "OmniAgent {} — autonomous agent system with Postgres, pgvector, MCP tools.",
+        "OmniAgent {} - autonomous agent system with Postgres, pgvector, MCP tools.",
         env!("CARGO_PKG_VERSION")
     );
     println!();
@@ -68,7 +68,7 @@ async fn main() -> AppResult<()> {
 
     // CLI arg handling BEFORE booting the server. A second process invoked
     // with `--version` (e.g. `docker exec ... omniagent --version`) must print
-    // and exit — it must NEVER reach run_server() and run destructive startup
+    // and exit - it must NEVER reach run_server() and run destructive startup
     // recovery against a live instance.
     match parse_args() {
         Ok(Some(code)) => std::process::exit(code),
@@ -114,7 +114,7 @@ async fn run_server() -> AppResult<()> {
     // ── SINGLE-INSTANCE GUARD: acquire the Postgres advisory lock on a
     // DEDICATED connection BEFORE any startup recovery runs. If another live
     // instance already owns the database, refuse to start with a clear error
-    // and exit non-zero — with NO DB writes (no skip, no redispatch, no
+    // and exit non-zero - with NO DB writes (no skip, no redispatch, no
     // migration side effects). The lock is session-scoped: it auto-releases
     // when this process dies (crash/restart), so a restart acquires it
     // immediately. Keys are per-database, so omnistable and omnidev (separate
@@ -152,7 +152,7 @@ async fn run_server() -> AppResult<()> {
     config_path::ensure_config_dir(&data_dir);
 
     // Provider/model overrides via config/models.yml: fail loud on a malformed
-    // file (absent/empty is fine — zero behavior change).
+    // file (absent/empty is fine - zero behavior change).
     if let Err(e) = omniagent::models_yaml::load_models_file(&data_dir) {
         return Err(Error::Message(format!("config/models.yml: {}", e)));
     }
@@ -292,7 +292,7 @@ async fn run_server() -> AppResult<()> {
 
     // ── STARTUP: Skip pending/processing messages BEFORE spawning any concurrent tasks ──
     // SAFE to run here because the advisory lock (acquired above) proves the
-    // previous owner is dead — so `processing` => orphaned is a valid
+    // previous owner is dead - so `processing` => orphaned is a valid
     // assumption again, restoring the original restart-recovery semantics.
     match agent::skip_on_startup(&pool, &data_dir).await {
         Ok(skipped) => {

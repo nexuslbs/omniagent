@@ -299,7 +299,7 @@ pub async fn resolve_env_ref_value(value: &str, pool: &sqlx::PgPool) -> String {
 
 /// Resolve `$env:VAR` and `$secret:NAME` references in all values of an env map.
 ///
-/// `${VAR}` is never interpolated — treated as a literal.
+/// `${VAR}` is never interpolated - treated as a literal.
 ///
 /// Delegates to the shared `crate::plugins_yaml::resolve_config_refs`.
 pub async fn resolve_env_refs(
@@ -311,7 +311,7 @@ pub async fn resolve_env_refs(
 
 /// Resolve environment variable references in a config value.
 ///
-/// DEPRECATED: `${VAR_NAME}` is never interpolated — it is treated as a
+/// DEPRECATED: `${VAR_NAME}` is never interpolated - it is treated as a
 /// literal string. Only `$env:` references are resolved.
 ///
 /// Delegates to the shared `crate::plugins_yaml::resolve_legacy_env_vars`.
@@ -627,7 +627,7 @@ pub fn decode_base64(encoded: &str) -> Result<Vec<u8>, anyhow::Error> {
 }
 
 // ---------------------------------------------------------------------------
-// (File reading is now a platform plugin capability — each plugin implements
+// (File reading is now a platform plugin capability - each plugin implements
 // read_file internally via the Platform trait. The core no longer knows about
 // plugin-specific field names like access_token or API URL patterns.)
 // ---------------------------------------------------------------------------
@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn test_resolve_env_vars_are_literal() {
         std::env::set_var("TEST_PLATFORM_KEY", "my-token");
-        // ${VAR} is NEVER interpolated — it stays as a literal string.
+        // ${VAR} is NEVER interpolated - it stays as a literal string.
         let resolved = resolve_env_vars("${TEST_PLATFORM_KEY}");
         assert_eq!(resolved, "${TEST_PLATFORM_KEY}");
     }

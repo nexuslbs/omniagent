@@ -117,12 +117,12 @@ pub struct AgentConfig {
     /// Hard context budget (tokens, global setting `prompt_token_budget_hard`):
     /// passed to the prompt plugin's compact-messages tool as `hard_budget`.
     /// The plugin compacts/prunes only when the context exceeds it.
-    /// Default: 200000 (was 500000 — the old default let a thread's context
+    /// Default: 200000 (was 500000 - the old default let a thread's context
     /// grow to ~250K tokens per call before compaction ever fired, which is
     /// why threads resubmitted huge uncached contexts on every call).
     pub token_budget_hard: usize,
     /// Soft context budget (tokens, global setting `prompt_token_budget_soft`):
-    /// passed to compact-messages as `soft_budget` — the reduction target.
+    /// passed to compact-messages as `soft_budget` - the reduction target.
     /// Default: 120000.
     pub token_budget_soft: usize,
 
@@ -310,7 +310,7 @@ impl AgentConfig {
             max_compaction_retries: get("max_compaction_retries", "2").parse().unwrap_or(2),
             default_profile: get("default_profile", "omni"),
 
-            // Vectorization — defaults match settings.yml so the worker is
+            // Vectorization - defaults match settings.yml so the worker is
             // active out of the box (vectorize_messages: true by default).
             vectorize_messages: get("vectorize_messages", "true").parse().unwrap_or(true),
             messages_vectorization_method: get("messages_vectorization_method", "local"),
@@ -526,7 +526,7 @@ mod tests {
         assert_eq!(cfg.max_inline_file_kb, 500);
         assert_eq!(cfg.platform_max_spawn_retries, 10);
         // Token budgets: bounded defaults (compaction fires well before the
-        // provider window instead of never — the old 500K hard budget let
+        // provider window instead of never - the old 500K hard budget let
         // per-call contexts reach ~250K tokens with zero proactive compaction).
         assert_eq!(cfg.token_budget_hard, 200000);
         assert_eq!(cfg.token_budget_soft, 120000);
@@ -593,7 +593,7 @@ mod tests {
 
     // ── config_snapshot ─────────────────────────────────────────────────────
     // config_snapshot requires an AgentContext which needs PgPool, LLMClient,
-    // AppContext, and PluginManager — all infrastructure-heavy. We skip that
+    // AppContext, and PluginManager - all infrastructure-heavy. We skip that
     // test here since it would require real DB connections.
 
     // ── from_env helper closure ─────────────────────────────────────────────

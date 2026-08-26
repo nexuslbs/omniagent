@@ -3,7 +3,7 @@
   "label": "ssh",
   "version": "0.1.0",
   "type": "mcp",
-  "description": "SSH operations — run commands on and copy files to/from a remote machine (ssh_run, ssh_copy, ssh_status)",
+  "description": "SSH operations - run commands on and copy files to/from a remote machine (ssh_run, ssh_copy, ssh_status)",
   "config_schema": [
     {
       "key": "ssh_dir",
@@ -22,7 +22,7 @@
     {
       "key": "workspace_dir",
       "default": "/opt/workspace",
-      "label": "Workspace Dir (sandbox — local side of ssh_copy must stay inside)",
+      "label": "Workspace Dir (sandbox - local side of ssh_copy must stay inside)",
       "type": "string",
       "required": false
     }

@@ -50,14 +50,14 @@ static CONFIG: Lazy<Mutex<Config>> = Lazy::new(|| Mutex::new(Config::default()))
 /// resolved from `$secret:GITHUB_APP_KEY` by the core) is written to a
 /// STABLE temp path (chmod 600) and used from there. This keeps the durable
 /// key in the secrets store and lets the plugin regenerate installation
-/// tokens indefinitely — no 1-hour static token to expire.
+/// tokens indefinitely - no 1-hour static token to expire.
 ///
 /// The path is fixed (NOT pid-suffixed) so repeated calls in the same process
 /// reuse one file, and if /tmp is ever cleaned mid-run the next call simply
 /// rewrites it. The write is verified (stat after write) so a failure surfaces
 /// as a clear error instead of a confusing openssl "private key not found".
 ///
-/// Fallback: the legacy on-disk key path for local development — only used
+/// Fallback: the legacy on-disk key path for local development - only used
 /// when the config key is empty AND that legacy file actually exists.
 fn resolve_key_path() -> Result<String> {
     let key_cfg = CONFIG.lock().github_app_private_key.clone();
@@ -67,14 +67,14 @@ fn resolve_key_path() -> Result<String> {
             Ok(()) => {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&stable, std::fs::Permissions::from_mode(0o600));
-                // Verify the file actually exists on disk — if the write was
+                // Verify the file actually exists on disk - if the write was
                 // silently lost (e.g. /tmp remounted, cleaned between calls),
                 // fail loudly rather than let openssl fail cryptically later.
                 if Path::new(&stable).exists() {
                     return Ok(stable);
                 }
                 anyhow::bail!(
-                    "GitHub App private key write to {} was not persisted — cannot sign JWT",
+                    "GitHub App private key write to {} was not persisted - cannot sign JWT",
                     stable
                 );
             }
@@ -146,7 +146,7 @@ fn base64url_encode(data: &[u8]) -> String {
 }
 
 /// Load GITHUB_APP_ID and GITHUB_INSTALLATION_ID from plugin config.
-/// Values arrive via the configure message — set explicitly in plugins.yml
+/// Values arrive via the configure message - set explicitly in plugins.yml
 /// (e.g. `github_app_id: 12345`). No env-var or .env reads.
 fn load_github_creds() -> Result<(String, String)> {
     let cfg = CONFIG.lock();
@@ -275,7 +275,7 @@ async fn get_installation_token(app_id: &str, inst_id: &str) -> Result<String> {
 /// re-exchanged before GitHub's 1-hour expiry, so auth never goes stale.
 ///
 /// Legacy fallback: a static token from config (`github_app_token`, e.g.
-/// `$secret:GH_APP_TOKEN`) — used directly, no JWT/private key needed.
+/// `$secret:GH_APP_TOKEN`) - used directly, no JWT/private key needed.
 async fn get_github_token() -> Result<String> {
     let (key_cfg, static_token) = {
         let cfg = CONFIG.lock();
@@ -287,7 +287,7 @@ async fn get_github_token() -> Result<String> {
 
     // Durable path: regenerate an installation token from the app private key.
     // resolve_key_path() now returns Err (with a clear message) when neither
-    // the config key nor a legacy key file exists — treat that as "no key".
+    // the config key nor a legacy key file exists - treat that as "no key".
     if !key_cfg.is_empty() || resolve_key_path().is_ok() {
         let (app_id, inst_id) = load_github_creds()?;
         return get_installation_token(&app_id, &inst_id).await;
@@ -307,7 +307,7 @@ async fn get_github_token() -> Result<String> {
 
 /// Run a git command and return (stdout, stderr, exit_code).
 ///
-/// Fully async (tokio::process) — a git subprocess NEVER blocks an async
+/// Fully async (tokio::process) - a git subprocess NEVER blocks an async
 /// worker thread (Aug 2026 all-plugins-async push). `kill_on_drop(true)`
 /// guarantees that when the timeout fires (the future holding the child is
 /// dropped), git is killed rather than left lingering holding repo locks.
@@ -324,7 +324,7 @@ async fn run_git(args: &[&str], cwd: Option<&str>, timeout_secs: u64) -> (String
     // leaked git output.
     // stdin MUST be /dev/null, not inherited: a spawned git child that
     // inherits fd 0 (the MCP JSON-RPC pipe) can consume protocol bytes meant
-    // for the server reader — the same request-loss class as the docker
+    // for the server reader - the same request-loss class as the docker
     // compose CLI children (G17b, Aug 2026).
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -443,7 +443,7 @@ async fn handle_create_github_repo(args: Value) -> Result<(String, bool)> {
 ///   2. `/opt/workspace` if it exists (dev/omnidev layout).
 ///   3. `{omni_dir}/data/workspace` (created on demand).
 ///
-/// The git plugin must NEVER default to its own plugin directory — that
+/// The git plugin must NEVER default to its own plugin directory - that
 /// pollutes the repo tree with clones.
 fn resolve_workspace_dir() -> String {
     let (cfg_ws, omni) = {
@@ -824,7 +824,7 @@ fn validate_git_args_within_workspace(repo_dir: &str, git_args: &[String]) -> Re
                 }
             }
             let pos = positional_args(rest, &value_flags);
-            // clone [opts] <repo> [<dir>] — destination is the LAST positional
+            // clone [opts] <repo> [<dir>] - destination is the LAST positional
             if let Some(dest) = pos.last() {
                 assert_path_in_workspace(&ws, repo_dir, "clone destination", dest)?;
             }
@@ -910,7 +910,7 @@ fn validate_git_args_within_workspace(repo_dir: &str, git_args: &[String]) -> Re
                 }
                 if w[0] == "--exec" {
                     anyhow::bail!(
-                        "git archive --exec runs a remote helper command — not allowed in \
+                        "git archive --exec runs a remote helper command - not allowed in \
                          the git workspace sandbox '{}'.",
                         ws
                     );
@@ -1153,7 +1153,7 @@ async fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
     }
 
     // Sandbox FIRST: repo must live inside the configured workspace dir.
-    // Returned as a tool error (is_error=true), NOT a handler Err — a
+    // Returned as a tool error (is_error=true), NOT a handler Err - a
     // sandbox rejection is an expected outcome, not a server failure, and
     // must not trip the MCP circuit breaker.
     if let Err(e) = validate_repo_within_workspace(&repo_dir) {
@@ -1190,7 +1190,7 @@ async fn handle_commit_and_push(args: Value) -> Result<(String, bool)> {
     let mut commit_note = String::new();
     if rc != 0 {
         if stderr.contains("nothing to commit") || out.contains("nothing to commit") {
-            // Nothing new to commit — but there may still be unpushed
+            // Nothing new to commit - but there may still be unpushed
             // commits ahead of origin. Fall through to the push below so
             // `commit_and_push` actually pushes pending work.
             commit_note = "Nothing to commit: working tree clean".to_string();
@@ -1322,7 +1322,7 @@ async fn handle_status(args: Value) -> Result<(String, bool)> {
 /// CRITICAL: no quotes around either side. In a config FILE, quotes are
 /// syntactic and stripped by the parser; but with `git -c`, the value is used
 /// LITERALLY, so `insteadOf="https://host"` (with quote characters) never
-/// matches the real URL — git falls back to unauthenticated https and fails
+/// matches the real URL - git falls back to unauthenticated https and fails
 /// with `could not read Username ... terminal prompts disabled`. Unquoted, git
 /// splits `url.<base>.insteadOf` on the last dot and the rewrite works
 /// (verified with GIT_TRACE: the remote-https helper is invoked with the
@@ -1335,7 +1335,7 @@ fn build_instead_of_override(token: &str, host_path: &str) -> String {
 
 /// `run_command`: run an arbitrary git command in a repository.
 ///
-/// Generic escape hatch — lets the agent run ANY git command the focused
+/// Generic escape hatch - lets the agent run ANY git command the focused
 /// tools (status / clone_repo / commit_and_push / create_github_repo) don't
 /// cover, e.g. `git log`, `git diff`, `git branch`, `git remote -v`,
 /// `git fetch`, `git reset --soft`, `git stash`, `git tag`.
@@ -1393,7 +1393,7 @@ async fn handle_run_command(args: Value) -> Result<(String, bool)> {
     // `--work-tree`, `clone <url> <dir>`, `init <dir>`, `config --global`,
     // `archive --output=`, `-c core.hooksPath=...` can redirect writes (and
     // executions) outside the workspace even when repo_dir is inside it.
-    // Returned as a tool error (is_error=true) — never a handler Err — so
+    // Returned as a tool error (is_error=true) - never a handler Err - so
     // legitimate blocks don't trip the MCP circuit breaker.
     if let Err(e) = validate_git_args_within_workspace(&repo_dir, &git_args) {
         return Ok((e.to_string(), true));
@@ -1440,7 +1440,7 @@ async fn handle_run_command(args: Value) -> Result<(String, bool)> {
             );
         } else {
             tracing::warn!(
-                "run_command: use_auth=true but origin '{}' is not https — running unauthenticated",
+                "run_command: use_auth=true but origin '{}' is not https - running unauthenticated",
                 remote_url
             );
         }
@@ -1450,7 +1450,7 @@ async fn handle_run_command(args: Value) -> Result<(String, bool)> {
     let arg_refs: Vec<&str> = full_args.iter().map(|s| s.as_str()).collect();
     let (stdout, stderr, rc) = run_git(&arg_refs, Some(&repo_dir), timeout_secs).await;
 
-    // git grep (and git log -G/-S) exit 1 when there are NO matches — that is
+    // git grep (and git log -G/-S) exit 1 when there are NO matches - that is
     // a VALID result, not an error. Reporting it as failure makes agents treat
     // "no match" as a tool error and burn calls switching strategy (observed).
     let is_grep = git_subcommand(&git_args) == Some("grep");
@@ -1533,7 +1533,7 @@ async fn main() -> Result<()> {
                 description:
                     "CLONE a git repository to the local filesystem. \
                     Clones into the git workspace directory (/opt/workspace in dev, \
-                    configurable via the git plugin 'workspace_dir' setting) — NEVER \
+                    configurable via the git plugin 'workspace_dir' setting) - NEVER \
                     into the plugin directory. If 'dir' is absolute it is used as-is; \
                     if relative it is resolved under the workspace directory; if omitted \
                     it defaults to the repository name inside the workspace directory. \
@@ -1616,13 +1616,13 @@ async fn main() -> Result<()> {
                     [\"remote\", \"-v\"], [\"fetch\", \"origin\"], [\"reset\", \"--soft\", \"HEAD~1\"], \
                     [\"stash\"], [\"tag\", \"-l\"], [\"show\", \"HEAD\"]. \
                     'repo_dir' (required) is the path to the git repository; \
-                    'args' (required) is the array of git arguments — NEVER a shell string, \
+                    'args' (required) is the array of git arguments - NEVER a shell string, \
                     so no shell injection is possible. \
                     GIT GREP: put all options BEFORE the pattern, e.g. \
                     [\"grep\", \"-n\", \"-A\", \"40\", \"<pattern>\", \"--\", \"<path>\"]. git grep \
                     treats everything after the first non-option token as a revision/path, \
                     so [\"grep\", \"<pattern>\", \"-A\", \"40\"] fails with \"unable to resolve \
-                    revision: -A\". Also: git grep exits 1 when there are no matches — \
+                    revision: -A\". Also: git grep exits 1 when there are no matches - \
                     that is a valid result, not an error. \
                     SANDBOX: both 'repo_dir' AND every path-bearing argument must stay inside \
                     the git workspace dir (/opt/workspace by default). Redirect flags \
@@ -1635,7 +1635,7 @@ async fn main() -> Result<()> {
                     core.hooksPath, core.excludesFile, ...) are validated and rejected \
                     when they would leave the workspace. \
                     'use_auth' (optional bool, default false): when true, injects the GitHub App \
-                    installation token for this single invocation (via a -c url.insteadOf override — \
+                    installation token for this single invocation (via a -c url.insteadOf override - \
                     the repo's own .git/config is NEVER modified) so push/fetch/pull against the \
                     origin https remote authenticate like commit_and_push does. \
                     'timeout' (optional number, default 60s) overrides the command timeout."
@@ -1677,7 +1677,7 @@ async fn main() -> Result<()> {
         server_info,
         tools,
         Some(move |params: Value| {
-            // parking_lot: lock() cannot fail — no poisoning, so config
+            // parking_lot: lock() cannot fail - no poisoning, so config
             // reloads can never be silently skipped after a panic.
             let mut cfg = CONFIG.lock();
             if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
@@ -1735,7 +1735,7 @@ mod tests {
     /// Returns a guard for a static test lock: the CONFIG workspace_dir is
     /// shared mutable state, so every test that calls `set_ws` must bind the
     /// returned guard (`let _g = set_ws(...)`) to serialize against the other
-    /// sandbox tests — otherwise a parallel test can flip the dir mid-assert.
+    /// sandbox tests - otherwise a parallel test can flip the dir mid-assert.
     fn set_ws(dir: &str) -> parking_lot::MutexGuard<'static, ()> {
         static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
         // parking_lot: lock() cannot fail, so a panic in one test can never
@@ -1768,7 +1768,7 @@ mod tests {
         )
     }
 
-    /// `temp_ws()` plus a real `git init` — for handler tests that probe
+    /// `temp_ws()` plus a real `git init` - for handler tests that probe
     /// `{repo}/.git` before validating arguments.
     async fn temp_git_repo() -> (String, String) {
         let (ws, repo) = temp_ws();
@@ -1805,7 +1805,7 @@ mod tests {
     #[test]
     fn sandbox_rejects_traversal_escape() {
         let _g = set_ws("/opt/workspace");
-        // workspace/../etc would resolve to /opt/etc — outside the sandbox.
+        // workspace/../etc would resolve to /opt/etc - outside the sandbox.
         assert!(validate_repo_within_workspace("/opt/workspace/../etc").is_err());
         // But a traversal that stays inside is fine.
         assert!(validate_repo_within_workspace("/opt/workspace/sub/../omniagent").is_ok());
@@ -1847,8 +1847,8 @@ mod tests {
     async fn sandbox_rejections_do_not_trip_handler_error() {
         let _g = set_ws("/opt/workspace");
         drop(_g);
-        // A sandbox rejection must come back as Ok((msg, true)) — NOT as an
-        // Err — so the MCP circuit breaker doesn't count it as a server
+        // A sandbox rejection must come back as Ok((msg, true)) - NOT as an
+        // Err - so the MCP circuit breaker doesn't count it as a server
         // failure and open the circuit after a few legitimate blocks.
         let (msg, is_error) = handle_status(serde_json::json!({
             "repo_dir": "/tmp/not-a-repo-outside",
@@ -1898,7 +1898,7 @@ mod tests {
         let err = validate_args(&["clone", "https://github.com/nexuslbs/foo.git", "/tmp/foo"])
             .unwrap_err();
         assert!(err.to_string().contains("clone destination"));
-        // Relative escape via .. — repo_dir is /opt/workspace/omniagent, so
+        // Relative escape via .. - repo_dir is /opt/workspace/omniagent, so
         // ../../escape resolves to /opt/escape (outside the workspace).
         assert!(validate_args(&[
             "clone",
@@ -2062,7 +2062,7 @@ mod tests {
         let cfg = build_instead_of_override("ghs_TESTTOKEN", "github.com");
         // git config --list will fail loudly if the key is malformed.
         // (-c is a global option, so it must precede the subcommand.)
-        // Use a temp dir as cwd — the build context has no /opt/workspace.
+        // Use a temp dir as cwd - the build context has no /opt/workspace.
         let (_ws, repo) = temp_ws();
         let (out, _, rc) =
             run_git(&["-c", cfg.as_str(), "config", "--list"], Some(&repo), 15).await;
@@ -2105,7 +2105,7 @@ mod tests {
         drop(_g);
 
         // A git call that ERRORS (sandbox rejection) must come back as a
-        // clean tool error — not panic on a poisoned lock.
+        // clean tool error - not panic on a poisoned lock.
         let (msg, is_error) = handle_run_command(serde_json::json!({
             "repo_dir": "/etc",
             "args": ["status"],

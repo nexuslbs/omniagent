@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Global provider registry: maps provider name to its subprocess client.
-/// Initialized empty — providers are populated on enable via `reload_plugins()`.
+/// Initialized empty - providers are populated on enable via `reload_plugins()`.
 pub static PROVIDER_REGISTRY: Lazy<RwLock<ProviderRegistry>> =
     Lazy::new(|| RwLock::new(ProviderRegistry::new()));
 
@@ -27,7 +27,7 @@ impl ProviderRegistry {
     }
 
     /// Create and register a new provider client.
-    /// The client is NOT started yet — call `start()` on the returned Arc.
+    /// The client is NOT started yet - call `start()` on the returned Arc.
     /// `current_dir` is the plugin install dir: relative entrypoint args
     /// resolve against it (the subprocess CWD), not the omniagent process CWD.
     pub fn register(
@@ -47,7 +47,7 @@ impl ProviderRegistry {
     }
 
     /// Register a pre-built, already-started provider client.
-    /// Unlike `register()`, this does NOT create a new client — the caller
+    /// Unlike `register()`, this does NOT create a new client - the caller
     /// is responsible for having called `start()` on the arc before inserting.
     /// This prevents races where another task grabs the Arc before start completes.
     pub fn register_arc(&mut self, name: &str, client: Arc<ExternalProviderClient>) {

@@ -111,7 +111,7 @@
       "label": "Max Summary Chars",
       "type": "integer",
       "default": 50000,
-      "description": "Hard cap (chars) on the frozen compaction summary block. Without it the block grows on every compaction (strict superset, never drained), so once preamble + block + tail exceed the hard token budget compaction fires on EVERY iteration and each firing grows the block further — an unbounded death spiral (observed: thread 1726, 162 compactions in 300 iterations, block 66K→357K chars). Oldest entries are pruned (newest kept) when the cap is exceeded; drained content remains recoverable from context-*.json dumps and auto-notes.md."
+      "description": "Hard cap (chars) on the frozen compaction summary block. Without it the block grows on every compaction (strict superset, never drained), so once preamble + block + tail exceed the hard token budget compaction fires on EVERY iteration and each firing grows the block further - an unbounded death spiral (observed: thread 1726, 162 compactions in 300 iterations, block 66K→357K chars). Oldest entries are pruned (newest kept) when the cap is exceeded; drained content remains recoverable from context-*.json dumps and auto-notes.md."
     }
   ],
   "label": "prompt"

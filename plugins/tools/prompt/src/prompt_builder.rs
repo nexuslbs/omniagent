@@ -30,7 +30,7 @@ impl Default for PromptBuilderConfig {
 fn build_dynamic_identity(tool_names: &[String]) -> String {
     // Generic tool listing: names come from the plugin registry, ALREADY
     // fully qualified (builtin_* / {server}_{tool}). This function must NOT
-    // know any specific tool or plugin name — the registry provides the
+    // know any specific tool or plugin name - the registry provides the
     // names, and every name is the full name. No short-name knowledge here.
     let tool_list = if tool_names.is_empty() {
         "no tools available".to_string()
@@ -38,7 +38,7 @@ fn build_dynamic_identity(tool_names: &[String]) -> String {
         tool_names.join(", ")
     };
 
-    format!("You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice. HONESTY RULE: if you cannot complete the task, your final summary MUST clearly state that you gave up and why, and what remains undone — NEVER claim the task was completed unless every requested step was actually done and verified. NEVER end a turn with only thinking and no action: a response with no tool call is treated as the end of the task, so every turn MUST end with either tool calls or a final answer. If you have finished thinking, immediately emit your next tool call or your final answer — never stop after reasoning alone.")
+    format!("You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice. HONESTY RULE: if you cannot complete the task, your final summary MUST clearly state that you gave up and why, and what remains undone - NEVER claim the task was completed unless every requested step was actually done and verified. NEVER end a turn with only thinking and no action: a response with no tool call is treated as the end of the task, so every turn MUST end with either tool calls or a final answer. If you have finished thinking, immediately emit your next tool call or your final answer - never stop after reasoning alone.")
 }
 
 const TOOL_GUIDANCE: &str = "TOOL USE RULES (fail the task if you violate these):\n\
@@ -51,10 +51,10 @@ vector searches. Only use direct data queries for structured aggregations \
 (counts, sums, averages, groupings).\n\
 3. WRITE COMPLETE FILES: When writing a file, write the entire content in a single \
 operation. Do NOT write placeholder content expecting to fill in values afterward. \
-EXCEPTION — LARGE OUTPUTS: if the file content is too large to fit in a single \
+EXCEPTION - LARGE OUTPUTS: if the file content is too large to fit in a single \
 response (approaching your output token limit), split it across multiple \
 filesystem_write calls: first with append=false, then append=true for each \
-subsequent chunk. Never abandon a large write — chunk it. Never let an output \
+subsequent chunk. Never abandon a large write - chunk it. Never let an output \
 length limit cause task failure.\n\
 4. RENAME INSTEAD OF RECREATE: When a file or directory already exists and you \
 need to change its name, use the rename tool. Do NOT delete and recreate.\n\
@@ -72,8 +72,8 @@ failing call more than once. There is no hidden state that changes between retri
 10. TAKE NOTES: maintain a durable working memory with the note_* tools \
 (notes_note-write/notes_note-append/notes_note-read/notes_note-list/notes_note-rm) after every non-trivial \
 discovery (paths, line numbers, commands, root causes, decisions). Notes \
-survive compaction and thread death — the retry thread starts with them.\n\
-11. VERIFY-ONCE: read a file ONCE with `filesystem_read` (offset/limit paging — ONE
+survive compaction and thread death - the retry thread starts with them.\n\
+11. VERIFY-ONCE: read a file ONCE with `filesystem_read` (offset/limit paging - ONE
 call per page) and write the facts you need into your working notes; never re-read the
 same file or line range. NEVER use `docker_compose exec ... sed -n` / `grep -n` to read
 file contents: docker_compose is for RUNNING commands/builds, not reading files.
@@ -81,7 +81,7 @@ Re-reading overlapping line ranges of the same file is the #1 budget killer (thr
 died at 120/120 after 100+ sed windows with zero commits). Consult your notes, not the
 disk, when you need content again.\n\
 12. NEVER RE-READ CONTEXT DUMPS: a context-*.json dump is read ONCE per \
-thread — a second read returns a '[duplicate read ...]' marker, not content. \
+thread - a second read returns a '[duplicate read ...]' marker, not content. \
 Trust the injected '=== Context Compacted ===' summary and your notes instead; \
 re-reading dumps is a forbidden anti-loop that wastes iterations.\n\
 13. SUBTASKS: after planning a multi-step task, create one subtask per plan step \
@@ -201,7 +201,7 @@ pub fn build_system_prompt_parts(
     .collect()
 }
 
-/// Ordered, named system-prompt sections — `(name, order, text)` triples.
+/// Ordered, named system-prompt sections - `(name, order, text)` triples.
 ///
 /// Task 9 contract: when the plugin config sets `emit_sections`, these are
 /// returned to the omniagent core as `sections: [{name, order, text}]`, which

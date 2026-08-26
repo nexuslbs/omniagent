@@ -38,7 +38,7 @@ pub trait Platform: Send + Sync + std::fmt::Debug {
     ///
     /// The platform plugin implements this by fetching the file content from
     /// its own API using its own authentication. The core does not know about
-    /// platform-specific config fields like `access_token` — each plugin handles
+    /// platform-specific config fields like `access_token` - each plugin handles
     /// file retrieval internally.
     ///
     /// Returns the raw file bytes on success. Returns an error if the platform

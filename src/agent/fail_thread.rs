@@ -101,7 +101,7 @@ pub(crate) async fn fail_thread(
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 2 — builtin fail-thread tool (spec §8 N1 + §3 F0-F4 matrix)
+// Phase 2 - builtin fail-thread tool (spec §8 N1 + §3 F0-F4 matrix)
 //
 // Ends the current thread as FAILED with an Error-type last message, then
 // applies the metadata.workflow_step kanban transition:
@@ -115,7 +115,7 @@ pub(crate) async fn fail_thread(
 //                 absent tester role / limit reached → blocked.
 //   F3 blocked  → task 'blocked', thread_status NULL, no thread.
 //   F4 (other)  → task 'blocked' + auto comment, no thread (includes 'review'
-//                 and role names — N6).
+//                 and role names - N6).
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── Phase 4: manual/API review decisions (spec §8 R12) ──────────────────────
@@ -139,7 +139,7 @@ pub fn validate_review_decision(decision: &str) -> Result<(), String> {
     }
 }
 
-/// Pure routing for a manual review decision — no DB access (unit-tested).
+/// Pure routing for a manual review decision - no DB access (unit-tested).
 ///
 /// Returns `(final_status, rerun_step, block_reason)`.
 /// - R5: `review` is valid without a reviewer role (manual state); `testing`
@@ -220,12 +220,12 @@ struct ReviewTaskRow {
 
 /// Apply a MANUAL/API review decision to a kanban task. This is the shared
 /// implementation behind `POST /review` and the `kanban_review_task` MCP tool
-/// (spec §8, R12) — the reviewer AGENT does not call it: it signals approve
+/// (spec §8, R12) - the reviewer AGENT does not call it: it signals approve
 /// via normal thread completion and issues via fail-thread with
 /// `workflow_step` = running/testing/blocked (N6).
 ///
 /// Decisions:
-/// - `approve` → task `done` (manual state — valid without a reviewer role, R5)
+/// - `approve` → task `done` (manual state - valid without a reviewer role, R5)
 /// - `rework`  → task `running` + scheduled executor thread (retry-guarded)
 /// - `retest`  → task `testing` + scheduled tester thread (R5: no tester role
 ///   → `blocked` + auto comment; retry-guarded)
@@ -284,7 +284,7 @@ pub async fn manual_review_decision(
 
     // Resolve the task's effective defaults ONCE at load (task → board →
     // channel → global settings). Board-based tasks carry NULL
-    // workflow_id/channel_id/profile/plan — the board (boards.yml) supplies
+    // workflow_id/channel_id/profile/plan - the board (boards.yml) supplies
     // the effective values. Fail-loud on invalid boards (mirrors
     // create_kanban_step_thread semantics).
     let resolved = crate::resolution::resolve_task_defaults(
@@ -316,7 +316,7 @@ pub async fn manual_review_decision(
     let has_executor_role = wf.roles.contains_key("executor");
     let has_tester_role = wf.roles.contains_key("tester");
 
-    // workflow_state JSON — executions live under the "executions" key.
+    // workflow_state JSON - executions live under the "executions" key.
     let mut state: serde_json::Value = task
         .workflow_state
         .as_deref()
@@ -352,7 +352,7 @@ pub async fn manual_review_decision(
         };
         let template = role_cfg.as_ref().and_then(|r| r.template.clone());
         // Single canonical INSERT (create_thread). Note: threads.cause has
-        // CHECK chk_thread_cause (cause IN ('user','system')) — the free-text
+        // CHECK chk_thread_cause (cause IN ('user','system')) - the free-text
         // "Manual review decision: ..." text goes in the cause MESSAGE content,
         // never in threads.cause.
         let new_thread = create_thread(
@@ -458,7 +458,7 @@ pub(crate) fn is_terminal_status(status: &str) -> bool {
 /// Callers must pass the RAW tool argument exactly ONCE. The output of this
 /// function is NOT a valid input: re-normalizing an already-normalized value
 /// turns `"executor"` (the F0 empty-default) into `"invalid"` (F4 → blocked)
-/// — the double-normalization bug that broke the empty `workflow_step`.
+/// - the double-normalization bug that broke the empty `workflow_step`.
 pub(crate) fn normalize_workflow_step(workflow_step: Option<&str>) -> &'static str {
     match workflow_step.unwrap_or("") {
         "" => "executor",
@@ -485,7 +485,7 @@ struct RetryGuard {
 }
 
 /// D7 retry-guard decision. The reviewer step is NEVER overridden and NEVER
-/// cleared — that is the boundedness guarantee (max total executions =
+/// cleared - that is the boundedness guarantee (max total executions =
 /// [(executor + tester + 1) * reviewer]).
 fn guard_at_retry_limit(step: &str, clear_on_review: bool, has_reviewer_role: bool) -> RetryGuard {
     if clear_on_review && matches!(step, "running" | "testing") {
@@ -666,16 +666,16 @@ pub(crate) async fn fail_thread_tool(
 /// What kind of transition is being requested.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RerunKind {
-    /// fail-task tool routing (F0-F4) — decided by the tool's metadata `workflow_step`.
+    /// fail-task tool routing (F0-F4) - decided by the tool's metadata `workflow_step`.
     FailTool {
         /// The `workflow_step` metadata value the tool was called with.
         step: String,
     },
-    /// Executor thread ended as FAILED — re-run the executor step (transition table row 2 / F0).
+    /// Executor thread ended as FAILED - re-run the executor step (transition table row 2 / F0).
     Failed,
-    /// Thread interrupted by the LLM-call iteration limit — re-run the SAME step (I1).
+    /// Thread interrupted by the LLM-call iteration limit - re-run the SAME step (I1).
     Interrupted,
-    /// Thread skipped before starting (channel closure/deletion) — re-schedule the
+    /// Thread skipped before starting (channel closure/deletion) - re-schedule the
     /// same step (R3: no retry consumed, kanban status unchanged).
     Skipped,
 }
@@ -689,7 +689,7 @@ fn role_for_step(step: &str) -> &'static str {
     }
 }
 
-/// Pure routing for the fail-task tool matrix (F0-F4) — no I/O.
+/// Pure routing for the fail-task tool matrix (F0-F4) - no I/O.
 ///
 /// Returns `(target_step, target_status)`:
 /// - `target_step == None` → blocked, no re-run thread (F3/F4, absent role,
@@ -707,18 +707,18 @@ fn route_fail_tool(
     // review_on_fail: only the REVIEWER may send the task to blocked. Any
     // non-reviewer fail that would land on `blocked` (F0 no-workflow, F1/F2
     // invalid caller/role, F3 explicit blocked, F4 invalid) routes to REVIEW
-    // instead — the reviewer decides. The reviewer caller (caller_step ==
+    // instead - the reviewer decides. The reviewer caller (caller_step ==
     // Some("review")) keeps the classic F0-F4 matrix, and explicit F1/F2
     // destinations are honored for every caller (the flag only converts
-    // blocked-bound outcomes — and F0 — to review).
+    // blocked-bound outcomes - and F0 - to review).
     let is_reviewer = caller_step == Some("review");
     // review_on_fail: only the REVIEWER may send the task to blocked.
     //   - F3 explicit "blocked" and F4 invalid are BLOCK DECISIONS: a
     //     non-reviewer caller's block request routes to review instead;
     //     the reviewer caller keeps the blocked outcome.
     //   - F1/F2 blocked-bounds (missing role / invalid caller) are NOT block
-    //     decisions — the caller was requesting a step the workflow cannot
-    //     fulfill — so the flag routes them to review for EVERY caller (the
+    //     decisions - the caller was requesting a step the workflow cannot
+    //     fulfill - so the flag routes them to review for EVERY caller (the
     //     reviewer decides what to do with the impossible request).
     let blocked_or_review = |would_block: bool, block_decision: bool| {
         if review_on_fail && would_block && (!is_reviewer || !block_decision) {
@@ -728,9 +728,9 @@ fn route_fail_tool(
         }
     };
     match normalized {
-        // F0 — executor default (no metadata workflow_step): re-run the
+        // F0 - executor default (no metadata workflow_step): re-run the
         // executor step; with review_on_fail a non-reviewer F0 goes to review
-        // (NOT executor re-run — the reviewer decides).
+        // (NOT executor re-run - the reviewer decides).
         "executor" => {
             if !has_wf {
                 (None, "blocked")
@@ -740,7 +740,7 @@ fn route_fail_tool(
                 (Some("running"), "running")
             }
         }
-        // F1 — a tester or reviewer thread requests executor rework, or the
+        // F1 - a tester or reviewer thread requests executor rework, or the
         // executor itself fails with an explicit 'running' target (R7 row-2:
         // rerun it). Explicit destinations are honored even under the flag.
         "running" => {
@@ -754,7 +754,7 @@ fn route_fail_tool(
                 (Some("running"), "running")
             }
         }
-        // F2 — a reviewer thread requests a re-test.
+        // F2 - a reviewer thread requests a re-test.
         "testing" => {
             let valid_caller = matches!(caller_step, Some("review"));
             if !has_wf || !valid_caller || !has_tester_role {
@@ -763,11 +763,11 @@ fn route_fail_tool(
                 (Some("testing"), "testing")
             }
         }
-        // F3 — explicit blocked target: a BLOCK DECISION — only the
+        // F3 - explicit blocked target: a BLOCK DECISION - only the
         // reviewer may block under the flag; a non-reviewer blocked request
         // routes to review.
         "blocked" => blocked_or_review(true, true),
-        // F4 — any invalid value (incl. 'review', N6): a BLOCK DECISION —
+        // F4 - any invalid value (incl. 'review', N6): a BLOCK DECISION -
         // blocked for the reviewer, review for any non-reviewer under the flag.
         _ => blocked_or_review(true, true),
     }
@@ -783,7 +783,7 @@ fn route_fail_tool(
 /// Returns `Ok(Some(new_thread_id))` when a re-run thread was created,
 /// `Ok(None)` when the transition was a blocked/no-thread outcome, and
 /// `Err(msg)` when the transition failed and nothing was committed.
-/// WS-5: retry inheritance — copy the parent thread's notes.md into the
+/// WS-5: retry inheritance - copy the parent thread's notes.md into the
 /// child thread's dir so a re-run/review thread starts with everything the
 /// interrupted parent learned. Best-effort file copy; returns false when the
 /// parent has no notes.
@@ -791,7 +791,7 @@ fn copy_thread_notes(data_dir: &str, parent_id: i64, child_id: i64) -> bool {
     let root = std::path::Path::new(data_dir).join("data").join("threads");
     let src = root.join(parent_id.to_string()).join("notes.md");
     let Ok(content) = std::fs::read_to_string(&src) else {
-        return false; // parent had no notes — nothing to inherit
+        return false; // parent had no notes - nothing to inherit
     };
     if content.trim().is_empty() {
         return false;
@@ -839,7 +839,7 @@ pub(crate) async fn engine_transition(
     .map_err(|e| format!("select task: {e}"))?;
 
     let Some(task) = task else {
-        return Ok(None); // task disappeared — nothing to transition
+        return Ok(None); // task disappeared - nothing to transition
     };
 
     // R4: blocked/done tasks never transition.
@@ -848,7 +848,7 @@ pub(crate) async fn engine_transition(
     }
 
     // Resolve the task's effective defaults ONCE at load (task → board).
-    // Board-based tasks carry NULL workflow_id; the board supplies it — this
+    // Board-based tasks carry NULL workflow_id; the board supplies it - this
     // is the fail-routing bug fix (reviewer reject on a board task must
     // rework, not block).
     let resolved = crate::resolution::resolve_task_defaults(
@@ -888,12 +888,12 @@ pub(crate) async fn engine_transition(
         .as_ref()
         .is_some_and(|w| w.roles.contains_key("reviewer"));
     // Effective review_on_fail: auto_approve FORCES it off (auto_approve
-    // means there is no effective reviewer — failed / interrupted-at-limit /
+    // means there is no effective reviewer - failed / interrupted-at-limit /
     // skipped executor-tester steps go directly to blocked).
     let effective_review_on_fail = workflow
         .as_ref()
         .is_some_and(|w| w.review_on_fail && !w.auto_approve);
-    // auto_approve: failures are FINAL (no reviewer, no rework loop) — the
+    // auto_approve: failures are FINAL (no reviewer, no rework loop) - the
     // fail matrix and the D7 review routing are both bypassed (→ blocked).
     let auto_approve = workflow.as_ref().is_some_and(|w| w.auto_approve);
     let limit_for = |step: &str| -> u64 {
@@ -917,7 +917,7 @@ pub(crate) async fn engine_transition(
     match &kind {
         RerunKind::FailTool { step } => {
             // `step` is ALREADY normalized by fail_thread_tool (F0-F4). Do
-            // NOT call normalize_workflow_step a second time — it turns its
+            // NOT call normalize_workflow_step a second time - it turns its
             // own output "executor" (the empty-workflow_step F0 default) into
             // "invalid" (F4 → blocked): the double-normalization bug that
             // broke the empty default (tester fail → blocked instead of
@@ -925,7 +925,7 @@ pub(crate) async fn engine_transition(
             let normalized = step.as_str();
             if auto_approve {
                 // auto_approve: every fail-thread outcome goes DIRECTLY to
-                // blocked — no executor re-run, no review (failures are
+                // blocked - no executor re-run, no review (failures are
                 // final when there is no effective reviewer).
                 rerun_step = None;
                 final_status = "blocked".to_string();
@@ -942,7 +942,7 @@ pub(crate) async fn engine_transition(
                 rerun_step = target.map(|s| s.to_string());
                 final_status = status.to_string();
                 if status == "review" {
-                    // review_on_fail: a non-reviewer fail routes to review —
+                    // review_on_fail: a non-reviewer fail routes to review -
                     // mirror the D7 review-thread path (create a review thread
                     // when the workflow has a reviewer role; otherwise the task
                     // lands in `review` as a manual state).
@@ -973,7 +973,7 @@ pub(crate) async fn engine_transition(
         RerunKind::Failed => {
             // Row 2: executor non-success terminal → re-run the executor step (F0).
             if auto_approve {
-                // auto_approve: failures are FINAL — blocked (no re-run;
+                // auto_approve: failures are FINAL - blocked (no re-run;
                 // there is no reviewer to rework).
                 block_reason = "auto_approve (failed)";
                 final_status = "blocked".to_string();
@@ -982,7 +982,7 @@ pub(crate) async fn engine_transition(
                 final_status = "running".to_string();
             } else {
                 block_reason = "no workflow";
-                // R8-N: plain task (no workflow) — a failed thread must land
+                // R8-N: plain task (no workflow) - a failed thread must land
                 // on 'blocked' (visible fail), not stay a zombie 'running'.
                 final_status = "blocked".to_string();
             }
@@ -999,7 +999,7 @@ pub(crate) async fn engine_transition(
             } else {
                 block_reason = "no workflow";
                 if !has_wf {
-                    // R8-N: plain task (no workflow) — an interrupted thread
+                    // R8-N: plain task (no workflow) - an interrupted thread
                     // must land on 'blocked' (visible fail), not stay a zombie
                     // 'running'.
                     final_status = "blocked".to_string();
@@ -1007,10 +1007,10 @@ pub(crate) async fn engine_transition(
             }
         }
         RerunKind::Skipped => {
-            // R3: channel closure/deletion — re-schedule the same step with NO
+            // R3: channel closure/deletion - re-schedule the same step with NO
             // retry consumed and the kanban status UNCHANGED (workflow or not).
             if auto_approve {
-                // auto_approve: a skipped task is FINAL — blocked (no
+                // auto_approve: a skipped task is FINAL - blocked (no
                 // re-schedule; there is no reviewer to decide).
                 block_reason = "auto_approve (skipped)";
                 final_status = "blocked".to_string();
@@ -1047,7 +1047,7 @@ pub(crate) async fn engine_transition(
                     .as_ref()
                     .is_some_and(|w| w.clear_executions_on_review);
                 let outcome = if auto_approve {
-                    // auto_approve: a step at its retry limit is FINAL —
+                    // auto_approve: a step at its retry limit is FINAL -
                     // blocked (the D7 clear-on-review routing is bypassed too).
                     RetryGuard {
                         final_status: "blocked",
@@ -1079,7 +1079,7 @@ pub(crate) async fn engine_transition(
     // Resolve the next step's execution identity before inserting it. The
     // executor must never inherit stale parent settings when a workflow role
     // defines its own identity. Returns (profile, provider, model, plan, template)
-    // — mirroring kanban_updater::resolve_step_identity so re-run threads get
+    // - mirroring kanban_updater::resolve_step_identity so re-run threads get
     // the role's plan_mode and template (thread 82 ran with plan=false +
     // template=NULL because this closure only resolved profile/provider/model).
     let resolve_step_identity = |step: &str| {
@@ -1148,7 +1148,7 @@ pub(crate) async fn engine_transition(
         if profile.trim().is_empty() {
             return Err(format!("no profile configured for workflow step {step}"));
         }
-        // Single canonical INSERT (create_thread) — carries plan + template so
+        // Single canonical INSERT (create_thread) - carries plan + template so
         // re-run threads keep the role's iteration budget and guidance.
         let new_thread = create_thread(
             &mut *tx,
@@ -1173,7 +1173,7 @@ pub(crate) async fn engine_transition(
         .map_err(|e| format!("insert rerun thread: {e}"))?;
         let new_id = new_thread.id;
 
-        // seq-0 cause message for the re-run thread — copy the PARENT's
+        // seq-0 cause message for the re-run thread - copy the PARENT's
         // msg_type='kanban' message content (the actual script), NOT
         // threads.cause (which is the CHECK-enum 'system'/'user', not content).
         // Without the script the noop provider echoes and the rerun "completes"
@@ -1227,7 +1227,7 @@ pub(crate) async fn engine_transition(
         // D7: retry-limit → review with a reviewer role creates a review
         // thread (same shape as the normal-completion review path, row 7);
         // without a reviewer role the task lands in `review` as a manual
-        // state (no thread) — handled by the None arm below.
+        // state (no thread) - handled by the None arm below.
         #[derive(sqlx::FromRow)]
         struct IdRow {
             id: i64,
@@ -1240,7 +1240,7 @@ pub(crate) async fn engine_transition(
         if profile.trim().is_empty() {
             return Err("no profile configured for workflow step review".to_string());
         }
-        // Single canonical INSERT (create_thread) — carries plan + template.
+        // Single canonical INSERT (create_thread) - carries plan + template.
         let new_thread = create_thread(
             &mut *tx,
             "pending",
@@ -1264,7 +1264,7 @@ pub(crate) async fn engine_transition(
         .map_err(|e| format!("insert review thread: {e}"))?;
         let new_id = new_thread.id;
 
-        // seq-0 cause message for the review thread — carries the parent's
+        // seq-0 cause message for the review thread - carries the parent's
         // failure reason when one exists (NEW FINDING 1).
         let cause = match (fail_reason.as_deref(), thread.cause.as_str()) {
             (Some(reason), "") => reason.to_string(),
@@ -1281,7 +1281,7 @@ pub(crate) async fn engine_transition(
         .await
         .map_err(|e| format!("insert review cause message: {e}"))?;
 
-        // NOTE: the review execution counter is NOT incremented here — the
+        // NOTE: the review execution counter is NOT incremented here - the
         // reviewer has not run yet; it increments when a review thread runs.
         Some(new_id)
     } else {
@@ -1347,7 +1347,7 @@ pub(crate) async fn engine_transition(
 
     tx.commit().await.map_err(|e| format!("commit: {e}"))?;
 
-    // WS-5: retry inheritance — the re-run/review thread starts with the
+    // WS-5: retry inheritance - the re-run/review thread starts with the
     // interrupted parent's durable notes (best-effort file copy).
     if let Some(child_id) = new_thread_id {
         copy_thread_notes(data_dir, thread.id, child_id);
@@ -1390,7 +1390,7 @@ mod tests {
         assert_eq!(normalize_workflow_step(Some("running")), "running");
         assert_eq!(normalize_workflow_step(Some("testing")), "testing");
         assert_eq!(normalize_workflow_step(Some("blocked")), "blocked");
-        // 'review' is not a valid fail target (N6) — routed to blocked (F4).
+        // 'review' is not a valid fail target (N6) - routed to blocked (F4).
         assert_eq!(normalize_workflow_step(Some("review")), "invalid");
         assert_eq!(normalize_workflow_step(Some("bogus")), "invalid");
     }
@@ -1454,7 +1454,7 @@ mod tests {
 
     #[test]
     fn route_fail_tool_f0_review_on_fail_routes_review() {
-        // Flag true: a non-reviewer F0 (no workflow_step) goes to REVIEW —
+        // Flag true: a non-reviewer F0 (no workflow_step) goes to REVIEW -
         // NOT executor re-run; the reviewer decides.
         let (step, status) = route_fail_tool("executor", Some("testing"), true, true, true, true);
         assert_eq!(step, None);
@@ -1474,7 +1474,7 @@ mod tests {
 
     #[test]
     fn route_fail_tool_blocked_restriction() {
-        // Flag true: ONLY the reviewer may send the task to blocked — a
+        // Flag true: ONLY the reviewer may send the task to blocked - a
         // non-reviewer explicit 'blocked' routes to review instead.
         let (step, status) = route_fail_tool("blocked", Some("testing"), true, true, true, true);
         assert_eq!(step, None);
@@ -1520,7 +1520,7 @@ mod tests {
     #[test]
     fn route_fail_tool_flag_keeps_explicit_destinations() {
         // Flag true: explicit F1 (executor rework) and F2 (re-test) are
-        // honored — the flag only converts blocked-bound outcomes / F0.
+        // honored - the flag only converts blocked-bound outcomes / F0.
         let (step, status) = route_fail_tool("running", Some("testing"), true, true, true, true);
         assert_eq!(step, Some("running"));
         assert_eq!(status, "running");
@@ -1613,7 +1613,7 @@ mod tests_review {
 
     #[test]
     fn route_manual_review_approve_and_block() {
-        // approve → done (manual state — valid without reviewer, R5)
+        // approve → done (manual state - valid without reviewer, R5)
         let (s, step, reason) = route_manual_review("approve", true, false, false, true);
         assert_eq!(s, "done");
         assert_eq!(step, None);
@@ -1789,7 +1789,7 @@ mod tests_rerun_script {
         // Bug B regression (GROUP 22 T4/T6/T7): a rerun thread's seq-0 cause
         // message must copy the PARENT's msg_type='kanban' message content
         // (the actual workflow script). The old code inserted threads.cause
-        // (CHECK-enum 'system'/'user', not content) — the noop provider then
+        // (CHECK-enum 'system'/'user', not content) - the noop provider then
         // had no script and the rerun "completed" vacuously, routing the task
         // to review instead of re-failing. This test fails against the old
         // code (content == 'user', no "builtin_fail-thread" marker).
@@ -1925,7 +1925,7 @@ mod tests_rerun_script {
             "rerun cause message must copy the parent's kanban script, got: {content}"
         );
 
-        // cleanup (new thread first — it references the parent)
+        // cleanup (new thread first - it references the parent)
         let _ = sql_forge!(
             "DELETE FROM messages WHERE thread_id IN (:new_id, :parent_id)",
             (
@@ -2386,7 +2386,7 @@ mod tests_r8n_no_workflow_blocked {
     #[ignore = "requires a live DATABASE_URL"]
     async fn fail_tool_f0_review_on_fail_manual_review() {
         // review_on_fail=true + executor F0 (no workflow_step) → task goes to
-        // REVIEW (manual state — no reviewer role in the workflow), NOT
+        // REVIEW (manual state - no reviewer role in the workflow), NOT
         // executor re-run and NOT blocked.
         let Ok(url) = std::env::var("DATABASE_URL") else {
             eprintln!("skipping: DATABASE_URL not set");
@@ -2433,7 +2433,7 @@ mod tests_r8n_no_workflow_blocked {
     #[tokio::test]
     #[ignore = "requires a live DATABASE_URL"]
     async fn fail_tool_auto_approve_forces_review_on_fail_false() {
-        // auto_approve=true + review_on_fail=true: the flag is FORCED off —
+        // auto_approve=true + review_on_fail=true: the flag is FORCED off -
         // an executor F0 fail behaves as review_on_fail=false (executor
         // re-run), NOT review.
         let Ok(url) = std::env::var("DATABASE_URL") else {

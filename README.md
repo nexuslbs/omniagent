@@ -7,7 +7,7 @@ Next-generation agent system built with Rust, PostgreSQL + pgvector, and MCP too
 | **Hindsight Memory** | Persistent cross-session memory via omniagent-hindsight, with automatic population from new messages and semantic recall in context assembly |
 | **Hindsight Populator** | Background action (deactivated by default) that retains messages into hindsight every 15 minutes. Activate via `UPDATE cron_jobs SET active = true WHERE id = 'hindsight_populator'`. Cron schedules use standard 5-field Linux format (minute hour day month weekday: the leading seconds field is not used). |
 | **Kanban Boards & Workflows** | Role-based kanban workflows (executor → tester → reviewer) from `config/workflows.yml`, board defaults from `config/boards.yml` (feature-gated on file presence), board/dependency/channel-busy gates in the dispatcher, `auto_approve`, `review_on_fail` |
-| **Event Hooks** | Event-driven hooks fired fire-and-forget, isolated from the triggering work: `thread_started`, `thread_finished`, `new_message` — delivered to the hooks channel (Dashboard Hooks page) |
+| **Event Hooks** | Event-driven hooks fired fire-and-forget, isolated from the triggering work: `thread_started`, `thread_finished`, `new_message` - delivered to the hooks channel (Dashboard Hooks page) |
 | **Token Context Budgets** | Token-only budgets (`prompt_token_budget_soft/hard`, default 100000/500000) owned by the prompt plugin's `compact-messages` tool; `chars/4` fallback when no tokenizer is available |
 | **models.yml Overrides** | `config/models.yml` provides plugin-less provider definitions + provider/model/token-budget overrides (`model_config.<model> > providers.<name> > global settings`) |
 | **Builtin `omniagent-api`** | Internal self-API fetch MCP tool (no host/scheme/port needed) replacing the old `kanban_*` / `cron_*` plugin tools; the kanban/cron API uses YML property names (`channel`, `workflow`, `cron`, `provider`, `model`) |
@@ -55,7 +55,7 @@ The plugin system has **three sources**:
 | **Bundled** | `plugins/{type}/{name}/` (omni-stack fork) | Standalone crates added by forked repos, same layout as built-in with a `plugin.json` manifest |
 | **Remote** | `plugins/{type}/.remote/{name}/` | Git-cloned from external repositories via `install-git` / Download (Update) |
 
-**Plugin identity is the composite key `[type + source + name]`** — never look up by name alone. Action handlers derive type+source from the URL path (HARD RULE, see AGENTS.md).
+**Plugin identity is the composite key `[type + source + name]`** - never look up by name alone. Action handlers derive type+source from the URL path (HARD RULE, see AGENTS.md).
 
 The dashboard Tools page shows plugins from all sources; YAML presence/`builtin: true` flags determine the primary source. Plugin state (enabled/disabled, config) lives in `plugins.yml`; installs compile + register, uninstall removes binary + disables, update re-clones from git + recompiles.
 
@@ -94,7 +94,7 @@ curl http://localhost:8080/health
 
 Channels represent communication endpoints (Telegram, Mattermost, API, cron, kanban). Each channel has its own profile, provider, model, and planning-mode configuration. Messages are processed sequentially within a channel, in parallel across channels.
 
-On the Mattermost platform, the `$new` command creates/updates a channel by that name: `$new <name>` — the optional first argument names the channel instead of prompting.
+On the Mattermost platform, the `$new` command creates/updates a channel by that name: `$new <name>` - the optional first argument names the channel instead of prompting.
 
 ### Channel Fields
 
@@ -191,7 +191,7 @@ The API key is read from the `{PROVIDER}_API_KEY` environment variable matching 
 - `providers.<name>.plugin: false` defines a **plugin-less provider** using builtin chat_completions/anthropic support (no plugin code needed)
 - `providers.<name>.models` replaces the plugin's `default_model.allowed_values` in selectors (Channels page, Providers page, `/models` page)
 - Provider-level fields (`api_mode`, `supports_reasoning`, `default_base_url`, `refresh_url`, `default_model`, `api_key`, `token_budget_*`, `max_tokens*`) override the plugin config
-- `model_config.<model>` per-model overrides take **highest precedence** — for each of soft/hard token budgets: `model_config.<model> > providers.<name> > global settings`
+- `model_config.<model>` per-model overrides take **highest precedence** - for each of soft/hard token budgets: `model_config.<model> > providers.<name> > global settings`
 
 **Summary table:**
 
@@ -238,7 +238,7 @@ Failures carry a subtype for diagnostics: `provider_error`, `tool_error`, `conte
 
 ### Per-Message Timing and Token Usage
 
-Each message records timing (created/finished) and token usage (prompt_tokens, completion_tokens, total_tokens) — the Dashboard Overview charts aggregate these.
+Each message records timing (created/finished) and token usage (prompt_tokens, completion_tokens, total_tokens) - the Dashboard Overview charts aggregate these.
 
 ### Startup Cleanup
 
@@ -268,7 +268,7 @@ VALUES ('job-1', 'daily-report', '0 9 * * *', 'cron-default', 'Write the daily r
 | Field | Description |
 |-------|-------------|
 | `name` | Unique job name |
-| `schedule` | 5-field cron (minute hour day month weekday — no leading seconds field) |
+| `schedule` | 5-field cron (minute hour day month weekday - no leading seconds field) |
 | `channel` | Destination channel |
 | `prompt` | Prompt template for the dispatched message |
 | `mode` | Execution mode |
@@ -302,7 +302,7 @@ INSERT INTO kanban_tasks (id, title, body, board, workflow_id, status)
 VALUES ('task-1', 'Fix login bug', 'Details...', 'omnidev', 'omniagent-dev', 'todo');
 ```
 
-Via the API (field names match the YML properties — `channel`, `workflow`, `board`, not `channel_id`/`workflow_id`):
+Via the API (field names match the YML properties - `channel`, `workflow`, `board`, not `channel_id`/`workflow_id`):
 
 ```bash
 curl -X POST localhost:8080/kanban/tasks \
@@ -319,7 +319,7 @@ Boards are optional (feature-gated on file presence). When `boards.yml` is prese
 
 ### Workflows (`config/workflows.yml`)
 
-Workflows define the **role-based lifecycle** of a task — which roles run in which order, with what template/mode/provider/model:
+Workflows define the **role-based lifecycle** of a task - which roles run in which order, with what template/mode/provider/model:
 
 ```yaml
 omniagent-dev:
@@ -376,7 +376,7 @@ The dispatcher scans for dispatchable tasks every `kanban_dispatcher_interval` s
 - Starts `todo` tasks on their board's workflow when the board/execution gates allow.
 - **Board gate**: boards with in-flight task limits stop further dispatches until a task finishes.
 - **Channel-busy gate**: a task whose channel is busy waits rather than queueing behind live work.
-- **Archived-task guard**: archived tasks are NEVER dispatched (the dispatch SQL excludes them — an archived task can't come back to life).
+- **Archived-task guard**: archived tasks are NEVER dispatched (the dispatch SQL excludes them - an archived task can't come back to life).
 - Dispatches create threads with cause `kanban` on the task's channel (resolved via the board chain).
 
 ### Channel and Profile Assignment
@@ -406,7 +406,7 @@ Tasks without an explicit channel resolve through: task → board → `default_k
 
 ## HTTP API
 
-The agent exposes an HTTP API on port 8080 (see `api-reference.md` for the full surface). Field names in the API follow the YML property names (`channel`, `workflow`, `cron`, `provider`, `model` — not `channel_id`/`workflow_id`/`current_*`).
+The agent exposes an HTTP API on port 8080 (see `api-reference.md` for the full surface). Field names in the API follow the YML property names (`channel`, `workflow`, `cron`, `provider`, `model` - not `channel_id`/`workflow_id`/`current_*`).
 
 | Area | Endpoints |
 |------|-----------|
@@ -423,4 +423,4 @@ The agent exposes an HTTP API on port 8080 (see `api-reference.md` for the full 
 
 ### Builtin `omniagent-api` Tool
 
-The agent exposes its own API to itself as the MCP tool `omniagent-api` (builtin): it fetches `http://localhost:8080/...` internally — no host/scheme/port configuration needed. It replaced the old `kanban_*` / `cron_*` plugin tools; the plugin's `fetch` tool gates unsafe methods via the `allow_unsafe_methods` config.
+The agent exposes its own API to itself as the MCP tool `omniagent-api` (builtin): it fetches `http://localhost:8080/...` internally - no host/scheme/port configuration needed. It replaced the old `kanban_*` / `cron_*` plugin tools; the plugin's `fetch` tool gates unsafe methods via the `allow_unsafe_methods` config.

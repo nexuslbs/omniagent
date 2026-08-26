@@ -680,7 +680,7 @@ pub struct CompletionResponse {
     /// Wall-clock time of the LLM call in milliseconds.
     pub duration_ms: u64,
     /// Provider finish reason (e.g. "stop", "length", "tool_calls").
-    /// `length` means the response was truncated by the token budget —
+    /// `length` means the response was truncated by the token budget -
     /// the model may not have finished emitting its action or answer.
     pub finish_reason: Option<String>,
 }
@@ -795,7 +795,7 @@ const LLM_TRANSPORT_RETRY_BASE_DELAY_MS: u64 = 500;
 
 /// Build the hardened reqwest client used for LLM completion requests.
 ///
-/// - `timeout`: total request timeout (5 minutes) — unchanged.
+/// - `timeout`: total request timeout (5 minutes) - unchanged.
 /// - `connect_timeout`: fail fast on hung TCP/TLS connects (30s).
 /// - `pool_idle_timeout`: recycle keep-alive sockets after 90s idle so stale
 ///   connections closed by the peer are not reused for new requests.
@@ -830,7 +830,7 @@ enum TransportFailure {
 /// Retryable: connect failures, timeouts, body-read and decode errors, and
 /// IO-level send failures. NOT retryable: deterministic errors such as
 /// request-build failures (invalid URL) and redirect loops. HTTP status
-/// errors are not `reqwest::Error` at all — a 4xx/5xx response arrives as
+/// errors are not `reqwest::Error` at all - a 4xx/5xx response arrives as
 /// `Ok(response)` and never reaches this function, so the transport layer
 /// never retries on status codes (429 has its own `RateLimited` path).
 fn classify_transport_error(err: &reqwest::Error) -> Option<TransportFailure> {
@@ -922,7 +922,7 @@ async fn send_with_transport_retry(
                     return Err(err);
                 }
                 warn!(
-                    "[llm] transient transport error (attempt {}/{}) — retrying in {}ms: {}",
+                    "[llm] transient transport error (attempt {}/{}) - retrying in {}ms: {}",
                     attempt,
                     LLM_TRANSPORT_RETRY_ATTEMPTS,
                     delay.as_millis(),
@@ -1092,7 +1092,7 @@ impl LLMClient {
             "stream": request.stream,
         });
         // max_tokens is optional: when None (not configured), the provider's
-        // own default output limit applies — no cap is sent in the request.
+        // own default output limit applies - no cap is sent in the request.
         if let Some(mt) = request.max_tokens {
             body["max_tokens"] = serde_json::Value::from(mt);
         }
@@ -1299,7 +1299,7 @@ impl LLMClient {
             "temperature": request.temperature,
         });
         // max_tokens is optional: when None (not configured), the provider's
-        // own default output limit applies — no cap is sent in the request.
+        // own default output limit applies - no cap is sent in the request.
         if let Some(mt) = request.max_tokens {
             body["max_tokens"] = serde_json::Value::from(mt);
         }
@@ -1467,7 +1467,7 @@ mod tests {
         // The function resolves the URL from plugin.json on disk when
         // found, or returns empty when no manifest is available (e.g.
         // during Docker builds where /app/plugins/ may not exist).
-        // Accept both outcomes — the test verifies the function doesn't
+        // Accept both outcomes - the test verifies the function doesn't
         // panic or return garbage.
         let url = resolve_default_base_url("openai");
         let ok = url == "https://api.openai.com/v1" || url.is_empty();
@@ -1816,7 +1816,7 @@ mod tests {
     // ── Transport hardening: retry behaviour (end-to-end) ──────────────────
 
     /// Spawn a minimal HTTP/1.1 server on an ephemeral port. Each accepted
-    /// connection is answered with `responder(request_index)` — the raw HTTP
+    /// connection is answered with `responder(request_index)` - the raw HTTP
     /// response text. Returns (base_url, request counter).
     fn spawn_http_server(
         responder: impl Fn(usize) -> String + Send + 'static,
@@ -2007,7 +2007,7 @@ mod usage_parse_tests {
 
     // Cache-hit accounting: the OpenAI-compatible usage object must parse the
     // DeepSeek `prompt_cache_hit_tokens` field into `cached_tokens` (serde
-    // alias) — this is the field the threads-table cached_tokens column is
+    // alias) - this is the field the threads-table cached_tokens column is
     // fed from via merge_usage + complete_thread.
     #[test]
     fn usage_parses_deepseek_prompt_cache_hit_tokens() {
@@ -2033,7 +2033,7 @@ mod usage_parse_tests {
     #[test]
     fn usage_missing_cache_fields_yields_none() {
         // The observed opencode-go gateway usage omits cache fields entirely:
-        // cached_tokens must be None (never a wrong number) — the threads
+        // cached_tokens must be None (never a wrong number) - the threads
         // table then records 0, which is exactly the reported symptom.
         let json = r#"{"prompt_tokens": 250000, "completion_tokens": 1000}"#;
         let u: Usage = serde_json::from_str(json).unwrap();

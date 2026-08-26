@@ -115,7 +115,7 @@ pub(crate) async fn setup_plugin_handler(
         //   remote   → {data_dir}/plugins/{type}/.remote/{name}/{path}/<command>
         //
         // This ensures anything outside omniagent (tests, scripts) never needs
-        // to know these paths — omniagent resolves them from plugin metadata.
+        // to know these paths - omniagent resolves them from plugin metadata.
         let type_dir = &p_type;
         let source_name: &str = detail.source.as_deref().unwrap_or(&source);
         let named_path = match source_name {
@@ -207,7 +207,7 @@ pub(crate) async fn setup_plugin_handler(
     {
         for (env_key, env_val) in &manifest.env {
             // Only $env: references are resolved. ${VAR} is treated as a
-            // literal string — it is never interpolated.
+            // literal string - it is never interpolated.
             let resolved = if let Some(var_name) = env_val.strip_prefix("$env:") {
                 crate::plugins_yaml::resolve_env_ref(var_name)
             } else {
@@ -228,7 +228,7 @@ pub(crate) async fn setup_plugin_handler(
                 // Forward ANY config value (string, number, bool) as its
                 // string form. Previously only `as_str()` values survived,
                 // silently dropping numeric/bool config (e.g. budget
-                // thresholds) — the plugin then always ran on defaults.
+                // thresholds) - the plugin then always ran on defaults.
                 let raw = match value {
                     serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
                     serde_json::Value::Number(n) => Some(n.to_string()),
@@ -605,7 +605,7 @@ pub(crate) async fn setup_plugin_handler(
             }
 
             // The platform plugin implements read_file internally, so the core
-            // stays plugin-agnostic — no need to register file readers or persist
+            // stays plugin-agnostic - no need to register file readers or persist
             // access_token from setup. The platform client is already in AppContext.
 
             // After setup, restart the platform binary so it picks up the new

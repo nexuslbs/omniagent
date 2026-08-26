@@ -37,7 +37,7 @@ pub struct PluginManifest {
     pub config_schema: Vec<ConfigSchemaField>,
     /// Environment variables for the plugin subprocess.
     /// Supports $env:VAR syntax for runtime resolution from the host env.
-    /// ${VAR} is never interpolated — treated as a literal string.
+    /// ${VAR} is never interpolated - treated as a literal string.
     /// Only used for platform plugins (ignored for MCP tools).
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,

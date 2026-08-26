@@ -100,8 +100,8 @@ struct ReloadPluginInfo {
 /// with '-') and absolute paths pass through unchanged; relative args are
 /// joined against the plugin's install dir and used when the candidate file
 /// exists, otherwise the arg is kept verbatim. Legacy absolute args (written
-/// before relative-arg support) under `legacy_prefix` — e.g. remote providers
-/// whose plugin.json was authored against the old bundled dir — are rewritten
+/// before relative-arg support) under `legacy_prefix` - e.g. remote providers
+/// whose plugin.json was authored against the old bundled dir - are rewritten
 /// to `install_dir` as a compatibility fallback.
 fn resolve_provider_args(
     args: &[String],
@@ -318,7 +318,7 @@ pub(crate) async fn reload_plugins(
                         .unwrap_or(false);
                     if changed {
                         tracing::info!(
-                            "Reload: provider '{}' entrypoint changed — restarting subprocess",
+                            "Reload: provider '{}' entrypoint changed - restarting subprocess",
                             name
                         );
                         PROVIDER_REGISTRY.write().remove(name);

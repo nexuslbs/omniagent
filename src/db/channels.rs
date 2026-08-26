@@ -5,16 +5,16 @@ use crate::db::types::{Channel, ChannelSeq0Message, ChannelStatus, CreateChannel
 use crate::error::{AppResult, Error};
 
 // ---------------------------------------------------------------------------
-// Channel store: channels.yml (the `channels` table is DROPPED — see
+// Channel store: channels.yml (the `channels` table is DROPPED - see
 // db-migrations). All definitions AND runtime state live in the yml; the
-// functions below keep their historical signatures (pool first — unused for
+// functions below keep their historical signatures (pool first - unused for
 // pure yml reads, still needed for thread-count / message queries) so call
 // sites change only in id type: numeric channel ids are now channel NAMES.
 // ---------------------------------------------------------------------------
 
 fn def_to_channel(name: &str, def: &ChannelDef) -> Channel {
     // Resolve identity fields (profile/provider/model) AT LOAD TIME with
-    // fallback — the loader returns resolved data, never shallow yml fields.
+    // fallback - the loader returns resolved data, never shallow yml fields.
     // A channels.yml edit (e.g. switching a channel's provider) therefore
     // takes effect on the very next load, with no restart and no cache.
     let resolved = crate::resolution::resolve_channel_identity(
@@ -27,7 +27,7 @@ fn def_to_channel(name: &str, def: &ChannelDef) -> Channel {
         name: name.to_string(),
         platform: def.platform.clone(),
         resource_identifier: def.resource_identifier.clone(),
-        // external_id is NOT a stored yml field — it was always equal to
+        // external_id is NOT a stored yml field - it was always equal to
         // resource_identifier at every creation site; derive for compat.
         external_id: (!rid.is_empty()).then_some(rid),
         current_profile: resolved.profile,
@@ -70,7 +70,7 @@ pub async fn get_channel_by_platform_name(
 }
 
 /// Look up a channel by its name (yml key). The old numeric id is gone:
-/// id == name. Kept as the historical entry point — callers pass the yml key.
+/// id == name. Kept as the historical entry point - callers pass the yml key.
 pub async fn find_channel_by_id(_pool: &PgPool, name: &str) -> AppResult<Option<Channel>> {
     Ok(channels_yaml::get_by_name(name)?.map(|def| def_to_channel(name, &def)))
 }
@@ -87,7 +87,7 @@ pub async fn get_channel_plan(_pool: &PgPool, name: &str) -> AppResult<Option<bo
 }
 
 /// Upsert a channel BY NAME (yml key). When a channel with that name exists
-/// it is UPDATED to the incoming platform + resource_identifier — a channel
+/// it is UPDATED to the incoming platform + resource_identifier - a channel
 /// is not pinned to the platform that first created it (same semantics as the
 /// old `ON CONFLICT (name) DO UPDATE`). Auto-created channels APPEND to
 /// channels.yml and become visible immediately (the yml IS the runtime store).

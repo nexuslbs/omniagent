@@ -58,8 +58,8 @@ fn get_plugin(name: &str) -> Option<serde_json::Value> {
 
 /// Set up a remote plugin for testing using the same API flow as the
 /// dashboard "Install from Git" modal:
-/// 1. POST /api/plugins/install-git — clones repo to .remote/<name>/, writes remote.yml
-/// 2. POST /api/plugins/{type}/{source}/{name}/install — compiles, registers in plugins.yml
+/// 1. POST /api/plugins/install-git - clones repo to .remote/<name>/, writes remote.yml
+/// 2. POST /api/plugins/{type}/{source}/{name}/install - compiles, registers in plugins.yml
 fn setup_remote_plugin(name: &str, base: &str) {
     // 1. install-git: clones repo to .remote/<name>/, persists remote.yml entry
     // Use HTTPS URL to avoid file:// git-cache issues
@@ -338,7 +338,7 @@ fn test_remote_plugin_reinstall() {
         assert_eq!(resp["success"], true, "Reinstall failed: {:?}", resp);
 
         // Verify the binary exists immediately after the API returns.
-        // The reinstall API is synchronous — it awaits compilation internally.
+        // The reinstall API is synchronous - it awaits compilation internally.
         // If compilation succeeded, the binary is on disk right away.
         if std::path::Path::new(&remote_binary_path(name).unwrap_or_else(|| {
             format!(
@@ -353,7 +353,7 @@ fn test_remote_plugin_reinstall() {
         }
 
         if attempt == 1 {
-            // Parallel test likely deleted our source — re-install and retry
+            // Parallel test likely deleted our source - re-install and retry
             setup_remote_plugin(name, base);
             let _ = api_post(&format!("{}/enable", base));
         }

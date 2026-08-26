@@ -457,7 +457,7 @@ struct CreateTaskResponse {
 fn task_row_to_entry(data_dir: &str, r: KanbanTaskRow) -> KanbanTaskEntry {
     // Resolve the task's fallback fields (task → board → channel → global)
     // AT LOAD TIME: the API hands out resolved channel/workflow/profile/plan/
-    // template — never the shallow row (board-based tasks carry NULLs even
+    // template - never the shallow row (board-based tasks carry NULLs even
     // though the board defines their effective values). On an invalid board
     // (boards.yml present + unknown board) dispatch fails loudly elsewhere;
     // here we log and fall back to the raw row so the API stays displayable.
@@ -575,7 +575,7 @@ fn validate_status(status: &str) -> bool {
 /// Validate the `board` value on task CREATE.
 ///
 /// When boards are enabled (boards.yml present) the board is REQUIRED and
-/// must name an existing board — a board-less task would otherwise be
+/// must name an existing board - a board-less task would otherwise be
 /// silently skipped by the auto-dispatcher forever. When boards are disabled
 /// the field is inert and any value is accepted.
 fn validate_create_board(
@@ -774,7 +774,7 @@ async fn create_task_handler(
     }
 
     // Board validation: when boards are enabled (boards.yml present), the
-    // board is required and must name an existing board — otherwise the
+    // board is required and must name an existing board - otherwise the
     // auto-dispatcher silently skips the task forever (boards.rs).
     if let Err(msg) = validate_create_board(&state.data_dir, body.board.as_deref()) {
         return err_json(StatusCode::BAD_REQUEST, &msg);
@@ -799,7 +799,7 @@ async fn create_task_handler(
 
     // Resolve the effective `plan` AT CREATE (spec: thread creation resolves
     // plan/profile/provider/model from the board). `kanban_tasks.plan` is
-    // `BOOLEAN NOT NULL DEFAULT false` — storing `body.plan.unwrap_or(false)`
+    // `BOOLEAN NOT NULL DEFAULT false` - storing `body.plan.unwrap_or(false)`
     // for a board task WITHOUT an explicit plan would materialize `false` and
     // SHADOW the board's `plan: true` at dispatch/review time (the raw
     // Some(false) beats the board in resolve_task_defaults, so
@@ -1013,7 +1013,7 @@ async fn change_status_handler(
     //     code wins; otherwise an existing typed code is preserved, falling
     //     back to the stable 'unspecified' code. The message falls back to the
     //     existing prose (or ''). Transitions OUT of `blocked` leave goal
-    //     state untouched — resume eligibility is decided by the dispatcher
+    //     state untouched - resume eligibility is decided by the dispatcher
     //     from goal_phase/goal_blocked_code; an explicit goal PATCH clears it.
     if body.status == "blocked" && old_status != body.status {
         let blocked_code = body
@@ -1399,7 +1399,7 @@ async fn update_task_handler(
     }
 
     // Board validation: when boards are enabled, the resulting task must
-    // always carry a valid board — clearing (empty string) or setting an
+    // always carry a valid board - clearing (empty string) or setting an
     // unknown board is rejected; a missing field keeps the existing board.
     if let Err(msg) = validate_update_board(&state.data_dir, body.board.as_deref()) {
         return err_json(StatusCode::BAD_REQUEST, &msg);
@@ -2236,7 +2236,7 @@ async fn delete_workflow_handler(
 }
 
 // ---------------------------------------------------------------------------
-// Boards CRUD (kanban boards — config/boards.yml)
+// Boards CRUD (kanban boards - config/boards.yml)
 // ---------------------------------------------------------------------------
 
 /// Absolute path to the deployment's `boards.yml` (under the data dir).
@@ -2514,8 +2514,8 @@ async fn reset_workflow_executions_handler(
 ///
 /// Thin HTTP wrapper over the shared in-process dispatch routine
 /// [`crate::kanban_dispatch::dispatch_todo_tasks`] (also driven by the core
-/// background loop, `kanban_dispatcher_interval`). The decision logic —
-/// board gate, dependency gate, channel-busy gate, priority ordering — lives
+/// background loop, `kanban_dispatcher_interval`). The decision logic -
+/// board gate, dependency gate, channel-busy gate, priority ordering - lives
 /// in `kanban_dispatch`; this handler only formats the outcome as an HTTP
 /// response. Returns `{"dispatched": false}` when nothing is eligible.
 async fn dispatch_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -2574,7 +2574,7 @@ async fn redispatch_handler(
     };
 
     // 1a. Resolve the task's effective defaults ONCE at load (task → board →
-    //     channel → global settings) — the universal resolution pattern. The
+    //     channel → global settings) - the universal resolution pattern. The
     //     role gate below must use the RESOLVED workflow_id: a board task has
     //     raw NULL workflow_id but inherits the board's workflow.
     let resolved = match crate::resolution::resolve_task_defaults(
@@ -2647,7 +2647,7 @@ async fn redispatch_handler(
     }
 
     // 4. Create the role thread for the task's CURRENT status (no stale
-    //    skip — the check above guarantees no active thread) and mark
+    //    skip - the check above guarantees no active thread) and mark
     //    thread_status='scheduled'. Task status is left unchanged.
     match create_kanban_step_thread(&state.pool, &state.data_dir, &id, &task.status, false).await {
         Ok(Some(tid)) => ok_json(serde_json::json!({

@@ -1,14 +1,14 @@
-//! Universal fallback resolution — resolve fields with fallbacks ONCE at load.
+//! Universal fallback resolution - resolve fields with fallbacks ONCE at load.
 //!
 //! User principle (2026-08-19): ANY place that uses fields that have
 //! fallbacks MUST resolve the fallbacks FIRST, before any shallow use of the
-//! raw fields. Resolve as EARLY as possible — right after the row/config is
-//! loaded — compute the effective values once, and let consumers use the
+//! raw fields. Resolve as EARLY as possible - right after the row/config is
+//! loaded - compute the effective values once, and let consumers use the
 //! RESOLVED struct. Never shallow-read a raw field that has a fallback chain
 //! (see `Reference/Field-Resolution.md`).
 //!
 //! Domains covered here:
-//! - Kanban task fields (Phase 1 — the live bug): `resolve_task_defaults`
+//! - Kanban task fields (Phase 1 - the live bug): `resolve_task_defaults`
 //!   (task → board → channel → global settings). The fail-routing path used
 //!   to read `kanban_tasks.workflow_id` raw, so board-based tasks
 //!   (workflow_id NULL) lost their workflow entirely and a reviewer
@@ -27,10 +27,10 @@
 use crate::channels_yaml::{load_channels_from, ChannelDef};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 1 — Kanban task defaults (task → board → channel → global)
+// Phase 1 - Kanban task defaults (task → board → channel → global)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Raw kanban-task fallback fields — exactly the columns that participate in
+/// Raw kanban-task fallback fields - exactly the columns that participate in
 /// the task → board → channel → global fallback chain. Consumers MUST pass
 /// these to [`resolve_task_defaults`] and use the returned
 /// [`ResolvedTaskDefaults`]; they must NEVER read these raw fields directly
@@ -58,7 +58,7 @@ pub struct ResolvedTaskDefaults {
     pub workflow_id: Option<String>,
     /// Effective channel name (task → board → `default_kanban_channel`
     /// setting → ""). `""` means no channel (thread fails with "no channel
-    /// defined" — fail-with-record, never a silent substitution).
+    /// defined" - fail-with-record, never a silent substitution).
     pub channel_id: String,
     /// Effective profile name (task → board → channel → default profile).
     pub profile: String,
@@ -89,7 +89,7 @@ fn channel_def_from(data_dir: &str, name: &str) -> Option<ChannelDef> {
 /// - `plan`: task → board.plan
 ///
 /// Fail-loud (mirrors `crate::boards::task_board` semantics): when boards.yml
-/// exists and the task's board is NULL or unknown → `Err` — never a silent
+/// exists and the task's board is NULL or unknown → `Err` - never a silent
 /// empty fallback that changes behavior. When boards.yml is absent (feature
 /// disabled) the board contributes nothing and the task behaves exactly like
 /// a non-board task.
@@ -165,7 +165,7 @@ pub fn resolve_task_defaults(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 2 — Effective channel (raw name → default chain + field fallbacks)
+// Phase 2 - Effective channel (raw name → default chain + field fallbacks)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Effective channel, resolved ONCE at load: the channel NAME (explicit →
@@ -185,7 +185,7 @@ pub struct ResolvedChannel {
 }
 
 /// Effective channel NAME for a producer (kanban dispatch, hooks, scheduler):
-/// an explicit name wins (even when it is not a known channel — the caller
+/// an explicit name wins (even when it is not a known channel - the caller
 /// then fails the thread with "channel not found", never silently substitutes
 /// the default); otherwise the named default-channel setting in settings.yml
 /// is used; when neither resolves to a known channel → `""` (the caller
@@ -216,7 +216,7 @@ pub fn effective_channel_name(
 /// Resolve the effective channel (name + profile/provider/model fallbacks)
 /// for a producer. See [`effective_channel_name`] for the name chain; the
 /// profile/provider/model come from the channel's channels.yml definition
-/// (empty when the channel is unknown — the caller fails with "channel not
+/// (empty when the channel is unknown - the caller fails with "channel not
 /// found").
 pub fn resolve_channel(
     data_dir: &str,
@@ -236,7 +236,7 @@ pub fn resolve_channel(
 /// Resolved channel identity: the channel's effective profile/provider/model
 /// with fallbacks applied AT LOAD TIME (channels.yml → profile registry →
 /// global default provider). Every channel loader hands out these resolved
-/// values — never shallow/empty yml fields that still need resolution.
+/// values - never shallow/empty yml fields that still need resolution.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResolvedChannelIdentity {
     /// Effective profile name (yml `profile` → default profile).
@@ -258,7 +258,7 @@ pub struct ResolvedChannelIdentity {
 /// TIME. The chain mirrors `crate::db::threads::resolve_thread_identity`'s
 /// channel tier (provider: channel → profile → global; model resolved at the
 /// same tier as the provider) so a channel loaded through this resolver
-/// reproduces exactly what thread creation would resolve — and a channels.yml
+/// reproduces exactly what thread creation would resolve - and a channels.yml
 /// edit (e.g. switching a channel's provider) takes effect on the NEXT load,
 /// with no restart and no boot-time cache.
 pub fn resolve_channel_identity(data_dir: &str, def: &ChannelDef) -> ResolvedChannelIdentity {
@@ -347,7 +347,7 @@ pub fn resolve_channel_identity(data_dir: &str, def: &ChannelDef) -> ResolvedCha
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 3 — Per-thread provider/model (resolved once at thread creation)
+// Phase 3 - Per-thread provider/model (resolved once at thread creation)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Resolved per-thread provider/model identity, resolved ONCE at thread
@@ -458,7 +458,7 @@ channels:
         let r = resolve_channel_identity(&dir, &def);
         assert_eq!(r.profile, crate::profile::default_profile_name());
         // Provider falls back to the resolved profile's provider (the default
-        // profile ships deepseek) — the loader returns resolved data, never
+        // profile ships deepseek) - the loader returns resolved data, never
         // None while a default profile exists.
         let profile_name = crate::profile::default_profile_name();
         let expected = crate::profile::ProfileRegistry::new(&dir)
@@ -470,7 +470,7 @@ channels:
     #[test]
     fn resolve_channel_identity_preserves_wf_test_pins() {
         // Regression guard 83f461b: the wf-test channel pins noop /
-        // test-tool-caller — the resolver must preserve the channel override.
+        // test-tool-caller - the resolver must preserve the channel override.
         let dir = temp_data_dir(
             None,
             Some(
@@ -491,7 +491,7 @@ channels:
 
     #[test]
     fn resolve_task_defaults_board_task_gets_board_defaults() {
-        // THE BUG: a board task has workflow_id/channel_id/profile NULL — the
+        // THE BUG: a board task has workflow_id/channel_id/profile NULL - the
         // resolver must supply them from the board (workflow + channel +
         // profile + plan).
         let dir = temp_data_dir(
@@ -682,7 +682,7 @@ channels:
             Some("channels:\n  kanban:\n    profile: omni\n  cron:\n"),
             Some("kanban:\n  default_kanban_channel: kanban\n"),
         );
-        // Explicit wins (even unknown — caller fails with channel-not-found).
+        // Explicit wins (even unknown - caller fails with channel-not-found).
         assert_eq!(
             effective_channel_name(&dir, Some("kanban"), "default_kanban_channel"),
             "kanban"
@@ -756,7 +756,7 @@ channels:
         let settings = crate::server::settings::load_settings_file(&dir);
         // token budget defaults (soft 100000 / hard 500000) live in config.rs;
         // here we assert the settings map itself defaults to empty (AgentConfig
-        // applies the defaults table at load — that is the snapshot).
+        // applies the defaults table at load - that is the snapshot).
         assert!(settings.is_empty(), "no settings.yml → empty snapshot");
     }
 }

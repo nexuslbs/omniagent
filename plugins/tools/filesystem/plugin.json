@@ -12,14 +12,14 @@
   "config_schema": [
     {
       "key": "workspace_dir",
-      "label": "Workspace Dir — file WRITES are always allowed here and in its subdirectories (reads are unrestricted)",
+      "label": "Workspace Dir - file WRITES are always allowed here and in its subdirectories (reads are unrestricted)",
       "type": "string",
       "default": "/opt/workspace",
       "required": true
     },
     {
       "key": "omni_dir",
-      "label": "OMNI_DIR root — subdirectories enabled by the write_* toggles below",
+      "label": "OMNI_DIR root - subdirectories enabled by the write_* toggles below",
       "type": "string",
       "default": "$env:OMNI_DIR",
       "required": false
@@ -47,7 +47,7 @@
     },
     {
       "key": "write_omni_all",
-      "label": "Allow file WRITES in the ENTIRE OMNI_DIR — supersedes the write_profiles / write_data / write_plugins toggles",
+      "label": "Allow file WRITES in the ENTIRE OMNI_DIR - supersedes the write_profiles / write_data / write_plugins toggles",
       "type": "boolean",
       "default": false,
       "required": false

@@ -7,7 +7,7 @@ use crate::profiles_yaml::ProfileDef;
 /// A profile defines the model, provider, data paths, and allowed tools
 /// for a given context (channel or direct prompt).
 ///
-/// Profiles are DECLARED by `{data_dir}/config/profiles.yml` — a
+/// Profiles are DECLARED by `{data_dir}/config/profiles.yml` - a
 /// `profiles/<name>/` directory with no matching YAML entry is ignored; a
 /// YAML entry without a directory is a valid existing profile. The legacy
 /// `profiles/<name>/config.json` stays on disk (backward compat) but is no
@@ -51,7 +51,7 @@ pub struct Profile {
 /// Default context budget for profiles that don't specify one.
 pub const PROMPT_BUDGET_DEFAULT: usize = 15_000;
 
-/// Legacy schema for `profiles/<name>/config.json` — KEPT for backward
+/// Legacy schema for `profiles/<name>/config.json` - KEPT for backward
 /// compat only (the file stays on disk, untouched, but is NOT read for
 /// resolution anymore).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,7 +66,7 @@ impl Profile {
     /// Create a default profile with the given name (in-memory fallback used
     /// when no profiles.yml declares the profile). Provider/model are
     /// neutral (`None`): resolution falls through to the global
-    /// `default_provider` / the provider's default model — never to a
+    /// `default_provider` / the provider's default model - never to a
     /// hardcoded vendor name.
     pub fn default(name: &str) -> Self {
         Self {
@@ -89,7 +89,7 @@ impl Profile {
 
     /// Build a `Profile` from a `profiles.yml` definition. YAML-absent
     /// fields stay `None` (so an entry that omits `provider`/`model` falls
-    /// through to the global `default_provider` — never to the in-memory
+    /// through to the global `default_provider` - never to the in-memory
     /// built-ins). Non-YAML runtime defaults (retrieval/grounding/budget)
     /// take the `Profile::default` values.
     pub fn from_def(name: &str, def: &ProfileDef) -> Self {
@@ -107,7 +107,7 @@ impl Profile {
     }
 
     /// Load a profile config from `<data_dir>/profiles/<name>/config.json`
-    /// (LEGACY — no longer consulted for resolution; kept for backward
+    /// (LEGACY - no longer consulted for resolution; kept for backward
     /// compat and tests).
     #[allow(dead_code)]
     pub fn load_config(data_dir: &str, name: &str) -> Option<ProfileConfig> {
@@ -116,7 +116,7 @@ impl Profile {
         serde_json::from_str(&content).ok()
     }
 
-    /// Apply a legacy ProfileConfig on top of the default (LEGACY — only
+    /// Apply a legacy ProfileConfig on top of the default (LEGACY - only
     /// used by tests; the YAML store is the resolution source now).
     #[allow(dead_code)]
     pub fn with_config(mut self, config: ProfileConfig) -> Self {
@@ -207,9 +207,9 @@ impl ProfileRegistry {
     /// When the default profile has no entry in `config/profiles.yml`, the
     /// in-memory default is inserted AND the entry is upserted into
     /// `config/profiles.yml` (atomic write under the save lock) so the
-    /// default profile is declared on disk — this is the startup
+    /// default profile is declared on disk - this is the startup
     /// auto-create. It NEVER creates or touches anything under
-    /// `profiles/` — no `create_dir_all`, no `config.json` write. An
+    /// `profiles/` - no `create_dir_all`, no `config.json` write. An
     /// existing legacy `profiles/<default>/config.json` is left alone.
     fn ensure_default(&mut self) {
         if self.profiles.contains_key(&self.default_profile) {
@@ -275,7 +275,7 @@ mod tests {
         let p = Profile::default("test");
         assert!(
             p.allowed_tools.is_empty(),
-            "Default profile should have no tools — they come from profiles.yml"
+            "Default profile should have no tools - they come from profiles.yml"
         );
         assert_eq!(p.plan, None);
         assert_eq!(p.template, None);

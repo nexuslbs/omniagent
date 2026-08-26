@@ -46,7 +46,7 @@ fn method_allowed(method: &str, allow_unsafe: bool) -> bool {
 
 /// Fetch a URL over HTTP(S).
 ///
-/// Fully async (reqwest async client) with connect + total timeouts — a hung
+/// Fully async (reqwest async client) with connect + total timeouts - a hung
 /// upstream can NEVER block an async worker thread or wedge the plugin
 /// runtime (Aug 2026 all-plugins-async push).
 async fn handle_fetch(args: Value) -> Result<(String, bool)> {

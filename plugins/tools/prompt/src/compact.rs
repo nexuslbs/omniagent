@@ -8,12 +8,12 @@ use crate::dump;
 /// The block is a SINGLE system message living at a FIXED index right after
 /// the never-touched preamble (main system prompt + cause message). Its
 /// content is reused VERBATIM on every call between compactions, so the
-/// prefix before the growing conversation tail stays byte-identical — this
+/// prefix before the growing conversation tail stays byte-identical - this
 /// is what preserves DeepSeek prefix caching across iterations.
 pub const COMPACTION_SUMMARY_MARKER: &str = "=== Compaction Summary ===";
 
 /// Excerpt/size limits for compaction, sourced from plugin config
-/// (plugin.json config_schema + settings.yml) — no hardcoded limits in code.
+/// (plugin.json config_schema + settings.yml) - no hardcoded limits in code.
 #[derive(Debug, Clone, Copy)]
 pub struct CompactSettings {
     /// Characters of each individual tool result excerpt kept when a
@@ -31,7 +31,7 @@ pub struct CompactSettings {
     /// Without a cap, a long thread compacts forever: once the preamble,
     /// block, and recent tail together exceed the hard token budget,
     /// compaction can never reduce the size below the trigger, so it runs
-    /// on EVERY iteration and each run appends MORE entries — an unbounded
+    /// on EVERY iteration and each run appends MORE entries - an unbounded
     /// death spiral (observed live: thread 1726, 162 compactions in 300
     /// iterations, block grew 66K → 357K chars). When the block exceeds
     /// this cap, the OLDEST entries are pruned (newest kept), so the block
@@ -41,7 +41,7 @@ pub struct CompactSettings {
 }
 /// Tools whose results ARE the agent's working memory (file contents,
 /// listings, search hits). When compaction must drain them, keep a much
-/// larger excerpt than the generic cap — zeroing them forces the agent to
+/// larger excerpt than the generic cap - zeroing them forces the agent to
 /// re-read the same files (thread 700 death spiral: 117 sed windows).
 fn is_read_type_tool(name: &str) -> bool {
     name.starts_with("filesystem_read")
@@ -85,7 +85,7 @@ pub struct CompactOutcome {
 ///   across calls.
 /// - Between compactions the block content is reused VERBATIM; only at the
 ///   NEXT compaction does newly drained content APPEND to it (strict
-///   superset — the old text is preserved byte-for-byte). The array shape is
+///   superset - the old text is preserved byte-for-byte). The array shape is
 ///   always `[preamble][frozen summary][growing tail]`.
 /// - No drain (tool-call turns <= keep_recent) -> nothing removed/inserted,
 ///   the caller returns `messages: null` and the core leaves the array alone.
@@ -93,7 +93,7 @@ pub struct CompactOutcome {
 /// WS-2/WS-3: before tool-role messages are drained, a JSON-lines digest of
 /// each destroyed tool result is appended to `context-<current_iteration>.json`
 /// in the thread dir (deduped, 200KB cap, keep last 3 dump files) and
-/// read-type results are excerpted into `auto-notes.md` — the agent's only
+/// read-type results are excerpted into `auto-notes.md` - the agent's only
 /// recovery channel for drained read content. Both behaviors are preserved
 /// exactly.
 pub fn compact_old_assistant_messages(
@@ -130,7 +130,7 @@ pub fn compact_old_assistant_messages(
     let drain_start = tool_indices[0]; // head of the drained region
                                        // End of the drained span: just past the LAST drained turn's tool
                                        // results. When keep_recent == 0 every turn is drained, so
-                                       // tool_indices[n_drain] would be out of bounds — walk forward from the
+                                       // tool_indices[n_drain] would be out of bounds - walk forward from the
                                        // last drained assistant instead. When keep_recent > 0 this lands on
                                        // the first KEPT turn (tool results immediately precede it).
     let mut drain_end = tool_indices[n_drain - 1] + 1;
@@ -178,7 +178,7 @@ pub fn compact_old_assistant_messages(
                             // auto-notes.md (re-injected every iteration).
                             // Dumps are forbidden to re-read (rule 12), so
                             // this is the ONLY recovery channel for drained
-                            // read content — otherwise the agent forgets
+                            // read content - otherwise the agent forgets
                             // what it read and re-reads the same files
                             // (thread 700: 117 sed windows of the same
                             // ranges, zero commits).
@@ -266,7 +266,7 @@ pub fn compact_old_assistant_messages(
             // are added at the end. Then bound the block: if it exceeds the
             // configured cap, drop the OLDEST entries (newest kept) so a
             // long thread cannot spiral into compaction-on-every-iteration
-            // (the block would otherwise grow forever — thread 1726 grew
+            // (the block would otherwise grow forever - thread 1726 grew
             // 66K → 357K chars over 162 compactions).
             messages[idx].content = format!("{}\n{}", messages[idx].content, joined_entries);
             prune_summary_block(&mut messages[idx].content, settings.max_summary_chars);
@@ -274,7 +274,7 @@ pub fn compact_old_assistant_messages(
         }
         None => {
             // First compaction: create the block at the head of the drained
-            // region — immediately after the never-touched preamble — and
+            // region - immediately after the never-touched preamble - and
             // remove the drained span (shifted by the insertion).
             let mut block_content = format!(
                 "{}\nFrozen prefix block: older conversation turns were compacted into this summary, oldest first. Everything before this block is the fixed preamble; everything after is the live conversation. Recover destroyed read results from auto-notes.md / context-*.json dumps.\n{}",
@@ -302,7 +302,7 @@ pub fn compact_old_assistant_messages(
 /// The header (marker + explanation lines, everything before the first
 /// `- [` entry) is always preserved byte-for-byte. Among the entries, the
 /// NEWEST ones are kept and the OLDEST are dropped until the block fits the
-/// cap. Dropped entries are not lost — every drained tool result was already
+/// cap. Dropped entries are not lost - every drained tool result was already
 /// persisted to the durable `context-<iter>.json` dump (and read-type
 /// results to `auto-notes.md`), so the block is only a bounded in-context
 /// digest. Without this cap the block is a strict superset that grows on
@@ -352,12 +352,12 @@ fn prune_summary_block(content: &mut String, max_chars: usize) {
     }
     kept.reverse();
     if kept.is_empty() {
-        // Nothing fits — still keep the single newest entry so the block
+        // Nothing fits - still keep the single newest entry so the block
         // carries SOME context (bounded by one entry).
         kept.push(entry_list.last().cloned().unwrap_or_default());
     }
     *content = format!(
-        "{}{}\n[older entries pruned — see context-*.json dumps]",
+        "{}{}\n[older entries pruned - see context-*.json dumps]",
         header,
         kept.join("\n")
     );
@@ -540,7 +540,7 @@ mod tests {
     }
 
     // (4) Strict-superset property: a second compaction appends new entries
-    // to the existing block and keeps its position — the first summary's
+    // to the existing block and keeps its position - the first summary's
     // text is preserved verbatim (byte-for-byte), never re-rendered.
     #[test]
     fn second_compaction_summary_is_strict_superset() {
@@ -619,7 +619,7 @@ mod tests {
         assert!(outcome.removed >= 2);
         assert_eq!(outcome.dump_file.as_deref(), Some("context-7.json"));
         // All turns share the same tool+args in this fixture, so append_dump
-        // dedupes the identical (file, tool+args) digests — >= 1 proves the
+        // dedupes the identical (file, tool+args) digests - >= 1 proves the
         // durable dump path fires (dedupe itself is covered in dump.rs).
         assert!(outcome.dump_entries >= 1);
 
@@ -652,7 +652,7 @@ mod tests {
 
         // 30 turns -> plenty of drainable material for many compactions.
         // Tool results are LARGE (like real filesystem_read output), so each
-        // drained entry costs ~read_excerpt_chars (2000) in the block — the
+        // drained entry costs ~read_excerpt_chars (2000) in the block - the
         // realistic pressure that overflowed the 5000-char cap.
         let mut msgs = vec![user_msg("start")];
         for i in 0..30 {
@@ -669,7 +669,7 @@ mod tests {
         for iter in 0..20 {
             let outcome = compact_old_assistant_messages(&mut msgs, 2, None, 7 + iter, &small);
             // Keep_recent=2: every call drains the OLDEST tail turn (1 tool
-            // message) as long as the tail has more than 2 turns — the
+            // message) as long as the tail has more than 2 turns - the
             // spiral precondition.
             if iter > 0 {
                 assert_eq!(outcome.removed, 1, "drain must still happen at iter {iter}");
@@ -685,7 +685,7 @@ mod tests {
         }
 
         // The block must be bounded by the cap (plus the single-entry
-        // fallback slack when no entry pair fits — never multiple entries).
+        // fallback slack when no entry pair fits - never multiple entries).
         let pos = summary_pos(&msgs);
         let block_chars = msgs[pos].content.chars().count();
         assert!(
@@ -695,7 +695,7 @@ mod tests {
 
         // The NEWEST drained content must be preserved; the OLDEST must be
         // pruned once the cap is exceeded. (At iter 19 the drained turn is
-        // "after 17" — the two most recent turns stay in the live tail.)
+        // "after 17" - the two most recent turns stay in the live tail.)
         let block = &msgs[pos].content;
         assert!(
             block.contains("RESULT after 16") || block.contains("RESULT after 17"),

@@ -1,7 +1,7 @@
 //! Channels API: list, detail, and update channels.
 //!
 //! Channel definitions AND runtime state live in `{data_dir}/config/channels.yml`
-//! (the `channels` database table is DROPPED — see db-migrations). The channel
+//! (the `channels` database table is DROPPED - see db-migrations). The channel
 //! NAME (the yml key) is the stable identifier used everywhere: API ids,
 //! `threads.channel_id`, `messages.channel_id`, `kanban_tasks.channel_id`,
 //! `summaries.channel_id` and tasks.yml `channel:` references.
@@ -9,7 +9,7 @@
 //! - `GET  /channels`      : list all channels
 //! - `GET  /channels/{id}` : get single channel detail (id == name)
 //! - `PATCH /channels/{id}`: update runtime fields (profile /
-//!   provider / model / closed / readonly / plan / template) —
+//!   provider / model / closed / readonly / plan / template) -
 //!   persisted atomically to channels.yml. Definition fields
 //!   (platform / resource_identifier) are NOT editable via the API;
 //!   they change only by editing the yml (or via the `update_channel_platform`
@@ -132,7 +132,7 @@ async fn get_channel_handler(
     ok_json(ChannelEntry::from(channel))
 }
 
-// PATCH body — runtime-mutable fields only (NULLIF-style partial updates:
+// PATCH body - runtime-mutable fields only (NULLIF-style partial updates:
 // None = leave unchanged, Some("") = clear, Some(v) = set).
 #[derive(Debug, Deserialize)]
 pub struct UpdateChannelRequest {

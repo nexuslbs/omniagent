@@ -1,4 +1,4 @@
-//! Models API: GET/PUT `/api/models` — read/write `config/models.yml`
+//! Models API: GET/PUT `/api/models` - read/write `config/models.yml`
 //! (provider/model overrides via a pure definition file, no plugin code).
 //!
 //! - `GET /api/models`: returns the parsed models.yml content

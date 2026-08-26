@@ -1,4 +1,4 @@
-//! `tasks.yml` — single source of truth for cron schedules and hooks.
+//! `tasks.yml` - single source of truth for cron schedules and hooks.
 //!
 //! Definitions (previously rows in the `cron_jobs` and `hooks` tables) live in
 //! `{data_dir}/config/tasks.yml` with two top-level keys:
@@ -68,14 +68,14 @@ pub struct ScheduleDef {
     pub channel: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    /// `true`/`false`/None — the single plan-mode bool.
+    /// `true`/`false`/None - the single plan-mode bool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<bool>,
     /// The cron expression, 5-field Linux format (legacy column `schedule`).
     pub cron: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    /// Action id — presence implies mode=action (legacy action_id).
+    /// Action id - presence implies mode=action (legacy action_id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -115,7 +115,7 @@ pub struct HookDef {
     pub count: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    /// Action id — presence implies mode=action unless `mode` is explicit.
+    /// Action id - presence implies mode=action unless `mode` is explicit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     /// Explicit mode: agentic | action (optional; derived otherwise).
@@ -361,15 +361,15 @@ pub fn validate_hook(key: &str, def: &HookDef) -> Result<(), String> {
 
 // ── Channel resolution ──────────────────────────────────────────────────────
 
-/// Resolve a channel NAME to its id — since channels now live in
+/// Resolve a channel NAME to its id - since channels now live in
 /// channels.yml, the id IS the name (the yml key). Missing/unknown/empty
-/// name → `None` (default-channel semantics) — never crashes.
+/// name → `None` (default-channel semantics) - never crashes.
 pub async fn resolve_channel_id(_pool: &PgPool, name: Option<&str>) -> Option<String> {
     let name = name.map(str::trim).filter(|n| !n.is_empty())?;
     crate::channels_yaml::exists(name).then(|| name.to_string())
 }
 
-/// Resolve a channel id (== name) to its NAME (identity — channels.yml keys
+/// Resolve a channel id (== name) to its NAME (identity - channels.yml keys
 /// are referenced by key string, like schedule_task_id/workflow_id).
 /// Unknown/zero id → `None`.
 pub async fn channel_name_for_id(_pool: &PgPool, id: Option<String>) -> Option<String> {

@@ -259,7 +259,7 @@ async fn handle_remove_dependency(_pool: &PgPool, args: &Value) -> Result<(Strin
 // ---------------------------------------------------------------------------
 
 /// Callback invoked when the host sends configuration via configure message.
-/// Plugin config — received via configure message.
+/// Plugin config - received via configure message.
 #[derive(Debug, Clone)]
 struct PluginConfig {
     pub database_url: String,
@@ -287,12 +287,12 @@ impl PluginConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: kanban_review_task (MANUAL/API only — spec §8 R12)
+// Tool: kanban_review_task (MANUAL/API only - spec §8 R12)
 // ---------------------------------------------------------------------------
 
 /// Manual/API-only review decision with the same validation as POST /review:
 /// decision whitelist (approve | rework | retest | block) + R5 target
-/// validation + retry guards — all enforced by
+/// validation + retry guards - all enforced by
 /// `omniagent::agent::manual_review_decision`.
 async fn handle_review(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let task_id = args["task_id"]
@@ -332,7 +332,7 @@ async fn handle_review(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Shared pool — populated by configure callback before any tool call
+    // Shared pool - populated by configure callback before any tool call
     let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
 
     let p_create = pool.clone();
@@ -599,7 +599,7 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "kanban_review_task".to_string(),
                 description:
-                    "MANUAL/API-only review decision for a kanban task. Decision: approve (task done), rework (back to running with a new executor thread), retest (back to testing with a new tester thread), block (task blocked). Invalid decisions and invalid targets (e.g. retest without a tester role in the workflow) are rejected. The reviewer AGENT never calls this tool — it signals approve via normal completion and issues via fail-thread."
+                    "MANUAL/API-only review decision for a kanban task. Decision: approve (task done), rework (back to running with a new executor thread), retest (back to testing with a new tester thread), block (task blocked). Invalid decisions and invalid targets (e.g. retest without a tester role in the workflow) are rejected. The reviewer AGENT never calls this tool - it signals approve via normal completion and issues via fail-thread."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",

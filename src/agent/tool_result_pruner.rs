@@ -1,4 +1,4 @@
-//! Deterministic tool-result pruning (head/middle/tail) — task 2.
+//! Deterministic tool-result pruning (head/middle/tail) - task 2.
 //!
 //! Complements the tool-result spill (task 1): spill preserves FULL fidelity
 //! on disk (preview + `[full output: <path>]` locator in the message); the
@@ -6,7 +6,7 @@
 //! conversation with a bounded head/middle/tail preview BEFORE the content is
 //! sent to the LLM (summary generation, context assembly, provider retries).
 //!
-//! Contract (from the task decision — do NOT re-litigate):
+//! Contract (from the task decision - do NOT re-litigate):
 //! - only `role == "tool"` message CONTENT is replaced; tool-CALL messages
 //!   (`role == "assistant"` carrying `tool_calls`) are never touched, so the
 //!   tool-call/result pairing stays intact (`tool_call_id`/`name` preserved),
@@ -15,7 +15,7 @@
 //!   can still read the full output via `filesystem_read`,
 //! - results at or under `min_chars` (Unicode code points) are never touched,
 //! - already-pruned contents (spill or prune previews) are never re-pruned
-//!   (idempotent — no compounding across iterations),
+//!   (idempotent - no compounding across iterations),
 //! - every replacement is accounted (chars before → after) and logged.
 //!
 //! The pruner is pure slicing: zero LLM calls, deterministic output, and
@@ -36,8 +36,8 @@ pub const DEFAULT_PRUNE_MIN_CHARS: usize = 20_000;
 
 /// Substring shared by the task-1 spill preview and this pruner's preview.
 /// Presence of this marker means the content is ALREADY a bounded preview
-/// with a locator — never re-prune it (idempotency).
-const ALREADY_PRUNED_MARKER: &str = "omitted — see full output below";
+/// with a locator - never re-prune it (idempotency).
+const ALREADY_PRUNED_MARKER: &str = "omitted - see full output below";
 
 /// Prune thresholds (from settings, with defaults).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +106,7 @@ impl PruneReport {
 }
 
 /// If `content` ends with a spill locator line (`[full output: <path>]`,
-/// task 1 — nothing but whitespace after the closing bracket), return
+/// task 1 - nothing but whitespace after the closing bracket), return
 /// `(content-without-locator, locator)` so the locator can be re-appended
 /// after the preview. Otherwise return `(content, None)`.
 fn split_spill_locator(content: &str) -> (&str, Option<&str>) {
@@ -166,7 +166,7 @@ pub fn prune_tool_result_content(content: &str, params: &PruneParams) -> Option<
     let tail: String = body_chars[body_total - tail_chars..].iter().collect();
     let omitted = body_total - head_chars - tail_chars;
     let mut preview =
-        format!("{head}\n\n[… {omitted} chars omitted — see full output below …]\n\n{tail}");
+        format!("{head}\n\n[… {omitted} chars omitted - see full output below …]\n\n{tail}");
     if let Some(loc) = locator {
         preview.push_str("\n\n");
         preview.push_str(loc);
@@ -216,7 +216,7 @@ pub fn prune_messages_owned(
 /// Detect provider "context too long" errors (task-3 hook): when an LLM
 /// provider rejects the request because the context exceeds its window, the
 /// caller prunes over-budget tool results so the retry's context fits.
-/// Pure string classification (lowercased substring match) — no LLM cost.
+/// Pure string classification (lowercased substring match) - no LLM cost.
 pub fn is_context_length_error(provider_error: &str) -> bool {
     let msg = provider_error.to_lowercase();
     const MARKERS: &[&str] = &[
@@ -269,7 +269,7 @@ mod tests {
         // Tail present: the last 100 chars of the original survive verbatim.
         assert!(pruned.ends_with(&content[content.len() - 100..]));
         // Explicit middle marker with the omitted count.
-        assert!(pruned.contains("chars omitted — see full output below"));
+        assert!(pruned.contains("chars omitted - see full output below"));
         // Bounded: head + tail + marker overhead.
         assert!(pruned.chars().count() <= 20_000 + 200);
         // Deterministic: same input, same output.
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn unicode_boundaries_safe() {
         // Multi-byte scalars incl. emoji (4-byte): slicing must never split.
-        let content = "héllo wörld — 日本語テスト 🚀🔥\n".repeat(4_000);
+        let content = "héllo wörld - 日本語テスト 🚀🔥\n".repeat(4_000);
         let pruned = prune_tool_result_content(&content, &params()).expect("pruned");
         // Output must be valid UTF-8 (it is by construction of String, but the
         // real check is that char-boundary slicing never panicked).
@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(prune_tool_result_content(&first, &params()), None);
         // A task-1 spill preview (different marker style) is also skipped.
         let spill_preview = format!(
-            "{}\n\n[... 999 chars omitted — see full output below ...]\n\n{}\n\n[full output: /tmp/spill/1/call.txt]",
+            "{}\n\n[... 999 chars omitted - see full output below ...]\n\n{}\n\n[full output: /tmp/spill/1/call.txt]",
             "h".repeat(300),
             "t".repeat(200),
         );

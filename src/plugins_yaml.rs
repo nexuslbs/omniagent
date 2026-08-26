@@ -571,7 +571,7 @@ pub fn resolve_config_value(value: &str) -> String {
 
 /// Resolve `$env:VAR` references in a manifest env value for `build_plugin_detail`.
 /// YAML plugin config values should use `resolve_config_value` instead.
-/// `${VAR}` is treated as a literal — never interpolated.
+/// `${VAR}` is treated as a literal - never interpolated.
 fn resolve_env_var(value: &str) -> String {
     if let Some(var_name) = value.strip_prefix("$env:") {
         return resolve_env_ref(var_name);
@@ -581,7 +581,7 @@ fn resolve_env_var(value: &str) -> String {
 
 /// Resolve `${VAR}` references in a string against the process environment.
 ///
-/// DEPRECATED: `${VAR}` is never interpolated anymore — it is treated as a
+/// DEPRECATED: `${VAR}` is never interpolated anymore - it is treated as a
 /// literal string. Only `$env:` references are resolved (see
 /// `resolve_config_value`). This function exists only for API compatibility.
 pub fn resolve_legacy_env_vars(value: &str) -> String {
@@ -598,7 +598,7 @@ pub fn resolve_legacy_env_vars(value: &str) -> String {
 /// - `$secret:NAME`: reads from the `secrets` table in the DB
 ///
 /// For `$secret:`, returns the original string if DB lookup fails.
-/// `${VAR}` is never interpolated — treated as a literal string.
+/// `${VAR}` is never interpolated - treated as a literal string.
 pub async fn resolve_config_ref_value(value: &str, pool: &sqlx::PgPool) -> String {
     if let Some(var_name) = value.strip_prefix("$env:") {
         return resolve_env_ref(var_name);
@@ -743,7 +743,7 @@ fn build_plugin_detail(
         for (key, val) in config_obj {
             // YAML config values can be strings, numbers, or booleans
             // (e.g. `github_app_id: 3967918`). Serialize non-strings to their
-            // literal form instead of silently dropping them — as_str() on a
+            // literal form instead of silently dropping them - as_str() on a
             // Number returns None, which used to make numeric plugin config
             // vanish and auth fail with "must be set in the plugin config".
             let raw = match val {
@@ -757,7 +757,7 @@ fn build_plugin_detail(
         }
     }
 
-    // Config values use original keys (not prefixed) — delivered via configure message.
+    // Config values use original keys (not prefixed) - delivered via configure message.
 
     let plugin_type_str = match manifest.plugin_type {
         PluginType::Platform => "platform",
@@ -1844,7 +1844,7 @@ pub async fn refresh_plugin_models(
     name: &str,
     pt: &PluginYamlType,
 ) -> AppResult<Option<PluginDetail>> {
-    // REWORKED (task 16): the dashboard refresh button now writes models.yml —
+    // REWORKED (task 16): the dashboard refresh button now writes models.yml -
     // it NEVER mutates the plugin's config_schema or DYNAMIC_ENUM_CACHE. The
     // plugin manifest stays byte-identical; only the models.yml entry changes
     // (absent -> plugin:true + models:[fetched]; present -> models updated).
@@ -1855,7 +1855,7 @@ pub async fn refresh_plugin_models(
 
     // Refresh URL: models.yml `refresh_url` first, else the plugin manifest's
     // default_model config_schema refresh_url (fallback for providers not yet
-    // in models.yml — the refresh button still works for them).
+    // in models.yml - the refresh button still works for them).
     let refresh_url = crate::models_yaml::models_refresh_url(data_dir, name).or_else(|| {
         get_plugin(data_dir, name, pt).ok().flatten().and_then(|d| {
             d.manifest
@@ -1928,7 +1928,7 @@ pub fn load_plugin_yaml_config(
     data_dir: &str,
     yaml_type: &PluginYamlType,
 ) -> Option<serde_json::Value> {
-    // Canonical config location is {data_dir}/config/{name} (config_path) —
+    // Canonical config location is {data_dir}/config/{name} (config_path) -
     // NOT {data_dir}/{name}. The legacy root-level plugins.yml was the old
     // layout; reading it directly would miss the config/ subdir and silently
     // return None on fresh data dirs, starving platform/tool/provider

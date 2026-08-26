@@ -316,7 +316,7 @@ async fn handle_get_counts(
 }
 
 // ---------------------------------------------------------------------------
-// Tool: manage_subtasks (unified) — action: add | list | update | delete | get_counts
+// Tool: manage_subtasks (unified) - action: add | list | update | delete | get_counts
 // ---------------------------------------------------------------------------
 
 /// The unified `manage_subtasks` action, validated from the incoming args.
@@ -337,7 +337,7 @@ fn as_i64(v: &Value) -> Option<i64> {
 }
 
 /// Parse + validate the `action` argument and the per-action required fields.
-/// Pure function (no DB access) — unit-tested.
+/// Pure function (no DB access) - unit-tested.
 fn parse_manage_action(args: &Value) -> Result<ManageAction> {
     let action = args["action"]
         .as_str()
@@ -535,7 +535,7 @@ async fn handle_manage(
 // ---------------------------------------------------------------------------
 
 /// Callback invoked when the host sends configuration via configure message.
-/// Plugin config — received via configure message.
+/// Plugin config - received via configure message.
 #[derive(Debug, Clone)]
 struct PluginConfig {
     pub database_url: String,
@@ -562,7 +562,7 @@ impl PluginConfig {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Shared pool — populated by configure callback before any tool call
+    // Shared pool - populated by configure callback before any tool call
     let pool = Arc::new(RwLock::new(None::<PgPool>));
 
     // Wrap each handler to capture a clone of the pool

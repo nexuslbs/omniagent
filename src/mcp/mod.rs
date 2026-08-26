@@ -124,7 +124,7 @@ pub fn compose_spill_preview(
     }
     let omitted = total - head.len() - tail.len();
     format!(
-        "{head}\n\n[... {omitted} chars omitted — see full output below ...]\n\n{tail}\n\n[full output: {}]",
+        "{head}\n\n[... {omitted} chars omitted - see full output below ...]\n\n{tail}\n\n[full output: {}]",
         spill_path.display()
     )
 }
@@ -285,7 +285,7 @@ pub struct AppContext {
     pub tool_catalog: Vec<Value>,
     /// Per-platform references for the `read_attached_file` MCP tool.
     /// Keyed by platform name. Each platform plugin implements `read_file`
-    /// internally, so the core stays plugin-agnostic — no knowledge of
+    /// internally, so the core stays plugin-agnostic - no knowledge of
     /// plugin-specific config fields like `access_token`.
     /// Wrapped in Arc<RwLock> so platforms can be dynamically added/removed.
     pub platforms: Arc<RwLock<HashMap<String, Arc<dyn crate::platform::Platform>>>>,
@@ -354,7 +354,7 @@ pub fn tool_qualify(server: &str, tool_name: &str) -> String {
 /// A registered MCP tool.
 #[derive(Clone)]
 pub struct McpTool {
-    /// The canonical tool name — ALWAYS the fully-qualified name:
+    /// The canonical tool name - ALWAYS the fully-qualified name:
     /// `builtin_{tool}` for built-ins, `{server}_{tool}` for external MCP
     /// tools (see `tool_qualify`). There is deliberately NO separate short
     /// name: every surface (prompt, schema, registry, API) uses this single
@@ -366,11 +366,11 @@ pub struct McpTool {
     pub server_name: Option<String>,
     /// Maximum time in seconds to wait for this tool to complete.
     /// `None` = NO timeout (tool runs until it finishes, errors, or the agent
-    /// cancels it). A timeout exists ONLY when explicitly set — either by the
+    /// cancels it). A timeout exists ONLY when explicitly set - either by the
     /// tool's own declaration (e.g. builtin wait-task = 310s) or by an agent
     /// config that opts in. There is deliberately NO default fallback: fixed
     /// tool timeouts were removed (Aug 2026) because background tasks now give
-    /// the agent full tracking/cancel/log control — a tool must never be
+    /// the agent full tracking/cancel/log control - a tool must never be
     /// killed by an invisible clock the agent didn't set.
     pub timeout_secs: Option<u64>,
     pub handler: McpToolHandler,
@@ -380,7 +380,7 @@ impl McpTool {
     /// Build a built-in tool. `short_name` is the plugin-internal name
     /// (e.g. "poll_task"); the canonical `name` is ALWAYS derived via
     /// `tool_qualify("builtin", short_name)` → `builtin_poll-task`. Only
-    /// this constructor knows the builtin prefix — callers pass the short
+    /// this constructor knows the builtin prefix - callers pass the short
     /// form and the full name is never hardcoded. This is the ONLY place a
     /// short name is acceptable: it is immediately qualified.
     pub fn builtin(
@@ -645,7 +645,7 @@ fn wait_task_tool() -> McpTool {
         server_name: None,
         // No declared timeout: the handler bounds itself by its own
         // `timeout_secs` argument and returns a timeout STATUS (not an error)
-        // when exceeded — an external kill clock would cut a legitimately
+        // when exceeded - an external kill clock would cut a legitimately
         // long wait short and force the agent into extra wait calls.
         timeout_secs: None,
         handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
@@ -1654,7 +1654,7 @@ mod tests {
 
     #[test]
     fn test_spill_multibyte_utf8_preview() {
-        let content = "héllo wörld — ".repeat(5000);
+        let content = "héllo wörld - ".repeat(5000);
         let max_inline = 1000;
         let path = std::path::Path::new("/tmp/x/1/call.txt");
         let preview = compose_spill_preview(&content, max_inline, path);

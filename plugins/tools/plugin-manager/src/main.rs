@@ -214,7 +214,7 @@ async fn handle_plugin_manager(data_dir: &str, args: &Value) -> Result<(String, 
 // ---------------------------------------------------------------------------
 
 /// Callback invoked when the host sends configuration via configure message.
-/// Plugin config — received via configure message.
+/// Plugin config - received via configure message.
 #[derive(Debug, Clone)]
 struct PluginConfig {
     pub omni_dir: String,
@@ -238,7 +238,7 @@ impl PluginConfig {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Shared data_dir — populated by configure callback before any tool call
+    // Shared data_dir - populated by configure callback before any tool call
     let data_dir: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
 
     let dd = data_dir.clone();

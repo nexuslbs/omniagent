@@ -11,7 +11,7 @@ use crate::error::AppResult;
 /// kanban_history row with action = "moved" so the board transition is always tracked.
 ///
 /// GOAL STATE (omnidev task 4): when the target status is `blocked`, the
-/// transition ALSO writes goal state — goal_phase='blocked' and, when the
+/// transition ALSO writes goal state - goal_phase='blocked' and, when the
 /// task has no typed blocked code yet, a fallback code `unspecified` (an
 /// existing typed code is preserved; the human message falls back to the
 /// existing prose or ''). The goal CAS revision (goal_revision) is bumped on
@@ -89,14 +89,14 @@ pub async fn update_kanban_task_status(
 // optional max-rounds cap, and a CAS revision counter. All mutations go
 // through update_kanban_task_goal (CAS-guarded) or the blocked status
 // transition in update_kanban_task_status. Goals are strictly per-task state
-// — no thread/channel execution semantics are touched.
+// - no thread/channel execution semantics are touched.
 
 /// Valid goal phases (mirrors the DB CHECK constraint
 /// chk_kanban_tasks_goal_phase and VALID_GOAL_PHASES in src/server/kanban.rs).
 pub const VALID_GOAL_PHASES: &[&str] = &["active", "paused", "blocked", "complete"];
 
 /// A goal-state mutation request: every field optional; omitted fields keep
-/// the task's existing value. `expected_revision` is the CAS guard — when set,
+/// the task's existing value. `expected_revision` is the CAS guard - when set,
 /// the update only applies if the task's current goal_revision matches.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct GoalPatch {
@@ -135,7 +135,7 @@ struct GoalRow {
 /// Apply a goal-state mutation to a kanban task, atomically, with CAS.
 ///
 /// Single transaction: locks the task row, verifies the optional
-/// `expected_revision` CAS guard (returns `Conflict` when it does not match —
+/// `expected_revision` CAS guard (returns `Conflict` when it does not match -
 /// the HTTP layer maps that to 409), applies the provided fields (omitted
 /// fields keep their existing values), bumps `goal_revision`, and records the
 /// mutation as a durable `goal` history event with the before/after values.

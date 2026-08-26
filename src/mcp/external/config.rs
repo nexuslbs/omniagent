@@ -48,7 +48,7 @@ pub struct McpServerConfig {
     /// `None` = NO timeout: the server may take as long as it needs; the
     /// caller (agent) tracks/cancels via background tasks. A timeout applies
     /// ONLY when explicitly configured. Fixed default timeouts were removed
-    /// (Aug 2026) — a tool must never be killed by an invisible clock.
+    /// (Aug 2026) - a tool must never be killed by an invisible clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
     /// Maximum consecutive failures before circuit breaker opens.
@@ -265,7 +265,7 @@ fn discover_plugin_servers_fallback(data_dir: &str) -> Vec<McpServerConfig> {
 ///
 /// Built-in MCP server binaries are workspace members compiled by
 /// `cargo build --release --workspace` and live next to the omniagent
-/// executable. The path is computed by convention — no existence checks,
+/// executable. The path is computed by convention - no existence checks,
 /// no fallback chain. Each plugin has exactly one deterministic path.
 pub(crate) fn get_bin_path(name: &str) -> String {
     // Binary lives next to the omniagent executable (workspace target/release).
@@ -348,7 +348,7 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
                 for (key, val) in obj {
                     // YAML config values can be strings, numbers, or booleans
                     // (e.g. `github_app_id: 3967918`). Serialize non-strings to
-                    // their literal form instead of silently dropping them —
+                    // their literal form instead of silently dropping them -
                     // as_str() on a Number returns None, which used to make
                     // numeric plugin config (like git's github_app_id /
                     // github_installation_id) vanish and auth fail with
@@ -375,7 +375,7 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
         return Some(servers);
     }
 
-    // Has mcp-config.json — parse it, or return None if no config file
+    // Has mcp-config.json - parse it, or return None if no config file
     if !config_file.exists() {
         return None;
     }
@@ -638,7 +638,7 @@ fn apply_config_schema_defaults(env: &mut HashMap<String, String>, plugin_dir: &
 
 /// Resolve environment variable references in a config value.
 ///
-/// DEPRECATED: `${VAR_NAME}` is never interpolated — it is treated as a
+/// DEPRECATED: `${VAR_NAME}` is never interpolated - it is treated as a
 /// literal string. Only `$env:` references are resolved (see
 /// `plugins_yaml::resolve_config_value`).
 pub fn resolve_env_vars(value: &str) -> String {
@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn test_resolve_env_vars_are_literal() {
         std::env::set_var("TEST_MCP_KEY", "secret-key-123");
-        // ${VAR} is NEVER interpolated — it stays as a literal string.
+        // ${VAR} is NEVER interpolated - it stays as a literal string.
         let resolved = resolve_env_vars("${TEST_MCP_KEY}");
         assert_eq!(resolved, "${TEST_MCP_KEY}");
     }

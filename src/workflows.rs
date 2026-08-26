@@ -1,7 +1,7 @@
 //! Workflow configuration: parsing + validation of `workflows.yml` (Phase 0).
 //!
 //! Workflows are FILE-DEFINED (decisions N4/R9): the YAML file at `<OMNI_DIR>/workflows.yml`
-//! is the single source of truth — there are NO `workflows` / `workflow_roles` DB tables.
+//! is the single source of truth - there are NO `workflows` / `workflow_roles` DB tables.
 //! This module implements Phase 0 only: parse + validate. The Workflows dashboard CRUD
 //! that writes the file is Phase 5; the execution engine that consumes the parsed config
 //! is Phase 1+.
@@ -37,7 +37,7 @@
 //! - role keys must be exactly one of `executor` | `tester` | `reviewer`;
 //! - the `executor` role is required;
 //! - `tester` / `reviewer` templates are required when the role is present,
-//!   UNLESS the role runs in `action` mode (`mode: action`) — action roles
+//!   UNLESS the role runs in `action` mode (`mode: action`) - action roles
 //!   dispatch a predefined action instead of an agent thread and need no
 //!   template (the `executor` template is optional in both modes);
 //! - `mode` must be `agent` (default) or `action`; any other value is rejected;
@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Role keys. Roles are role/display names only — they must NEVER be used as
+/// Role keys. Roles are role/display names only - they must NEVER be used as
 /// thread step keys (see [`STEP_KEYS`]).
 pub const EXECUTOR_ROLE: &str = "executor";
 pub const TESTER_ROLE: &str = "tester";
@@ -60,7 +60,7 @@ pub const MODE_ACTION: &str = "action";
 pub const ROLE_MODES: [&str; 2] = [MODE_AGENT, MODE_ACTION];
 
 /// Thread step keys (`threads.workflow_step`): 'running' | 'testing' | 'review'.
-/// Step keys only — NEVER role names (N5).
+/// Step keys only - NEVER role names (N5).
 pub const STEP_KEYS: [&str; 3] = ["running", "testing", "review"];
 
 /// Map a thread step key (`running`/`testing`/`review`) to its workflow role
@@ -155,7 +155,7 @@ impl WorkflowsFile {
     /// Load a single workflow definition by id from `<data_dir>/workflows.yml`.
     ///
     /// A missing file or an unknown workflow id yields `Ok(None)` (treated as
-    /// "no workflow"); parse/validation errors are returned — never silently
+    /// "no workflow"); parse/validation errors are returned - never silently
     /// swallowed, so callers can decide whether to degrade or fail.
     pub fn load_workflow(
         data_dir: &str,
@@ -573,7 +573,7 @@ mod tests {
         assert_eq!(role_for_step("running"), Some(EXECUTOR_ROLE));
         assert_eq!(role_for_step("testing"), Some(TESTER_ROLE));
         assert_eq!(role_for_step("review"), Some(REVIEWER_ROLE));
-        // Step keys only — role names and anything else are not valid steps.
+        // Step keys only - role names and anything else are not valid steps.
         assert_eq!(role_for_step("executor"), None);
         assert_eq!(role_for_step("blocked"), None);
         assert_eq!(role_for_step(""), None);

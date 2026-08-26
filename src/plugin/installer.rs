@@ -20,7 +20,7 @@ use crate::plugin::{load_manifest, PluginManifest, PluginType};
 ///
 /// Fully async download (reqwest async client, connect + total timeouts): a
 /// hung plugin URL must NEVER block the core's async runtime (Aug 2026
-/// all-async push — the actions-plugin wedge class applied to the core).
+/// all-async push - the actions-plugin wedge class applied to the core).
 /// The remaining local work (temp dir, tar/unzip subprocess, copy) runs on
 /// tokio's blocking pool via `spawn_blocking`.
 /// Returns the parsed PluginManifest from the extracted plugin.json.
@@ -54,7 +54,7 @@ pub async fn install_from_url(url: &str, data_dir: &str) -> AppResult<PluginMani
     let data_dir_owned = data_dir.to_string();
 
     // Extraction + copy are local, bounded operations (tar/unzip subprocess,
-    // filesystem copies) — run them on the blocking pool so no async worker
+    // filesystem copies) - run them on the blocking pool so no async worker
     // thread is ever occupied by them.
     tokio::task::spawn_blocking(move || {
         install_from_url_blocking(&url_owned, &bytes, &data_dir_owned)
@@ -275,8 +275,8 @@ fn find_plugin_json(dir: &Path) -> AppResult<String> {
 /// Uses a shared bare-mirror cache at `{workspace_dir}/.git-cache/<sha256(url)>/`
 /// so that multiple plugins from the same repo share a single object store.
 /// Fresh clones use `git clone --reference-if-able <cache>`: instant, zero
-/// network when the cache is usable (a shallow cache — from a shallow source
-/// like a CI depth-1 checkout — is skipped gracefully instead of aborting).
+/// network when the cache is usable (a shallow cache - from a shallow source
+/// like a CI depth-1 checkout - is skipped gracefully instead of aborting).
 ///
 /// The type directory (mcp, platforms, providers) is determined automatically
 /// from the `type` field in the plugin's plugin.json manifest after cloning.
@@ -355,7 +355,7 @@ pub fn install_from_git(
     // checkout with --depth=1), try to unshallow it so subsequent
     // git clone --reference-if-able can still use it as a fast object
     // store. If the SOURCE itself is shallow (nothing to deepen from),
-    // --unshallow reports success but the cache stays shallow — that's
+    // --unshallow reports success but the cache stays shallow - that's
     // fine: --reference-if-able below then skips the cache and falls
     // back to a direct clone from the URL.
     if cache_path.join("shallow").exists() {
@@ -370,7 +370,7 @@ pub fn install_from_git(
                 cache_dir
             );
         } else if cache_path.join("shallow").exists() {
-            // Source itself is shallow (CI depth-1 checkout) — --unshallow
+            // Source itself is shallow (CI depth-1 checkout) - --unshallow
             // exit 0 but could not deepen. Reference will be skipped; the
             // clone still succeeds via --reference-if-able.
             tracing::warn!(
@@ -433,7 +433,7 @@ pub fn install_from_git(
             // broken checkout here; the clone block below (guarded by
             // `if !initial_remote_path.join(".git").exists()`) then does a
             // fresh reference clone from cache. Previously this path fell
-            // straight through to find_plugin_json() on a deleted directory —
+            // straight through to find_plugin_json() on a deleted directory -
             // a transient fetch failure nuked the install instead of
             // recovering from the local cache.
             tracing::warn!(
@@ -988,7 +988,7 @@ pub fn discover_plugins(data_dir: &str) -> Vec<(PluginManifest, String, String)>
 
                 if has_plugin_json {
                     // Already discovered in Section B above.
-                    // Skip — plugin.json entries are pushed there with the same
+                    // Skip - plugin.json entries are pushed there with the same
                     // source type. Only Cargo.toml-only plugins need this section.
                 } else if has_cargo_toml {
                     // Synthetic manifest for Rust workspace member crates

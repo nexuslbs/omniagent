@@ -235,7 +235,7 @@ impl ExternalProviderClient {
                     .unwrap_or_default();
                 // Usage parsing accepts every cache-field naming convention
                 // (cached_tokens / prompt_cache_hit_tokens / anthropic cache
-                // fields) — see provider::external::parse_usage.
+                // fields) - see provider::external::parse_usage.
                 let usage = result.get("usage").and_then(parse_usage);
                 let finish_reason = result
                     .get("finish_reason")

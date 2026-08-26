@@ -1,4 +1,4 @@
-//! mcp-server-compose — standalone MCP server for docker compose commands.
+//! mcp-server-compose - standalone MCP server for docker compose commands.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
 //! Tools: compose
@@ -9,7 +9,7 @@
 //! **Config**: The plugin reads all configuration from the MCP `configure`
 //! message (delivered by omniagent from the plugin config / config_schema).
 //! It does NOT read environment variables. The single config key is
-//! `workspace_dir` (default `/opt/workspace`) — the root under which the agent
+//! `workspace_dir` (default `/opt/workspace`) - the root under which the agent
 //! may run compose projects.
 //!
 //! **Tool API**:
@@ -225,7 +225,7 @@ fn build_compose_command(
     // server's stdin (fd 0 = the MCP JSON-RPC pipe). A tokio::process::Command
     // with no explicit .stdin() inherits the parent's fd 0. Under 50 concurrent
     // `docker compose exec` calls the CLI children hold the read end of the
-    // SAME pipe the client writes requests to — they steal JSON-RPC lines and
+    // SAME pipe the client writes requests to - they steal JSON-RPC lines and
     // the server's reader never sees them (intermittent request loss, sparse
     // dispatch tails). The exec-script path overrides stdin with a fresh piped
     // fd below; every other path gets /dev/null so the CLI can never consume
@@ -289,7 +289,7 @@ fn enrich_port_conflict(stderr: &str) -> Option<String> {
          stop it first: docker compose -f <compose-file> down  (or 'docker rm -f <container-name>').\n",
     );
     msg.push_str(
-        "3. Remember: services only need to reach each other INSIDE the docker network — \
+        "3. Remember: services only need to reach each other INSIDE the docker network - \
          prefer omitting host 'ports:' entirely and use the service name as the hostname \
          (e.g. http://backend:8080 from another container).\n",
     );
@@ -339,16 +339,16 @@ fn build_failure_message(rc: i32, stdout: &str, stderr: &str, cmd_display: &str)
 /// server framework then DROPS this handler's future, which drops this guard,
 /// which kills the child. Without this, a `docker compose exec … cargo build`
 /// chain keeps burning CPU/RAM detached after its thread died (thread 73,
-/// Aug 2026 — PIDs alive 6+ min after thread end).
+/// Aug 2026 - PIDs alive 6+ min after thread end).
 ///
 /// The child is spawned in its own process group (`process_group(0)`), and the
 /// kill also signals the whole group, so the `docker compose → docker` local
-/// chain is reaped too — killing only the direct child would orphan the
+/// chain is reaped too - killing only the direct child would orphan the
 /// grandchildren.
 ///
 /// Explicit DETACHED operations (`up -d`, `run -d`, `start`, …) are the
 /// exception: they must survive thread end (user rule). For those the guard is
-/// created with `detach: true` and Drop is a no-op — the docker CLI child exits
+/// created with `detach: true` and Drop is a no-op - the docker CLI child exits
 /// on its own right after handing the containers to the daemon, and the
 /// containers themselves are managed by the daemon, not by this process.
 struct KillOnDrop {
@@ -373,7 +373,7 @@ impl KillOnDrop {
     ///
     /// The child stays owned by the guard for the whole wait, so if THIS future
     /// is dropped mid-wait (cancel notification, timeout, plugin shutdown), the
-    /// Drop impl still kills the child — a bare `Child::wait_with_output` would
+    /// Drop impl still kills the child - a bare `Child::wait_with_output` would
     /// lose the handle and leak the process.
     async fn wait_with_output(&mut self) -> std::io::Result<std::process::Output> {
         let child = self.child.as_mut().expect("wait_with_output called twice");
@@ -410,7 +410,7 @@ impl Drop for KillOnDrop {
             return;
         }
         if let Some(mut child) = self.child.take() {
-            // `Child::kill`/`Child::wait` are async — spawn a fire-and-forget
+            // `Child::kill`/`Child::wait` are async - spawn a fire-and-forget
             // kill+reap task. If no runtime is active (process teardown on a
             // non-async thread), there is nothing safe we can do; the child is
             // orphaned and will be reaped by the OS eventually.
@@ -501,7 +501,7 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
 
     // Resolve compose_file(s): each relative to project_dir or absolute inside
     // workspace. Default docker-compose.yml when omitted. Multiple entries become
-    // repeated -f flags (base first, overrides after) — like
+    // repeated -f flags (base first, overrides after) - like
     // `docker compose -f base -f overlay`.
     let mut resolved_compose_files: Vec<String> = Vec::new();
     if compose_files_arg.is_empty() {
@@ -535,7 +535,7 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
     };
 
     let verb = command.split_whitespace().next().unwrap_or("");
-    // NO default timeout (Aug 2026 rule: fixed tool timeouts were removed —
+    // NO default timeout (Aug 2026 rule: fixed tool timeouts were removed -
     // background tasks + wait-task give the agent full tracking/cancel/log
     // control; a tool must never be killed by an invisible clock the agent
     // didn't set). Only an EXPLICIT `timeout` param bounds the command.
@@ -575,7 +575,7 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
     };
 
     // Whether this command is an explicit detached op that must survive
-    // thread-end (`up -d`, `run -d`, `start`) — everything else is tracked and
+    // thread-end (`up -d`, `run -d`, `start`) - everything else is tracked and
     // its subprocess must be killed when the thread ends.
     let detach = is_detached_command(&command);
 
@@ -695,7 +695,7 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
 }
 
 // ---------------------------------------------------------------------------
-// Plugin config — received via MCP configure message, not from env vars
+// Plugin config - received via MCP configure message, not from env vars
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -737,14 +737,14 @@ async fn main() -> Result<()> {
             name: "compose".to_string(),
             description:
                 "Run docker compose commands on a compose project inside the workspace. \
-                 'project_dir' (required) is the compose project directory — the workspace dir or a subdirectory of it. \
-                 'compose_file' (optional) is the compose file(s): a STRING or ARRAY of strings — each a path RELATIVE \\
+                 'project_dir' (required) is the compose project directory - the workspace dir or a subdirectory of it. \
+                 'compose_file' (optional) is the compose file(s): a STRING or ARRAY of strings - each a path RELATIVE \\
                  to project_dir (default docker-compose.yml when omitted), or an ABSOLUTE path anywhere inside the \\
                  workspace (e.g. a shared overlay). Multiple entries are passed as repeated -f flags in order \\
                  (e.g. [\"docker-compose.yml\", \"docker-compose.dev.yml\"] -> -f docker-compose.yml -f docker-compose.dev.yml), \\
                  so overrides merge exactly like `docker compose -f base -f overlay`. \\
                  'env_file' (optional) is a .env-style file: relative to project_dir, or an ABSOLUTE path anywhere inside \\
-                 the workspace (e.g. /opt/workspace/<project>/<name>.env for a shared env file) — passed via --env-file. \
+                 the workspace (e.g. /opt/workspace/<project>/<name>.env for a shared env file) - passed via --env-file. \
                  Use 'command' for the compose verb + flags (e.g. 'up -d', 'ps', 'build', 'logs --tail=50'). \
                  For exec/run: use 'service' (container name) and 'args' (command to run inside container). \
                  USAGE EXAMPLES: \
@@ -793,7 +793,7 @@ async fn main() -> Result<()> {
                     },
                     "timeout": {
                         "type": "number",
-                        "description": "Optional — explicit timeout in seconds for this command. When omitted there is NO timeout: the command runs until it finishes, errors, or the agent cancels it (use the background task system: poll-task/wait-task/cancel-task)."
+                        "description": "Optional - explicit timeout in seconds for this command. When omitted there is NO timeout: the command runs until it finishes, errors, or the agent cancels it (use the background task system: poll-task/wait-task/cancel-task)."
                     }
                 },
                 "required": ["project_dir", "command"]
@@ -929,7 +929,7 @@ mod tests {
     #[tokio::test]
     async fn kill_on_drop_preserves_detached() {
         // Detached op (`up -d`, `run -d`, `start`): dropping the guard must NOT
-        // kill the child — it is an explicit background operation.
+        // kill the child - it is an explicit background operation.
         let child = tokio::process::Command::new("sleep")
             .arg("60")
             .stdout(std::process::Stdio::null())

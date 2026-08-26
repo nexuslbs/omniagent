@@ -6,7 +6,7 @@ pub struct ChatMessage {
     pub role: String,
     pub content: String,
     /// Tool call ID for tool result messages (must be preserved through
-    /// compaction round-trips — the provider rejects tool messages without it).
+    /// compaction round-trips - the provider rejects tool messages without it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

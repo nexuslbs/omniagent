@@ -607,7 +607,7 @@ async fn handle_save_summary(pool: &PgPool, args: &Value) -> Result<(String, boo
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Shared state — populated by configure callback before any tool call
+    // Shared state - populated by configure callback before any tool call
     let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
     let data_dir: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
 

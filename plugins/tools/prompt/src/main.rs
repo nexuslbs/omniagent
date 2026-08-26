@@ -28,7 +28,7 @@ use sqlx::{FromRow, PgPool};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 // ---------------------------------------------------------------------------
-// Plugin config — received via configure message, never from env vars
+// Plugin config - received via configure message, never from env vars
 // ---------------------------------------------------------------------------
 
 /// Plugin-level config with defaults matching the original settings values.
@@ -99,7 +99,7 @@ impl PluginConfig {
     /// configure payload from a HashMap<String,String>), so numeric fields
     /// must be parsed leniently: accept both a real JSON number and a
     /// numeric string ("200000"). Previously `as_i64()` was used, which
-    /// returns None for strings — silently dropping every configured budget
+    /// returns None for strings - silently dropping every configured budget
     /// and forcing the plugin to run on defaults forever.
     fn from_json(json: &Value) -> Self {
         let mut cfg = Self::default();
@@ -326,12 +326,12 @@ async fn get_threads_since(
 }
 
 // ---------------------------------------------------------------------------
-// R8-J: prior attempts of the SAME task — the prompt must pass past context.
+// R8-J: prior attempts of the SAME task - the prompt must pass past context.
 // Earlier threads of this kanban task (ALL statuses, not just completed)
 // with their final summaries, so a successor knows what prior attempts did
 // and why they died. Threads 113/138/140/155 each burned 100-120 calls
 // re-deriving the same harness knowledge because this context never reached
-// them — 6 budget-deaths total.
+// them - 6 budget-deaths total.
 // ---------------------------------------------------------------------------
 
 const PRIOR_ATTEMPTS_MAX_ENTRIES: usize = 5;
@@ -347,8 +347,8 @@ struct PriorAttemptRow {
 
 /// Prior threads of the SAME kanban task (R8-J): ALL statuses (completed /
 /// interrupted / failed / ...), newest first, capped at `limit`. Earlier
-/// attempts hold exactly the knowledge a successor needs — what was done,
-/// what died, why — but `get_threads_since` filters status='completed' and
+/// attempts hold exactly the knowledge a successor needs - what was done,
+/// what died, why - but `get_threads_since` filters status='completed' and
 /// is therefore deliberately NOT reused here.
 async fn get_prior_threads_by_task(
     pool: &PgPool,
@@ -382,7 +382,7 @@ async fn get_prior_threads_by_task(
 }
 
 /// The thread's final summary message (msg_type='summary') if it produced
-/// one — this is the report a thread leaves behind for its successor.
+/// one - this is the report a thread leaves behind for its successor.
 async fn get_thread_summary(pool: &PgPool, thread_id: i64) -> Result<Option<String>> {
     let row = sql_forge!(
         scalar String,
@@ -398,7 +398,7 @@ async fn get_thread_summary(pool: &PgPool, thread_id: i64) -> Result<Option<Stri
 
 /// Pure renderer for the prior-attempts block (R8-J). Every prior thread is
 /// listed with id/status/iterations/ended_at plus its summary excerpt when
-/// one exists — a thread with NO summary is still listed (its very existence
+/// one exists - a thread with NO summary is still listed (its very existence
 /// warns the successor). Returns None when there are no prior threads.
 fn render_prior_attempts_block(
     rows: Vec<PriorAttemptRow>,
@@ -411,7 +411,7 @@ fn render_prior_attempts_block(
         return None;
     }
     let mut lines = vec![
-        "=== Previous attempts of this task (READ — do NOT repeat what they did) ===".to_string(),
+        "=== Previous attempts of this task (READ - do NOT repeat what they did) ===".to_string(),
     ];
     for r in &rows {
         let iterations = r
@@ -452,7 +452,7 @@ async fn build_prior_attempts_block(pool: &PgPool, thread_id: i64) -> Result<Opt
     .await
     .context("Failed to fetch thread task_id")?;
     let Some(Some(task_id)) = task_id else {
-        return Ok(None); // plain thread — no same-task history
+        return Ok(None); // plain thread - no same-task history
     };
 
     let rows =
@@ -880,7 +880,7 @@ fn extract_tracking_path(body: &str) -> Option<String> {
 
 /// Build the continuation self-orientation block for a thread. Returns None
 /// (no-op) for threads without a task linkage; a failing sub-query degrades
-/// gracefully by simply omitting that sub-part — never fails the prompt.
+/// gracefully by simply omitting that sub-part - never fails the prompt.
 async fn build_continuation_block(pool: &PgPool, thread_id: i64) -> anyhow::Result<Option<String>> {
     let thread_ref: Option<ThreadTaskRef> = sql_forge!(
         ThreadTaskRef,
@@ -1099,7 +1099,7 @@ fn build_role_block(workflow_step: &str) -> Option<String> {
 /// from `<omni_dir>/profiles/<profile>/templates/<name>.md` (with `.md`
 /// appended when the name has no extension) and returned. Returns None when
 /// the workflow/role is absent, the template field is empty, or the template
-/// file is missing — callers decide whether to degrade (executor) or fall
+/// file is missing - callers decide whether to degrade (executor) or fall
 /// back (tester/reviewer).
 fn load_role_template(
     data_dir: &str,
@@ -1127,7 +1127,7 @@ fn load_role_template(
             role,
             profile_name,
             template_name,
-            "workflow role template file not found in profiles/<profile>/templates — no template applied"
+            "workflow role template file not found in profiles/<profile>/templates - no template applied"
         );
     }
     loaded
@@ -1179,9 +1179,9 @@ fn apply_workflow_mapping(
 /// Extract the description of a skill for the "Available skills" prompt block.
 ///
 /// Tool-created skills carry YAML frontmatter (first line `---`) with a
-/// `description:` field — prefer that so the prompt shows the real trigger
+/// `description:` field - prefer that so the prompt shows the real trigger
 /// instead of the raw `---` fence. Hand-written skills start with a
-/// `# Title` heading — fall back to the first meaningful line with the
+/// `# Title` heading - fall back to the first meaningful line with the
 /// leading `#` stripped.
 fn extract_skill_description(content: &str) -> String {
     if let Some(desc) = extract_frontmatter_field(content, "description") {
@@ -1415,10 +1415,10 @@ async fn handle_generate_full(
         ));
     }
 
-    // 2c-ext2. Previous attempts of the SAME task (R8-J) — earlier threads
+    // 2c-ext2. Previous attempts of the SAME task (R8-J) - earlier threads
     // of this kanban task, ALL statuses, with their final summaries. Placed
     // right after the template so the agent reads "what to do" and "what was
-    // already tried (and died)" together — a successor must never re-derive
+    // already tried (and died)" together - a successor must never re-derive
     // harness knowledge a prior thread already documented (6 budget-deaths:
     // threads 113/138/140/155 burned 100-120 calls each re-exploring the
     // same ground because this context never reached them).
@@ -1461,7 +1461,7 @@ async fn handle_generate_full(
         }
     }
 
-    // 2e. Continuation self-orientation — prior threads of the same task,
+    // 2e. Continuation self-orientation - prior threads of the same task,
     // kanban history, and resume-ledger pointer. Skipped entirely for plain
     // (non-task) threads; never fails the prompt.
     if let Some(tid) = thread_id {
@@ -1601,15 +1601,15 @@ async fn handle_generate_full(
 // ---------------------------------------------------------------------------
 
 /// Measure the size of a message list for the compaction gate. Always returns
-/// a TOKEN estimate — the single budget unit everywhere:
+/// a TOKEN estimate - the single budget unit everywhere:
 ///
 /// - When `tokenizer_encoding` is configured (e.g. "gpt-4" -> cl100k_base,
 ///   "o200k_base"), the size is the REAL tiktoken BPE token count of the
 ///   JSON-serialized message array (mirrors src/agent/helpers.rs::count_tokens).
 /// - When no tokenizer is configured (empty encoding) or it fails to load,
 ///   the classic proxy applies: tokens ≈ chars/4 (chars measured 4x the token
-///   budget). This fallback is deterministic — a 200K-char context counts as
-///   50K tokens — so tests can assert on the exact math.
+///   budget). This fallback is deterministic - a 200K-char context counts as
+///   50K tokens - so tests can assert on the exact math.
 fn measure_size(items: &[crate::chat_message::ChatMessage], tokenizer_encoding: &str) -> usize {
     // Char measurement (base of the chars/4 fallback).
     let chars: usize = items
@@ -1698,13 +1698,13 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // The hard budget protects against that: short conversations never exceed
     // it, so they are never compacted. Real long threads do exceed it, and
     // then compaction runs on EVERY call (no cadence) until the size drops
-    // back to the soft budget — the soft budget is the REDUCTION TARGET, not
+    // back to the soft budget - the soft budget is the REDUCTION TARGET, not
     // a trigger. When the tool decides not to compact, it returns null.
     //
     // Compaction itself runs at most 3 passes with a progressively smaller
     // keep_recent; if the size is still over the soft budget after that, the
     // tool returns the PARTIAL result (the reduction achieved so far) instead
-    // of erroring — the caller applies it, which gets the size under the HARD
+    // of erroring - the caller applies it, which gets the size under the HARD
     // trigger budget, so later iterations stop re-triggering compaction.
     // Erroring would discard the partial reduction and make every later
     // iteration repeat the same failed compaction forever.
@@ -1714,7 +1714,7 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     // Budgets arrive as REQUIRED tool params: the omniagent resolves the
     // effective per-thread token budgets (model config > provider > global
     // settings) and passes them in. The plugin stays agnostic of where the
-    // budgets come from — a custom prompt plugin may gate entirely
+    // budgets come from - a custom prompt plugin may gate entirely
     // differently as long as the interface stays the same.
     let current_size = measure_size(&messages, &cfg.tokenizer_encoding);
     let hard_budget = match args["hard_budget"].as_u64() {
@@ -1747,7 +1747,7 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
         // Reduce to the soft budget: compact, and if still over soft, keep
         // compacting with a progressively smaller keep_recent. Compaction
         // stops when size <= soft or there is nothing more to compact
-        // (keep_recent would hit 0 — compact_old_assistant_messages then
+        // (keep_recent would hit 0 - compact_old_assistant_messages then
         // compacts every assistant tool-call message).
         //
         // At most 3 passes: if the size is still over the soft budget after
@@ -1788,7 +1788,7 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     let after = messages.len();
 
     // Contract: return the compacted messages array when something changed,
-    // or null when nothing was compacted. No boolean flags — the caller
+    // or null when nothing was compacted. No boolean flags - the caller
     // applies the result iff it receives an array.
     let result = serde_json::json!({
         "messages": if before != after {
@@ -1836,11 +1836,11 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Shared pool — populated by configure callback before any tool call
+    // Shared pool - populated by configure callback before any tool call
     let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
     let (pool_ready_tx, pool_ready_rx) = tokio::sync::watch::channel(false);
 
-    // Shared config — updated by configure message at startup
+    // Shared config - updated by configure message at startup
     let plugin_config = Arc::new(RwLock::new(PluginConfig::default()));
 
     // Generate full prompt handler
@@ -1852,7 +1852,7 @@ async fn main() -> Result<()> {
         let cfg = cfg_gen.clone();
         let mut rx = pool_ready_gen.clone();
         Box::pin(async move {
-            // Wait until pool is configured (persistent state — already-true fires
+            // Wait until pool is configured (persistent state - already-true fires
             // immediately for latecomers, unlike Notify which misses them).
             while !*rx.borrow() {
                 rx.changed().await.ok();
@@ -1995,7 +1995,7 @@ async fn main() -> Result<()> {
                 !new_config.database_url.is_empty(),
                 !new_config.omni_dir.is_empty()
             );
-            // Spawn async DB connection — runs in background while
+            // Spawn async DB connection - runs in background while
             // the MCP loop continues. Handlers wait on pool_ready.
             tokio::spawn(async move {
                 match connect_db(&db_url).await {
@@ -2031,7 +2031,7 @@ mod tests {
     #[test]
     fn extract_tracking_path_parses_resume_ledger() {
         let body =
-            "Run me. Resume ledger: /opt/omni/data/tasks/WorkflowImplementation.md — append, don't overwrite.";
+            "Run me. Resume ledger: /opt/omni/data/tasks/WorkflowImplementation.md - append, don't overwrite.";
         assert_eq!(
             extract_tracking_path(body).as_deref(),
             Some("/opt/omni/data/tasks/WorkflowImplementation.md")
@@ -2174,7 +2174,7 @@ mod tests {
     #[test]
     fn role_template_loads_content_from_profile_templates_dir() {
         // The workflow role `template` field is a FILE NAME resolved against
-        // <data_dir>/profiles/<profile>/templates/<name>.md — the content is
+        // <data_dir>/profiles/<profile>/templates/<name>.md - the content is
         // loaded, never the raw name.
         let dir = tempdir_uniq("role-template-test");
         let data_dir = dir.as_path().to_str().unwrap();
@@ -2505,7 +2505,7 @@ mod prior_attempts_tests {
 
     #[test]
     fn prior_attempts_block_lists_all_statuses_with_summaries() {
-        // (a) ALL statuses are listed (not just completed) — interrupted
+        // (a) ALL statuses are listed (not just completed) - interrupted
         // threads hold the "what died and why" knowledge.
         let rows = vec![
             pa_row(140, "interrupted", Some(120), Some("2026-08-08 03:10")),
@@ -2525,7 +2525,7 @@ mod prior_attempts_tests {
         );
         let block = render_prior_attempts_block(rows, &summaries).expect("block present");
         assert!(block.starts_with(
-            "=== Previous attempts of this task (READ — do NOT repeat what they did) ==="
+            "=== Previous attempts of this task (READ - do NOT repeat what they did) ==="
         ));
         // newest first
         assert!(block.contains(
@@ -2571,7 +2571,7 @@ mod prior_attempts_tests {
     #[ignore = "requires a live DATABASE_URL"]
     async fn get_prior_threads_by_task_returns_interrupted_threads() {
         // task_18c9b88db4f55f65 (R7-D4): thread 155 interrupted, 156
-        // completed. The query must return BOTH — completed-only filtering
+        // completed. The query must return BOTH - completed-only filtering
         // is exactly the bug this change fixes.
         let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
         let pool = connect_db(&url).await.expect("connect_db");
@@ -2718,7 +2718,7 @@ mod token_counting_tests {
     }
 
     /// Ground-truth real token count of the JSON-serialized message array
-    /// via tiktoken — what the plugin measurement must match.
+    /// via tiktoken - what the plugin measurement must match.
     fn real_tokens(messages: &[ChatMessage]) -> usize {
         let json = serde_json::to_string(messages).unwrap();
         tiktoken_rs::get_bpe_from_model("gpt-4")
@@ -2729,7 +2729,7 @@ mod token_counting_tests {
 
     /// The chars/4 fallback used when NO tokenizer is configured (chars
     /// counted 4x the token budget). Real tiktoken counts differ from this
-    /// proxy on dense text — proven by the tests below.
+    /// proxy on dense text - proven by the tests below.
     fn chars_4_proxy(messages: &[ChatMessage]) -> usize {
         chars_of(messages) / 4
     }
@@ -2821,7 +2821,7 @@ mod token_counting_tests {
     }
 
     // (b) With a tokenizer configured, compaction gates on the REAL token
-    // count — a case where the chars/4 fallback would stay under the budget.
+    // count - a case where the chars/4 fallback would stay under the budget.
     #[tokio::test]
     async fn compaction_triggers_on_real_token_count_when_tokenizer_configured() {
         // Digit-dense tool args/results tokenize ~1 token/char in cl100k_base,
@@ -3016,7 +3016,7 @@ mod token_counting_tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    // (d) Budgets are REQUIRED params — missing them is an error (the
+    // (d) Budgets are REQUIRED params - missing them is an error (the
     // omniagent always passes soft_budget/hard_budget).
     #[tokio::test]
     async fn compact_messages_requires_budget_params() {
@@ -3038,7 +3038,7 @@ mod token_counting_tests {
 
     // (e) Prune-inside-compact: with hard/soft budget PARAMS the tool drains
     // old tool-result turns, keeps the recent ones verbatim, and read-type
-    // results in the drained region are auto-noted (thread_dir arg) — the
+    // results in the drained region are auto-noted (thread_dir arg) - the
     // thread-700 re-read death-spiral fix preserved inside compact-messages.
     #[tokio::test]
     async fn compact_prunes_and_auto_notes_via_budget_params() {

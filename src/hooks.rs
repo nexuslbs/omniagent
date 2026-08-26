@@ -6,7 +6,7 @@
 //!   - `thread_finished` : a thread reaches a terminal state
 //!   - `new_message`     : a message is inserted
 //!
-//! Definitions live in `{data_dir}/config/tasks.yml` (`hooks:` key — the
+//! Definitions live in `{data_dir}/config/tasks.yml` (`hooks:` key - the
 //! git-tracked source of truth), NOT in the (dormant) `hooks` table. The
 //! only runtime state is the per-hook JSON counter, stored in the small
 //! `hook_counters (hook_key, counter)` table.
@@ -262,7 +262,7 @@ impl HooksEngine {
             return Ok(());
         }
         // Guard: threads (or messages from threads) with no channel or no
-        // profile never trigger hooks — return early, no hook is evaluated.
+        // profile never trigger hooks - return early, no hook is evaluated.
         if !thread_has_channel_and_profile(&thread.channel_id, &thread.profile) {
             return Ok(());
         }
@@ -329,7 +329,7 @@ impl HooksEngine {
         let should_trigger = new_value >= hook.count as i64;
         if should_trigger {
             counter_reset(&mut counter, &hook.scope, key);
-            // Persist this trigger's ids as this scope key's next `meta` —
+            // Persist this trigger's ids as this scope key's next `meta` -
             // atomically with the counter reset (same tx). `meta` is nested
             // per scope key, so counter increments/resets never clobber it.
             meta_update(
@@ -500,7 +500,7 @@ impl HooksEngine {
             crate::scheduler::resolve_action(&self.data_dir, &action_id)?;
         // The event object is merged into the action's arguments under the
         // well-known `event` key. Merge order: static `params` first, then the
-        // event — the event WINS on key collision (trigger-specific data).
+        // event - the event WINS on key collision (trigger-specific data).
         if let Value::Object(args) = &mut tool_call.arguments {
             args.insert("event".to_string(), event.clone());
         } else {
@@ -542,7 +542,7 @@ pub fn default_counter() -> Value {
 /// Returns:
 /// - `Some("global")` for global scope (no filtering).
 /// - `Some(channel_name)` for channel scope: target None = all channels
-///   (one counter per channel); target Some(t) = only that named channel —
+///   (one counter per channel); target Some(t) = only that named channel -
 ///   events from other channels return `None` (ignored).
 /// - `Some(profile)` for profile scope (same filter logic).
 /// - `None` when the event is out of scope for this hook.
@@ -607,13 +607,13 @@ pub fn counter_reset(counter: &mut Value, scope: &str, key: &str) {
     counter_set(counter, scope, key, 0);
 }
 
-/// Read the per-scope-key `meta` section of a counter document — the ids of
+/// Read the per-scope-key `meta` section of a counter document - the ids of
 /// the last time the hook was triggered FOR THIS scope key. Returns
 /// `(None, None)` before the first trigger of that key.
 ///
 /// `meta` is stored per scope key (`meta[scope][key]` for channel/profile
 /// scopes, a single `meta["global"]` entry for the global scope) so every
-/// profile/channel keeps its OWN last_thread/last_message — a trigger in one
+/// profile/channel keeps its OWN last_thread/last_message - a trigger in one
 /// profile/channel must never leak its ids into another scope key's event.
 pub fn meta_get(counter: &Value, scope: &str, key: &str) -> (Option<i64>, Option<i64>) {
     let entry = match scope {
@@ -889,7 +889,7 @@ mod tests {
             })
         );
         // After a trigger, `meta` carries the trigger's ids per scope key,
-        // alongside global/channel/profile — untouched by counter
+        // alongside global/channel/profile - untouched by counter
         // increments/resets.
         meta_update(&mut c, "global", "global", Some(123), Some(456));
         assert_eq!(c["meta"]["global"]["last_thread"], json!(123));
@@ -929,7 +929,7 @@ mod tests {
 
     #[test]
     fn meta_isolation_per_scope_key() {
-        // Per-profile hook (no target): each profile keeps its OWN meta —
+        // Per-profile hook (no target): each profile keeps its OWN meta -
         // profile A's trigger must never leak ids into profile B's event.
         let mut c = default_counter();
         meta_update(&mut c, "profile", "omni", Some(11), Some(22));

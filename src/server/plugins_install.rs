@@ -62,7 +62,7 @@ pub(crate) async fn install_plugin_handler(
             info!("Install: compilation succeeded for '{}'", name);
         }
         Ok(false) => {
-            // Ok(false) means no Cargo.toml found — the plugin directory exists but
+            // Ok(false) means no Cargo.toml found - the plugin directory exists but
             // isn't a Rust crate, so it's a non-Rust plugin (Python/NodeJS). Install
             // its declared dependencies (requirements.txt / pyproject.toml /
             // package.json) hermetically so it can actually run. Remote plugins with
@@ -293,7 +293,7 @@ pub(crate) async fn install_url_handler(
 ) -> impl IntoResponse {
     info!("Installing plugin from URL: {}", body.url);
 
-    // Download and extract (async — never blocks the core's runtime)
+    // Download and extract (async - never blocks the core's runtime)
     let manifest = match plugin::installer::install_from_url(&body.url, &state.data_dir).await {
         Ok(m) => m,
         Err(e) => {
@@ -455,7 +455,7 @@ pub(crate) async fn install_git_handler(
     // Register remote MCP tools immediately when the plugin is already
     // enabled in plugins.yml (e.g. the deploy env carries actions as an
     // enabled remote plugin): install-git just cloned the source, so spawn
-    // the MCP server and register its tools right away — otherwise the
+    // the MCP server and register its tools right away - otherwise the
     // plugin stays "error" (no tools in the registry) until a separate
     // Install action fires the hot-reload. Fresh installs (no YAML entry
     // yet) keep the old behavior: the separate Install action triggers it.
@@ -463,20 +463,20 @@ pub(crate) async fn install_git_handler(
         match plugins_yaml::get_entry(&state.data_dir, &yaml_type, &target_name) {
             Ok(Some(entry)) if entry.enabled => {
                 info!(
-                    "install-git: plugin '{}' already enabled — hot-reloading MCP server to register tools",
+                    "install-git: plugin '{}' already enabled - hot-reloading MCP server to register tools",
                     target_name
                 );
                 reload_tool_plugin(&state, &target_name).await;
             }
             Ok(Some(_entry)) => {
                 info!(
-                    "install-git: plugin '{}' cloned but disabled — tools will register on enable",
+                    "install-git: plugin '{}' cloned but disabled - tools will register on enable",
                     target_name
                 );
             }
             Ok(None) => {
                 info!(
-                    "install-git: plugin '{}' cloned but not registered in plugins.yml — tools will register on Install",
+                    "install-git: plugin '{}' cloned but not registered in plugins.yml - tools will register on Install",
                     target_name
                 );
             }
@@ -810,7 +810,7 @@ pub(crate) async fn rename_plugin_handler(
 
 /// Install dependencies for a non-Rust (Python/NodeJS) plugin.
 ///
-/// Hermetic by design — no global package pollution:
+/// Hermetic by design - no global package pollution:
 /// - **Python** (`requirements.txt` or `pyproject.toml`): creates a venv at
 ///   `{plugin_dir}/.venv` and pip-installs into it. Falls back to
 ///   `pip install --target {plugin_dir}/pylib` when `python3 -m venv` is

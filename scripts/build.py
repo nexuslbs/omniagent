@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-build.py — Build omniagent and all builtin plugin binaries.
+build.py - Build omniagent and all builtin plugin binaries.
 
 Automatically discovers all workspace member packages from Cargo.toml
 and builds them with cargo build --release. No hardcoded package lists.
 
 When adding a new plugin (platform or tool) to the workspace, it is
-automatically included — no changes needed to this script, the Dockerfile,
+automatically included - no changes needed to this script, the Dockerfile,
 or deploy.py.
 
 Usage (from repo root):
@@ -46,7 +46,7 @@ def run(cmd: list[str], description: str) -> None:
         for line in lines[-10:]:
             print(line, file=sys.stderr)
     if result.returncode != 0:
-        print(f"\n  ❌ {description} — FAILED (exit {result.returncode}) [{elapsed:.0f}s]")
+        print(f"\n  ❌ {description} - FAILED (exit {result.returncode}) [{elapsed:.0f}s]")
         sys.exit(result.returncode)
     print(f"  ✅ {description} [{elapsed:.0f}s]")
 
@@ -76,7 +76,7 @@ def main() -> None:
 
     # Build the entire workspace in one invocation.
     # This compiles omniagent, db-migrations, and every plugin binary
-    # (platforms + tools) — everything in [workspace].members.
+    # (platforms + tools) - everything in [workspace].members.
     # Without --workspace, cargo only builds the root package and its deps,
     # skipping standalone member crates like the MCP servers.
     # Single-invocation builds are faster than per-package (-p) invocations

@@ -65,7 +65,7 @@ fn format_thousands(n: usize) -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryStore {
     /// Profile directory root (`profiles/<profile>`). The canonical memory
-    /// file lives AT THE ROOT (`profiles/<profile>/MEMORY.md`) — SOUL.md is
+    /// file lives AT THE ROOT (`profiles/<profile>/MEMORY.md`) - SOUL.md is
     /// removed and USER.md is never read. The legacy `memories/MEMORY.md`
     /// duplicate is a transitional copy that the next release drops; it is
     /// not read by the prompt builder.

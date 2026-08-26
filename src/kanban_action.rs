@@ -12,7 +12,7 @@
 //! - `run_action_step`, the shared action execution helper: resolves the
 //!   actions.yml tool (`scheduler::resolve_action` pattern), executes it via
 //!   the plugin manager, persists the result as a kanban step thread
-//!   (msg_type='kanban', workflow_step set, TERMINAL — system on success /
+//!   (msg_type='kanban', workflow_step set, TERMINAL - system on success /
 //!   failed on error) and returns the outcome.
 //!
 //! The routing of the step outcome (success/failure → next column) lives in
@@ -33,7 +33,7 @@ use crate::error::{AppResult, Error};
 use crate::mcp::AppContext;
 
 /// Runtime handles needed to execute actions.yml tools from workflow step
-/// creation/routing — registered once at startup (mirrors GLOBAL_CONFIG).
+/// creation/routing - registered once at startup (mirrors GLOBAL_CONFIG).
 struct KanbanActionRuntime {
     plugin_manager: Arc<dyn PluginManager>,
     app_context: AppContext,
@@ -51,7 +51,7 @@ pub fn init(plugin_manager: Arc<dyn PluginManager>, app_context: AppContext) {
 }
 
 /// Access the registered runtime. `None` when not initialized (unit tests or
-/// a partial startup) — callers treat it as "action execution unavailable".
+/// a partial startup) - callers treat it as "action execution unavailable".
 pub(crate) fn runtime() -> Option<(&'static Arc<dyn PluginManager>, &'static AppContext)> {
     RUNTIME.get().map(|r| (&r.plugin_manager, &r.app_context))
 }
@@ -98,7 +98,7 @@ struct ActionTaskRow {
 /// it via the plugin manager, persist the result as a terminal kanban step
 /// thread (msg_type='kanban', workflow_step = step), and return the outcome.
 ///
-/// The thread is created TERMINAL (system on success, failed on error) — the
+/// The thread is created TERMINAL (system on success, failed on error) - the
 /// agent loop never sees it; the caller routes the task via
 /// [`crate::agent::kanban_updater::route_step_completion`].
 pub(crate) async fn run_action_step(ctx: ActionStepCtx<'_>) -> AppResult<ActionStepOutcome> {

@@ -194,7 +194,7 @@ pub(crate) async fn compile_rust_crate(
         name, plugin_dir, source, force_rebuild
     );
 
-    // Locate the Cargo.toml — if none exists, skip compilation
+    // Locate the Cargo.toml - if none exists, skip compilation
     // (non-Rust plugins like Python don't have Cargo.toml)
     let cargo_path = format!("{}/Cargo.toml", plugin_dir);
     if !std::path::Path::new(&cargo_path).exists() {
@@ -289,7 +289,7 @@ pub(crate) struct ResolvedPlugin {
 }
 
 /// Resolve the plugin source directory, type, and category.
-/// Uses type and source from the URL path deterministically — no guessing, no fallbacks.
+/// Uses type and source from the URL path deterministically - no guessing, no fallbacks.
 ///
 /// - `source = "remote"` → reads remote.yml for sub-path, dir is `.remote/{name}/{sub_path}`
 /// - `source = "bundled"` → dir is `{data_dir}/plugins/{type_dir}/{name}`
@@ -313,7 +313,7 @@ pub(crate) async fn resolve_plugin_for_compile(
     let (category, plugin_dir) = match source {
         "remote" => {
             // Remote: read remote.yml to get the sub-path (deterministic lookup)
-            // Error if no remote.yml entry — the Add/install-git action must create it first.
+            // Error if no remote.yml entry - the Add/install-git action must create it first.
             let remote = crate::plugins_yaml::get_remote_plugin(data_dir, &yaml_type, name)
                 .ok_or_else(|| {
                     (

@@ -1,9 +1,9 @@
 //! Profiles API: list, update, create, and import profiles.
 //!
 //! Profile definitions AND runtime state live in
-//! `{data_dir}/config/profiles.yml` — the single source of truth (the legacy
+//! `{data_dir}/config/profiles.yml` - the single source of truth (the legacy
 //! `profiles/<name>/config.json` stays on disk for backward compat but is
-//! NOT read for resolution). The profile NAME is the yml key — the stable
+//! NOT read for resolution). The profile NAME is the yml key - the stable
 //! identifier used everywhere (`threads.profile`, channels.yml `profile:`,
 //! kanban boards/tasks `profile:`, dashboard profile selects).
 //!
@@ -17,7 +17,7 @@
 //!   `{data_dir}/config/profiles.yml`
 //!
 //! IMPORT MERGE POLICY: imported entries OVERWRITE existing entries with the
-//! same name (upsert semantics) — consistent with the channels import
+//! same name (upsert semantics) - consistent with the channels import
 //! precedent, where every imported channel is PATCHed/upserted into
 //! channels.yml. The whole document is validated BEFORE the atomic save; on
 //! any validation/parse error nothing is written. The response lists which
@@ -171,7 +171,7 @@ fn yaml_from_body(body: &str) -> Result<String, String> {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// GET /profiles — YAML-declared profiles, sorted by name. Returns a BARE
+/// GET /profiles - YAML-declared profiles, sorted by name. Returns a BARE
 /// array (dashboard consumes it as `ProfileData[]`), mirroring GET /channels.
 async fn list_profiles_handler(
     State(state): State<Arc<AppState>>,
@@ -189,7 +189,7 @@ async fn list_profiles_handler(
     Ok(Json(entries))
 }
 
-/// POST /profiles — create (upsert) a profile from `{name, provider, model}`.
+/// POST /profiles - create (upsert) a profile from `{name, provider, model}`.
 async fn create_profile_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateProfileRequest>,
@@ -210,7 +210,7 @@ async fn create_profile_handler(
     }
 }
 
-/// PATCH /profiles/{id} — update one or more bare fields. Empty strings
+/// PATCH /profiles/{id} - update one or more bare fields. Empty strings
 /// clear provider/model/template to None (fall through the resolution chain).
 async fn update_profile_handler(
     State(state): State<Arc<AppState>>,
@@ -246,12 +246,12 @@ async fn update_profile_handler(
     }
 }
 
-/// POST /profiles/import — merge an external profiles.yml-structured
+/// POST /profiles/import - merge an external profiles.yml-structured
 /// document into `{data_dir}/config/profiles.yml`.
 ///
 /// Body: raw YAML text (`profiles:` top-level) OR JSON `{"yaml": "..."}`.
 /// Merge policy: existing entries with the same name are OVERWRITTEN
-/// (upsert — same as the channels import precedent); new names are added.
+/// (upsert - same as the channels import precedent); new names are added.
 /// The whole document is validated BEFORE the atomic save; on error nothing
 /// is written. Response: `{imported: [...], updated: [...]}`.
 async fn import_profiles_handler(

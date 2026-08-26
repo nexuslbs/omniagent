@@ -1,13 +1,13 @@
-//! Context-overflow forced compaction + retry — task 3 (kill the death spiral).
+//! Context-overflow forced compaction + retry - task 3 (kill the death spiral).
 //!
 //! When an LLM provider rejects a request because the accumulated thread
 //! context exceeds the model's context window (a "context-length error"),
-//! retrying the SAME oversized context can never succeed — the thread dies
+//! retrying the SAME oversized context can never succeed - the thread dies
 //! with no way back (iteration-budget / output-budget exhaustion follows).
 //! This module implements the recovery half of context economy:
 //!
 //!   1. prune over-budget tool results deterministically (task 2, zero LLM
-//!      cost — wired in `main_loop.rs`),
+//!      cost - wired in `main_loop.rs`),
 //!   2. if pruning is exhausted, FORCE a summary compaction of the OLDEST
 //!      portion of the thread and REPLACE it in the in-memory history with a
 //!      single "Compact Checkpoint" user message (mirroring dsh's
@@ -19,7 +19,7 @@
 //! Only the in-memory conversation is compacted: the thread history in the
 //! DB is never deleted, so full fidelity is preserved. The system prompt
 //! (leading `system` messages: memory, template, context, plan, output
-//! limit) is NEVER compacted — it stays verbatim for every retry. The newest
+//! limit) is NEVER compacted - it stays verbatim for every retry. The newest
 //! message always stays verbatim so the model keeps the current request
 //! context. Tool-call/result pairing is preserved: a range that contains an
 //! assistant tool-call is extended over the paired tool result so no
@@ -33,7 +33,7 @@ use std::ops::Range;
 /// retried request is the one that needs context headroom.
 pub const COMPACT_SUMMARY_MAX_TOKENS: u32 = 1024;
 
-/// Rough token estimate from char count (chars/4 — the common heuristic).
+/// Rough token estimate from char count (chars/4 - the common heuristic).
 pub fn estimate_tokens(chars: usize) -> usize {
     chars / 4
 }
@@ -102,7 +102,7 @@ pub fn select_compaction_range(messages: &[ChatMessage]) -> Option<Range<usize>>
             break;
         }
     }
-    // Never compact the newest message — the retry needs it verbatim.
+    // Never compact the newest message - the retry needs it verbatim.
     let max_end = messages.len().saturating_sub(1).max(start);
     let mut end = end.min(max_end);
     // Extend over dangling tool results: an assistant tool-call inside the
@@ -133,7 +133,7 @@ pub fn select_compaction_range(messages: &[ChatMessage]) -> Option<Range<usize>>
 /// Build the LLM request that summarizes the compacted range. Tool results
 /// are stripped (their content is already pruned/persisted; the summary only
 /// needs the gist) and assistant `tool_calls` are nulled (providers such as
-/// DeepSeek require complete tool-call chains — same convention as the
+/// DeepSeek require complete tool-call chains - same convention as the
 /// response-handler summary path).
 pub fn build_compact_summary_request(range_messages: &[ChatMessage]) -> CompletionRequest {
     let mut summary_msgs: Vec<ChatMessage> = range_messages
@@ -167,7 +167,7 @@ pub fn build_compact_summary_request(range_messages: &[ChatMessage]) -> Completi
 /// conversation (mirrors dsh's `user/message` with `surfaceOp: replace`).
 pub fn compact_checkpoint_message(summary: &str) -> ChatMessage {
     ChatMessage::user(&format!(
-        "=== Compact Checkpoint (earlier conversation summarized — full fidelity preserved in thread history) ===\n\n{}",
+        "=== Compact Checkpoint (earlier conversation summarized - full fidelity preserved in thread history) ===\n\n{}",
         summary
     ))
 }

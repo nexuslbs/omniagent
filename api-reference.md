@@ -7,7 +7,7 @@ This file is **curated from `src/server/*.rs` routers** (see "Source of
 truth" below) and is copied into the release image at build time:
 
 - `/opt/omni/docs/api.md` (canonical)
-- `/app/docs/api.md` (fallback — survives a fresh `/opt/omni` volume mount)
+- `/app/docs/api.md` (fallback - survives a fresh `/opt/omni` volume mount)
 
 Inside a running container, re-derive with:
 
@@ -20,7 +20,7 @@ docker exec <container> ls /opt/omni/docs
 
 - Base URL: `http://localhost:8080` (internal only).
 - From inside the agent: use the `builtin_omniagent-api` tool with
-  `method` + `path` (+ optional `body`) — no host/scheme/port needed.
+  `method` + `path` (+ optional `body`) - no host/scheme/port needed.
 - From a shell: `docker exec <container> curl -s http://localhost:8080/kanban/tasks`
 - All JSON bodies are `application/json`. Responses are
   `{"success":true,"data":...}` or `{"success":false,"error":...}`.
@@ -55,29 +55,29 @@ docker exec <container> ls /opt/omni/docs
 
 | Method + path | Body | Purpose |
 |---|---|---|
-| GET /kanban/tasks | — | board tasks (flat list) |
-| GET /kanban/tasks/{id} | — | task detail |
+| GET /kanban/tasks | - | board tasks (flat list) |
+| GET /kanban/tasks/{id} | - | task detail |
 | POST /kanban/tasks | `{"title","status","board","profile","channel","priority",...}` | create task |
 | PATCH /kanban/tasks/{id} | partial fields | update task |
 | PATCH /kanban/tasks/{id}/status | `{"status":"running"}` | change status (+ position shift) |
 | PATCH /kanban/tasks/{id}/position | `{"position":N}` | change position (cross-column) |
-| DELETE /kanban/tasks/{id} | — | delete task |
-| GET /kanban/tasks/{id}/dependencies | — | list dependencies |
+| DELETE /kanban/tasks/{id} | - | delete task |
+| GET /kanban/tasks/{id}/dependencies | - | list dependencies |
 | POST /kanban/tasks/{id}/dependencies | `{"depends_on_id":N}` | add dependency |
-| DELETE /kanban/tasks/{id}/dependencies/{depId} | — | remove dependency |
-| GET /kanban/tasks/{id}/threads | — | threads for a task |
-| GET /kanban/tasks/{id}/history | — | history log |
-| GET /kanban/history | — | all history (task_id query param) |
-| GET /kanban/tasks/{id}/subtasks | — | task subtasks |
-| POST /kanban/tasks/{id}/workflow/executions/reset | — | reset workflow executions |
-| POST /kanban/dispatch | — | dispatch highest-priority eligible todo task |
-| POST /kanban/tasks/{id}/redispatch | — | re-create thread for a task |
+| DELETE /kanban/tasks/{id}/dependencies/{depId} | - | remove dependency |
+| GET /kanban/tasks/{id}/threads | - | threads for a task |
+| GET /kanban/tasks/{id}/history | - | history log |
+| GET /kanban/history | - | all history (task_id query param) |
+| GET /kanban/tasks/{id}/subtasks | - | task subtasks |
+| POST /kanban/tasks/{id}/workflow/executions/reset | - | reset workflow executions |
+| POST /kanban/dispatch | - | dispatch highest-priority eligible todo task |
+| POST /kanban/tasks/{id}/redispatch | - | re-create thread for a task |
 | POST /review | `{"task_id","decision","comment"}` | review decision |
-| GET /workflows | — | list workflows |
+| GET /workflows | - | list workflows |
 | PUT/POST/DELETE /workflows/{key} | workflow def | upsert / delete workflow |
-| GET /boards | — | list boards |
+| GET /boards | - | list boards |
 | POST /boards | board def | create board |
-| DELETE /boards/{key} | — | delete board |
+| DELETE /boards/{key} | - | delete board |
 
 Common create-task body:
 
@@ -90,16 +90,16 @@ Common create-task body:
 
 | Method + path | Body | Purpose |
 |---|---|---|
-| GET /schedule | — | list schedules |
-| GET /schedule/{id} | — | schedule detail |
+| GET /schedule | - | list schedules |
+| GET /schedule/{id} | - | schedule detail |
 | POST /schedule | `{"id","enabled","channel","profile","cron","prompt","plan",...}` | create |
 | PATCH /schedule/{id} | partial fields | update |
-| PATCH /schedule/{id}/toggle | — | toggle enabled |
-| POST /schedule/{id}/run | — | trigger now |
-| DELETE /schedule/{id} | — | delete (removes from tasks.yml) |
-| GET /schedule/{id}/threads | — | schedule threads |
-| GET /schedule/{id}/subtasks | — | schedule subtasks |
-| POST /run-cron/{schedule_id} | — | legacy manual fire |
+| PATCH /schedule/{id}/toggle | - | toggle enabled |
+| POST /schedule/{id}/run | - | trigger now |
+| DELETE /schedule/{id} | - | delete (removes from tasks.yml) |
+| GET /schedule/{id}/threads | - | schedule threads |
+| GET /schedule/{id}/subtasks | - | schedule subtasks |
+| POST /run-cron/{schedule_id} | - | legacy manual fire |
 
 Create-schedule body:
 
@@ -108,7 +108,7 @@ Create-schedule body:
  "profile": "omni", "cron": "0 3 * * *", "prompt": "Run nightly cleanup"}
 ```
 
-## Plugins (prefix: `/api/plugins` — the builtin tool needs the full path)
+## Plugins (prefix: `/api/plugins` - the builtin tool needs the full path)
 
 | Method + path | Purpose |
 |---|---|
@@ -208,6 +208,6 @@ To regenerate/refresh after a code change, re-derive the route list with:
 grep -rn '\.route(' src/server/ | sed "s/.*\.route(//; s/,.*//" | sort -u
 ```
 
-Repo: https://github.com/nexuslbs/omniagent (not shipped in the image —
+Repo: https://github.com/nexuslbs/omniagent (not shipped in the image -
 `git clone https://github.com/nexuslbs/omniagent /opt/workspace/omniagent-src`
 to read the source).

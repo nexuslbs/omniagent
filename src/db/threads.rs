@@ -13,7 +13,7 @@ use crate::error::{AppResult, Error};
 // Thread query functions
 // ---------------------------------------------------------------------------
 
-/// Create a new thread — THE single INSERT for every thread creation path.
+/// Create a new thread - THE single INSERT for every thread creation path.
 ///
 /// All thread rows (general message threads, kanban executor threads, workflow
 /// step threads, engine re-runs, manual-review re-runs, skip-recovery
@@ -21,7 +21,7 @@ use crate::error::{AppResult, Error};
 /// (plan, template, workflow_step, task_type, schedule_task_id, hook_caused)
 /// is always persisted. Hand-rolled INSERTs elsewhere have repeatedly drifted:
 /// step threads were created without `plan`/`template` (60-iteration no-plan
-/// budget, no role guidance — threads 75-78, 82) and `hook_caused` was missed
+/// budget, no role guidance - threads 75-78, 82) and `hook_caused` was missed
 /// in several paths.
 ///
 /// `executor` accepts either a `&PgPool` or `&mut PgTransaction` (both
@@ -46,7 +46,7 @@ where
         );
     }
     // Identity invariant: a thread MUST carry a valid persisted
-    // profile/provider/model — creation fails instead of inserting empties.
+    // profile/provider/model - creation fails instead of inserting empties.
     if profile.trim().is_empty() {
         err_msg!("Cannot create thread: profile is empty");
     }
@@ -108,7 +108,7 @@ pub async fn set_thread_failed(pool: &PgPool, thread_id: i64) -> AppResult<()> {
 /// Priority order (highest first):
 /// 1. Task/Cron explicit setting (`task_plan`)
 /// 2. Channel setting (`channel_plan`)
-/// 3. Profile setting (`profile_plan` — profiles.yml `plan`)
+/// 3. Profile setting (`profile_plan` - profiles.yml `plan`)
 /// 4. None (let the plugin decide at runtime)
 ///
 /// Returns `None` when no explicit preference is set: the plugin
@@ -149,7 +149,7 @@ pub fn max_iterations_for_plan(config: &AgentConfig, plan: bool) -> u32 {
 ///
 /// The rule is the same on every path: a skipped thread NEVER consumes retry
 /// and NEVER moves the task back to todo (the old "return to prior status"
-/// behavior is gone). The step is RE-SCHEDULED — a fresh thread is created
+/// behavior is gone). The step is RE-SCHEDULED - a fresh thread is created
 /// carrying the same cause, thread_status is set back to 'scheduled', and the
 /// kanban status is left unchanged (completed workflow steps are never re-run
 /// and never lost).
@@ -179,7 +179,7 @@ pub(crate) fn skip_recovery(task_id: Option<&str>, task_status: Option<&str>) ->
 
 /// Copy a skipped thread's PERSISTED identity onto its re-scheduled
 /// replacement (R3/startup recovery). Re-scheduled threads never re-resolve
-/// provider/model/profile at runtime — they inherit the parent's creation-time
+/// provider/model/profile at runtime - they inherit the parent's creation-time
 /// identity. Returns `Err` when the parent lacks any part of the identity:
 /// the re-schedule fails instead of fabricating defaults or inserting empties.
 pub(crate) fn copied_thread_identity(
@@ -294,7 +294,7 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
     };
 
     // 'pending' is NOT a terminal status: a plain status flip is enough.
-    // 'skipped' IS terminal — route it through the single choke point
+    // 'skipped' IS terminal - route it through the single choke point
     // (mark_thread_terminal) so terminal=true is always set with it.
     if thread_status == "skipped" {
         mark_thread_terminal(&mut *tx, msg.thread_id, "skipped").await?;
@@ -307,7 +307,7 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
         .await?;
     }
 
-    // R3 (Phase 6): channel closure/deletion is a pre-start/external skip — it
+    // R3 (Phase 6): channel closure/deletion is a pre-start/external skip - it
     // NEVER consumes retry and NEVER moves the task back to 'todo' (the old
     // "return to prior status" behavior is replaced by re-scheduling, so
     // completed workflow steps are never re-run). A fresh thread carrying the
@@ -370,8 +370,8 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
                     )
                     .map_err(|e| Error::Message(format!("Thread #{}: {e}", t.id)))?;
                     // Single canonical INSERT (create_thread): the re-scheduled
-                    // thread must carry the parent's full execution identity —
-                    // including plan + template — or it silently runs with a
+                    // thread must carry the parent's full execution identity -
+                    // including plan + template - or it silently runs with a
                     // no-plan iteration budget and no role guidance.
                     let new_thread = create_thread(
                         &mut *tx,
@@ -446,7 +446,7 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
 }
 
 /// Execution identity resolved once at thread creation and persisted on the
-/// thread row. Running threads never re-resolve it — the executor consumes
+/// thread row. Running threads never re-resolve it - the executor consumes
 /// the persisted profile/provider/model and fails when they are absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedThreadIdentity {
@@ -474,7 +474,7 @@ pub struct ResolvedThreadIdentity {
 /// - model: resolved at the same tier as the provider (explicit model,
 ///   profile model, channel model, or the provider's default model)
 ///
-/// Returns `Err` when no profile/provider/model can be resolved — creation
+/// Returns `Err` when no profile/provider/model can be resolved - creation
 /// must fail rather than persist an empty/invalid identity.
 pub fn resolve_thread_identity(
     data_dir: &str,
@@ -619,7 +619,7 @@ pub async fn create_thread_with_cause(
         err_msg!("msg_type 'user' is no longer valid for seq-0 messages: use 'Cause' instead");
     }
     // 1. Get channel for its plan override and current_* fields. A thread
-    // with no channel (empty channel_id — the explicit -> default -> ''
+    // with no channel (empty channel_id - the explicit -> default -> ''
     // resolution chain came up empty) is still CREATED so the record
     // persists for audit; it is then marked failed with "no channel
     // defined" below. Unknown channel names are treated the same way.
@@ -1065,7 +1065,7 @@ pub(crate) fn kanban_step_actionable(
     }
 }
 
-/// R8-J: an executor thread must ALWAYS carry a template — the role template
+/// R8-J: an executor thread must ALWAYS carry a template - the role template
 /// wins; for the running step the fallback chain is task.template ->
 /// channel.template -> "dev-development" (never None). Step threads
 /// (testing/review) carry their role template only (required by workflow
@@ -1101,7 +1101,7 @@ fn kanban_thread_content(title: &str, body: Option<&str>) -> String {
 /// Core of kanban status-change dispatch and `/redispatch`: create the
 /// workflow-role thread for `status` on `task_id` and mark the task's
 /// `thread_status` as 'scheduled'. The task's OWN status is NEVER changed
-/// here — the caller owns the status transition.
+/// here - the caller owns the status transition.
 ///
 /// Returns `Some(thread_id)` when a thread was created, `None` when the
 /// status has no role to run (non-workflow `testing`/`review`, a workflow
@@ -1163,7 +1163,7 @@ pub(crate) async fn create_kanban_step_thread(
     }
 
     // 1b. Resolve the task's effective defaults ONCE at load (task → board →
-    //     channel → global settings) — the universal resolution pattern. The
+    //     channel → global settings) - the universal resolution pattern. The
     //     board gate is part of the resolution: boards.yml present + invalid
     //     board (NULL or not in the file) fails LOUD here, and the thread is
     //     created and IMMEDIATELY terminated as 'failed' with a clear Error
@@ -1521,7 +1521,7 @@ async fn fail_kanban_thread_no_board(
     .await?;
 
     // Error message (msg_type='error', error_type=configuration) + terminal
-    // 'failed' — the same shape the builtin fail-thread produces.
+    // 'failed' - the same shape the builtin fail-thread produces.
     let external_id = format!(
         "validation-error:{}:{}",
         thread.id,
@@ -1614,7 +1614,7 @@ pub async fn ensure_task_board_valid(
 /// Dispatch a kanban task for a target status: skip any stale active
 /// threads, create the mapped role thread (running -> executor, testing ->
 /// tester, review -> reviewer) and mark the task `thread_status='scheduled'`.
-/// Does NOT change the task's own status — the caller owns the transition.
+/// Does NOT change the task's own status - the caller owns the transition.
 ///
 /// Returns `Some(thread_id)` when a thread was created, `None` when the
 /// status has no role to run.
@@ -1633,7 +1633,7 @@ pub(crate) async fn dispatch_task_for_status(
 /// The old per-thread re-schedule branch is gone: the unified startup
 /// recovery marks every pending/processing thread terminal (single choke
 /// point) and then re-creates the role thread for each kanban task in
-/// `running`/`testing`/`review` that has NO active thread — the SAME code
+/// `running`/`testing`/`review` that has NO active thread - the SAME code
 /// path as status-change dispatch and `/redispatch`. Safeguards preserved:
 /// no retry consumed, task status never moved back to `todo`, blocked/done
 /// tasks untouched.
@@ -1835,7 +1835,7 @@ pub async fn get_completed_seq0_threads_since(
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Phase 2 — getters used by the builtin fail-thread tool / finalization guard
+// Phase 2 - getters used by the builtin fail-thread tool / finalization guard
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Get a thread row by ID (used by the builtin fail-thread tool to resolve
@@ -1918,7 +1918,7 @@ pub async fn delete_old_threads(
     // 1. Messages of candidate threads (FK messages_thread_id_fkey). The
     //    append-only trigger (trg_messages_append_only) blocks DELETE on
     //    messages, so it is disabled for this transaction only (transactional
-    //    DDL: rollback restores it) — old-data cleanup is the sanctioned
+    //    DDL: rollback restores it) - old-data cleanup is the sanctioned
     //    purge path.
     sqlx::query("ALTER TABLE messages DISABLE TRIGGER trg_messages_append_only")
         .execute(&mut *tx)
@@ -1976,7 +1976,7 @@ mod tests {
     #[test]
     fn channel_closed_with_running_thread_reschedules() {
         // thread_status='running', interrupted by channel closure: thread is
-        // skipped and the task re-scheduled the same way — no retry consumed,
+        // skipped and the task re-scheduled the same way - no retry consumed,
         // no re-run, never moved to todo.
         match skip_recovery(Some("task-1"), Some("running")) {
             SkipRecovery::Reschedule { task_status } => {
@@ -1989,7 +1989,7 @@ mod tests {
     #[test]
     fn skip_never_moves_to_todo_and_never_consumes_retry() {
         // R3: pre-start/external skips never consume retry and never move to
-        // todo — the recovery plan has no todo variant and touches no counters.
+        // todo - the recovery plan has no todo variant and touches no counters.
         for status in ["todo", "running", "testing", "review"] {
             match skip_recovery(Some("task-1"), Some(status)) {
                 SkipRecovery::Reschedule { task_status } => {
@@ -2004,7 +2004,7 @@ mod tests {
     fn startup_skip_reschedules_instead_of_moving_to_todo() {
         // Same rule at omniagent start: scheduled or running task threads are
         // re-scheduled (fresh thread, thread_status='scheduled', status
-        // unchanged) — never moved to todo.
+        // unchanged) - never moved to todo.
         for status in ["todo", "running"] {
             assert!(
                 matches!(
@@ -2153,7 +2153,7 @@ mod tests {
     // provider chain (profile.provider was checked BEFORE
     // channel.current_provider). That made kanban executor threads on the
     // wf-test channel (current_provider=noop) resolve to the omni profile's
-    // deepseek provider — a REAL LLM call in tests that must never hit one.
+    // deepseek provider - a REAL LLM call in tests that must never hit one.
     // Channel override MUST win: it is the operator's explicit per-channel
     // choice; the profile's provider is only a default.
 
@@ -2296,7 +2296,7 @@ mod tests {
             ),
             Some("channel-tpl".to_string())
         );
-        // Step threads (testing/review) without a role template stay None —
+        // Step threads (testing/review) without a role template stay None -
         // same as kanban_updater's step-thread creation.
         assert_eq!(
             resolve_kanban_thread_template(

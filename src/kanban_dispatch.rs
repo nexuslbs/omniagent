@@ -4,7 +4,7 @@
 //! The dispatch decision logic (board gate, dependency gate, channel-busy
 //! gate, priority ordering) lives here so it can be driven BOTH by the HTTP
 //! handler (`POST /kanban/dispatch`) and by the core background loop
-//! (`kanban_dispatcher_interval` in settings.yml, default 15s) — no external
+//! (`kanban_dispatcher_interval` in settings.yml, default 15s) - no external
 //! cron/action required.
 
 use serde::Serialize;
@@ -33,7 +33,7 @@ struct DispatchTaskRow {
     /// Task status; the scan SQL already filters `status = 'todo'`.
     status: String,
     /// Archived flag (NULL = not archived). Archived tasks must NEVER be
-    /// dispatched — see `scan_row_eligible` and the scan SQL predicate.
+    /// dispatched - see `scan_row_eligible` and the scan SQL predicate.
     archived: Option<bool>,
     /// Channel name (yml key) the task targets; needed to gate dispatch on
     /// the channel's active threads without a per-task detail fetch.
@@ -65,8 +65,8 @@ fn scan_row_eligible(status: &str, archived: Option<bool>) -> bool {
 }
 
 /// Goal resume-eligibility filter: a task whose goal machine is blocked with
-/// the typed code `user-blocked` is NEVER auto-dispatched — even when its
-/// kanban status is moved back to `todo` — manual review (and an explicit
+/// the typed code `user-blocked` is NEVER auto-dispatched - even when its
+/// kanban status is moved back to `todo` - manual review (and an explicit
 /// goal clear via PATCH /kanban/tasks/{id}/goal) is required first. Other
 /// blocked codes (e.g. provider-unavailable) stay dispatch-eligible: they
 /// represent transient conditions that may clear on their own. This is a
@@ -165,10 +165,10 @@ fn first_dispatchable_index(
 
 /// Number of ACTIVE (queued/running) threads on a channel.
 ///
-/// The dispatch gate blocks a channel that has any of these — the in-flight
+/// The dispatch gate blocks a channel that has any of these - the in-flight
 /// task's full workflow (executor -> tester -> reviewer -> done) must finish
 /// before the next task on the same channel begins. The filter is STATUS-based
-/// (`pending` = queued, `processing` = running) — deliberately NOT
+/// (`pending` = queued, `processing` = running) - deliberately NOT
 /// terminal-based: an operator stop leaves `skipped` threads with
 /// terminal=false, and a terminal gate would block dispatch on that channel
 /// forever. The `idx_threads_channel_status (channel_id, status)` index keeps
@@ -188,9 +188,9 @@ async fn channel_active_thread_count(pool: &PgPool, channel_id: &str) -> Result<
 }
 
 /// Resolve the effective channel NAME for a task: the explicit task channel
-/// wins (even when unknown — the caller then fails the thread with "channel
+/// wins (even when unknown - the caller then fails the thread with "channel
 /// not found"), else the board's channel, else the `default_kanban_channel`
-/// setting, else "". Shared resolver (src/resolution.rs) — no per-consumer
+/// setting, else "". Shared resolver (src/resolution.rs) - no per-consumer
 /// fallback logic.
 fn resolve_task_channel(
     data_dir: &str,
@@ -210,7 +210,7 @@ fn resolve_task_channel(
 /// to `running` and start a thread for it. A task is eligible when every
 /// non-archived dependency is `done` AND its channel has no active
 /// (queued/running) thread AND its channel is not claimed by another active
-/// task — the channel gates let the current task's full workflow
+/// task - the channel gates let the current task's full workflow
 /// (executor -> tester -> reviewer -> done) finish before the next task on
 /// the same channel begins.
 ///
@@ -255,7 +255,7 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
 
     // 1b. Board gate (feature-flagged on the presence of config/boards.yml):
     //     when boards are enabled, tasks with no board or an unknown board
-    //     are INVALID-BOARD tasks — skipped exactly like backlog/archived
+    //     are INVALID-BOARD tasks - skipped exactly like backlog/archived
     //     tasks (never promoted/dispatched). Thread creation for them is
     //     additionally blocked/failed in create_kanban_step_thread.
     let boards_enabled = crate::boards::boards_enabled(data_dir);
@@ -288,7 +288,7 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
 
     // 1c. Goal resume-eligibility gate (per-task filter, like the board
     //     gate): a task whose goal machine is blocked with the typed code
-    //     `user-blocked` is never auto-dispatched — even when its status is
+    //     `user-blocked` is never auto-dispatched - even when its status is
     //     moved back to `todo`, manual review + an explicit goal clear is
     //     required first. Does NOT touch the sequential per-channel gate.
     let tasks: Vec<DispatchTaskRow> = tasks
@@ -299,13 +299,13 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
     // 1d. Same-channel active-task scan (task-level gate): non-archived tasks
     //     in `running`/`testing`/`review` whose thread_status is live
     //     ('scheduled' = thread queued, 'running' = thread processing) claim
-    //     their resolved channel — a `todo` candidate on that channel must NOT
+    //     their resolved channel - a `todo` candidate on that channel must NOT
     //     be dispatched while the predecessor's workflow still has a live
     //     thread. This closes the window the threads-table gate alone misses
     //     (e.g. between an executor finishing and its testing/review thread
     //     spawning, or while a review thread still occupies the channel).
     //     Tasks with empty/NULL thread_status (manual review, no auto thread)
-    //     are IGNORED — they do not occupy the channel. Archived tasks never
+    //     are IGNORED - they do not occupy the channel. Archived tasks never
     //     count. Channels are resolved with the same task -> board -> default
     //     resolution used for the candidates (resolve_task_channel).
     let active_tasks = match sql_forge!(
@@ -402,7 +402,7 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
     }
 
     // 2b. Channel-busy gate: skip candidates whose channel has an active
-    // (queued/running) thread — the status-based gate, NOT terminal-based (an
+    // (queued/running) thread - the status-based gate, NOT terminal-based (an
     // operator stop leaves `skipped` threads with terminal=false, and a
     // terminal gate would block dispatch on that channel forever). Skipping a
     // busy channel lets the in-flight task's full workflow (executor ->
@@ -508,14 +508,14 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
             }
         };
 
-    // 4. Mark the task running ("ready" was retired — see VALID_STATUSES; the
+    // 4. Mark the task running ("ready" was retired - see VALID_STATUSES; the
     //    executor would flip it to "running" on pickup anyway).
     //
     //    ACTION-MODE EXCEPTION: for an action-mode executor, step 3 ran the
     //    action SYNCHRONOUSLY inside create_kanban_step_thread and the hook
     //    already routed the task through the workflow matrix
     //    (review/blocked/done/testing) via route_step_completion. Never
-    //    clobber that routed status back to `running` — the task would sit in
+    //    clobber that routed status back to `running` - the task would sit in
     //    `running` forever with only a terminal action thread (GROUP 40-A).
     //    Only mark `running` when the task is still `todo` (agent-mode
     //    executor: the pending thread runs asynchronously).
@@ -535,7 +535,7 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
     })?;
     if current_status.as_deref() != Some("todo") {
         tracing::info!(
-            "[kanban/dispatch] task {} already transitioned by action-mode hook (status={}) — leaving as-is",
+            "[kanban/dispatch] task {} already transitioned by action-mode hook (status={}) - leaving as-is",
             picked.id,
             current_status.as_deref().unwrap_or("?")
         );
@@ -639,7 +639,7 @@ mod tests {
             0
         );
         // (d) Regression: an operator-stop `skipped` thread with
-        // terminal=false does NOT block — the gate never looks at `terminal`.
+        // terminal=false does NOT block - the gate never looks at `terminal`.
         assert_eq!(active_thread_count(&["skipped"]), 0);
     }
 
@@ -684,8 +684,8 @@ mod tests {
     #[test]
     fn dispatch_scan_skips_archived_tasks() {
         // Regression (2026-08-18): archived kanban tasks must never be
-        // promoted/dispatched. PATCH `archived:true` only flips the flag —
-        // the task's status stays 'todo' — so scan eligibility MUST exclude
+        // promoted/dispatched. PATCH `archived:true` only flips the flag -
+        // the task's status stays 'todo' - so scan eligibility MUST exclude
         // archived tasks. On the old scan SQL (`WHERE status = :status`
         // only) this exact scenario promoted the archived task and ran its
         // executor thread.
@@ -803,7 +803,7 @@ mod tests {
     #[test]
     fn dispatch_blocked_by_same_channel_active_task() {
         // A todo candidate whose channel is claimed by another active task
-        // (running/testing/review + live thread_status) is NOT dispatched —
+        // (running/testing/review + live thread_status) is NOT dispatched -
         // even when the channel has no queued/running thread (the
         // threads-table gate alone would miss the window where the
         // predecessor's thread_status is still live).

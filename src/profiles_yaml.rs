@@ -1,8 +1,8 @@
-//! `profiles.yml` — SINGLE source of truth for profile definitions.
+//! `profiles.yml` - SINGLE source of truth for profile definitions.
 //!
 //! Profile definitions (previously `profiles/<name>/config.json`) live in
 //! `{data_dir}/config/profiles.yml`, mirroring how `config/channels.yml`
-//! defines and resolves channels. The map KEY is the profile NAME — the
+//! defines and resolves channels. The map KEY is the profile NAME - the
 //! stable identifier used everywhere (`threads.profile`, channels.yml
 //! `profile:`, kanban boards/tasks `profile:`, the dashboard profile
 //! selects, `/profile` platform commands).
@@ -18,20 +18,20 @@
 //! ```
 //!
 //! FIELD NAMING (bare, matches channels.yml):
-//! - `provider` / `model` — bare names (NOT the legacy `default_provider` /
+//! - `provider` / `model` - bare names (NOT the legacy `default_provider` /
 //!   `default_model` or the DB column names).
-//! - `plan` (bool) — profile-level plan override (tier between channel and
+//! - `plan` (bool) - profile-level plan override (tier between channel and
 //!   global in the plan fallback chain).
-//! - `template` (str) — profile-level thread template (tier between channel
+//! - `template` (str) - profile-level thread template (tier between channel
 //!   and the `dev-development` default).
-//! - `allowed_tools` (list) — allowed MCP tool names for the profile.
-//! - `base_url` / `api_key` / `max_tokens` / `temperature` — provider-level
+//! - `allowed_tools` (list) - allowed MCP tool names for the profile.
+//! - `base_url` / `api_key` / `max_tokens` / `temperature` - provider-level
 //!   overrides kept from the legacy `Profile`/`ProfileConfig` schema.
-//! - NO `name` field inside an entry — the map key IS the name (same
+//! - NO `name` field inside an entry - the map key IS the name (same
 //!   yml-key pattern as channels.yml).
 //!
 //! The legacy `profiles/<name>/config.json` files are NOT removed and NOT
-//! migrated — they stay on disk for backward compat until a future release
+//! migrated - they stay on disk for backward compat until a future release
 //! removes them, but they are NO LONGER read for resolution.
 //!
 //! Profiles become *declared* by presence in the YAML: a `profiles/<name>/`
@@ -52,7 +52,7 @@ use crate::error::{AppResult, Error};
 /// Name of the profile definition file inside `{data_dir}/config/`.
 pub const PROFILES_FILE: &str = "profiles.yml";
 
-/// Global data dir — set once at startup (main.rs) so the yml store is
+/// Global data dir - set once at startup (main.rs) so the yml store is
 /// reachable from every profile query.
 static DATA_DIR: OnceLock<String> = OnceLock::new();
 
@@ -82,7 +82,7 @@ pub struct ProfilesFile {
 }
 
 /// One profile definition. Field names are BARE (`provider`/`model`/
-/// `plan`/`template`/`allowed_tools`) — the legacy `config.json` schema
+/// `plan`/`template`/`allowed_tools`) - the legacy `config.json` schema
 /// (also bare) is preserved for the provider-level fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -216,7 +216,7 @@ where
 
 /// Merge an external `ProfilesFile` (from the import API) into the on-disk
 /// store under the global save lock. Existing entries with the same name are
-/// OVERWRITTEN (upsert semantics — same as the channels import precedent,
+/// OVERWRITTEN (upsert semantics - same as the channels import precedent,
 /// where every imported channel is PATCHed/upserted into channels.yml).
 /// Each imported definition is validated before persist. Returns the names
 /// that were newly added and the names that were updated.
@@ -268,8 +268,8 @@ pub fn exists(name: &str) -> bool {
 
 // ── Validation ──────────────────────────────────────────────────────────────
 
-/// Validate a profile definition (duplicate keys are impossible — the map
-/// key IS the name). A profile entry may be empty (all optional fields) —
+/// Validate a profile definition (duplicate keys are impossible - the map
+/// key IS the name). A profile entry may be empty (all optional fields) -
 /// the registry supplies the in-memory defaults.
 pub fn validate_profile(name: &str, _def: &ProfileDef) -> Result<(), String> {
     if name.trim().is_empty() {

@@ -3,7 +3,7 @@
 //!
 //! Tools: create_cron_job, list_cron_jobs, delete_cron_job, update_cron_job
 //!
-//! Definitions live in {OMNI_DIR}/config/tasks.yml (`schedules:` key) — the
+//! Definitions live in {OMNI_DIR}/config/tasks.yml (`schedules:` key) - the
 //! git-tracked source of truth. Runtime state (cadence) is tracked implicitly
 //! via the threads each schedule creates (threads.schedule_task_id) and the
 //! task_runs bookkeeping table.
@@ -18,12 +18,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// OMNI_DIR (data_dir) — config files live in {data_dir}/config/.
+/// OMNI_DIR (data_dir) - config files live in {data_dir}/config/.
 fn data_dir() -> String {
     std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/omni".to_string())
 }
 
-/// Resolve a channel id to its NAME — with string ids the id IS the name
+/// Resolve a channel id to its NAME - with string ids the id IS the name
 /// (channels.yml key). Verified to exist in the yml; unknown -> None.
 async fn channel_name_for_id(_pool: &PgPool, id: &str) -> Option<String> {
     omniagent::channels_yaml::exists(id).then(|| id.to_string())
@@ -113,7 +113,7 @@ async fn handle_create(
         serde_json::json!(parts)
     };
 
-    // yml stores channel NAME — resolve from id (if given), else default (None).
+    // yml stores channel NAME - resolve from id (if given), else default (None).
     let channel_name = match channel_id_arg {
         Some(cid) => channel_name_for_id(pool, &cid).await,
         None => None,
@@ -247,7 +247,7 @@ async fn handle_update(_pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Plugin config hook
 // ---------------------------------------------------------------------------
 
-/// Plugin config — received via configure message.
+/// Plugin config - received via configure message.
 #[derive(Debug, Clone)]
 struct PluginConfig {
     pub database_url: String,
@@ -274,8 +274,8 @@ impl PluginConfig {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Shared pool — populated by configure callback before any tool call
-    // Channels live in {OMNI_DIR}/config/channels.yml — set the global data dir.
+    // Shared pool - populated by configure callback before any tool call
+    // Channels live in {OMNI_DIR}/config/channels.yml - set the global data dir.
     omniagent::channels_yaml::set_data_dir(&data_dir());
     let pool = Arc::new(RwLock::new(None::<PgPool>));
 

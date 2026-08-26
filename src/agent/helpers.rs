@@ -204,7 +204,7 @@ pub fn is_guarded_read_only(tool: &str) -> bool {
         ))
 }
 
-/// WS-4b: FNV-1a hash of a tool call's raw argument JSON — stable within the
+/// WS-4b: FNV-1a hash of a tool call's raw argument JSON - stable within the
 /// process, no imports needed.
 pub fn hash_tool_args(args: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;

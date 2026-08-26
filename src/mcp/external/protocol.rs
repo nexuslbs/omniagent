@@ -246,7 +246,7 @@ pub fn build_list_tools_request(id: u64) -> String {
 }
 
 /// Build a configure request with plugin config values.
-/// Always uses id=0 (notification-style) — no response expected.
+/// Always uses id=0 (notification-style) - no response expected.
 pub fn build_configure_request(config: &HashMap<String, String>) -> String {
     let config_obj: serde_json::Map<String, serde_json::Value> = config
         .iter()

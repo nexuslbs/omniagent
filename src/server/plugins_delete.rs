@@ -92,7 +92,7 @@ pub(crate) async fn delete_plugin_handler(
                 }
             }
 
-            // Set enabled=false in YAML (keep the entry) — using type from URL path
+            // Set enabled=false in YAML (keep the entry) - using type from URL path
             if let Err(e) = plugins_yaml::set_enabled(data_dir, &yaml_type, &name, false) {
                 tracing::error!("[plugins] Failed to set disabled in YAML: {:?}", e);
             }

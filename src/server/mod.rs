@@ -124,7 +124,7 @@ pub(crate) struct AppState {
     shared_config: Arc<RwLock<AgentConfig>>,
     /// Per-platform restart signal flags + notify (keyed by plugin name)
     platform_restart_signals: PlatformRestartSignals,
-    /// Plugin manager — single authority for all plugin lifecycle operations
+    /// Plugin manager - single authority for all plugin lifecycle operations
     plugin_manager: Arc<dyn PluginManager>,
 }
 
@@ -160,7 +160,7 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
 
     // Eagerly start enabled plugins at boot. Without this, provider subprocesses
     // (and enabled MCP tool servers) only spawn when /api/reload or a plugin
-    // enable/disable/restart call runs reload_plugins — on a cold stack (fresh
+    // enable/disable/restart call runs reload_plugins - on a cold stack (fresh
     // deploy, container restart) an enabled provider has NO running subprocess
     // until some unrelated API call happens to trigger a reload, so the first
     // LLM completion falls through to HTTP and fails ("builder error" for
@@ -289,7 +289,7 @@ async fn health_handler() -> &'static str {
 ///
 /// Only when the target thread was actively `processing`: the handler
 /// processes one thread at a time per channel, so a `pending` target (or any
-/// other state) means the handler is running a DIFFERENT thread or is idle —
+/// other state) means the handler is running a DIFFERENT thread or is idle -
 /// cancelling it would silently kill that unrelated thread.
 fn stop_thread_cancels_handler(target_status: Option<&str>) -> bool {
     matches!(target_status, Some("processing"))
@@ -582,8 +582,8 @@ async fn stop_thread_handler(
     // 5. Cancel the channel's processing task ONLY when the target thread was
     //    the one actively being processed (status 'processing' at lookup time).
     //    The handler processes one thread at a time per channel, so any other
-    //    target state means the handler is running a DIFFERENT thread — or is
-    //    idle — and must NOT be cancelled (stopping one thread must never kill
+    //    target state means the handler is running a DIFFERENT thread - or is
+    //    idle - and must NOT be cancelled (stopping one thread must never kill
     //    an unrelated in-flight thread). The skip in step 2 already made the
     //    target terminal, so the handler can no longer claim it and the
     //    supervisor keeps the channel handler running for remaining threads.
@@ -847,7 +847,7 @@ async fn prompt_handler(
     } else {
         tool_names.join(", ")
     };
-    segments.push(format!("You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice. HONESTY RULE: if you cannot complete the task, your final summary MUST clearly state that you gave up and why, and what remains undone — NEVER claim the task was completed unless every requested step was actually done and verified."));
+    segments.push(format!("You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice. HONESTY RULE: if you cannot complete the task, your final summary MUST clearly state that you gave up and why, and what remains undone - NEVER claim the task was completed unless every requested step was actually done and verified."));
     segments.push(format!("Active Hermes profile: {profile_name}."));
 
     // Volatile tier: memory placeholder
@@ -940,7 +940,7 @@ async fn prompt_preview_handler(
         tool_names.join(", ")
     };
     let system_prompt = format!(
-        "You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice. HONESTY RULE: if you cannot complete the task, your final summary MUST clearly state that you gave up and why, and what remains undone — NEVER claim the task was completed unless every requested step was actually done and verified.\n\nActive profile: {profile_name}.\n\n{}",
+        "You are OmniAgent: precise, efficient, autonomous. Your tools: {tool_list}. Use minimum roundtrips. If a tool fails, move on: don't retry more than twice. HONESTY RULE: if you cannot complete the task, your final summary MUST clearly state that you gave up and why, and what remains undone - NEVER claim the task was completed unless every requested step was actually done and verified.\n\nActive profile: {profile_name}.\n\n{}",
         if !memory_raw.is_empty() { format!("## MEMORY (your personal notes)\n{memory_raw}") } else { String::new() }
     );
 
@@ -1174,7 +1174,7 @@ async fn execute_mcp_tool_handler(
 
     // Build the tool-call context the same way the agent loop does: start from
     // the shared app context, apply the caller-provided meta fields (if any),
-    // then fill in DEFAULTS for anything still missing — the default profile,
+    // then fill in DEFAULTS for anything still missing - the default profile,
     // platform "cli", and empty channel/thread. This keeps every tool call
     // consistent: plugins receive _meta with a profile/platform even when the
     // caller did not specify one.
@@ -1524,7 +1524,7 @@ mod tests {
     #[test]
     fn stop_thread_cancels_handler_only_when_target_was_processing() {
         // A pending target: the handler is processing a DIFFERENT thread (or
-        // idle) — it must NOT be cancelled, or the unrelated thread dies.
+        // idle) - it must NOT be cancelled, or the unrelated thread dies.
         assert!(!stop_thread_cancels_handler(None));
         assert!(!stop_thread_cancels_handler(Some("pending")));
         assert!(!stop_thread_cancels_handler(Some("completed")));
@@ -1557,7 +1557,7 @@ mod tests {
             ),
             Some("running".to_string())
         );
-        // Noop drops the marker when one is set — the task status itself is
+        // Noop drops the marker when one is set - the task status itself is
         // untouched (apply_stop_recovery does not transition the task there).
         assert_eq!(
             stop_recovery_thread_status(&queries::StopRecovery::Noop, Some("scheduled")),

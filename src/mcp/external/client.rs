@@ -71,12 +71,12 @@ impl CircuitBreaker {
     ///
     /// Aug 2026: ALWAYS returns true. A circuit breaker must never make a
     /// plugin "stop working": a counted failure (timeout, tool error, or even
-    /// a transport hiccup) does not mean the plugin is broken — it can be a
+    /// a transport hiccup) does not mean the plugin is broken - it can be a
     /// long build, a slow network, or a busy server. The agent decides what is
     /// wrong: it sees the error, and if a task takes too long it cancels it
     /// with cancel-task. On a genuine transport failure the client fails the
     /// call loudly AND respawns the plugin process (see call_tool), so the
-    /// next call works — the agent picks it up later. Blocking tool calls is
+    /// next call works - the agent picks it up later. Blocking tool calls is
     /// never the right behavior.
     pub fn is_allowed(&self) -> bool {
         true
@@ -347,7 +347,7 @@ fn convert_input_schema(schema: &Value) -> Value {
 /// A background reader task reads stdout lines, parses JSON-RPC responses,
 /// and sends the result to the waiting caller via a oneshot channel keyed
 /// by request ID. The `call_tool` method writes to stdin via an mpsc channel
-/// (non-blocking) and awaits the oneshot — zero locks in the hot path.
+/// (non-blocking) and awaits the oneshot - zero locks in the hot path.
 ///
 /// This replaces the old `Mutex<Option<AsyncChildProcess>>` which serialized
 /// ALL tool calls to the same server, even when the server could handle
@@ -362,7 +362,7 @@ pub struct StdioMcpClient {
     read_task: Mutex<Option<JoinHandle<()>>>,
     /// Background task: drains the request channel and writes stdin.
     /// Kept separate from read_task so a burst of responses can never starve
-    /// request writes (single select! loop dropped requests under load —
+    /// request writes (single select! loop dropped requests under load -
     /// G17b, Aug 2026).
     write_task: Mutex<Option<JoinHandle<()>>>,
     /// Child process handle (for lifecycle/cleanup).
@@ -382,7 +382,7 @@ pub struct StdioMcpClient {
 /// for the request id and drops the pending entry. The shared server framework
 /// (mcp-server-util) then aborts the handler task, and plugins that wrap
 /// subprocesses in kill-on-drop guards (docker compose) kill the underlying
-/// OS process — so no tool-spawned subprocess survives the thread that issued
+/// OS process - so no tool-spawned subprocess survives the thread that issued
 /// it (thread 73, Aug 2026: `docker compose exec … cargo` chain still alive
 /// 6+ minutes after the thread ended).
 ///
@@ -435,7 +435,7 @@ impl Drop for InFlightCallGuard {
 
 /// Fail ALL pending requests with a JSON-RPC error so every waiting caller
 /// receives a concrete error instead of hanging until a timeout. Called when
-/// the connection dies (write error, read error, EOF) — the agent must KNOW
+/// the connection dies (write error, read error, EOF) - the agent must KNOW
 /// an error happened and which one, never believe a call is still running.
 fn fail_all_pending(
     pending: &Arc<parking_lot::Mutex<HashMap<u64, oneshot::Sender<String>>>>,
@@ -545,13 +545,13 @@ impl StdioMcpClient {
         // awakened by streaming responses and STARVED the write branch: the
         // loop stopped dequeuing from `stdin_rx` after ~46 of 50 requests,
         // the rest sat in the unbounded channel forever (unbounded sends
-        // never fail — silent loss by construction), and those callers hung
+        // never fail - silent loss by construction), and those callers hung
         // until their timeout. Splitting into a dedicated writer task makes
         // starvation impossible: each task does exactly one job.
         //
         // On ANY connection failure (write error, read error, EOF), ALL
         // pending requests are failed LOUDLY with a JSON-RPC error so every
-        // caller gets a concrete error — the agent KNOWS an error happened
+        // caller gets a concrete error - the agent KNOWS an error happened
         // and which one, instead of thinking the call is still running.
         // ─────────────────────────────────────────────────────────────────
 
@@ -564,7 +564,7 @@ impl StdioMcpClient {
                 // ATOMIC LINE WRITE: `request + "\n"` in ONE buffer, one
                 // write_all (one await, one OS write). Two separate write_all
                 // calls (request, then "\n") let the runtime interleave a
-                // second request between them, producing `req1req2\n` — the
+                // second request between them, producing `req1req2\n` - the
                 // server's serde parse fails and the request is dropped.
                 let mut buf = String::with_capacity(request.len() + 1);
                 buf.push_str(&request);
@@ -601,7 +601,7 @@ impl StdioMcpClient {
                 match reader.read_line(&mut line_buf).await {
                     Ok(0) => {
                         // EOF: the server process is gone. Fail every pending
-                        // caller loudly — the agent must KNOW the connection
+                        // caller loudly - the agent must KNOW the connection
                         // died, not wait forever.
                         tracing::info!("MCP server '{}' closed stdout", reader_name);
                         fail_all_pending(
@@ -796,7 +796,7 @@ impl StdioMcpClient {
     /// clears transport state, re-spawns the process, and re-runs the full MCP
     /// handshake (configure → initialize → tools/list). On success the client
     /// is ready for the next tool call. The current (failed) call still
-    /// returns an error to the agent — the respawn benefits the NEXT call.
+    /// returns an error to the agent - the respawn benefits the NEXT call.
     async fn respawn(&self) -> AppResult<()> {
         let server_name = self.config.name.clone();
 
@@ -887,7 +887,7 @@ impl McpServerClient for StdioMcpClient {
             let reader_dead = rt.as_ref().map(|h| h.is_finished()).unwrap_or(true); // None = not initialized
             if writer_dead || reader_dead {
                 // The connection is gone. Fail the call loudly AND respawn the
-                // plugin process so the NEXT call can succeed — the agent sees
+                // plugin process so the NEXT call can succeed - the agent sees
                 // this error and retries (it picks the plugin back up later).
                 // A dead plugin must restart, never stay blocked.
                 drop(wt);
@@ -896,7 +896,7 @@ impl McpServerClient for StdioMcpClient {
                     Ok(()) => {
                         return Err(err_str!(
                             "MCP server '{}' connection lost (background {} stopped); \
-                             plugin respawned — retry the call",
+                             plugin respawned - retry the call",
                             self.config.name,
                             if writer_dead && reader_dead {
                                 "writer and reader tasks"
@@ -929,7 +929,7 @@ impl McpServerClient for StdioMcpClient {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let req = build_call_tool_request(id, name, arguments, meta);
 
-        // Explicit timeout only if configured (`None` = wait indefinitely —
+        // Explicit timeout only if configured (`None` = wait indefinitely -
         // the agent controls lifetime via background tasks, and a connection
         // failure fails ALL pending calls loudly, so nothing hangs silently).
         let timeout_dur = self.config.timeout_secs.map(Duration::from_secs);
@@ -954,7 +954,7 @@ impl McpServerClient for StdioMcpClient {
         // If this future is dropped before the response arrives (thread ended,
         // /stop-thread, channel close, client-side timeout), the guard sends
         // `notifications/cancelled` to the server so it aborts the handler and
-        // kills the underlying subprocess (docker KillOnDrop) — no stale
+        // kills the underlying subprocess (docker KillOnDrop) - no stale
         // tool-spawned process survives its thread (thread 73, Aug 2026).
         let mut cancel_guard = InFlightCallGuard::new(id, Some(stdin_clone), self.pending.clone());
 
@@ -972,7 +972,7 @@ impl McpServerClient for StdioMcpClient {
                     ));
                 }
                 Err(_elapsed) => {
-                    // A timeout is NOT a plugin failure — it can be caused by
+                    // A timeout is NOT a plugin failure - it can be caused by
                     // many legitimate reasons (long build, slow network, busy
                     // server). Never count it toward the circuit breaker; the
                     // agent gets the timeout error and can retry or wait
@@ -1004,7 +1004,7 @@ impl McpServerClient for StdioMcpClient {
                 JsonRpcResponse::Success { result, .. } => result,
                 JsonRpcResponse::Error { error, .. } => {
                     // A JSON-RPC error response means the plugin is ALIVE and
-                    // answered — the tool itself failed (e.g. a compose
+                    // answered - the tool itself failed (e.g. a compose
                     // command returned non-zero). This is a normal tool
                     // outcome the agent must see, not a transport failure.
                     // Do NOT count it toward the circuit breaker.
@@ -1319,7 +1319,7 @@ pub fn create_client(config: McpServerConfig) -> Box<dyn McpServerClient> {
 /// `pool` is used to resolve `$secret:NAME` references in each server's env
 /// map (the sync config loader passes them through verbatim because it has no
 /// DB access). Resolving here means the subprocess env AND the `configure`
-/// message both carry real secret values — e.g. the git plugin receives the
+/// message both carry real secret values - e.g. the git plugin receives the
 /// actual GITHUB_APP_KEY instead of the literal "$secret:GITHUB_APP_KEY".
 /// Pass `None` when no DB pool is available (resolution is skipped).
 pub async fn initialize_external_tools(
@@ -1441,7 +1441,7 @@ mod tests {
     fn test_circuit_breaker_never_blocks_tool_calls() {
         // Aug 2026 design: a circuit breaker must NEVER make a plugin "stop
         // working". Even after many recorded failures (state = Open), tool
-        // calls remain allowed — the agent sees errors and decides, and the
+        // calls remain allowed - the agent sees errors and decides, and the
         // client respawns the plugin on genuine transport failure. The breaker
         // state is retained purely as a diagnostic.
         let cb = CircuitBreaker::new(3);

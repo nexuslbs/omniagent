@@ -1,14 +1,14 @@
-//! `channels.yml` — SINGLE source of truth for channel definitions AND
+//! `channels.yml` - SINGLE source of truth for channel definitions AND
 //! runtime state.
 //!
 //! Channel definitions (previously rows in the `channels` table) live in
-//! `{data_dir}/config/channels.yml`. The map KEY is the channel NAME — the
+//! `{data_dir}/config/channels.yml`. The map KEY is the channel NAME - the
 //! stable identifier used everywhere: API id (`GET /channels/{name}`),
 //! `threads.channel_id`, `messages.channel_id`, `kanban_tasks.channel_id`,
 //! `summaries.channel_id` and tasks.yml `channel:` references. This mirrors
 //! the established yml-key pattern: `threads.schedule_task_id` holds the
 //! tasks.yml schedule key, `threads.workflow_id` holds the workflows.yml
-//! workflow key — yml keys are referenced by key string, never by a
+//! workflow key - yml keys are referenced by key string, never by a
 //! DB-generated id.
 //!
 //! ```yaml
@@ -24,11 +24,11 @@
 //!
 //! FIELD NAMING (bare, matches `threads.profile/provider/model` and
 //! tasks.yml `profile:`):
-//! - `profile` / `model` / `provider` — NOT the legacy DB column names
+//! - `profile` / `model` / `provider` - NOT the legacy DB column names
 //!   `current_profile` / `current_model` / `current_provider`. The API keeps
 //!   exposing `current_*` for dashboard compatibility; the loader maps.
-//! - `plan` (bool) — the single channel-level plan override.
-//! - `prompt_sections` — channel-scoped ordered prompt sections (task 9):
+//! - `plan` (bool) - the single channel-level plan override.
+//! - `prompt_sections` - channel-scoped ordered prompt sections (task 9):
 //!   `[{name, order, text}]` that SHADOW plugin-global sections with the
 //!   same name for threads of this channel (scope shadowing, per-thread).
 //! - NO `metadata`, NO `external_id` (derived from `resource_identifier`),
@@ -37,7 +37,7 @@
 //!
 //! Runtime-mutable fields (`profile`/`model`/`provider`/`closed`/`readonly`/
 //! `plan`/`template`) live in the SAME yml and are REWRITTEN atomically
-//! (tmp file + rename) when they change — the yml is the only store, there
+//! (tmp file + rename) when they change - the yml is the only store, there
 //! is no runtime table. The `channels` database table and all its foreign
 //! keys are dropped by the migration; `channel_id` columns are TEXT holding
 //! channel NAMES.
@@ -55,7 +55,7 @@ use crate::error::{AppResult, Error};
 /// Name of the channels definition file inside `{data_dir}/config/`.
 pub const CHANNELS_FILE: &str = "channels.yml";
 
-/// Global data dir — set once at startup (main.rs) so the yml store is
+/// Global data dir - set once at startup (main.rs) so the yml store is
 /// reachable from every channel query (the yml replaces the DB table, but
 /// callers still pass the (now unused) pool).
 static DATA_DIR: OnceLock<String> = OnceLock::new();
@@ -86,7 +86,7 @@ pub struct ChannelsFile {
 }
 
 /// One channel definition. Field names are BARE (`profile`/`model`/
-/// `provider`/`plan`) — the legacy `current_*`/`metadata` names are dead and
+/// `provider`/`plan`) - the legacy `current_*`/`metadata` names are dead and
 /// NOT accepted here.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -265,14 +265,14 @@ pub fn exists(name: &str) -> bool {
 /// kanban dispatch, CLI): an explicit channel name (must exist in
 /// channels.yml) wins; otherwise the named default-channel setting
 /// (`default_*_channel` in settings.yml) is used. When neither resolves to
-/// a known channel, returns `None` — the caller creates the thread with an
+/// a known channel, returns `None` - the caller creates the thread with an
 /// empty channel and fails it with "no channel defined" (the record is
 /// kept for audit).
 pub fn resolve_default_channel(explicit: Option<&str>, setting_name: &str) -> Option<String> {
     if let Some(name) = explicit.map(str::trim).filter(|n| !n.is_empty()) {
         // The explicit name wins even when it is NOT a known channel: the
         // caller then fails the thread with "channel not found" (fail-with-
-        // record) — never silently substitute the default setting.
+        // record) - never silently substitute the default setting.
         return Some(name.to_string());
     }
     let dir = data_dir()?;
@@ -289,7 +289,7 @@ pub fn resolve_default_channel(explicit: Option<&str>, setting_name: &str) -> Op
 
 // ── Validation ──────────────────────────────────────────────────────────────
 
-/// Validate a channel definition (duplicate keys are impossible — the map
+/// Validate a channel definition (duplicate keys are impossible - the map
 /// key IS the name; platform-less
 /// channels are allowed = type 'cli').
 pub fn validate_channel(name: &str, _def: &ChannelDef) -> Result<(), String> {
@@ -491,7 +491,7 @@ channels:
             None
         );
 
-        // Explicit channel always wins (unknown names too — the caller then
+        // Explicit channel always wins (unknown names too - the caller then
         // fails with "channel not found" instead of substituting a default).
         assert_eq!(
             resolve_default_channel(Some("kanban"), "default_schedule_channel").as_deref(),

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""noop-full — standalone provider implementing the omniagent provider plugin protocol.
+"""noop-full - standalone provider implementing the omniagent provider plugin protocol.
 
 Communicates via JSON-lines over stdin/stdout. No api_mode dependency on omniagent.
 
@@ -31,7 +31,7 @@ def handle_complete(req_id, params):
 
     if model == "test-truncate":
         # Regression fixture for the workflow-routing truncation fix (Part 2):
-        # simulate a response cut off by the output budget — prose with NO tool
+        # simulate a response cut off by the output budget - prose with NO tool
         # call and finish_reason="length". A truncated response must NOT be
         # treated as a completed step / final answer (live incident
         # task_18cea6054b6e6e73/thread 135: reviewer cut mid-sentence → task

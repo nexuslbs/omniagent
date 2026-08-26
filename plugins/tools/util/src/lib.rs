@@ -183,13 +183,13 @@ pub type ToolHandler = Box<
 /// an async worker thread.
 ///
 /// CRITICAL (Aug 2026, kanban dispatcher wedge): a handler that performs
-/// blocking work — `std::process::Command::wait_with_output`,
-/// `reqwest::blocking`, `std::fs` scans — MUST NOT run inline on an async
+/// blocking work - `std::process::Command::wait_with_output`,
+/// `reqwest::blocking`, `std::fs` scans - MUST NOT run inline on an async
 /// worker thread. A blocking call that hangs (e.g. an upstream HTTP endpoint
 /// that never answers, with no client timeout) holds the worker thread
 /// hostage; the runtime cannot be interrupted by dropping the handler future
 /// (client cancellation), and with enough concurrent hangs every worker
-/// saturates — the WHOLE plugin wedges (all MCP calls time out, process
+/// saturates - the WHOLE plugin wedges (all MCP calls time out, process
 /// appears alive but idle: the actions-plugin incident, 19:21–23:16).
 ///
 /// Running the sync body on the blocking pool guarantees the async runtime
@@ -197,7 +197,7 @@ pub type ToolHandler = Box<
 /// thread (bounded by the handler's own internal timeouts), never a worker.
 ///
 /// All built-in plugins were converted to TRULY async handlers (tokio::process,
-/// async reqwest) in Aug 2026 — the preferred state. This helper remains as
+/// async reqwest) in Aug 2026 - the preferred state. This helper remains as
 /// the SAFE pattern for any future sync handler that cannot be made async:
 /// route it through here instead of inlining blocking work.
 pub fn sync_handler<F>(handler: F) -> ToolHandler
@@ -218,7 +218,7 @@ where
 ///
 /// Same contract as `soft_error` but for async handlers: an expected failure
 /// (invalid input, sandbox rejection, command not found) must surface as a
-/// tool error result — NOT as a handler Err — so it never trips the MCP
+/// tool error result - NOT as a handler Err - so it never trips the MCP
 /// circuit breaker on the client side. Plugins that validate user input
 /// (docker, git, filesystem, ...) should route their handlers through this.
 pub fn soft_error_async<F, Fut>(handler: F) -> ToolHandler
@@ -250,8 +250,8 @@ pub struct McpToolEntry {
 /// Shared stdout writer: every `tools/call` request is handled in its own
 /// spawned task, so a long-running tool (docker exec, git clone, ...) never
 /// blocks subsequent calls to the plugin. Tasks share this mutex-protected
-/// writer; the lock is held ONLY for the short JSON write — never while a tool
-/// handler runs — so concurrent tool executions proceed in parallel.
+/// writer; the lock is held ONLY for the short JSON write - never while a tool
+/// handler runs - so concurrent tool executions proceed in parallel.
 type SharedWriter = Arc<tokio::sync::Mutex<tokio::io::BufWriter<tokio::io::Stdout>>>;
 
 /// Serialize + write a single JSON-RPC response line under the shared writer lock.
@@ -324,7 +324,7 @@ where
     // loop ran as a tokio task (as it did before Aug 2026), a burst of
     // concurrent `tools/call` handlers could occupy every worker thread,
     // the reader task would stop being polled, the OS pipe would backfill,
-    // and the client's writes would block — the server appeared to "stop
+    // and the client's writes would block - the server appeared to "stop
     // reading after ~30 requests" with NO error anywhere (G17b, Aug 2026).
     //
     // A dedicated std::thread doing BLOCKING read_line is immune: it is
@@ -335,7 +335,7 @@ where
     //
     // The channel is UNBOUNDED on purpose: backpressure belongs to the
     // machine, not the protocol. If the host genuinely cannot keep up
-    // (OOM, fork failures), the OS will error loudly — a read error on the
+    // (OOM, fork failures), the OS will error loudly - a read error on the
     // thread exits with a FATAL log instead of stalling silently.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     {
@@ -353,7 +353,7 @@ where
                 // every request is delivered to the dispatcher as exactly one
                 // independent String no matter how the kernel chunks the
                 // stream. (Aug 2026, G17b: per-request framing must not be at
-                // the mercy of a fragile read_line — each task/execution is
+                // the mercy of a fragile read_line - each task/execution is
                 // identified solely by its own delimited frame.)
                 let mut stdin = std::io::stdin();
                 let mut buf = [0u8; 64 * 1024];
@@ -396,7 +396,7 @@ where
                             // NEVER fail silently: a machine-level read error
                             // must be loud so the operator sees it.
                             eprintln!(
-                                "[{}] FATAL stdin read error: {} — reader thread exiting",
+                                "[{}] FATAL stdin read error: {} - reader thread exiting",
                                 server_name, e
                             );
                             break;
@@ -421,7 +421,7 @@ where
     // In-flight tools/call request ids → their cancel signal. When the client
     // sends `notifications/cancelled` (thread ended, /stop-thread, channel
     // close, client-side timeout), the matching task is signalled and DROPS
-    // its handler future — plugins that wrap subprocesses in kill-on-drop
+    // its handler future - plugins that wrap subprocesses in kill-on-drop
     // guards (docker compose) then kill the child, so no stale process
     // survives the thread that spawned it (thread 73, Aug 2026).
     let cancel_map: Arc<std::sync::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<()>>>> =
@@ -454,7 +454,7 @@ where
                 // channel close, client-side timeout, ...). Signal the
                 // tools/call task so its handler future is DROPPED mid-await;
                 // plugins owning OS subprocesses behind KillOnDrop guards then
-                // kill those children. Notifications have no request id — do
+                // kill those children. Notifications have no request id - do
                 // NOT respond.
                 let request_id = request
                     .params
@@ -537,11 +537,11 @@ where
                     // CONCURRENT: each tools/call runs in its own spawned task so
                     // a long-running tool (docker exec, git clone, ...) never
                     // blocks other calls to this plugin. The shared writer lock is
-                    // held only for the short JSON response write — never while a
-                    // handler executes — so N calls proceed in parallel.
+                    // held only for the short JSON response write - never while a
+                    // handler executes - so N calls proceed in parallel.
                     //
-                    // The task handle is tracked in `in_flight` (JoinSet) — NOT
-                    // discarded — so a panicking handler is logged loudly rather
+                    // The task handle is tracked in `in_flight` (JoinSet) - NOT
+                    // discarded - so a panicking handler is logged loudly rather
                     // than failing silently.
                     let writer = writer.clone();
                     let tools = tools.clone();
@@ -553,7 +553,7 @@ where
                         // Run the handler under a cancel signal. If the client
                         // sends `notifications/cancelled` for this request id
                         // (thread ended, /stop-thread, channel close, client-side
-                        // timeout), the handler future is DROPPED mid-await —
+                        // timeout), the handler future is DROPPED mid-await -
                         // plugins with kill-on-drop subprocess guards (docker)
                         // then kill the underlying OS process, so no stale
                         // `docker compose exec …` chain outlives its thread.
@@ -599,7 +599,7 @@ where
     // dropped mid-flight; log any panics. A small grace timeout bounds the
     // shutdown so a wedged handler can't hang the server forever. Tasks still
     // running past the grace period are aborted when `in_flight` is dropped at
-    // the end of this function — dropping the handler futures is what triggers
+    // the end of this function - dropping the handler futures is what triggers
     // the plugins' kill-on-drop guards, so tracked subprocesses die with the
     // server (detached ops like `up -d` intentionally survive).
     tracing::info!(
@@ -706,7 +706,7 @@ async fn handle_tools_call(
 
     // HANG BACKSTOP (Aug 2026, actions-plugin wedge): every handler runs
     // under an optional wall-clock timeout. This is NOT a tool-execution
-    // timeout — it is a leak guard for pathological hangs that no amount of
+    // timeout - it is a leak guard for pathological hangs that no amount of
     // client-side cancellation can reap (e.g. a sqlx query against a silently
     // dead connection, or an upstream HTTP endpoint that never answers AND
     // the caller forgot a client timeout). Disabled by default (0): long
@@ -714,7 +714,7 @@ async fn handle_tools_call(
     // short. Set MCP_HANDLER_TIMEOUT_SECS in the plugin process env when the
     // server hosts only short-lived tools (e.g. the actions plugin, whose
     // cron tools must always answer within seconds). On timeout the handler
-    // future is DROPPED — clean for async handlers — and a JSON-RPC error is
+    // future is DROPPED - clean for async handlers - and a JSON-RPC error is
     // returned so the client's pending call resolves instead of leaking.
     let handler_timeout: Option<std::time::Duration> = std::env::var("MCP_HANDLER_TIMEOUT_SECS")
         .ok()
@@ -736,7 +736,7 @@ async fn handle_tools_call(
                 },
                 Err(_) => {
                     tracing::error!(
-                        "Handler '{}' timed out after {}s — future dropped (hang backstop)",
+                        "Handler '{}' timed out after {}s - future dropped (hang backstop)",
                         params.name,
                         dur.as_secs()
                     );
@@ -805,7 +805,7 @@ async fn send_error(
 }
 
 // ---------------------------------------------------------------------------
-// HashVectorizer — deterministic local text embedding for semantic search
+// HashVectorizer - deterministic local text embedding for semantic search
 // ---------------------------------------------------------------------------
 
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -864,8 +864,8 @@ mod tests {
 
     #[tokio::test]
     async fn soft_error_async_converts_err_to_tool_error() {
-        // An async handler that fails must come back as Ok((msg, true)) —
-        // never as Err — so the MCP circuit breaker stays closed.
+        // An async handler that fails must come back as Ok((msg, true)) -
+        // never as Err - so the MCP circuit breaker stays closed.
         let failing = soft_error_async(|_args: Value, _meta: Option<McpMeta>| async move {
             anyhow::bail!("expected failure: bad verb")
         });
@@ -904,7 +904,7 @@ mod tests {
     #[tokio::test]
     async fn sync_handler_runs_sync_fn_and_returns_result() {
         // A plain sync handler routed through sync_handler behaves identically
-        // to a direct call — but runs on the blocking pool.
+        // to a direct call - but runs on the blocking pool.
         let handler = sync_handler(|args: Value| {
             let name = args["name"].as_str().unwrap_or("world");
             Ok((format!("hello {name}"), false))

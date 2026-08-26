@@ -11,15 +11,15 @@ use sql_forge::sql_forge;
 /// Phase 3: failed / interrupted / skipped terminals go through the atomic
 /// engine transition (re-run with retry guard, or blocked).
 ///
-/// Phase 4 (reviewer/tester decisions — spec §3 rows 7-17):
+/// Phase 4 (reviewer/tester decisions - spec §3 rows 7-17):
 /// - reviewer success (`review` step, clean completion) → `done` (R12)
 /// - reviewer half-finished (completed with a failed final tool result) → `blocked`
 /// - tester success (`testing` step, clean completion) → `review`; a reviewer
 ///   role in the workflow gets a scheduled review thread (row 7), otherwise
 ///   the task waits for manual review (no thread)
-/// - tester failure (`testing` step, any error — D5) → executor step: task
+/// - tester failure (`testing` step, any error - D5) → executor step: task
 ///   `running` + scheduled executor thread (consumes the executor retry
-///   budget; the guard blocks the task at the limit — rows 8/9)
+///   budget; the guard blocks the task at the limit - rows 8/9)
 ///
 /// Role-mode + auto_approve extension (workflows.yml):
 /// - action-mode roles (executor/tester/reviewer) run actions.yml tools via
@@ -137,7 +137,7 @@ pub(crate) fn workflow_policy(data_dir: &str, wf_id: Option<&str>, step: &str) -
 /// next kanban column. Shared by:
 /// - `update_kanban_status` (agent-loop finalization),
 /// - the action-mode hook in `create_kanban_step_thread` (terminal action
-///   threads route synchronously — nobody else finalizes them),
+///   threads route synchronously - nobody else finalizes them),
 /// - the action-mode step-thread creation in `create_review_thread` /
 ///   `create_testing_thread` (a terminal action thread must be routed).
 pub(crate) async fn route_step_completion(
@@ -168,7 +168,7 @@ pub(crate) async fn route_step_completion(
                 Err(e) => tracing::warn!("[workflow] failed to mark task {} done: {}", task_id, e),
             }
         }
-        // Inconclusive review — the final tool result errored, so there is no
+        // Inconclusive review - the final tool result errored, so there is no
         // clean approve signal (R12); block for manual intervention.
         CompletedRoute::BlockedInconclusiveReview => {
             let comment = format!(
@@ -189,7 +189,7 @@ pub(crate) async fn route_step_completion(
             match create_review_thread(pool, data_dir, thread).await {
                 Ok(StepThreadOutcome::Pending { thread_id }) => {
                     let comment = format!(
-                        "Tester passed (thread #{}). Task in review — review thread #{thread_id}.",
+                        "Tester passed (thread #{}). Task in review - review thread #{thread_id}.",
                         thread.id
                     );
                     match transition_with_comment(
@@ -220,7 +220,7 @@ pub(crate) async fn route_step_completion(
                     // route the terminal action outcome through the matrix
                     // (reviewer action success → done, failure → blocked).
                     let comment = format!(
-                        "Tester passed (thread #{}). Task in review — review action executed (thread #{thread_id}).",
+                        "Tester passed (thread #{}). Task in review - review action executed (thread #{thread_id}).",
                         thread.id
                     );
                     match transition_with_comment(
@@ -258,7 +258,7 @@ pub(crate) async fn route_step_completion(
                 }
                 Ok(StepThreadOutcome::None) => {
                     let comment = format!(
-                        "Tester passed (thread #{}). Task in review — review thread creation failed, manual review required.",
+                        "Tester passed (thread #{}). Task in review - review thread creation failed, manual review required.",
                         thread.id
                     );
                     match transition_with_comment(pool, task_id, "review", None, &comment).await {
@@ -280,7 +280,7 @@ pub(crate) async fn route_step_completion(
                         thread.id, e, task_id
                     );
                     let comment = format!(
-                        "Tester passed (thread #{}). Task in review — review thread creation failed: {}. Manual review required.",
+                        "Tester passed (thread #{}). Task in review - review thread creation failed: {}. Manual review required.",
                         thread.id, e
                     );
                     match transition_with_comment(pool, task_id, "review", None, &comment).await {
@@ -303,7 +303,7 @@ pub(crate) async fn route_step_completion(
             match create_testing_thread(pool, data_dir, thread).await {
                 Ok(StepThreadOutcome::Pending { thread_id }) => {
                     let comment = format!(
-                        "Executor done (thread #{}). Task in testing — tester step thread #{thread_id}.",
+                        "Executor done (thread #{}). Task in testing - tester step thread #{thread_id}.",
                         thread.id
                     );
                     match transition_with_comment(
@@ -334,7 +334,7 @@ pub(crate) async fn route_step_completion(
                     // route the terminal action outcome through the matrix
                     // (tester action success → review; failure → review).
                     let comment = format!(
-                        "Executor done (thread #{}). Task in testing — testing action executed (thread #{thread_id}).",
+                        "Executor done (thread #{}). Task in testing - testing action executed (thread #{thread_id}).",
                         thread.id
                     );
                     match transition_with_comment(
@@ -376,7 +376,7 @@ pub(crate) async fn route_step_completion(
                         thread.id, e, task_id
                     );
                     let comment = format!(
-                        "Executor done (thread #{}). Task in review — tester thread creation failed: {}. Manual review required.",
+                        "Executor done (thread #{}). Task in review - tester thread creation failed: {}. Manual review required.",
                         thread.id, e
                     );
                     match transition_with_comment(pool, task_id, "review", None, &comment).await {
@@ -390,7 +390,7 @@ pub(crate) async fn route_step_completion(
                 }
                 Ok(StepThreadOutcome::None) => {
                     let comment = format!(
-                        "Executor done (thread #{}). Task in review — tester step skipped (no task_id). Manual review required.",
+                        "Executor done (thread #{}). Task in review - tester step skipped (no task_id). Manual review required.",
                         thread.id
                     );
                     match transition_with_comment(pool, task_id, "review", None, &comment).await {
@@ -411,7 +411,7 @@ pub(crate) async fn route_step_completion(
         // Row 7: tester pass, no reviewer role → manual review (no thread).
         CompletedRoute::ReviewManual => {
             let comment = format!(
-                "Tester passed (thread #{}). Task in review (manual review — no reviewer role).",
+                "Tester passed (thread #{}). Task in review (manual review - no reviewer role).",
                 thread.id
             );
             match transition_with_comment(pool, task_id, "review", None, &comment).await {
@@ -457,7 +457,7 @@ pub(crate) async fn route_step_completion(
                 }
             }
         }
-        // Half-finished executor run — cannot promote to review.
+        // Half-finished executor run - cannot promote to review.
         CompletedRoute::BlockedHalfFinished => {
             if let Err(e) = queries::update_kanban_task_status(pool, task_id, "blocked").await {
                 tracing::warn!(
@@ -470,7 +470,7 @@ pub(crate) async fn route_step_completion(
     }
 }
 
-/// Phase 4 decision for a completed thread (pure — unit-tested).
+/// Phase 4 decision for a completed thread (pure - unit-tested).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompletedRoute {
     /// Reviewer approved via clean normal completion (R12) → task done.
@@ -583,7 +583,7 @@ pub(crate) async fn transition_with_comment(
 
 /// Outcome of creating a workflow step thread (testing/review).
 enum StepThreadOutcome {
-    /// A pending agent thread was created — the agent loop runs the step.
+    /// A pending agent thread was created - the agent loop runs the step.
     Pending { thread_id: i64 },
     /// The step role runs in action mode: the action already executed
     /// synchronously and the thread is terminal (system on success / failed
@@ -640,7 +640,7 @@ async fn resolve_step_identity(
     // back to the parent thread's plan so tester/reviewer threads created
     // without an explicit column keep a sane default. Without this, step
     // threads always ran with plan=false -> max_iterations_no_plan (60),
-    // while the executor got max_iterations_plan (300) — testers writing
+    // while the executor got max_iterations_plan (300) - testers writing
     // + running integration tests blew the 60-iteration budget repeatedly
     // (threads 75/76 interrupted at exactly 60).
     let plan = match role_cfg.as_ref().and_then(|r| r.plan_mode.as_deref()) {
@@ -738,7 +738,7 @@ async fn create_review_thread(
         .await
         .unwrap_or_default();
     let identity = resolve_step_identity(pool, data_dir, thread, "review").await?;
-    // Single canonical INSERT (create_thread) — carries plan + template so
+    // Single canonical INSERT (create_thread) - carries plan + template so
     // the reviewer keeps the role's iteration budget and guidance.
     let new_thread = crate::db::threads::create_thread(
         pool,
@@ -830,7 +830,7 @@ async fn create_testing_thread(
         .await
         .unwrap_or_default();
     let identity = resolve_step_identity(pool, data_dir, thread, "testing").await?;
-    // Single canonical INSERT (create_thread) — carries plan + template so
+    // Single canonical INSERT (create_thread) - carries plan + template so
     // the tester keeps the role's iteration budget and guidance.
     let new_thread = crate::db::threads::create_thread(
         pool,
@@ -874,7 +874,7 @@ async fn create_testing_thread(
 /// via the plugin manager and create the terminal kanban thread, mirroring the
 /// create_kanban_step_thread action hook. Returns `Some(outcome)` when the role
 /// is action-mode and the action executed (or failed to resolve); `None` when
-/// the role is agent-mode / runtime unavailable / no action_id — the caller
+/// the role is agent-mode / runtime unavailable / no action_id - the caller
 /// falls back to a pending agent thread.
 async fn run_action_role_step(
     pool: &sqlx::PgPool,
@@ -1046,7 +1046,7 @@ mod tests {
     #[test]
     fn route_completed_thread_reviewer_half_finished_blocks() {
         // A review that completed with a failed final tool result is
-        // inconclusive — it cannot count as an approve (R12). Also the
+        // inconclusive - it cannot count as an approve (R12). Also the
         // action-mode reviewer failure → blocked (user rule).
         assert_eq!(
             route_completed_thread("review", true, true, false, agent()),
@@ -1158,7 +1158,7 @@ mod tests {
 
     #[test]
     fn route_completed_thread_auto_approve_goes_done() {
-        // auto_approve: reviewer ignored — tester pass and executor pass
+        // auto_approve: reviewer ignored - tester pass and executor pass
         // (without tester) go straight to done; review_on_fail forced false.
         assert_eq!(
             route_completed_thread("testing", false, true, false, auto_approve()),

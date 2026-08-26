@@ -2,7 +2,7 @@
 name = "mcp-server-compose"
 version = "0.1.0"
 edition = "2021"
-description = "Docker Compose MCP server — run docker compose commands"
+description = "Docker Compose MCP server - run docker compose commands"
 
 [dependencies]
 mcp-server-util = { path = "../util" }

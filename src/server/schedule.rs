@@ -127,7 +127,7 @@ pub struct SubtasksResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Row types (threads/subtasks queries stay DB-backed — runs live in threads)
+// Row types (threads/subtasks queries stay DB-backed - runs live in threads)
 // ---------------------------------------------------------------------------
 
 #[derive(FromRow)]
@@ -464,7 +464,7 @@ async fn create_schedule_handler(
     if mode == "action" {
         def.action = Some(action_id.to_string());
     }
-    // Legacy create defaulted plan=true for new jobs — preserve that.
+    // Legacy create defaulted plan=true for new jobs - preserve that.
     def.plan = Some(body.plan.unwrap_or(true));
     // yml has no separate `active` column: enabled doubles as active.
     def.enabled = body.enabled.or(body.active).unwrap_or(true);

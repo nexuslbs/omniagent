@@ -5,7 +5,7 @@
 //!
 //! SANDBOX: only WRITE operations are confined to the configured
 //! `workspace_dir` (default `/opt/workspace`) and its subdirectories.
-//! Reads, lists, searches, and metadata lookups are allowed anywhere —
+//! Reads, lists, searches, and metadata lookups are allowed anywhere -
 //! reading is side-effect free, and the agent legitimately needs to inspect
 //! files outside the workspace (configs, wiki, credentials paths, ...).
 
@@ -54,7 +54,7 @@ fn resolve_omni_dir(cfg_omni: &str) -> String {
     }
 }
 
-/// WS-6: allowed write roots — the workspace dir (always) plus the OMNI_DIR
+/// WS-6: allowed write roots - the workspace dir (always) plus the OMNI_DIR
 /// subdirs enabled by config. `write_omni_all` supersedes the three subdir
 /// toggles.
 fn allowed_write_roots(cfg: &Config) -> Vec<String> {
@@ -115,7 +115,7 @@ fn restrict_write_path(path: &str, cfg: &Config) -> Result<String, String> {
 
 /// Resolve a READ path: reads are unrestricted (anywhere on the filesystem),
 /// so this only normalizes the path. Relative paths still resolve against the
-/// workspace root for convenience, but absolute paths may point anywhere —
+/// workspace root for convenience, but absolute paths may point anywhere -
 /// reading is side-effect free.
 fn resolve_read_path(path: &str, workspace_dir: &str) -> String {
     let requested = Path::new(path);
@@ -166,7 +166,7 @@ fn handle_read(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
-    // Reads are unrestricted — allowed anywhere on the filesystem.
+    // Reads are unrestricted - allowed anywhere on the filesystem.
     let safe_path = resolve_read_path(path, workspace_dir);
     let content = fs::read_to_string(&safe_path)
         .map_err(|e| anyhow::anyhow!("Failed to read file '{}': {}", safe_path, e))?;
@@ -212,7 +212,7 @@ fn handle_write(args: Value, cfg: &Config) -> Result<(String, bool)> {
         .ok_or_else(|| anyhow::anyhow!("Missing 'content' argument"))?;
     let append = args["append"].as_bool().unwrap_or(false);
 
-    // Validate path is within the workspace sandbox (lexical — works for
+    // Validate path is within the workspace sandbox (lexical - works for
     // files that don't exist yet).
     let safe_path_str = restrict_write_path(path, cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
     let safe_path = Path::new(&safe_path_str);
@@ -262,7 +262,7 @@ fn handle_list(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
-    // Listing is a read — allowed anywhere on the filesystem.
+    // Listing is a read - allowed anywhere on the filesystem.
     let safe_path = resolve_read_path(path, workspace_dir);
 
     let entries = fs::read_dir(&safe_path)
@@ -308,7 +308,7 @@ fn handle_search(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'pattern' argument"))?;
     // Default the search base to the workspace root, but searches may point
-    // anywhere — searching is a read.
+    // anywhere - searching is a read.
     let base_path = args["path"].as_str().unwrap_or(workspace_dir);
     let safe_base = resolve_read_path(base_path, workspace_dir);
 
@@ -348,7 +348,7 @@ fn handle_info(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let path = args["path"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument"))?;
-    // Metadata lookup is a read — allowed anywhere on the filesystem.
+    // Metadata lookup is a read - allowed anywhere on the filesystem.
     let safe_path = resolve_read_path(path, workspace_dir);
 
     let metadata = fs::metadata(&safe_path)
@@ -390,7 +390,7 @@ fn handle_info(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Plugin config — received via MCP configure message, not from env vars
+// Plugin config - received via MCP configure message, not from env vars
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -753,8 +753,8 @@ mod tests {
 
     #[tokio::test]
     async fn write_outside_sandbox_soft_error_does_not_trip() {
-        // Through soft_error the rejection arrives as Ok((msg, true)) — NOT a
-        // handler Err — so the MCP circuit breaker stays closed.
+        // Through soft_error the rejection arrives as Ok((msg, true)) - NOT a
+        // handler Err - so the MCP circuit breaker stays closed.
         let (msg, is_error) = soft_error(|args: Value| {
             handle_write(
                 args,
@@ -799,7 +799,7 @@ mod tests {
 
     #[test]
     fn read_outside_workspace_allowed() {
-        // Reads are UNRESTRICTED — only writes are sandboxed. Reading
+        // Reads are UNRESTRICTED - only writes are sandboxed. Reading
         // /etc/hostname (outside /opt/workspace) must succeed.
         let (msg, is_error) = handle_read(
             serde_json::json!({"path": "/etc/hostname"}),
@@ -831,7 +831,7 @@ mod tests {
 
     #[test]
     fn list_and_info_outside_workspace_allowed() {
-        // Listing /etc is a read — allowed.
+        // Listing /etc is a read - allowed.
         let (msg, is_error) = handle_list(serde_json::json!({"path": "/etc"}), "/opt/workspace")
             .expect("list outside workspace must succeed");
         assert!(!is_error, "msg: {}", msg);
@@ -847,7 +847,7 @@ mod tests {
 
     #[test]
     fn search_outside_workspace_allowed() {
-        // Searching /usr/share is a read — allowed.
+        // Searching /usr/share is a read - allowed.
         let (msg, is_error) = handle_search(
             serde_json::json!({"path": "/usr/share", "pattern": "*.md"}),
             "/opt/workspace",

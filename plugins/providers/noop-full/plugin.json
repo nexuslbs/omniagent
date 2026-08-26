@@ -2,7 +2,7 @@
   "name": "noop-full",
   "version": "1.0.0",
   "type": "provider",
-  "description": "Full standalone provider — handles chat completions entirely in-client via stdio protocol, no api_mode dependency on omniagent",
+  "description": "Full standalone provider - handles chat completions entirely in-client via stdio protocol, no api_mode dependency on omniagent",
   "entrypoint": {
     "command": "python3",
     "args": ["client.py"],

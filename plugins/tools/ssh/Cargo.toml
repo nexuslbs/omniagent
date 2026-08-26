@@ -2,7 +2,7 @@
 name = "mcp-server-ssh"
 version = "0.1.0"
 edition = "2021"
-description = "SSH MCP server: ssh_run, ssh_copy, ssh_status — run commands on and copy files to/from remote machines"
+description = "SSH MCP server: ssh_run, ssh_copy, ssh_status - run commands on and copy files to/from remote machines"
 
 [dependencies]
 mcp-server-util = { path = "../util" }

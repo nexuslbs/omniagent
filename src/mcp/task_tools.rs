@@ -59,7 +59,7 @@ pub async fn handle_wait_task(args: Value, _ctx: AppContext) -> AppResult<McpToo
     // Default to a GENEROUS wait: the loop polls every 500ms and returns as
     // soon as the task completes, so a long default costs nothing when the
     // task is fast. A short default (30s) made agents that omit timeout_secs
-    // burn one iteration per 30s of every long build/test — observed killing
+    // burn one iteration per 30s of every long build/test - observed killing
     // threads at the iteration cap mid-cargo-build (Aug 2026). 900s covers a
     // full Rust release build / dev-stack setup in a single call.
     let timeout_secs = args

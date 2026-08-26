@@ -1,7 +1,7 @@
 //! Board configuration: parsing + validation of `boards.yml` (kanban boards).
 //!
 //! Boards are FILE-DEFINED like workflows: the YAML file at
-//! `<OMNI_DIR>/config/boards.yml` is the single source of truth — there are
+//! `<OMNI_DIR>/config/boards.yml` is the single source of truth - there are
 //! NO `boards` DB tables. The file maps board names to default execution
 //! options (channel, profile, workflow, plan, template, priority) that act as
 //! the task's fallback when the kanban task itself does not set an option.
@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// A board's default execution options — the same option set a kanban task
+/// A board's default execution options - the same option set a kanban task
 /// can carry (kanban_tasks: channel_id, profile, workflow_id, plan,
 /// template, priority). Each field is optional; resolution falls through
 /// to the next level (Channel / Global Settings) when a field is absent.
@@ -178,7 +178,7 @@ pub fn boards_enabled(data_dir: impl AsRef<Path>) -> bool {
 
 /// Resolve the board config for a task's `board` value.
 ///
-/// - Boards disabled (no boards.yml): `Ok(None)` — the board field is inert.
+/// - Boards disabled (no boards.yml): `Ok(None)` - the board field is inert.
 /// - Boards enabled + board is NULL: `Err("task has no board")`.
 /// - Boards enabled + board not in the file:
 ///   `Err("task board 'X' not found in boards.yml")`.

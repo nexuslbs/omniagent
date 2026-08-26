@@ -55,7 +55,7 @@ impl CircuitBreaker {
 
     fn is_allowed(&self) -> bool {
         // Aug 2026: ALWAYS true. A circuit breaker must never make a plugin
-        // silently stop working (dropping envelopes) — a counted failure does
+        // silently stop working (dropping envelopes) - a counted failure does
         // not prove the plugin is broken. Real platform failures are handled
         // by the restart mechanism (restart_count / reload_platform_plugin),
         // and the supervisor restarts the subprocess. This flag is kept only
@@ -118,7 +118,7 @@ pub struct ExternalPlatformClient {
     /// DB pool for resolving $secret: refs directly. read_file must NOT make
     /// re-entrant HTTP calls back into omniagent's own server: the child's
     /// callback would need a tokio worker while the parent blocks one in
-    /// std::io read_line — with few workers that deadlocks the whole runtime.
+    /// std::io read_line - with few workers that deadlocks the whole runtime.
     pool: Arc<StdMutex<Option<PgPool>>>,
 }
 
@@ -236,7 +236,7 @@ impl ExternalPlatformClient {
         }
 
         // Resolve $env: and $secret: references in env values.
-        // ${VAR} is never interpolated — treated as a literal.
+        // ${VAR} is never interpolated - treated as a literal.
         // This ensures that env vars set at runtime (e.g. by the setup handler
         // via std::env::set_var) and secrets stored in the DB are picked up
         // even after a config reload.
@@ -459,7 +459,7 @@ impl Platform for ExternalPlatformClient {
                 // Resolve all config refs ($env:, $secret:) so the plugin
                 // receives actual values (e.g. access_token), not literal
                 // references like "$env:ACCESS_TOKEN" or "$secret:my_key".
-                // ${VAR} is never interpolated — treated as a literal.
+                // ${VAR} is never interpolated - treated as a literal.
                 let mut resolved_config = config_map;
                 crate::plugins_yaml::resolve_config_refs(&mut resolved_config, &pool).await;
                 let req =
@@ -951,7 +951,7 @@ impl Platform for ExternalPlatformClient {
 
                                                                 // Dedup: skip if this post already created a thread. Without this,
                                                                 // one Mattermost post can spawn two threads with the same
-                                                                // external_id — e.g. when the poller re-processes a post after an
+                                                                // external_id - e.g. when the poller re-processes a post after an
                                                                 // omniagent restart, or when both the websocket and the polling
                                                                 // path deliver the same message.
                                                                 let already_has_thread = thread_exists_for_external_id(
@@ -1326,7 +1326,7 @@ impl Platform for ExternalPlatformClient {
 
         // Resolve the access token VALUE directly via the DB pool. Passing the
         // value (not just the name) means the child never needs to call back
-        // into omniagent's HTTP server — a re-entrant callback while the
+        // into omniagent's HTTP server - a re-entrant callback while the
         // parent blocks a tokio worker in std I/O deadlocks the runtime with
         // few workers (observed: 2-CPU deploy, HTTP server wedged, all tests
         // timing out after G12).
@@ -1393,7 +1393,7 @@ impl Platform for ExternalPlatformClient {
                 plugin_name, e
             ))
         })?;
-        drop(stdin); // Close stdin — signals plugin to process and exit
+        drop(stdin); // Close stdin - signals plugin to process and exit
 
         // Read response from stdout with a hard timeout. NEVER block a tokio
         // worker synchronously: the child may take time, but the runtime must

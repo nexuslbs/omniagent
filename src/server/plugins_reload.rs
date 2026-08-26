@@ -64,7 +64,7 @@ pub(crate) async fn reload_platform_plugin(state: &Arc<AppState>, name: &str) {
     };
 
     if let Some((restart_count, _stopped, restart_notify)) = signal {
-        // Platform is running — signal a restart
+        // Platform is running - signal a restart
         restart_count.fetch_add(1, Ordering::SeqCst);
         restart_notify.notify_one();
         tracing::info!(
@@ -73,9 +73,9 @@ pub(crate) async fn reload_platform_plugin(state: &Arc<AppState>, name: &str) {
             restart_count.load(Ordering::SeqCst)
         );
     } else {
-        // Platform is NOT running — start it dynamically
+        // Platform is NOT running - start it dynamically
         tracing::info!(
-            "Platform plugin '{}' is not currently running — starting dynamically",
+            "Platform plugin '{}' is not currently running - starting dynamically",
             name
         );
         if let Err(e) = start_platform_plugin(state, name).await {
@@ -134,7 +134,7 @@ pub(crate) async fn start_platform_plugin(state: &Arc<AppState>, name: &str) -> 
 
     // 5. Register platform client for the read_attached_file MCP tool
     // The platform plugin implements read_file internally, so the core
-    // stays plugin-agnostic — no knowledge of field names like access_token.
+    // stays plugin-agnostic - no knowledge of field names like access_token.
     // Just store the Arc<dyn Platform> in AppContext for the MCP tool to use.
     state.app_context.platforms.write().await.insert(
         name.to_string(),
@@ -204,7 +204,7 @@ pub(crate) async fn stop_platform_plugin(state: &Arc<AppState>, name: &str) {
         );
     } else {
         tracing::warn!(
-            "Platform plugin '{}' was not registered — already stopped or never started",
+            "Platform plugin '{}' was not registered - already stopped or never started",
             name
         );
     }

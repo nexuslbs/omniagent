@@ -247,16 +247,16 @@ A plugin's **source** is determined **solely by its physical location on disk**.
 
 ## Plugin Identity: [type + source + name] is the Composite Key
 
-**A plugin's identity is `[type, source, name]`, NOT `name` alone.** Platforms, tools (MCP servers), and providers are entirely different things even when they share the same name. The name `test-python` can refer to a platform plugin, a tool plugin, and a provider plugin simultaneously — each is a distinct entity with its own configuration, lifecycle, and state.
+**A plugin's identity is `[type, source, name]`, NOT `name` alone.** Platforms, tools (MCP servers), and providers are entirely different things even when they share the same name. The name `test-python` can refer to a platform plugin, a tool plugin, and a provider plugin simultaneously - each is a distinct entity with its own configuration, lifecycle, and state.
 
 **All plugin lookups MUST use the composite key `[type, source, name]`:**
 
 ```rust
-// ✅ CORRECT — unambiguous, type-aware
+// ✅ CORRECT - unambiguous, type-aware
 plugins_yaml::get_plugin(data_dir, name, &PluginYamlType::Tool)
 
-// ❌ WRONG — ambiguous, mixes types
-// get_plugin(data_dir, name)  — no type parameter (DEPRECATED)
+// ❌ WRONG - ambiguous, mixes types
+// get_plugin(data_dir, name)  - no type parameter (DEPRECATED)
 ```
 
 **API routes follow `/{type}/{source}/{name}/{action}` where type is required:**
@@ -277,7 +277,7 @@ Python/frontend code filtering plugin lists MUST include `plugin_type` in the fi
 # ✅ CORRECT
 next((p for p in plugins if p["name"] == name and p.get("plugin_type") == "platform"), None)
 
-# ❌ WRONG — will find wrong plugin if types share a name
+# ❌ WRONG - will find wrong plugin if types share a name
 # next((p for p in plugins if p["name"] == name), None)
 ```
 
@@ -408,9 +408,9 @@ The `resolve_plugin_for_compile()` function extracts the common preamble from bo
 - Verifies the plugin directory exists on disk; returns `NOT_FOUND` if not
 - Returns `ResolvedPlugin` struct with `yaml_type`, `category`, `plugin_dir`
 
-No `detect_plugin_category()`, no `get_plugin_dir_for_category()`, no `get_entry_with_type()` — all replaced by deterministic path construction from URL parameters.
+No `detect_plugin_category()`, no `get_plugin_dir_for_category()`, no `get_entry_with_type()` - all replaced by deterministic path construction from URL parameters.
 
-## External Platform Plugin Client — Race Condition Prevention
+## External Platform Plugin Client - Race Condition Prevention
 
 ### Core Problem: `tokio::sync::Notify` Stale Notification Bit
 
@@ -423,11 +423,11 @@ This caused the mattermost subprocess (and would cause ANY external platform sub
 ### Fix: Two-Pronged Defense
 
 ```rust
-// FIX 1: Inner loop — ignore stale notifications when counters match
+// FIX 1: Inner loop - ignore stale notifications when counters match
 _ = self.restart_notify.notified() => {
     let current_restart = self.restart_count.load(Ordering::SeqCst);
     // If restart count hasn't changed since spawn, the notification
-    // bit is stale — don't kill the subprocess
+    // bit is stale - don't kill the subprocess
     if current_restart == last_restart_count {
         continue;  // ← KEY: skip break, keep subprocess alive
     }
@@ -435,7 +435,7 @@ _ = self.restart_notify.notified() => {
     break;
 }
 
-// FIX 2: Before respawn — consume stale notification bit proactively
+// FIX 2: Before respawn - consume stale notification bit proactively
 if current_restart != last_restart_count {
     last_restart_count = current_restart;
     // Consume the pending notification so the next spawn's
@@ -590,7 +590,7 @@ The Remove handler (`delete_plugin_handler`) follows strict source-based rules (
 
 ## Kanban Boards & Role-Based Workflows (recent architecture)
 
-Kanban is driven by **boards** (`config/boards.yml`, optional — feature-gated on file presence) and **role-based workflows** (`config/workflows.yml`).
+Kanban is driven by **boards** (`config/boards.yml`, optional - feature-gated on file presence) and **role-based workflows** (`config/workflows.yml`).
 
 ### workflows.yml
 
@@ -616,7 +616,7 @@ omniagent-dev:
 ### boards.yml
 
 - When `boards.yml` is present, task create/edit **requires** a valid board (API rejects missing/invalid board).
-- Boards define defaults resolved **at load time** (task → board → channel → global settings): channel, workflow, plan, template, provider/model. Loaders return resolved data, never shallow values — do not re-resolve at execution time.
+- Boards define defaults resolved **at load time** (task → board → channel → global settings): channel, workflow, plan, template, provider/model. Loaders return resolved data, never shallow values - do not re-resolve at execution time.
 - The dispatcher enforces the **board gate** (per-board in-flight limits) and **channel-busy gate**, and **never dispatches archived tasks** (archived guard in the dispatch SQL).
 
 ## Event Hooks (`src/hooks.rs`)
@@ -633,7 +633,7 @@ Hooks are delivered to the hooks channel (configured via `default_hook_channel` 
 
 - Budgets are **global settings** in `settings.yml`: `prompt_token_budget_soft` (100000) / `prompt_token_budget_hard` (500000). There are NO char budgets in core.
 - The **prompt plugin's `compact-messages` tool owns compaction**: it receives soft/hard budget params at call time (resolved per provider/model; `chars/4` fallback when no tokenizer is available) and performs pruning (`prune_old_tool_results`) inside compaction.
-- Core no longer has budget/prune logic — do NOT reintroduce char budgets or prune-elsewhere logic.
+- Core no longer has budget/prune logic - do NOT reintroduce char budgets or prune-elsewhere logic.
 - `AgentConfig` fields are `token_budget_hard/soft` (read from those settings keys).
 
 ## models.yml Overrides
@@ -645,7 +645,7 @@ Hooks are delivered to the hooks channel (configured via `default_hook_channel` 
 
 ## API Field-Name Parity (HARD RULE)
 
-The HTTP API and YAML configs use the **same property names**: `channel`, `workflow`, `cron`, `board`, `provider`, `model` — NOT `channel_id`, `workflow_id`, `current_*`, or `schedule`. When adding/renaming API fields, keep YML parity; tests in omni-deployer `scripts/tests.py` (GROUP 39/46/47) assert this.
+The HTTP API and YAML configs use the **same property names**: `channel`, `workflow`, `cron`, `board`, `provider`, `model` - NOT `channel_id`, `workflow_id`, `current_*`, or `schedule`. When adding/renaming API fields, keep YML parity; tests in omni-deployer `scripts/tests.py` (GROUP 39/46/47) assert this.
 
 ## Single-Instance Guard
 
@@ -664,4 +664,4 @@ cargo clippy -- -D warnings
 cargo test --workspace --release
 ```
 
-When a migration/query changes, regenerate the offline SQLx cache (`.sqlx/`) so `SQLX_OFFLINE` builds pass. Never commit scratch files (`*.patch`, `.task*`, `.push*`, `.smoke*`, `.g4x-*`, `_run_*.py`, `apply_*.py`) — scratch helper/driver scripts belong ONLY in `OMNI_DIR/data/scripts/` or `omni-stack/data/scripts/` (both gitignored, never versioned); never create them inside the repo tree.
+When a migration/query changes, regenerate the offline SQLx cache (`.sqlx/`) so `SQLX_OFFLINE` builds pass. Never commit scratch files (`*.patch`, `.task*`, `.push*`, `.smoke*`, `.g4x-*`, `_run_*.py`, `apply_*.py`) - scratch helper/driver scripts belong ONLY in `OMNI_DIR/data/scripts/` or `omni-stack/data/scripts/` (both gitignored, never versioned); never create them inside the repo tree.

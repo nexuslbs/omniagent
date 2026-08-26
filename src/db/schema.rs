@@ -7,9 +7,9 @@
 //
 // Channel definitions AND runtime state live in {data_dir}/config/channels.yml
 // (git-tracked; see src/channels_yaml.rs). There is NO `channels` database
-// table and NO foreign keys referencing it — the channels TABLE AND ALL FKs
+// table and NO foreign keys referencing it - the channels TABLE AND ALL FKs
 // WERE DROPPED. The YAML map key is the channel NAME: the stable identifier
-// used everywhere — the API channel id, the threads/messages/kanban_tasks/
+// used everywhere - the API channel id, the threads/messages/kanban_tasks/
 // summaries channel_id column (TEXT holding the name), and tasks.yml
 // `channel:` references. This mirrors the established pattern of referencing
 // yml keys by key string: threads.schedule_task_id holds the tasks.yml key,
@@ -61,7 +61,7 @@
 //
 // threads.channel_id, messages.channel_id, kanban_tasks.channel_id and
 // summaries.channel_id are TEXT columns holding the channel NAME (key into
-// channels.yml). There are NO FK constraints referencing channels — the name
+// channels.yml). There are NO FK constraints referencing channels - the name
 // IS the reference, exactly like threads.schedule_task_id / workflow_id /
 // task_id reference their respective yml keys.
 //

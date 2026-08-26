@@ -81,7 +81,7 @@ pub struct CompleteResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<UsageResult>,
     /// Provider finish reason (e.g. "stop", "length", "tool_calls").
-    /// `length` signals the response was truncated by the output budget —
+    /// `length` signals the response was truncated by the output budget -
     /// the model may not have finished emitting its action or answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
@@ -116,7 +116,7 @@ pub struct UsageResult {
 ///
 /// Returns `None` when the value is missing or not an object. Missing
 /// numeric fields default to 0 (prompt/completion) or `None` (cache,
-/// reasoning) — identical to the old inline extraction, so behavior for
+/// reasoning) - identical to the old inline extraction, so behavior for
 /// providers that omit cache fields is unchanged.
 pub fn parse_usage(value: &serde_json::Value) -> Option<UsageResult> {
     let u = value.as_object()?;
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn parse_usage_missing_cache_fields_yields_none() {
         // Providers that omit cache fields (observed: the opencode-go gateway
-        // strips them) must parse to cached_tokens=None — never a wrong number.
+        // strips them) must parse to cached_tokens=None - never a wrong number.
         let u = serde_json::json!({
             "prompt_tokens": 250000,
             "completion_tokens": 1000,

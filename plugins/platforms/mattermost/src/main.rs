@@ -1059,7 +1059,7 @@ impl PluginConfig {
     ///
     /// The `host` config carries the agent's BIND address (the HOST env
     /// default is `0.0.0.0`). A bind address is not a connect target, so
-    /// wildcard values (`0.0.0.0`, `::`) — and empty values — are
+    /// wildcard values (`0.0.0.0`, `::`) - and empty values - are
     /// translated to `localhost` for connecting, with port defaulting to
     /// `8080`.
     fn agent_api_base(&self) -> String {
@@ -1448,7 +1448,7 @@ async fn main() -> Result<()> {
                     }
                     Err(e) => {
                         // All four auth paths failed. Do NOT claim the admin
-                        // user exists with a wrong password — that was a false
+                        // user exists with a wrong password - that was a false
                         // heuristic: on a fresh DB the real cause is usually a
                         // transport failure (Mattermost still running first-run
                         // DB migrations). Report what actually happened so the
@@ -1460,7 +1460,7 @@ async fn main() -> Result<()> {
                                 "code": -1,
                                 "message": format!(
                                     "Could not complete Mattermost setup: all authentication paths failed (admin login, empty-password fallback, access token, and first-user creation). \
-                                    If the Mattermost server was still starting up (first-run DB migrations), wait for it to become ready and run setup again — setup is idempotent. \
+                                    If the Mattermost server was still starting up (first-run DB migrations), wait for it to become ready and run setup again - setup is idempotent. \
                                     If the server is already ready, the configured admin credentials may be wrong; fix them with: docker exec omm-mattermost /tmp/mmctl --local user change-password {} --password '<new-password>' \
                                     and re-run setup. Underlying error: {}",
                                     params.admin_user, e
@@ -2058,7 +2058,7 @@ async fn handle_react(
     params: &ReactParams,
 ) -> PluginResponse {
     // Self-healing bot identity (Aug 2026): bot_user was previously captured
-    // ONCE at startup — a transient get_me() failure (Mattermost briefly
+    // ONCE at startup - a transient get_me() failure (Mattermost briefly
     // unreachable, token rotation racing plugin start) permanently crippled
     // reactions with "Cannot react: no authenticated Mattermost user" even
     // when the token was actually valid. Now the id is cached in a shared
@@ -2140,7 +2140,7 @@ async fn login_admin_client(
 ///
 /// The server accepts connections (ping → 200) while its first-run DB
 /// migrations are still running in background jobs, so a ping is NOT a
-/// reliable readiness signal — consumers that run setup immediately after
+/// reliable readiness signal - consumers that run setup immediately after
 /// container start race the half-migrated DB and fail with transport errors.
 /// A DB-backed endpoint (`GET /api/v4/users`, which requires auth) only
 /// returns a definitive status (401/403/200) once the API layer AND the
@@ -2251,7 +2251,7 @@ async fn handle_read_file() -> Result<()> {
     // plugin's config). No env vars, no plugins.yml reads.
     let access_token_name = request["access_token_name"].as_str().unwrap_or("");
 
-    // The core now resolves the token VALUE and sends it directly — the
+    // The core now resolves the token VALUE and sends it directly - the
     // one-shot read-file process must NOT call back into omniagent's HTTP
     // server (re-entrant callback + parent blocking on the pipe = deadlock).
     // Fall back to the secrets API only when no value was provided.
@@ -2571,7 +2571,7 @@ async fn handle_setup(
                         if let Ok(me) = test.get_me().await {
                             if me.id == uid {
                                 tracing::info!(
-                                    "Existing access_token valid for bot user '{}' — reusing",
+                                    "Existing access_token valid for bot user '{}' - reusing",
                                     params.bot_user
                                 );
                                 reuse = Some(tok.clone());
@@ -3544,7 +3544,7 @@ async fn set_agent_secret(
     match resp.status().as_u16() {
         // Updated successfully (the secrets API returns 200 on success)
         200..=299 => Ok(()),
-        // Secret does not exist yet — create it via POST /secrets
+        // Secret does not exist yet - create it via POST /secrets
         404 => {
             let post_url = format!("{}/secrets", api_base);
             let create_body = serde_json::json!({
@@ -3568,7 +3568,7 @@ async fn set_agent_secret(
                 );
             }
         }
-        // Any other status (500, 401, 403, ...) is a failure — never treat as success
+        // Any other status (500, 401, 403, ...) is a failure - never treat as success
         other => anyhow::bail!(
             "Failed to update agent secret '{}': HTTP {}",
             secret_name,
@@ -3607,7 +3607,7 @@ mod tests {
     #[test]
     fn agent_api_base_connects_via_localhost_for_bind_addresses() {
         // Bind wildcards (the agent HOST default is 0.0.0.0) are not
-        // connect targets — they must become localhost.
+        // connect targets - they must become localhost.
         assert_eq!(
             cfg_with_host("0.0.0.0").agent_api_base(),
             "http://localhost:8080"

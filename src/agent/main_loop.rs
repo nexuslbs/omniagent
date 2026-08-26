@@ -34,7 +34,7 @@ async fn backoff_delay(attempt: u32) -> Duration {
 /// Extract up to 6 plan steps from plan content (markdown or JSON).
 ///
 /// Real plans are markdown: `<plan>1. step one</plan>` or plain numbered/bulleted
-/// lists. We no longer REQUIRE JSON `{"steps": [...]}` — that never matched real
+/// lists. We no longer REQUIRE JSON `{"steps": [...]}` - that never matched real
 /// plans (every live plan is markdown), so no subtasks were ever auto-created.
 /// JSON steps are still honored as a fallback. Priority is preserved: the FIRST
 /// step gets the HIGHEST priority.
@@ -176,10 +176,10 @@ mod plan_extract_tests {
 // An agent must never tear down the container it runs inside: a
 // `docker compose restart/down/stop/rm/kill` against its OWN compose
 // project kills its own thread (thread 488 self-kill). The guard resolves
-// the docker-authoritative compose PROJECT NAME of both sides — the agent's
+// the docker-authoritative compose PROJECT NAME of both sides - the agent's
 // own container (`com.docker.compose.project` label via `docker inspect`)
 // and the target project (`docker compose ... config --format json` →
-// `.name`, the exact resolution compose itself performs) — and blocks a
+// `.name`, the exact resolution compose itself performs) - and blocks a
 // destructive verb ONLY when the two names are EQUAL. `up` is NEVER blocked
 // for any project, and other projects (e.g. the omnidev dev stack) are
 // always manageable. Resolution is DELEGATED to docker/compose; compose's
@@ -273,7 +273,7 @@ async fn resolve_self_project() -> Option<String> {
 
 /// Resolve the TARGET project's effective name by delegating to compose
 /// (`config --format json` → `.name`). Fallback: a RUNNING project's
-/// containers carry the `com.docker.compose.project` label — read it via
+/// containers carry the `com.docker.compose.project` label - read it via
 /// `docker ps` filtered by the project's working_dir label.
 async fn resolve_target_project(
     project_dir: &str,
@@ -337,7 +337,7 @@ async fn resolve_target_project(
 async fn self_restart_guard_block(args_json: &str) -> Option<String> {
     let args: serde_json::Value = serde_json::from_str(args_json).ok()?;
     let verb = compose_verb(&args)?;
-    // `up` (and any non-destructive verb) is NEVER blocked — skip the
+    // `up` (and any non-destructive verb) is NEVER blocked - skip the
     // resolution overhead entirely.
     if !DESTRUCTIVE_COMPOSE_VERBS.contains(&verb) {
         return None;
@@ -362,7 +362,7 @@ async fn self_restart_guard_block(args_json: &str) -> Option<String> {
     let target_project = resolve_target_project(project_dir, &compose_files, env_file).await;
     if guard_blocks(verb, self_project.as_deref(), target_project.as_deref()) {
         Some(format!(
-            "Blocked: docker_compose '{verb}' targets compose project '{target}' — the project this agent runs inside (self project '{self_name}'). \
+            "Blocked: docker_compose '{verb}' targets compose project '{target}' - the project this agent runs inside (self project '{self_name}'). \
              Tearing down your own container kills this thread. Only Hermes may restart the stack. \
              You may manage OTHER compose projects (e.g. the omnidev dev stack) freely; `up` is never blocked.",
             target = target_project.as_deref().unwrap_or("?"),
@@ -580,7 +580,7 @@ pub(crate) async fn run_main_loop(
             }
             // Include the actual user request (task body for kanban/cron tasks,
             // original message for user threads) so the plan phase sees WHAT the
-            // task is — not just the generic planning instruction. The context
+            // task is - not just the generic planning instruction. The context
             // block also carries the seq-0 cause message (prompt plugin), but
             // this guarantees the request reaches the plan LLM even if context
             // assembly drops it.
@@ -595,7 +595,7 @@ pub(crate) async fn run_main_loop(
                  Keep this plan concise. Your maximum output per response is {} \
                  tokens. If a step would produce a very large deliverable \
                  (e.g. a big file), note in the plan that it must be written in \
-                 chunks via filesystem_write append=true — never let an output \
+                 chunks via filesystem_write append=true - never let an output \
                  limit cause failure.",
                 fmt_output_budget(max_tokens)
             )));
@@ -770,7 +770,7 @@ Previous plan:\n{}",
                         let steps = extract_plan_steps(&plan_content);
                         if steps.is_empty() {
                             warn!(
-                                "[plan] No parseable steps in plan for thread {} — skipping subtask auto-create",
+                                "[plan] No parseable steps in plan for thread {} - skipping subtask auto-create",
                                 thread.id
                             );
                         } else {
@@ -816,7 +816,7 @@ Previous plan:\n{}",
     // Inverse role mapping (R7): for tester/reviewer STEP threads the role
     // template (dev-tester/dev-reviewer) is the USER prompt, and the task
     // description (title + body carried in the cause message) is the SYSTEM
-    // prompt — the opposite of the executor layout (template = system,
+    // prompt - the opposite of the executor layout (template = system,
     // task body = user). The step-thread cause message carries the task
     // description; template_section carries the role template.
     let is_step_thread = matches!(thread.workflow_step.as_deref(), Some("testing" | "review"));
@@ -878,17 +878,17 @@ Previous plan:\n{}",
 
     // ── Truncation recovery (finish_reason=length) ──
     // Normal LLM calls use the configured `max_tokens` budget (None = no cap:
-    // the provider's own default applies — no max_tokens sent in the request).
+    // the provider's own default applies - no max_tokens sent in the request).
     // When the provider reports finish_reason=length (the output ceiling was
     // hit) the thread RECOVERS: it retries a bounded number of times
     // (`max_truncation_retries`, default 3) with an escalating nudge that
-    // demands a progressively SHORTER response (or multi-part emission) — NOT
+    // demands a progressively SHORTER response (or multi-part emission) - NOT
     // "continue where you left off", which regenerates the same oversized
     // output. The retry budget is per-thread and resets whenever the model
     // produces a valid (non-truncated) response, so in-progress tool work is
     // never discarded and a later truncation gets fresh recovery attempts.
     // Only after the budget is exhausted does the thread give up truthfully
-    // (surfacing exactly what was trimmed) — a recoverable output truncation
+    // (surfacing exactly what was trimmed) - a recoverable output truncation
     // never trips the stuck/empty-thread safety valve below.
     let mut escalated_max_tokens: Option<u32> = None;
     // Per-thread truncation-recovery counter: incremented on each recovery
@@ -912,7 +912,7 @@ Previous plan:\n{}",
          (e.g. writing a large file) or your final answer would exceed this, \
          SPLIT the work across multiple calls: write the first chunk with \
          filesystem_write (append=false), then append the remaining chunks with \
-         append=true. Never abandon a task because of the output limit — chunk \
+         append=true. Never abandon a task because of the output limit - chunk \
          the output instead.",
         fmt_output_budget(max_output_tokens)
     )));
@@ -947,7 +947,7 @@ Previous plan:\n{}",
     // A correct (non-error) response resets the counter to 0. The limit
     // comes from config `provider_max_retries` (default 3); MAX_LLM_RETRIES
     // is the fallback when the setting is 0. This bounds token waste even
-    // if a tool misbehaves (e.g. compaction) — we stop after this many
+    // if a tool misbehaves (e.g. compaction) - we stop after this many
     // consecutive errors instead of burning tokens re-sending a bloated
     // context.
     const MAX_LLM_RETRIES: u32 = 3;
@@ -963,7 +963,7 @@ Previous plan:\n{}",
     // Task 3: bounded forced-compaction retries on provider context-length
     // errors (the death-spiral recovery). When the accumulated thread history
     // exceeds the model's context window, pruning tool results (task 2) is not
-    // enough — force a summary compaction of the OLDEST segment and retry.
+    // enough - force a summary compaction of the OLDEST segment and retry.
     // Bounded per thread by `max_compaction_retries` (default 2) so a hopeless
     // thread fails honestly instead of looping forever. Both counters reset on
     // a successful tool-calling response (see below).
@@ -984,7 +984,7 @@ Previous plan:\n{}",
     let mut used_sub_prompt_chars: usize = 0;
     let mut sub_prompts_exhausted: bool = false;
 
-    // WS-4b: engine-level read guard — (tool, args-hash) -> (iteration, len)
+    // WS-4b: engine-level read guard - (tool, args-hash) -> (iteration, len)
     // for read-only tools. Cleared whenever a state-changing tool runs.
     let mut read_guard: std::collections::HashMap<(String, u64), (u32, usize)> =
         std::collections::HashMap::new();
@@ -1004,7 +1004,7 @@ Previous plan:\n{}",
         // When a channel has a user task RUNNING and there are PENDING user
         // tasks for the same channel/profile/parent-context (or children of
         // this thread), their prompts are appended to THIS thread's full
-        // prompt — BEFORE the condense call so compaction never drops them.
+        // prompt - BEFORE the condense call so compaction never drops them.
         // Each pending thread is marked skipped and a sub_cause message
         // records the original thread id (messages.original_thread_id).
         // Gates: iteration-percent (feature enabled when > 0; lookups only
@@ -1155,7 +1155,7 @@ Previous plan:\n{}",
                         // (apply it) OR null/absent (no change). The core is
                         // deliberately AGNOSTIC: it applies whatever the tool
                         // returns without verifying. The tool alone decides when
-                        // compaction happens and whether it succeeded — it may
+                        // compaction happens and whether it succeeded - it may
                         // compact by chars or by tokens (tokenizer-dependent),
                         // so the core cannot and must not re-check correctness.
                         if let Some(condensed) = result.get("messages").and_then(|v| v.as_array()) {
@@ -1209,7 +1209,7 @@ Previous plan:\n{}",
                     (iter_limit - current_iter).max(0)
                 ),
             );
-        // WS-3: durable working notes survive compaction — injected every
+        // WS-3: durable working notes survive compaction - injected every
         // iteration AFTER condense so notes are always in context.
         if let Ok(notes_content) = std::fs::read_to_string(thread_dir.join("notes.md")) {
             let notes_total = notes_content.chars().count();
@@ -1229,7 +1229,7 @@ Previous plan:\n{}",
                 );
             }
         }
-        // WS-5: ENGINE auto-notes — read-type tool results are auto-saved to
+        // WS-5: ENGINE auto-notes - read-type tool results are auto-saved to
         // auto-notes.md by prune/compact before their context copy is
         // destroyed. Inject the TAIL (most recent reads first) so the agent
         // always remembers what it read, even if it never wrote a note
@@ -1253,13 +1253,13 @@ Previous plan:\n{}",
                 );
             }
         }
-        // WS-3: compaction notice — never re-read the dump (rule 12).
+        // WS-3: compaction notice - never re-read the dump (rule 12).
         if was_compacted {
             helpers::upsert_system_message(
                     &mut messages,
                     "=== Context Compacted",
                     format!(
-                        "=== Context Compacted (iteration {current_iter}) ===\nDump: {} ({} entries).\nNever re-read context-{current_iter}.json — rule 12.",
+                        "=== Context Compacted (iteration {current_iter}) ===\nDump: {} ({} entries).\nNever re-read context-{current_iter}.json - rule 12.",
                         dump_file.as_deref().unwrap_or("context dump"),
                         dump_entries
                     ),
@@ -1359,7 +1359,7 @@ Previous plan:\n{}",
                 error!("LLM call failed: {:?}", e);
                 // Task 3: context-overflow recovery (kill the death spiral).
                 // A provider context-length error (input too long) can never be
-                // fixed by retrying the SAME oversized context — the thread
+                // fixed by retrying the SAME oversized context - the thread
                 // would just die after exhausting retries. Recovery, bounded by
                 // max_compaction_retries:
                 //   (a) prune over-budget tool results (task 2, zero LLM cost),
@@ -1429,7 +1429,7 @@ Previous plan:\n{}",
                         );
                     } else {
                         warn!(
-                            "[compact] Context-length error for thread {}: compaction unavailable or budget exhausted ({} used / max {}) — will fail honestly",
+                            "[compact] Context-length error for thread {}: compaction unavailable or budget exhausted ({} used / max {}) - will fail honestly",
                             thread.id, compaction_retries_used, max_compaction_retries
                         );
                     }
@@ -1492,7 +1492,7 @@ Previous plan:\n{}",
             // RECOVERABLE condition, not a stuck/empty thread: retry a bounded
             // number of times (max_truncation_retries, default 3) with an
             // escalating nudge that demands a progressively SHORTER response
-            // (or multi-part emission) — never "continue where you left off",
+            // (or multi-part emission) - never "continue where you left off",
             // which regenerates the same oversized output. Reasoning-only
             // truncation (content empty, reasoning consumed the budget) drops
             // the reasoning and demands a thinking-free response, because
@@ -1550,7 +1550,7 @@ Previous plan:\n{}",
                              If a single tool call (e.g. writing a large file) or your final answer would exceed this, \
                              SPLIT the work across multiple calls: write the first chunk with filesystem_write \
                              (append=false), then append the remaining chunks with append=true. Never abandon a task \
-                             because of the output limit — chunk the output instead.",
+                             because of the output limit - chunk the output instead.",
                             fmt_output_budget(escalated_max_tokens), fmt_output_budget(base_max_tokens),
                         ),
                     );
@@ -1573,7 +1573,7 @@ Previous plan:\n{}",
                     );
                     // Give up truthfully: surface exactly what was trimmed.
                     // In-progress tool work is preserved in the thread history
-                    // (messages/DB) — only the final response was lost, so the
+                    // (messages/DB) - only the final response was lost, so the
                     // step can be resumed rather than redone. The thread MUST
                     // fail (status "failed" → blocked / review_on_fail), never
                     // complete and advance to the tester.
@@ -1774,7 +1774,7 @@ Previous plan:\n{}",
                     // Reasoning has content but no response content and no
                     // tool calls. A reasoning-only response with no tool
                     // call is a TERMINAL state for the agent: the model has
-                    // decided to stop. We do NOT nudge or retry — forcing a
+                    // decided to stop. We do NOT nudge or retry - forcing a
                     // stopped model to continue produces degraded or
                     // fabricated continuations. Leave final_content empty:
                     // the post-loop fallback reports the give-up truthfully
@@ -1783,7 +1783,7 @@ Previous plan:\n{}",
                     //
                     // Genuine truncation (finish_reason=length) is handled above the
                     // subtask/content handling: it escalates the output budget once,
-                    // then fails fast — it never reaches this voluntary-stop path.
+                    // then fails fast - it never reaches this voluntary-stop path.
 
                     // Voluntary stop: terminal. Empty final_content triggers
                     // the truthful give-up fallback after the loop.
@@ -1791,7 +1791,7 @@ Previous plan:\n{}",
                 }
             } else {
                 // Correct response with content (loop ends right after this,
-                // so no counter reset needed here — the tool-call path below
+                // so no counter reset needed here - the tool-call path below
                 // resets it for iterations that continue).
                 response.content
             };
@@ -1942,7 +1942,7 @@ Previous plan:\n{}",
                         tc_id.clone(),
                         tool_name.clone(),
                         format!(
-                            "[duplicate of {tool_name} at iteration {guard_iter} — see your notes; re-reading the same input is forbidden by rule 11]"
+                            "[duplicate of {tool_name} at iteration {guard_iter} - see your notes; re-reading the same input is forbidden by rule 11]"
                         ),
                     ));
                     continue;
@@ -2013,7 +2013,7 @@ Previous plan:\n{}",
                 let task_result = std::panic::AssertUnwindSafe(async move {
                     // Phase 1.5 guard: if this docker_compose call would restart the
                 // agent's own stack, return a synthetic error result instead of
-                // executing it — the message plumbing below records it as a
+                // executing it - the message plumbing below records it as a
                 // tool result with is_error=true so the model sees the block.
                 if let Some(block_msg) = self_restart_block_for_task {
                     return (
@@ -2027,7 +2027,7 @@ Previous plan:\n{}",
 
                 // Execute with short timeout (fast path) + background fallback.
                 // Builtin task tools (wait/poll/cancel/read-task-logs) are the
-                // INTERFACE to the background system — they must never be
+                // INTERFACE to the background system - they must never be
                 // backgrounded themselves. wait-task declares timeout_secs=310
                 // and blocks polling; applying the 5s bg switch to it would
                 // return a NEW task_id instead of the awaited result, so the
@@ -2041,7 +2041,7 @@ Previous plan:\n{}",
                 // did) made serial MCP plugins like docker_compose execute the
                 // command TWICE: the fast-path future was dropped but its
                 // request was already executing at the plugin, and the re-sent
-                // request queued behind it — the bg task resolved only after
+                // request queued behind it - the bg task resolved only after
                 // the second execution, or never when the agent re-dispatched
                 // repeatedly (each retry queued another duplicate).
                 let bg_mcp_call = mcp_call.clone();
@@ -2063,7 +2063,7 @@ Previous plan:\n{}",
                     // Run synchronously with the tool's own declared timeout
                     // (wait-task declares 310s; poll/cancel/read-task-logs are
                     // fast). If the tool declares NO timeout, await it directly
-                    // — the tool decides when it's done.
+                    // - the tool decides when it's done.
                     match timeout_dur {
                         Some(dur) => {
                             match tokio::time::timeout(dur, tool_future.as_mut()).await {
@@ -2101,7 +2101,7 @@ Previous plan:\n{}",
                         // (if any) still bounds it; with NO declared timeout
                         // (`None`) the task runs until it completes, errors,
                         // or the agent cancels it via cancel-task.
-                        // Do NOT execute the call again — the request was
+                        // Do NOT execute the call again - the request was
                         // already sent to the plugin; a serial plugin would
                         // run the command twice (and each agent re-dispatch
                         // would queue another duplicate behind it).
@@ -2476,7 +2476,7 @@ Review the tool results above to see what was attempted and what remains."
 
 /// Cap for the preserved reasoning note injected on a truncation retry
 /// (reasoning-forward: the model must NOT re-derive the chain). Only applied
-/// for CONTENT truncation — reasoning-only truncation drops the reasoning
+/// for CONTENT truncation - reasoning-only truncation drops the reasoning
 /// entirely (it IS the overflow cause).
 const PRESERVED_REASONING_CHARS: usize = 16000;
 
@@ -2487,7 +2487,7 @@ enum TruncationKind {
     /// not be present. Recovery preserves the partial content + reasoning.
     ContentTruncated,
     /// The output budget was consumed ENTIRELY by reasoning (content empty).
-    /// Recovery must NOT preserve the reasoning — it caused the overflow, and
+    /// Recovery must NOT preserve the reasoning - it caused the overflow, and
     /// reasoning models restart their chain on each retry, regenerating the
     /// same oversized thought and re-triggering length. The retry instead
     /// demands a thinking-free response so the budget frees up.
@@ -2510,7 +2510,7 @@ enum TruncationAction {
 /// Pure decision function. A recoverable length truncation NEVER fails the
 /// thread outright: it retries (bounded by `max_retries`) with escalating
 /// shorter-response nudges. Only when the retry budget is exhausted does it
-/// GiveUp — and even then the give-up reports precisely what was trimmed and
+/// GiveUp - and even then the give-up reports precisely what was trimmed and
 /// preserves the thread's in-progress tool work. The stuck/empty-thread
 /// safety valve lives in the empty-content / reasoning-only voluntary-stop
 /// paths BELOW the truncation branch, so a recoverable truncation (which is
@@ -2591,7 +2591,7 @@ fn truncation_retry_messages(
     let nudge = match (attempt, kind) {
         (_, TruncationKind::ReasoningOnly) => format!(
             "[System] Your previous response was cut off by the token limit: your REASONING consumed the entire output budget and produced no content (attempt {attempt}/{max_retries}). \
-             Do NOT think out loud — SKIP reasoning entirely and emit your response directly: a single small tool call, or a concise final answer."
+             Do NOT think out loud - SKIP reasoning entirely and emit your response directly: a single small tool call, or a concise final answer."
         ),
         (1, TruncationKind::ContentTruncated) => format!(
             "[System] Your previous response was cut off by the token limit (attempt 1/{max_retries}). \
@@ -2610,7 +2610,7 @@ fn truncation_retry_messages(
             "[System] Your responses keep hitting the token limit (attempt {attempt}/{max_retries}). \
              Produce an EXTREMELY condensed response: at most a few lines. Emit one minimal tool call or a \
              one-paragraph final answer. If the deliverable is large, deliver it in PARTS via successive \
-             small tool calls — never one oversized block."
+             small tool calls - never one oversized block."
         ),
     };
     msgs.push(ChatMessage::system(&nudge));
@@ -2629,7 +2629,7 @@ mod truncation_tests {
         );
         // A non-truncated response with empty content + reasoning is the
         // voluntary-stop case handled by the safety valve BELOW the truncation
-        // branch — never classified as a truncation.
+        // branch - never classified as a truncation.
         assert_eq!(
             truncation_action(false, 3, 3, true, true),
             TruncationAction::Continue
@@ -2684,7 +2684,7 @@ mod truncation_tests {
     #[test]
     fn retry_budget_is_bounded_give_up_not_infinite() {
         // max_retries=3: attempts 1..=3 retry, the 4th consecutive truncation
-        // gives up — bounded, never an infinite loop.
+        // gives up - bounded, never an infinite loop.
         assert!(matches!(
             truncation_action(true, 0, 3, false, false),
             TruncationAction::Retry { .. }
@@ -2716,7 +2716,7 @@ mod truncation_tests {
     #[test]
     fn giveup_contract_forces_failed_status() {
         // GiveUp contract: the executor loop sets force_failed=true so the
-        // thread's final status is "failed" (NOT "completed") — a failed
+        // thread's final status is "failed" (NOT "completed") - a failed
         // executor thread goes blocked (or review with review_on_fail), it
         // never advances to the tester. This is NOT the old bare "3x length ->
         // truthful fail": GiveUp only fires after escalating shorter-response
@@ -2814,7 +2814,7 @@ mod truncation_tests {
 
     #[test]
     fn reasoning_only_retry_drops_reasoning_and_demands_no_thinking() {
-        // Reasoning-only truncation: the reasoning IS the problem — it must
+        // Reasoning-only truncation: the reasoning IS the problem - it must
         // NOT be preserved (preserving it re-triggers the same oversized chain
         // on the retry) and the nudge must demand a thinking-free response.
         let msgs = truncation_retry_messages(
@@ -2836,7 +2836,7 @@ mod truncation_tests {
     fn recoverable_truncation_never_trips_voluntary_stop_path() {
         // The safety valve (stuck/empty thread) must NOT fire on a recoverable
         // truncation: every truncated response is classified Retry (or GiveUp
-        // after the budget) — never Continue. Continue is reserved for
+        // after the budget) - never Continue. Continue is reserved for
         // genuinely non-truncated responses, the only input that reaches the
         // reasoning-only voluntary-stop terminal below the truncation branch.
         assert!(!matches!(

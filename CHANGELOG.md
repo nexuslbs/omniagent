@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed — Planning normalized to a single `plan` bool
+### Changed - Planning normalized to a single `plan` bool
 
 - The legacy `planning_mode` string duplicate is gone everywhere: DB columns
   (`threads`, `kanban_tasks`, `cron_jobs`, `hooks`, `channels`) are dropped after
@@ -17,10 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The retired `planning_mode`/`plan_with_subtasks` values from the earlier
   "Phase 0a: planning mode" work are replaced by the boolean field.
 
-### Added — Default channel settings
+### Added - Default channel settings
 
-- Three writable select settings — `default_schedule_channel`,
-  `default_hook_channel`, `default_kanban_channel` — each a select over the channels
+- Three writable select settings - `default_schedule_channel`,
+  `default_hook_channel`, `default_kanban_channel` - each a select over the channels
   defined in channels.yml (any platform; a platform-less channel is type `cli`).
 - The `kanban`/`cron`/`hook` channel platforms are gone; a channel with no `platform`
   field is a `cli` channel.
@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A thread with no channel is still inserted (record kept for audit) and then marked
   failed with "no channel defined".
 
-### Removed — `default_cli_channel` setting
+### Removed - `default_cli_channel` setting
 
 - The `default_cli_channel` setting was removed: the binary has no CLI session mode
   (only `--version`/`--help` args then server boot), and the only `/mcp/execute`
@@ -43,12 +43,12 @@ limits, manual-only review decisions, step-aware recovery, and a canonical
 7-status list (`backlog`, `todo`, `running`, `testing`, `review`, `blocked`,
 `done`). The retired `ready` status is rejected everywhere.
 
-### Added — Phase 0a: planning mode
+### Added - Phase 0a: planning mode
 
 - `planning_mode` column on `kanban_tasks` and `channels` (schema + API).
 - Kanban board/detail expose the planning-mode flag with channel fallback.
 
-### Added — Phase 0: workflow schema + config
+### Added - Phase 0: workflow schema + config
 
 - Schema v6 DDL: `kanban_tasks.workflow_id`, `thread_status`,
   `workflow_state`, workflow fields on `threads`, `kanban_history` comment
@@ -57,12 +57,12 @@ limits, manual-only review decisions, step-aware recovery, and a canonical
   role resolution and `clear_executions_on_review`.
 - `ready` removed from the valid status list.
 
-### Changed — Phase 1: canonical status list
+### Changed - Phase 1: canonical status list
 
 - Seven-status list enforced across server, DB, and tools;
   `validate_status("ready")` now fails everywhere.
 
-### Added — Phase 2: fail-thread tool + workflow step keys
+### Added - Phase 2: fail-thread tool + workflow step keys
 
 - Builtin `fail_thread` tool (`src/agent/fail_thread.rs`) with F-matrix
   routing (F0–F4), consumed by `kanban_updater` and task tools.
@@ -70,36 +70,36 @@ limits, manual-only review decisions, step-aware recovery, and a canonical
   `testing`, `blocked`; anything else (incl. `review` and role names) is
   invalid.
 
-### Changed — Phase 3: atomic engine transitions
+### Changed - Phase 3: atomic engine transitions
 
 - Server-loop transitions are transactional: retry counts per role,
   interruption reruns, no thread spawn when a task is already
   `blocked`/`done`, and at retry limit the task moves to `blocked` with an
   auto comment and the step never starts.
 
-### Changed — Phase 3b: role-aware prompt context
+### Changed - Phase 3b: role-aware prompt context
 
 - `prompt_generate` emits a workflow-context block; tester/reviewer use
   inverse role prompts (template as user prompt, task description as system
   prompt).
 
-### Added — Phase 4: reviewer/tester decision routing
+### Added - Phase 4: reviewer/tester decision routing
 
 - Tester `fail`/normal routing; reviewer decisions per R12, with
   manual-only review endpoints (`kanban_review_task` tool +
   `POST /kanban/tasks/:id/review`) and target-status validation (R5).
 
-### Changed — Phase 4b: clear_executions_on_review
+### Changed - Phase 4b: clear_executions_on_review
 
 - `clear_executions_on_review` retry guard in `fail_thread`: executor/tester
   limit rolls to review instead of `blocked` when set.
 
-### Added — Phase 5: workflow CRUD + reset
+### Added - Phase 5: workflow CRUD + reset
 
 - `workflows.yml` CRUD endpoints (atomic save + reload) and
   `POST /workflows/executions/reset` to clear per-task execution counters.
 
-### Changed — Phase 6: step-aware recovery
+### Changed - Phase 6: step-aware recovery
 
 - Channel closure/deletion recovery is step-aware
   (`skip_recovery` in `src/db/threads.rs`): implicit continuation
@@ -107,7 +107,7 @@ limits, manual-only review decisions, step-aware recovery, and a canonical
   tasks are never rescheduled; explicit stop never auto-retries and never
   moves the task to `todo`.
 
-### Changed — Phase 7: docs, polish, verification
+### Changed - Phase 7: docs, polish, verification
 
 - Added this CHANGELOG documenting phases 0a, 0–7.
 - Retired `ready` fully removed from production defaults

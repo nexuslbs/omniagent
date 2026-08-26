@@ -217,7 +217,7 @@ impl Agent {
 /// Cancel every in-flight task for all threads of a channel.
 ///
 /// When a channel is stopped/closed (`/stop`, `/stop-thread`, `/close`) or the
-/// supervisor cancels a channel handler, the handler's futures are dropped —
+/// supervisor cancels a channel handler, the handler's futures are dropped -
 /// that already kills FOREGROUND tool calls via the MCP client's drop-cancel
 /// guard. But the agent's BACKGROUND tool tasks are detached `tokio::spawn`ed
 /// tasks that only stop when the task registry abort fires; without this
@@ -227,7 +227,7 @@ impl Agent {
 async fn cancel_in_flight_for_channel(cfg: &AgentContext, channel_id: &str) {
     let registry = crate::agent::task_registry::TASK_REGISTRY.get().cloned();
     let Some(registry) = registry else {
-        return; // registry not initialized — nothing to cancel
+        return; // registry not initialized - nothing to cancel
     };
     let thread_ids: Vec<i64> = match sql_forge!(
         scalar i64,
@@ -288,7 +288,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                 info!("Channel {} handler cancelled", channel_id);
                 // Safety net: never leave a `processing` thread ownerless. If
                 // the handler was dropped mid-processing, the thread it was
-                // actively processing is still `processing` — skip it (the
+                // actively processing is still `processing` - skip it (the
                 // skip is a no-op when it already reached a terminal state).
                 let active_id = active_thread.lock().unwrap().take();
                 if let Some(active_id) = active_id {
@@ -306,7 +306,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                 }
                 // Kill any tool-spawned subprocesses still running for this
                 // channel's threads: the agent's BACKGROUND tool tasks are
-                // detached and only stop when the registry abort fires —
+                // detached and only stop when the registry abort fires -
                 // without this, /stop-thread and /close would strand
                 // `docker compose exec …` children (thread 73, Aug 2026).
                 // (Foreground calls are already killed by dropping the
@@ -526,7 +526,7 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                         }
                     }
                     // process_thread finished (Ok or Err): the thread is now
-                    // terminal — clear the active marker so a later
+                    // terminal - clear the active marker so a later
                     // cancellation skips nothing.
                     *active_thread.lock().unwrap() = None;
                 }

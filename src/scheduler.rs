@@ -12,7 +12,7 @@
 //! Concurrency is enforced by an atomic claim in `task_runs`: the fire record
 //! is upserted with `WHERE last_fired_at IS NOT DISTINCT FROM :last_seen`, so
 //! only one tick can win the claim for a given due time. Runs themselves are
-//! NOT stored beyond the cadence marker — they are observable via the threads
+//! NOT stored beyond the cadence marker - they are observable via the threads
 //! each schedule creates (`threads.schedule_task_id = <yml key>`).
 
 use crate::err_msg;
@@ -309,7 +309,7 @@ async fn last_fired_at(pool: &PgPool, key: &str) -> AppResult<Option<DateTime<Ut
     .await?)
 }
 
-/// Atomically record `now` as the last fire for `key` — but ONLY if the
+/// Atomically record `now` as the last fire for `key` - but ONLY if the
 /// schedule is still at the same last-fire state we computed due from
 /// (`last_fire`). Returns true when this tick won the claim (proceed to
 /// fire); false when a concurrent tick already claimed this occurrence.

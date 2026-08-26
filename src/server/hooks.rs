@@ -3,7 +3,7 @@
 //! Mirrors the schedule (cron) API, but hooks are triggered by events
 //! (thread_started / thread_finished / new_message) instead of time.
 //!
-//! Definitions live in `{data_dir}/config/tasks.yml` (`hooks:` key — the
+//! Definitions live in `{data_dir}/config/tasks.yml` (`hooks:` key - the
 //! git-tracked source of truth); every handler reads/writes it (parsed fresh
 //! per request). The only runtime state is the per-hook JSON counter in the
 //! `hook_counters` table, surfaced through the `counter` response field.

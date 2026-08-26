@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "mcp",
   "label": "docker",
-  "description": "Docker compose tools — run compose commands (up, down, ps, logs, exec)",
+  "description": "Docker compose tools - run compose commands (up, down, ps, logs, exec)",
   "config_schema": [
     {
       "key": "workspace_dir",

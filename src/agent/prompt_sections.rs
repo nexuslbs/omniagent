@@ -113,7 +113,7 @@ pub(crate) fn parse_plugin_sections(
 /// Returns `(sections, body)`: the template-scoped sections declared in the
 /// frontmatter and the remaining body (with the frontmatter stripped). A
 /// template without a frontmatter block returns `(vec![], content)`
-/// unchanged — legacy templates render byte-identical.
+/// unchanged - legacy templates render byte-identical.
 ///
 /// Frontmatter format (convention used by the repo's memory files):
 ///

@@ -35,7 +35,7 @@ pub(crate) async fn handle_response(
     if let Some(current_status) = queries::get_thread_status(&cfg.pool, thread.id).await? {
         if current_status == "failed" {
             info!(
-                "thread {} already ended as FAILED by the fail-thread tool — skipping finalization",
+                "thread {} already ended as FAILED by the fail-thread tool - skipping finalization",
                 thread.id
             );
             let saved = queries::get_last_message(&cfg.pool, thread.id)
@@ -98,7 +98,7 @@ pub(crate) async fn handle_response(
         }
         let iter_summary = format!(
             "The iteration limit ({}/{}) was reached so the task may be incomplete. \
-             Write a reasonably brief summary (a few sentences to a short paragraph) — the reader needs the key \
+             Write a reasonably brief summary (a few sentences to a short paragraph) - the reader needs the key \
              accomplishments and remaining work. Inform the user they can request to continue.",
             current_iter, iter_limit,
         );
@@ -193,7 +193,7 @@ pub(crate) async fn handle_response(
             )));
             let iter_summary = "The agent produced no final message, but tool activity was \
                  recorded. Write a reasonably brief summary (a few sentences to a short \
-                 paragraph) — the reader needs the key accomplishments and remaining work.";
+                 paragraph) - the reader needs the key accomplishments and remaining work.";
             summary_msgs.push(ChatMessage::system(iter_summary));
             let summary_request = CompletionRequest {
                 messages: summary_msgs,
@@ -399,7 +399,7 @@ pub(crate) async fn handle_response(
     if let Some(ref ext_id) = reaction_ext_id {
         if let Some(ref platform) = channel.platform {
             if let Some(ref resource) = channel.resource_identifier {
-                // Map status to platform emoji before enqueueing —
+                // Map status to platform emoji before enqueueing -
                 // the platform plugin expects an actual emoji name, not a status string.
                 let react_emoji = match final_status {
                     "completed" => ":white_check_mark:",
@@ -425,7 +425,7 @@ pub(crate) async fn handle_response(
 /// Final thread status after the executor loop (pure, unit-tested).
 /// - `force_failed` (fail-thread tool, truncation fail-fast, empty-response
 ///   exhaustion, subtask enforcement) → "failed": the task goes blocked (or
-///   review when `review_on_fail` is set) — it never advances forward.
+///   review when `review_on_fail` is set) - it never advances forward.
 /// - iteration-limit interruption → "interrupted" (resumable).
 /// - otherwise → "completed".
 pub(crate) fn post_loop_final_status(force_failed: bool, limit_reached: bool) -> &'static str {
@@ -445,7 +445,7 @@ const MAX_DIGEST_TOOL_CHARS: usize = 300;
 
 /// Build a compact, bounded digest of tool activity from the thread's tool
 /// messages (newest first). Returns `None` when the thread has no tool
-/// messages. Each entry is `[tool] <name> <truncated output>` — enough for
+/// messages. Each entry is `[tool] <name> <truncated output>` - enough for
 /// the summarizer to see file writes, git commits, and test results without
 /// blowing the summary token budget. Plain text in a `system` message, so the
 /// DeepSeek tool_call/tool-result chain requirement is never reintroduced.

@@ -1,4 +1,4 @@
-//! `code_exec` — run a model-written program in the toolbox container and get
+//! `code_exec` - run a model-written program in the toolbox container and get
 //! a **typed** JSON result back (dsh `codeRuntime` seam).
 //!
 //! Design contract (kanban task 8):
@@ -8,8 +8,8 @@
 //!   `docker exec` pattern the docker plugin uses for project containers.
 //! - The completion value crosses a lossless-JSON boundary as a TYPED value:
 //!   `{ "ok": true, "value": <typed json>, "logs": [stdout lines] }`.
-//! - Errors are FIELDS on a resolved result — `{ "ok": false, "error": <msg>,
-//!   "logs": [...] }` — never a tool-call failure (`is_error: false`).
+//! - Errors are FIELDS on a resolved result - `{ "ok": false, "error": <msg>,
+//!   "logs": [...] }` - never a tool-call failure (`is_error: false`).
 //! - Timeout: bounded client-side (tokio timeout + process-group kill of the
 //!   docker CLI child) AND container-side (the runner installs a hard alarm /
 //!   exit timer, so the program dies even if the client vanishes).
@@ -17,7 +17,7 @@
 //!   child via the `KillOnDrop` guard; the container-side timer bounds the
 //!   program itself.
 //! - The toolbox image carries the runners (`/usr/bin/code_exec_runner`,
-//!   `/usr/bin/code_exec_runner_js`) — see omni-stack `services/toolbox`.
+//!   `/usr/bin/code_exec_runner_js`) - see omni-stack `services/toolbox`.
 //! - Toolbox discovery mirrors deploy.py's `_g25_toolbox_name()`: docker label
 //!   `com.docker.compose.service=toolbox` (project name varies across
 //!   omnidev/omnideploy), so no hardcoded container names.
@@ -57,7 +57,7 @@ pub fn code_exec_tool() -> McpTool {
             Input: `language` (\"python\" or \"js\"), `program` (source text; top-level `return` and `await` are allowed), \
             optional `args` (JSON object passed to the program as its `args` parameter), optional `timeout_secs` (default 120, max 600). \
             Returns `{\"ok\": true, \"value\": <typed json>, \"logs\": [stdout lines]}` on success, or \
-            `{\"ok\": false, \"error\": <message>, \"logs\": [...]}` on failure/timeout — errors are FIELDS, never a tool failure. \
+            `{\"ok\": false, \"error\": <message>, \"logs\": [...]}` on failure/timeout - errors are FIELDS, never a tool failure. \
             The program runs inside the toolbox container, isolated from the agent core; it is killed hard on timeout or cancellation."
             .to_string(),
         input_schema: json!({
@@ -139,8 +139,8 @@ fn build_run_command(
     let mut cmd = tokio::process::Command::new("docker");
     cmd.arg("exec").arg("-i").arg(toolbox);
     // busybox `timeout` = hard container-side kill (SIGTERM preempts busy
-    // loops, so even a JS `while(true){}` that starves its event loop — and
-    // thus the runner's own setTimeout guard — cannot outlive the limit).
+    // loops, so even a JS `while(true){}` that starves its event loop - and
+    // thus the runner's own setTimeout guard - cannot outlive the limit).
     // The runner still installs its own in-process timer as a redundant
     // guard for the common (non-starvation) case.
     cmd.arg("timeout").arg(timeout_secs.to_string());

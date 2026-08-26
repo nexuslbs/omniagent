@@ -28,7 +28,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Plugin-level config — received via configure message, never from env vars.
+/// Plugin-level config - received via configure message, never from env vars.
 #[derive(Debug, Clone)]
 pub struct PluginConfig {
     pub omni_dir: String,
@@ -103,7 +103,7 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "note_append".to_string(),
                 description:
-                    "Append a line to a durable working-memory note file in this thread's notes dir                      (data/threads/<thread_id>/). Notes survive compaction and thread death — the retry                      thread starts with them. Use for facts, paths, line numbers, commands, root causes,                      and decisions."
+                    "Append a line to a durable working-memory note file in this thread's notes dir                      (data/threads/<thread_id>/). Notes survive compaction and thread death - the retry                      thread starts with them. Use for facts, paths, line numbers, commands, root causes,                      and decisions."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -136,7 +136,7 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "note_write".to_string(),
                 description:
-                    "Overwrite a note file in this thread's notes dir (creating it if needed). Use for the                      canonical notes.md working memory of this thread. Notes survive compaction and thread                      death — the retry thread starts with them."
+                    "Overwrite a note file in this thread's notes dir (creating it if needed). Use for the                      canonical notes.md working memory of this thread. Notes survive compaction and thread                      death - the retry thread starts with them."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",

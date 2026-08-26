@@ -14,7 +14,7 @@
     {
       "key": "workspace_dir",
       "default": "/opt/workspace",
-      "label": "Workspace Dir (sandbox — git actions only allowed here and in subdirectories)",
+      "label": "Workspace Dir (sandbox - git actions only allowed here and in subdirectories)",
       "type": "string",
       "required": false
     },

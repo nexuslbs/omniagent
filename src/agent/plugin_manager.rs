@@ -1,4 +1,4 @@
-//! Plugin Manager — abstraction layer over plugin lifecycle and MCP tool registry.
+//! Plugin Manager - abstraction layer over plugin lifecycle and MCP tool registry.
 //!
 //! Defines a trait that decouples Axum handlers, the executor, and the scheduler
 //! from the concrete MCP registry / client registry implementation.
@@ -13,14 +13,14 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::mcp::{McpRegistry, McpTool};
 
-/// Plugin manager trait — single authority for all plugin lifecycle operations.
+/// Plugin manager trait - single authority for all plugin lifecycle operations.
 ///
 /// Every call site in the server handlers, agent executor, and scheduler goes
 /// through this trait instead of directly touching global statics or RwLocks.
 #[async_trait]
 pub trait PluginManager: Send + Sync + 'static {
     /// Snapshot the full tool registry (for the executor/scheduler).
-    /// Returns a cloned McpRegistry — zero contention on subsequent operations.
+    /// Returns a cloned McpRegistry - zero contention on subsequent operations.
     async fn snapshot_registry(&self) -> McpRegistry;
 
     /// Register tools into the registry (after MCP server init).
@@ -51,7 +51,7 @@ pub trait PluginManager: Send + Sync + 'static {
 
 /// Wraps the current global statics and the `Arc<RwLock<McpRegistry>>` behind the trait interface.
 ///
-/// No behavior changes — every method delegates to the same statics
+/// No behavior changes - every method delegates to the same statics
 /// that the direct call sites used. This is a pure abstraction extraction.
 #[derive(Clone)]
 pub struct LegacyPluginManager {
@@ -186,7 +186,7 @@ impl ActorPluginManager {
     }
 }
 
-/// The actor's event loop — runs on a dedicated tokio task.
+/// The actor's event loop - runs on a dedicated tokio task.
 async fn actor_loop(mut registry: McpRegistry, mut rx: mpsc::UnboundedReceiver<PluginCommand>) {
     tracing::info!("[plugin-manager] Actor started");
     while let Some(cmd) = rx.recv().await {

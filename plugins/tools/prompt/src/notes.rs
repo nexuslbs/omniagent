@@ -5,7 +5,7 @@
 //! plain filenames (no path separators, no `..`, no absolute paths), so a
 //! resolved path can never escape the thread dir.
 //!
-//! WS-4a: `context-*.json` dump files are read ONCE per thread — a second
+//! WS-4a: `context-*.json` dump files are read ONCE per thread - a second
 //! read of the same dump returns a synthetic "[duplicate read ...]" marker
 //! instead of the content (rule 12 anti-loop).
 
@@ -104,7 +104,7 @@ pub fn note_read(dir: &Path, name: &str, thread_id: i64) -> (String, bool) {
     if is_dump && dump_was_read(thread_id, &name) {
         return (
             format!(
-                "[duplicate read of {name} (thread {thread_id}) — forbidden by rule 12: \
+                "[duplicate read of {name} (thread {thread_id}) - forbidden by rule 12: \
                  never re-read a context dump; trust the injected '=== Context Compacted ===' \
                  summary and your notes instead]"
             ),

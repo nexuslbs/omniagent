@@ -24,14 +24,14 @@ pub(crate) async fn enable_plugin_handler(
     let yaml_type = plugins_yaml::PluginYamlType::from_type_str(&p_type);
     if let Ok(Some(entry)) = plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name) {
         if entry.enabled && entry.source == source {
-            // Already enabled — idempotent no-op: just return the plugin detail.
+            // Already enabled - idempotent no-op: just return the plugin detail.
             // (Previously this branch force-restarted the plugin, which is the
             // job of the dedicated /restart endpoint, not /enable.)
             //
             // EXCEPT for providers: reload_plugins is the ONLY place that
             // spawns the provider subprocess, and on a cold stack (fresh
             // deploy, container restart) the subprocess has not been started
-            // yet — nothing triggers the startup reload. If we return here
+            // yet - nothing triggers the startup reload. If we return here
             // without reloading, an enabled provider stays subprocess-less
             // until some unrelated API call happens to run reload_plugins, and
             // the first LLM completion falls back to HTTP and fails. Reload is
@@ -120,7 +120,7 @@ pub(crate) async fn disable_plugin_handler(
         return e.into_response();
     }
     let yaml_type = plugins_yaml::PluginYamlType::from_type_str(&p_type);
-    // Preserve existing config when disabling — only toggle the enabled flag.
+    // Preserve existing config when disabling - only toggle the enabled flag.
     let existing_config = plugins_yaml::get_entry(&state.data_dir, &yaml_type, &name)
         .ok()
         .flatten()

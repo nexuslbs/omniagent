@@ -69,7 +69,7 @@ fn handle_create_skill(args: Value, config: &Config, profile_name: &str) -> Resu
     // Build file path: <data_dir>/skills/<category>/<name>.md for the global
     // root, or <data_dir>/profiles/<profile>/skills/<category>/<name>.md when
     // a profile is active. The PROFILE root is what the prompt plugin lists
-    // as "Available skills" in every system prompt — writing there makes the
+    // as "Available skills" in every system prompt - writing there makes the
     // new skill immediately visible to the agent. (A global-root write would
     // be findable via list_skills/view_skill but would NOT show up in the
     // agent's own prompt, so the agent would never know it exists.)
@@ -103,7 +103,7 @@ fn handle_create_skill(args: Value, config: &Config, profile_name: &str) -> Resu
         )
     })?;
 
-    // Write the file — Hermes-compatible SKILL.md with rich frontmatter:
+    // Write the file - Hermes-compatible SKILL.md with rich frontmatter:
     // description follows the "Use when <trigger>..." convention (prepended
     // when missing) so the prompt block renders an actionable trigger; license
     // MIT; optional metadata.hermes tags / related_skills from args.
@@ -211,7 +211,7 @@ fn handle_skills_list(_args: Value, config: &Config, profile_name: &str) -> Resu
         root_entries.sort_by_key(|e| e.file_name());
 
         // Pattern 3: flat <name>.md files directly in the skills root (no
-        // category subdirectory — the profile-scoped layout). Handle them
+        // category subdirectory - the profile-scoped layout). Handle them
         // first so they're listed even when no category dirs exist.
         for root_entry in &root_entries {
             let path = root_entry.path();
@@ -373,7 +373,7 @@ fn get_skill_enabled(usage_data: &HashMap<String, Value>, name: &str, category: 
 ///
 /// The agent is told which skills are available (via the prompt plugin's
 /// "Available skills" block), but without this tool it cannot actually READ
-/// their content — skills were write-only (create) and metadata-only (list).
+/// their content - skills were write-only (create) and metadata-only (list).
 /// This closes the loop: the agent can load the procedure and follow it.
 ///
 /// Accepts the skill name (case-insensitive, hyphens/underscores normalized),
@@ -382,7 +382,7 @@ fn get_skill_enabled(usage_data: &HashMap<String, Value>, name: &str, category: 
 ///   - `<skills>/<category>/<name>.md` (flat file layout)
 ///
 /// Skills may live under either the GLOBAL skills root (`{omni_dir}/skills`)
-/// or the PROFILE-scoped root (`{omni_dir}/profiles/{profile}/skills` — where
+/// or the PROFILE-scoped root (`{omni_dir}/profiles/{profile}/skills` - where
 /// the prompt plugin lists them from). Both are searched.
 fn handle_view_skill(args: Value, config: &Config, profile_name: &str) -> Result<(String, bool)> {
     let data_dir = &config.omni_dir;
@@ -421,7 +421,7 @@ fn handle_view_skill(args: Value, config: &Config, profile_name: &str) -> Result
         if !skills_root.exists() {
             continue;
         }
-        // Pattern 3: <root>/<name>.md — flat file directly in the skills
+        // Pattern 3: <root>/<name>.md - flat file directly in the skills
         // root (no category subdirectory; the profile-scoped layout used by
         // the prompt plugin).
         let root_flat = skills_root.join(format!("{}.md", requested));
@@ -516,7 +516,7 @@ fn handle_view_skill(args: Value, config: &Config, profile_name: &str) -> Result
 }
 
 // ---------------------------------------------------------------------------
-// Plugin config — received via MCP configure message, not from env vars
+// Plugin config - received via MCP configure message, not from env vars
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -648,7 +648,7 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "view_skill".to_string(),
                 description:
-                    "READ the full content of a skill by name. Use this when a skill is listed as available and you need its actual procedure/steps — e.g. before working in a workspace repo, running docker compose, or following a workflow. Accepts the skill name (case-insensitive; optionally scoped by category). Returns the complete SKILL.md content."
+                    "READ the full content of a skill by name. Use this when a skill is listed as available and you need its actual procedure/steps - e.g. before working in a workspace repo, running docker compose, or following a workflow. Accepts the skill name (case-insensitive; optionally scoped by category). Returns the complete SKILL.md content."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -780,7 +780,7 @@ mod tests {
 
     #[test]
     fn view_skill_profile_scoped() {
-        // Skills live under profiles/<profile>/skills — view_skill must find
+        // Skills live under profiles/<profile>/skills - view_skill must find
         // them there (this is where the prompt plugin lists them from).
         let (cfg, dir) = test_config();
         let (msg, is_error) = handle_view_skill(

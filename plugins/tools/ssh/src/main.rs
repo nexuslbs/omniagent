@@ -6,7 +6,7 @@
 //! The plugin is deliberately AGNOSTIC: it just executes ssh/scp operations
 //! safely and reports results. Remote-development workflows (git clone on the
 //! remote, copy secrets, docker compose up, wait-task, logs/status) are built
-//! ON TOP of this plugin as a skill + template guidance — NOT baked in here.
+//! ON TOP of this plugin as a skill + template guidance - NOT baked in here.
 //!
 //! Config (via the MCP `configure` message, resolved from plugins.yml):
 //!   - ssh_dir: directory containing the ssh `config` file and any private
@@ -54,7 +54,7 @@ static CONFIG: LazyLock<Mutex<Config>> = LazyLock::new(|| Mutex::new(Config::def
 /// Priority:
 ///   1. explicit `ssh_dir` tool argument (per-call override)
 ///   2. configured `ssh_dir` from plugins.yml
-///   3. `{OMNI_DIR}/data/ssh` — OMNI_DIR env var (like git's omni_dir),
+///   3. `{OMNI_DIR}/data/ssh` - OMNI_DIR env var (like git's omni_dir),
 ///      falling back to /opt/omni when unset.
 fn resolve_ssh_dir(override_dir: Option<&str>) -> String {
     let cfg = CONFIG.lock();
@@ -84,7 +84,7 @@ fn is_non_key_file(name: &str) -> bool {
 /// SSH refuses to use a private key that is group/world readable (and so
 /// does OpenSSH's own ssh-agent policy). The plugin enforces this BEFORE
 /// every ssh/scp run: any non-public file in ssh_dir is chmod 600'd, and a
-/// failure to set permissions aborts the operation with a clear error —
+/// failure to set permissions aborts the operation with a clear error -
 /// ssh is NEVER run with a world-readable key.
 fn secure_ssh_dir(dir: &str) -> Result<()> {
     let d = Path::new(dir);
@@ -121,7 +121,7 @@ fn secure_ssh_dir(dir: &str) -> Result<()> {
                         )
                     })?;
             }
-            // Verify the write actually landed — never run ssh with a key
+            // Verify the write actually landed - never run ssh with a key
             // that is still group/world accessible.
             let after = std::fs::metadata(&path)
                 .with_context(|| format!("Failed to re-stat {}", path.display()))?;
@@ -140,7 +140,7 @@ fn secure_ssh_dir(dir: &str) -> Result<()> {
 
 /// Split an inline `[user@]host[:port]` spec into (host, optional port).
 ///
-/// ssh uses `-p <port>`, scp uses `-P <port>` — both need the port extracted
+/// ssh uses `-p <port>`, scp uses `-P <port>` - both need the port extracted
 /// from the inline form. IPv6 bracket form `[::1]:port` is preserved.
 fn split_host_port(host: &str) -> (String, Option<u16>) {
     // IPv6 bracket form: [::1] or [::1]:port
@@ -156,7 +156,7 @@ fn split_host_port(host: &str) -> (String, Option<u16>) {
             return (addr, None);
         }
     }
-    // user@host:port — split on the last colon if followed by digits only.
+    // user@host:port - split on the last colon if followed by digits only.
     if let Some(idx) = host.rfind(':') {
         let tail = &host[idx + 1..];
         if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
@@ -237,7 +237,7 @@ fn truncate(s: String) -> String {
     }
 }
 
-//  Core subprocess runner (COPY of the run_git pattern — subprocess hygiene)
+//  Core subprocess runner (COPY of the run_git pattern - subprocess hygiene)
 
 /// Run `ssh <opts> <host> <remote_cmd...>` and return
 /// (stdout, stderr, exit_code, elapsed_ms).
@@ -268,7 +268,7 @@ async fn run_ssh(
     for a in remote_args {
         cmd.arg(a);
     }
-    // CRITICAL: pipe stdout/stderr BEFORE spawn; stdin NEVER inherited —
+    // CRITICAL: pipe stdout/stderr BEFORE spawn; stdin NEVER inherited -
     // /dev/null normally, piped for script mode (a fresh pipe, not fd 0).
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -383,7 +383,7 @@ async fn handle_run(args: Value) -> Result<(String, bool)> {
     let script = args["script"].as_str().unwrap_or("").to_string();
     if command.is_empty() && script.is_empty() {
         anyhow::bail!(
-            "Missing required parameter: command (shell command) — or provide 'script' \
+            "Missing required parameter: command (shell command) - or provide 'script' \
              (multi-line script piped to remote sh via stdin)"
         );
     }
@@ -401,7 +401,7 @@ async fn handle_run(args: Value) -> Result<(String, bool)> {
 
     // Build the remote command line. The command is passed as ONE argument so
     // the remote shell (which ssh hands the whole string to) interprets shell
-    // operators — exactly like docker compose exec passes args through sh -c.
+    // operators - exactly like docker compose exec passes args through sh -c.
     let remote_cmd = if script.is_empty() {
         if workdir.is_empty() {
             command.clone()
@@ -531,7 +531,7 @@ async fn handle_copy(args: Value) -> Result<(String, bool)> {
     cmd.process_group(0);
 
     // Sandbox the LOCAL side; the remote side is a bare path (scp joins it
-    // to host: internally — never let it start with '-' or ':').
+    // to host: internally - never let it start with '-' or ':').
     let (arg1, arg2): (String, String) = match direction.as_str() {
         "to-remote" => {
             let local = match resolve_local_path(&source, &workspace, "source") {
@@ -622,7 +622,7 @@ async fn handle_copy(args: Value) -> Result<(String, bool)> {
     ))
 }
 
-/// `status` (ssh_status): connectivity check — `ssh host true`.
+/// `status` (ssh_status): connectivity check - `ssh host true`.
 async fn handle_status(args: Value) -> Result<(String, bool)> {
     let host = args["host"]
         .as_str()
@@ -688,11 +688,11 @@ async fn main() -> Result<()> {
                 description: "RUN a command on a remote machine over SSH. \
                     'host' (required) is a host alias from the ssh config file in ssh_dir, \
                     OR an inline 'user@host:port' spec. 'command' (required) is the shell \
-                    command to run — no character restrictions, interpreted by the remote \
+                    command to run - no character restrictions, interpreted by the remote \
                     shell (sh -c) exactly like docker compose exec args. 'workdir' (optional) \
                     cd's to a remote dir first. 'script' (optional) pipes a multi-line script \
                     to the remote `sh` via stdin (alternative to command). 'timeout' (optional) \
-                    bounds the command in seconds — when omitted there is NO timeout (long \
+                    bounds the command in seconds - when omitted there is NO timeout (long \
                     commands run as tracked background tasks; use builtin_wait-task to follow). \
                     'ssh_dir' (optional) overrides the configured ssh dir (default \
                     {OMNI_DIR}/data/ssh). Returns stdout, stderr, exit code and duration."

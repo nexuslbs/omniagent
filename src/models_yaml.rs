@@ -27,7 +27,7 @@
 //!         max_tokens_on_truncation: 128000
 //! ```
 //!
-//! Precedence (per user spec): for EACH of soft/hard token budget INDEPENDENTLY —
+//! Precedence (per user spec): for EACH of soft/hard token budget INDEPENDENTLY -
 //!   1. `model_config.<model>` budget;
 //!   2. else provider-level budget (`providers.<name>` soft/hard);
 //!   3. else GLOBAL settings budget (`prompt_token_budget_soft` default 120000 /
@@ -37,7 +37,7 @@
 //!
 //! omniagent RESOLVES the effective values and passes them to the prompt plugin's
 //! compact-messages tool as `soft_budget`/`hard_budget` params. The prompt plugin
-//! stays AGNOSTIC of models.yml — it only ever sees resolved budgets as params.
+//! stays AGNOSTIC of models.yml - it only ever sees resolved budgets as params.
 //!
 //! Absent/empty models.yml -> zero behavior change. Malformed -> load errors so
 //! startup can fail loud with a clear message.

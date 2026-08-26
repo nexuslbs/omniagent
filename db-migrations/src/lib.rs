@@ -106,7 +106,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .await
         .ok();
 
-    // hook_counters: runtime hook counter state — one JSON counter per hook
+    // hook_counters: runtime hook counter state - one JSON counter per hook
     // key (definitions live in {data_dir}/config/tasks.yml). The counter shape
     // matches the legacy hooks.counter JSONB column.
     sqlx::query(
@@ -121,7 +121,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await
     .ok();
 
-    // task_runs: scheduler cadence bookkeeping — one last-fired timestamp per
+    // task_runs: scheduler cadence bookkeeping - one last-fired timestamp per
     // schedule key (definitions live in {data_dir}/config/tasks.yml). This is
     // the ONLY runtime state the scheduler keeps; runs themselves are
     // observable via the threads each schedule creates.
@@ -238,7 +238,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     // via subquery (see db/threads.rs + db/messages.rs); the partial unique
     // index makes double-thread creation impossible even under concurrent
     // delivery (websocket + polling overlap, restart catch-up re-scan).
-    // Note: no backfill UPDATE here — messages is append-only (trigger
+    // Note: no backfill UPDATE here - messages is append-only (trigger
     // trg_messages_append_only blocks UPDATE); existing rows keep NULL
     // channel_id and the index simply doesn't cover them (NULLs are distinct
     // in btree unique indexes), so enforcement applies to new inserts only.
@@ -270,7 +270,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     );
 
     // ── Workflow implementation (Phase 0): schema additions ────────────────
-    // kanban_tasks: workflow_id = workflow key (NO FK — workflows are
+    // kanban_tasks: workflow_id = workflow key (NO FK - workflows are
     // file-defined, decision N4), thread_status = lifecycle state of the
     // workflow-managed thread (NULL | scheduled | running), workflow_state =
     // execution JSONB, e.g. {"executions": {"running": N, "testing": M, "review": K}}.
@@ -299,9 +299,9 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .await
         .ok();
 
-    // threads: workflow_id + workflow_step (STEP keys only — running/testing/review,
+    // threads: workflow_id + workflow_step (STEP keys only - running/testing/review,
     // NEVER role names; roles are role/display names only, N5) + task_type
-    // ('kanban' | 'cron'). task_id already exists — no task_type backfill (N7).
+    // ('kanban' | 'cron'). task_id already exists - no task_type backfill (N7).
     sqlx::query("ALTER TABLE threads ADD COLUMN IF NOT EXISTS workflow_id TEXT")
         .execute(pool)
         .await
@@ -354,7 +354,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     // threads.template: the task template resolved at thread-creation time by
     // the creator (kanban dispatcher / scheduler / platform user-message path).
     // The execution loop reads it uniformly from the threads table (or the
-    // seq-0 cause metadata) for ALL agent executions — no task-type-specific
+    // seq-0 cause metadata) for ALL agent executions - no task-type-specific
     // template lookups (owner architecture rule).
     sqlx::query("ALTER TABLE threads ADD COLUMN IF NOT EXISTS template TEXT DEFAULT ''")
         .execute(pool)
@@ -399,7 +399,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     // ── Terminal status invariant ──────────────────────────────────────────
     // Every thread in a terminal status (skipped/completed/failed/interrupted/
-    // system) MUST have terminal=true — enforced structurally so a terminal
+    // system) MUST have terminal=true - enforced structurally so a terminal
     // row can never look like active work to code checking `terminal` (e.g. a
     // dispatch gate `WHERE terminal = false` would block a channel forever).
     // Backfill FIRST: pre-existing bad rows (e.g. operator-stop skips written
@@ -432,7 +432,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     // (active/paused/blocked/complete), a stable machine-routable
     // goal_blocked_code (kebab-case) + human goal_blocked_message, an optional
     // goal_max_rounds cap, and a CAS revision counter (goal_revision). All
-    // columns are NULL except goal_revision (NOT NULL DEFAULT 0) — a task with
+    // columns are NULL except goal_revision (NOT NULL DEFAULT 0) - a task with
     // NULL goal_phase has no goal state (zero behavior change for tasks that
     // never use goals). Goals are strictly per-task state: the sequential
     // per-channel dispatch model (threads.status gate in kanban_dispatch.rs)
@@ -1043,7 +1043,7 @@ async fn migrate_channels_to_yml(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await?;
     // Fresh installs have no messages.channel_id yet (it is added by the
-    // schema-v5 step later in run()) — ensure it exists first, otherwise
+    // schema-v5 step later in run()) - ensure it exists first, otherwise
     // the CREATE INDEX below fails with "column channel_id does not exist".
     sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS channel_id TEXT")
         .execute(pool)

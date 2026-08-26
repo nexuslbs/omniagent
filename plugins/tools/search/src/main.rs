@@ -60,7 +60,7 @@ struct TokenAggRow {
 }
 
 // ---------------------------------------------------------------------------
-// Plugin config — received via MCP configure message, not from env vars
+// Plugin config - received via MCP configure message, not from env vars
 // ---------------------------------------------------------------------------
 
 #[derive(Default, Clone)]
@@ -149,7 +149,7 @@ fn handle_search_wiki(args: &Value, omni_dir: &str, profile_name: &str) -> Resul
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'query'"))?;
     let limit = args["limit"].as_i64().unwrap_or(10).min(30) as usize;
     // Profile comes from the AGENT's runtime context (_meta.profile_name,
-    // injected by the MCP client on every tool call) — NOT from a tool
+    // injected by the MCP client on every tool call) - NOT from a tool
     // argument. Only fall back to the active profile when meta is absent
     // (e.g. manual testing outside the agent).
     let profile = if profile_name.trim().is_empty() {
@@ -346,7 +346,7 @@ async fn handle_search_channel_prompts(
 }
 
 // ---------------------------------------------------------------------------
-// Tool: search_database (free-form read-only SELECT) — SQL safety helpers
+// Tool: search_database (free-form read-only SELECT) - SQL safety helpers
 // ---------------------------------------------------------------------------
 
 /// Write/DDL SQL keywords that are forbidden in read-only queries. Matching is
@@ -1054,10 +1054,10 @@ async fn handle_search_metrics(pool: &PgPool, args: &Value) -> Result<(String, b
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Plugin config — received via MCP configure message
+    // Plugin config - received via MCP configure message
     let config: Arc<Mutex<Config>> = Arc::new(Mutex::new(Config::default()));
 
-    // Shared database pool — populated by configure callback before any tool call
+    // Shared database pool - populated by configure callback before any tool call
     let pool: Arc<RwLock<Option<PgPool>>> = Arc::new(RwLock::new(None));
 
     // on_configure: called when omniagent sends the resolved plugin config
@@ -1086,7 +1086,7 @@ async fn main() -> Result<()> {
                     cfg.omni_dir = dir.to_string();
                 }
             }
-            // Channels.yml data dir — needed by search_channels
+            // Channels.yml data dir - needed by search_channels
             omniagent::channels_yaml::set_data_dir(&cfg.omni_dir);
             tracing::info!("Search plugin configured");
         })
@@ -1116,7 +1116,7 @@ async fn main() -> Result<()> {
     let wiki_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let c = c1.clone();
         let d = d1.clone();
-        // Agent's profile from _meta (injected by the MCP client) — same
+        // Agent's profile from _meta (injected by the MCP client) - same
         // pattern as the skills plugin. Never requires a profile argument.
         let profile = meta
             .as_ref()

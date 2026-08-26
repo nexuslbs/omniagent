@@ -85,7 +85,7 @@ fn settings_path(data_dir: &str) -> std::path::PathBuf {
 }
 
 /// Load settings.yml as a flat key-value map from nested sections only.
-/// Expects the format: `section:\n  key: value` — flat `KEY: value` at the
+/// Expects the format: `section:\n  key: value` - flat `KEY: value` at the
 /// top level is silently ignored.
 /// Returns an empty map if the file doesn't exist or can't be parsed.
 pub(crate) fn load_settings_file(data_dir: &str) -> HashMap<String, String> {
@@ -112,7 +112,7 @@ pub(crate) fn load_settings_file(data_dir: &str) -> HashMap<String, String> {
     map
 }
 
-/// Extract key-value pairs from a single section mapping (no recursion —
+/// Extract key-value pairs from a single section mapping (no recursion -
 /// only one level deep). Keys are lowercased; values are stringified.
 fn flatten_section(value: &serde_yaml::Value, map: &mut HashMap<String, String>) {
     if let serde_yaml::Value::Mapping(mapping) = value {
@@ -710,7 +710,7 @@ fn enrich_provider_options(meta: &mut SettingMeta, data_dir: &str) {
 }
 
 /// Enrich default_*_channel setting options with the channels defined in
-/// channels.yml (any platform — including platform-less 'cli' channels).
+/// channels.yml (any platform - including platform-less 'cli' channels).
 fn enrich_channel_options(meta: &mut SettingMeta, data_dir: &str) {
     let _ = data_dir; // channels.yml path is resolved internally
     let channels = match crate::channels_yaml::find_all() {
