@@ -300,6 +300,55 @@ impl MattermostClient {
         Ok(channels)
     }
 
+    /// Get ALL channels of a team (public channels and private channels the
+    /// requesting user is a member of), paginated. Unlike get_user_channels,
+    /// this is NOT limited to channels the user has joined, so the plugin can
+    /// watch every channel of the team.
+    async fn get_team_channels(&self, team_id: &str) -> Result<Vec<MattermostChannel>> {
+        let mut all: Vec<MattermostChannel> = Vec::new();
+        let per_page: u32 = 200;
+        let mut page: u32 = 0;
+
+        loop {
+            let resp = self
+                .http_client
+                .get(format!(
+                    "{}/api/v4/teams/{}/channels?page={}&per_page={}",
+                    self.api_base, team_id, page, per_page
+                ))
+                .header("Authorization", &self.auth_header)
+                .send()
+                .await?;
+
+            let status = resp.status();
+            let body: Value = resp
+                .json()
+                .await
+                .context("Failed to parse getTeamChannels response")?;
+
+            if !status.is_success() {
+                let msg = body["message"].as_str().unwrap_or("unknown error");
+                return Err(anyhow::anyhow!(
+                    "Mattermost getTeamChannels failed ({}): {}",
+                    status,
+                    msg
+                ));
+            }
+
+            let channels: Vec<MattermostChannel> =
+                serde_json::from_value(body).context("Failed to parse Mattermost team channels")?;
+            let count = channels.len();
+            all.extend(channels);
+
+            if count < per_page as usize {
+                break;
+            }
+            page += 1;
+        }
+
+        Ok(all)
+    }
+
     /// Get posts for a channel, ordered by create_at descending.
     /// Returns up to `per_page` posts.
     async fn get_channel_posts(
@@ -1660,7 +1709,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Auto-discover channels the bot is a member of
+    // Auto-discover all channels in the bot's teams (auto-joining as needed)
     let channel_ids: Vec<String> = if let Some(ref bot) = bot_user {
         let ids = discover_channels(&client, &bot.id).await;
         if !ids.is_empty() {
@@ -3020,7 +3069,11 @@ async fn init_channel_cursor(
     }
 }
 
-/// Auto-discover all channels the bot is a member of across all teams.
+/// Auto-discover ALL channels in every team the bot belongs to and ensure the
+/// bot is a member of each (auto-join). This makes the plugin watch every
+/// channel of the team — including channels created after startup — so a post
+/// like "$new <name>" in a brand-new channel is delivered without any manual
+/// step (no need to add the bot to the channel first).
 async fn discover_channels(client: &MattermostClient, bot_id: &str) -> Vec<String> {
     let mut channel_ids: Vec<String> = Vec::new();
 
@@ -3033,9 +3086,42 @@ async fn discover_channels(client: &MattermostClient, bot_id: &str) -> Vec<Strin
     };
 
     for team in &teams {
-        match client.get_user_channels(bot_id, &team.id).await {
+        // Current memberships of the bot in this team: channels already joined
+        // are skipped (add_channel_member is idempotent, but skipping avoids an
+        // API call per channel on every discovery cycle).
+        let member_ids: std::collections::HashSet<String> =
+            match client.get_user_channels(bot_id, &team.id).await {
+                Ok(channels) => channels.iter().map(|c| c.id.clone()).collect(),
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to get memberships for team {} ({}): {:?}",
+                        team.display_name,
+                        team.id,
+                        e
+                    );
+                    continue;
+                }
+            };
+
+        match client.get_team_channels(&team.id).await {
             Ok(channels) => {
                 for ch in &channels {
+                    if !member_ids.contains(&ch.id) {
+                        match client.add_channel_member(&ch.id, bot_id).await {
+                            Ok(_) => tracing::info!(
+                                "Auto-joined channel {} ({}) in team {}",
+                                ch.name,
+                                ch.id,
+                                team.display_name
+                            ),
+                            Err(e) => tracing::warn!(
+                                "Failed to auto-join channel {} ({}): {:?}",
+                                ch.name,
+                                ch.id,
+                                e
+                            ),
+                        }
+                    }
                     channel_ids.push(ch.id.clone());
                 }
             }
@@ -3245,9 +3331,16 @@ async fn ws_event_loop(
                     continue;
                 }
 
-                // Event loop: WS events just trigger poll_channel for that channel
+                // Event loop: WS events just trigger poll_channel for that channel.
+                // A periodic rediscovery timer (watch-all) joins channels created
+                // after startup and catches up posts made in them, so "$new" in a
+                // brand-new channel works without waiting for a reconnect.
+                let mut rediscover = tokio::time::interval(Duration::from_secs(60));
+                rediscover.tick().await; // consume the immediate first tick
+
                 loop {
-                    match read.next().await {
+                    tokio::select! {
+                        next = read.next() => match next {
                         Some(Ok(Message::Text(text))) => {
                             let event: Value = match serde_json::from_str(&text) {
                                 Ok(v) => v,
@@ -3323,6 +3416,51 @@ async fn ws_event_loop(
                                         max_download_bytes,
                                     )
                                     .await;
+                                }
+                                "channel_created" => {
+                                    // A channel was created in a team the bot belongs
+                                    // to: auto-join it immediately (watch-all) and
+                                    // initialize the cursor so a "$new" post in the
+                                    // brand-new channel is picked up right away.
+                                    let ch_id = match event
+                                        .pointer("/broadcast/channel_id")
+                                        .and_then(|v| v.as_str())
+                                    {
+                                        Some(c) => c.to_string(),
+                                        None => {
+                                            tracing::debug!(
+                                                "channel_created event missing broadcast channel_id"
+                                            );
+                                            continue;
+                                        }
+                                    };
+
+                                    // Skip channels we don't watch
+                                    if !watch_all && !channel_set.contains(&ch_id) {
+                                        continue;
+                                    }
+
+                                    match client.add_channel_member(&ch_id, &bot_id).await {
+                                        Ok(_) => tracing::info!(
+                                            "Auto-joined newly created channel {}",
+                                            ch_id
+                                        ),
+                                        Err(e) => tracing::warn!(
+                                            "Failed to auto-join newly created channel {}: {:?}",
+                                            ch_id,
+                                            e
+                                        ),
+                                    }
+
+                                    if !last_create_at.contains_key(&ch_id) {
+                                        init_channel_cursor(
+                                            &client,
+                                            &ch_id,
+                                            &bot_id,
+                                            &mut last_create_at,
+                                        )
+                                        .await;
+                                    }
                                 }
                                 "post_deleted" => {
                                     // A post was deleted. Extract the post_id and channel_id,
@@ -3485,6 +3623,39 @@ async fn ws_event_loop(
                             break;
                         }
                         _ => {}
+                        },
+                        _ = rediscover.tick() => {
+                            if watch_all {
+                                // Watch-all: periodically re-discover channels and
+                                // auto-join any created since the last cycle, then
+                                // poll them to catch up posts made before the bot
+                                // joined (e.g. a "$new" posted right after channel
+                                // creation).
+                                let discovered = discover_channels(&client, &bot_id).await;
+                                for ch_id in &discovered {
+                                    if !last_create_at.contains_key(ch_id.as_str()) {
+                                        init_channel_cursor(
+                                            &client,
+                                            ch_id,
+                                            &bot_id,
+                                            &mut last_create_at,
+                                        )
+                                        .await;
+                                        poll_channel(
+                                            &client,
+                                            ch_id,
+                                            &bot_id,
+                                            &mut last_create_at,
+                                            &mut bot_cache,
+                                            &mut processed_posts,
+                                            &server_url,
+                                            max_download_bytes,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
