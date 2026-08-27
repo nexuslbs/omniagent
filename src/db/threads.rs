@@ -2328,10 +2328,12 @@ mod tests {
 ///
 /// Match condition (per feature spec): same channel + same profile +
 /// cause='user' + status='pending' + NOT terminal, AND
-/// (pending.parent_id IS NOT DISTINCT FROM running.parent_id   -- same parent
-///  context as the running thread, incl. both NULL = same top-level
-///  OR pending.parent_id = running.id)                          -- child of the
-///  running thread). Ordered by id ASC (oldest first).
+/// ((pending.parent_id IS NOT NULL
+///   AND pending.parent_id = running.parent_id)  -- reply inside the SAME
+///  Mattermost thread as the running thread (shared real parent id);
+///  top-level channel messages (parent_id NULL) never match here.
+///  OR pending.parent_id = running.id)            -- direct reply to the running
+///  thread's own message). Ordered by id ASC (oldest first).
 pub async fn list_appendable_pending_threads(
     pool: &PgPool,
     channel_id: &str,
