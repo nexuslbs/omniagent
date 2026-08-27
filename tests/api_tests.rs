@@ -440,6 +440,7 @@ fn test_kanban_tags_and_dependency_history() {
         .post(format!("{}/kanban/tasks", BASE))
         .json(&serde_json::json!({
             "title": format!("tags-roundtrip-{}", suffix),
+            "board": "plain",
             "tags": ["v1.0.0", "dashboard"],
         }))
         .send()
@@ -498,7 +499,7 @@ fn test_kanban_tags_and_dependency_history() {
     // 5. Dependencies: add + remove.
     let resp = client
         .post(format!("{}/kanban/tasks", BASE))
-        .json(&serde_json::json!({ "title": format!("tags-roundtrip-dep-{}", suffix) }))
+        .json(&serde_json::json!({ "title": format!("tags-roundtrip-dep-{}", suffix), "board": "plain" }))
         .send()
         .unwrap();
     assert_eq!(resp.status(), 200, "POST dep task should succeed");
