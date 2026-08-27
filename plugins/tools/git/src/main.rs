@@ -46,59 +46,52 @@ static CONFIG: Lazy<Mutex<Config>> = Lazy::new(|| Mutex::new(Config::default()))
 
 /// Path to the GitHub App private key used for JWT signing.
 ///
-/// The key provided through plugin config (`github_app_private_key`, e.g.
-/// resolved from `$secret:GITHUB_APP_KEY` by the core) is written to a
-/// STABLE temp path (chmod 600) and used from there. This keeps the durable
-/// key in the secrets store and lets the plugin regenerate installation
-/// tokens indefinitely - no 1-hour static token to expire.
+/// The key comes EXCLUSIVELY from plugin config (`github_app_private_key`,
+/// resolved from `$secret:GITHUB_APP_KEY` by the core) - the plugin never
+/// reads a key from a fixed on-disk location. The configured PEM is
+/// materialized to an OS temp file (chmod 600) purely because the openssl
+/// CLI signs from a file path; the scratch location is derived from
+/// `std::env::temp_dir()`, so no magic absolute path is referenced anywhere.
 ///
-/// The path is fixed (NOT pid-suffixed) so repeated calls in the same process
-/// reuse one file, and if /tmp is ever cleaned mid-run the next call simply
-/// rewrites it. The write is verified (stat after write) so a failure surfaces
-/// as a clear error instead of a confusing openssl "private key not found".
-///
-/// Fallback: the legacy on-disk key path for local development - only used
-/// when the config key is empty AND that legacy file actually exists.
+/// The file name is fixed (NOT pid-suffixed) so repeated calls in the same
+/// process reuse one file, and if the temp dir is ever cleaned mid-run the
+/// next call simply rewrites it. The write is verified (stat after write) so
+/// a failure surfaces as a clear error instead of a confusing openssl
+/// "private key not found".
 fn resolve_key_path() -> Result<String> {
     let key_cfg = CONFIG.lock().github_app_private_key.clone();
-    if !key_cfg.is_empty() {
-        let stable = "/tmp/mcp-git-gh-key.pem".to_string();
-        match std::fs::write(&stable, key_cfg.as_bytes()) {
-            Ok(()) => {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&stable, std::fs::Permissions::from_mode(0o600));
-                // Verify the file actually exists on disk - if the write was
-                // silently lost (e.g. /tmp remounted, cleaned between calls),
-                // fail loudly rather than let openssl fail cryptically later.
-                if Path::new(&stable).exists() {
-                    return Ok(stable);
-                }
-                anyhow::bail!(
-                    "GitHub App private key write to {} was not persisted - cannot sign JWT",
-                    stable
-                );
+    if key_cfg.is_empty() {
+        anyhow::bail!(
+            "No GitHub App credentials configured: set github_app_private_key \
+             (PEM, via $secret:GITHUB_APP_KEY) plus github_app_id and \
+             github_installation_id in the git plugin config"
+        );
+    }
+    let stable = std::env::temp_dir()
+        .join("mcp-git-gh-key.pem")
+        .to_string_lossy()
+        .to_string();
+    match std::fs::write(&stable, key_cfg.as_bytes()) {
+        Ok(()) => {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&stable, std::fs::Permissions::from_mode(0o600));
+            // Verify the file actually exists on disk - if the write was
+            // silently lost (e.g. temp dir remounted, cleaned between calls),
+            // fail loudly rather than let openssl fail cryptically later.
+            if Path::new(&stable).exists() {
+                return Ok(stable);
             }
-            Err(e) => anyhow::bail!(
-                "Failed to write GitHub App private key to {}: {}",
-                stable,
-                e
-            ),
+            anyhow::bail!(
+                "GitHub App private key write to {} was not persisted - cannot sign JWT",
+                stable
+            );
         }
+        Err(e) => anyhow::bail!(
+            "Failed to write GitHub App private key to {}: {}",
+            stable,
+            e
+        ),
     }
-    let data_dir = CONFIG.lock().omni_dir.clone();
-    let legacy = format!(
-        "{0}/data/credentials/nexuslbs-app.2026-06-04.private-key.pem",
-        data_dir
-    );
-    if Path::new(&legacy).exists() {
-        return Ok(legacy);
-    }
-    anyhow::bail!(
-        "No GitHub App credentials configured: set github_app_private_key \
-         (PEM, via $secret:) plus github_app_id and github_installation_id \
-         in the git plugin config (no legacy key at {})",
-        legacy
-    )
 }
 
 const GITHUB_ORG: &str = "nexuslbs";
@@ -286,8 +279,8 @@ async fn get_github_token() -> Result<String> {
     };
 
     // Durable path: regenerate an installation token from the app private key.
-    // resolve_key_path() now returns Err (with a clear message) when neither
-    // the config key nor a legacy key file exists - treat that as "no key".
+    // resolve_key_path() returns Err (with a clear message) when the config
+    // key is unset - treat that as "no key".
     if !key_cfg.is_empty() || resolve_key_path().is_ok() {
         let (app_id, inst_id) = load_github_creds()?;
         return get_installation_token(&app_id, &inst_id).await;
