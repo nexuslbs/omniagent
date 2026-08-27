@@ -346,3 +346,142 @@ fn test_secrets_multiline_roundtrip() {
         .send()
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// /kanban tags + dependency history: every tag add/remove and dependency
+// add/remove must produce a durable kanban_history entry.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn test_kanban_tags_and_dependency_history() {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to build HTTP client");
+
+    let suffix = std::process::id();
+    // 1. Create a task (optionally pre-tagged).
+    let resp = client
+        .post(format!("{}/kanban/tasks", BASE))
+        .json(&serde_json::json!({
+            "title": format!("tags-roundtrip-{}", suffix),
+            "tags": ["v1.0.0", "dashboard"],
+        }))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "POST /kanban/tasks should succeed");
+    let json: serde_json::Value = resp.json().unwrap();
+    let task_id = json["data"]["id"].as_str().expect("task id").to_string();
+
+    // 2. Task detail carries the initial tags.
+    let resp = client
+        .get(format!("{}/kanban/tasks/{}", BASE, task_id))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "GET /kanban/tasks/{{id}} should succeed");
+    let json: serde_json::Value = resp.json().unwrap();
+    let tags = json["data"]["tags"].as_array().map(|a| {
+        a.iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        tags.as_ref().is_some_and(|t| {
+            t.contains(&"v1.0.0".to_string()) && t.contains(&"dashboard".to_string())
+        }),
+        "created task must carry its initial tags, got {:?}",
+        tags
+    );
+
+    // 3. Add a tag via the dedicated endpoint.
+    let resp = client
+        .post(format!("{}/kanban/tasks/{}/tags", BASE, task_id))
+        .json(&serde_json::json!({ "tag": "infra" }))
+        .send()
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "POST /kanban/tasks/{{id}}/tags should succeed"
+    );
+
+    // 4. Remove a tag.
+    let resp = client
+        .delete(format!("{}/kanban/tasks/{}/tags/infra", BASE, task_id))
+        .send()
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "DELETE /kanban/tasks/{{id}}/tags/infra should succeed"
+    );
+
+    // 5. Dependencies: add + remove.
+    let resp = client
+        .post(format!("{}/kanban/tasks", BASE))
+        .json(&serde_json::json!({ "title": format!("tags-roundtrip-dep-{}", suffix) }))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "POST dep task should succeed");
+    let json: serde_json::Value = resp.json().unwrap();
+    let dep_id = json["data"]["id"]
+        .as_str()
+        .expect("dep task id")
+        .to_string();
+
+    let resp = client
+        .post(format!("{}/kanban/tasks/{}/dependencies", BASE, task_id))
+        .json(&serde_json::json!({ "depends_on_id": dep_id }))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "POST dependency should succeed");
+
+    let resp = client
+        .delete(format!(
+            "{}/kanban/tasks/{}/dependencies/{}",
+            BASE, task_id, dep_id
+        ))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "DELETE dependency should succeed");
+
+    // 6. History must contain entries for every operation.
+    let resp = client
+        .get(format!("{}/kanban/tasks/{}/history", BASE, task_id))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "GET history should succeed");
+    let json: serde_json::Value = resp.json().unwrap();
+    let actions: Vec<String> = json["data"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v["action"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    for expected in [
+        "created",
+        "tag_added",
+        "tag_added",
+        "tag_removed",
+        "dependency_added",
+        "dependency_removed",
+    ] {
+        assert!(
+            actions.contains(&expected.to_string()),
+            "history must contain '{expected}', got {actions:?}"
+        );
+    }
+
+    // 7. Cleanup.
+    client
+        .delete(format!("{}/kanban/tasks/{}", BASE, task_id))
+        .send()
+        .unwrap();
+    client
+        .delete(format!("{}/kanban/tasks/{}", BASE, dep_id))
+        .send()
+        .unwrap();
+}

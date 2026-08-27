@@ -103,6 +103,10 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
             "/kanban/tasks/{id}/dependencies/{depId}",
             delete(remove_dependency_handler),
         )
+        // 11b. Tags (kanban task tags)
+        .route("/kanban/tasks/{id}/tags", get(list_tags_handler))
+        .route("/kanban/tasks/{id}/tags", post(add_tag_handler))
+        .route("/kanban/tasks/{id}/tags/{tag}", delete(remove_tag_handler))
         // 12. History
         .route("/kanban/tasks/{id}/history", get(list_history_handler))
         // 12b. History (by query param task_id, for frontend kanban-history page)
@@ -177,6 +181,7 @@ struct CreateTaskRequest {
     plan: Option<bool>,
     workflow: Option<String>,
     board: Option<String>,
+    tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,6 +239,11 @@ struct AddDependencyRequest {
     depends_on_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TagRequest {
+    tag: String,
+}
+
 // ---------------------------------------------------------------------------
 // Row types (sqlx::FromRow for sql_forge!)
 // ---------------------------------------------------------------------------
@@ -259,6 +269,7 @@ struct KanbanTaskRow {
     goal_blocked_message: Option<String>,
     goal_max_rounds: Option<i32>,
     goal_revision: Option<i32>,
+    tags_json: Option<serde_json::Value>,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
     updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -381,6 +392,7 @@ struct KanbanTaskEntry {
     goal_blocked_message: Option<String>,
     goal_max_rounds: Option<i32>,
     goal_revision: Option<i32>,
+    tags: Vec<String>,
     created_at: Option<String>,
     updated_at: Option<String>,
 }
@@ -511,6 +523,16 @@ fn task_row_to_entry(data_dir: &str, r: KanbanTaskRow) -> KanbanTaskEntry {
             .and_then(|res| res.workflow_id.clone())
             .or_else(|| r.workflow_id.clone()),
         board: r.board,
+        tags: r
+            .tags_json
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default(),
         goal_phase: r.goal_phase,
         goal_blocked_code: r.goal_blocked_code,
         goal_blocked_message: r.goal_blocked_message,
@@ -652,6 +674,12 @@ async fn list_tasks_handler(
             channel_id, profile, archived, template, plan, workflow_id, board,
             goal_phase, goal_blocked_code, goal_blocked_message, goal_max_rounds,
             goal_revision,
+            COALESCE((
+                SELECT jsonb_agg(kt.name ORDER BY kt.name)
+                FROM task_tags tt
+                JOIN kanban_tags kt ON kt.id = tt.tag_id
+                WHERE tt.task_id = kanban_tasks.id
+            ), '[]'::jsonb) AS tags_json,
             created_at, updated_at
         FROM kanban_tasks
         WHERE ((:show_archived_bool OR archived = false)
@@ -697,6 +725,12 @@ async fn get_task_handler(
             channel_id, profile, archived, template, plan, workflow_id, board,
             goal_phase, goal_blocked_code, goal_blocked_message, goal_max_rounds,
             goal_revision,
+            COALESCE((
+                SELECT jsonb_agg(kt.name ORDER BY kt.name)
+                FROM task_tags tt
+                JOIN kanban_tags kt ON kt.id = tt.tag_id
+                WHERE tt.task_id = kanban_tasks.id
+            ), '[]'::jsonb) AS tags_json,
             created_at, updated_at
         FROM kanban_tasks
         WHERE id = :id
@@ -873,6 +907,21 @@ async fn create_task_handler(
     {
         error!("[kanban/tasks] history insert for create failed: {:?}", e);
         // Non-fatal: task was already created
+    }
+
+    // Initial tags (best-effort, mirrors the dedicated tag endpoint): each
+    // tag gets a kanban_tags/task_tags row plus a durable 'tag_added'
+    // history entry; failures are logged, never fatal.
+    if let Some(tags) = &body.tags {
+        for tag in tags {
+            let tag = tag.trim();
+            if tag.is_empty() {
+                continue;
+            }
+            if let Err(e) = attach_tag(&state.pool, &id, tag).await {
+                error!("[kanban/tasks] tag attach on create failed: {:?}", e);
+            }
+        }
     }
 
     ok_json(CreateTaskResponse { success: true, id })
@@ -1906,6 +1955,37 @@ async fn add_dependency_handler(
         );
     }
 
+    // 5. History: every dependency addition is a durable kanban_history
+    //    entry ('dependency_added') carrying the target id + title.
+    let dep_title: Option<String> = sql_forge!(
+        scalar String,
+        "SELECT title FROM kanban_tasks WHERE id = :id",
+        ( :id = depends_on_id )
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+    let dep_prev = serde_json::json!({
+        "depends_on_id": depends_on_id,
+        "title": dep_title,
+    });
+    if let Err(e) = sql_forge!(
+        r#"
+        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values)
+        VALUES (:task_id, 'dependency_added', NULL, NULL, :previous_values::jsonb)
+        "#,
+        ( :task_id = task_id, :previous_values = &dep_prev )
+    )
+    .execute(&state.pool)
+    .await
+    {
+        error!(
+            "[kanban/tasks/{}/dependencies] history insert failed: {:?}",
+            task_id, e
+        );
+    }
+
     ok_json(serde_json::json!({ "success": true }))
 }
 
@@ -1917,23 +1997,228 @@ async fn remove_dependency_handler(
     State(state): State<Arc<AppState>>,
     Path((id, dep_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    if let Err(e) = sql_forge!(
+    // Fetch the target's title BEFORE deleting so the history entry can name
+    // it; a missing row simply means nothing to remove (idempotent no-op).
+    let dep_title: Option<String> = sql_forge!(
+        scalar String,
+        "SELECT title FROM kanban_tasks WHERE id = :id",
+        ( :id = &dep_id )
+    )
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+
+    let res = match sql_forge!(
         r#"DELETE FROM kanban_task_dependencies WHERE task_id = :task_id AND depends_on_id = :dep_id"#,
         ( :task_id = &id, :dep_id = &dep_id )
     )
     .execute(&state.pool)
     .await
     {
-        error!(
-            "[kanban/tasks/{}/dependencies/{}] delete failed: {:?}",
-            id, dep_id, e
-        );
-        return err_json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to remove dependency",
-        );
+        Ok(r) => r,
+        Err(e) => {
+            error!(
+                "[kanban/tasks/{}/dependencies/{}] delete failed: {:?}",
+                id, dep_id, e
+            );
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to remove dependency",
+            );
+        }
+    };
+
+    // History: record the removal when a dependency row was actually deleted.
+    if res.rows_affected() > 0 {
+        let dep_prev = serde_json::json!({
+            "depends_on_id": dep_id,
+            "title": dep_title,
+        });
+        if let Err(e) = sql_forge!(
+            r#"
+            INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values)
+            VALUES (:task_id, 'dependency_removed', NULL, NULL, :previous_values::jsonb)
+            "#,
+            ( :task_id = &id, :previous_values = &dep_prev )
+        )
+        .execute(&state.pool)
+        .await
+        {
+            error!(
+                "[kanban/tasks/{}/dependencies/{}] history insert failed: {:?}",
+                id, dep_id, e
+            );
+        }
     }
 
+    ok_json(serde_json::json!({ "success": true }))
+}
+
+// ---------------------------------------------------------------------------
+// 11b. Tags: list / add / remove (kanban task tags)
+// ---------------------------------------------------------------------------
+
+#[derive(FromRow)]
+struct TagRow {
+    name: String,
+}
+
+/// Shared tag attach routine: ensure the tag exists (kanban_tags), link it to
+/// the task (task_tags), and - only when the association is NEW - record a
+/// durable 'tag_added' history entry. Returns true when the tag was newly
+/// attached (history written), false when it was already present (no-op).
+async fn attach_tag(pool: &sqlx::PgPool, task_id: &str, tag: &str) -> Result<bool, sqlx::Error> {
+    // 1. Ensure the tag exists (name registry, unique on name).
+    sql_forge!(
+        r#"INSERT INTO kanban_tags (name) VALUES (:name) ON CONFLICT (name) DO NOTHING"#,
+        ( :name = tag )
+    )
+    .execute(pool)
+    .await?;
+    // 2. Link it to the task (idempotent: ON CONFLICT DO NOTHING).
+    let tag_id: i64 = sql_forge!(
+        scalar i64,
+        "SELECT id FROM kanban_tags WHERE name = :name",
+        ( :name = tag )
+    )
+    .fetch_one(pool)
+    .await?;
+    let res = sql_forge!(
+        r#"INSERT INTO task_tags (task_id, tag_id) VALUES (:task_id, :tag_id) ON CONFLICT DO NOTHING"#,
+        ( :task_id = task_id, :tag_id = tag_id )
+    )
+    .execute(pool)
+    .await?;
+    if res.rows_affected() == 0 {
+        return Ok(false); // already attached
+    }
+    // 3. Durable history entry for the newly attached tag.
+    let prev = serde_json::json!({ "tag": tag });
+    sql_forge!(
+        r#"
+        INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values)
+        VALUES (:task_id, 'tag_added', NULL, NULL, :previous_values::jsonb)
+        "#,
+        ( :task_id = task_id, :previous_values = &prev )
+    )
+    .execute(pool)
+    .await?;
+    Ok(true)
+}
+
+/// GET /kanban/tasks/{id}/tags: list the task's tags (sorted by name).
+async fn list_tags_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let rows = match sql_forge!(
+        TagRow,
+        r#"
+        SELECT kt.name
+        FROM task_tags tt
+        JOIN kanban_tags kt ON kt.id = tt.tag_id
+        WHERE tt.task_id = :task_id
+        ORDER BY kt.name
+        "#,
+        ( :task_id = &id )
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("[kanban/tasks/{}/tags] list failed: {:?}", id, e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to fetch tags");
+        }
+    };
+    let tags: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+    ok_json(tags)
+}
+
+/// POST /kanban/tasks/{id}/tags: attach a tag to the task. The tag is created
+/// on demand (kanban_tags) and linked (task_tags); a NEW association writes a
+/// 'tag_added' kanban_history entry (idempotent re-adds are no-ops).
+async fn add_tag_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<TagRequest>,
+) -> impl IntoResponse {
+    let tag = body.tag.trim().to_string();
+    if tag.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "Tag cannot be empty");
+    }
+    // The task must exist (404 for unknown tasks).
+    let exists = match sql_forge!(
+        DepCheckRow,
+        r#"SELECT id AS task_id FROM kanban_tasks WHERE id = :id"#,
+        ( :id = &id )
+    )
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(e) => {
+            error!("[kanban/tasks/{}/tags] task check failed: {:?}", id, e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to check task");
+        }
+    };
+    if !exists {
+        return err_json(StatusCode::NOT_FOUND, "Task not found");
+    }
+    match attach_tag(&state.pool, &id, &tag).await {
+        Ok(added) => ok_json(serde_json::json!({ "success": true, "tag": tag, "added": added })),
+        Err(e) => {
+            error!("[kanban/tasks/{}/tags] attach failed: {:?}", id, e);
+            err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to add tag")
+        }
+    }
+}
+
+/// DELETE /kanban/tasks/{id}/tags/{tag}: detach a tag from the task. A removal
+/// writes a 'tag_removed' kanban_history entry. Idempotent: removing a tag the
+/// task does not have is a success no-op.
+async fn remove_tag_handler(
+    State(state): State<Arc<AppState>>,
+    Path((id, tag)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let tag = tag.trim().to_string();
+    if tag.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "Tag cannot be empty");
+    }
+    let res = match sql_forge!(
+        r#"
+        DELETE FROM task_tags
+        WHERE task_id = :task_id
+          AND tag_id IN (SELECT id FROM kanban_tags WHERE name = :tag)
+        "#,
+        ( :task_id = &id, :tag = &tag )
+    )
+    .execute(&state.pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            error!("[kanban/tasks/{}/tags/{}] detach failed: {:?}", id, tag, e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to remove tag");
+        }
+    };
+    if res.rows_affected() > 0 {
+        let prev = serde_json::json!({ "tag": tag });
+        if let Err(e) = sql_forge!(
+            r#"
+            INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, previous_values)
+            VALUES (:task_id, 'tag_removed', NULL, NULL, :previous_values::jsonb)
+            "#,
+            ( :task_id = &id, :previous_values = &prev )
+        )
+        .execute(&state.pool)
+        .await
+        {
+            error!("[kanban/tasks/{}/tags/{}] history insert failed: {:?}", id, tag, e);
+        }
+    }
     ok_json(serde_json::json!({ "success": true }))
 }
 
@@ -2728,6 +3013,7 @@ mod tests {
             goal_blocked_message: None,
             goal_max_rounds: None,
             goal_revision: None,
+            tags_json: None,
             created_at: None,
             updated_at: None,
         };
@@ -2846,6 +3132,7 @@ mod tests {
             goal_blocked_message: None,
             goal_max_rounds: None,
             goal_revision: None,
+            tags_json: None,
             created_at: None,
             updated_at: None,
         };
@@ -2879,6 +3166,7 @@ mod tests {
             goal_blocked_message: None,
             goal_max_rounds: None,
             goal_revision: None,
+            tags_json: None,
             created_at: None,
             updated_at: None,
         };

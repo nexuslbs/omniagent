@@ -32,6 +32,42 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .await
         .ok();
 
+    // ── Kanban tags (kanban task tags) ─────────────────────────────────────
+    // kanban_tags: free-form label registry (one row per unique tag name).
+    // task_tags: task <-> tag association (FK CASCADE: deleting a task or a
+    // tag cleans up its links). Tag add/remove operations write durable
+    // kanban_history entries ('tag_added' / 'tag_removed').
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS kanban_tags (
+            id         BIGSERIAL PRIMARY KEY,
+            name       TEXT NOT NULL UNIQUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .ok();
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS task_tags (
+            task_id    TEXT NOT NULL REFERENCES kanban_tasks(id) ON DELETE CASCADE,
+            tag_id     BIGINT NOT NULL REFERENCES kanban_tags(id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (task_id, tag_id)
+        );
+        "#,
+    )
+    .execute(pool)
+    .await
+    .ok();
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_task_tags_tag_id ON task_tags (tag_id)")
+        .execute(pool)
+        .await
+        .ok();
+    tracing::info!("[migration] Kanban tags tables (kanban_tags, task_tags) added");
+
     // -- Event-driven Hooks (thread_started / thread_finished / new_message) --
     // threads.hook_caused marks hook-caused threads so the hooks engine can
     // skip them (infinite-loop protection: hook threads never re-trigger).
