@@ -125,7 +125,78 @@ fn test_overview_dashboard() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().unwrap();
     assert!(json["success"].as_bool().unwrap_or(false));
-    assert!(json.get("data").is_some());
+    let data = json.get("data").expect("data must be present");
+    assert!(data.is_object(), "data must be an object");
+
+    // Task gate 3: Token Trend must cover 14 days and each day must carry
+    // the 3-series breakdown (input cache hit / cache miss / output) with
+    // tokens == hit + miss + output (data consistency).
+    let trend = data["token_trend"]
+        .as_array()
+        .expect("token_trend must be an array");
+    assert_eq!(trend.len(), 14, "token_trend must cover exactly 14 days");
+    for day in trend {
+        let day_str = day["day"].as_str().unwrap_or_default();
+        assert!(!day_str.is_empty(), "each trend entry must carry a real day, got {day}");
+        let hit = day["input_cache_hit"]
+            .as_i64()
+            .expect("input_cache_hit must be a number");
+        let miss = day["input_cache_miss"]
+            .as_i64()
+            .expect("input_cache_miss must be a number");
+        let out = day["output_tokens"]
+            .as_i64()
+            .expect("output_tokens must be a number");
+        let total = day["tokens"].as_i64().expect("tokens must be a number");
+        assert!(
+            hit >= 0 && miss >= 0 && out >= 0,
+            "breakdown fields must be non-negative, got {day}"
+        );
+        assert_eq!(
+            total,
+            hit + miss + out,
+            "tokens must equal input_cache_hit + input_cache_miss + output_tokens, got {day}"
+        );
+    }
+
+    // Task gate 1: Top Tools Used must list real tool names (no "unknown").
+    let tools = data["top_tools"]
+        .as_array()
+        .expect("top_tools must be an array");
+    for t in tools {
+        let name = t["tool"].as_str().unwrap_or_default();
+        let count = t["count"].as_i64().unwrap_or(0);
+        assert!(!name.is_empty(), "tool name must not be empty, got {t}");
+        assert!(
+            !name.eq_ignore_ascii_case("unknown"),
+            "tool name must not be 'unknown', got {t}"
+        );
+        assert!(count > 0, "tool count must be positive, got {t}");
+    }
+
+    // Task gate 2: Kanban Snapshot = last status-changed tasks, newest first,
+    // each row carrying board / task_id / title / status / tags / changed_at.
+    let snap = data["kanban_snapshot"]
+        .as_array()
+        .expect("kanban_snapshot must be an array");
+    for s in snap {
+        for field in ["board", "task_id", "title", "status", "changed_at"] {
+            assert!(
+                !s[field].as_str().unwrap_or_default().is_empty(),
+                "snapshot entry must carry {field}, got {s}"
+            );
+        }
+        assert!(s["tags"].is_array(), "tags must be an array, got {s}");
+    }
+    for pair in snap.windows(2) {
+        assert!(
+            pair[0]["changed_at"].as_str().unwrap_or_default()
+                >= pair[1]["changed_at"].as_str().unwrap_or_default(),
+            "kanban snapshot must be ordered newest-first, got {:?} then {:?}",
+            pair[0]["changed_at"],
+            pair[1]["changed_at"]
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
