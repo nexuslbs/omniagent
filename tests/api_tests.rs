@@ -379,7 +379,11 @@ fn test_kanban_tags_and_dependency_history() {
         .get(format!("{}/kanban/tasks/{}", BASE, task_id))
         .send()
         .unwrap();
-    assert_eq!(resp.status(), 200, "GET /kanban/tasks/{{id}} should succeed");
+    assert_eq!(
+        resp.status(),
+        200,
+        "GET /kanban/tasks/{{id}} should succeed"
+    );
     let json: serde_json::Value = resp.json().unwrap();
     let tags = json["data"]["tags"].as_array().map(|a| {
         a.iter()

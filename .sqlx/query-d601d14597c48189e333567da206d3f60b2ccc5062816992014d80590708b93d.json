@@ -1,0 +1,56 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            COALESCE(t.board, '') AS board,\n            h.kanban_task_id AS task_id,\n            COALESCE(t.title, '') AS title,\n            COALESCE(h.final_board, '') AS status,\n            COALESCE((\n                SELECT string_agg(kt.name, ',' ORDER BY kt.name)\n                FROM task_tags tt\n                JOIN kanban_tags kt ON kt.id = tt.tag_id\n                WHERE tt.task_id = h.kanban_task_id\n            ), '') AS tags,\n            h.created_at::text AS changed_at\n        FROM kanban_history h\n        JOIN kanban_tasks t ON t.id = h.kanban_task_id\n        WHERE h.action = 'moved'\n        ORDER BY h.created_at DESC, h.id DESC\n        LIMIT 10\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "board",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "task_id",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "title",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "tags",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "changed_at",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "d601d14597c48189e333567da206d3f60b2ccc5062816992014d80590708b93d"
+}

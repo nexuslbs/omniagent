@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            g::date::text AS day,\n            COALESCE(SUM(t.input_tokens + t.output_tokens), 0)::bigint AS tokens,\n            COALESCE(SUM(t.cached_tokens), 0)::bigint AS input_cache_hit,\n            COALESCE(SUM(GREATEST(t.input_tokens - t.cached_tokens, 0)), 0)::bigint AS input_cache_miss,\n            COALESCE(SUM(t.output_tokens), 0)::bigint AS output_tokens\n        FROM generate_series(\n            (NOW() - INTERVAL '13 days')::date,\n            NOW()::date,\n            INTERVAL '1 day'\n        ) g\n        LEFT JOIN threads t ON t.created_at::date = g::date\n        GROUP BY g::date\n        ORDER BY g::date\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "day",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "tokens",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "input_cache_hit",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "input_cache_miss",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "output_tokens",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "65582327fbdf8584563aec0c89689416cbf116a855097bfd6fde0aa56c1f9d85"
+}

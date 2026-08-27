@@ -73,6 +73,9 @@ struct StatusDistRow {
 struct TokenTrendRow {
     day: Option<String>,
     tokens: Option<i64>,
+    input_cache_hit: Option<i64>,
+    input_cache_miss: Option<i64>,
+    output_tokens: Option<i64>,
 }
 
 #[derive(FromRow)]
@@ -88,6 +91,16 @@ struct ChannelHealthRow {
 struct TopToolRow {
     tool: Option<String>,
     count: Option<i64>,
+}
+
+#[derive(FromRow)]
+struct KanbanSnapshotRow {
+    board: Option<String>,
+    task_id: Option<String>,
+    title: Option<String>,
+    status: Option<String>,
+    tags: Option<String>,
+    changed_at: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +150,14 @@ struct StatusDistEntry {
 #[derive(Serialize)]
 struct TokenTrendEntry {
     day: String,
+    /// Total tokens (input + output) — kept for backward compatibility.
     tokens: i64,
+    /// Input tokens served from cache (cache hit).
+    input_cache_hit: i64,
+    /// Input tokens that missed the cache (input_tokens - cached_tokens).
+    input_cache_miss: i64,
+    /// Output (completion) tokens.
+    output_tokens: i64,
 }
 
 #[derive(Serialize)]
@@ -156,6 +176,17 @@ struct TopToolEntry {
 }
 
 #[derive(Serialize)]
+struct KanbanSnapshotEntry {
+    board: String,
+    task_id: String,
+    title: String,
+    /// Status after the change (kanban_history.final_board).
+    status: String,
+    tags: Vec<String>,
+    changed_at: String,
+}
+
+#[derive(Serialize)]
 struct DashboardResponse {
     kpis: KpiResponse,
     threads_over_time: Vec<HourlyEntry>,
@@ -164,6 +195,8 @@ struct DashboardResponse {
     recent_activity: Vec<OverviewEntry>,
     channel_health: Vec<ChannelHealthEntry>,
     top_tools: Vec<TopToolEntry>,
+    /// Most recent kanban status changes (action='moved' history entries).
+    kanban_snapshot: Vec<KanbanSnapshotEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -344,12 +377,19 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     };
 
     // ── 4. Token trend (14 days) ──────────────────────────────────────────
+    // Breakdown per day:
+    //   input_cache_hit  = SUM(cached_tokens)                 (input served from cache)
+    //   input_cache_miss = SUM(input_tokens - cached_tokens)  (fresh input tokens)
+    //   output_tokens    = SUM(output_tokens)                 (completion tokens)
     let token_trend = match sql_forge!(
         TokenTrendRow,
         r#"
         SELECT
             g::date::text AS day,
-            COALESCE(SUM(t.input_tokens + t.output_tokens), 0)::bigint AS tokens
+            COALESCE(SUM(t.input_tokens + t.output_tokens), 0)::bigint AS tokens,
+            COALESCE(SUM(t.cached_tokens), 0)::bigint AS input_cache_hit,
+            COALESCE(SUM(GREATEST(t.input_tokens - t.cached_tokens, 0)), 0)::bigint AS input_cache_miss,
+            COALESCE(SUM(t.output_tokens), 0)::bigint AS output_tokens
         FROM generate_series(
             (NOW() - INTERVAL '13 days')::date,
             NOW()::date,
@@ -368,6 +408,9 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
             .map(|r| TokenTrendEntry {
                 day: r.day.unwrap_or_default(),
                 tokens: r.tokens.unwrap_or(0),
+                input_cache_hit: r.input_cache_hit.unwrap_or(0),
+                input_cache_miss: r.input_cache_miss.unwrap_or(0),
+                output_tokens: r.output_tokens.unwrap_or(0),
             })
             .collect::<Vec<_>>(),
         Err(e) => {
@@ -482,6 +525,10 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     };
 
     // ── 7. Top tools (last 7 days) ────────────────────────────────────────
+    // Tool names live on tool-RESULT messages (msg_subtype = qualified tool
+    // name); the tool-call messages ('tool' / 'multi-tool') leave msg_subtype
+    // NULL, which is why the previous msg_type='tool' query rendered
+    // "unknown" for every row.
     let top_tools = match sql_forge!(
         TopToolRow,
         r#"
@@ -489,7 +536,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
             COALESCE(m.msg_subtype, 'unknown') AS tool,
             COUNT(*)::bigint AS count
         FROM messages m
-        WHERE m.msg_type = 'tool'
+        WHERE m.msg_type = 'tool-result'
             AND m.created_at >= NOW() - INTERVAL '7 days'
         GROUP BY m.msg_subtype
         ORDER BY count DESC
@@ -515,6 +562,61 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         }
     };
 
+    // ── 8. Kanban snapshot (recent status changes) ────────────────────────
+    // The kanban_history table records every status transition (action
+    // 'moved'). Show the last changed tasks, newest first, with the board,
+    // task name, resulting status, tags and the change timestamp.
+    let kanban_snapshot = match sql_forge!(
+        KanbanSnapshotRow,
+        r#"
+        SELECT
+            COALESCE(t.board, '') AS board,
+            h.kanban_task_id AS task_id,
+            COALESCE(t.title, '') AS title,
+            COALESCE(h.final_board, '') AS status,
+            COALESCE((
+                SELECT string_agg(kt.name, ',' ORDER BY kt.name)
+                FROM task_tags tt
+                JOIN kanban_tags kt ON kt.id = tt.tag_id
+                WHERE tt.task_id = h.kanban_task_id
+            ), '') AS tags,
+            h.created_at::text AS changed_at
+        FROM kanban_history h
+        JOIN kanban_tasks t ON t.id = h.kanban_task_id
+        WHERE h.action = 'moved'
+        ORDER BY h.created_at DESC, h.id DESC
+        LIMIT 10
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|r| KanbanSnapshotEntry {
+                board: r.board.unwrap_or_default(),
+                task_id: r.task_id.unwrap_or_default(),
+                title: r.title.unwrap_or_default(),
+                status: r.status.unwrap_or_default(),
+                tags: r
+                    .tags
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect(),
+                changed_at: r.changed_at.unwrap_or_default(),
+            })
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            error!("[dashboard] kanban_snapshot query failed: {:?}", e);
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to fetch kanban snapshot",
+            );
+        }
+    };
+
     let dashboard = DashboardResponse {
         kpis: KpiResponse {
             threads_today: kpis.threads_today.unwrap_or(0),
@@ -531,6 +633,7 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         recent_activity: recent,
         channel_health,
         top_tools,
+        kanban_snapshot,
     };
 
     ok_json(dashboard)
