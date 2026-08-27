@@ -1089,6 +1089,28 @@ Previous plan:\n{}",
                                 pt.id, e
                             );
                         }
+                        // Send the generic skipped reaction to the platform for the
+                        // pending thread (mirrors response_handler: skipped => ":o:").
+                        // enqueue_reaction is platform-agnostic, so this works on
+                        // mattermost and any other platform.
+                        if let (Some(platform), Some(resource)) =
+                            (&channel.platform, &channel.resource_identifier)
+                        {
+                            if let Ok(Some(cause)) =
+                                queries::get_cause_message(&cfg.pool, pt.id).await
+                            {
+                                if let Some(ext_id) = cause.external_id {
+                                    helpers::enqueue_reaction(
+                                        &cfg.ctx,
+                                        platform,
+                                        resource,
+                                        &ext_id,
+                                        ":o:",
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
                         // Push into the in-memory prompt BEFORE condensation.
                         messages.push(ChatMessage::user(&appended));
                         used_sub_prompt_chars = next_used;

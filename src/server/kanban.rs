@@ -792,7 +792,7 @@ async fn create_task_handler(
         .status
         .as_deref()
         .filter(|s| validate_status(s))
-        .unwrap_or("backlog")
+        .unwrap_or("todo")
         .to_string();
 
     let task_priority = body.priority.unwrap_or(0);

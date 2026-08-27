@@ -72,7 +72,7 @@ async fn handle_create(
     let mut req = serde_json::json!({
         "title": title,
         "body": args["body"].as_str().unwrap_or(""),
-        "status": args["status"].as_str().unwrap_or("backlog"),
+        "status": args["status"].as_str().unwrap_or("todo"),
         "priority": args["priority"].as_i64().unwrap_or(0),
         "assignee": args["assignee"].as_str().unwrap_or(""),
         "template": args["template"].as_str().unwrap_or(""),
@@ -96,7 +96,7 @@ async fn handle_create(
     let id = resp["data"]["id"]
         .as_str()
         .ok_or_else(|| anyhow!("Missing 'id' in create response"))?;
-    let status = args["status"].as_str().unwrap_or("backlog");
+    let status = args["status"].as_str().unwrap_or("todo");
     Ok((
         format!("Kanban task '{title}' created with id '{id}' and status '{status}'"),
         false,
@@ -439,7 +439,7 @@ async fn main() -> Result<()> {
                         },
                         "status": {
                             "type": "string",
-                            "description": "Optional status (default: 'backlog'). One of: backlog, todo, running, testing, review, blocked, done",
+                            "description": "Optional status (default: 'todo'). One of: backlog, todo, running, testing, review, blocked, done",
                             "enum": ["backlog", "todo", "running", "testing", "review", "blocked", "done"]
                         },
                         "priority": {

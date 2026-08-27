@@ -2360,7 +2360,7 @@ pub async fn list_appendable_pending_threads(
           AND t.status = 'pending'
           AND NOT t.terminal
           AND t.id <> :running_thread_id
-          AND (t.parent_id IS NOT DISTINCT FROM (SELECT parent_id FROM threads WHERE id = :running_thread_id)
+          AND ((t.parent_id IS NOT NULL AND t.parent_id = (SELECT parent_id FROM threads WHERE id = :running_thread_id))
                OR t.parent_id = :running_thread_id)
         ORDER BY t.id ASC
         "#,
