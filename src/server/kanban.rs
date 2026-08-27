@@ -798,6 +798,21 @@ async fn list_dependencies_handler(
 // 4. POST /kanban/tasks: Create a new task
 // ---------------------------------------------------------------------------
 
+/// True when a task with this id already exists - used to keep generated
+/// IDs unique (see server::kanban_ids). A DB error is treated as "not
+/// taken": the negligible collision risk is preferable to failing creation.
+async fn task_id_exists(pool: &sqlx::PgPool, id: &str) -> bool {
+    sql_forge!(
+        DepCheckRow,
+        "SELECT id AS task_id FROM kanban_tasks WHERE id = :id",
+        ( :id = id )
+    )
+    .fetch_optional(pool)
+    .await
+    .map(|row| row.is_some())
+    .unwrap_or(false)
+}
+
 async fn create_task_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateTaskRequest>,
@@ -814,13 +829,35 @@ async fn create_task_handler(
         return err_json(StatusCode::BAD_REQUEST, &msg);
     }
 
-    let id = format!(
-        "task_{:x}",
+    // Human-readable task ID derived from board name + title:
+    // `task_<board_slug>_<title_slug>` (see server::kanban_ids). The
+    // nanosecond hex is retained as the collision suffix (rule 7):
+    // `task_<board>_<title>_<hex>` when the base ID already exists.
+    let hex = format!(
+        "{:x}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos()
     );
+    let base = crate::server::kanban_ids::build_task_id(
+        body.board.as_deref().unwrap_or(""),
+        &title,
+        crate::server::kanban_ids::MAX_TASK_ID_LEN,
+    );
+    let base = if base.is_empty() {
+        // Neither slug had alphanumeric content: fall back to the hex id.
+        format!("task_{hex}")
+    } else {
+        base
+    };
+    let mut id = base.clone();
+    for attempt in 0..5u64 {
+        if !task_id_exists(&state.pool, &id).await {
+            break;
+        }
+        id = crate::server::kanban_ids::append_unique_suffix(&base, &hex, attempt);
+    }
 
     let task_status = body
         .status

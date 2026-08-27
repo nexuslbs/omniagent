@@ -14,6 +14,7 @@ pub(crate) mod actions;
 pub(crate) mod channels;
 pub(crate) mod hooks;
 pub(crate) mod kanban;
+pub(crate) mod kanban_ids;
 pub(crate) mod llm_proxy;
 pub(crate) mod memory;
 pub(crate) mod messages;

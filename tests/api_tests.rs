@@ -137,7 +137,10 @@ fn test_overview_dashboard() {
     assert_eq!(trend.len(), 14, "token_trend must cover exactly 14 days");
     for day in trend {
         let day_str = day["day"].as_str().unwrap_or_default();
-        assert!(!day_str.is_empty(), "each trend entry must carry a real day, got {day}");
+        assert!(
+            !day_str.is_empty(),
+            "each trend entry must carry a real day, got {day}"
+        );
         let hit = day["input_cache_hit"]
             .as_i64()
             .expect("input_cache_hit must be a number");
