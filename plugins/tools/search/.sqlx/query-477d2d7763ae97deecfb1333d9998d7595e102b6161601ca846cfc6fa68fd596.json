@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id, title, body, status, priority, position, assignee,\n            channel_id, profile, archived, template, plan, workflow_id, board,\n            goal_phase, goal_blocked_code, goal_blocked_message, goal_max_rounds,\n            goal_revision,\n            created_at, updated_at\n        FROM kanban_tasks\n        WHERE (($1 OR archived = false)\n           OR (NOT $2 AND archived = false))\n          AND ($3 = '' OR board = $4)\n        ORDER BY position ASC, created_at DESC\n        ",
+  "query": "\n        SELECT\n            id, title, body, status, priority, position, assignee,\n            channel_id, profile, archived, template, plan, workflow_id, board,\n            goal_phase, goal_blocked_code, goal_blocked_message, goal_max_rounds,\n            goal_revision,\n            COALESCE((\n                SELECT jsonb_agg(kt.name ORDER BY kt.name)\n                FROM task_tags tt\n                JOIN kanban_tags kt ON kt.id = tt.tag_id\n                WHERE tt.task_id = kanban_tasks.id\n            ), '[]'::jsonb) AS tags_json,\n            created_at, updated_at\n        FROM kanban_tasks\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -214,6 +214,12 @@
       },
       {
         "ordinal": 19,
+        "name": "tags_json",
+        "type_info": "Jsonb",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 20,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -224,7 +230,7 @@
         }
       },
       {
-        "ordinal": 20,
+        "ordinal": 21,
         "name": "updated_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -237,9 +243,6 @@
     ],
     "parameters": {
       "Left": [
-        "Bool",
-        "Bool",
-        "Text",
         "Text"
       ]
     },
@@ -263,9 +266,10 @@
       true,
       true,
       false,
+      null,
       true,
       true
     ]
   },
-  "hash": "9acc3ffd8341b5a87c9935442c565a179dba5fd999babbf5170e8788bfe5b9df"
+  "hash": "477d2d7763ae97deecfb1333d9998d7595e102b6161601ca846cfc6fa68fd596"
 }

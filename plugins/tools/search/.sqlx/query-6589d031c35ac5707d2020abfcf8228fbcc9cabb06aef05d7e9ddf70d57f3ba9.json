@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            t.id,\n            t.channel_id,\n            t.channel_id AS channel_name,\n            t.status,\n            t.cause,\n            t.profile,\n            t.provider,\n            t.model,\n            t.created_at,\n            t.ended_at,\n            t.duration_ms,\n            t.input_tokens,\n            t.output_tokens,\n            t.cached_tokens,\n            t.iterations,\n            t.parent_id,\n            t.plan,\n            t.started_at,\n            m0.content AS cause_content_preview,\n            m0.msg_type AS cause_msg_type,\n            m0.msg_subtype AS cause_msg_subtype,\n            COALESCE((SELECT COUNT(*) FROM messages sub WHERE sub.thread_id = t.id), 0) AS msg_count,\n            (SELECT content FROM messages sub2 WHERE sub2.thread_id = t.id ORDER BY sub2.id DESC LIMIT 1) AS last_message\n        FROM threads t\n        LEFT JOIN messages m0 ON m0.thread_id = t.id AND m0.thread_sequence = 0\n        WHERE 1=1\n          AND ($1 = '' OR t.status = ANY(string_to_array($2, ',')))\n          AND ($3 = '' OR t.cause = $4)\n          AND ($5 = '' OR t.channel_id = $6)\n          AND ($7 = 0::bigint OR t.id = $8)\n          AND ($9 = 0::bigint OR t.parent_id = $10)\n        ORDER BY t.id DESC\n        LIMIT $11 OFFSET $12\n        ",
+  "query": "\n        SELECT\n            t.id,\n            t.channel_id,\n            t.channel_id AS channel_name,\n            t.status,\n            t.cause,\n            t.profile,\n            t.provider,\n            t.model,\n            t.created_at,\n            t.ended_at,\n            t.duration_ms,\n            t.input_tokens,\n            t.output_tokens,\n            t.cached_tokens,\n            t.iterations,\n            t.parent_id,\n            (SELECT sc.thread_id FROM messages sc WHERE sc.msg_type = 'sub_cause' AND sc.original_thread_id = t.id LIMIT 1) AS merged_into_thread_id,\n            t.plan,\n            t.started_at,\n            m0.content AS cause_content_preview,\n            m0.msg_type AS cause_msg_type,\n            m0.msg_subtype AS cause_msg_subtype,\n            COALESCE((SELECT COUNT(*) FROM messages sub WHERE sub.thread_id = t.id), 0) AS msg_count,\n            (SELECT content FROM messages sub2 WHERE sub2.thread_id = t.id ORDER BY sub2.id DESC LIMIT 1) AS last_message\n        FROM threads t\n        LEFT JOIN messages m0 ON m0.thread_id = t.id AND m0.thread_sequence = 0\n        WHERE 1=1\n          AND ($1 = '' OR t.status = ANY(string_to_array($2, ',')))\n          AND ($3 = '' OR t.cause = $4)\n          AND ($5 = '' OR t.channel_id = $6)\n          AND ($7 = 0::bigint OR t.id = $8)\n          AND ($9 = 0::bigint OR t.parent_id = $10)\n        ORDER BY t.id DESC\n        LIMIT $11 OFFSET $12\n        ",
   "describe": {
     "columns": [
       {
@@ -181,6 +181,12 @@
       },
       {
         "ordinal": 16,
+        "name": "merged_into_thread_id",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 17,
         "name": "plan",
         "type_info": "Bool",
         "origin": {
@@ -191,7 +197,7 @@
         }
       },
       {
-        "ordinal": 17,
+        "ordinal": 18,
         "name": "started_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -202,7 +208,7 @@
         }
       },
       {
-        "ordinal": 18,
+        "ordinal": 19,
         "name": "cause_content_preview",
         "type_info": "Text",
         "origin": {
@@ -213,7 +219,7 @@
         }
       },
       {
-        "ordinal": 19,
+        "ordinal": 20,
         "name": "cause_msg_type",
         "type_info": "Text",
         "origin": {
@@ -224,7 +230,7 @@
         }
       },
       {
-        "ordinal": 20,
+        "ordinal": 21,
         "name": "cause_msg_subtype",
         "type_info": "Text",
         "origin": {
@@ -235,13 +241,13 @@
         }
       },
       {
-        "ordinal": 21,
+        "ordinal": 22,
         "name": "msg_count",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 22,
+        "ordinal": 23,
         "name": "last_message",
         "type_info": "Text",
         "origin": "Expression"
@@ -280,6 +286,7 @@
       true,
       false,
       true,
+      null,
       false,
       true,
       false,
@@ -289,5 +296,5 @@
       null
     ]
   },
-  "hash": "ef1b425a57a942a2bdd8232ff971b6c12021d9e60894ba6fcaa75270c4117d4f"
+  "hash": "6589d031c35ac5707d2020abfcf8228fbcc9cabb06aef05d7e9ddf70d57f3ba9"
 }
