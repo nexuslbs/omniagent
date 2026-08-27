@@ -1101,11 +1101,7 @@ Previous plan:\n{}",
                             {
                                 if let Some(ext_id) = cause.external_id {
                                     helpers::enqueue_reaction(
-                                        &cfg.ctx,
-                                        platform,
-                                        resource,
-                                        &ext_id,
-                                        ":o:",
+                                        &cfg.ctx, platform, resource, &ext_id, ":o:",
                                     )
                                     .await;
                                 }

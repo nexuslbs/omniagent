@@ -280,3 +280,69 @@ fn test_unknown_route_returns_404() {
     let resp = get("/nonexistent-route");
     assert_eq!(resp.status(), 404);
 }
+
+// ---------------------------------------------------------------------------
+// /secrets multiline round-trip (multiline values must be stored verbatim)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn test_secrets_multiline_roundtrip() {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("Failed to build HTTP client");
+
+    // PEM-shaped multiline value (the GITHUB_APP_KEY use case).
+    let name = format!("test-multiline-{}", std::process::id());
+    let value = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFA\nline2-with-padding\n-----END PRIVATE KEY-----\n";
+
+    // Create
+    let resp = client
+        .post(format!("{}/secrets", BASE))
+        .json(&serde_json::json!({ "name": name, "fieldType": "password", "value": value }))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "POST /secrets should succeed");
+    let json: serde_json::Value = resp.json().unwrap();
+    assert_eq!(
+        json["data"]["current_value"].as_str(),
+        Some(value),
+        "multiline value must be stored verbatim after create"
+    );
+
+    // Read back
+    let resp = client
+        .get(format!("{}/secrets/{}", BASE, name))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "GET /secrets/{name} should succeed");
+    let json: serde_json::Value = resp.json().unwrap();
+    assert_eq!(
+        json["data"]["current_value"].as_str(),
+        Some(value),
+        "multiline value must round-trip through GET"
+    );
+
+    // Update with another multiline value
+    let value2 =
+        "-----BEGIN PRIVATE KEY-----\nupdated-line-1\nupdated-line-2\n-----END PRIVATE KEY-----\n";
+    let resp = client
+        .put(format!("{}/secrets/{}", BASE, name))
+        .json(&serde_json::json!({ "value": value2 }))
+        .send()
+        .unwrap();
+    assert_eq!(resp.status(), 200, "PUT /secrets/{name} should succeed");
+    let json: serde_json::Value = resp.json().unwrap();
+    assert_eq!(
+        json["data"]["current_value"].as_str(),
+        Some(value2),
+        "multiline value must be stored verbatim after update"
+    );
+
+    // Cleanup
+    client
+        .delete(format!("{}/secrets/{}", BASE, name))
+        .send()
+        .unwrap();
+}
