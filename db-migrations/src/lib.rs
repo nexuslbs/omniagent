@@ -13,7 +13,91 @@
 use anyhow::Result;
 use sqlx::PgPool;
 
+/// Hosts treated as "known dev targets": the DB-write guard allows schema
+/// writes to these WITHOUT an explicit override. Everything else is treated as
+/// a production/live database and REFUSED unless OMNIAGENT_ALLOW_DB_WRITE=true.
+///
+/// NOTE: the bare compose service name `postgres` is deliberately NOT in this
+/// list - the production omni-stack uses exactly that host in its
+/// DATABASE_URL, so allowing it would let a dev binary write to prod. The dev
+/// overlay (docker-compose.dev.yml) gives the omnidev postgres the dev-only
+/// alias `omnidev-postgres` and points the dev DATABASE_URL at it.
+const KNOWN_DEV_DB_HOSTS: [&str; 5] = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "omnidev-postgres", // omnidev dev overlay network alias (docker-compose.dev.yml)
+    "omnidev-postgres-1", // omnidev postgres container name (docker exec workflows)
+];
+
+/// Guard: refuse to auto-apply declarative schema to a database that is not a
+/// known dev target, unless the operator explicitly opted in via
+/// OMNIAGENT_ALLOW_DB_WRITE=true (production deploys set it in their env).
+///
+/// WHY: omniagent migrations are declarative and auto-run at every startup
+/// (CREATE TABLE IF NOT EXISTS ..., no schema_migrations versioning), so a
+/// dev-built binary pointed at the production postgres silently creates
+/// tables in the live DB before the feature is even committed. Incident
+/// 2026-08-27/28: the kanban-tags dev workflow created kanban_tags/task_tags
+/// in the PROD omni-stack DB (172.18.0.4:5432) via `cargo sqlx prepare` +
+/// live API verification. This guard makes that fail loudly instead.
+fn guard_db_write_allowed() -> Result<()> {
+    // Explicit operator override (production deploys): always allow.
+    if std::env::var("OMNIAGENT_ALLOW_DB_WRITE").as_deref() == Ok("true") {
+        return Ok(());
+    }
+    let database_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            // No URL in the environment: the pool was supplied programmatically
+            // by the caller, nothing to guard against.
+            return Ok(());
+        }
+    };
+    let host = db_host(&database_url)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if KNOWN_DEV_DB_HOSTS.contains(&host.as_str()) {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "refusing to auto-apply schema to non-dev database (host '{}'). \
+             Dev-built omniagent/db-migrations must run against the omnidev dev \
+             postgres only (known dev hosts: {}); NEVER against the omni-stack \
+             production DB. To explicitly allow schema writes to this database \
+             (production deploy), set OMNIAGENT_ALLOW_DB_WRITE=true.",
+        if host.is_empty() { "<unknown>" } else { &host },
+        KNOWN_DEV_DB_HOSTS.join(", "),
+    ))
+}
+
+/// Extract the host portion of a postgres:// DATABASE_URL.
+/// Handles: postgres://user:pass@host:5432/db, @host/db, [::1]:5432, and the
+/// unix-socket form postgres:///dbname (returns None -> empty host).
+fn db_host(database_url: &str) -> Option<&str> {
+    let rest = database_url.split_once("://")?.1;
+    let rest = match rest.find('@') {
+        Some(idx) => &rest[idx + 1..],
+        None => rest,
+    };
+    let host_port = match rest.find('/') {
+        Some(idx) => &rest[..idx],
+        None => rest,
+    };
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
+}
+
 pub async fn run(pool: &PgPool) -> Result<()> {
+    guard_db_write_allowed()?;
     create_extensions(pool).await?;
     create_tables(pool).await?;
     create_indexes(pool).await?;
@@ -1105,4 +1189,52 @@ async fn migrate_channels_to_yml(pool: &PgPool) -> Result<()> {
         "[migration] Channels moved to config/channels.yml; channels table + FKs dropped"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{db_host, KNOWN_DEV_DB_HOSTS};
+
+    #[test]
+    fn db_host_parses_common_urls() {
+        assert_eq!(
+            db_host("postgres://omniagent:pass@postgres:5432/omniagent"),
+            Some("postgres")
+        );
+        assert_eq!(
+            db_host("postgres://omniagent:pass@172.18.0.4:5432/omniagent"),
+            Some("172.18.0.4")
+        );
+        assert_eq!(db_host("postgres://u@localhost/db"), Some("localhost"));
+        assert_eq!(db_host("postgres://u:p@[::1]:5432/db"), Some("::1"));
+        assert_eq!(db_host("postgres:///dbname"), None);
+        assert_eq!(
+            db_host("postgres://u@omnidev-postgres:5432/omniagent"),
+            Some("omnidev-postgres")
+        );
+    }
+
+    #[test]
+    fn dev_host_allowlist_is_exact() {
+        for h in [
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "omnidev-postgres",
+            "omnidev-postgres-1",
+        ] {
+            assert!(
+                KNOWN_DEV_DB_HOSTS.contains(&h),
+                "{h} should be a known dev host"
+            );
+        }
+        // The bare compose service name and prod-like hosts must NOT be dev:
+        // the production omni-stack DATABASE_URL uses host `postgres`.
+        for h in ["postgres", "172.18.0.4", "prod-db", "db.example.com", ""] {
+            assert!(
+                !KNOWN_DEV_DB_HOSTS.contains(&h),
+                "{h} must not be a known dev host"
+            );
+        }
+    }
 }

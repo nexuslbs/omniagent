@@ -665,3 +665,33 @@ cargo test --workspace --release
 ```
 
 When a migration/query changes, regenerate the offline SQLx cache (`.sqlx/`) so `SQLX_OFFLINE` builds pass. Never commit scratch files (`*.patch`, `.task*`, `.push*`, `.smoke*`, `.g4x-*`, `_run_*.py`, `apply_*.py`) - scratch helper/driver scripts belong ONLY in `OMNI_DIR/data/scripts/` or `omni-stack/data/scripts/` (both gitignored, never versioned); never create them inside the repo tree.
+
+    ## DB Write Guard — dev-built omniagent/migrations must NEVER write to the production DB (MANDATORY)
+
+    Omniagent migrations are DECLARATIVE and auto-run at every startup
+    (CREATE TABLE IF NOT EXISTS ...; there is no schema_migrations versioning).
+    A dev-built binary pointed at the production postgres will silently create
+    tables in the live DB before the feature is even committed.
+
+    INCIDENT (2026-08-27/28): the kanban-tags feature executor ran its dev workflow
+    (`cargo sqlx prepare` + live API verification) against the PRODUCTION omni-stack
+    postgres from a dev container, creating `kanban_tags`/`task_tags` (+ a 'v1.0.0'
+    tag row) in the prod DB before the feature was committed.
+
+    RULES:
+    1. **Dev verification (sqlx prepare, live API tests, migration application) runs
+       against the omnidev stack DB ONLY** (project `omnidev`, its own postgres
+       container `omnidev-postgres-1`, dev-only alias `omnidev-postgres`).
+       NEVER point a dev binary/`db-migrations` at `omni-stack-postgres-1` or the
+       omni-stack postgres IP (172.18.0.4:5432).
+    2. `db-migrations::run()` refuses to auto-apply schema to any database whose
+       host is NOT a known dev target (localhost/127.0.0.1/::1/`omnidev-postgres`)
+       unless `OMNIAGENT_ALLOW_DB_WRITE=true` is set. The bare `postgres` service
+       name is deliberately NOT a dev host (the production omni-stack uses it).
+    3. Production deploys set `OMNIAGENT_ALLOW_DB_WRITE=true` explicitly
+       (deploy.py / shared.py stable mode write it into the deploy env). Dev stacks
+       leave it unset/false.
+    4. The dev overlay (docker-compose.dev.yml) forces the dev stack onto its own
+       postgres via the `omnidev-postgres` alias — a dev binary can never resolve
+       to the omni-stack DB.
+    
