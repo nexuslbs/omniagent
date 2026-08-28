@@ -14,8 +14,15 @@ use anyhow::Result;
 use sqlx::PgPool;
 
 /// Hosts treated as "known dev targets": the DB-write guard allows schema
-/// writes to these WITHOUT an explicit override. Everything else is treated as
-/// a production/live database and REFUSED unless OMNIAGENT_ALLOW_DB_WRITE=true.
+/// writes from a DEV-BUILT binary to these hosts WITHOUT an explicit
+/// override. Everything else is treated as a production/live database and
+/// REFUSED for dev builds unless OMNIAGENT_ALLOW_DB_WRITE=true.
+///
+/// Release-built images (OMNIAGENT_BUILD_MODE=release baked at build time by
+/// the release pipeline) are NOT subject to this list: the operator
+/// explicitly chose to run that image, and the declarative schema is
+/// idempotent (CREATE TABLE IF NOT EXISTS ...), so release images
+/// auto-apply migrations on container start (no manual env vars).
 ///
 /// NOTE: the bare compose service name `postgres` is deliberately NOT in this
 /// list - the production omni-stack uses exactly that host in its
@@ -30,9 +37,36 @@ const KNOWN_DEV_DB_HOSTS: [&str; 5] = [
     "omnidev-postgres-1", // omnidev postgres container name (docker exec workflows)
 ];
 
+/// True when this binary was built in RELEASE mode: the release image build
+/// (publish pipeline) passes `--build-arg OMNIAGENT_BUILD_MODE=release` to the
+/// production Dockerfile, which bakes it as ENV. Release-built images
+/// auto-apply the idempotent declarative schema on container start against
+/// ANY database - the operator explicitly chose to run that image, so the
+/// dev-host restriction does not apply. Dev builds (Dockerfile.dev, plain
+/// `cargo run`, `docker build` without the release arg) have no marker (or
+/// OMNIAGENT_BUILD_MODE=dev) and stay fully guarded (fail closed).
+fn is_release_build() -> bool {
+    is_release_build_mode(std::env::var("OMNIAGENT_BUILD_MODE").ok().as_deref())
+}
+
+/// Pure helper (unit-testable): a build mode is "release" ONLY for the exact
+/// string "release". Anything else - absent, "dev", "development", "test",
+/// "local" - counts as a dev build (fail closed).
+fn is_release_build_mode(value: Option<&str>) -> bool {
+    matches!(value, Some("release"))
+}
+
 /// Guard: refuse to auto-apply declarative schema to a database that is not a
-/// known dev target, unless the operator explicitly opted in via
-/// OMNIAGENT_ALLOW_DB_WRITE=true (production deploys set it in their env).
+/// known dev target when the BINARY IS DEV-BUILT, unless the operator
+/// explicitly opted in via OMNIAGENT_ALLOW_DB_WRITE=true.
+///
+/// Decision table (checked in order):
+///   1. OMNIAGENT_ALLOW_DB_WRITE=true         -> allow (operator escape hatch)
+///   2. OMNIAGENT_BUILD_MODE=release (baked)  -> allow (release image
+///      auto-applies the idempotent schema on start - no manual env vars)
+///   3. DB host in KNOWN_DEV_DB_HOSTS         -> allow (dev build, dev DB)
+///   4. anything else                         -> REFUSE (dev build pointed at
+///      a non-dev / production database)
 ///
 /// WHY: omniagent migrations are declarative and auto-run at every startup
 /// (CREATE TABLE IF NOT EXISTS ..., no schema_migrations versioning), so a
@@ -41,9 +75,18 @@ const KNOWN_DEV_DB_HOSTS: [&str; 5] = [
 /// 2026-08-27/28: the kanban-tags dev workflow created kanban_tags/task_tags
 /// in the PROD omni-stack DB (172.18.0.4:5432) via `cargo sqlx prepare` +
 /// live API verification. This guard makes that fail loudly instead.
+/// Release-built images skip the dev-host check: building a release image is
+/// an explicit operator action and the schema is idempotent, so running it
+/// against the production DB on upgrade is exactly what a version upgrade
+/// must do (no manual env vars).
 fn guard_db_write_allowed() -> Result<()> {
-    // Explicit operator override (production deploys): always allow.
+    // 1. Explicit operator override (escape hatch): always allow.
     if std::env::var("OMNIAGENT_ALLOW_DB_WRITE").as_deref() == Ok("true") {
+        return Ok(());
+    }
+    // 2. Release-built image: the operator chose to run it; auto-apply the
+    //    idempotent declarative schema on container start (version upgrades).
+    if is_release_build() {
         return Ok(());
     }
     let database_url = match std::env::var("DATABASE_URL") {
@@ -61,11 +104,13 @@ fn guard_db_write_allowed() -> Result<()> {
         return Ok(());
     }
     Err(anyhow::anyhow!(
-        "refusing to auto-apply schema to non-dev database (host '{}'). \
-             Dev-built omniagent/db-migrations must run against the omnidev dev \
-             postgres only (known dev hosts: {}); NEVER against the omni-stack \
-             production DB. To explicitly allow schema writes to this database \
-             (production deploy), set OMNIAGENT_ALLOW_DB_WRITE=true.",
+        "refusing to auto-apply schema to non-dev database (host '{}'): this \
+         binary is DEV-built (no OMNIAGENT_BUILD_MODE=release marker), so \
+         db-migrations must run against the omnidev dev postgres only (known \
+         dev hosts: {}); NEVER against the omni-stack production DB. Build a \
+         RELEASE image (--build-arg OMNIAGENT_BUILD_MODE=release) to \
+         auto-apply migrations on upgrade with no env vars, or set \
+         OMNIAGENT_ALLOW_DB_WRITE=true to override for this run.",
         if host.is_empty() { "<unknown>" } else { &host },
         KNOWN_DEV_DB_HOSTS.join(", "),
     ))
@@ -1193,7 +1238,7 @@ async fn migrate_channels_to_yml(pool: &PgPool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{db_host, KNOWN_DEV_DB_HOSTS};
+    use super::{db_host, is_release_build_mode, KNOWN_DEV_DB_HOSTS};
 
     #[test]
     fn db_host_parses_common_urls() {
@@ -1234,6 +1279,26 @@ mod tests {
             assert!(
                 !KNOWN_DEV_DB_HOSTS.contains(&h),
                 "{h} must not be a known dev host"
+            );
+        }
+    }
+
+    #[test]
+    fn release_build_mode_is_exact_match() {
+        assert!(is_release_build_mode(Some("release")));
+        for v in [
+            None,
+            Some("dev"),
+            Some("development"),
+            Some("test"),
+            Some("local"),
+            Some("RELEASE"),
+            Some("Release"),
+            Some(""),
+        ] {
+            assert!(
+                !is_release_build_mode(v),
+                "{v:?} must NOT count as a release build (fail closed)"
             );
         }
     }

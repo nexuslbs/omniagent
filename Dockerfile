@@ -162,5 +162,14 @@ COPY --from=builder /build/plugins /app/plugins
 COPY api-reference.md /opt/omni/docs/api.md
 COPY api-reference.md /app/docs/api.md
 
+# Build-mode marker: release images (built by the publish pipeline with
+# `--build-arg OMNIAGENT_BUILD_MODE=release`) bake this ENV so db-migrations
+# auto-applies the idempotent declarative schema on container start against
+# the live DB - version upgrades need NO manual env vars. Default = dev
+# (fail closed): any image built WITHOUT the explicit release arg is treated
+# as a dev build and stays fully guarded against non-dev databases.
+ARG OMNIAGENT_BUILD_MODE=dev
+ENV OMNIAGENT_BUILD_MODE=${OMNIAGENT_BUILD_MODE}
+
 EXPOSE 8080
 CMD ["omniagent"]

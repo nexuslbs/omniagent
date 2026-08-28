@@ -684,13 +684,24 @@ When a migration/query changes, regenerate the offline SQLx cache (`.sqlx/`) so 
        container `omnidev-postgres-1`, dev-only alias `omnidev-postgres`).
        NEVER point a dev binary/`db-migrations` at `omni-stack-postgres-1` or the
        omni-stack postgres IP (172.18.0.4:5432).
-    2. `db-migrations::run()` refuses to auto-apply schema to any database whose
-       host is NOT a known dev target (localhost/127.0.0.1/::1/`omnidev-postgres`)
-       unless `OMNIAGENT_ALLOW_DB_WRITE=true` is set. The bare `postgres` service
-       name is deliberately NOT a dev host (the production omni-stack uses it).
-    3. Production deploys set `OMNIAGENT_ALLOW_DB_WRITE=true` explicitly
-       (deploy.py / shared.py stable mode write it into the deploy env). Dev stacks
-       leave it unset/false.
+    2. The DB-write guard distinguishes BUILD MODE, not just DB host:
+       - **Release-built images** (publish pipeline: `docker build --build-arg
+         OMNIAGENT_BUILD_MODE=release`, baked as ENV in the image) AUTO-APPLY
+         the idempotent declarative schema on container start against ANY
+         database - no manual env vars, no operator step. Version upgrades
+         just work.
+       - **Dev-built binaries/images** (Dockerfile.dev, `cargo run`,
+         `docker build` without the release arg -> default
+         `OMNIAGENT_BUILD_MODE=dev`) refuse to auto-apply schema to any
+         database whose host is NOT a known dev target
+         (localhost/127.0.0.1/::1/`omnidev-postgres`) unless
+         `OMNIAGENT_ALLOW_DB_WRITE=true` is set. The bare `postgres` service
+         name is deliberately NOT a dev host (the production omni-stack uses it).
+    3. `OMNIAGENT_ALLOW_DB_WRITE=true` remains an ESCAPE HATCH (explicit
+       operator override) but is no longer REQUIRED for production - release
+       images skip the dev-host check by construction. deploy.py / shared.py
+       harness envs may still set it for their own isolated deploy projects.
+       Dev stacks leave it unset/false.
     4. The dev overlay (docker-compose.dev.yml) forces the dev stack onto its own
        postgres via the `omnidev-postgres` alias — a dev binary can never resolve
        to the omni-stack DB.
