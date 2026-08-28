@@ -3050,7 +3050,7 @@ async fn init_channel_cursor(
 
 /// Auto-discover ALL channels in every team the bot belongs to and ensure the
 /// bot is a member of each (auto-join). This makes the plugin watch every
-/// channel of the team — including channels created after startup — so a post
+/// channel of the team, including channels created after startup, so a post
 /// like "$new <name>" in a brand-new channel is delivered without any manual
 /// step (no need to add the bot to the channel first).
 async fn discover_channels(client: &MattermostClient, bot_id: &str) -> Vec<String> {

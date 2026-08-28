@@ -666,7 +666,7 @@ cargo test --workspace --release
 
 When a migration/query changes, regenerate the offline SQLx cache (`.sqlx/`) so `SQLX_OFFLINE` builds pass. Never commit scratch files (`*.patch`, `.task*`, `.push*`, `.smoke*`, `.g4x-*`, `_run_*.py`, `apply_*.py`) - scratch helper/driver scripts belong ONLY in `OMNI_DIR/data/scripts/` or `omni-stack/data/scripts/` (both gitignored, never versioned); never create them inside the repo tree.
 
-    ## DB Write Guard — dev-built omniagent/migrations must NEVER write to the production DB (MANDATORY)
+    ## DB Write Guard: dev-built omniagent/migrations must NEVER write to the production DB (MANDATORY)
 
     Omniagent migrations are DECLARATIVE and auto-run at every startup
     (CREATE TABLE IF NOT EXISTS ...; there is no schema_migrations versioning).
@@ -703,6 +703,6 @@ When a migration/query changes, regenerate the offline SQLx cache (`.sqlx/`) so 
        harness envs may still set it for their own isolated deploy projects.
        Dev stacks leave it unset/false.
     4. The dev overlay (docker-compose.dev.yml) forces the dev stack onto its own
-       postgres via the `omnidev-postgres` alias — a dev binary can never resolve
+       postgres via the `omnidev-postgres` alias; a dev binary can never resolve
        to the omni-stack DB.
     

@@ -150,7 +150,7 @@ struct StatusDistEntry {
 #[derive(Serialize)]
 struct TokenTrendEntry {
     day: String,
-    /// Total tokens (input + output) — kept for backward compatibility.
+    /// Total tokens (input + output), kept for backward compatibility.
     tokens: i64,
     /// Input tokens served from cache (cache hit).
     input_cache_hit: i64,

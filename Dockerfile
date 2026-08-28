@@ -9,7 +9,7 @@ WORKDIR /build
 
 # ── Dependency caching ─────────────────────────────────────────────
 # Copy ALL workspace manifests + lockfile FIRST so the dep-compile layer
-# below only invalidates when Cargo.toml/Cargo.lock change — not on every
+# below only invalidates when Cargo.toml/Cargo.lock change, not on every
 # source edit. Without every member manifest present, `cargo build` fails
 # instantly and NOTHING gets cached (each build recompiles all deps).
 COPY Cargo.toml Cargo.lock* ./
@@ -31,7 +31,7 @@ COPY plugins/tools/ssh/Cargo.toml ./plugins/tools/ssh/
 COPY plugins/tools/skills/Cargo.toml ./plugins/tools/skills/
 COPY plugins/platforms/mattermost/Cargo.toml ./plugins/platforms/mattermost/
 
-# Stub every workspace member (BOTH bin and lib targets — the root
+# Stub every workspace member (BOTH bin and lib targets: the root
 # declares [lib], and plugins depend on mcp-server-util / db-migrations
 # as libs, so a main.rs-only stub fails manifest resolution and caches
 # nothing) so cargo compiles all dependencies once here. Real sources
@@ -56,19 +56,19 @@ COPY . .
 ENV SQLX_OFFLINE=true
 # Remove any stub files that survived COPY . . (lib-only crates whose
 # real source has no main.rs, bin-only crates with no lib.rs) so they
-# don't compile as phantom targets. Scoped to source dirs only — never
+# don't compile as phantom targets. Scoped to source dirs only; never
 # touch target/ (compiled deps from the stub build must be preserved).
 # Also touch every real source: COPY . . preserves host file mtimes,
 # which predate the stub-build artifacts, so cargo's mtime freshness
 # check would otherwise consider the STUB rlibs up-to-date and skip
 # recompiling the real sources (plugins then link an empty omniagent
-# lib — "unresolved import omniagent::db"). Touching forces cargo to
+# lib: "unresolved import omniagent::db"). Touching forces cargo to
 # recompile the workspace crates while still reusing cached deps.
 RUN grep -rl "//STUB" --include="*.rs" src db-migrations plugins 2>/dev/null | xargs -r rm && \
     find src db-migrations plugins -name "*.rs" -exec touch {} + && \
     echo "stub cleanup + source touch done"
 # build.py auto-discovers all workspace members from Cargo.toml and
-# builds everything — omniagent, db-migrations, and all plugin binaries
+# builds everything: omniagent, db-migrations, and all plugin binaries
 # (platforms + tools). No hardcoded package lists.
 RUN python3 scripts/build.py
 
@@ -96,7 +96,7 @@ FROM debian:trixie-slim
 #   - ca-certificates, curl, git: for cloning remote plugin repos
 #   - python3, python3-pip: for Python plugins
 #   - python3-psycopg2: for integration tests (tests.py) that read DB rows
-#     directly (workflow tests GROUP 22) — Debian package because PEP 668
+#     directly (workflow tests GROUP 22): Debian package because PEP 668
 #     blocks bare pip on python3.13
 #   - python3-yaml: integration tests read config yml files (settings.yml)
 #   - nodejs: for JavaScript/Node.js MCP servers

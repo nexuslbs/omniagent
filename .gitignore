@@ -1,5 +1,5 @@
 # omni-stack .gitignore
-# Allow everything by default — only exclude build artifacts, env files, and secrets.
+# Allow everything by default; only exclude build artifacts, env files, and secrets.
 
 # ── Build artifacts ──
 target/
@@ -35,7 +35,7 @@ Thumbs.db
 *.log
 tmp/
 
-# ── Eliminated struct — workspace root, each plugin has own Cargo.toml ──
+# Eliminated struct: workspace root, each plugin has own Cargo.toml
 /Cargo.toml
 
 # ── Data dir (runtime-only: research, generated content) ──
@@ -54,7 +54,7 @@ mcp-server-memory
 /mcp-server-*
 plugins/tools/*/mcp-server-*
 
-# smoke-test / task scratch artifacts — NEVER commit these
+# smoke-test / task scratch artifacts: NEVER commit these
 .g46-omni/
 .g46dbg/
 .smoke-*/

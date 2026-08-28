@@ -18,7 +18,7 @@ target/
 Vagrantfile
 
 # Stray committed build artifacts (binary files checked into git by
-# mistake — entrypoints resolve via PATH to /usr/local/bin/, so these
+# mistake: entrypoints resolve via PATH to /usr/local/bin/, so these
 # are never used at runtime). Excluding them shrinks the build context
 # by ~300MB and the runtime image by the same.
 mcp-server-prompt
