@@ -342,6 +342,11 @@ pub async fn manual_review_decision(
 
     // Create the scheduled re-run thread for rework/retest (same pattern as
     // engine_transition: pending thread + seq-0 cause message).
+    // Event-driven hooks: the seq-0 cause message inserted below is a real new
+    // message in a non-hook thread - fire new_message exactly once AFTER the
+    // transaction commits (GROUP 27 CI invariant: SQL ground truth == fired
+    // events; a missed fire makes the count=1 hook undercount).
+    let mut hook_fire: Option<(i64, i64)> = None;
     let new_thread_id: Option<i64> = if let Some(step) = rerun_step.as_deref() {
         let cause_msg = format!("Manual review decision: {decision}. Task: {task_id}");
         let role_cfg = workflow_role_for_step(step).and_then(|role| wf.resolve_role(role));
@@ -378,14 +383,17 @@ pub async fn manual_review_decision(
         .map_err(|e| format!("insert manual review thread: {e}"))?;
         let new_id = new_thread.id;
 
-        sql_forge!(
+        let msg_id: i64 = sql_forge!(
+            scalar i64,
             "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
-             VALUES (:tid, 'cause', :content, 0, 'cause')",
+             VALUES (:tid, 'cause', :content, 0, 'cause')
+             RETURNING id",
             ( :tid = new_id, :content = cause_msg )
         )
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| format!("insert manual review cause message: {e}"))?;
+        hook_fire = Some((new_id, msg_id));
 
         Some(new_id)
     } else {
@@ -435,6 +443,12 @@ pub async fn manual_review_decision(
     .map_err(err_str)?;
 
     tx.commit().await.map_err(err_str)?;
+
+    // Event-driven hooks: fire new_message for the re-run thread's seq-0 cause
+    // message (post-commit: the hook handler must observe the committed row).
+    if let Some((tid, mid)) = hook_fire {
+        crate::hooks::fire_new_message(tid, mid);
+    }
 
     Ok(ReviewOutcome {
         task_id: task_id.to_string(),
@@ -1136,6 +1150,11 @@ pub(crate) async fn engine_transition(
     .map_err(|e| format!("select parent error message: {e}"))?
     .map(|r| r.content)
     .filter(|c| !c.is_empty());
+    // Event-driven hooks: the seq-0 cause message inserted below is a real new
+    // message in a non-hook thread - fire new_message exactly once AFTER the
+    // transaction commits (GROUP 27 CI invariant: SQL ground truth == fired
+    // events; a missed fire makes the count=1 hook undercount).
+    let mut hook_fire: Option<(i64, i64)> = None;
     let new_thread_id: Option<i64> = if let Some(step) = rerun_step.as_deref() {
         #[derive(sqlx::FromRow)]
         struct IdRow {
@@ -1209,14 +1228,17 @@ pub(crate) async fn engine_transition(
             ),
             None => script_content,
         };
-        sql_forge!(
+        let msg_id: i64 = sql_forge!(
+            scalar i64,
             "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
-             VALUES (:tid, 'cause', :content, 0, 'kanban')",
+             VALUES (:tid, 'cause', :content, 0, 'kanban')
+             RETURNING id",
             ( :tid = new_id, :content = script_content )
         )
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| format!("insert rerun cause message: {e}"))?;
+        hook_fire = Some((new_id, msg_id));
 
         // Count the completed run of this step (R8: same transaction).
         if increment {
@@ -1272,14 +1294,17 @@ pub(crate) async fn engine_transition(
             (None, "") => "retry limit reached; review".to_string(),
             (None, c) => c.to_string(),
         };
-        sql_forge!(
+        let msg_id: i64 = sql_forge!(
+            scalar i64,
             "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
-             VALUES (:tid, 'cause', :content, 0, 'cause')",
+             VALUES (:tid, 'cause', :content, 0, 'cause')
+             RETURNING id",
             ( :tid = new_id, :content = cause )
         )
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| format!("insert review cause message: {e}"))?;
+        hook_fire = Some((new_id, msg_id));
 
         // NOTE: the review execution counter is NOT incremented here - the
         // reviewer has not run yet; it increments when a review thread runs.
@@ -1346,6 +1371,12 @@ pub(crate) async fn engine_transition(
     .map_err(|e| format!("insert kanban history: {e}"))?;
 
     tx.commit().await.map_err(|e| format!("commit: {e}"))?;
+
+    // Event-driven hooks: fire new_message for the re-run/review thread's
+    // seq-0 cause message (post-commit: hook handler sees the committed row).
+    if let Some((tid, mid)) = hook_fire {
+        crate::hooks::fire_new_message(tid, mid);
+    }
 
     // WS-5: retry inheritance - the re-run/review thread starts with the
     // interrupted parent's durable notes (best-effort file copy).

@@ -763,17 +763,23 @@ async fn create_review_thread(
     .map_err(|e| format!("create review thread: {e}"))?;
     let new_id = new_thread.id;
 
-    sql_forge!(
+    let msg_id: i64 = sql_forge!(
+        scalar i64,
         "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
-         VALUES (:new_id, 'cause', :cause_msg, 0, 'cause')",
+         VALUES (:new_id, 'cause', :cause_msg, 0, 'cause')
+         RETURNING id",
         (
             :new_id = new_id,
             :cause_msg = cause_msg,
         )
     )
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
+    // Event-driven hooks: the seq-0 cause message is a real new message in a
+    // non-hook thread - fire new_message exactly once so hook counters see
+    // every message (GROUP 27 CI invariant: SQL ground truth == fired events).
+    crate::hooks::fire_new_message(new_id, msg_id);
 
     Ok(StepThreadOutcome::Pending { thread_id: new_id })
 }
@@ -855,17 +861,23 @@ async fn create_testing_thread(
     .map_err(|e| format!("create testing thread: {e}"))?;
     let new_id = new_thread.id;
 
-    sql_forge!(
+    let msg_id: i64 = sql_forge!(
+        scalar i64,
         "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
-         VALUES (:new_id, 'cause', :cause_msg, 0, 'cause')",
+         VALUES (:new_id, 'cause', :cause_msg, 0, 'cause')
+         RETURNING id",
         (
             :new_id = new_id,
             :cause_msg = cause_msg,
         )
     )
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
+    // Event-driven hooks: the seq-0 cause message is a real new message in a
+    // non-hook thread - fire new_message exactly once so hook counters see
+    // every message (GROUP 27 CI invariant: SQL ground truth == fired events).
+    crate::hooks::fire_new_message(new_id, msg_id);
 
     Ok(StepThreadOutcome::Pending { thread_id: new_id })
 }

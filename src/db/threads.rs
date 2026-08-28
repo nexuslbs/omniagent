@@ -1527,7 +1527,8 @@ async fn fail_kanban_thread_no_board(
         thread.id,
         chrono::Utc::now().timestamp()
     );
-    sql_forge!(
+    let msg_id: i64 = sql_forge!(
+        scalar i64,
         r#"
         INSERT INTO messages
             (thread_id, role, content, thread_sequence, external_id, metadata,
@@ -1535,6 +1536,7 @@ async fn fail_kanban_thread_no_board(
         VALUES
             (:tid, 'system', :content, 1, :external_id,
              :metadata::jsonb, 'error', :subtype, 0, 0, '{}'::jsonb)
+        RETURNING id
         "#,
         (
             :tid = thread.id,
@@ -1544,8 +1546,11 @@ async fn fail_kanban_thread_no_board(
             :subtype = format!("board:{}", task.id),
         )
     )
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
+    // Event-driven hooks: validation errors are real messages in non-hook
+    // threads - fire new_message exactly once (GROUP 27 CI invariant).
+    crate::hooks::fire_new_message(thread.id, msg_id);
 
     // Terminal write through the single choke point (status='failed',
     // terminal=true, ended_at, iterations) + hooks.
