@@ -765,12 +765,13 @@ async fn create_review_thread(
 
     let msg_id: i64 = sql_forge!(
         scalar i64,
-        "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
-         VALUES (:new_id, 'cause', :cause_msg, 0, 'cause')
+        "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type, msg_subtype)
+         VALUES (:new_id, 'cause', :cause_msg, 0, 'kanban', NULLIF(:task_id, '')::text)
          RETURNING id",
         (
             :new_id = new_id,
             :cause_msg = cause_msg,
+            :task_id = task_id,
         )
     )
     .fetch_one(pool)
@@ -863,12 +864,13 @@ async fn create_testing_thread(
 
     let msg_id: i64 = sql_forge!(
         scalar i64,
-        "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
-         VALUES (:new_id, 'cause', :cause_msg, 0, 'cause')
+        "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type, msg_subtype)
+         VALUES (:new_id, 'cause', :cause_msg, 0, 'kanban', NULLIF(:task_id, '')::text)
          RETURNING id",
         (
             :new_id = new_id,
             :cause_msg = cause_msg,
+            :task_id = task_id,
         )
     )
     .fetch_one(pool)
