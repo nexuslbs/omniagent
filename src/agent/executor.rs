@@ -8,6 +8,16 @@ use crate::db::types::{Message, Thread};
 use crate::error::AppResult;
 use crate::llm::{LLMClient, LLMConfig, ProviderId};
 
+/// Aborts the periodic typing-indicator task when dropped, so the "typing"
+/// signal stops as soon as thread processing ends (every exit path).
+struct TypingGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for TypingGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub async fn process_thread(
     cfg: &AgentContext,
     thread: &Thread,
@@ -186,12 +196,35 @@ pub async fn process_thread(
         }
     }
 
-    if let Some(ref platform_name) = channel.platform {
+    // Start a periodic typing indicator while this thread is being processed.
+    // Mattermost "is typing..." and Telegram sendChatAction both expire after
+    // a few seconds, so the signal is repeated every 5s until processing
+    // finishes (the guard aborts the task on every exit path).
+    let _typing_guard = if let Some(ref platform_name) = channel.platform {
         if let Some(ref resource) = channel.resource_identifier {
             let parent_id = cause_msg.external_id.clone();
-            helpers::enqueue_typing(&cfg.ctx, platform_name, resource, parent_id).await;
+            let typing_ctx = cfg.ctx.clone();
+            let typing_platform = platform_name.clone();
+            let typing_resource = resource.clone();
+            let typing_handle = tokio::spawn(async move {
+                loop {
+                    helpers::enqueue_typing(
+                        &typing_ctx,
+                        &typing_platform,
+                        &typing_resource,
+                        parent_id.clone(),
+                    )
+                    .await;
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            });
+            Some(TypingGuard(typing_handle))
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
     // Tool names surfaced to the prompt must be the SAME set the
     // function-calling schema exposes: the profile's allowed tools, filtered
