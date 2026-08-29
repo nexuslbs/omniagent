@@ -237,7 +237,40 @@ async fn create_action_thread(
         None => title.to_string(),
     };
     let ts = chrono::Utc::now().timestamp();
-    let (thread, _cause_msg) = queries::create_thread_with_cause(
+    // Idempotency guard: the dispatcher action hook and
+    // route_step_completion's step-thread creation can both run the same
+    // action-mode step concurrently for one task (GROUP 40-C hybrid race:
+    // the loser hit uq_messages_seq0_external_id and the caller fell back
+    // to a pending AGENT thread). If an action thread for this task+step
+    // already exists (terminal), reuse it instead of creating a duplicate.
+    #[derive(sqlx::FromRow)]
+    struct ExistingActionRow {
+        id: i64,
+        status: String,
+    }
+    let existing: Option<ExistingActionRow> = sql_forge!(
+        ExistingActionRow,
+        r#"SELECT t.id, t.status FROM threads t
+           JOIN messages m ON m.thread_id = t.id AND m.thread_sequence = 0
+           WHERE t.task_id = :task_id AND t.workflow_step = :step
+             AND m.external_id LIKE :prefix
+             AND t.status IN ('system', 'failed')
+           ORDER BY t.id LIMIT 1"#,
+        ( :task_id = task_id, :step = step, :prefix = format!("kanban-action:{}:{}:%", task_id, step) )
+    )
+    .fetch_optional(pool)
+    .await?;
+    if let Some(existing) = existing {
+        info!(
+            "[kanban-action] Reusing existing action thread {} for task {} step '{}'",
+            existing.id, task_id, step
+        );
+        return Ok(ActionStepOutcome {
+            thread_id: existing.id,
+            errored: existing.status == "failed",
+        });
+    }
+    let (thread, _cause_msg) = match queries::create_thread_with_cause(
         pool,
         data_dir,
         "system",
@@ -268,7 +301,46 @@ async fn create_action_thread(
             hook_caused: false,
         },
     )
-    .await?;
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            // Concurrent duplicate creation (same task+step within the same
+            // second): another path already inserted the seq-0 kanban-action
+            // message. Reuse the existing thread and drop the orphan 'created'
+            // row we may have inserted before the message insert failed.
+            let existing: Option<ExistingActionRow> = sql_forge!(
+                ExistingActionRow,
+                r#"SELECT t.id, t.status FROM threads t
+                   JOIN messages m ON m.thread_id = t.id AND m.thread_sequence = 0
+                   WHERE t.task_id = :task_id AND t.workflow_step = :step
+                     AND m.external_id LIKE :prefix
+                   ORDER BY t.id LIMIT 1"#,
+                ( :task_id = task_id, :step = step, :prefix = format!("kanban-action:{}:{}:%", task_id, step) )
+            )
+            .fetch_optional(pool)
+            .await?;
+            if let Some(existing) = existing {
+                let _ = sql_forge!(
+                    "DELETE FROM threads WHERE task_id = :task_id AND workflow_step = :step
+                     AND status = 'created' AND id <> :winner_id
+                     AND NOT EXISTS (SELECT 1 FROM messages WHERE thread_id = threads.id)",
+                    ( :task_id = task_id, :step = step, :winner_id = existing.id )
+                )
+                .execute(pool)
+                .await;
+                info!(
+                    "[kanban-action] Reusing existing action thread {} for task {} step '{}' (duplicate)",
+                    existing.id, task_id, step
+                );
+                return Ok(ActionStepOutcome {
+                    thread_id: existing.id,
+                    errored: existing.status == "failed",
+                });
+            }
+            return Err(e);
+        }
+    };
 
     // Persist the tool result as a seq-1 message (role='agent',
     // msg_type='tool-result' with metadata.is_error) so the action outcome is
