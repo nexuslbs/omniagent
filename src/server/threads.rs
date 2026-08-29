@@ -14,6 +14,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sql_forge::sql_forge;
 use sqlx::FromRow;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::error;
 
@@ -28,6 +29,8 @@ pub fn threads_router() -> Router<Arc<AppState>> {
         .route("/threads", get(list_threads_handler))
         .route("/threads/filters", get(thread_filters_handler))
         .route("/threads/{id}/subtasks", get(thread_subtasks_handler))
+        .route("/listen/thread/{id}", get(listen_thread_handler))
+        .route("/listen/channel/{channel_id}", get(listen_channel_handler))
 }
 
 // ---------------------------------------------------------------------------
@@ -391,4 +394,255 @@ async fn thread_subtasks_handler(
     };
 
     ok_json(subtasks)
+}
+
+// ---------------------------------------------------------------------------
+// P3-2: lightweight status-change listener (no thread-to-thread coupling)
+// ---------------------------------------------------------------------------
+// These endpoints are PASSIVE watches: they poll the threads table (a cheap
+// single-row SELECT every ~250ms) and return as soon as the watched condition
+// changes or the timeout elapses. A thread calling them never blocks or
+// depends on another thread's execution - it simply observes status
+// transitions. There is NO cross-channel coupling either: a channel listener
+// only ever reads rows of the requested channel.
+
+#[derive(Debug, Deserialize)]
+pub struct ListenThreadParams {
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListenThreadResult {
+    pub thread_id: i64,
+    pub status: Option<String>,
+    pub terminal: bool,
+    pub waited_ms: u64,
+    pub timed_out: bool,
+}
+
+#[derive(FromRow)]
+struct ListenRow {
+    status: Option<String>,
+    terminal: bool,
+}
+
+/// GET /listen/thread/{id}?timeout_ms=60000
+/// Returns as soon as the thread reaches a terminal status (finished /
+/// skipped / failed / cancelled / merged / ...), or after the timeout with
+/// the current non-terminal status. The wait never extends far beyond the
+/// actual status change.
+async fn listen_thread_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Query(params): Query<ListenThreadParams>,
+) -> impl IntoResponse {
+    let timeout_ms = params.timeout_ms.unwrap_or(60_000).min(300_000);
+    let started = std::time::Instant::now();
+    loop {
+        let row = match sql_forge!(
+            ListenRow,
+            "SELECT status, terminal FROM threads WHERE id = :id",
+            ( :id = id )
+        )
+        .fetch_optional(&state.pool)
+        .await
+        {
+            Ok(row) => row,
+            Err(e) => {
+                error!("[listen/thread/{id}] query failed: {:?}", e);
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to check thread status",
+                );
+            }
+        };
+        let Some(r) = row else {
+            return err_json(StatusCode::NOT_FOUND, &format!("Thread {} not found", id));
+        };
+        if r.terminal {
+            return ok_json(ListenThreadResult {
+                thread_id: id,
+                status: r.status,
+                terminal: true,
+                waited_ms: started.elapsed().as_millis() as u64,
+                timed_out: false,
+            });
+        }
+        if started.elapsed().as_millis() as u64 >= timeout_ms {
+            return ok_json(ListenThreadResult {
+                thread_id: id,
+                status: r.status,
+                terminal: false,
+                waited_ms: started.elapsed().as_millis() as u64,
+                timed_out: true,
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListenChannelParams {
+    pub timeout_ms: Option<u64>,
+    /// Only watch threads with id > since_thread_id.
+    pub since_thread_id: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListenChannelResult {
+    pub channel_id: String,
+    /// "new_thread" | "thread_finished" | "timeout"
+    pub event: String,
+    pub thread_id: Option<i64>,
+    pub status: Option<String>,
+    pub waited_ms: u64,
+    pub timed_out: bool,
+}
+
+#[derive(FromRow)]
+struct ChannelActiveRow {
+    id: i64,
+    status: Option<String>,
+    terminal: bool,
+}
+
+#[derive(FromRow)]
+struct ChannelMaxRow {
+    max_id: Option<i64>,
+}
+
+/// GET /listen/channel/{channel_id}?timeout_ms=60000&since_thread_id=N
+/// Returns when (a) a NEW thread with id > since_thread_id starts in the
+/// channel, or (b) a thread that was active at watch time becomes terminal.
+/// Pure observation of the requested channel only - no cross-channel side
+/// effects, no coupling.
+async fn listen_channel_handler(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+    Query(params): Query<ListenChannelParams>,
+) -> impl IntoResponse {
+    let timeout_ms = params.timeout_ms.unwrap_or(60_000).min(300_000);
+    let since = params.since_thread_id.unwrap_or(0);
+    let started = std::time::Instant::now();
+
+    // Snapshot the max thread id and the set of active (non-terminal)
+    // threads at watch start; only those count as "new"/"finished" events.
+    let base_max: i64 = match sql_forge!(
+        ChannelMaxRow,
+        "SELECT MAX(id) AS max_id FROM threads WHERE channel_id = :cid AND id > :since",
+        ( :cid = &channel_id, :since = since )
+    )
+    .fetch_optional(&state.pool)
+    .await
+    {
+        Ok(Some(r)) => r.max_id.unwrap_or(since),
+        Ok(None) => since,
+        Err(e) => {
+            error!(
+                "[listen/channel/{}] snapshot query failed: {:?}",
+                channel_id, e
+            );
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to snapshot channel state",
+            );
+        }
+    };
+    let mut active: HashSet<i64> = match sql_forge!(
+        ChannelActiveRow,
+        "SELECT id, status, terminal FROM threads WHERE channel_id = :cid AND id > :since AND NOT terminal",
+        ( :cid = &channel_id, :since = since )
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows.into_iter().map(|r| r.id).collect(),
+        Err(e) => {
+            error!("[listen/channel/{}] active query failed: {:?}", channel_id, e);
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to list active threads",
+            );
+        }
+    };
+
+    loop {
+        // (a) new thread started?
+        let max_now: Option<i64> = match sql_forge!(
+            ChannelMaxRow,
+            "SELECT MAX(id) AS max_id FROM threads WHERE channel_id = :cid AND id > :since",
+            ( :cid = &channel_id, :since = since )
+        )
+        .fetch_optional(&state.pool)
+        .await
+        {
+            Ok(r) => r.and_then(|x| x.max_id),
+            Err(e) => {
+                error!("[listen/channel/{}] max query failed: {:?}", channel_id, e);
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to check channel threads",
+                );
+            }
+        };
+        if let Some(m) = max_now {
+            if m > base_max {
+                return ok_json(ListenChannelResult {
+                    channel_id: channel_id.clone(),
+                    event: "new_thread".to_string(),
+                    thread_id: Some(m),
+                    status: None,
+                    waited_ms: started.elapsed().as_millis() as u64,
+                    timed_out: false,
+                });
+            }
+        }
+        // (b) any watched active thread finished?
+        if !active.is_empty() {
+            let rows: Vec<ChannelActiveRow> = match sql_forge!(
+                ChannelActiveRow,
+                "SELECT id, status, terminal FROM threads WHERE channel_id = :cid AND id > :since",
+                ( :cid = &channel_id, :since = since )
+            )
+            .fetch_all(&state.pool)
+            .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    error!(
+                        "[listen/channel/{}] finish query failed: {:?}",
+                        channel_id, e
+                    );
+                    return err_json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Failed to check thread finishes",
+                    );
+                }
+            };
+            for r in rows {
+                if active.contains(&r.id) && r.terminal {
+                    active.remove(&r.id);
+                    return ok_json(ListenChannelResult {
+                        channel_id: channel_id.clone(),
+                        event: "thread_finished".to_string(),
+                        thread_id: Some(r.id),
+                        status: r.status,
+                        waited_ms: started.elapsed().as_millis() as u64,
+                        timed_out: false,
+                    });
+                }
+            }
+        }
+        if started.elapsed().as_millis() as u64 >= timeout_ms {
+            return ok_json(ListenChannelResult {
+                channel_id: channel_id.clone(),
+                event: "timeout".to_string(),
+                thread_id: None,
+                status: None,
+                waited_ms: started.elapsed().as_millis() as u64,
+                timed_out: true,
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
 }

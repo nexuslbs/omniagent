@@ -277,22 +277,42 @@ async fn get_thread_messages(pool: &PgPool, thread_id: i64, limit: i64) -> Resul
 }
 
 async fn get_latest_summary(pool: &PgPool, channel_id: &str) -> Result<Option<SummaryRow>> {
+    // Channel-rename alias resolution (P2-2): a thread created under an old
+    // channel slug (e.g. mm-kanban, renamed to omnidev on 2026-08-29) must
+    // still find summaries saved under the current channel name, and vice
+    // versa. Without this, pre-rename summaries are never injected into
+    // post-rename threads. c1 is the extra alias key (empty = none).
+    let (c0, c1) = channel_summary_keys(channel_id);
     let row = sql_forge!(
         SummaryRow,
         r#"
         SELECT id, channel_id, next_thread_id, content
         FROM summaries
-        WHERE channel_id = :channel_id
+        WHERE channel_id = :c0 OR (:c1 <> '' AND channel_id = :c1)
         ORDER BY id DESC
         LIMIT 1
         "#,
-        ( :channel_id = &channel_id )
+        ( :c0 = &c0, :c1 = &c1 )
     )
     .fetch_optional(pool)
     .await
     .context("Failed to fetch latest summary")?;
 
     Ok(row)
+}
+
+/// Channel slug -> summary lookup keys: the channel itself plus any known
+/// pre-rename aliases. Channel renames keep historical summaries under the
+/// old slug while new threads carry the new one. Extend this map when a
+/// channel is renamed again.
+fn channel_summary_keys(channel_id: &str) -> (String, String) {
+    let c0 = channel_id.to_string();
+    let c1 = match channel_id {
+        "mm-kanban" => "omnidev",
+        "omnidev" => "mm-kanban",
+        _ => "",
+    };
+    (c0, c1.to_string())
 }
 
 async fn get_threads_since(

@@ -1321,6 +1321,7 @@ dependencies = [
  "glob",
  "mcp-server-util",
  "parking_lot",
+ "regex",
  "serde_json",
  "tokio",
  "tracing",

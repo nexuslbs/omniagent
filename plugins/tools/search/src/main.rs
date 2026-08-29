@@ -877,8 +877,8 @@ async fn count_retrieval_events(pool: &PgPool, hours: i64, profile_filter: &str)
         FROM messages m
         JOIN threads t ON t.id = m.thread_id
         WHERE m.role = 'agent'
-          AND m.msg_type = 'tool_call'
-          AND m.msg_subtype IN ('search_messages', 'search_wiki')
+          AND m.msg_type = 'tool'
+          AND (m.content LIKE 'search_messages:%' OR m.content LIKE 'search_wiki:%')
           AND m.created_at >= :cutoff
           AND (:profile_filter = '' OR t.profile = :profile_filter)
         "#,

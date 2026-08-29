@@ -1,7 +1,8 @@
 //! mcp-server-filesystem: standalone MCP server for local file operations.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
-//! Tools: filesystem_read, filesystem_write, filesystem_list, filesystem_search, filesystem_info
+//! Tools: filesystem_read, filesystem_write, filesystem_list, filesystem_search, filesystem_info,
+//! filesystem_grep (recursive regex content search)
 //!
 //! SANDBOX: only WRITE operations are confined to the configured
 //! `workspace_dir` (default `/opt/workspace`) and its subdirectories.
@@ -13,6 +14,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use mcp_server_util::*;
 use parking_lot::Mutex;
+use regex::RegexBuilder;
 use serde_json::Value;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -390,6 +392,121 @@ fn handle_info(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
 }
 
 // ---------------------------------------------------------------------------
+// Tool: filesystem_grep (recursive regex content search)
+// ---------------------------------------------------------------------------
+
+fn handle_grep(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
+    let pattern = args["pattern"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing 'pattern' argument"))?;
+    // Default the base to the workspace root, but searches may point
+    // anywhere - searching is a read.
+    let base_path = args["path"].as_str().unwrap_or(workspace_dir);
+    let safe_base = resolve_read_path(base_path, workspace_dir);
+    let glob_filter = args["glob"].as_str().map(|s| s.to_string());
+    let case_sensitive = args["case_sensitive"].as_bool().unwrap_or(false);
+    let max_results = args["max_results"].as_u64().unwrap_or(200).min(1000) as usize;
+
+    // Case-insensitive by default (like grep -i). The regex itself carries
+    // the flag - never lowercase the input line, which would corrupt
+    // character classes and Unicode.
+    let re = RegexBuilder::new(pattern)
+        .case_insensitive(!case_sensitive)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Invalid regex pattern '{}': {}", pattern, e))?;
+
+    // Iterative recursive walk (no recursion depth issues). Skips .git,
+    // target and node_modules to avoid noise; skips binary files (NUL sniff
+    // on the first 8 KiB). Bounded by max_results.
+    let mut results: Vec<String> = Vec::new();
+    let mut files_seen: usize = 0;
+    let mut stack: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from(&safe_base)];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if results.len() >= max_results {
+                break;
+            }
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name == ".git" || name == "target" || name == "node_modules" {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            if !ft.is_file() {
+                continue;
+            }
+            // Optional file-name filter (glob matched against the full path).
+            if let Some(g) = &glob_filter {
+                let ok = glob::Pattern::new(g)
+                    .map(|p| p.matches_path(&path))
+                    .unwrap_or(false);
+                if !ok {
+                    continue;
+                }
+            }
+            // Skip binary files: sniff for a NUL byte in the first 8 KiB.
+            let Ok(bytes) = fs::read(&path) else { continue };
+            let head = &bytes[..bytes.len().min(8192)];
+            if head.contains(&0) {
+                continue;
+            }
+            let Ok(content) = String::from_utf8(bytes) else {
+                continue;
+            };
+            files_seen += 1;
+            for (i, line) in content.lines().enumerate() {
+                if results.len() >= max_results {
+                    break;
+                }
+                if re.is_match(line) {
+                    let line_num = i + 1;
+                    let display = if line.chars().count() > 200 {
+                        let trunc = line
+                            .char_indices()
+                            .nth(200)
+                            .map(|(idx, _)| idx)
+                            .unwrap_or(line.len());
+                        format!("{}...", &line[..trunc])
+                    } else {
+                        line.to_string()
+                    };
+                    results.push(format!("{}:{}:{}", path.display(), line_num, display));
+                }
+            }
+        }
+    }
+
+    let output = if results.is_empty() {
+        format!(
+            "No matches for pattern '{}' in {} ({} files checked)",
+            pattern, safe_base, files_seen
+        )
+    } else {
+        let mut out = format!(
+            "Found {} match(es) for pattern '{}' in {} ({} files checked):\n",
+            results.len(),
+            pattern,
+            safe_base,
+            files_seen
+        );
+        if results.len() >= max_results {
+            out.push_str(&format!("[... capped at {} results ...]\n", max_results));
+        }
+        out.push_str(&results.join("\n"));
+        out
+    };
+
+    Ok((output, false))
+}
+
+// ---------------------------------------------------------------------------
 // Plugin config - received via MCP configure message, not from env vars
 // ---------------------------------------------------------------------------
 
@@ -495,6 +612,13 @@ async fn main() -> Result<()> {
         let cfg = c5.lock();
         let wd = resolve_workspace_dir(&cfg.workspace_dir);
         handle_info(args, &wd)
+    });
+
+    let c6 = config.clone();
+    let grep_handler = soft_error(move |args: Value| {
+        let cfg = c6.lock();
+        let wd = resolve_workspace_dir(&cfg.workspace_dir);
+        handle_grep(args, &wd)
     });
 
     let tools = vec![
@@ -619,6 +743,49 @@ async fn main() -> Result<()> {
                 }),
             },
             handler: info_handler,
+        },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "filesystem_grep".to_string(),
+                description:
+                    "SEARCH FILE CONTENTS recursively for lines matching a REGEX pattern (like grep -rn). \
+                    Use this to find where a symbol, string or pattern appears in code or configs. \
+                    SEARCHES ARE UNRESTRICTED: any base path can be searched (defaults to the workspace root; \
+                    only WRITES are confined to the workspace dir). \
+                    Returns 'path:line: content' matches, capped at max_results (default 200). \
+                    Prefer this over filesystem_search (names only) and NEVER use code-exec for grep: \
+                    discovery belongs in filesystem_search/filesystem_grep, code-exec is for computation."
+                        .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Regular expression to match against file contents (e.g. 'update_thread_progress', 'fn handle_', 'TODO|FIXME')"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Base directory to search recursively (default: workspace root)"
+                        },
+                        "glob": {
+                            "type": "string",
+                            "description": "Optional file-name filter (glob, e.g. '*.rs', '*.md')"
+                        },
+                        "case_sensitive": {
+                            "type": "boolean",
+                            "description": "Match case-sensitively (default false)",
+                            "default": false
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Max matches to return (default 200, max 1000)",
+                            "default": 200
+                        }
+                    },
+                    "required": ["pattern"]
+                }),
+            },
+            handler: grep_handler,
         },
     ];
 
@@ -843,6 +1010,58 @@ mod tests {
         .expect("info outside workspace must succeed");
         assert!(!is_error2, "msg: {}", msg2);
         assert!(msg2.contains("Type: file"));
+    }
+
+    #[test]
+    fn grep_matches_lines_recursively() {
+        let dir = std::env::temp_dir().join("fs-grep-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("a.rs"), "fn alpha() {\n    let x = 1;\n}\n").unwrap();
+        fs::write(dir.join("sub/b.txt"), "hello world\nalpha beta\n").unwrap();
+        fs::write(dir.join("sub/c.md"), "nothing here\n").unwrap();
+        let (msg, is_error) = handle_grep(
+            serde_json::json!({
+                "pattern": "alpha",
+                "path": dir.to_string_lossy(),
+                "glob": "*.rs",
+            }),
+            "/opt/workspace",
+        )
+        .expect("grep must succeed");
+        assert!(!is_error, "msg: {msg}");
+        assert!(msg.contains("a.rs:1:fn alpha()"), "msg: {msg}");
+        assert!(
+            !msg.contains("b.txt"),
+            "glob filter must exclude b.txt: {msg}"
+        );
+        let (msg2, _) = handle_grep(
+            serde_json::json!({
+                "pattern": "ALPHA",
+                "path": dir.to_string_lossy(),
+            }),
+            "/opt/workspace",
+        )
+        .expect("case-insensitive grep must succeed");
+        assert!(
+            msg2.contains("alpha beta"),
+            "case-insensitive match: {msg2}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grep_invalid_regex_is_soft_error() {
+        let dir = std::env::temp_dir().join("fs-grep-bad-regex");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let err = handle_grep(
+            serde_json::json!({"pattern": "[", "path": dir.to_string_lossy()}),
+            "/opt/workspace",
+        )
+        .expect_err("invalid regex must be rejected by the handler");
+        assert!(err.to_string().contains("Invalid regex"), "err: {err}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
