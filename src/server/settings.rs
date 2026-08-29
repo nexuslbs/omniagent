@@ -150,7 +150,7 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
     let path = settings_path(data_dir);
 
     // ── Section groupings for the nested YAML output ──
-    let section_order = ["general", "execution", "prompt", "memory", "channels"];
+    let section_order = ["general", "execution", "prompt", "channels"];
     let sections: std::collections::HashMap<&str, Vec<&str>> = [
         (
             "general",
@@ -167,8 +167,6 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "kanban_dispatcher_interval",
                 "temperature",
                 "tokenizer_encoding",
-                "sub_prompt_max_chars",
-                "sub_prompt_iteration_percent",
             ],
         ),
         (
@@ -189,26 +187,9 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
                 "prompt_log_level",
                 "prompt_tool_excerpt_chars",
                 "prompt_total_excerpt_cap",
-            ],
-        ),
-        (
-            "memory",
-            vec![
+                "sub_prompt_max_chars",
+                "sub_prompt_iteration_percent",
                 "memory_max_chars",
-                "messages_vectorization_api_key",
-                "messages_vectorization_api_model",
-                "messages_vectorization_api_url",
-                "messages_vectorization_interval",
-                "messages_vectorization_method",
-                "messages_vectorization_protocol",
-                "vectorize_messages",
-                "vectorize_wiki",
-                "wiki_vectorization_api_key",
-                "wiki_vectorization_api_model",
-                "wiki_vectorization_api_url",
-                "wiki_vectorization_interval",
-                "wiki_vectorization_method",
-                "wiki_vectorization_protocol",
             ],
         ),
         (
@@ -578,7 +559,7 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
         (
             "default_profile".into(),
             SettingMeta {
-                field_type: "text".into(),
+                field_type: "select".into(),
                 description: "Default profile name used when no profile is specified for a channel".into(),
                 options: None,
                 readonly: false,
@@ -608,11 +589,6 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             settings: vec![],
         },
         SettingCategory {
-            name: "memory".into(),
-            label: "Memory & Retention".into(),
-            settings: vec![],
-        },
-        SettingCategory {
             name: "system".into(),
             label: "System".into(),
             settings: vec![],
@@ -627,7 +603,10 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "prompt_compact_messages_tool"
             | "prompt_log_level"
             | "prompt_token_budget_hard"
-            | "prompt_token_budget_soft" => "prompt",
+            | "prompt_token_budget_soft"
+            | "memory_max_chars"
+            | "sub_prompt_max_chars"
+            | "sub_prompt_iteration_percent" => "prompt",
             // execution category
             "max_iterations_no_plan"
             | "max_iterations_plan"
@@ -637,10 +616,7 @@ fn categorize_settings(defs: Vec<(String, String, SettingMeta)>) -> Vec<SettingC
             | "temperature"
             | "tool_bg_secs" => "execution",
             // general category (default; matches state_block_update_interval)
-            "kanban_dispatcher_interval" => "general",
-            "sub_prompt_max_chars" | "sub_prompt_iteration_percent" => "general",
-            // memory category
-            "delete_after_days" | "memory_max_chars" => "memory",
+            "kanban_dispatcher_interval" | "delete_after_days" => "general",
             // system : bootstrap from env
             "host" | "port" | "database_url" | "omni_dir" => "system",
             // everything else → general
@@ -721,6 +697,25 @@ fn enrich_channel_options(meta: &mut SettingMeta, data_dir: &str) {
         channels
             .into_iter()
             .map(|(name, _)| SettingOption {
+                id: name.clone(),
+                name,
+            })
+            .collect(),
+    );
+}
+
+/// Enrich default_profile setting options with the profiles declared in
+/// profiles.yml (profile names are the stable identifiers used everywhere).
+fn enrich_profile_options(meta: &mut SettingMeta, data_dir: &str) {
+    let registry = crate::profile::ProfileRegistry::new(data_dir);
+    let names = registry.list_names();
+    if names.is_empty() {
+        return; // Fall back to no options
+    }
+    meta.options = Some(
+        names
+            .into_iter()
+            .map(|name| SettingOption {
                 id: name.clone(),
                 name,
             })
@@ -816,6 +811,14 @@ pub async fn get_settings_handler(State(state): State<Arc<AppState>>) -> Json<Se
         {
             enrich_channel_options(meta, &state.data_dir);
         }
+    }
+
+    // Enrich default_profile options with the profiles declared in profiles.yml
+    if let Some((_, _, ref mut meta)) = defs
+        .iter_mut()
+        .find(|(name, _, _)| name == "default_profile")
+    {
+        enrich_profile_options(meta, &state.data_dir);
     }
 
     // Enrich prompt_generate_tool and prompt_compact_messages_tool with available MCP tools
@@ -1032,16 +1035,19 @@ mod tests {
     }
 
     #[test]
-    fn sub_prompt_settings_are_writable_numbers_in_general() {
-        // Both sub-prompt settings must be exposed by the settings API:
-        // defined with a number type + documented defaults, writable via
-        // PUT /settings, and categorized under "general".
+    fn sub_prompt_settings_are_writable_numbers_in_prompt() {
+        // The sub-prompt + memory settings must be exposed by the settings
+        // API: number type + documented defaults, writable via PUT /settings,
+        // and categorized under "prompt" (delete_after_days under "general").
+        // The old "memory" (Memory & Retention) category must be gone.
         let defs = get_all_setting_definitions();
         let by_name: std::collections::HashMap<&str, &SettingMeta> =
             defs.iter().map(|(n, m)| (n.as_str(), m)).collect();
         for (name, expected_default) in [
             ("sub_prompt_max_chars", "4000"),
             ("sub_prompt_iteration_percent", "50"),
+            ("memory_max_chars", "5000"),
+            ("delete_after_days", "30"),
         ] {
             let meta = by_name
                 .get(name)
@@ -1052,31 +1058,74 @@ mod tests {
         }
 
         let keys = writable_setting_keys();
-        assert!(keys.contains("sub_prompt_max_chars"), "max_chars writable");
-        assert!(
-            keys.contains("sub_prompt_iteration_percent"),
-            "percent writable"
-        );
+        for name in [
+            "sub_prompt_max_chars",
+            "sub_prompt_iteration_percent",
+            "memory_max_chars",
+            "delete_after_days",
+        ] {
+            assert!(keys.contains(name), "{name} must be writable");
+        }
 
         let defs_with_value: Vec<(String, String, SettingMeta)> = defs
             .iter()
-            .filter(|(n, _)| n == "sub_prompt_max_chars" || n == "sub_prompt_iteration_percent")
+            .filter(|(n, _)| {
+                matches!(
+                    n.as_str(),
+                    "sub_prompt_max_chars"
+                        | "sub_prompt_iteration_percent"
+                        | "memory_max_chars"
+                        | "delete_after_days"
+                )
+            })
             .map(|(n, m)| (n.clone(), String::new(), m.clone()))
             .collect();
         let cats = categorize_settings(defs_with_value);
+        let cat_names: Vec<&str> = cats.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            !cat_names.contains(&"memory"),
+            "memory category must be gone: {cat_names:?}"
+        );
+        let prompt = cats
+            .iter()
+            .find(|c| c.name == "prompt")
+            .unwrap_or_else(|| panic!("prompt category must exist"));
+        let prompt_names: Vec<&str> = prompt.settings.iter().map(|s| s.name.as_str()).collect();
+        for name in [
+            "sub_prompt_max_chars",
+            "sub_prompt_iteration_percent",
+            "memory_max_chars",
+        ] {
+            assert!(
+                prompt_names.contains(&name),
+                "{name} in prompt: {prompt_names:?}"
+            );
+        }
         let general = cats
             .iter()
             .find(|c| c.name == "general")
             .unwrap_or_else(|| panic!("general category must exist"));
-        let names: Vec<&str> = general.settings.iter().map(|s| s.name.as_str()).collect();
+        let general_names: Vec<&str> = general.settings.iter().map(|s| s.name.as_str()).collect();
         assert!(
-            names.contains(&"sub_prompt_max_chars"),
-            "sub_prompt_max_chars in general: {names:?}"
+            general_names.contains(&"delete_after_days"),
+            "delete_after_days in general: {general_names:?}"
         );
-        assert!(
-            names.contains(&"sub_prompt_iteration_percent"),
-            "sub_prompt_iteration_percent in general: {names:?}"
-        );
+    }
+
+    #[test]
+    fn default_profile_is_a_select() {
+        // default_profile renders as a <select> populated from profiles.yml:
+        // metadata type "select" (the dashboard renders no secret/env-ref or
+        // clipboard buttons for select-typed settings).
+        let defs = get_all_setting_definitions();
+        let by_name: std::collections::HashMap<&str, &SettingMeta> =
+            defs.iter().map(|(n, m)| (n.as_str(), m)).collect();
+        let meta = by_name
+            .get("default_profile")
+            .unwrap_or_else(|| panic!("default_profile must be defined"));
+        assert_eq!(meta.field_type, "select", "default_profile is a select");
+        assert!(!meta.readonly, "default_profile is writable");
+        assert_eq!(meta.default.as_deref(), Some("omni"));
     }
 
     #[test]
