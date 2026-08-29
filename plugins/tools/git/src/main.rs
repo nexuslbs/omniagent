@@ -23,6 +23,7 @@ use tokio::process::Command;
 struct Config {
     omni_dir: String,
     workspace_dir: String,
+    allow_omni_dir: bool,
     github_app_token: String,
     github_app_private_key: String,
     github_app_id: String,
@@ -34,6 +35,7 @@ impl Default for Config {
         Self {
             omni_dir: "/opt/omni".to_string(),
             workspace_dir: "/opt/workspace".to_string(),
+            allow_omni_dir: true,
             github_app_token: String::new(),
             github_app_private_key: String::new(),
             github_app_id: String::new(),
@@ -452,6 +454,20 @@ fn resolve_workspace_dir() -> String {
     format!("{}/data/workspace", omni)
 }
 
+/// The directories git operations are allowed to touch.
+///
+/// Always the configured `workspace_dir`; plus the `omni_dir` repo when
+/// `allow_omni_dir` is enabled (default true), so the agent can run git
+/// (status/push/...) against the omni-dir configs repo.
+fn allowed_sandbox_roots(ws: &str) -> Vec<String> {
+    let cfg = CONFIG.lock();
+    let mut roots = vec![ws.to_string()];
+    if cfg.allow_omni_dir && !cfg.omni_dir.is_empty() {
+        roots.push(cfg.omni_dir.clone());
+    }
+    roots
+}
+
 /// Ensure the workspace directory exists and is usable.
 fn ensure_workspace_dir() -> Result<String> {
     let dir = resolve_workspace_dir();
@@ -498,18 +514,23 @@ fn validate_repo_within_workspace(repo_dir: &str) -> Result<()> {
         ws_abs.join(repo_abs)
     };
 
-    let ws_norm = normalize_path(ws_abs);
     let repo_norm = normalize_path(&repo_path);
 
-    if !repo_norm.starts_with(&ws_norm) {
-        anyhow::bail!(
-            "Path '{}' is outside the git workspace sandbox '{}'. \
-             Git operations are only allowed in the workspace dir and its subdirectories.",
-            repo_dir,
-            ws
-        );
+    // Accepted roots: the workspace dir, plus the omni_dir repo when
+    // `allow_omni_dir` is enabled (default true).
+    for root in allowed_sandbox_roots(&ws) {
+        let root_norm = normalize_path(Path::new(&root));
+        if repo_norm.starts_with(&root_norm) {
+            return Ok(());
+        }
     }
-    Ok(())
+
+    anyhow::bail!(
+        "Path '{}' is outside the git workspace sandbox '{}'. \
+         Git operations are only allowed in the workspace dir and its subdirectories.",
+        repo_dir,
+        ws
+    );
 }
 
 /// Assert that a path argument (absolute, or relative to `repo_dir`) resolves
@@ -521,17 +542,21 @@ fn assert_path_in_workspace(ws: &str, repo_dir: &str, label: &str, p: &str) -> R
         Path::new(repo_dir).join(p).display().to_string()
     };
     let norm = normalize_path(Path::new(&joined));
-    let ws_norm = normalize_path(Path::new(ws));
-    if !norm.starts_with(&ws_norm) {
-        anyhow::bail!(
-            "git argument '{}' references '{}', which is outside the git workspace sandbox \
-             '{}'. All git operations must stay inside the workspace.",
-            label,
-            p,
-            ws
-        );
+
+    for root in allowed_sandbox_roots(ws) {
+        let root_norm = normalize_path(Path::new(&root));
+        if norm.starts_with(&root_norm) {
+            return Ok(());
+        }
     }
-    Ok(())
+
+    anyhow::bail!(
+        "git argument '{}' references '{}', which is outside the git workspace sandbox \
+         '{}'. All git operations must stay inside the workspace.",
+        label,
+        p,
+        ws
+    );
 }
 
 /// Git config keys whose value is a shell command git may execute.
@@ -1683,6 +1708,11 @@ async fn main() -> Result<()> {
                     cfg.workspace_dir = dir.to_string();
                 }
             }
+            if let Some(v) = params.get("allow_omni_dir") {
+                if let Some(b) = v.as_bool() {
+                    cfg.allow_omni_dir = b;
+                }
+            }
             if let Some(v) = params.get("github_app_token").and_then(|v| v.as_str()) {
                 if !v.is_empty() {
                     cfg.github_app_token = v.to_string();
@@ -1729,13 +1759,22 @@ mod tests {
     /// shared mutable state, so every test that calls `set_ws` must bind the
     /// returned guard (`let _g = set_ws(...)`) to serialize against the other
     /// sandbox tests - otherwise a parallel test can flip the dir mid-assert.
-    fn set_ws(dir: &str) -> parking_lot::MutexGuard<'static, ()> {
+    fn set_sandbox(ws: &str, omni: &str, allow_omni: bool) -> parking_lot::MutexGuard<'static, ()> {
         static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
         // parking_lot: lock() cannot fail, so a panic in one test can never
         // poison the lock and cascade opaque failures onto the others.
         let guard = TEST_LOCK.lock();
-        CONFIG.lock().workspace_dir = dir.to_string();
+        let mut cfg = CONFIG.lock();
+        cfg.workspace_dir = ws.to_string();
+        cfg.omni_dir = omni.to_string();
+        cfg.allow_omni_dir = allow_omni;
         guard
+    }
+
+    /// Point the CONFIG workspace_dir at a dir for sandbox tests; omni_dir
+    /// keeps its default and allow_omni_dir stays enabled (default true).
+    fn set_ws(dir: &str) -> parking_lot::MutexGuard<'static, ()> {
+        set_sandbox(dir, "/opt/omni", true)
     }
 
     /// Create a unique temp dir; returns (workspace_base, repo_path_inside).
@@ -1786,13 +1825,42 @@ mod tests {
 
     #[test]
     fn sandbox_rejects_outside_path() {
-        let _g = set_ws("/opt/workspace");
+        // allow_omni_dir disabled: the omni_dir repo is outside the sandbox too.
+        let _g = set_sandbox("/opt/workspace", "/opt/omni", false);
         let err = validate_repo_within_workspace("/opt/omni/plugins").unwrap_err();
         assert!(err
             .to_string()
             .contains("outside the git workspace sandbox"));
         assert!(validate_repo_within_workspace("/etc").is_err());
         assert!(validate_repo_within_workspace("/tmp").is_err());
+    }
+
+    #[test]
+    fn sandbox_accepts_omni_dir_by_default() {
+        // allow_omni_dir defaults to true: git may run in the omni_dir repo.
+        let _g = set_ws("/opt/workspace");
+        assert!(validate_repo_within_workspace("/opt/omni").is_ok());
+        assert!(validate_repo_within_workspace("/opt/omni/profiles/omni").is_ok());
+        // ...but a sibling dir outside both sandboxes is still rejected.
+        assert!(validate_repo_within_workspace("/opt/other").is_err());
+    }
+
+    #[test]
+    fn sandbox_rejects_omni_dir_when_disabled() {
+        let _g = set_sandbox("/opt/workspace", "/opt/omni", false);
+        assert!(validate_repo_within_workspace("/opt/omni").is_err());
+    }
+
+    #[test]
+    fn args_accept_omni_dir_path_when_allowed() {
+        let _g = set_ws("/opt/workspace");
+        // -C /opt/omni must be accepted: the omni_dir repo is a sandbox root.
+        let owned = vec![
+            "-C".to_string(),
+            "/opt/omni".to_string(),
+            "status".to_string(),
+        ];
+        assert!(validate_git_args_within_workspace("/opt/workspace/repo", &owned).is_ok());
     }
 
     #[test]
@@ -1877,7 +1945,7 @@ mod tests {
     fn args_reject_git_dir_redirect() {
         assert!(validate_args(&["--git-dir=/etc", "status"]).is_err());
         assert!(validate_args(&["--work-tree=/", "status"]).is_err());
-        assert!(validate_args(&["--git-common-dir=/opt/omni", "status"]).is_err());
+        assert!(validate_args(&["--git-common-dir=/opt/other", "status"]).is_err());
         assert!(validate_args(&["--object-dir=/var/lib", "cat-file", "-p", "HEAD"]).is_err());
         assert!(validate_args(&["--exec-path=/tmp", "rev-parse", "HEAD"]).is_err());
         assert!(validate_args(&["--template=/etc", "init"]).is_err());

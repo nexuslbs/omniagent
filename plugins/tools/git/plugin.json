@@ -19,6 +19,13 @@
       "required": false
     },
     {
+      "key": "allow_omni_dir",
+      "default": true,
+      "label": "Allow git operations in the omni_dir repo (default true)",
+      "type": "boolean",
+      "required": false
+    },
+    {
       "key": "github_app_token",
       "label": "GitHub App Token (legacy static token)",
       "type": "string",
