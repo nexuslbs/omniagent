@@ -721,7 +721,12 @@ impl Platform for ExternalPlatformClient {
                                                 circuit.record_success();
                                             }
                                             // If this was a deliver response with an external_id,
-                                            // save it back to the message in the database.
+                                            // save it back to the message in the database. System
+                                            // threads (hooks/cron/kanban-action) carry synthetic
+                                            // external ids until their seq-0 is posted; the real
+                                            // platform id overwrites those so later messages reply
+                                            // under the actual post. Real user post ids are never
+                                            // overwritten.
                                             if let Ok(dr) = serde_json::from_value::<DeliverResult>(result) {
                                                 if let Some(ext_id) = dr.external_id {
                                                     if let Some(msg_id) = last_deliver_msg_id.take() {
@@ -730,8 +735,8 @@ impl Platform for ExternalPlatformClient {
                                                         let seq = last_deliver_thread_sequence.take().unwrap_or(1);
                                                         let _ = last_deliver_thread_id.take();
                                                         sql_forge!(
-                                                            r#"UPDATE messages SET external_id = :ext_id WHERE id = :msg_id AND external_id IS NULL"#,
-                                                            ( :ext_id = &ext_id, :msg_id = msg_id )
+                                                            r#"UPDATE messages SET external_id = :ext_id WHERE id = :msg_id AND (external_id IS NULL OR external_id LIKE :hook_pat OR external_id LIKE :cron_pat OR external_id LIKE :kanban_pat)"#,
+                                                            ( :ext_id = &ext_id, :msg_id = msg_id, :hook_pat = "hook:%", :cron_pat = "cron:%", :kanban_pat = "kanban-action:%" )
                                                         )
                                                         .execute(&pool)
                                                         .await

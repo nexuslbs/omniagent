@@ -175,14 +175,23 @@ pub async fn process_thread(
 
     // ── System-thread seq-0 delivery fix ──
     // For system-originated threads (kanban, cron) whose seq-0 cause message
-    // has no external_id yet (created via direct SQL by the kanban dispatcher,
-    // which bypasses enqueue_delivery), deliver the cause to the platform FIRST
-    // so it creates the root post. Without this, the platform has no thread
-    // context and skips every subsequent delivery with
+    // has no REAL platform external_id yet (created via direct SQL by the
+    // kanban dispatcher / hooks / scheduler, which bypass enqueue_delivery),
+    // deliver the cause to the platform FIRST so it creates the root post.
+    // System threads carry either no external_id (kanban) or a synthetic one
+    // ("hook:", "cron:", "kanban-action:") that is not a real platform post
+    // id; both must be posted automatically by the bot. Without this, the
+    // platform has no thread context and skips every subsequent delivery with
     // "no thread context available (cause_external_id=None, cause_root_id=None)".
     // The platform's deliver response is saved back as the cause external_id
-    // (client.rs save-back path), which gives seq-1+ messages a reply target.
-    if cause_msg.external_id.is_none() && cause_msg.thread_sequence == 0 {
+    // (client.rs save-back path, which overwrites synthetic ids), giving
+    // seq-1+ messages a reply target.
+    let seq0_needs_delivery = cause_msg.thread_sequence == 0
+        && cause_msg
+            .external_id
+            .as_deref()
+            .is_none_or(is_synthetic_external_id);
+    if seq0_needs_delivery {
         if let Some(ref platform_name) = channel.platform {
             if let Some(ref resource) = channel.resource_identifier {
                 tracing::info!(
@@ -260,4 +269,13 @@ pub async fn process_thread(
     )
     .await?;
     Ok(saved)
+}
+
+/// True when `id` is a synthetic external_id assigned by omniagent itself
+/// (hooks, cron, kanban-action threads) rather than a real platform post id.
+/// System threads must still post their seq-0 message to the channel, so the
+/// executor delivers them exactly like kanban threads (which use no
+/// external_id at all).
+fn is_synthetic_external_id(id: &str) -> bool {
+    id.starts_with("hook:") || id.starts_with("cron:") || id.starts_with("kanban-action:")
 }
