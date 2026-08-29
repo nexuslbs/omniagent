@@ -1211,13 +1211,16 @@ pub(crate) async fn engine_transition(
         .await
         .map_err(|e| format!("select parent kanban message: {e}"))?
         .map(|r| r.content)
-        .filter(|c| !c.is_empty())
+        .filter(|c| !crate::db::threads::is_placeholder_cause_content(c))
         .unwrap_or_else(|| {
-            if thread.cause.is_empty() {
-                "re-run".to_string()
-            } else {
-                thread.cause.clone()
-            }
+            // NEVER fall back to threads.cause: it is the 'system'/'user'
+            // cause-kind enum, not content - using it produced literal
+            // 'system' prompts (threads 240-263).
+            tracing::warn!(
+                "[fail-thread] no usable kanban script for re-run of thread #{}; using descriptive fallback",
+                thread.id
+            );
+            format!("Re-run of thread #{} (step {step})", thread.id)
         });
         // Prefix the parent's failure reason so the re-run thread's prompt
         // carries the failure context (NEW FINDING 1).
@@ -1288,11 +1291,28 @@ pub(crate) async fn engine_transition(
 
         // seq-0 cause message for the review thread - carries the parent's
         // failure reason when one exists (NEW FINDING 1).
-        let cause = match (fail_reason.as_deref(), thread.cause.as_str()) {
-            (Some(reason), "") => reason.to_string(),
-            (Some(reason), c) => format!("{reason}\n\n{c}"),
-            (None, "") => "retry limit reached; review".to_string(),
-            (None, c) => c.to_string(),
+        // The review thread's seq-0 cause must carry the parent's REAL prompt
+        // (its seq-0 cause message content) plus the failure reason when one
+        // exists - never threads.cause, which is the 'system'/'user' kind
+        // enum, not content (using it produced literal 'system' prompts).
+        #[derive(sqlx::FromRow)]
+        struct ReviewCauseRow {
+            content: String,
+        }
+        let parent_prompt = sql_forge!(
+            ReviewCauseRow,
+            "SELECT content FROM messages WHERE thread_id = :tid AND thread_sequence = 0 ORDER BY id LIMIT 1",
+            ( :tid = thread.id )
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| format!("select parent cause message: {e}"))?
+        .map(|r| r.content)
+        .filter(|c| !crate::db::threads::is_placeholder_cause_content(c))
+        .unwrap_or_else(|| "retry limit reached; review".to_string());
+        let cause = match fail_reason.as_deref() {
+            Some(reason) => format!("{reason}\n\n{parent_prompt}"),
+            None => parent_prompt,
         };
         let msg_id: i64 = sql_forge!(
             scalar i64,

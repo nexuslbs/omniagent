@@ -733,7 +733,26 @@ async fn create_review_thread(
         task_description(pool, &task_id).await
     };
     let cause_msg = if task_desc.is_empty() {
-        thread.cause.clone()
+        // Fall back to the parent's real seq-0 cause content when the task
+        // has no description - never threads.cause (the 'system'/'user' kind
+        // enum), which produced literal 'system' prompts (threads 240-263).
+        let parent_prompt: Option<String> = {
+            #[derive(sqlx::FromRow)]
+            struct CauseRow {
+                content: String,
+            }
+            sql_forge!(
+                CauseRow,
+                "SELECT content FROM messages WHERE thread_id = :tid AND thread_sequence = 0 ORDER BY id LIMIT 1",
+                ( :tid = thread.id )
+            )
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .map(|r| r.content)
+            .filter(|c| !crate::db::threads::is_placeholder_cause_content(c))
+        };
+        parent_prompt.unwrap_or_else(|| format!("Workflow step: review. Task: {task_id}"))
     } else {
         format!("Workflow step: review. Task: {task_id}\n\n{task_desc}")
     };

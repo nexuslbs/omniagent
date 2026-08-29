@@ -9,6 +9,17 @@ use crate::db::types::{
 use crate::err_msg;
 use crate::error::{AppResult, Error};
 
+/// True when a cause-message content is a placeholder that must never be used
+/// as a thread prompt: empty/whitespace, or the literal cause-kind strings
+/// ('system'/'user') that were historically written into message content
+/// instead of the real prompt (threads 240-263). Retry/reschedule/review
+/// paths copy the parent's seq-0 cause content; a placeholder there means the
+/// parent never carried a real prompt, so callers must fall back.
+pub fn is_placeholder_cause_content(content: &str) -> bool {
+    let t = content.trim();
+    t.is_empty() || t == "system" || t == "user"
+}
+
 // ---------------------------------------------------------------------------
 // Thread query functions
 // ---------------------------------------------------------------------------
@@ -395,7 +406,27 @@ pub async fn create_cause_and_set_pending(pool: &PgPool, msg: &MessageNew) -> Ap
                     .await?;
                     let new_id = new_thread.id;
 
-                    let cause = t.cause.clone().unwrap_or_else(|| "re-run".to_string());
+                    // The re-scheduled thread's seq-0 cause message must carry the
+                    // PARENT's real prompt (its seq-0 cause message content),
+                    // never threads.cause: that column is the 'system'/'user'
+                    // cause-kind enum, not content - using it produced literal
+                    // 'system' prompts (threads 240-263).
+                    #[derive(sqlx::FromRow)]
+                    struct CauseContentRow {
+                        content: String,
+                    }
+                    let cause = match sql_forge!(
+                            CauseContentRow,
+                            "SELECT content FROM messages WHERE thread_id = :tid AND thread_sequence = 0 ORDER BY id LIMIT 1",
+                            ( :tid = t.id )
+                        )
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .map(|r| r.content)
+                        {
+                            Some(c) if !is_placeholder_cause_content(&c) => c,
+                            _ => format!("Re-run of thread #{} (channel closed)", t.id),
+                        };
                     sql_forge!(
                         r#"
                         INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
@@ -925,7 +956,27 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: &str) -> AppResult<
                     )
                     .await?;
                     let new_id = new_thread.id;
-                    let cause = t.cause.clone().unwrap_or_else(|| "re-run".to_string());
+                    // The re-scheduled thread's seq-0 cause message must carry the
+                    // PARENT's real prompt (its seq-0 cause message content),
+                    // never threads.cause: that column is the 'system'/'user'
+                    // cause-kind enum, not content - using it produced literal
+                    // 'system' prompts (threads 240-263).
+                    #[derive(sqlx::FromRow)]
+                    struct CauseContentRow {
+                        content: String,
+                    }
+                    let cause = match sql_forge!(
+                            CauseContentRow,
+                            "SELECT content FROM messages WHERE thread_id = :tid AND thread_sequence = 0 ORDER BY id LIMIT 1",
+                            ( :tid = t.id )
+                        )
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .map(|r| r.content)
+                        {
+                            Some(c) if !is_placeholder_cause_content(&c) => c,
+                            _ => format!("Re-run of thread #{} (channel closed)", t.id),
+                        };
                     sql_forge!(
                         "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
                          VALUES (:tid, 'cause', :content, 0, 'cause')",
@@ -1998,6 +2049,30 @@ pub async fn delete_old_threads(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placeholder_cause_content_never_used_as_prompt() {
+        // Regression for threads 240-263: retry/reschedule/review paths
+        // historically wrote the cause-kind enum ('system'/'user') into the
+        // seq-0 cause message content. These strings must be treated as
+        // placeholders so the retry path falls back to a real prompt.
+        for placeholder in ["system", "user", "", "   ", "\n"] {
+            assert!(
+                is_placeholder_cause_content(placeholder),
+                "{placeholder:?} must be a placeholder"
+            );
+        }
+        for real in [
+            "Implement feature X\n## Body",
+            "  a real prompt  ",
+            "kanban task body",
+        ] {
+            assert!(
+                !is_placeholder_cause_content(real),
+                "{real:?} must NOT be a placeholder"
+            );
+        }
+    }
 
     #[test]
     fn channel_closed_with_scheduled_thread_reschedules() {
