@@ -31,6 +31,25 @@ async fn backoff_delay(attempt: u32) -> Duration {
     Duration::from_millis(delay_ms)
 }
 
+/// Build the live progress stats for a running thread from the cumulative
+/// LLM usage and the elapsed time since the thread started. Mirrors the
+/// terminal-state stats construction in `response_handler` so the live
+/// intermediate values match the final write exactly.
+fn thread_progress_stats(
+    usage: &Option<Usage>,
+    start_time: &std::time::Instant,
+) -> queries::CompleteThreadStats {
+    queries::CompleteThreadStats {
+        input_tokens: usage.as_ref().map(|u| u.prompt_tokens as i32).unwrap_or(0),
+        cached_tokens: usage.as_ref().and_then(|u| u.cached_tokens).unwrap_or(0) as i32,
+        output_tokens: usage
+            .as_ref()
+            .map(|u| u.completion_tokens as i32)
+            .unwrap_or(0),
+        duration_ms: start_time.elapsed().as_millis() as i32,
+    }
+}
+
 /// Extract up to 6 plan steps from plan content (markdown or JSON).
 ///
 /// Real plans are markdown: `<plan>1. step one</plan>` or plain numbered/bulleted
@@ -682,6 +701,21 @@ Previous plan:\n{}",
             match per_thread_llm.completion(plan_request).await {
                 Ok(resp) => {
                     helpers::merge_usage(&mut cumulative_usage, resp.usage.clone());
+                    // Live progress: persist intermediate usage stats after the
+                    // planning LLM call so processing threads show live values.
+                    if let Err(e) = queries::update_thread_progress(
+                        &cfg.pool,
+                        thread.id,
+                        (iter + 1) as i32,
+                        thread_progress_stats(&cumulative_usage, &start_time),
+                    )
+                    .await
+                    {
+                        warn!(
+                            "[plan] Failed to update thread {} progress after plan call: {:?}",
+                            thread.id, e
+                        );
+                    }
                     let plan_token_usage = resp
                         .usage
                         .as_ref()
@@ -1496,6 +1530,24 @@ Previous plan:\n{}",
 
         // Track cumulative token usage
         helpers::merge_usage(&mut cumulative_usage, response.usage.clone());
+
+        // Live progress: incrementally update the threads table after EVERY
+        // LLM call (iterations, tokens, elapsed time) so processing threads
+        // show up-to-date stats while they run. Single cheap row update; the
+        // terminal-state write (complete_thread) stays the final word.
+        if let Err(e) = queries::update_thread_progress(
+            &cfg.pool,
+            thread.id,
+            current_iter,
+            thread_progress_stats(&cumulative_usage, &start_time),
+        )
+        .await
+        {
+            warn!(
+                "[executor] Failed to update thread {} progress: {:?}",
+                thread.id, e
+            );
+        }
 
         // Store reasoning if present
         if response.reasoning.is_some() {

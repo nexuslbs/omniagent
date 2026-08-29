@@ -963,6 +963,39 @@ pub async fn skip_channel_threads(pool: &PgPool, channel_id: &str) -> AppResult<
     Ok(threads.len())
 }
 
+/// Incrementally update a RUNNING thread's usage stats (iterations, tokens,
+/// elapsed time) after every LLM call, so processing threads show live,
+/// up-to-date values (e.g. via the thread retrieval API) while they execute.
+///
+/// Cheap single-row UPDATE (no subqueries). This is purely additive to the
+/// terminal-state write: `complete_thread` / `mark_thread_terminal` remain the
+/// final word, and the `NOT terminal` guard means a row that has already been
+/// completed/failed/cancelled is never re-touched (no race with the final
+/// write, which uses the same guard).
+pub async fn update_thread_progress(
+    pool: &PgPool,
+    thread_id: i64,
+    iterations: i32,
+    stats: CompleteThreadStats,
+) -> AppResult<u64> {
+    let result = sql_forge!(
+        r#"
+        UPDATE threads
+        SET iterations = :iterations,
+            input_tokens = :input_tokens,
+            cached_tokens = :cached_tokens,
+            output_tokens = :output_tokens,
+            duration_ms = :duration_ms
+        WHERE id = :id AND NOT terminal
+        "#,
+        ( :iterations = iterations, :id = thread_id, :input_tokens = stats.input_tokens, :cached_tokens = stats.cached_tokens, :output_tokens = stats.output_tokens, :duration_ms = stats.duration_ms )
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 /// Mark a thread terminal: set status + ended_at + terminal=true + iterations.
 ///
 /// THE single choke point for every write that flips a thread into a terminal
@@ -2324,6 +2357,130 @@ mod tests {
             kanban_thread_content("Title", Some("Body")),
             "Title\n\nBody"
         );
+    }
+
+    #[tokio::test]
+    async fn update_thread_progress_shows_live_values_then_terminal_write() {
+        // DB-backed test: exercises the incremental thread-progress UPDATE
+        // against a real (dev) database. Skipped when DATABASE_URL is absent
+        // (offline/CI without a DB). It only ever touches rows it creates
+        // itself, and never runs against a production database.
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+
+        let thread_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile) \
+             VALUES ('pending', 'user', 'test-channel', 'test-profile') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert test thread");
+
+        // Claim: status -> 'processing' (the live/running state).
+        assert!(claim_thread(&pool, thread_id).await, "claim must succeed");
+
+        // Simulate three LLM calls; after each, the row must already show the
+        // cumulative live values while the thread is still processing.
+        for i in 1..=3 {
+            let stats = CompleteThreadStats {
+                input_tokens: 100 * i,
+                cached_tokens: 20 * i,
+                output_tokens: 50 * i,
+                duration_ms: 500 * i,
+            };
+            update_thread_progress(&pool, thread_id, i, stats)
+                .await
+                .expect("incremental update must succeed");
+            let (iterations, input_tokens, cached_tokens, output_tokens, duration_ms, status, terminal): (
+                i32,
+                i32,
+                i32,
+                i32,
+                i32,
+                String,
+                bool,
+            ) = sqlx::query_as(
+                "SELECT iterations, input_tokens, cached_tokens, output_tokens, duration_ms, status, terminal \
+                 FROM threads WHERE id = $1",
+            )
+            .bind(thread_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch live progress");
+            assert_eq!(iterations, i, "live iterations after call {i}");
+            assert_eq!(input_tokens, 100 * i, "live input_tokens after call {i}");
+            assert_eq!(cached_tokens, 20 * i, "live cached_tokens after call {i}");
+            assert_eq!(output_tokens, 50 * i, "live output_tokens after call {i}");
+            assert_eq!(duration_ms, 500 * i, "live duration_ms after call {i}");
+            assert_eq!(
+                status, "processing",
+                "thread must stay processing while live"
+            );
+            assert!(!terminal, "live thread must not be terminal");
+        }
+
+        // Mirror production: each LLM call persisted a message with the
+        // matching iteration_number (terminal iterations = MAX(iteration_number)).
+        for i in 1..=3 {
+            sqlx::query(
+                "INSERT INTO messages (thread_id, thread_sequence, role, content, msg_type, iteration_number) \
+                 VALUES ($1, $2, 'agent', 'x', 'message', $2)",
+            )
+            .bind(thread_id)
+            .bind(i)
+            .execute(&pool)
+            .await
+            .expect("insert test message");
+        }
+
+        // Terminal write must remain exactly as before: final stats win and
+        // terminal=true is set.
+        let final_stats = CompleteThreadStats {
+            input_tokens: 300,
+            cached_tokens: 60,
+            output_tokens: 150,
+            duration_ms: 1500,
+        };
+        complete_thread(&pool, thread_id, "completed", final_stats)
+            .await
+            .expect("terminal write must succeed");
+        let (iterations, input_tokens, cached_tokens, output_tokens, duration_ms, status, terminal): (
+            i32,
+            i32,
+            i32,
+            i32,
+            i32,
+            String,
+            bool,
+        ) = sqlx::query_as(
+            "SELECT iterations, input_tokens, cached_tokens, output_tokens, duration_ms, status, terminal \
+             FROM threads WHERE id = $1",
+        )
+        .bind(thread_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch terminal row");
+        assert_eq!(iterations, 3, "terminal iterations from messages");
+        assert_eq!(input_tokens, 300);
+        assert_eq!(cached_tokens, 60);
+        assert_eq!(output_tokens, 150);
+        assert_eq!(duration_ms, 1500);
+        assert_eq!(status, "completed");
+        assert!(terminal, "terminal flag must be set");
+
+        // Cleanup: delete only the rows this test created.
+        let _ = sqlx::query("DELETE FROM messages WHERE thread_id = $1")
+            .bind(thread_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(thread_id)
+            .execute(&pool)
+            .await;
     }
 }
 
