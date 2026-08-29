@@ -514,6 +514,26 @@ mod self_restart_guard_tests {
     }
 }
 
+/// Iteration accounting for the plan phase: the number of iteration slots
+/// the plan phase actually consumed. Returns 1 only when a plan was generated
+/// (plan_content.is_some()); 0 when planning was skipped or FAILED.
+///
+/// The plan prompt is logged with its own numbering (msg_subtype "plan",
+/// iteration 0) and the plan message itself is logged at iteration 1, so a
+/// successful plan means the first main-loop prompt lands on iteration 2.
+/// A failed plan generation must NOT consume an iteration slot: the first
+/// main-loop prompt then lands on iteration 1 with no gap in the
+/// user-visible iteration sequence (thread 263 showed the jump 0 -> 2 with
+/// no message at iteration 1 because plan_consumed was derived from
+/// should_plan instead of actual plan success).
+fn plan_iterations_consumed(plan_content: &Option<String>) -> i32 {
+    if plan_content.is_some() {
+        1
+    } else {
+        0
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_main_loop(
     cfg: &AgentContext,
@@ -964,16 +984,18 @@ Previous plan:\n{}",
     // ones stay within max_iterations_no_plan.
     let iter_limit =
         queries::max_iterations_for_plan(&cfg.config_snapshot(), prompt_parts.plan) as i32;
-    // The plan phase consumed 1 iteration (if it ran). Subtract it so the
-    // tool-calling loop gets the remaining budget.
-    let plan_consumed = if should_plan { 1 } else { 0 };
+    // The plan phase consumed an iteration slot ONLY when a plan was actually
+    // generated (plan_content.is_some()). A failed or skipped plan consumes
+    // nothing: the first main-loop prompt then stays at iteration 1 instead
+    // of jumping to 2 with a gap (thread 263 showed the 0 -> 2 jump).
+    let plan_consumed = plan_iterations_consumed(&plan_content);
     let max_llm_calls = (iter_limit - plan_consumed).max(0) as u32;
     let mut final_content = String::new();
     let mut final_reasoning: Option<String> = None;
     let mut final_tool_call: bool = false;
     let mut limit_reached: bool = false;
     let mut _last_response_usage: Option<Usage> = None;
-    current_iter = plan_consumed; // 0 for prompt_only, 1 if plan already ran
+    current_iter = plan_consumed; // 0 when plan failed/skipped, 1 when a plan was generated
     let mut unfinished_subtask_retries: u32 = 0;
     let mut calls_since_subtask_management: u32 = 0;
     // How many consecutive LLM errors (provider errors, truncation,
@@ -2964,5 +2986,39 @@ mod sub_prompt_gate_tests {
         // percent=0 disables the feature entirely.
         assert!(!sub_prompt_gate_ok(1, 300, 0));
         assert!(!sub_prompt_gate_ok(0, 300, 0));
+    }
+}
+
+#[cfg(test)]
+mod plan_iteration_tests {
+    use super::*;
+
+    #[test]
+    fn failed_plan_does_not_skip_first_main_loop_iteration() {
+        // should_plan=true but plan generation FAILED: plan_content is None.
+        // plan_consumed = 0, so the first main-loop prompt (current_iter
+        // starts at plan_consumed and is incremented before each call) is
+        // iteration 1, not 2: no gap in the user-visible sequence.
+        let consumed = plan_iterations_consumed(&None);
+        assert_eq!(consumed, 0);
+        assert_eq!(1 + consumed, 1); // first main-loop prompt iteration
+    }
+
+    #[test]
+    fn successful_plan_moves_first_main_loop_prompt_to_iteration_two() {
+        // should_plan=true and a plan WAS generated: plan_content is Some.
+        // plan_consumed = 1 (the plan prompt is logged at iteration 0 and the
+        // plan message at iteration 1), so the first main-loop prompt is
+        // iteration 2.
+        let consumed = plan_iterations_consumed(&Some("<plan>1. do it</plan>".to_string()));
+        assert_eq!(consumed, 1);
+        assert_eq!(1 + consumed, 2); // first main-loop prompt iteration
+    }
+
+    #[test]
+    fn skipped_plan_leaves_first_iteration_at_one() {
+        // should_plan=false: no plan phase at all; first prompt is iteration 1.
+        assert_eq!(plan_iterations_consumed(&None), 0);
+        assert_eq!(1 + plan_iterations_consumed(&None), 1);
     }
 }
