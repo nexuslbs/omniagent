@@ -180,7 +180,7 @@ struct KanbanSnapshotEntry {
     board: String,
     task_id: String,
     title: String,
-    /// Status after the change (kanban_history.final_board).
+    /// Current kanban board status of the task (kanban_tasks.status).
     status: String,
     tags: Vec<String>,
     changed_at: String,
@@ -195,7 +195,8 @@ struct DashboardResponse {
     recent_activity: Vec<OverviewEntry>,
     channel_health: Vec<ChannelHealthEntry>,
     top_tools: Vec<TopToolEntry>,
-    /// Most recent kanban status changes (action='moved' history entries).
+    /// Most recently changed kanban tasks (one entry per task, taken from the
+    /// latest action='moved' history row), each with its current board status.
     kanban_snapshot: Vec<KanbanSnapshotEntry>,
 }
 
@@ -562,29 +563,34 @@ async fn dashboard_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
         }
     };
 
-    // ── 8. Kanban snapshot (recent status changes) ────────────────────────
+    // ── 8. Kanban snapshot (recently changed tasks) ───────────────────────────
     // The kanban_history table records every status transition (action
     // 'moved'). Show the last changed tasks, newest first, with the board,
-    // task name, resulting status, tags and the change timestamp.
+    // task name, CURRENT status (from kanban_tasks), tags and the
+    // change timestamp.
     let kanban_snapshot = match sql_forge!(
         KanbanSnapshotRow,
         r#"
-        SELECT
-            COALESCE(t.board, '') AS board,
-            h.kanban_task_id AS task_id,
-            COALESCE(t.title, '') AS title,
-            COALESCE(h.final_board, '') AS status,
-            COALESCE((
-                SELECT string_agg(kt.name, ',' ORDER BY kt.name)
-                FROM task_tags tt
-                JOIN kanban_tags kt ON kt.id = tt.tag_id
-                WHERE tt.task_id = h.kanban_task_id
-            ), '') AS tags,
-            h.created_at::text AS changed_at
-        FROM kanban_history h
-        JOIN kanban_tasks t ON t.id = h.kanban_task_id
-        WHERE h.action = 'moved'
-        ORDER BY h.created_at DESC, h.id DESC
+        SELECT board, task_id, title, status, tags, changed_at
+        FROM (
+            SELECT DISTINCT ON (h.kanban_task_id)
+                COALESCE(t.board, '') AS board,
+                h.kanban_task_id AS task_id,
+                COALESCE(t.title, '') AS title,
+                COALESCE(t.status, '') AS status,
+                COALESCE((
+                    SELECT string_agg(kt.name, ',' ORDER BY kt.name)
+                    FROM task_tags tt
+                    JOIN kanban_tags kt ON kt.id = tt.tag_id
+                    WHERE tt.task_id = h.kanban_task_id
+                ), '') AS tags,
+                h.created_at::text AS changed_at
+            FROM kanban_history h
+            JOIN kanban_tasks t ON t.id = h.kanban_task_id
+            WHERE h.action = 'moved'
+            ORDER BY h.kanban_task_id, h.created_at DESC, h.id DESC
+        ) sub
+        ORDER BY sub.changed_at::timestamptz DESC
         LIMIT 10
         "#,
     )
