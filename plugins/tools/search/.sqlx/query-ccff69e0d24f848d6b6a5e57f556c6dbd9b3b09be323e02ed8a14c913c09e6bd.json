@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT MAX(id) AS max_id FROM threads WHERE channel_id = $1 AND id > $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "max_id",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ccff69e0d24f848d6b6a5e57f556c6dbd9b3b09be323e02ed8a14c913c09e6bd"
+}

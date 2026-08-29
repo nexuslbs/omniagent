@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            COALESCE(t.board, '') AS board,\n            h.kanban_task_id AS task_id,\n            COALESCE(t.title, '') AS title,\n            COALESCE(h.final_board, '') AS status,\n            COALESCE((\n                SELECT string_agg(kt.name, ',' ORDER BY kt.name)\n                FROM task_tags tt\n                JOIN kanban_tags kt ON kt.id = tt.tag_id\n                WHERE tt.task_id = h.kanban_task_id\n            ), '') AS tags,\n            h.created_at::text AS changed_at\n        FROM kanban_history h\n        JOIN kanban_tasks t ON t.id = h.kanban_task_id\n        WHERE h.action = 'moved'\n        ORDER BY h.created_at DESC, h.id DESC\n        LIMIT 10\n        ",
+  "query": "\n        SELECT board, task_id, title, status, tags, changed_at\n        FROM (\n            SELECT DISTINCT ON (h.kanban_task_id)\n                COALESCE(t.board, '') AS board,\n                h.kanban_task_id AS task_id,\n                COALESCE(t.title, '') AS title,\n                COALESCE(t.status, '') AS status,\n                COALESCE((\n                    SELECT string_agg(kt.name, ',' ORDER BY kt.name)\n                    FROM task_tags tt\n                    JOIN kanban_tags kt ON kt.id = tt.tag_id\n                    WHERE tt.task_id = h.kanban_task_id\n                ), '') AS tags,\n                h.created_at::text AS changed_at\n            FROM kanban_history h\n            JOIN kanban_tasks t ON t.id = h.kanban_task_id\n            WHERE h.action = 'moved'\n            ORDER BY h.kanban_task_id, h.created_at DESC, h.id DESC\n        ) sub\n        ORDER BY sub.changed_at::timestamptz DESC\n        LIMIT 10\n        ",
   "describe": {
     "columns": [
       {
@@ -57,5 +57,5 @@
       null
     ]
   },
-  "hash": "d601d14597c48189e333567da206d3f60b2ccc5062816992014d80590708b93d"
+  "hash": "973436fe795a24f618c11a1a24d61d5e2a8b00bdbd335f61b96d15380b5453a9"
 }
