@@ -279,3 +279,81 @@ pub async fn process_thread(
 fn is_synthetic_external_id(id: &str) -> bool {
     id.starts_with("hook:") || id.starts_with("cron:") || id.starts_with("kanban-action:")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_synthetic_external_id;
+
+    // ─── is_synthetic_external_id tests ───
+
+    #[test]
+    fn test_is_synthetic_external_id_hook_prefix() {
+        // Real-world shape from hooks.rs: "hook:{id}:{ts}"
+        assert!(is_synthetic_external_id(
+            "hook:wiki-maintenance:1788016954478"
+        ));
+        assert!(is_synthetic_external_id("hook:123:456"));
+    }
+
+    #[test]
+    fn test_is_synthetic_external_id_cron_prefix() {
+        // Real-world shape from scheduler.rs: "cron:{job}:{ts}"
+        assert!(is_synthetic_external_id("cron:daily_report:1788016954478"));
+        assert!(is_synthetic_external_id("cron:0:1"));
+    }
+
+    #[test]
+    fn test_is_synthetic_external_id_kanban_action_prefix() {
+        // Real-world shape from kanban_action.rs: "kanban-action:{task}:{step}:{ts}"
+        assert!(is_synthetic_external_id(
+            "kanban-action:task_abc:step:12345"
+        ));
+    }
+
+    #[test]
+    fn test_is_synthetic_external_id_real_platform_ids_false() {
+        // A real Mattermost post id (26 chars, exactly like the channel ids in
+        // channels.yml) is NOT synthetic and must never be re-delivered.
+        assert!(!is_synthetic_external_id("3nt7qohominz9fxmz7bcujms9c"));
+        // A Telegram message id is NOT synthetic either.
+        assert!(!is_synthetic_external_id("123456789:abcdefg"));
+        // UUID-style ids (some plugins) are not synthetic.
+        assert!(!is_synthetic_external_id(
+            "550e8400-e29b-41d4-a716-446655440000"
+        ));
+    }
+
+    #[test]
+    fn test_is_synthetic_external_id_edge_cases_false() {
+        assert!(!is_synthetic_external_id(""));
+        assert!(!is_synthetic_external_id("hook")); // prefix must include the colon
+        assert!(!is_synthetic_external_id("hookish:123")); // must not prefix-match substrings
+        assert!(!is_synthetic_external_id("HOOK:123")); // matching is case-sensitive
+        assert!(!is_synthetic_external_id("cronjob:123"));
+        assert!(!is_synthetic_external_id("kanban:123")); // kanban threads use None, not "kanban:"
+    }
+
+    // ─── seq-0 delivery decision tests ───
+
+    #[test]
+    fn test_seq0_delivery_decision_matches_executor_predicate() {
+        // Mirrors the exact predicate in process_thread:
+        //   cause_msg.thread_sequence == 0
+        //     && cause_msg.external_id.as_deref().is_none_or(is_synthetic_external_id)
+        let needs_delivery =
+            |seq: i64, ext: Option<&str>| seq == 0 && ext.is_none_or(is_synthetic_external_id);
+        // Kanban workflow threads: no external_id -> seq-0 must be delivered.
+        assert!(needs_delivery(0, None));
+        // Hooks/cron/kanban-action threads: synthetic id -> seq-0 must be delivered.
+        assert!(needs_delivery(0, Some("hook:1:2")));
+        assert!(needs_delivery(0, Some("cron:1:2")));
+        assert!(needs_delivery(0, Some("kanban-action:1:2")));
+        // User-originated threads: real platform post id -> never re-delivered
+        // (no double post regression).
+        assert!(!needs_delivery(0, Some("3nt7qohominz9fxmz7bcujms9c")));
+        // Only the seq-0 message is delivered here; replies are threaded.
+        assert!(!needs_delivery(1, None));
+        assert!(!needs_delivery(1, Some("hook:1:2")));
+        assert!(!needs_delivery(2, Some("cron:1:2")));
+    }
+}
