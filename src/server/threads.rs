@@ -74,6 +74,12 @@ pub struct ThreadEntry {
     pub cause_msg_type: Option<String>,
     pub cause_msg_subtype: Option<String>,
     pub channel_closed: bool,
+    pub task_id: Option<String>,
+    pub schedule_task_id: Option<String>,
+    pub workflow_step: Option<String>,
+    pub workflow: Option<String>,
+    pub kanban_board: Option<String>,
+    pub hook_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -128,6 +134,12 @@ struct ThreadListRow {
     cause_content_preview: Option<String>,
     cause_msg_type: Option<String>,
     cause_msg_subtype: Option<String>,
+    task_id: Option<String>,
+    schedule_task_id: Option<String>,
+    workflow_step: Option<String>,
+    workflow_id: Option<String>,
+    external_id: Option<String>,
+    kanban_board: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -224,10 +236,17 @@ async fn list_threads_handler(
             m0.content AS cause_content_preview,
             m0.msg_type AS cause_msg_type,
             m0.msg_subtype AS cause_msg_subtype,
+            t.task_id,
+            t.schedule_task_id,
+            t.workflow_step,
+            t.workflow_id AS workflow_id,
+            m0.external_id,
+            kt.board AS kanban_board,
             COALESCE((SELECT COUNT(*) FROM messages sub WHERE sub.thread_id = t.id), 0) AS msg_count,
             (SELECT content FROM messages sub2 WHERE sub2.thread_id = t.id ORDER BY sub2.id DESC LIMIT 1) AS last_message
         FROM threads t
         LEFT JOIN messages m0 ON m0.thread_id = t.id AND m0.thread_sequence = 0
+        LEFT JOIN kanban_tasks kt ON kt.id = t.task_id
         WHERE 1=1
           AND (:status = '' OR t.status = ANY(string_to_array(:status, ',')))
           AND (:cause = '' OR t.cause = :cause)
@@ -297,6 +316,16 @@ async fn list_threads_handler(
                 cause_msg_type: r.cause_msg_type,
                 cause_msg_subtype: r.cause_msg_subtype,
                 channel_closed,
+                task_id: r.task_id,
+                schedule_task_id: r.schedule_task_id,
+                workflow_step: r.workflow_step,
+                workflow: r.workflow_id,
+                kanban_board: r.kanban_board,
+                hook_id: r.external_id.as_deref().and_then(|ext| {
+                    ext.strip_prefix("hook:")
+                        .and_then(|rest| rest.split(':').next())
+                        .map(str::to_string)
+                }),
             }
         })
         .collect();
