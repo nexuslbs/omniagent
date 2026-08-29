@@ -19,9 +19,9 @@
       "required": false
     },
     {
-      "key": "allow_omni_dir",
-      "default": true,
-      "label": "Allow git operations in the omni_dir repo (default true)",
+      "key": "disable_omni_dir",
+      "default": false,
+      "label": "Disable git operations in the omni_dir repo",
       "type": "boolean",
       "required": false
     },

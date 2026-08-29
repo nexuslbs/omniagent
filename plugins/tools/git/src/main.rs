@@ -23,7 +23,7 @@ use tokio::process::Command;
 struct Config {
     omni_dir: String,
     workspace_dir: String,
-    allow_omni_dir: bool,
+    disable_omni_dir: bool,
     github_app_token: String,
     github_app_private_key: String,
     github_app_id: String,
@@ -35,7 +35,7 @@ impl Default for Config {
         Self {
             omni_dir: "/opt/omni".to_string(),
             workspace_dir: "/opt/workspace".to_string(),
-            allow_omni_dir: true,
+            disable_omni_dir: false,
             github_app_token: String::new(),
             github_app_private_key: String::new(),
             github_app_id: String::new(),
@@ -45,6 +45,23 @@ impl Default for Config {
 }
 
 static CONFIG: Lazy<Mutex<Config>> = Lazy::new(|| Mutex::new(Config::default()));
+
+/// Apply the omni_dir git-operation toggle from plugin config params.
+///
+/// New key: `disable_omni_dir` (default false = git operations allowed).
+/// A legacy `allow_omni_dir` value (old key, inverted meaning) is migrated
+/// so behavior is preserved on upgrade; the new key wins when both are
+/// present.
+fn apply_omni_dir_setting(cfg: &mut Config, params: &Value) {
+    match params.get("disable_omni_dir").and_then(|v| v.as_bool()) {
+        Some(b) => cfg.disable_omni_dir = b,
+        None => {
+            if let Some(v) = params.get("allow_omni_dir").and_then(|v| v.as_bool()) {
+                cfg.disable_omni_dir = !v;
+            }
+        }
+    }
+}
 
 /// Path to the GitHub App private key used for JWT signing.
 ///
@@ -456,13 +473,13 @@ fn resolve_workspace_dir() -> String {
 
 /// The directories git operations are allowed to touch.
 ///
-/// Always the configured `workspace_dir`; plus the `omni_dir` repo when
-/// `allow_omni_dir` is enabled (default true), so the agent can run git
-/// (status/push/...) against the omni-dir configs repo.
+/// Always the configured `workspace_dir`; plus the `omni_dir` repo unless
+/// `disable_omni_dir` is set (default false = allowed), so the agent can run
+/// git (status/push/...) against the omni-dir configs repo.
 fn allowed_sandbox_roots(ws: &str) -> Vec<String> {
     let cfg = CONFIG.lock();
     let mut roots = vec![ws.to_string()];
-    if cfg.allow_omni_dir && !cfg.omni_dir.is_empty() {
+    if !cfg.disable_omni_dir && !cfg.omni_dir.is_empty() {
         roots.push(cfg.omni_dir.clone());
     }
     roots
@@ -516,8 +533,8 @@ fn validate_repo_within_workspace(repo_dir: &str) -> Result<()> {
 
     let repo_norm = normalize_path(&repo_path);
 
-    // Accepted roots: the workspace dir, plus the omni_dir repo when
-    // `allow_omni_dir` is enabled (default true).
+    // Accepted roots: the workspace dir, plus the omni_dir repo unless
+    // `disable_omni_dir` is set (default false = allowed).
     for root in allowed_sandbox_roots(&ws) {
         let root_norm = normalize_path(Path::new(&root));
         if repo_norm.starts_with(&root_norm) {
@@ -1708,11 +1725,7 @@ async fn main() -> Result<()> {
                     cfg.workspace_dir = dir.to_string();
                 }
             }
-            if let Some(v) = params.get("allow_omni_dir") {
-                if let Some(b) = v.as_bool() {
-                    cfg.allow_omni_dir = b;
-                }
-            }
+            apply_omni_dir_setting(&mut cfg, &params);
             if let Some(v) = params.get("github_app_token").and_then(|v| v.as_str()) {
                 if !v.is_empty() {
                     cfg.github_app_token = v.to_string();
@@ -1759,7 +1772,11 @@ mod tests {
     /// shared mutable state, so every test that calls `set_ws` must bind the
     /// returned guard (`let _g = set_ws(...)`) to serialize against the other
     /// sandbox tests - otherwise a parallel test can flip the dir mid-assert.
-    fn set_sandbox(ws: &str, omni: &str, allow_omni: bool) -> parking_lot::MutexGuard<'static, ()> {
+    fn set_sandbox(
+        ws: &str,
+        omni: &str,
+        disable_omni: bool,
+    ) -> parking_lot::MutexGuard<'static, ()> {
         static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
         // parking_lot: lock() cannot fail, so a panic in one test can never
         // poison the lock and cascade opaque failures onto the others.
@@ -1767,14 +1784,14 @@ mod tests {
         let mut cfg = CONFIG.lock();
         cfg.workspace_dir = ws.to_string();
         cfg.omni_dir = omni.to_string();
-        cfg.allow_omni_dir = allow_omni;
+        cfg.disable_omni_dir = disable_omni;
         guard
     }
 
     /// Point the CONFIG workspace_dir at a dir for sandbox tests; omni_dir
-    /// keeps its default and allow_omni_dir stays enabled (default true).
+    /// keeps its default and disable_omni_dir stays false (git allowed).
     fn set_ws(dir: &str) -> parking_lot::MutexGuard<'static, ()> {
-        set_sandbox(dir, "/opt/omni", true)
+        set_sandbox(dir, "/opt/omni", false)
     }
 
     /// Create a unique temp dir; returns (workspace_base, repo_path_inside).
@@ -1825,8 +1842,8 @@ mod tests {
 
     #[test]
     fn sandbox_rejects_outside_path() {
-        // allow_omni_dir disabled: the omni_dir repo is outside the sandbox too.
-        let _g = set_sandbox("/opt/workspace", "/opt/omni", false);
+        // disable_omni_dir set: the omni_dir repo is outside the sandbox too.
+        let _g = set_sandbox("/opt/workspace", "/opt/omni", true);
         let err = validate_repo_within_workspace("/opt/omni/plugins").unwrap_err();
         assert!(err
             .to_string()
@@ -1836,8 +1853,40 @@ mod tests {
     }
 
     #[test]
+    fn config_disable_omni_dir_default_and_migration() {
+        // New default: git operations on the omni_dir repo are ALLOWED.
+        assert!(!Config::default().disable_omni_dir);
+
+        // Legacy `allow_omni_dir` (old key, inverted meaning) is migrated:
+        // allow=true  -> disable=false (git ops still allowed)
+        // allow=false -> disable=true  (git ops blocked)
+        let mut cfg = Config::default();
+        apply_omni_dir_setting(&mut cfg, &serde_json::json!({"allow_omni_dir": true}));
+        assert!(!cfg.disable_omni_dir);
+        apply_omni_dir_setting(&mut cfg, &serde_json::json!({"allow_omni_dir": false}));
+        assert!(cfg.disable_omni_dir);
+
+        // The new key wins when both are present.
+        apply_omni_dir_setting(
+            &mut cfg,
+            &serde_json::json!({"disable_omni_dir": false, "allow_omni_dir": true}),
+        );
+        assert!(!cfg.disable_omni_dir);
+
+        // New key read directly.
+        apply_omni_dir_setting(&mut cfg, &serde_json::json!({"disable_omni_dir": true}));
+        assert!(cfg.disable_omni_dir);
+        apply_omni_dir_setting(&mut cfg, &serde_json::json!({"disable_omni_dir": false}));
+        assert!(!cfg.disable_omni_dir);
+
+        // Absent keys leave the current value untouched.
+        apply_omni_dir_setting(&mut cfg, &serde_json::json!({}));
+        assert!(!cfg.disable_omni_dir);
+    }
+
+    #[test]
     fn sandbox_accepts_omni_dir_by_default() {
-        // allow_omni_dir defaults to true: git may run in the omni_dir repo.
+        // disable_omni_dir defaults to false: git may run in the omni_dir repo.
         let _g = set_ws("/opt/workspace");
         assert!(validate_repo_within_workspace("/opt/omni").is_ok());
         assert!(validate_repo_within_workspace("/opt/omni/profiles/omni").is_ok());
@@ -1847,7 +1896,7 @@ mod tests {
 
     #[test]
     fn sandbox_rejects_omni_dir_when_disabled() {
-        let _g = set_sandbox("/opt/workspace", "/opt/omni", false);
+        let _g = set_sandbox("/opt/workspace", "/opt/omni", true);
         assert!(validate_repo_within_workspace("/opt/omni").is_err());
     }
 
