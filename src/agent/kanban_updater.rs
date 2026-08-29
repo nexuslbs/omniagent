@@ -35,7 +35,10 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
     };
 
     // Phase 3: non-success terminals → atomic engine transition.
-    if matches!(final_status, "failed" | "interrupted" | "skipped") {
+    if matches!(
+        final_status,
+        "failed" | "interrupted" | "skipped" | "merged"
+    ) {
         // review_on_fail: a hard-failed executor/tester step goes to review
         // instead of blocked / executor re-run (auto_approve forces the flag
         // off via workflow_policy). Interrupted/skipped keep the existing
@@ -51,7 +54,7 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
         }
         let kind = match final_status {
             "interrupted" => RerunKind::Interrupted,
-            "skipped" => RerunKind::Skipped,
+            "skipped" | "merged" => RerunKind::Skipped,
             _ => RerunKind::Failed,
         };
         match engine_transition(&cfg.pool, &cfg.ctx.data_dir, thread, kind).await {

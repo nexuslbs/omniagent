@@ -401,13 +401,7 @@ pub(crate) async fn handle_response(
             if let Some(ref resource) = channel.resource_identifier {
                 // Map status to platform emoji before enqueueing -
                 // the platform plugin expects an actual emoji name, not a status string.
-                let react_emoji = match final_status {
-                    "completed" => ":white_check_mark:",
-                    "failed" => ":x:",
-                    "interrupted" => ":broken_heart:",
-                    "skipped" => ":o:",
-                    other => other,
-                };
+                let react_emoji = status_reaction_emoji(final_status);
                 helpers::enqueue_reaction(&cfg.ctx, platform, resource, ext_id, react_emoji).await;
             }
         }
@@ -420,6 +414,20 @@ pub(crate) async fn handle_response(
     crate::agent::summary_trigger::trigger_summary_and_cleanup(cfg, thread).await;
 
     Ok(saved)
+}
+
+/// Map a final thread status to the reaction emoji sent on the cause message.
+/// The platform plugin receives the raw emoji shortcode: Mattermost strips the
+/// colons, Telegram maps the known shortcodes to unicode emoji.
+pub(crate) fn status_reaction_emoji(status: &str) -> &str {
+    match status {
+        "completed" => ":white_check_mark:",
+        "failed" => ":x:",
+        "interrupted" => ":broken_heart:",
+        "skipped" => ":o:",
+        "merged" => ":handshake:",
+        other => other,
+    }
 }
 
 /// Final thread status after the executor loop (pure, unit-tested).
@@ -575,5 +583,20 @@ mod tests {
         assert_eq!(post_loop_final_status(true, true), "failed");
         assert_eq!(post_loop_final_status(false, true), "interrupted");
         assert_eq!(post_loop_final_status(false, false), "completed");
+    }
+}
+
+#[cfg(test)]
+mod merged_reaction_tests {
+    use super::status_reaction_emoji;
+
+    #[test]
+    fn merged_maps_to_handshake() {
+        assert_eq!(status_reaction_emoji("merged"), ":handshake:");
+        assert_eq!(status_reaction_emoji("skipped"), ":o:");
+        assert_eq!(status_reaction_emoji("completed"), ":white_check_mark:");
+        assert_eq!(status_reaction_emoji("failed"), ":x:");
+        assert_eq!(status_reaction_emoji("interrupted"), ":broken_heart:");
+        assert_eq!(status_reaction_emoji("custom"), "custom");
     }
 }

@@ -1039,7 +1039,7 @@ Previous plan:\n{}",
         // tasks for the same channel/profile/parent-context (or children of
         // this thread), their prompts are appended to THIS thread's full
         // prompt - BEFORE the condense call so compaction never drops them.
-        // Each pending thread is marked skipped and a sub_cause message
+        // Each pending thread is marked merged and a sub_cause message
         // records the original thread id (messages.original_thread_id).
         // Gates: iteration-percent (feature enabled when > 0; lookups only
         // within the first N% of the iteration budget) + cumulative char
@@ -1116,15 +1116,16 @@ Previous plan:\n{}",
                             continue;
                         }
                         if let Err(e) =
-                            queries::mark_thread_skipped_for_sub_prompt(&cfg.pool, pt.id).await
+                            queries::mark_thread_merged_for_sub_prompt(&cfg.pool, pt.id, thread.id)
+                                .await
                         {
                             warn!(
-                                "[sub-prompt] Failed to mark pending thread #{} skipped: {:?}",
+                                "[sub-prompt] Failed to mark pending thread #{} merged: {:?}",
                                 pt.id, e
                             );
                         }
-                        // Send the generic skipped reaction to the platform for the
-                        // pending thread (mirrors response_handler: skipped => ":o:").
+                        // Send the merged reaction to the platform for the pending
+                        // thread (mirrors response_handler: merged => ":handshake:").
                         // enqueue_reaction is platform-agnostic, so this works on
                         // mattermost and any other platform.
                         if let (Some(platform), Some(resource)) =
@@ -1135,7 +1136,11 @@ Previous plan:\n{}",
                             {
                                 if let Some(ext_id) = cause.external_id {
                                     helpers::enqueue_reaction(
-                                        &cfg.ctx, platform, resource, &ext_id, ":o:",
+                                        &cfg.ctx,
+                                        platform,
+                                        resource,
+                                        &ext_id,
+                                        ":handshake:",
                                     )
                                     .await;
                                 }

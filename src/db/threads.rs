@@ -2374,7 +2374,7 @@ mod tests {
 
         let thread_id: i64 = sqlx::query_scalar(
             "INSERT INTO threads (status, cause, channel_id, profile) \
-             VALUES ('pending', 'user', 'test-channel', 'test-profile') RETURNING id",
+             VALUES ('pending', 'user', 'test-channel-merged-pending', 'test-profile') RETURNING id",
         )
         .fetch_one(&pool)
         .await
@@ -2537,15 +2537,26 @@ pub async fn list_appendable_pending_threads(
 }
 
 #[allow(clippy::items_after_test_module)]
-/// Mark a pending thread 'skipped' after its prompt was appended as a
+/// Mark a pending thread 'merged' after its prompt was appended as a
 /// sub-prompt into a running thread (feature: sub-prompts).
 ///
+/// 'merged' is a terminal status, semantically identical to 'skipped' (the
+/// thread produces no own run/result) but distinguishable in history/UI: the
+/// prompt was absorbed by the executing thread `running_thread_id`. The
+/// target link is recorded by the sub_cause message (see
+/// insert_sub_cause_message; the threads API exposes it as
+/// merged_into_thread_id).
+///
 /// Uses the single terminal choke point (mark_thread_terminal) so
-/// terminal=true is always set with 'skipped'. When the skipped thread is
+/// terminal=true is always set with 'merged'. When the merged thread is
 /// linked to a kanban task, the task's thread_status is cleared and a history
-/// entry records the skip (best-effort, mirrors skip_channel_threads).
-pub async fn mark_thread_skipped_for_sub_prompt(pool: &PgPool, pending_id: i64) -> AppResult<u64> {
-    let result = mark_thread_terminal(pool, pending_id, "skipped").await?;
+/// entry records the merge (best-effort, mirrors skip_channel_threads).
+pub async fn mark_thread_merged_for_sub_prompt(
+    pool: &PgPool,
+    pending_id: i64,
+    running_thread_id: i64,
+) -> AppResult<u64> {
+    let result = mark_thread_terminal(pool, pending_id, "merged").await?;
     if result > 0 {
         crate::hooks::fire_thread_finished(pending_id);
         #[derive(sqlx::FromRow)]
@@ -2567,8 +2578,8 @@ pub async fn mark_thread_skipped_for_sub_prompt(pool: &PgPool, pending_id: i64) 
             .execute(pool)
             .await;
             let comment = format!(
-                "Thread #{} skipped (prompt appended as sub-prompt to running thread)",
-                pending_id
+                "Thread #{} merged (prompt appended as sub-prompt to running thread #{})",
+                pending_id, running_thread_id
             );
             let _ = sql_forge!(
                 r#"
@@ -2582,4 +2593,73 @@ pub async fn mark_thread_skipped_for_sub_prompt(pool: &PgPool, pending_id: i64) 
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod merged_status_tests {
+    use super::*;
+
+    /// DB-backed: exercises the sub-prompt merge terminal transition against a
+    /// real (dev) database: a pending thread becomes terminal 'merged' while
+    /// the target running thread is untouched. Skipped when DATABASE_URL is
+    /// absent (offline/CI without a DB). Only touches rows it creates itself,
+    /// never production.
+    #[tokio::test]
+    async fn merged_for_sub_prompt_is_terminal_with_target_link() {
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+
+        let pending_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile) VALUES ('pending', 'user', 'test-channel', 'test-profile') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert pending thread");
+        let running_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile) VALUES ('processing', 'user', 'test-channel-merged-running', 'test-profile') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("insert running thread");
+
+        let n = mark_thread_merged_for_sub_prompt(&pool, pending_id, running_id)
+            .await
+            .expect("mark merged");
+        assert_eq!(n, 1, "exactly one row flipped to merged");
+
+        let row: (String, bool) =
+            sqlx::query_as("SELECT status, terminal FROM threads WHERE id = $1")
+                .bind(pending_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch merged thread");
+        assert_eq!(row.0, "merged", "status is merged");
+        assert!(row.1, "merged is terminal");
+
+        // The target running thread is left untouched (still processing, not
+        // terminal). The merged_into_thread_id link itself is derived from the
+        // sub_cause message that main_loop inserts before marking merged (see
+        // insert_sub_cause_message / the server threads API / the dashboard
+        // merged-into badge); messages are append-only so this DB-backed test
+        // does not insert one.
+        let trow: (String, bool) =
+            sqlx::query_as("SELECT status, terminal FROM threads WHERE id = $1")
+                .bind(running_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch running thread");
+        assert_eq!(trow.0, "processing", "running thread still processing");
+        assert!(!trow.1, "running thread is not terminal");
+
+        sqlx::query("DELETE FROM threads WHERE id = $1 OR id = $2")
+            .bind(pending_id)
+            .bind(running_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup threads");
+    }
 }

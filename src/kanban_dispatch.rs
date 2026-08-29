@@ -635,7 +635,14 @@ mod tests {
         assert_eq!(active_thread_count(&["pending", "processing"]), 2);
         // (c) Terminal-status threads never block dispatch.
         assert_eq!(
-            active_thread_count(&["completed", "failed", "skipped", "interrupted", "created"]),
+            active_thread_count(&[
+                "completed",
+                "failed",
+                "skipped",
+                "merged",
+                "interrupted",
+                "created"
+            ]),
             0
         );
         // (d) Regression: an operator-stop `skipped` thread with
