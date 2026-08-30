@@ -491,6 +491,101 @@ pub async fn enqueue_reaction(
     }
 }
 
+/// Telegram first/last-only collapse state for one thread run.
+///
+/// When the telegram platform plugin is configured with `first_last_only`
+/// enabled (plugins.yml `platforms.telegram.config`), the main loop collapses
+/// intermediate thread deliveries: only the FIRST and LAST messages of the
+/// run reach the chat. This struct tracks whether the first message has been
+/// sent yet; `should_deliver(is_final)` returns true for the first delivery,
+/// for the final delivery, and always when collapse is disabled.
+#[derive(Debug, Default)]
+pub struct FirstLastCollapse {
+    pub enabled: bool,
+    pub first_sent: bool,
+}
+
+impl FirstLastCollapse {
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            first_sent: false,
+        }
+    }
+
+    /// Decide whether a delivery should reach the platform.
+    ///
+    /// Collapse disabled -> always deliver (regression: current behavior).
+    /// Collapse enabled  -> deliver only the first message of the run and
+    /// the final message (is_final=true); every intermediate message is
+    /// suppressed. A single-message run (first == final) is delivered once.
+    pub fn should_deliver(&mut self, is_final: bool) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        if !self.first_sent {
+            self.first_sent = true;
+            return true;
+        }
+        is_final
+    }
+}
+
+/// True when the telegram platform plugin is configured with
+/// `first_last_only` enabled. Only the telegram platform honors this flag;
+/// Mattermost behavior is unaffected.
+pub fn telegram_first_last_only(data_dir: &str) -> bool {
+    let flag = match crate::plugins_yaml::get_plugin(
+        data_dir,
+        "telegram",
+        &crate::plugins_yaml::PluginYamlType::Platform,
+    ) {
+        Ok(Some(detail)) => detail
+            .resolved_env
+            .get("first_last_only")
+            .cloned()
+            .or_else(|| {
+                detail
+                    .config
+                    .get("first_last_only")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+    matches!(
+        flag.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "on" | "yes"
+    )
+}
+
+/// Enqueue a thread-run delivery honoring the telegram first/last collapse.
+///
+/// When `collapse.enabled` and the message is neither the first nor the final
+/// delivery of the run, the delivery is suppressed (the message stays
+/// persisted in the thread history, only the platform delivery is skipped).
+pub async fn enqueue_delivery_collapsed(
+    ctx: &AppContext,
+    saved: &Message,
+    channel: &Channel,
+    thread: &Thread,
+    cause_external_id: Option<String>,
+    collapse: &mut FirstLastCollapse,
+    is_final: bool,
+) {
+    if !collapse.should_deliver(is_final) {
+        tracing::info!(
+            "[first-last] suppressing intermediate delivery to platform '{}' (thread {}, seq {})",
+            channel.platform.as_deref().unwrap_or("?"),
+            thread.id,
+            saved.thread_sequence
+        );
+        return;
+    }
+    enqueue_delivery(ctx, saved, channel, thread, cause_external_id).await;
+}
+
 /// Enqueue a typing indicator to a platform channel/thread.
 /// Broadcasts "bot is typing..." while the agent is processing.
 pub async fn enqueue_typing(
@@ -530,6 +625,92 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    // ─── Telegram first/last-only collapse tests ───
+
+    #[test]
+    fn test_collapse_disabled_delivers_every_message() {
+        // Flag absent/false (default): regression - all messages delivered.
+        let mut c = FirstLastCollapse::new(false);
+        assert!(c.should_deliver(false));
+        assert!(c.should_deliver(false));
+        assert!(c.should_deliver(false));
+        assert!(c.should_deliver(true));
+    }
+
+    #[test]
+    fn test_collapse_enabled_delivers_only_first_and_last() {
+        let mut c = FirstLastCollapse::new(true);
+        // First message of the run: delivered.
+        assert!(c.should_deliver(false));
+        // Intermediate messages: suppressed.
+        assert!(!c.should_deliver(false));
+        assert!(!c.should_deliver(false));
+        assert!(!c.should_deliver(false));
+        // Final message of the run: delivered.
+        assert!(c.should_deliver(true));
+    }
+
+    #[test]
+    fn test_collapse_single_message_run_delivered_once() {
+        // A run with only a final message (first == final) delivers it once;
+        // the final delivery (is_final=true) still happens after an earlier
+        // delivery in a multi-message run, and intermediates stay suppressed.
+        let mut c = FirstLastCollapse::new(true);
+        assert!(c.should_deliver(true));
+        assert!(!c.should_deliver(false));
+        let mut d = FirstLastCollapse::new(true);
+        assert!(d.should_deliver(false)); // first message
+        assert!(!d.should_deliver(false)); // intermediate suppressed
+        assert!(d.should_deliver(true)); // final message still delivered
+    }
+
+    fn telegram_test_data_dir(first_last: Option<&str>) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+        let config_dir = format!("{}/config", path);
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let flag_line = match first_last {
+            Some(v) => format!("      first_last_only: {}\n", v),
+            None => String::new(),
+        };
+        std::fs::write(
+            format!("{}/plugins.yml", config_dir),
+            format!("platforms:\n  telegram:\n    enabled: true\n    source: local\n    config:\n      bot_token: fake\n{}", flag_line),
+        )
+        .unwrap();
+        let plugin_dir = format!("{}/plugins/platforms/telegram", path);
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            format!("{}/plugin.json", plugin_dir),
+            r#"{"name":"telegram","version":"1.0.0","type":"platform"}"#,
+        )
+        .unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn test_telegram_first_last_only_true_when_flag_on() {
+        let (_d, path) = telegram_test_data_dir(Some("\"on\""));
+        assert!(telegram_first_last_only(&path));
+        let (_d2, path2) = telegram_test_data_dir(Some("true"));
+        assert!(telegram_first_last_only(&path2));
+    }
+
+    #[test]
+    fn test_telegram_first_last_only_false_when_absent_or_off() {
+        let (_d, path) = telegram_test_data_dir(None);
+        assert!(!telegram_first_last_only(&path));
+        let (_d2, path2) = telegram_test_data_dir(Some("false"));
+        assert!(!telegram_first_last_only(&path2));
+    }
+
+    #[test]
+    fn test_telegram_first_last_only_false_without_telegram_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+        assert!(!telegram_first_last_only(&path));
+    }
 
     // ─── shared test builders (also used by compact_old_assistant_messages tests) ───
 
