@@ -317,6 +317,17 @@ pub fn compact_old_assistant_messages(messages: &mut Vec<ChatMessage>, keep_rece
     }
 }
 
+/// Internal telemetry message types that are persisted to the thread
+/// history for reconstruction but must never be delivered to the platform
+/// chat: tool-call records ("tool", "multi-tool"), tool results, and
+/// reasoning traces.
+pub fn is_internal_telemetry(msg_type: &str) -> bool {
+    matches!(
+        msg_type,
+        "tool" | "multi-tool" | "tool-result" | "reasoning"
+    )
+}
+
 /// Enqueue a message for delivery to its platform.
 /// Uses the channel's platform and resource_identifier to determine
 /// the delivery target. All messages (user and system) follow the same
@@ -353,8 +364,8 @@ pub async fn enqueue_delivery(
         None => return,
     };
 
-    // Never deliver tool results directly
-    if saved.msg_type == "tool-result" {
+    // Never deliver internal tool/telemetry messages to the platform.
+    if is_internal_telemetry(&saved.msg_type) {
         return;
     }
 
@@ -1051,5 +1062,23 @@ mod tests {
         // With bad encoding, falls back to estimate_chars
         let result = count_tokens(&msgs, "nonexistent_encoding_xyz", Some(&tools));
         assert!(result > 0);
+    }
+
+    // is_internal_telemetry tests
+
+    #[test]
+    fn test_is_internal_telemetry_true_for_telemetry_types() {
+        assert!(is_internal_telemetry("tool"));
+        assert!(is_internal_telemetry("multi-tool"));
+        assert!(is_internal_telemetry("tool-result"));
+        assert!(is_internal_telemetry("reasoning"));
+    }
+
+    #[test]
+    fn test_is_internal_telemetry_false_for_user_facing_types() {
+        assert!(!is_internal_telemetry("summary"));
+        assert!(!is_internal_telemetry("error"));
+        assert!(!is_internal_telemetry("response"));
+        assert!(!is_internal_telemetry(""));
     }
 }
