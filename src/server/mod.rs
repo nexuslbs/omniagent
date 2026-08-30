@@ -73,6 +73,7 @@ use crate::mcp::{AppContext, McpToolCall};
 use parking_lot::RwLock;
 
 mod diagnostic;
+mod git_sync;
 
 // ── Shared response helpers ────────────────────────────────────────────────
 // Used by threads.rs, channels.rs, etc. for consistent JSON response format.
@@ -236,6 +237,8 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
         // ── Settings routes ──
         .route("/settings", get(settings::get_settings_handler))
         .route("/settings", put(settings::update_settings_handler))
+        // ── Git sync: canonical sync entrypoint (explorer + backup/restore) ──
+        .route("/git/sync", post(git_sync::sync_handler))
         // ── Secrets routes ──
         .merge(secrets::secrets_router())
         // ── Messages API routes ──

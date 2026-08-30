@@ -17,6 +17,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+mod git_sync;
+
 //  Constants
 
 #[derive(Clone)]
@@ -1701,6 +1703,30 @@ async fn main() -> Result<()> {
             },
             handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { handle_run_command(args).await })),
         },
+        McpToolEntry {
+            def: McpToolDef {
+                name: "git_sync".to_string(),
+                description:
+                    "SYNC a git repository: fetch, pull --rebase, then push to origin. \
+                    The canonical sync entrypoint used by the dashboard explorer sync button \
+                    and the backup/restore hook. Authentication uses the GitHub App \
+                    installation token; if a fetch/pull/push fails because the token is \
+                    expired or revoked, a fresh token is generated from the app private key \
+                    and the sync is retried once. 'repo_dir' defaults to the omni_dir config \
+                    repo; pass it to sync a different repository inside the workspace."
+                        .to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "repo_dir": {
+                            "type": "string",
+                            "description": "Path to the git repository to sync (defaults to the omni_dir config repo)"
+                        }
+                    }
+                }),
+            },
+            handler: Box::new(|args: Value, _meta: Option<McpMeta>| Box::pin(async move { git_sync::handle_git_sync(args).await })),
+        },
     ];
 
     let server_info = ServerInfo {
@@ -1791,7 +1817,7 @@ mod tests {
 
     /// Point the CONFIG workspace_dir at a dir for sandbox tests; omni_dir
     /// keeps its default and disable_omni_dir stays false (git allowed).
-    async fn set_ws(dir: &str) -> tokio::sync::MutexGuard<'static, ()> {
+    pub(crate) async fn set_ws(dir: &str) -> tokio::sync::MutexGuard<'static, ()> {
         set_sandbox(dir, "/opt/omni", false).await
     }
 

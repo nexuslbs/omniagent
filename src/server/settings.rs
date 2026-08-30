@@ -157,6 +157,7 @@ fn write_settings_file(data_dir: &str, vars: &HashMap<String, String>) -> Result
             vec![
                 "condense_keep_turns",
                 "delete_after_days",
+                "git_sync_tool",
                 "default_provider",
                 "llm_provider",
                 "max_inline_file_kb",
@@ -361,6 +362,16 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
                 options: None,
                 readonly: false,
                 default: Some("prompt_compact-messages".into()),
+            },
+        ),
+        (
+            "git_sync_tool".into(),
+            SettingMeta {
+                field_type: "select".into(),
+                description: "Name of the MCP tool to call for git sync (pull/rebase/push). Used by the dashboard explorer sync button and the backup/restore hook; defaults to the builtin git plugin's git_sync tool".into(),
+                options: None,
+                readonly: false,
+                default: Some("git_sync".into()),
             },
         ),
         (
@@ -734,6 +745,7 @@ fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
         "max_unfinished_subtask_retries",
         "prompt_generate_tool",
         "prompt_compact_messages_tool",
+        "git_sync_tool",
         "delete_after_days",
         "kanban_dispatcher_interval",
         "memory_max_chars",
@@ -824,7 +836,11 @@ pub async fn get_settings_handler(State(state): State<Arc<AppState>>) -> Json<Se
     // Enrich prompt_generate_tool and prompt_compact_messages_tool with available MCP tools
     let registry = state.plugin_manager.snapshot_registry().await;
     let mcp_tools: Vec<&crate::mcp::McpTool> = registry.all();
-    for tool_key in ["prompt_generate_tool", "prompt_compact_messages_tool"] {
+    for tool_key in [
+        "prompt_generate_tool",
+        "prompt_compact_messages_tool",
+        "git_sync_tool",
+    ] {
         if let Some((_, _, ref mut meta)) = defs
             .iter_mut()
             .find(|(name, _, _)| name.as_str() == tool_key)
