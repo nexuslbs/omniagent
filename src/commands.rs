@@ -180,6 +180,17 @@ pub fn parse_new_command(input: &str) -> AppResult<NewCommand> {
     Ok(NewCommand { name })
 }
 
+/// True when `text` is a `/new` or `//new` command for EXTERNAL platforms
+/// (Telegram and other non-Mattermost platforms).
+///
+/// External platform commands start with "/" (Telegram Bot API style).
+/// `$new` is Mattermost-only syntax and must never trigger here: a user
+/// typing `$new` in a Telegram chat is not issuing a command.
+pub fn is_external_new_command(text: &str) -> bool {
+    let t = text.trim_start();
+    t == "/new" || t.starts_with("/new ") || t == "//new" || t.starts_with("//new ")
+}
+
 // ---------------------------------------------------------------------------
 // ChannelCommand: parsed result for `/channel`
 // ---------------------------------------------------------------------------
@@ -444,6 +455,27 @@ mod tests {
     fn test_parse_new_whitespace() {
         let cmd = parse_new_command("  //new  ").unwrap();
         assert!(cmd.name.is_none());
+    }
+
+    #[test]
+    fn test_is_external_new_command() {
+        // "/" prefixed commands are recognized (Telegram Bot API style).
+        assert!(is_external_new_command("/new"));
+        assert!(is_external_new_command("/new telegram"));
+        assert!(is_external_new_command("/new  telegram"));
+        assert!(is_external_new_command("  /new telegram"));
+        assert!(is_external_new_command("//new"));
+        assert!(is_external_new_command("//new telegram"));
+        // "$new" is Mattermost syntax: NEVER a command on external platforms.
+        assert!(!is_external_new_command("$new"));
+        assert!(!is_external_new_command("$new telegram"));
+        assert!(!is_external_new_command("  $new telegram"));
+        // Other text is not a command (precise token match).
+        assert!(!is_external_new_command("hello world"));
+        assert!(!is_external_new_command("/newsletter"));
+        assert!(!is_external_new_command("/newer"));
+        assert!(!is_external_new_command("/newbie"));
+        assert!(!is_external_new_command(""));
     }
 
     // ── /channel tests ───────────────────────────────────────────────────

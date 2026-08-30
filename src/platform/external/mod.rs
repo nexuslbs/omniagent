@@ -90,157 +90,232 @@ pub fn load_plugins_config(data_dir: &str) -> Vec<PlatformPluginConfig> {
             if !path.is_dir() {
                 continue;
             }
-            let plugin_json_path = path.join("plugin.json");
-            if !plugin_json_path.exists() {
+            // Remote plugin clones live under `.remote/` and are resolved
+            // source-aware below; never scan them at this level.
+            if path.file_name().and_then(|n| n.to_str()) == Some(".remote") {
                 continue;
             }
-            let content = match std::fs::read_to_string(&plugin_json_path) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to read platform manifest {}: {:?}",
-                        plugin_json_path.display(),
-                        e
-                    );
-                    continue;
-                }
-            };
-            let manifest = match serde_json::from_str::<crate::plugin::PluginManifest>(&content) {
-                Ok(m) => m,
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to parse platform manifest {}: {:?}",
-                        plugin_json_path.display(),
-                        e
-                    );
-                    continue;
-                }
-            };
-            if manifest.plugin_type != crate::plugin::PluginType::Platform {
+            if let Some(merged) = build_platform_config(&path, data_dir) {
+                tracing::info!(
+                    "Loaded platform plugin '{}' from plugins/platforms/",
+                    merged.name
+                );
+                results.push(merged);
+            }
+        }
+    }
+
+    // ── Remote platform plugins (source=remote in plugins.yml) ──────────
+    // Remote plugins are git-cloned to
+    // {data_dir}/plugins/platforms/.remote/{repo}/{path}/ (see
+    // plugin/installer.rs). Their plugin.json is nested under the clone, so
+    // the one-level scan above cannot see them. Resolve each remote platform
+    // explicitly from plugins.yml + remote.yml, otherwise a remote platform
+    // (e.g. telegram) is never discovered: not started at boot, and the
+    // enable/config hot-load path fails with "not found in plugin config".
+    if let Ok(entries) =
+        crate::plugins_yaml::load_raw(data_dir, &crate::plugins_yaml::PluginYamlType::Platform)
+    {
+        for (name, entry) in &entries {
+            if entry.source != "remote" {
                 continue;
             }
-            let entrypoint = match &manifest.entrypoint {
-                Some(ep) => ep,
+            if results.iter().any(|c| c.name == *name) {
+                continue; // already loaded from a non-remote location
+            }
+            let remote = match crate::plugins_yaml::get_remote_plugin(
+                data_dir,
+                &crate::plugins_yaml::PluginYamlType::Platform,
+                name,
+            ) {
+                Some(r) => r,
                 None => {
                     tracing::warn!(
-                        "Platform plugin '{}' has no entrypoint, skipping",
-                        manifest.name,
+                        "Remote platform plugin '{}' has no remote.yml entry (cannot resolve path)",
+                        name
                     );
                     continue;
                 }
             };
-
-            // Resolve the command path: for bare-name commands, check if it's a
-            // workspace member binary (next to omniagent), otherwise use as-is.
-            let resolved_command = if entrypoint.command.contains('/') {
-                entrypoint.command.clone()
-            } else {
-                let bin_path = crate::mcp::external::config::get_bin_path(&entrypoint.command);
-                if std::path::Path::new(&bin_path).exists() {
+            let subpath = remote.path.as_deref().unwrap_or("");
+            let remote_dir = format!(
+                "{}/plugins/platforms/.remote/{}/{}",
+                data_dir, name, subpath
+            );
+            match build_platform_config(std::path::Path::new(&remote_dir), data_dir) {
+                Some(merged) => {
                     tracing::info!(
-                        "Resolved command for platform '{}' from '{}' to '{}'",
-                        manifest.name,
-                        entrypoint.command,
-                        bin_path
+                        "Loaded remote platform plugin '{}' from {}",
+                        merged.name,
+                        remote_dir
                     );
-                    bin_path
-                } else {
-                    entrypoint.command.clone()
+                    results.push(merged);
                 }
-            };
-
-            // Resolve relative entrypoint args (e.g. "platform.py", "server.js")
-            // against the plugin directory so the spawned process cmdline is
-            // self-describing (full path) and resolves regardless of CWD.
-            // Args that are flags (start with '-'), absolute, or not present in
-            // the plugin dir are passed through unchanged.
-            let plugin_dir_str = path.to_string_lossy().to_string();
-            let resolved_args: Vec<String> = entrypoint
-                .args
-                .clone()
-                .into_iter()
-                .map(|arg| {
-                    if arg.starts_with('-') || std::path::Path::new(&arg).is_absolute() {
-                        return arg;
-                    }
-                    let candidate = std::path::Path::new(&plugin_dir_str).join(&arg);
-                    if candidate.exists() {
-                        candidate.to_string_lossy().to_string()
-                    } else {
-                        arg
-                    }
-                })
-                .collect();
-
-            let config = PlatformPluginConfig {
-                name: manifest.name.clone(),
-                enabled: true,
-                command: resolved_command,
-                args: resolved_args,
-                env: manifest.env,
-                config: std::collections::HashMap::new(),
-                max_retries: 3,
-                current_dir: Some(plugin_dir_str),
-            };
-
-            // Validate that the entrypoint binary exists (for file-path commands).
-            // Commands that look like PATH lookups (no slash) are assumed to exist.
-            // Relative paths (e.g. "./target/release/...") resolve against the
-            // plugin directory (config.current_dir), not the process CWD.
-            let command = &config.command;
-            let has_binary = if command.contains('/') {
-                let path = std::path::Path::new(command);
-                if path.is_relative() {
-                    match &config.current_dir {
-                        Some(dir) => std::path::Path::new(dir).join(path).exists(),
-                        None => std::env::current_dir()
-                            .ok()
-                            .map(|cwd| cwd.join(path).exists())
-                            .unwrap_or(false),
-                    }
-                } else {
-                    path.exists()
+                None => {
+                    tracing::warn!(
+                        "Remote platform plugin '{}' not found at '{}' (needs install)",
+                        name,
+                        remote_dir
+                    );
                 }
+            }
+        }
+    }
+
+    results
+}
+
+/// Build a [`PlatformPluginConfig`] from a plugin directory containing a
+/// `plugin.json` platform manifest. Returns `None` when the directory has no
+/// platform manifest or its entrypoint is unusable.
+///
+/// Applies the plugins.yml `enabled` override (the manifest default is
+/// `enabled: true`) and merges the plugins.yml `config` values (original
+/// field names) into the config map.
+fn build_platform_config(
+    plugin_dir: &std::path::Path,
+    data_dir: &str,
+) -> Option<PlatformPluginConfig> {
+    let plugin_json_path = plugin_dir.join("plugin.json");
+    if !plugin_json_path.exists() {
+        return None;
+    }
+    let content = match std::fs::read_to_string(&plugin_json_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to read platform manifest {}: {:?}",
+                plugin_json_path.display(),
+                e
+            );
+            return None;
+        }
+    };
+    let manifest = match serde_json::from_str::<crate::plugin::PluginManifest>(&content) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to parse platform manifest {}: {:?}",
+                plugin_json_path.display(),
+                e
+            );
+            return None;
+        }
+    };
+    if manifest.plugin_type != crate::plugin::PluginType::Platform {
+        return None;
+    }
+    let Some(entrypoint) = manifest.entrypoint.as_ref() else {
+        tracing::warn!(
+            "Platform plugin '{}' has no entrypoint, skipping",
+            manifest.name,
+        );
+        return None;
+    };
+
+    // Resolve the command path: for bare-name commands, check if it's a
+    // workspace member binary (next to omniagent), otherwise use as-is.
+    let resolved_command = if entrypoint.command.contains('/') {
+        entrypoint.command.clone()
+    } else {
+        let bin_path = crate::mcp::external::config::get_bin_path(&entrypoint.command);
+        if std::path::Path::new(&bin_path).exists() {
+            tracing::info!(
+                "Resolved command for platform '{}' from '{}' to '{}'",
+                manifest.name,
+                entrypoint.command,
+                bin_path
+            );
+            bin_path
+        } else {
+            entrypoint.command.clone()
+        }
+    };
+
+    // Resolve relative entrypoint args (e.g. "platform.py", "server.js")
+    // against the plugin directory so the spawned process cmdline is
+    // self-describing (full path) and resolves regardless of CWD.
+    // Args that are flags (start with '-'), absolute, or not present in
+    // the plugin dir are passed through unchanged.
+    let plugin_dir_str = plugin_dir.to_string_lossy().to_string();
+    let resolved_args: Vec<String> = entrypoint
+        .args
+        .clone()
+        .into_iter()
+        .map(|arg| {
+            if arg.starts_with('-') || std::path::Path::new(&arg).is_absolute() {
+                return arg;
+            }
+            let candidate = std::path::Path::new(&plugin_dir_str).join(&arg);
+            if candidate.exists() {
+                candidate.to_string_lossy().to_string()
             } else {
-                // PATH-based command: assume it's available
-                true
-            };
+                arg
+            }
+        })
+        .collect();
 
-            if !has_binary {
-                tracing::warn!(
+    let config = PlatformPluginConfig {
+        name: manifest.name.clone(),
+        enabled: true,
+        command: resolved_command,
+        args: resolved_args,
+        env: manifest.env,
+        config: std::collections::HashMap::new(),
+        max_retries: 3,
+        current_dir: Some(plugin_dir_str),
+    };
+
+    // Validate that the entrypoint binary exists (for file-path commands).
+    // Commands that look like PATH lookups (no slash) are assumed to exist.
+    // Relative paths (e.g. "./target/release/...") resolve against the
+    // plugin directory (config.current_dir), not the process CWD.
+    let command = &config.command;
+    let has_binary = if command.contains('/') {
+        let path = std::path::Path::new(command);
+        if path.is_relative() {
+            match &config.current_dir {
+                Some(dir) => std::path::Path::new(dir).join(path).exists(),
+                None => std::env::current_dir()
+                    .ok()
+                    .map(|cwd| cwd.join(path).exists())
+                    .unwrap_or(false),
+            }
+        } else {
+            path.exists()
+        }
+    } else {
+        // PATH-based command: assume it's available
+        true
+    };
+
+    if !has_binary {
+        tracing::warn!(
                 "Skipping platform plugin '{}': entrypoint binary not found at '{}' (resolved relative to plugin dir: {:?})",
                 manifest.name,
                 command,
                 config.current_dir.as_deref().map(|dir| std::path::Path::new(dir).join(command)),
             );
-                continue;
-            }
-
-            let mut merged = merge_platform_config_env(
-                &config,
-                &serde_json::json!(manifest.config_schema),
-                data_dir,
-            );
-
-            // Apply YAML enabled override: the manifest always sets enabled=true,
-            // but the plugins.yml entry may have enabled=false.
-            if let Ok(Some(yaml_entry)) = crate::plugins_yaml::get_entry(
-                data_dir,
-                &crate::plugins_yaml::PluginYamlType::Platform,
-                &manifest.name,
-            ) {
-                merged.enabled = yaml_entry.enabled;
-            }
-
-            tracing::info!(
-                "Loaded platform plugin '{}' from plugins/platforms/",
-                manifest.name
-            );
-            results.push(merged);
-        }
+        return None;
     }
 
-    results
+    let mut merged = merge_platform_config_env(
+        &config,
+        &serde_json::json!(manifest.config_schema),
+        data_dir,
+    );
+
+    // Apply YAML enabled override: the manifest always sets enabled=true,
+    // but the plugins.yml entry may have enabled=false.
+    if let Ok(Some(yaml_entry)) = crate::plugins_yaml::get_entry(
+        data_dir,
+        &crate::plugins_yaml::PluginYamlType::Platform,
+        &manifest.name,
+    ) {
+        merged.enabled = yaml_entry.enabled;
+    }
+
+    Some(merged)
 }
 
 /// Convenience wrapper: merge platforms.yml config into a PlatformPluginConfig.
@@ -726,5 +801,58 @@ mod tests {
         let parsed: PluginRequest = serde_json::from_str(&req).unwrap();
         assert_eq!(parsed.id, Some(2));
         assert_eq!(parsed.method, "deliver");
+    }
+
+    #[test]
+    fn test_load_plugins_config_discovers_remote_platform() {
+        // Remote-installed platforms (source=remote) live under
+        // {data_dir}/plugins/platforms/.remote/{repo}/{path}/ and must be
+        // discovered by load_plugins_config (hot-load requirement): without
+        // the remote pass, e.g. the telegram platform would never be started.
+        let tmp = std::env::temp_dir().join(format!(
+            "omniagent-test-remote-platform-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let data_dir = tmp.join("data");
+
+        let plugin_dir = data_dir.join("plugins/platforms/.remote/telegram/platforms/telegram");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+                plugin_dir.join("plugin.json"),
+                r#"{"name":"telegram","version":"1.0.0","type":"platform","entrypoint":{"command":"python3","args":["platform.py"],"transport":"stdio"},"capabilities":{"inbound":true,"outbound":true},"config_schema":[{"key":"bot_token","label":"Bot Token","type":"secret"}]}"#,
+            )
+            .unwrap();
+        // A dummy entrypoint so the arg resolution sees platform.py.
+        std::fs::write(plugin_dir.join("platform.py"), "#!/usr/bin/env python3\n").unwrap();
+
+        let config_dir = data_dir.join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+                config_dir.join("plugins.yml"),
+                "platforms:\n  telegram:\n    enabled: true\n    source: remote\n    config:\n      bot_token: abc123\n",
+            )
+            .unwrap();
+        std::fs::write(
+                config_dir.join("remote.yml"),
+                "platforms:\n  telegram:\n    url: https://example.com/omni-plugins.git\n    path: platforms/telegram\n",
+            )
+            .unwrap();
+
+        let configs = load_plugins_config(data_dir.to_str().unwrap());
+        let tg = configs
+            .iter()
+            .find(|c| c.name == "telegram")
+            .expect("telegram platform must be discovered from .remote/");
+        assert!(
+            tg.enabled,
+            "remote platform must inherit plugins.yml enabled=true"
+        );
+        assert_eq!(
+            tg.config.get("bot_token").map(|s| s.as_str()),
+            Some("abc123"),
+            "plugins.yml config must be merged into the platform config"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
