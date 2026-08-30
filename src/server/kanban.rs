@@ -1005,20 +1005,9 @@ async fn change_status_handler(
     let old_status = task.status.as_deref().unwrap_or("backlog");
     let old_position = task.position.unwrap_or(0);
 
-    // 2. Determine target position
-    let target_position = match body.position {
-        Some(pos) => pos,
-        None => match next_position(&state.pool, &body.status).await {
-            Ok(pos) => pos,
-            Err(e) => {
-                error!("[kanban/tasks/{}/status] next_position failed: {:?}", id, e);
-                return err_json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to compute position",
-                );
-            }
-        },
-    };
+    // 2. Determine target position: an explicit position wins; without one
+    //    the moved task becomes the TOPMOST card of the destination column.
+    let target_position = body.position.unwrap_or(0);
 
     if old_status == body.status && old_position == target_position {
         // No-op: already there
@@ -1526,6 +1515,7 @@ async fn update_task_handler(
             plan = :plan,
             workflow_id = CASE WHEN :workflow_id = '' THEN workflow_id ELSE NULLIF(:workflow_id, '')::text END,
             board = CASE WHEN :board = '' THEN board ELSE NULLIF(:board, '')::text END,
+            position = CASE WHEN :board != '' AND :board != board THEN 0 ELSE position END,
             updated_at = NOW()
         WHERE id = :id
         "#,
