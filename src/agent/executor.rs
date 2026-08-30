@@ -200,7 +200,7 @@ pub async fn process_thread(
                     platform_name,
                     resource
                 );
-                helpers::enqueue_delivery(&cfg.ctx, cause_msg, &channel, thread, None).await;
+                helpers::enqueue_delivery(&cfg.ctx, cause_msg, &channel, thread, None, false).await;
             }
         }
     }

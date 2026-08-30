@@ -481,6 +481,12 @@ pub struct DeliverParams {
     /// platform plugins that don't allow nested threads (Mattermost).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause_root_id: Option<String>,
+    /// External id of the message this delivery must be sent as a reply to
+    /// (the seq-0 message's platform external id, e.g. a Telegram
+    /// message_id). Set only for FINAL thread deliveries on platforms that
+    /// support reply threading; None means a standalone send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_message_id: Option<String>,
     #[serde(default)]
     pub is_summary: bool,
     #[serde(default)]
@@ -794,6 +800,7 @@ mod tests {
             thread_sequence: 2,
             cause_external_id: Some("789".to_string()),
             cause_root_id: None,
+            reply_to_message_id: Some("789".to_string()),
             is_summary: true,
             is_user_thread: true,
         };
@@ -801,6 +808,36 @@ mod tests {
         let parsed: PluginRequest = serde_json::from_str(&req).unwrap();
         assert_eq!(parsed.id, Some(2));
         assert_eq!(parsed.method, "deliver");
+        let pv = parsed.params.as_ref().expect("deliver params");
+        assert_eq!(
+            pv.get("reply_to_message_id").and_then(|v| v.as_str()),
+            Some("789"),
+            "reply_to_message_id must be carried in the deliver request"
+        );
+    }
+
+    #[test]
+    fn test_build_deliver_request_omits_reply_when_none() {
+        let params = DeliverParams {
+            resource_identifier: "-10012345".to_string(),
+            content: "Hello".to_string(),
+            msg_type: "summary".to_string(),
+            msg_subtype: None,
+            thread_id: 456,
+            thread_sequence: 2,
+            cause_external_id: Some("789".to_string()),
+            cause_root_id: None,
+            reply_to_message_id: None,
+            is_summary: true,
+            is_user_thread: true,
+        };
+        let req = build_deliver_request(2, &params);
+        let parsed: PluginRequest = serde_json::from_str(&req).unwrap();
+        let pv = parsed.params.as_ref().expect("deliver params");
+        assert!(
+            pv.get("reply_to_message_id").is_none(),
+            "reply_to_message_id must be omitted when None (standalone send)"
+        );
     }
 
     #[test]

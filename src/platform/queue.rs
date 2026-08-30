@@ -40,6 +40,11 @@ pub struct OutboundEnvelope {
     /// If the cause message was itself a reply in a thread, this is the
     /// thread root's external_id (e.g. root_id in Mattermost).
     pub cause_root_id: Option<String>,
+    /// External id of the message this delivery must be sent as a reply to
+    /// (e.g. the seq-0 message's Telegram message_id). Only set for FINAL
+    /// thread deliveries on platforms that support reply threading; None
+    /// means a standalone send.
+    pub reply_to_message_id: Option<String>,
     /// Whether this is a summary message.
     pub is_summary: bool,
     /// Whether this thread was started by a user (vs cron/kanban/system).

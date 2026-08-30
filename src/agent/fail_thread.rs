@@ -80,6 +80,7 @@ pub(crate) async fn fail_thread(
             &channel,
             thread,
             cause_msg.external_id.clone(),
+            true,
         )
         .await;
 
@@ -654,6 +655,7 @@ pub(crate) async fn fail_thread_tool(
             &channel,
             thread,
             Some(cause_ext.clone()),
+            true,
         )
         .await;
         if let (Some(ref platform), Some(ref resource)) =

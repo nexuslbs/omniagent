@@ -179,6 +179,7 @@ pub async fn enqueue_notification(
         thread_sequence: 0,
         cause_external_id: None,
         cause_root_id: None,
+        reply_to_message_id: None,
         is_summary: false,
         is_user_thread: false,
     };

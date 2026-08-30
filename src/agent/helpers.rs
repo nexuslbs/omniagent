@@ -335,6 +335,7 @@ pub async fn enqueue_delivery(
     channel: &Channel,
     thread: &Thread,
     cause_external_id: Option<String>,
+    is_final: bool,
 ) {
     // If the channel has no platform, there's nowhere to deliver
     let platform = match &channel.platform {
@@ -368,6 +369,26 @@ pub async fn enqueue_delivery(
         }
     } else {
         cause_external_id
+    };
+
+    // Final thread deliveries on Telegram must be sent as a REPLY to the
+    // thread's seq-0 message (reply_to_message_id = the seq-0 message's
+    // Telegram message_id), never as a standalone top-level message. When the
+    // seq-0 external id is unavailable (legacy thread, id lost), fall back to
+    // the current standalone send and log it - the message is never dropped.
+    let reply_to_message_id = if is_final && platform == "telegram" {
+        match &resolved_cause_external_id {
+            Some(seq0_ext) => Some(seq0_ext.clone()),
+            None => {
+                tracing::info!(
+                    "[reply-to-seq0] final message for thread {} has no seq-0 external id - sending standalone",
+                    saved.thread_id
+                );
+                None
+            }
+        }
+    } else {
+        None
     };
 
     // For system-originated threads (kanban, cron, etc.), add a metadata
@@ -443,6 +464,7 @@ pub async fn enqueue_delivery(
                         .map(|s| s.to_string())
                 })
         },
+        reply_to_message_id,
         is_summary: saved.is_summary,
         is_user_thread: thread.cause == "user",
     };
@@ -482,6 +504,7 @@ pub async fn enqueue_reaction(
         thread_sequence: 0,
         cause_external_id: Some(external_id.to_string()),
         cause_root_id: None,
+        reply_to_message_id: None,
         is_summary: false,
         is_user_thread: false,
     };
@@ -583,7 +606,7 @@ pub async fn enqueue_delivery_collapsed(
         );
         return;
     }
-    enqueue_delivery(ctx, saved, channel, thread, cause_external_id).await;
+    enqueue_delivery(ctx, saved, channel, thread, cause_external_id, is_final).await;
 }
 
 /// Enqueue a typing indicator to a platform channel/thread.
@@ -609,6 +632,7 @@ pub async fn enqueue_typing(
         thread_sequence: 0,
         cause_external_id: parent_id,
         cause_root_id: None,
+        reply_to_message_id: None,
         is_summary: false,
         is_user_thread: false,
     };
