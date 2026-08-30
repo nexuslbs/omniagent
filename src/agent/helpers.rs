@@ -530,38 +530,39 @@ pub async fn enqueue_reaction(
 /// When the telegram platform plugin is configured with `first_last_only`
 /// enabled (plugins.yml `platforms.telegram.config`), the main loop collapses
 /// intermediate thread deliveries: only the FIRST and LAST messages of the
-/// run reach the chat. This struct tracks whether the first message has been
-/// sent yet; `should_deliver(is_final)` returns true for the first delivery,
-/// for the final delivery, and always when collapse is disabled.
+/// thread reach the chat.
+///
+/// FIRST is selected by thread position (seq-0, the thread's prompt/cause
+/// message), never by "first delivery of a run": a run almost always starts
+/// with tool calls, so a first-delivery heuristic picks the wrong bubble
+/// (raw tool-call records used to appear mid-thread as "first"). LAST is the
+/// thread's final message (the final assistant summary, or the error message
+/// when the thread ends without a summary). `should_deliver(is_final, seq)`
+/// returns true for seq-0, for the final delivery, and always when collapse
+/// is disabled.
 #[derive(Debug, Default)]
 pub struct FirstLastCollapse {
     pub enabled: bool,
-    pub first_sent: bool,
 }
 
 impl FirstLastCollapse {
     pub fn new(enabled: bool) -> Self {
-        Self {
-            enabled,
-            first_sent: false,
-        }
+        Self { enabled }
     }
 
     /// Decide whether a delivery should reach the platform.
     ///
     /// Collapse disabled -> always deliver (regression: current behavior).
-    /// Collapse enabled  -> deliver only the first message of the run and
-    /// the final message (is_final=true); every intermediate message is
-    /// suppressed. A single-message run (first == final) is delivered once.
-    pub fn should_deliver(&mut self, is_final: bool) -> bool {
+    /// Collapse enabled  -> deliver only the thread's first message by
+    /// position (seq-0, the prompt/cause) and the final message
+    /// (is_final=true); every intermediate message is suppressed. A run
+    /// whose only deliverable message is the final one (first == last) is
+    /// delivered once.
+    pub fn should_deliver(&self, is_final: bool, thread_sequence: i32) -> bool {
         if !self.enabled {
             return true;
         }
-        if !self.first_sent {
-            self.first_sent = true;
-            return true;
-        }
-        is_final
+        thread_sequence == 0 || is_final
     }
 }
 
@@ -596,9 +597,10 @@ pub fn telegram_first_last_only(data_dir: &str) -> bool {
 
 /// Enqueue a thread-run delivery honoring the telegram first/last collapse.
 ///
-/// When `collapse.enabled` and the message is neither the first nor the final
-/// delivery of the run, the delivery is suppressed (the message stays
-/// persisted in the thread history, only the platform delivery is skipped).
+/// When `collapse.enabled` and the message is neither the thread's first
+/// message by position (seq-0) nor the final message, the delivery is
+/// suppressed (the message stays persisted in the thread history, only the
+/// platform delivery is skipped).
 pub async fn enqueue_delivery_collapsed(
     ctx: &AppContext,
     saved: &Message,
@@ -608,7 +610,7 @@ pub async fn enqueue_delivery_collapsed(
     collapse: &mut FirstLastCollapse,
     is_final: bool,
 ) {
-    if !collapse.should_deliver(is_final) {
+    if !collapse.should_deliver(is_final, saved.thread_sequence) {
         tracing::info!(
             "[first-last] suppressing intermediate delivery to platform '{}' (thread {}, seq {})",
             channel.platform.as_deref().unwrap_or("?"),
@@ -666,38 +668,37 @@ mod tests {
     #[test]
     fn test_collapse_disabled_delivers_every_message() {
         // Flag absent/false (default): regression - all messages delivered.
-        let mut c = FirstLastCollapse::new(false);
-        assert!(c.should_deliver(false));
-        assert!(c.should_deliver(false));
-        assert!(c.should_deliver(false));
-        assert!(c.should_deliver(true));
+        let c = FirstLastCollapse::new(false);
+        assert!(c.should_deliver(false, 0));
+        assert!(c.should_deliver(false, 5));
+        assert!(c.should_deliver(false, 12));
+        assert!(c.should_deliver(true, 12));
     }
 
     #[test]
-    fn test_collapse_enabled_delivers_only_first_and_last() {
-        let mut c = FirstLastCollapse::new(true);
-        // First message of the run: delivered.
-        assert!(c.should_deliver(false));
-        // Intermediate messages: suppressed.
-        assert!(!c.should_deliver(false));
-        assert!(!c.should_deliver(false));
-        assert!(!c.should_deliver(false));
-        // Final message of the run: delivered.
-        assert!(c.should_deliver(true));
+    fn test_collapse_enabled_delivers_only_seq0_and_final() {
+        let c = FirstLastCollapse::new(true);
+        // First message by position (seq-0, the prompt/cause): delivered.
+        assert!(c.should_deliver(false, 0));
+        // Intermediate messages (seq > 0, not final): suppressed, including
+        // tool-call records and reasoning traces that are not the seq-0.
+        assert!(!c.should_deliver(false, 1));
+        assert!(!c.should_deliver(false, 5));
+        assert!(!c.should_deliver(false, 7));
+        // Final message of the thread: delivered.
+        assert!(c.should_deliver(true, 8));
     }
 
     #[test]
     fn test_collapse_single_message_run_delivered_once() {
-        // A run with only a final message (first == final) delivers it once;
-        // the final delivery (is_final=true) still happens after an earlier
-        // delivery in a multi-message run, and intermediates stay suppressed.
-        let mut c = FirstLastCollapse::new(true);
-        assert!(c.should_deliver(true));
-        assert!(!c.should_deliver(false));
-        let mut d = FirstLastCollapse::new(true);
-        assert!(d.should_deliver(false)); // first message
-        assert!(!d.should_deliver(false)); // intermediate suppressed
-        assert!(d.should_deliver(true)); // final message still delivered
+        // A run with only a final message (first == last) delivers it once.
+        let c = FirstLastCollapse::new(true);
+        assert!(c.should_deliver(true, 1));
+        // An intermediate message after the final one stays suppressed.
+        assert!(!c.should_deliver(false, 2));
+        // A seq-0 message that is also the final message is delivered once.
+        let d = FirstLastCollapse::new(true);
+        assert!(d.should_deliver(true, 0));
     }
 
     fn telegram_test_data_dir(first_last: Option<&str>) -> (tempfile::TempDir, String) {
