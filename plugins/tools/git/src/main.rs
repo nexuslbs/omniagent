@@ -1768,19 +1768,20 @@ mod tests {
 
     /// Point the CONFIG workspace_dir at a temp dir for sandbox tests.
     ///
-    /// Returns a guard for a static test lock: the CONFIG workspace_dir is
-    /// shared mutable state, so every test that calls `set_ws` must bind the
-    /// returned guard (`let _g = set_ws(...)`) to serialize against the other
-    /// sandbox tests - otherwise a parallel test can flip the dir mid-assert.
-    fn set_sandbox(
+    /// Returns a guard for a static async test lock: the CONFIG workspace_dir
+    /// is shared mutable state, so every test that calls `set_sandbox` /
+    /// `set_ws` binds the returned guard and HOLDS it across awaits. The guard
+    /// is Send (tokio::sync::Mutex), so async tests keep it for the whole test
+    /// body - no parallel test can flip the dir mid-test.
+    async fn set_sandbox(
         ws: &str,
         omni: &str,
         disable_omni: bool,
-    ) -> parking_lot::MutexGuard<'static, ()> {
-        static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-        // parking_lot: lock() cannot fail, so a panic in one test can never
-        // poison the lock and cascade opaque failures onto the others.
-        let guard = TEST_LOCK.lock();
+    ) -> tokio::sync::MutexGuard<'static, ()> {
+        static TEST_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+        // tokio::sync::Mutex (async): the guard is Send, so tests can hold it
+        // across awaits; a panic never poisons it (no poison state).
+        let guard = TEST_LOCK.lock().await;
         let mut cfg = CONFIG.lock();
         cfg.workspace_dir = ws.to_string();
         cfg.omni_dir = omni.to_string();
@@ -1790,8 +1791,8 @@ mod tests {
 
     /// Point the CONFIG workspace_dir at a dir for sandbox tests; omni_dir
     /// keeps its default and disable_omni_dir stays false (git allowed).
-    fn set_ws(dir: &str) -> parking_lot::MutexGuard<'static, ()> {
-        set_sandbox(dir, "/opt/omni", false)
+    async fn set_ws(dir: &str) -> tokio::sync::MutexGuard<'static, ()> {
+        set_sandbox(dir, "/opt/omni", false).await
     }
 
     /// Create a unique temp dir; returns (workspace_base, repo_path_inside).
@@ -1826,24 +1827,24 @@ mod tests {
         (ws, repo)
     }
 
-    #[test]
-    fn sandbox_accepts_workspace_root() {
+    #[tokio::test]
+    async fn sandbox_accepts_workspace_root() {
         let ws = "/opt/workspace";
-        let _g = set_ws(ws);
+        let _g = set_ws(ws).await;
         assert!(validate_repo_within_workspace(ws).is_ok());
     }
 
-    #[test]
-    fn sandbox_accepts_subdirectory() {
-        let _g = set_ws("/opt/workspace");
+    #[tokio::test]
+    async fn sandbox_accepts_subdirectory() {
+        let _g = set_ws("/opt/workspace").await;
         assert!(validate_repo_within_workspace("/opt/workspace/playground/movie-db").is_ok());
         assert!(validate_repo_within_workspace("/opt/workspace/omniagent").is_ok());
     }
 
-    #[test]
-    fn sandbox_rejects_outside_path() {
+    #[tokio::test]
+    async fn sandbox_rejects_outside_path() {
         // disable_omni_dir set: the omni_dir repo is outside the sandbox too.
-        let _g = set_sandbox("/opt/workspace", "/opt/omni", true);
+        let _g = set_sandbox("/opt/workspace", "/opt/omni", true).await;
         let err = validate_repo_within_workspace("/opt/omni/plugins").unwrap_err();
         assert!(err
             .to_string()
@@ -1884,25 +1885,25 @@ mod tests {
         assert!(!cfg.disable_omni_dir);
     }
 
-    #[test]
-    fn sandbox_accepts_omni_dir_by_default() {
+    #[tokio::test]
+    async fn sandbox_accepts_omni_dir_by_default() {
         // disable_omni_dir defaults to false: git may run in the omni_dir repo.
-        let _g = set_ws("/opt/workspace");
+        let _g = set_ws("/opt/workspace").await;
         assert!(validate_repo_within_workspace("/opt/omni").is_ok());
         assert!(validate_repo_within_workspace("/opt/omni/profiles/omni").is_ok());
         // ...but a sibling dir outside both sandboxes is still rejected.
         assert!(validate_repo_within_workspace("/opt/other").is_err());
     }
 
-    #[test]
-    fn sandbox_rejects_omni_dir_when_disabled() {
-        let _g = set_sandbox("/opt/workspace", "/opt/omni", true);
+    #[tokio::test]
+    async fn sandbox_rejects_omni_dir_when_disabled() {
+        let _g = set_sandbox("/opt/workspace", "/opt/omni", true).await;
         assert!(validate_repo_within_workspace("/opt/omni").is_err());
     }
 
-    #[test]
-    fn args_accept_omni_dir_path_when_allowed() {
-        let _g = set_ws("/opt/workspace");
+    #[tokio::test]
+    async fn args_accept_omni_dir_path_when_allowed() {
+        let _g = set_ws("/opt/workspace").await;
         // -C /opt/omni must be accepted: the omni_dir repo is a sandbox root.
         let owned = vec![
             "-C".to_string(),
@@ -1912,34 +1913,33 @@ mod tests {
         assert!(validate_git_args_within_workspace("/opt/workspace/repo", &owned).is_ok());
     }
 
-    #[test]
-    fn sandbox_rejects_traversal_escape() {
-        let _g = set_ws("/opt/workspace");
+    #[tokio::test]
+    async fn sandbox_rejects_traversal_escape() {
+        let _g = set_ws("/opt/workspace").await;
         // workspace/../etc would resolve to /opt/etc - outside the sandbox.
         assert!(validate_repo_within_workspace("/opt/workspace/../etc").is_err());
         // But a traversal that stays inside is fine.
         assert!(validate_repo_within_workspace("/opt/workspace/sub/../omniagent").is_ok());
     }
 
-    #[test]
-    fn sandbox_accepts_relative_repo_path() {
-        let _g = set_ws("/opt/workspace");
+    #[tokio::test]
+    async fn sandbox_accepts_relative_repo_path() {
+        let _g = set_ws("/opt/workspace").await;
         // Relative paths resolve against the workspace root.
         assert!(validate_repo_within_workspace("omniagent").is_ok());
         assert!(validate_repo_within_workspace("").is_ok()); // workspace itself
     }
 
-    #[test]
-    fn sandbox_respects_custom_workspace_dir() {
-        let _g = set_ws("/tmp/custom-ws");
+    #[tokio::test]
+    async fn sandbox_respects_custom_workspace_dir() {
+        let _g = set_ws("/tmp/custom-ws").await;
         assert!(validate_repo_within_workspace("/tmp/custom-ws/project").is_ok());
         assert!(validate_repo_within_workspace("/opt/workspace/project").is_err());
     }
 
     #[tokio::test]
     async fn sandbox_clone_destination_enforced() {
-        let _g = set_ws("/opt/workspace");
-        drop(_g);
+        let _g = set_ws("/opt/workspace").await;
         // Clone with an absolute dir outside the workspace must be rejected
         // as a tool error (is_error=true), before any network access.
         let args = serde_json::json!({
@@ -1955,8 +1955,7 @@ mod tests {
 
     #[tokio::test]
     async fn sandbox_rejections_do_not_trip_handler_error() {
-        let _g = set_ws("/opt/workspace");
-        drop(_g);
+        let _g = set_ws("/opt/workspace").await;
         // A sandbox rejection must come back as Ok((msg, true)) - NOT as an
         // Err - so the MCP circuit breaker doesn't count it as a server
         // failure and open the circuit after a few legitimate blocks.
@@ -1972,40 +1971,55 @@ mod tests {
     // ── Argument-level sandbox: redirect flags & write destinations ──
 
     /// Shorthand: run arg validation against a repo inside a temp workspace.
-    fn validate_args(args: &[&str]) -> Result<()> {
+    async fn validate_args(args: &[&str]) -> Result<()> {
         let (ws, repo) = temp_ws();
-        let _g = set_ws(&ws);
+        let _g = set_ws(&ws).await;
         let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         validate_git_args_within_workspace(&repo, &owned)
     }
 
-    #[test]
-    fn args_reject_chdir_escape() {
+    #[tokio::test]
+    async fn args_reject_chdir_escape() {
         // The proven live escape: git -C /tmp init wrote /tmp/.git.
-        let err = validate_args(&["-C", "/tmp", "init"]).unwrap_err();
+        let err = validate_args(&["-C", "/tmp", "init"]).await.unwrap_err();
         assert!(err
             .to_string()
             .contains("outside the git workspace sandbox"));
         // Attached form too.
-        assert!(validate_args(&["-C/tmp", "init"]).is_err());
+        assert!(validate_args(&["-C/tmp", "init"]).await.is_err());
     }
 
-    #[test]
-    fn args_reject_git_dir_redirect() {
-        assert!(validate_args(&["--git-dir=/etc", "status"]).is_err());
-        assert!(validate_args(&["--work-tree=/", "status"]).is_err());
-        assert!(validate_args(&["--git-common-dir=/opt/other", "status"]).is_err());
-        assert!(validate_args(&["--object-dir=/var/lib", "cat-file", "-p", "HEAD"]).is_err());
-        assert!(validate_args(&["--exec-path=/tmp", "rev-parse", "HEAD"]).is_err());
-        assert!(validate_args(&["--template=/etc", "init"]).is_err());
-        assert!(validate_args(&["--shallow-file=/tmp/s", "rev-parse", "HEAD"]).is_err());
+    #[tokio::test]
+    async fn args_reject_git_dir_redirect() {
+        assert!(validate_args(&["--git-dir=/etc", "status"]).await.is_err());
+        assert!(validate_args(&["--work-tree=/", "status"]).await.is_err());
+        assert!(validate_args(&["--git-common-dir=/opt/other", "status"])
+            .await
+            .is_err());
+        assert!(
+            validate_args(&["--object-dir=/var/lib", "cat-file", "-p", "HEAD"])
+                .await
+                .is_err()
+        );
+        assert!(validate_args(&["--exec-path=/tmp", "rev-parse", "HEAD"])
+            .await
+            .is_err());
+        assert!(validate_args(&["--template=/etc", "init"]).await.is_err());
+        assert!(
+            validate_args(&["--shallow-file=/tmp/s", "rev-parse", "HEAD"])
+                .await
+                .is_err()
+        );
         // Space-separated form.
-        assert!(validate_args(&["--git-dir", "/etc", "status"]).is_err());
+        assert!(validate_args(&["--git-dir", "/etc", "status"])
+            .await
+            .is_err());
     }
 
-    #[test]
-    fn args_reject_clone_destination_escape() {
+    #[tokio::test]
+    async fn args_reject_clone_destination_escape() {
         let err = validate_args(&["clone", "https://github.com/nexuslbs/foo.git", "/tmp/foo"])
+            .await
             .unwrap_err();
         assert!(err.to_string().contains("clone destination"));
         // Relative escape via .. - repo_dir is /opt/workspace/omniagent, so
@@ -2015,90 +2029,148 @@ mod tests {
             "https://github.com/nexuslbs/foo.git",
             "../../escape"
         ])
+        .await
         .is_err());
         // A .. that stays inside the workspace is fine.
         assert!(
-            validate_args(&["clone", "https://github.com/nexuslbs/foo.git", "../escape"]).is_ok()
+            validate_args(&["clone", "https://github.com/nexuslbs/foo.git", "../escape"])
+                .await
+                .is_ok()
         );
         // Inside workspace is fine.
         assert!(
-            validate_args(&["clone", "https://github.com/nexuslbs/foo.git", "subdir/foo"]).is_ok()
+            validate_args(&["clone", "https://github.com/nexuslbs/foo.git", "subdir/foo"])
+                .await
+                .is_ok()
         );
     }
 
-    #[test]
-    fn args_reject_init_directory_escape() {
-        let err = validate_args(&["init", "/tmp/foo"]).unwrap_err();
+    #[tokio::test]
+    async fn args_reject_init_directory_escape() {
+        let err = validate_args(&["init", "/tmp/foo"]).await.unwrap_err();
         assert!(err.to_string().contains("init directory"));
-        assert!(validate_args(&["init", "subdir"]).is_ok());
+        assert!(validate_args(&["init", "subdir"]).await.is_ok());
     }
 
-    #[test]
-    fn args_reject_config_global_and_file_escape() {
-        let err = validate_args(&["config", "--global", "user.name", "x"]).unwrap_err();
+    #[tokio::test]
+    async fn args_reject_config_global_and_file_escape() {
+        let err = validate_args(&["config", "--global", "user.name", "x"])
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("~/.gitconfig"));
-        assert!(validate_args(&["config", "--system", "core.autocrlf", "true"]).is_err());
-        let err = validate_args(&["config", "--file", "/tmp/cfg", "user.name", "x"]).unwrap_err();
+        assert!(
+            validate_args(&["config", "--system", "core.autocrlf", "true"])
+                .await
+                .is_err()
+        );
+        let err = validate_args(&["config", "--file", "/tmp/cfg", "user.name", "x"])
+            .await
+            .unwrap_err();
         assert!(err
             .to_string()
             .contains("outside the git workspace sandbox"));
         // Repo-local config is fine.
-        assert!(validate_args(&["config", "user.name", "x"]).is_ok());
+        assert!(validate_args(&["config", "user.name", "x"]).await.is_ok());
     }
 
-    #[test]
-    fn args_reject_output_redirection_escape() {
-        assert!(validate_args(&["archive", "--output=/tmp/out.tar", "HEAD"]).is_err());
-        assert!(validate_args(&["archive", "-o", "/tmp/out.tar", "HEAD"]).is_err());
-        assert!(validate_args(&["format-patch", "-o", "/tmp/patchdir"]).is_err());
-        assert!(validate_args(&["format-patch", "--output-directory=/tmp/patchdir"]).is_err());
-        assert!(validate_args(&["diff", "--output=/tmp/d.patch"]).is_err());
-        assert!(validate_args(&["apply", "--directory=/tmp", "x.patch"]).is_err());
-        assert!(validate_args(&["checkout-index", "--prefix=/tmp/", "--all"]).is_err());
-        assert!(validate_args(&["bundle", "create", "/tmp/x.bundle", "main"]).is_err());
-        assert!(validate_args(&["worktree", "add", "/tmp/wt", "-b", "x"]).is_err());
+    #[tokio::test]
+    async fn args_reject_output_redirection_escape() {
+        assert!(validate_args(&["archive", "--output=/tmp/out.tar", "HEAD"])
+            .await
+            .is_err());
+        assert!(validate_args(&["archive", "-o", "/tmp/out.tar", "HEAD"])
+            .await
+            .is_err());
+        assert!(validate_args(&["format-patch", "-o", "/tmp/patchdir"])
+            .await
+            .is_err());
+        assert!(
+            validate_args(&["format-patch", "--output-directory=/tmp/patchdir"])
+                .await
+                .is_err()
+        );
+        assert!(validate_args(&["diff", "--output=/tmp/d.patch"])
+            .await
+            .is_err());
+        assert!(validate_args(&["apply", "--directory=/tmp", "x.patch"])
+            .await
+            .is_err());
+        assert!(
+            validate_args(&["checkout-index", "--prefix=/tmp/", "--all"])
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_args(&["bundle", "create", "/tmp/x.bundle", "main"])
+                .await
+                .is_err()
+        );
+        assert!(validate_args(&["worktree", "add", "/tmp/wt", "-b", "x"])
+            .await
+            .is_err());
         // Inside-workspace outputs are fine.
-        assert!(validate_args(&["archive", "--output=out.tar", "HEAD"]).is_ok());
-        assert!(validate_args(&["format-patch", "-o", "patches"]).is_ok());
-        assert!(validate_args(&["worktree", "add", "wt", "-b", "x"]).is_ok());
+        assert!(validate_args(&["archive", "--output=out.tar", "HEAD"])
+            .await
+            .is_ok());
+        assert!(validate_args(&["format-patch", "-o", "patches"])
+            .await
+            .is_ok());
+        assert!(validate_args(&["worktree", "add", "wt", "-b", "x"])
+            .await
+            .is_ok());
     }
 
-    #[test]
-    fn args_reject_exec_config_overrides() {
-        let err =
-            validate_args(&["-c", "core.pager=sh -c 'echo x > /tmp/pwn'", "log"]).unwrap_err();
+    #[tokio::test]
+    async fn args_reject_exec_config_overrides() {
+        let err = validate_args(&["-c", "core.pager=sh -c 'echo x > /tmp/pwn'", "log"])
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("configures a command"));
-        assert!(validate_args(&["-c", "alias.evil=!rm -rf /", "evil"]).is_err());
-        assert!(validate_args(&["-c", "credential.helper=!sh -c 'x'", "fetch"]).is_err());
-        assert!(validate_args(&["-c", "core.hooksPath=/etc", "commit"]).is_err());
-        assert!(validate_args(&["-c", "core.excludesFile=/tmp/x", "status"]).is_err());
+        assert!(validate_args(&["-c", "alias.evil=!rm -rf /", "evil"])
+            .await
+            .is_err());
+        assert!(
+            validate_args(&["-c", "credential.helper=!sh -c 'x'", "fetch"])
+                .await
+                .is_err()
+        );
+        assert!(validate_args(&["-c", "core.hooksPath=/etc", "commit"])
+            .await
+            .is_err());
+        assert!(validate_args(&["-c", "core.excludesFile=/tmp/x", "status"])
+            .await
+            .is_err());
         // Benign overrides pass through.
-        assert!(validate_args(&["-c", "user.name=Test", "commit"]).is_ok());
-        assert!(validate_args(&["-c", "core.autocrlf=true", "status"]).is_ok());
+        assert!(validate_args(&["-c", "user.name=Test", "commit"])
+            .await
+            .is_ok());
+        assert!(validate_args(&["-c", "core.autocrlf=true", "status"])
+            .await
+            .is_ok());
     }
 
-    #[test]
-    fn args_reject_maintenance_register() {
-        let err = validate_args(&["maintenance", "start"]).unwrap_err();
+    #[tokio::test]
+    async fn args_reject_maintenance_register() {
+        let err = validate_args(&["maintenance", "start"]).await.unwrap_err();
         assert!(err.to_string().contains("cron/systemd"));
-        assert!(validate_args(&["maintenance", "register"]).is_err());
+        assert!(validate_args(&["maintenance", "register"]).await.is_err());
         // Running maintenance in the repo is fine.
-        assert!(validate_args(&["maintenance", "run"]).is_ok());
+        assert!(validate_args(&["maintenance", "run"]).await.is_ok());
     }
 
-    #[test]
-    fn args_allow_benign_commands() {
-        assert!(validate_args(&["log", "--oneline", "-10"]).is_ok());
-        assert!(validate_args(&["diff"]).is_ok());
-        assert!(validate_args(&["status"]).is_ok());
-        assert!(validate_args(&["remote", "-v"]).is_ok());
-        assert!(validate_args(&["fetch", "origin"]).is_ok());
-        assert!(validate_args(&["reset", "--soft", "HEAD~1"]).is_ok());
-        assert!(validate_args(&["stash"]).is_ok());
-        assert!(validate_args(&["tag", "-l"]).is_ok());
-        assert!(validate_args(&["show", "HEAD"]).is_ok());
-        assert!(validate_args(&["branch", "-a"]).is_ok());
-        assert!(validate_args(&["push", "origin", "main"]).is_ok());
+    #[tokio::test]
+    async fn args_allow_benign_commands() {
+        assert!(validate_args(&["log", "--oneline", "-10"]).await.is_ok());
+        assert!(validate_args(&["diff"]).await.is_ok());
+        assert!(validate_args(&["status"]).await.is_ok());
+        assert!(validate_args(&["remote", "-v"]).await.is_ok());
+        assert!(validate_args(&["fetch", "origin"]).await.is_ok());
+        assert!(validate_args(&["reset", "--soft", "HEAD~1"]).await.is_ok());
+        assert!(validate_args(&["stash"]).await.is_ok());
+        assert!(validate_args(&["tag", "-l"]).await.is_ok());
+        assert!(validate_args(&["show", "HEAD"]).await.is_ok());
+        assert!(validate_args(&["branch", "-a"]).await.is_ok());
+        assert!(validate_args(&["push", "origin", "main"]).await.is_ok());
     }
 
     // ── git subcommand detection ──
@@ -2124,8 +2196,7 @@ mod tests {
     #[tokio::test]
     async fn args_rejections_do_not_trip_handler_error() {
         let (ws, repo) = temp_git_repo().await;
-        let _g = set_ws(&ws);
-        drop(_g);
+        let _g = set_ws(&ws).await;
         // -C escape must come back as Ok((msg, true)), not Err.
         let (msg, is_error) = handle_run_command(serde_json::json!({
             "repo_dir": repo,
@@ -2198,7 +2269,7 @@ mod tests {
     #[tokio::test]
     async fn panic_while_holding_config_does_not_poison_plugin() {
         // Plugin configured and healthy.
-        let _g = set_ws("/tmp/poison-test-ws");
+        let _g = set_ws("/tmp/poison-test-ws").await;
 
         // A handler panics while CONFIG is held. With std::sync::Mutex the
         // mutex is poisoned on unwind; parking_lot releases it cleanly.
@@ -2212,7 +2283,6 @@ mod tests {
 
         // The plugin must still be fully operational.
         assert_eq!(resolve_workspace_dir(), "/tmp/poison-test-ws");
-        drop(_g);
 
         // A git call that ERRORS (sandbox rejection) must come back as a
         // clean tool error - not panic on a poisoned lock.
@@ -2245,8 +2315,7 @@ mod tests {
     async fn git_handler_errors_leave_shared_state_healthy() {
         // A git call that fails must not corrupt the shared config: the
         // next call sees the same workspace and behaves identically.
-        let _g = set_ws("/tmp/err-test-ws");
-        drop(_g);
+        let _g = set_ws("/tmp/err-test-ws").await;
 
         let (msg, is_error) = handle_run_command(serde_json::json!({
             "repo_dir": "/etc",
