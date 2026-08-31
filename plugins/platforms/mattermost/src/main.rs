@@ -1007,6 +1007,11 @@ struct DeliverParams {
     is_summary: bool,
     #[serde(default)]
     is_user_thread: bool,
+    /// True when this is the final delivery of the run (the thread's last
+    /// message). Used by the first_last_only collapse to keep the final
+    /// message while suppressing intermediates.
+    #[serde(default)]
+    is_final: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1097,6 +1102,10 @@ struct PluginConfig {
         deserialize_with = "deserialize_u64_from_string_or_number"
     )]
     max_download_bytes: u64,
+    /// When true, deliver only the thread's FIRST (seq-0) and FINAL messages
+    /// to Mattermost; every intermediate delivery is suppressed (no API call).
+    #[serde(default, deserialize_with = "deserialize_bool_from_string_or_bool")]
+    first_last_only: bool,
 }
 
 impl PluginConfig {
@@ -1164,6 +1173,39 @@ where
         }
     }
     deserializer.deserialize_any(U64OrString)
+}
+
+/// Deserialize a bool that may be a real boolean or a string ("true", "on",
+/// "1", "yes", ...). The core sends configure params as the FLAT plugins.yml
+/// env map with STRING values (HashMap<String,String> serialized to JSON), so
+/// a plain `bool` field rejects "true"; both shapes must behave identically
+/// (mirrors the telegram plugin's _as_bool coercion).
+fn deserialize_bool_from_string_or_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+    struct BoolOrString;
+    impl<'de> de::Visitor<'de> for BoolOrString {
+        type Value = bool;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a boolean or a boolean string")
+        }
+        fn visit_bool<E: de::Error>(self, v: bool) -> Result<bool, E> {
+            Ok(v)
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<bool, E> {
+            match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "on" | "yes" => Ok(true),
+                "0" | "false" | "off" | "no" | "" => Ok(false),
+                other => Err(de::Error::custom(format!(
+                    "invalid boolean string: {:?}",
+                    other
+                ))),
+            }
+        }
+    }
+    deserializer.deserialize_any(BoolOrString)
 }
 
 // ---------------------------------------------------------------------------
@@ -1848,7 +1890,7 @@ async fn main() -> Result<()> {
             "deliver" => {
                 if let Some(params) = request.params {
                     match serde_json::from_value::<DeliverParams>(params) {
-                        Ok(p) => handle_deliver(req_id, &client, &p).await,
+                        Ok(p) => handle_deliver(req_id, &client, &p, config.first_last_only).await,
                         Err(e) => make_error(req_id, -1, &format!("Invalid deliver params: {}", e)),
                     }
                 } else {
@@ -1933,6 +1975,7 @@ async fn handle_deliver(
     id: u64,
     client: &MattermostClient,
     params: &DeliverParams,
+    first_last_only: bool,
 ) -> PluginResponse {
     let channel_id = &params.resource_identifier;
     let content = &params.content;
@@ -1944,6 +1987,29 @@ async fn handle_deliver(
             serde_json::json!({
                 "delivered": false,
                 "reason": "empty_content",
+            }),
+        );
+    }
+
+    // Mattermost first/last-only collapse (plugin-scoped, driven by the
+    // mattermost first_last_only config flag): only the thread's FIRST
+    // message (seq-0, the prompt/cause) and the FINAL message of the run
+    // reach the channel; every intermediate delivery is suppressed. Core
+    // sends the full message stream to every platform; this filtering is
+    // mattermost-specific and lives here, never in core.
+    if first_last_only && params.thread_sequence != 0 && !params.is_final {
+        tracing::info!(
+            "first_last_only: suppressing intermediate delivery (seq={}, is_final={}) to channel {}",
+            params.thread_sequence,
+            params.is_final,
+            channel_id,
+        );
+        return make_success(
+            id,
+            serde_json::json!({
+                "delivered": false,
+                "external_id": "",
+                "suppressed": true,
             }),
         );
     }

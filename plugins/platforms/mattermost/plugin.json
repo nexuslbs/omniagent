@@ -133,6 +133,14 @@
       "min": 1024,
       "max": 1073741824,
       "description": "Maximum file size in bytes to download from the platform API. Files larger than this are not downloaded; only metadata and a file URL reference are included. Default: 10 MB (10485760)."
+    },
+    {
+      "key": "first_last_only",
+      "label": "First/Last Message Only",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "When enabled, only the first (seq-0) and final messages of each thread are posted to Mattermost; intermediate messages (tool calls, plans, reasoning) are suppressed. Does not affect other platform plugins."
     }
   ]
 }

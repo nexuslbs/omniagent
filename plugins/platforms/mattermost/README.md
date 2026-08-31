@@ -56,6 +56,7 @@ All fields are optional in `plugin.json` and have sensible defaults via `serde(d
 | `connection_mode` | enum | `"websocket"` | `"polling"` or `"websocket"` |
 | `polling_enabled` | boolean | `true` | Whether polling is active (if mode is `"polling"`) |
 | `polling_interval` | integer | `15` | Seconds between polls (min 5, max 300) |
+| `first_last_only` | boolean | `false` | Deliver only the thread's first (seq-0) and final messages to Mattermost; suppress intermediate deliveries |
 | `channel_ids` | string | `""` | Comma-separated channel IDs to watch in addition to auto-discovered ones |
 | `setup_team` | string | `""` | Team name for setup mode |
 | `setup_channel` | string | `"setup"` | Channel name for setup mode |
