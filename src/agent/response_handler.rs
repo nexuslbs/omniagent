@@ -25,7 +25,6 @@ pub(crate) async fn handle_response(
     token_usage_json: Option<serde_json::Value>,
     evidence_metadata: serde_json::Value,
     enable_subtasks: bool,
-    collapse: &mut helpers::FirstLastCollapse,
 ) -> AppResult<Message> {
     // ── Fail-thread tool outcome (Phase 2) ──────────────────────────────────
     // If the builtin fail-thread tool already ended this thread as FAILED
@@ -172,13 +171,12 @@ pub(crate) async fn handle_response(
 
         let summary_saved = queries::create_message(&cfg.pool, &summary_msg).await?;
         info!("[summary] Saved summary message for thread {}", thread.id);
-        helpers::enqueue_delivery_collapsed(
+        helpers::enqueue_delivery(
             &cfg.ctx,
             &summary_saved,
             channel,
             thread,
             cause_msg.external_id.clone(),
-            collapse,
             true,
         )
         .await;
@@ -254,13 +252,12 @@ pub(crate) async fn handle_response(
                 "[summary] Saved empty-final summary message for thread {}",
                 thread.id
             );
-            helpers::enqueue_delivery_collapsed(
+            helpers::enqueue_delivery(
                 &cfg.ctx,
                 &summary_saved,
                 channel,
                 thread,
                 cause_msg.external_id.clone(),
-                collapse,
                 true,
             )
             .await;
@@ -297,13 +294,12 @@ pub(crate) async fn handle_response(
                 token_usage: serde_json::json!({}),
             };
             let saved = queries::create_message(&cfg.pool, &agent_msg).await?;
-            helpers::enqueue_delivery_collapsed(
+            helpers::enqueue_delivery(
                 &cfg.ctx,
                 &saved,
                 channel,
                 thread,
                 cause_msg.external_id.clone(),
-                collapse,
                 true,
             )
             .await;
@@ -332,13 +328,12 @@ pub(crate) async fn handle_response(
             token_usage: serde_json::json!({}),
         };
         let saved = queries::create_message(&cfg.pool, &agent_msg).await?;
-        helpers::enqueue_delivery_collapsed(
+        helpers::enqueue_delivery(
             &cfg.ctx,
             &saved,
             channel,
             thread,
             cause_msg.external_id.clone(),
-            collapse,
             true,
         )
         .await;

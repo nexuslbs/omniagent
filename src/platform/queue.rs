@@ -45,6 +45,11 @@ pub struct OutboundEnvelope {
     /// thread deliveries on platforms that support reply threading; None
     /// means a standalone send.
     pub reply_to_message_id: Option<String>,
+    /// Whether this delivery is the thread's final message (the last
+    /// delivery of the run). Generic delivery metadata: the platform plugin
+    /// decides how to use it (e.g. telegram first/last-only collapse and
+    /// reply threading).
+    pub is_final: bool,
     /// Whether this is a summary message.
     pub is_summary: bool,
     /// Whether this thread was started by a user (vs cron/kanban/system).

@@ -549,14 +549,6 @@ pub(crate) async fn run_main_loop(
     prof: &crate::profile::Profile,
     start_time: std::time::Instant,
 ) -> AppResult<Message> {
-    // Telegram first/last-only collapse: when the telegram platform plugin is
-    // configured with first_last_only=true, only the FIRST and LAST messages
-    // of this run are delivered to the chat (intermediate output collapsed).
-    // Mattermost is never affected by this flag.
-    let mut collapse = helpers::FirstLastCollapse::new(
-        helpers::telegram_first_last_only(&cfg.ctx.data_dir)
-            && channel.platform.as_deref() == Some("telegram"),
-    );
     // Track cumulative token usage across all LLM calls
     let mut cumulative_usage: Option<crate::llm::Usage> = None;
     let mut force_failed: bool = false;
@@ -2001,13 +1993,12 @@ Previous plan:\n{}",
                 error!("Failed to persist tool call message: {:?}", e)
             }
             helpers::CreateMessageResult::Success(ref saved) => {
-                helpers::enqueue_delivery_collapsed(
+                helpers::enqueue_delivery(
                     &cfg.ctx,
                     saved,
                     channel,
                     thread,
                     cause_msg.external_id.clone(),
-                    &mut collapse,
                     false,
                 )
                 .await;
@@ -2589,13 +2580,12 @@ Review the tool results above to see what was attempted and what remains."
                 token_usage: serde_json::json!({}),
             };
             let reasoning_saved = queries::create_message(&cfg.pool, &reasoning_msg).await?;
-            helpers::enqueue_delivery_collapsed(
+            helpers::enqueue_delivery(
                 &cfg.ctx,
                 &reasoning_saved,
                 channel,
                 thread,
                 cause_msg.external_id.clone(),
-                &mut collapse,
                 false,
             )
             .await;
@@ -2622,7 +2612,6 @@ Review the tool results above to see what was attempted and what remains."
         token_usage_json,
         evidence_metadata,
         enable_subtasks,
-        &mut collapse,
     )
     .await?;
     Ok(saved)

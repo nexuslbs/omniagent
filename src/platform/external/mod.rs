@@ -487,6 +487,12 @@ pub struct DeliverParams {
     /// support reply threading; None means a standalone send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_message_id: Option<String>,
+    /// Whether this delivery is the thread's final message (the last
+    /// delivery of the run). Generic delivery metadata: the platform plugin
+    /// decides how to use it (e.g. telegram first/last-only collapse and
+    /// reply threading).
+    #[serde(default)]
+    pub is_final: bool,
     #[serde(default)]
     pub is_summary: bool,
     #[serde(default)]
@@ -801,6 +807,7 @@ mod tests {
             cause_external_id: Some("789".to_string()),
             cause_root_id: None,
             reply_to_message_id: Some("789".to_string()),
+            is_final: true,
             is_summary: true,
             is_user_thread: true,
         };
@@ -813,6 +820,11 @@ mod tests {
             pv.get("reply_to_message_id").and_then(|v| v.as_str()),
             Some("789"),
             "reply_to_message_id must be carried in the deliver request"
+        );
+        assert_eq!(
+            pv.get("is_final").and_then(|v| v.as_bool()),
+            Some(true),
+            "is_final must be carried in the deliver request"
         );
     }
 
@@ -828,6 +840,7 @@ mod tests {
             cause_external_id: Some("789".to_string()),
             cause_root_id: None,
             reply_to_message_id: None,
+            is_final: false,
             is_summary: true,
             is_user_thread: true,
         };

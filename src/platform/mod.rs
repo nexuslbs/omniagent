@@ -180,6 +180,7 @@ pub async fn enqueue_notification(
         cause_external_id: None,
         cause_root_id: None,
         reply_to_message_id: None,
+        is_final: false,
         is_summary: false,
         is_user_thread: false,
     };

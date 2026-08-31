@@ -317,17 +317,6 @@ pub fn compact_old_assistant_messages(messages: &mut Vec<ChatMessage>, keep_rece
     }
 }
 
-/// Internal telemetry message types that are persisted to the thread
-/// history for reconstruction but must never be delivered to the platform
-/// chat: tool-call records ("tool", "multi-tool"), tool results, and
-/// reasoning traces.
-pub fn is_internal_telemetry(msg_type: &str) -> bool {
-    matches!(
-        msg_type,
-        "tool" | "multi-tool" | "tool-result" | "reasoning"
-    )
-}
-
 /// True when `id` is a synthetic external_id assigned by omniagent itself
 /// (hooks, cron, kanban-action threads) rather than a real platform post id.
 /// System threads must still post their seq-0 message to the channel, so
@@ -388,8 +377,8 @@ pub async fn enqueue_delivery(
         None => return,
     };
 
-    // Never deliver internal tool/telemetry messages to the platform.
-    if is_internal_telemetry(&saved.msg_type) {
+    // Never deliver tool results directly
+    if saved.msg_type == "tool-result" {
         return;
     }
 
@@ -410,26 +399,6 @@ pub async fn enqueue_delivery(
         } else {
             cause_external_id
         };
-
-    // Final thread deliveries on Telegram must be sent as a REPLY to the
-    // thread's seq-0 message (reply_to_message_id = the seq-0 message's
-    // Telegram message_id), never as a standalone top-level message. When the
-    // seq-0 external id is unavailable (legacy thread, id lost), fall back to
-    // the current standalone send and log it - the message is never dropped.
-    let reply_to_message_id = if is_final && platform == "telegram" {
-        match &resolved_cause_external_id {
-            Some(seq0_ext) => Some(seq0_ext.clone()),
-            None => {
-                tracing::info!(
-                    "[reply-to-seq0] final message for thread {} has no seq-0 external id - sending standalone",
-                    saved.thread_id
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
 
     // For system-originated threads (kanban, cron, etc.), add a metadata
     // prefix to the seq-0 message so the platform channel lists it with
@@ -504,7 +473,8 @@ pub async fn enqueue_delivery(
                         .map(|s| s.to_string())
                 })
         },
-        reply_to_message_id,
+        reply_to_message_id: None,
+        is_final,
         is_summary: saved.is_summary,
         is_user_thread: thread.cause == "user",
     };
@@ -545,6 +515,7 @@ pub async fn enqueue_reaction(
         cause_external_id: Some(external_id.to_string()),
         cause_root_id: None,
         reply_to_message_id: None,
+        is_final: false,
         is_summary: false,
         is_user_thread: false,
     };
@@ -657,103 +628,6 @@ pub(crate) async fn finalize_thread(
     Ok(())
 }
 
-/// Telegram first/last-only collapse state for one thread run.
-///
-/// When the telegram platform plugin is configured with `first_last_only`
-/// enabled (plugins.yml `platforms.telegram.config`), the main loop collapses
-/// intermediate thread deliveries: only the FIRST and LAST messages of the
-/// thread reach the chat.
-///
-/// FIRST is selected by thread position (seq-0, the thread's prompt/cause
-/// message), never by "first delivery of a run": a run almost always starts
-/// with tool calls, so a first-delivery heuristic picks the wrong bubble
-/// (raw tool-call records used to appear mid-thread as "first"). LAST is the
-/// thread's final message (the final assistant summary, or the error message
-/// when the thread ends without a summary). `should_deliver(is_final, seq)`
-/// returns true for seq-0, for the final delivery, and always when collapse
-/// is disabled.
-#[derive(Debug, Default)]
-pub struct FirstLastCollapse {
-    pub enabled: bool,
-}
-
-impl FirstLastCollapse {
-    pub fn new(enabled: bool) -> Self {
-        Self { enabled }
-    }
-
-    /// Decide whether a delivery should reach the platform.
-    ///
-    /// Collapse disabled -> always deliver (regression: current behavior).
-    /// Collapse enabled  -> deliver only the thread's first message by
-    /// position (seq-0, the prompt/cause) and the final message
-    /// (is_final=true); every intermediate message is suppressed. A run
-    /// whose only deliverable message is the final one (first == last) is
-    /// delivered once.
-    pub fn should_deliver(&self, is_final: bool, thread_sequence: i32) -> bool {
-        if !self.enabled {
-            return true;
-        }
-        thread_sequence == 0 || is_final
-    }
-}
-
-/// True when the telegram platform plugin is configured with
-/// `first_last_only` enabled. Only the telegram platform honors this flag;
-/// Mattermost behavior is unaffected.
-pub fn telegram_first_last_only(data_dir: &str) -> bool {
-    let flag = match crate::plugins_yaml::get_plugin(
-        data_dir,
-        "telegram",
-        &crate::plugins_yaml::PluginYamlType::Platform,
-    ) {
-        Ok(Some(detail)) => detail
-            .resolved_env
-            .get("first_last_only")
-            .cloned()
-            .or_else(|| {
-                detail
-                    .config
-                    .get("first_last_only")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or_default(),
-        _ => String::new(),
-    };
-    matches!(
-        flag.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "on" | "yes"
-    )
-}
-
-/// Enqueue a thread-run delivery honoring the telegram first/last collapse.
-///
-/// When `collapse.enabled` and the message is neither the thread's first
-/// message by position (seq-0) nor the final message, the delivery is
-/// suppressed (the message stays persisted in the thread history, only the
-/// platform delivery is skipped).
-pub async fn enqueue_delivery_collapsed(
-    ctx: &AppContext,
-    saved: &Message,
-    channel: &Channel,
-    thread: &Thread,
-    cause_external_id: Option<String>,
-    collapse: &mut FirstLastCollapse,
-    is_final: bool,
-) {
-    if !collapse.should_deliver(is_final, saved.thread_sequence) {
-        tracing::info!(
-            "[first-last] suppressing intermediate delivery to platform '{}' (thread {}, seq {})",
-            channel.platform.as_deref().unwrap_or("?"),
-            thread.id,
-            saved.thread_sequence
-        );
-        return;
-    }
-    enqueue_delivery(ctx, saved, channel, thread, cause_external_id, is_final).await;
-}
-
 /// Enqueue a typing indicator to a platform channel/thread.
 /// Broadcasts "bot is typing..." while the agent is processing.
 pub async fn enqueue_typing(
@@ -778,6 +652,7 @@ pub async fn enqueue_typing(
         cause_external_id: parent_id,
         cause_root_id: None,
         reply_to_message_id: None,
+        is_final: false,
         is_summary: false,
         is_user_thread: false,
     };
@@ -794,91 +669,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-
-    // ─── Telegram first/last-only collapse tests ───
-
-    #[test]
-    fn test_collapse_disabled_delivers_every_message() {
-        // Flag absent/false (default): regression - all messages delivered.
-        let c = FirstLastCollapse::new(false);
-        assert!(c.should_deliver(false, 0));
-        assert!(c.should_deliver(false, 5));
-        assert!(c.should_deliver(false, 12));
-        assert!(c.should_deliver(true, 12));
-    }
-
-    #[test]
-    fn test_collapse_enabled_delivers_only_seq0_and_final() {
-        let c = FirstLastCollapse::new(true);
-        // First message by position (seq-0, the prompt/cause): delivered.
-        assert!(c.should_deliver(false, 0));
-        // Intermediate messages (seq > 0, not final): suppressed, including
-        // tool-call records and reasoning traces that are not the seq-0.
-        assert!(!c.should_deliver(false, 1));
-        assert!(!c.should_deliver(false, 5));
-        assert!(!c.should_deliver(false, 7));
-        // Final message of the thread: delivered.
-        assert!(c.should_deliver(true, 8));
-    }
-
-    #[test]
-    fn test_collapse_single_message_run_delivered_once() {
-        // A run with only a final message (first == last) delivers it once.
-        let c = FirstLastCollapse::new(true);
-        assert!(c.should_deliver(true, 1));
-        // An intermediate message after the final one stays suppressed.
-        assert!(!c.should_deliver(false, 2));
-        // A seq-0 message that is also the final message is delivered once.
-        let d = FirstLastCollapse::new(true);
-        assert!(d.should_deliver(true, 0));
-    }
-
-    fn telegram_test_data_dir(first_last: Option<&str>) -> (tempfile::TempDir, String) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().to_str().unwrap().to_string();
-        let config_dir = format!("{}/config", path);
-        std::fs::create_dir_all(&config_dir).unwrap();
-        let flag_line = match first_last {
-            Some(v) => format!("      first_last_only: {}\n", v),
-            None => String::new(),
-        };
-        std::fs::write(
-            format!("{}/plugins.yml", config_dir),
-            format!("platforms:\n  telegram:\n    enabled: true\n    source: local\n    config:\n      bot_token: fake\n{}", flag_line),
-        )
-        .unwrap();
-        let plugin_dir = format!("{}/plugins/platforms/telegram", path);
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(
-            format!("{}/plugin.json", plugin_dir),
-            r#"{"name":"telegram","version":"1.0.0","type":"platform"}"#,
-        )
-        .unwrap();
-        (dir, path)
-    }
-
-    #[test]
-    fn test_telegram_first_last_only_true_when_flag_on() {
-        let (_d, path) = telegram_test_data_dir(Some("\"on\""));
-        assert!(telegram_first_last_only(&path));
-        let (_d2, path2) = telegram_test_data_dir(Some("true"));
-        assert!(telegram_first_last_only(&path2));
-    }
-
-    #[test]
-    fn test_telegram_first_last_only_false_when_absent_or_off() {
-        let (_d, path) = telegram_test_data_dir(None);
-        assert!(!telegram_first_last_only(&path));
-        let (_d2, path2) = telegram_test_data_dir(Some("false"));
-        assert!(!telegram_first_last_only(&path2));
-    }
-
-    #[test]
-    fn test_telegram_first_last_only_false_without_telegram_plugin() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().to_str().unwrap().to_string();
-        assert!(!telegram_first_last_only(&path));
-    }
 
     // ─── shared test builders (also used by compact_old_assistant_messages tests) ───
 
@@ -1197,23 +987,6 @@ mod tests {
         assert!(result > 0);
     }
 
-    // is_internal_telemetry tests
-
-    #[test]
-    fn test_is_internal_telemetry_true_for_telemetry_types() {
-        assert!(is_internal_telemetry("tool"));
-        assert!(is_internal_telemetry("multi-tool"));
-        assert!(is_internal_telemetry("tool-result"));
-        assert!(is_internal_telemetry("reasoning"));
-    }
-
-    #[test]
-    fn test_is_internal_telemetry_false_for_user_facing_types() {
-        assert!(!is_internal_telemetry("summary"));
-        assert!(!is_internal_telemetry("error"));
-        assert!(!is_internal_telemetry("response"));
-        assert!(!is_internal_telemetry(""));
-    }
 }
 
 #[cfg(test)]

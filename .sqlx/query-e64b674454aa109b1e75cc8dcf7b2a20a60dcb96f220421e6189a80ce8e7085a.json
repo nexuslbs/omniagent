@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "        UPDATE threads t\n            SET status = $1,\n                input_tokens = CASE WHEN $2 > 0 THEN $3\n                                    ELSE usage_agg.input_tokens END,\n                cached_tokens = CASE WHEN $4 > 0 THEN $5\n                                     ELSE usage_agg.cached_tokens END,\n                output_tokens = CASE WHEN $6 > 0 THEN $7\n                                     ELSE usage_agg.output_tokens END,\n                duration_ms = $8,\n                ended_at = NOW(),\n                iterations = COALESCE(\n                    (SELECT MAX(iteration_number)\n                     FROM messages WHERE thread_id = $9),\n                    0\n                ),\n                terminal = true\n            FROM (\n                SELECT\n                    COALESCE(SUM(COALESCE((m.token_usage->>'prompt_tokens')::bigint, 0)), 0)::int AS input_tokens,\n                    COALESCE(SUM(COALESCE((m.token_usage->>'cached_tokens')::bigint, 0)), 0)::int AS cached_tokens,\n                    COALESCE(SUM(COALESCE((m.token_usage->>'completion_tokens')::bigint, 0)), 0)::int AS output_tokens\n                FROM messages m\n                WHERE m.thread_id = $10 AND m.msg_type <> 'error'\n            ) usage_agg\n            WHERE t.id = $11 AND NOT t.terminal",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e64b674454aa109b1e75cc8dcf7b2a20a60dcb96f220421e6189a80ce8e7085a"
+}

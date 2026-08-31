@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE thread_subtasks\n        SET status = 'cancelled', updated_at = NOW()\n        WHERE thread_id = $1 AND status IN ('pending', 'in_progress')\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f63cf8ddff4c5ea943bc050f41189890d8418790154de8b2fedc27ee01138fd4"
+}
