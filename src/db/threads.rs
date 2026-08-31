@@ -845,6 +845,13 @@ pub async fn claim_thread(pool: &PgPool, thread_id: i64) -> bool {
 }
 
 /// Complete a thread with final status and usage stats.
+///
+/// Token stats come from the caller's `stats` (the thread's actual cumulative
+/// usage) when nonzero; otherwise they fall back to aggregating the thread's
+/// `messages.token_usage` JSONB, so failure/interrupt paths without live usage
+/// still persist real values. Non-agentic threads (no LLM calls) end at 0,
+/// never NULL. `iterations` is set to the real LLM call count (the highest
+/// message `iteration_number`).
 pub async fn complete_thread(
     pool: &PgPool,
     thread_id: i64,
@@ -852,22 +859,31 @@ pub async fn complete_thread(
     stats: CompleteThreadStats,
 ) -> AppResult<()> {
     sql_forge!(
-        r#"
-        UPDATE threads
-        SET status = :status,
-            input_tokens = :input_tokens,
-            cached_tokens = :cached_tokens,
-            output_tokens = :output_tokens,
-            duration_ms = :duration_ms,
-            ended_at = NOW(),
-            iterations = COALESCE(
-                (SELECT MAX(iteration_number)
-                 FROM messages WHERE thread_id = :id),
-                0
-            ),
-            terminal = true
-        WHERE id = :id AND NOT terminal
-        "#,
+        r#"        UPDATE threads t
+            SET status = :status,
+                input_tokens = CASE WHEN :input_tokens > 0 THEN :input_tokens
+                                    ELSE usage_agg.input_tokens END,
+                cached_tokens = CASE WHEN :cached_tokens > 0 THEN :cached_tokens
+                                     ELSE usage_agg.cached_tokens END,
+                output_tokens = CASE WHEN :output_tokens > 0 THEN :output_tokens
+                                     ELSE usage_agg.output_tokens END,
+                duration_ms = :duration_ms,
+                ended_at = NOW(),
+                iterations = COALESCE(
+                    (SELECT MAX(iteration_number)
+                     FROM messages WHERE thread_id = :id),
+                    0
+                ),
+                terminal = true
+            FROM (
+                SELECT
+                    COALESCE(SUM(COALESCE((m.token_usage->>'prompt_tokens')::bigint, 0)), 0)::int AS input_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'cached_tokens')::bigint, 0)), 0)::int AS cached_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'completion_tokens')::bigint, 0)), 0)::int AS output_tokens
+                FROM messages m
+                WHERE m.thread_id = :id
+            ) usage_agg
+            WHERE t.id = :id AND NOT t.terminal"#,
         ( :status = status, :id = thread_id, :input_tokens = stats.input_tokens, :cached_tokens = stats.cached_tokens, :output_tokens = stats.output_tokens, :duration_ms = stats.duration_ms )
     )
     .execute(pool)
@@ -1070,17 +1086,26 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     let result = sql_forge!(
-        r#"
-        UPDATE threads
-        SET status = :status,
-            ended_at = NOW(),
-            iterations = COALESCE(
-                (SELECT MAX(iteration_number) FROM messages WHERE thread_id = :id),
-                0
-            ),
-            terminal = true
-        WHERE id = :id AND NOT terminal
-        "#,
+        r#"        UPDATE threads t
+            SET status = :status,
+                ended_at = NOW(),
+                input_tokens = usage_agg.input_tokens,
+                cached_tokens = usage_agg.cached_tokens,
+                output_tokens = usage_agg.output_tokens,
+                iterations = COALESCE(
+                    (SELECT MAX(iteration_number) FROM messages WHERE thread_id = :id),
+                    0
+                ),
+                terminal = true
+            FROM (
+                SELECT
+                    COALESCE(SUM(COALESCE((m.token_usage->>'prompt_tokens')::bigint, 0)), 0)::int AS input_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'cached_tokens')::bigint, 0)), 0)::int AS cached_tokens,
+                    COALESCE(SUM(COALESCE((m.token_usage->>'completion_tokens')::bigint, 0)), 0)::int AS output_tokens
+                FROM messages m
+                WHERE m.thread_id = :id
+            ) usage_agg
+            WHERE t.id = :id AND NOT t.terminal"#,
         ( :status = status, :id = thread_id )
     )
     .execute(executor)
@@ -2554,6 +2579,137 @@ mod tests {
             .await;
         let _ = sqlx::query("DELETE FROM threads WHERE id = $1")
             .bind(thread_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn terminal_write_persists_real_token_stats_from_messages() {
+        // DB-backed test: a terminal write with zero passed stats must fall
+        // back to aggregating messages.token_usage, and a non-agentic system
+        // thread (no LLM calls) ends at 0/0 - never NULL/'-'. Skipped when
+        // DATABASE_URL is absent (offline/CI without a DB). It only ever
+        // touches rows it creates itself, and never runs against a
+        // production database.
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+
+        let thread_id: i64 = sqlx::query_scalar(
+                "INSERT INTO threads (status, cause, channel_id, profile) \
+                 VALUES ('pending', 'user', 'test-channel-token-stats', 'test-profile') RETURNING id",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("insert test thread");
+
+        // Two agentic LLM calls (iteration 1 and 2) persisted their usage on
+        // the tool-call messages, exactly like main_loop does.
+        for (seq, iteration, prompt, completion, cached) in
+            [(1, 1, 100, 20, 30), (2, 2, 150, 25, 40)]
+        {
+            sqlx::query(
+                    "INSERT INTO messages \
+                         (thread_id, thread_sequence, role, content, msg_type, iteration_number, token_usage) \
+                     VALUES ($1, $2, 'agent', 'call', 'tool', $3, $4::jsonb)",
+                )
+                .bind(thread_id)
+                .bind(seq)
+                .bind(iteration)
+                .bind(
+                    serde_json::json!({
+                        "prompt_tokens": prompt,
+                        "completion_tokens": completion,
+                        "cached_tokens": cached,
+                    })
+                    .to_string(),
+                )
+                .execute(&pool)
+                .await
+                .expect("insert usage message");
+        }
+
+        // Failure path passes ZERO stats: the fallback must persist the REAL
+        // aggregated usage (100+150 prompt, 30+40 cached, 20+25 completion)
+        // and the real LLM call count (iterations = 2).
+        complete_thread(
+            &pool,
+            thread_id,
+            "failed",
+            CompleteThreadStats {
+                input_tokens: 0,
+                cached_tokens: 0,
+                output_tokens: 0,
+                duration_ms: 0,
+            },
+        )
+        .await
+        .expect("terminal write must succeed");
+        let (iterations, input_tokens, cached_tokens, output_tokens, terminal): (
+            i32,
+            i32,
+            i32,
+            i32,
+            bool,
+        ) = sqlx::query_as(
+            "SELECT iterations, input_tokens, cached_tokens, output_tokens, terminal \
+                 FROM threads WHERE id = $1",
+        )
+        .bind(thread_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch terminal row");
+        assert_eq!(iterations, 2, "real LLM call count");
+        assert_eq!(input_tokens, 250, "fallback prompt sum");
+        assert_eq!(cached_tokens, 70, "fallback cached sum");
+        assert_eq!(output_tokens, 45, "fallback completion sum");
+        assert!(terminal, "terminal flag must be set");
+
+        // Non-agentic system thread: no usage messages -> 0/0, never NULL.
+        let sys_id: i64 = sqlx::query_scalar(
+                "INSERT INTO threads (status, cause, channel_id, profile) \
+                 VALUES ('pending', 'system', 'test-channel-token-stats', 'test-profile') RETURNING id",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("insert system thread");
+        sqlx::query(
+                "INSERT INTO messages (thread_id, thread_sequence, role, content, msg_type, token_usage) \
+                 VALUES ($1, 0, 'cause', 'init', 'cause', '{}')",
+            )
+            .bind(sys_id)
+            .execute(&pool)
+            .await
+            .expect("insert cause message");
+        set_thread_system(&pool, sys_id)
+            .await
+            .expect("mark system thread terminal");
+        let (iterations, input_tokens, output_tokens, terminal): (i32, i32, i32, bool) =
+            sqlx::query_as(
+                "SELECT iterations, input_tokens, output_tokens, terminal \
+                     FROM threads WHERE id = $1",
+            )
+            .bind(sys_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch system row");
+        assert_eq!(iterations, 0, "system thread iterations stay 0");
+        assert_eq!(input_tokens, 0, "system thread tokens stay 0");
+        assert_eq!(output_tokens, 0, "system thread tokens stay 0");
+        assert!(terminal, "system thread must be terminal");
+
+        // Cleanup: delete only the rows this test created.
+        let _ = sqlx::query("DELETE FROM messages WHERE thread_id IN ($1, $2)")
+            .bind(thread_id)
+            .bind(sys_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM threads WHERE id IN ($1, $2)")
+            .bind(thread_id)
+            .bind(sys_id)
             .execute(&pool)
             .await;
     }
