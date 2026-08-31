@@ -216,7 +216,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         CREATE TABLE IF NOT EXISTS hooks (
             id            TEXT PRIMARY KEY,
             name          TEXT NOT NULL,
-            display_name  TEXT NOT NULL DEFAULT '',
             event         TEXT NOT NULL,
             scope         TEXT NOT NULL DEFAULT 'global',
             target        TEXT,
@@ -636,6 +635,29 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         "[migration] Schema v8: goal state columns (kanban_tasks.goal_phase/goal_blocked_code/goal_blocked_message/goal_max_rounds/goal_revision) + chk_kanban_tasks_goal_phase CHECK"
     );
 
+    // -- Data migration: unify schedule/cron identity on a single name ------
+    // The weekly disk-cleanup cron is keyed by its human name
+    // 'cron-disk-cleanup'; rows still referencing the old generated keys are
+    // re-pointed so the schedule history and cadence follow the rename
+    // (idempotent: no-op once renamed, safe on every start).
+    sqlx::query(
+        "UPDATE threads SET schedule_task_id = 'cron-disk-cleanup' \
+         WHERE schedule_task_id IN ('cron_18d0c264ade52f4c', 'cron_18d0c52afa06be59')",
+    )
+    .execute(pool)
+    .await
+    .ok();
+    sqlx::query(
+        "UPDATE task_runs SET task_key = 'cron-disk-cleanup' \
+         WHERE task_key IN ('cron_18d0c264ade52f4c', 'cron_18d0c52afa06be59')",
+    )
+    .execute(pool)
+    .await
+    .ok();
+    tracing::info!(
+        "[migration] Data: disk-cleanup cron re-keyed to 'cron-disk-cleanup' (single-name identity)"
+    );
+
     Ok(())
 }
 
@@ -786,7 +808,6 @@ async fn create_tables(pool: &PgPool) -> Result<()> {
         CREATE TABLE IF NOT EXISTS cron_jobs (
             id                TEXT PRIMARY KEY,
             name              TEXT NOT NULL,
-            display_name      TEXT NOT NULL DEFAULT '',
             schedule          TEXT NOT NULL,
             prompt            TEXT NOT NULL DEFAULT '',
             skills            TEXT DEFAULT '[]',

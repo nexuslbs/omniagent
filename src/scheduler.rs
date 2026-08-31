@@ -34,7 +34,6 @@ use crate::mcp::{AppContext, McpToolCall};
 struct CronJobDueRow {
     id: String,
     name: Option<String>,
-    display_name: String,
     schedule: String,
     prompt: Option<String>,
     channel_id: Option<String>,
@@ -53,7 +52,6 @@ impl CronJobDueRow {
         Self {
             id: key.to_string(),
             name: Some(key.to_string()),
-            display_name: def.display_name.clone().unwrap_or_else(|| key.to_string()),
             schedule: def.cron.clone(),
             prompt: def.prompt.clone(),
             channel_id,
@@ -98,11 +96,7 @@ async fn tick(
 
     for job in jobs {
         let now = Utc::now();
-        let display_name = if job.display_name.is_empty() {
-            job.name.as_deref().unwrap_or("cron-job")
-        } else {
-            &job.display_name
-        };
+        let display_name: &str = job.name.as_deref().unwrap_or(&job.id);
 
         // ── Validate 5-field cron format ──
         if !validate_cron_schedule_5field(&job.schedule) {
@@ -237,7 +231,6 @@ async fn tick(
                 metadata: serde_json::json!({
                     "cron_job_id": job.id,
                     "cron_job_name": job.name,
-                    "cron_display_name": display_name,
                     "scheduled_at": job.schedule,
                     "channel_id": channel_id,
                     "profile": profile_name,
@@ -619,7 +612,6 @@ async fn create_action_thread(ctx: ActionThreadCtx<'_>) -> AppResult<i64> {
             metadata: serde_json::json!({
                 "cron_job_id": ctx.job.id,
                 "cron_job_name": ctx.job.name,
-                "cron_display_name": ctx.display_name,
                 "scheduled_at": ctx.job.schedule,
                 "channel_id": channel_id,
                 "profile": profile_name,
@@ -814,10 +806,7 @@ pub async fn fire_cron_job_by_id(
 
     // Validate 5-field cron format
     if !validate_cron_schedule_5field(&def.cron) {
-        let j_name = def
-            .display_name
-            .clone()
-            .unwrap_or_else(|| schedule_id.to_string());
+        let j_name = schedule_id.to_string();
         err_msg!(
             "Invalid cron schedule '{}' for job '{}': expected exactly 5 fields (min hour dom month dow), got {} fields. Use standard Linux crontab format, e.g. '0 9 * * 1-5' for weekdays at 9am.",
             def.cron, j_name, def.cron.split_whitespace().count()
@@ -827,11 +816,7 @@ pub async fn fire_cron_job_by_id(
     let channel_id = tasks_yaml::resolve_channel_id(pool, def.channel.as_deref()).await;
     let job = CronJobDueRow::from_yml(schedule_id, def, channel_id);
     let now = Utc::now();
-    let display_name = if job.display_name.is_empty() {
-        job.name.as_deref().unwrap_or("cron-job")
-    } else {
-        &job.display_name
-    };
+    let display_name: &str = job.name.as_deref().unwrap_or(&job.id);
 
     // ── Handle mode='action' ──
     if job.mode.as_deref() == Some("action") {
@@ -928,7 +913,6 @@ pub async fn fire_cron_job_by_id(
             metadata: serde_json::json!({
                 "cron_job_id": job.id,
                 "cron_job_name": job.name,
-                "cron_display_name": display_name,
                 "scheduled_at": job.schedule,
                 "channel_id": channel_id,
                 "profile": profile_name,

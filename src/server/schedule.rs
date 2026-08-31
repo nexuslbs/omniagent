@@ -59,7 +59,6 @@ pub fn schedule_router() -> Router<Arc<AppState>> {
 pub struct JobEntry {
     pub id: String,
     pub name: String,
-    pub display_name: String,
     pub cron: String,
     pub prompt_preview: String,
     pub prompt: Option<String>,
@@ -179,7 +178,6 @@ pub struct ListScheduleQuery {
 #[derive(Debug, Deserialize)]
 pub struct CreateScheduleRequest {
     pub name: Option<String>,
-    pub display_name: Option<String>,
     pub cron: Option<String>,
     pub prompt: Option<String>,
     pub active: Option<bool>,
@@ -196,7 +194,6 @@ pub struct CreateScheduleRequest {
 #[derive(Debug, Deserialize)]
 pub struct UpdateScheduleRequest {
     pub name: Option<String>,
-    pub display_name: Option<String>,
     pub cron: Option<String>,
     pub prompt: Option<String>,
     pub active: Option<bool>,
@@ -320,7 +317,6 @@ async fn schedule_to_entry(
     JobEntry {
         id: key.to_string(),
         name: key.to_string(),
-        display_name: def.display_name.clone().unwrap_or_else(|| key.to_string()),
         cron: def.cron.clone(),
         prompt_preview,
         prompt: def.prompt.clone(),
@@ -456,7 +452,6 @@ async fn create_schedule_handler(
         prompt: body.prompt.clone().filter(|p| !p.trim().is_empty()),
         channel: channel_name,
         profile: body.profile.clone().filter(|p| !p.trim().is_empty()),
-        display_name: body.display_name.clone().filter(|d| !d.trim().is_empty()),
         template: body.template.clone().filter(|t| !t.trim().is_empty()),
         silent: body.silent,
         ..Default::default()
@@ -516,9 +511,6 @@ async fn update_schedule_handler(
     if let Some(p) = body.prompt.clone() {
         def.prompt = if p.is_empty() { None } else { Some(p) };
     }
-    if let Some(d) = body.display_name.clone() {
-        def.display_name = if d.is_empty() { None } else { Some(d) };
-    }
     if let Some(p) = body.profile.clone() {
         def.profile = if p.is_empty() { None } else { Some(p) };
     }
@@ -575,6 +567,46 @@ async fn update_schedule_handler(
     if let Err(err) = tasks_yaml::validate_schedule(&id, def) {
         return err_json(StatusCode::BAD_REQUEST, &err);
     }
+    // Single editable name: a name change re-keys the schedule and re-points
+    // thread + cadence bookkeeping to the new key (the name IS the id).
+    let new_key = body.name.as_deref().and_then(|n| {
+        let k = generate_id(n);
+        if !k.is_empty() && k != id {
+            Some(k)
+        } else {
+            None
+        }
+    });
+    if let Some(k) = &new_key {
+        if tasks.schedules.contains_key(k) {
+            return err_json(
+                StatusCode::CONFLICT,
+                &format!("A schedule named '{}' already exists", k),
+            );
+        }
+        let moved = tasks.schedules.remove(&id).expect("schedule exists");
+        tasks.schedules.insert(k.clone(), moved);
+        if let Err(e) =
+            sqlx::query("UPDATE threads SET schedule_task_id = $1 WHERE schedule_task_id = $2")
+                .bind(k)
+                .bind(&id)
+                .execute(&state.pool)
+                .await
+        {
+            error!(
+                "[schedule/{}] rename: thread reference update failed: {:?}",
+                id, e
+            );
+        }
+        if let Err(e) = sqlx::query("UPDATE task_runs SET task_key = $1 WHERE task_key = $2")
+            .bind(k)
+            .bind(&id)
+            .execute(&state.pool)
+            .await
+        {
+            error!("[schedule/{}] rename: task_runs update failed: {:?}", id, e);
+        }
+    }
     if let Err(e) = tasks_yaml::save_tasks(&state.data_dir, &tasks) {
         error!("[schedule/{}] save tasks.yml failed: {:?}", id, e);
         return err_json(
@@ -582,7 +614,7 @@ async fn update_schedule_handler(
             "Failed to save schedule to tasks.yml",
         );
     }
-    ok_json(serde_json::json!({ "success": true }))
+    ok_json(serde_json::json!({ "success": true, "id": new_key.unwrap_or(id) }))
 }
 
 /// PATCH /schedule/{id}/toggle: toggle the enabled state of a schedule.

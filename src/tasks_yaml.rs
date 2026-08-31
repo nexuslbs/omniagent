@@ -85,8 +85,6 @@ pub struct ScheduleDef {
     pub skills: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub silent: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
 }
 
 /// One hook definition (legacy `hooks` row).
@@ -123,8 +121,6 @@ pub struct HookDef {
     pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -152,7 +148,6 @@ impl Default for ScheduleDef {
             template: None,
             skills: None,
             silent: None,
-            display_name: None,
         }
     }
 }
@@ -172,7 +167,6 @@ impl Default for HookDef {
             action: None,
             mode: None,
             template: None,
-            display_name: None,
         }
     }
 }

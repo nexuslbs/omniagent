@@ -58,7 +58,6 @@ pub fn hooks_router() -> Router<Arc<AppState>> {
 struct HookResponse {
     id: String,
     name: String,
-    display_name: String,
     event: String,
     scope: String,
     target: Option<String>,
@@ -87,7 +86,6 @@ impl HookResponse {
         Self {
             id: key.to_string(),
             name: key.to_string(),
-            display_name: def.display_name.clone().unwrap_or_else(|| key.to_string()),
             event: def.event.clone(),
             scope: def.scope.clone(),
             target: def.target.clone(),
@@ -113,11 +111,7 @@ impl HookResponse {
 
 #[derive(Debug, Deserialize)]
 struct CreateHookRequest {
-    #[serde(default)]
-    id: Option<String>,
     name: String,
-    #[serde(default)]
-    display_name: Option<String>,
     event: String,
     #[serde(default)]
     scope: Option<String>,
@@ -147,8 +141,6 @@ struct CreateHookRequest {
 struct UpdateHookRequest {
     #[serde(default)]
     name: Option<String>,
-    #[serde(default)]
-    display_name: Option<String>,
     #[serde(default)]
     event: Option<String>,
     #[serde(default)]
@@ -185,6 +177,20 @@ struct ListHooksQuery {
 
 fn default_true() -> Option<bool> {
     Some(true)
+}
+
+/// Slugify a name into a valid section key (the name IS the key).
+fn generate_id(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -304,10 +310,8 @@ async fn create_hook_handler(
     if event.is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "event is required");
     }
-    let id = body
-        .id
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| format!("hook-{}", chrono::Utc::now().timestamp_millis()));
+    // The name IS the key: slugify it into the hook id.
+    let id = generate_id(&body.name);
 
     let mut def = HookDef {
         event,
@@ -317,7 +321,6 @@ async fn create_hook_handler(
         prompt: body.prompt.clone().filter(|p| !p.trim().is_empty()),
         profile: body.profile.clone().filter(|p| !p.trim().is_empty()),
         template: body.template.clone().filter(|t| !t.trim().is_empty()),
-        display_name: body.display_name.clone().filter(|d| !d.trim().is_empty()),
         ..Default::default()
     };
     if let Some(action_id) = body.action_id.clone().filter(|a| !a.trim().is_empty()) {
@@ -400,9 +403,6 @@ async fn update_hook_handler(
     if let Some(t) = body.template.clone() {
         def.template = if t.is_empty() { None } else { Some(t) };
     }
-    if let Some(d) = body.display_name.clone() {
-        def.display_name = if d.is_empty() { None } else { Some(d) };
-    }
     if let Some(mode) = body.mode.clone() {
         def.mode = if mode.is_empty() { None } else { Some(mode) };
     }
@@ -430,6 +430,34 @@ async fn update_hook_handler(
     if let Err(err) = tasks_yaml::validate_hook(&id, def) {
         return err_json(StatusCode::BAD_REQUEST, &err);
     }
+    // Single editable name: a name change re-keys the hook and re-points the
+    // runtime counter to the new key (the name IS the id).
+    let new_key = body.name.as_deref().and_then(|n| {
+        let k = generate_id(n);
+        if !k.is_empty() && k != id {
+            Some(k)
+        } else {
+            None
+        }
+    });
+    if let Some(k) = &new_key {
+        if tasks.hooks.contains_key(k) {
+            return err_json(
+                StatusCode::CONFLICT,
+                &format!("A hook named '{}' already exists", k),
+            );
+        }
+        let moved = tasks.hooks.remove(&id).expect("hook exists");
+        tasks.hooks.insert(k.clone(), moved);
+        if let Err(e) = sqlx::query("UPDATE hook_counters SET hook_key = $1 WHERE hook_key = $2")
+            .bind(k)
+            .bind(&id)
+            .execute(&state.pool)
+            .await
+        {
+            error!("[hooks/{}] rename: counter update failed: {:?}", id, e);
+        }
+    }
     if let Err(e) = tasks_yaml::save_tasks(&state.data_dir, &tasks) {
         error!("[hooks] save tasks.yml failed: {:?}", e);
         return err_json(
@@ -437,7 +465,7 @@ async fn update_hook_handler(
             "Failed to save hook to tasks.yml",
         );
     }
-    ok_json(serde_json::json!({ "success": true }))
+    ok_json(serde_json::json!({ "success": true, "id": new_key.unwrap_or(id) }))
 }
 
 async fn toggle_hook_handler(

@@ -56,7 +56,6 @@ async fn handle_create(
     let name = args["name"].as_str().unwrap_or("");
     let schedule = args["schedule"].as_str().unwrap_or("");
     let prompt = args["prompt"].as_str();
-    let display_name = args["display_name"].as_str().unwrap_or(name);
     let skills_str = args["skills"].as_str().unwrap_or("");
     // channel: explicit channel_id wins; else the CURRENT channel from the
     // agent's runtime context (_meta.channel_id); else no channel (default).
@@ -95,12 +94,18 @@ async fn handle_create(
         ));
     }
 
-    let id = format!("cron_{:x}", {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    });
+    // The name IS the key: the job is identified by its (slugified) name.
+    let id: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
 
     let skills_json: Value = if skills_str.is_empty() {
         serde_json::json!([])
@@ -139,14 +144,13 @@ async fn handle_create(
         template: None,
         skills: Some(skills_json.to_string()),
         silent: Some(silent.unwrap_or(false)),
-        display_name: Some(display_name.to_string()),
     };
     tasks.schedules.insert(id.clone(), def);
     tasks_yaml::save_tasks(&data_dir(), &tasks)
         .map_err(|e| anyhow::anyhow!("Failed to save tasks.yml: {}", e))?;
 
     Ok((
-        format!("✅ Created cron job **{}** (`{}`)", display_name, name),
+        format!("✅ Created cron job **{}** (`{}`)", name, id),
         false,
     ))
 }
@@ -166,7 +170,7 @@ async fn handle_list(_pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
     for (i, (id, row)) in tasks.schedules.iter().enumerate() {
         let enabled = row.enabled;
         let status = if enabled { "🟢" } else { "🔴" };
-        let name_display = row.display_name.clone().unwrap_or_else(|| id.clone());
+        let name_display = id.clone();
         let mode_display = if row.action.is_some() {
             "action"
         } else {
@@ -181,8 +185,8 @@ async fn handle_list(_pool: &PgPool, _args: &Value) -> Result<(String, bool)> {
             .collect::<String>();
         let channel = row.channel.clone().unwrap_or_else(|| "default".to_string());
         lines.push(format!(
-            "{}. {} **{}** (`{}`)\n   - Schedule: `{}` | Mode: {} | Channel: {}\n   - Runs are visible via threads (schedule_task_id = `{}`)\n   - Prompt: {}",
-            i + 1, status, name_display, id, row.cron, mode_display, channel, id, prompt_preview
+            "{}. {} **{}**\n   - Schedule: `{}` | Mode: {} | Channel: {}\n   - Runs are visible via threads (schedule_task_id = `{}`)\n   - Prompt: {}",
+            i + 1, status, name_display, row.cron, mode_display, channel, id, prompt_preview
         ));
     }
 
@@ -322,12 +326,11 @@ async fn main() -> Result<()> {
             def: McpToolDef {
                 name: "create_cron_job".to_string(),
                 description:
-                    "Create a new cron job. Schedules a recurring task with a cron expression and a prompt to execute. Provide a unique short name (lowercase, underscores, no spaces) as 'name', and optionally a human-readable 'display_name'.".to_string(),
+                    "Create a new cron job. Schedules a recurring task with a cron expression and a prompt to execute. The 'name' is the job's identifier in the schedule section and is editable.".to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "name": { "type": "string", "description": "A unique short name for this cron job (lowercase, underscores, no spaces)" },
-                        "display_name": { "type": "string", "description": "Optional human-readable display name" },
                         "schedule": { "type": "string", "description": "Cron schedule expression in 5-field Linux format (min hour day month weekday)" },
                         "prompt": { "type": "string", "description": "The prompt/message to execute when the cron job triggers" },
                         "skills": { "type": "string", "description": "Optional comma-separated list of skill names" },
