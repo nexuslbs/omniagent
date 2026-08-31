@@ -92,6 +92,16 @@ pub(crate) async fn fail_thread(
 
     // If this thread is linked to a kanban task, mark it as blocked so a
     // validation failure can't leave the task in "running" forever.
+    // Auto-cancel all pending subtasks: a failed thread's remaining subtasks
+    // can never be completed by the agent.
+    if let Err(e) = crate::subtask::cancel_pending_subtasks(&cfg.pool, thread.id).await {
+        tracing::warn!(
+            "[executor] Failed to cancel pending subtasks for thread {}: {:?}",
+            thread.id,
+            e
+        );
+    }
+
     crate::agent::kanban_updater::update_kanban_status(cfg, thread, "failed").await;
 
     // Deliver the error message back to the user's platform (the :x: reaction
@@ -673,6 +683,16 @@ pub(crate) async fn fail_thread_tool(
     }
 
     // 4. Apply the workflow_step kanban transition (F0-F4).
+    // 3b. Auto-cancel ALL pending subtasks: a failed thread's remaining
+    // subtasks can never be completed by the agent.
+    if let Err(e) = crate::subtask::cancel_pending_subtasks(&ctx.pool, thread.id).await {
+        tracing::warn!(
+            "[fail-thread] Failed to cancel pending subtasks for thread {}: {:?}",
+            thread.id,
+            e
+        );
+    }
+
     let transition = apply_fail_step_transition(ctx, thread, step).await;
 
     // 5. Deliver the error message (mirrors fail_thread). The :x: reaction
@@ -2624,6 +2644,252 @@ mod tests_r8n_no_workflow_blocked {
         );
 
         cleanup(&pool, &task_id, &[parent_id, new_id]).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+}
+
+#[cfg(test)]
+mod tests_fail_tool_lifecycle {
+    use super::*;
+
+    /// Insert a kanban task (status 'running', no workflow) + its thread;
+    /// returns the thread id. Mirrors tests_r8n_no_workflow_blocked::setup.
+    async fn setup_thread(pool: &sqlx::PgPool, task_id: &str) -> i64 {
+        let _ = sql_forge!(
+                "DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE task_id = :task_id)",
+                ( :task_id = task_id )
+            )
+            .execute(pool)
+            .await;
+        let _ = sql_forge!(
+            "DELETE FROM threads WHERE task_id = :task_id",
+            ( :task_id = task_id )
+        )
+        .execute(pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM kanban_history WHERE kanban_task_id = :task_id",
+            ( :task_id = task_id )
+        )
+        .execute(pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM kanban_tasks WHERE id = :task_id",
+            ( :task_id = task_id )
+        )
+        .execute(pool)
+        .await;
+        sql_forge!(
+                "INSERT INTO kanban_tasks (id, title, body, status, priority, channel_id, profile, position, template, plan, workflow_id)
+                 VALUES (:task_id, 'lifecycle', '', 'running', 1, 'kanban', 'test', 0, NULL, false, NULL)",
+                ( :task_id = task_id )
+            )
+            .execute(pool)
+            .await
+            .expect("insert kanban task");
+        sql_forge!(
+                scalar i64,
+                "INSERT INTO threads (status, cause, channel_id, profile, provider, model, task_id, parent_id, workflow_id, workflow_step, task_type)
+                 VALUES ('running', 'user', 'kanban', 'test', 'noop', 'noop', :task_id, NULL, NULL, 'running', 'kanban')
+                 RETURNING id",
+                ( :task_id = task_id )
+            )
+            .fetch_one(pool)
+            .await
+            .expect("insert parent thread")
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, task_id: &str, thread_id: i64) {
+        let _ = sql_forge!(
+            "DELETE FROM messages WHERE thread_id = :tid",
+            ( :tid = thread_id )
+        )
+        .execute(pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM thread_subtasks WHERE thread_id = :tid",
+            ( :tid = thread_id )
+        )
+        .execute(pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM threads WHERE task_id = :task_id",
+            ( :task_id = task_id )
+        )
+        .execute(pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM kanban_history WHERE kanban_task_id = :task_id",
+            ( :task_id = task_id )
+        )
+        .execute(pool)
+        .await;
+        let _ = sql_forge!(
+            "DELETE FROM kanban_tasks WHERE id = :task_id",
+            ( :task_id = task_id )
+        )
+        .execute(pool)
+        .await;
+    }
+
+    /// Regression for the three observed thread-lifecycle bugs:
+    /// 1. fail-thread ends the thread at the fail message (terminal 'failed')
+    ///    and auto-cancels ALL pending subtasks;
+    /// 2. the Error-type fail message never shares a seq with another message
+    ///    (observed: fail message + tool-result JSON marker both had seq 38);
+    /// 3. the fail message is the LAST message of the thread.
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn fail_thread_tool_cancels_subtasks_and_keeps_seq_unique() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+        let data_dir =
+            std::env::temp_dir().join(format!("fail-tool-lifecycle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let task_id = format!("lifecycle-{}", std::process::id());
+        let thread_id = setup_thread(&pool, &task_id).await;
+
+        // Cause (seq 0) + the tool-call message the loop persisted (seq 1):
+        // fail_thread_tool must insert its Error message at seq 2 (max + 1).
+        sql_forge!(
+            "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
+             VALUES (:tid, 'cause', 'the task script', 0, 'kanban')",
+            ( :tid = thread_id )
+        )
+        .execute(&pool)
+        .await
+        .expect("insert cause message");
+        sql_forge!(
+            "INSERT INTO messages (thread_id, role, content, thread_sequence, msg_type)
+             VALUES (:tid, 'agent', 'builtin_fail-thread: lifecycle regression', 1, 'tool')",
+            ( :tid = thread_id )
+        )
+        .execute(&pool)
+        .await
+        .expect("insert tool-call message");
+
+        // Three pending subtasks: the fail path must auto-cancel all of them.
+        for desc in ["step 1", "step 2", "step 3"] {
+            crate::subtask::add_subtask(&pool, thread_id, desc, 0)
+                .await
+                .expect("add subtask");
+        }
+
+        let thread = crate::db::threads::get_thread_by_id(&pool, thread_id)
+            .await
+            .expect("fetch thread")
+            .expect("thread exists");
+        let ctx = crate::mcp::AppContext {
+            pool: pool.clone(),
+            readonly_pool: pool.clone(),
+            data_dir: data_dir.to_str().unwrap().to_string(),
+            platform_senders: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            current_thread_id: Some(thread_id),
+            current_channel_id: Some("kanban".to_string()),
+            current_allowed_tools: Vec::new(),
+            current_channel_name: None,
+            current_platform: None,
+            current_profile_name: Some("test".to_string()),
+            tool_catalog: Vec::new(),
+            platforms: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
+            external_clients: std::sync::Arc::new(
+                crate::mcp::external::client::ExternalMcpClients::new(),
+            ),
+        };
+
+        let saved = crate::agent::fail_thread::fail_thread_tool(
+            &ctx,
+            &thread,
+            Some("blocked"),
+            Some("fail-thread lifecycle regression: must end the thread".to_string()),
+        )
+        .await
+        .expect("fail_thread_tool should succeed");
+
+        // Bug 1: the thread is terminal 'failed' and the Error-type fail
+        // message is the LAST message (no messages follow it).
+        let status = crate::db::threads::get_thread_status(&pool, thread_id)
+            .await
+            .expect("get status")
+            .expect("status exists");
+        assert_eq!(status, "failed", "fail-thread must mark the thread failed");
+        let last = crate::db::threads::get_last_message(&pool, thread_id)
+            .await
+            .expect("get last message")
+            .expect("last message exists");
+        assert_eq!(
+            last.id, saved.id,
+            "fail message must be the thread's last message"
+        );
+        assert_eq!(
+            last.msg_type, "error",
+            "last message must be msg_type=error"
+        );
+
+        // Bug 1b: ALL pending subtasks auto-cancelled by the fail path.
+        let subtasks = crate::subtask::list_subtasks(&pool, thread_id)
+            .await
+            .expect("list subtasks");
+        assert_eq!(subtasks.len(), 3, "all three subtasks must still exist");
+        for st in &subtasks {
+            assert_eq!(
+                st.status, "cancelled",
+                "subtask {} must be auto-cancelled by the fail path",
+                st.id
+            );
+        }
+
+        // Bug 2: sequence uniqueness invariant - no two messages share a seq.
+        let dup: i64 = sql_forge!(
+            scalar i64,
+            "SELECT COUNT(*) FROM (
+                    SELECT thread_sequence FROM messages WHERE thread_id = :tid
+                    GROUP BY thread_sequence HAVING COUNT(*) > 1
+                 ) d",
+            ( :tid = thread_id )
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count duplicate seqs");
+        assert_eq!(dup, 0, "no two messages may share a sequence number");
+
+        // The Error message sits at the next available seq (max + 1), not
+        // colliding with the tool-call message or the cause.
+        let max_seq = crate::db::threads::get_max_thread_sequence(&pool, thread_id)
+            .await
+            .expect("max seq");
+        assert_eq!(
+            saved.thread_sequence, max_seq,
+            "fail message must be the newest seq (got {}, max {})",
+            saved.thread_sequence, max_seq
+        );
+
+        // F3 'blocked' on a no-workflow task: the kanban task lands blocked.
+        let task_status: String = sql_forge!(
+            scalar String,
+            "SELECT status FROM kanban_tasks WHERE id = :task_id",
+            ( :task_id = &task_id )
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fetch task status");
+        assert_eq!(
+            task_status, "blocked",
+            "F3 blocked must move the task to blocked"
+        );
+
+        cleanup(&pool, &task_id, thread_id).await;
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 }

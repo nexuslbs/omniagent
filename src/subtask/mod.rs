@@ -208,3 +208,32 @@ pub async fn get_subtask_counts(pool: &PgPool, thread_id: i64) -> anyhow::Result
         total_count: row.total_count.unwrap_or(0),
     })
 }
+
+/// Cancel ALL pending/in-progress subtasks of a thread. Called on the FAIL
+/// path (builtin_fail-thread, validation failures): a failed thread's
+/// remaining subtasks can never be completed by the agent, so they must be
+/// auto-cancelled instead of left dangling (observed: after a fail-thread
+/// call the thread kept running and the LLM had to manually complete each
+/// pending subtask). Completed/cancelled subtasks are left untouched.
+/// Returns the number of subtasks cancelled.
+pub async fn cancel_pending_subtasks(pool: &PgPool, thread_id: i64) -> anyhow::Result<u64> {
+    let result = sql_forge!(
+        r#"
+        UPDATE thread_subtasks
+        SET status = 'cancelled', updated_at = NOW()
+        WHERE thread_id = :thread_id AND status IN ('pending', 'in_progress')
+        "#,
+        ( :thread_id = thread_id )
+    )
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() > 0 {
+        tracing::info!(
+            "[subtask] Auto-cancelled {} pending subtask(s) of thread {} (fail path)",
+            result.rows_affected(),
+            thread_id
+        );
+    }
+    Ok(result.rows_affected())
+}

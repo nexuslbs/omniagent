@@ -1042,6 +1042,14 @@ Previous plan:\n{}",
     // This prevents aggressive condensation on every Nth iteration even when
     // the last condense just happened.
     let mut last_condense_iteration: i32 = 0;
+    // The iteration on which the last prompt message was logged. Retry
+    // iterations of a failed LLM call (provider error / empty response /
+    // truncation / forced compaction all do `current_iter -= 1` + continue)
+    // carry the SAME current_iter as the attempt that already logged a
+    // prompt, so they must NOT log a second prompt: every prompt message must
+    // be immediately followed by the LLM response (or its failure), never by
+    // another prompt (observed double insertion: thread 467, #37482+#37484).
+    let mut last_prompt_iter: i32 = -1;
     // Sub-prompts (feature): cumulative char budget + exhaustion flag for
     // appended pending user prompts, scoped to this thread run (persisted
     // across iterations of the same run).
@@ -1355,13 +1363,13 @@ Previous plan:\n{}",
         } else {
             "follow_up"
         };
-        let should_log_prompt = match prompt_log_level {
-            "off" => false,
-            "first" => !has_logged_first_prompt,
-            "first+compact" => !has_logged_first_prompt || current_iter == last_condense_iteration,
-            "all" => true,
-            _ => false,
-        };
+        let should_log_prompt = should_log_prompt_for(
+            prompt_log_level,
+            has_logged_first_prompt,
+            current_iter,
+            last_prompt_iter,
+            last_condense_iteration,
+        );
         if should_log_prompt {
             let prompt_seq = {
                 let v = *next_seq;
@@ -1399,6 +1407,7 @@ Previous plan:\n{}",
                 );
             }
             has_logged_first_prompt = true;
+            last_prompt_iter = current_iter;
         }
 
         // ── LLM completion call ──
@@ -2307,11 +2316,21 @@ Previous plan:\n{}",
 
                 // Persist single consolidated result message
                 // (no separate "tool" call message anymore)
+                // Seq uniqueness invariant (thread 467: the fail-thread
+                // Error message and its tool-result shared seq 38): the
+                // pre-allocated `seq` may already be taken by a message the
+                // tool itself inserted while executing (builtin_fail-thread
+                // persists at get_max_thread_sequence + 1, which equals the
+                // pre-allocated result seq). max(db_max + 1, preallocated)
+                // guarantees the result never collides with any persisted row.
+                let db_max = crate::db::threads::get_max_thread_sequence(&pool, tid)
+                    .await
+                    .unwrap_or(0);
                 let result_msg = MessageNew {
                     thread_id: tid,
                     role: "agent".to_string(),
                     content: content_str,
-                    thread_sequence: seq,
+                    thread_sequence: effective_result_seq(db_max, seq),
                     external_id: None,
                     metadata: serde_json::json!({"is_error": is_error}),
                     embedding: None,
@@ -2414,6 +2433,41 @@ Previous plan:\n{}",
                     );
                 }
             }
+        }
+
+        // ── Terminal-thread check (fail-thread lifecycle fix) ──
+        // A tool may have ended this thread while executing: builtin_fail-thread
+        // marks the thread terminal (status 'failed') and persists its
+        // Error-type message. The loop MUST terminate immediately at the fail
+        // message: no further LLM calls, no further messages. handle_response
+        // short-circuits on the terminal status and returns the last message
+        // as-is, so the Error-type message stays the thread's last word.
+        let terminal_status = queries::get_thread_status(&cfg.pool, thread.id)
+            .await
+            .ok()
+            .flatten()
+            .filter(|s| is_terminal_loop_status(s));
+        if terminal_status.is_some() {
+            // The fail round's reasoning must never be persisted after the
+            // fail message (step 8 below would insert it as a later message).
+            final_reasoning = None;
+            info!(
+                "[executor] Thread {} ended by a tool (status='{}') - terminating the loop immediately",
+                thread.id,
+                terminal_status.unwrap()
+            );
+            break;
+        }
+
+        // Resync the in-memory sequence counter with the DB: a tool may have
+        // inserted its own messages (e.g. fail-thread's Error message), so
+        // the pre-allocated result seqs may have been bumped. The next
+        // message must never reuse a seq that is already persisted.
+        let db_max_after = queries::get_max_thread_sequence(&cfg.pool, thread.id)
+            .await
+            .unwrap_or(0);
+        if db_max_after >= *next_seq {
+            *next_seq = db_max_after + 1;
         }
 
         // Push LLM messages in original call order
@@ -2956,6 +3010,139 @@ mod truncation_tests {
 /// the current iteration is within the first `percent`% of the iteration
 /// budget (`current_iter * 100 <= iter_limit * percent`). percent=0 disables
 /// the feature at the call site (the gate is never consulted).
+
+/// Pure: should the prompt message be logged before this LLM call?
+/// Levels: "off" never; "first" only the first; "first+compact" the first or
+/// right after a condensation; "all" every non-retry call. A retry of a
+/// failed LLM call (provider error / empty response / truncation / forced
+/// compaction: all do `current_iter -= 1` then `continue`) carries the SAME
+/// current_iter as the attempt that already logged a prompt, so it is
+/// skipped - the invariant is that every prompt message is immediately
+/// followed by the LLM response (or its failure), never by another prompt.
+fn should_log_prompt_for(
+    log_level: &str,
+    has_logged_first: bool,
+    current_iter: i32,
+    last_prompt_iter: i32,
+    last_condense_iter: i32,
+) -> bool {
+    if log_level == "off" {
+        return false;
+    }
+    if current_iter == last_prompt_iter {
+        return false;
+    }
+    match log_level {
+        "first" => !has_logged_first,
+        "first+compact" => !has_logged_first || current_iter == last_condense_iter,
+        "all" => true,
+        _ => false,
+    }
+}
+
+/// Pure: the sequence number for a persisted tool result. The pre-allocated
+/// `preallocated` seq may already be taken by a message the tool itself
+/// inserted while executing (e.g. builtin_fail-thread's Error message at
+/// get_max_thread_sequence + 1). max(db_max + 1, preallocated) guarantees the
+/// result never collides with anything already persisted.
+fn effective_result_seq(db_max: i32, preallocated: i32) -> i32 {
+    (db_max + 1).max(preallocated)
+}
+
+/// Pure: is a thread status terminal for the executor loop? When a tool
+/// ended the thread (e.g. builtin_fail-thread -> 'failed'), the loop must
+/// stop immediately and write no further messages.
+fn is_terminal_loop_status(status: &str) -> bool {
+    matches!(
+        status,
+        "failed" | "completed" | "interrupted" | "skipped" | "system" | "merged"
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod thread_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_logged_once_per_attempt_not_on_retries() {
+        // First attempt at iteration 1: logged.
+        assert!(should_log_prompt_for("all", false, 1, -1, 0));
+        // Retry of the same attempt (current_iter unchanged): NOT logged.
+        assert!(!should_log_prompt_for("all", true, 1, 1, 0));
+        // A real next iteration: logged again.
+        assert!(should_log_prompt_for("all", true, 2, 1, 0));
+        // "first" level: only while never logged.
+        assert!(should_log_prompt_for("first", false, 1, -1, 0));
+        assert!(!should_log_prompt_for("first", true, 2, 1, 0));
+        // "first+compact": first + post-compaction (iter == last condense).
+        assert!(should_log_prompt_for("first+compact", true, 5, 2, 5));
+        assert!(!should_log_prompt_for("first+compact", true, 6, 5, 5));
+        // Retry after a compaction attempt: skipped (same iteration).
+        assert!(!should_log_prompt_for("first+compact", true, 5, 5, 5));
+        // "off": never.
+        assert!(!should_log_prompt_for("off", false, 1, -1, 0));
+    }
+
+    #[test]
+    fn retry_after_empty_response_does_not_double_prompt() {
+        // Observed bug: provider error / empty response did `current_iter -= 1`
+        // + continue, re-logging the prompt on the retry (two consecutive
+        // prompt messages, no LLM response between them - thread 467,
+        // messages #37482 + #37484).
+        let mut current_iter = 3;
+        let mut last_prompt_iter = -1;
+        let mut has_logged_first = false;
+        assert!(should_log_prompt_for(
+            "all",
+            has_logged_first,
+            current_iter,
+            last_prompt_iter,
+            0
+        ));
+        has_logged_first = true;
+        last_prompt_iter = current_iter;
+        // LLM call fails -> retry path does current_iter -= 1, then the loop
+        // top increments again: the retry sees the SAME current_iter.
+        current_iter -= 1;
+        current_iter += 1;
+        assert!(!should_log_prompt_for(
+            "all",
+            has_logged_first,
+            current_iter,
+            last_prompt_iter,
+            0
+        ));
+    }
+
+    #[test]
+    fn effective_result_seq_never_collides_with_tool_inserted_message() {
+        // fail-thread tool inserted its Error message at get_max_thread_sequence
+        // + 1, which equals the pre-allocated result seq: the result must be
+        // bumped past it (thread 467 shared seq 38).
+        assert_eq!(effective_result_seq(38, 38), 39);
+        // A parallel sibling result: unique vs the error at 38.
+        assert_eq!(effective_result_seq(38, 39), 39);
+        // Tool inserted two messages: bump past both.
+        assert_eq!(effective_result_seq(40, 38), 41);
+        // Normal case (no tool-inserted messages): pre-allocated seq wins.
+        assert_eq!(effective_result_seq(9, 10), 10);
+        assert_eq!(effective_result_seq(9, 11), 11);
+    }
+
+    #[test]
+    fn terminal_loop_statuses_stop_the_loop() {
+        assert!(is_terminal_loop_status("failed"));
+        assert!(is_terminal_loop_status("completed"));
+        assert!(is_terminal_loop_status("interrupted"));
+        assert!(is_terminal_loop_status("skipped"));
+        assert!(is_terminal_loop_status("system"));
+        assert!(is_terminal_loop_status("merged"));
+        for s in ["running", "pending", "processing", "review", ""] {
+            assert!(!is_terminal_loop_status(s), "{s:?} must not be terminal");
+        }
+    }
+}
 #[allow(dead_code)]
 #[allow(clippy::items_after_test_module)]
 pub(crate) fn sub_prompt_gate_ok(current_iter: i32, iter_limit: i32, percent: u32) -> bool {
