@@ -114,7 +114,7 @@ pub(crate) async fn handle_response(
         };
 
         let _summary_start = std::time::Instant::now();
-        let (summary_text, _summary_token_usage) = match per_thread_llm
+        let (summary_text, summary_token_usage) = match per_thread_llm
             .completion(summary_request)
             .await
         {
@@ -167,7 +167,7 @@ pub(crate) async fn handle_response(
             msg_subtype: Some("interrupted".to_string()),
             iteration_number: current_iter,
             duration_ms: 0,
-            token_usage: serde_json::json!({}),
+            token_usage: summary_token_usage.unwrap_or_else(|| serde_json::json!({})),
         };
 
         let summary_saved = queries::create_message(&cfg.pool, &summary_msg).await?;
@@ -372,9 +372,12 @@ pub(crate) async fn handle_response(
     // Recompute final status after post-loop enforcement
     let final_status = post_loop_final_status(*force_failed, limit_reached);
 
-    queries::complete_thread(
+    helpers::finalize_thread(
+        &cfg.ctx,
         &cfg.pool,
         thread.id,
+        Some(cause_msg),
+        Some(channel),
         final_status,
         CompleteThreadStats {
             input_tokens: cumulative_usage
@@ -394,28 +397,6 @@ pub(crate) async fn handle_response(
     )
     .await?;
 
-    // ── Send completion reaction to platform ──
-    // Find the cause message's external_id for the reaction target
-    let reaction_ext_id = if cause_msg.external_id.is_some() {
-        cause_msg.external_id.clone()
-    } else {
-        crate::db::threads::get_cause_message(&cfg.pool, cause_msg.thread_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|m| m.external_id)
-    };
-    if let Some(ref ext_id) = reaction_ext_id {
-        if let Some(ref platform) = channel.platform {
-            if let Some(ref resource) = channel.resource_identifier {
-                // Map status to platform emoji before enqueueing -
-                // the platform plugin expects an actual emoji name, not a status string.
-                let react_emoji = status_reaction_emoji(final_status);
-                helpers::enqueue_reaction(&cfg.ctx, platform, resource, ext_id, react_emoji).await;
-            }
-        }
-    }
-
     // If this thread is linked to a kanban task, update its status
     crate::agent::kanban_updater::update_kanban_status(cfg, thread, final_status).await;
 
@@ -423,20 +404,6 @@ pub(crate) async fn handle_response(
     crate::agent::summary_trigger::trigger_summary_and_cleanup(cfg, thread).await;
 
     Ok(saved)
-}
-
-/// Map a final thread status to the reaction emoji sent on the cause message.
-/// The platform plugin receives the raw emoji shortcode: Mattermost strips the
-/// colons, Telegram maps the known shortcodes to unicode emoji.
-pub(crate) fn status_reaction_emoji(status: &str) -> &str {
-    match status {
-        "completed" => ":white_check_mark:",
-        "failed" => ":x:",
-        "interrupted" => ":broken_heart:",
-        "skipped" => ":o:",
-        "merged" => ":handshake:",
-        other => other,
-    }
 }
 
 /// Final thread status after the executor loop (pure, unit-tested).
@@ -592,20 +559,5 @@ mod tests {
         assert_eq!(post_loop_final_status(true, true), "failed");
         assert_eq!(post_loop_final_status(false, true), "interrupted");
         assert_eq!(post_loop_final_status(false, false), "completed");
-    }
-}
-
-#[cfg(test)]
-mod merged_reaction_tests {
-    use super::status_reaction_emoji;
-
-    #[test]
-    fn merged_maps_to_handshake() {
-        assert_eq!(status_reaction_emoji("merged"), ":handshake:");
-        assert_eq!(status_reaction_emoji("skipped"), ":o:");
-        assert_eq!(status_reaction_emoji("completed"), ":white_check_mark:");
-        assert_eq!(status_reaction_emoji("failed"), ":x:");
-        assert_eq!(status_reaction_emoji("interrupted"), ":broken_heart:");
-        assert_eq!(status_reaction_emoji("custom"), "custom");
     }
 }

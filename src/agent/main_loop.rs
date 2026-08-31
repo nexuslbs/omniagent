@@ -1154,28 +1154,20 @@ Previous plan:\n{}",
                                 pt.id, e
                             );
                         }
-                        // Send the merged reaction to the platform for the pending
-                        // thread (mirrors response_handler: merged => ":handshake:").
-                        // enqueue_reaction is platform-agnostic, so this works on
-                        // mattermost and any other platform.
-                        if let (Some(platform), Some(resource)) =
-                            (&channel.platform, &channel.resource_identifier)
-                        {
-                            if let Ok(Some(cause)) =
-                                queries::get_cause_message(&cfg.pool, pt.id).await
-                            {
-                                if let Some(ext_id) = cause.external_id {
-                                    helpers::enqueue_reaction(
-                                        &cfg.ctx,
-                                        platform,
-                                        resource,
-                                        &ext_id,
-                                        ":handshake:",
-                                    )
-                                    .await;
-                                }
-                            }
-                        }
+                        // Send the merged reaction to the platform for the
+                        // pending thread (merged => ":handshake:"). Uses the
+                        // shared choke-point resolution: only a REAL
+                        // cause-message target is used (never synthetic
+                        // hook/cron ids, never empty).
+                        helpers::enqueue_status_reaction(
+                            &cfg.ctx,
+                            &cfg.pool,
+                            pt.id,
+                            None,
+                            Some(channel),
+                            "merged",
+                        )
+                        .await;
                         // Push into the in-memory prompt BEFORE condensation.
                         messages.push(ChatMessage::user(&appended));
                         used_sub_prompt_chars = next_used;

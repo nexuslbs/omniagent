@@ -881,7 +881,7 @@ pub async fn complete_thread(
                     COALESCE(SUM(COALESCE((m.token_usage->>'cached_tokens')::bigint, 0)), 0)::int AS cached_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'completion_tokens')::bigint, 0)), 0)::int AS output_tokens
                 FROM messages m
-                WHERE m.thread_id = :id
+                WHERE m.thread_id = :id AND m.msg_type <> 'error'
             ) usage_agg
             WHERE t.id = :id AND NOT t.terminal"#,
         ( :status = status, :id = thread_id, :input_tokens = stats.input_tokens, :cached_tokens = stats.cached_tokens, :output_tokens = stats.output_tokens, :duration_ms = stats.duration_ms )
@@ -893,6 +893,42 @@ pub async fn complete_thread(
     crate::hooks::fire_thread_finished(thread_id);
 
     Ok(())
+}
+
+/// Aggregate the thread's real token usage from its messages' token_usage
+/// (prompt/cached/completion sums), excluding terminal error messages (which
+/// carry the same aggregate for message-level UI and must not be
+/// double-counted). Used by fail paths that lack a live cumulative usage so
+/// the final error message still shows the tokens already spent.
+pub async fn aggregate_thread_token_usage(
+    pool: &PgPool,
+    thread_id: i64,
+) -> AppResult<(i32, i32, i32)> {
+    #[derive(sqlx::FromRow)]
+    struct UsageAggRow {
+        input_tokens: Option<i64>,
+        cached_tokens: Option<i64>,
+        output_tokens: Option<i64>,
+    }
+    let row: UsageAggRow = sql_forge!(
+            UsageAggRow,
+            r#"
+            SELECT
+                COALESCE(SUM(COALESCE((token_usage->>'prompt_tokens')::bigint, 0)), 0)::bigint AS input_tokens,
+                COALESCE(SUM(COALESCE((token_usage->>'cached_tokens')::bigint, 0)), 0)::bigint AS cached_tokens,
+                COALESCE(SUM(COALESCE((token_usage->>'completion_tokens')::bigint, 0)), 0)::bigint AS output_tokens
+            FROM messages
+            WHERE thread_id = :thread_id AND msg_type <> 'error'
+            "#,
+            ( :thread_id = thread_id )
+        )
+        .fetch_one(pool)
+        .await?;
+    Ok((
+        row.input_tokens.unwrap_or(0) as i32,
+        row.cached_tokens.unwrap_or(0) as i32,
+        row.output_tokens.unwrap_or(0) as i32,
+    ))
 }
 
 /// Set all pending/processing threads for a channel to 'skipped'.
@@ -1103,7 +1139,7 @@ where
                     COALESCE(SUM(COALESCE((m.token_usage->>'cached_tokens')::bigint, 0)), 0)::int AS cached_tokens,
                     COALESCE(SUM(COALESCE((m.token_usage->>'completion_tokens')::bigint, 0)), 0)::int AS output_tokens
                 FROM messages m
-                WHERE m.thread_id = :id
+                WHERE m.thread_id = :id AND m.msg_type <> 'error'
             ) usage_agg
             WHERE t.id = :id AND NOT t.terminal"#,
         ( :status = status, :id = thread_id )

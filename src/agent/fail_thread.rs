@@ -21,6 +21,14 @@ pub(crate) async fn fail_thread(
     let seq = *next_seq;
     *next_seq += 1;
 
+    // Real token usage already spent by this thread, aggregated from its
+    // messages (the error message itself carries the same aggregate so
+    // message-level UI shows real numbers instead of '-'). finalize_thread
+    // below writes the same real stats to the threads row.
+    let usage = crate::db::threads::aggregate_thread_token_usage(&cfg.pool, thread.id)
+        .await
+        .unwrap_or((0, 0, 0));
+
     let err_msg = MessageNew {
         thread_id: thread.id,
         role: "system".to_string(),
@@ -42,14 +50,28 @@ pub(crate) async fn fail_thread(
         msg_subtype: Some(subtype.to_string()),
         iteration_number: 0,
         duration_ms: 0,
-        token_usage: serde_json::json!({}),
+        token_usage: serde_json::json!({
+            "prompt_tokens": usage.0,
+            "completion_tokens": usage.2,
+            "cached_tokens": usage.1,
+        }),
     };
 
     let saved = queries::create_message(&cfg.pool, &err_msg).await?;
 
-    if let Err(e) = queries::complete_thread(
+    // Fetch the channel for reaction delivery; finalize_thread resolves a
+    // REAL cause-message target and enqueues the status reaction.
+    let channel = queries::get_channel_by_id(&cfg.pool, &thread.channel_id)
+        .await
+        .ok()
+        .flatten();
+
+    if let Err(e) = helpers::finalize_thread(
+        &cfg.ctx,
         &cfg.pool,
         thread.id,
+        Some(cause_msg),
+        channel.as_ref(),
         "failed",
         CompleteThreadStats {
             input_tokens: 0,
@@ -72,8 +94,10 @@ pub(crate) async fn fail_thread(
     // validation failure can't leave the task in "running" forever.
     crate::agent::kanban_updater::update_kanban_status(cfg, thread, "failed").await;
 
-    // Deliver the error message back to the user's platform
-    if let Ok(Some(channel)) = queries::get_channel_by_id(&cfg.pool, &thread.channel_id).await {
+    // Deliver the error message back to the user's platform (the :x: reaction
+    // was already enqueued by finalize_thread above on a REAL, resolvable
+    // cause-message target).
+    if let Some(channel) = channel {
         helpers::enqueue_delivery(
             &cfg.ctx,
             &saved,
@@ -83,15 +107,6 @@ pub(crate) async fn fail_thread(
             true,
         )
         .await;
-
-        // Send failure reaction (:x:) on the cause message
-        if let Some(ref platform) = channel.platform {
-            if let Some(ref resource) = channel.resource_identifier {
-                if let Some(ref ext_id) = cause_msg.external_id {
-                    helpers::enqueue_reaction(&cfg.ctx, platform, resource, ext_id, ":x:").await;
-                }
-            }
-        }
     }
 
     Ok(saved)
@@ -582,6 +597,13 @@ pub(crate) async fn fail_thread_tool(
 
     // 2. Build + persist the Error-type last message.
     let next_seq = crate::db::threads::get_max_thread_sequence(&ctx.pool, thread.id).await? + 1;
+
+    // Real token usage already spent by this thread, aggregated from its
+    // messages (the error message itself carries the same aggregate so
+    // message-level UI shows real numbers instead of '-').
+    let usage = crate::db::threads::aggregate_thread_token_usage(&ctx.pool, thread.id)
+        .await
+        .unwrap_or((0, 0, 0));
     let content = reason
         .unwrap_or_else(|| "The thread was ended as FAILED by the fail-thread tool.".to_string());
     let err_msg = MessageNew {
@@ -610,15 +632,29 @@ pub(crate) async fn fail_thread_tool(
         msg_subtype: Some("fail_thread".to_string()),
         iteration_number: 0,
         duration_ms: 0,
-        token_usage: serde_json::json!({}),
+        token_usage: serde_json::json!({
+            "prompt_tokens": usage.0,
+            "completion_tokens": usage.2,
+            "cached_tokens": usage.1,
+        }),
     };
     let saved = crate::db::messages::create_message(&ctx.pool, &err_msg).await?;
 
+    // Fetch the channel for reaction delivery; finalize_thread resolves a
+    // REAL cause-message target and enqueues the :x: reaction.
+    let channel = crate::db::channels::get_channel_by_id(&ctx.pool, &thread.channel_id)
+        .await
+        .ok()
+        .flatten();
+
     // 3. End the thread as FAILED (terminal; the DB layer only transitions
     //    non-terminal threads, so a second completion is a no-op).
-    if let Err(e) = crate::db::threads::complete_thread(
+    if let Err(e) = crate::agent::helpers::finalize_thread(
+        ctx,
         &ctx.pool,
         thread.id,
+        None,
+        channel.as_ref(),
         "failed",
         CompleteThreadStats {
             input_tokens: 0,
@@ -639,32 +675,19 @@ pub(crate) async fn fail_thread_tool(
     // 4. Apply the workflow_step kanban transition (F0-F4).
     let transition = apply_fail_step_transition(ctx, thread, step).await;
 
-    // 5. Deliver the error message + failure reaction (mirrors fail_thread).
-    if let Ok(Some(channel)) =
-        crate::db::channels::get_channel_by_id(&ctx.pool, &thread.channel_id).await
-    {
+    // 5. Deliver the error message (mirrors fail_thread). The :x: reaction
+    //    was already enqueued by finalize_thread above with a REAL,
+    //    resolvable cause-message target. Pass the RAW cause external_id
+    //    (None or synthetic) so enqueue_delivery resolves the real reply
+    //    target from the database like every other system thread.
+    if let Some(channel) = channel {
         let cause_ext = crate::db::threads::get_cause_message(&ctx.pool, thread.id)
             .await
             .ok()
             .flatten()
-            .and_then(|m| m.external_id)
-            .unwrap_or_default();
-        crate::agent::helpers::enqueue_delivery(
-            ctx,
-            &saved,
-            &channel,
-            thread,
-            Some(cause_ext.clone()),
-            true,
-        )
-        .await;
-        if let (Some(ref platform), Some(ref resource)) =
-            (channel.platform, channel.resource_identifier)
-        {
-            let _ =
-                crate::agent::helpers::enqueue_reaction(ctx, platform, resource, &cause_ext, ":x:")
-                    .await;
-        }
+            .and_then(|m| m.external_id);
+        crate::agent::helpers::enqueue_delivery(ctx, &saved, &channel, thread, cause_ext, true)
+            .await;
     }
 
     tracing::info!(

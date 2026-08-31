@@ -302,6 +302,22 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                             "Channel {} handler cancelled: skipped in-flight thread {}",
                             channel_id, active_id
                         );
+                        // All terminal states send the status reaction: the
+                        // cancelled in-flight thread was skipped, enqueue :o:.
+                        let channel =
+                            crate::db::channels::get_channel_by_id(&cfg.pool, &channel_id)
+                                .await
+                                .ok()
+                                .flatten();
+                        crate::agent::helpers::enqueue_status_reaction(
+                            &cfg.ctx,
+                            &cfg.pool,
+                            active_id,
+                            None,
+                            channel.as_ref(),
+                            "skipped",
+                        )
+                        .await;
                     }
                 }
                 // Kill any tool-spawned subprocesses still running for this
@@ -321,6 +337,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                 // Check if the channel has been closed in the DB
                 if let Ok(true) = queries::is_channel_closed(&cfg.pool, &channel_id).await {
                     info!("Channel {} is closed in DB, handler exiting", channel_id);
+                    // Channel is closed: its threads are skipped with no
+                    // status reaction (no deliverable platform target exists),
+                    // so the DB-only skip path is used here.
                     if let Err(e) = queries::skip_channel_threads(&cfg.pool, &channel_id).await {
                         tracing::warn!("[supervisor] Failed to skip threads for channel {}: {:?}", channel_id, e);
                     }
@@ -386,8 +405,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                                 tracing::warn!("[supervisor] Failed to create no-cause error msg for thread {}: {:?}", thread.id, e);
                             }
                             // Mark thread as failed
-                            if let Err(e) = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
-                                tracing::warn!("[supervisor] Failed to mark thread {} failed (no-cause): {:?}", thread.id, e);
+                            let channel = crate::db::channels::get_channel_by_id(&cfg.pool, &thread.channel_id).await.ok().flatten();
+                            if let Err(e) = crate::agent::helpers::finalize_thread(&cfg.ctx, &cfg.pool, thread.id, None, channel.as_ref(), "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
+                                tracing::warn!("[supervisor] Failed to finalize thread {} failed (no-cause): {:?}", thread.id, e);
                             }
                             // Kanban-linked task must not stay "running" when the
                             // thread dies without a cause message.
@@ -417,8 +437,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                             if let Err(e) = queries::create_message(&cfg.pool, &err_msg).await {
                                 tracing::warn!("[supervisor] Failed to create error msg for thread {}: {:?}", thread.id, e);
                             }
-                            if let Err(e) = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
-                                tracing::warn!("[supervisor] Failed to mark thread {} failed (no-cause): {:?}", thread.id, e);
+                            let channel = crate::db::channels::get_channel_by_id(&cfg.pool, &thread.channel_id).await.ok().flatten();
+                            if let Err(e) = crate::agent::helpers::finalize_thread(&cfg.ctx, &cfg.pool, thread.id, None, channel.as_ref(), "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
+                                tracing::warn!("[supervisor] Failed to finalize thread {} failed (no-cause): {:?}", thread.id, e);
                             }
                             crate::agent::kanban_updater::update_kanban_status(&cfg, thread, "failed").await;
                             continue;
@@ -435,8 +456,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                                 "Thread {} has reached message limit ({}/{}), skipping",
                                 thread.id, count, max_iter
                             );
-                            if let Err(e) = queries::complete_thread(&cfg.pool, thread.id, "skipped", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
-                                tracing::warn!("[supervisor] Failed to mark thread {} skipped: {:?}", thread.id, e);
+                            let channel = crate::db::channels::get_channel_by_id(&cfg.pool, &thread.channel_id).await.ok().flatten();
+                            if let Err(e) = crate::agent::helpers::finalize_thread(&cfg.ctx, &cfg.pool, thread.id, None, channel.as_ref(), "skipped", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
+                                tracing::warn!("[supervisor] Failed to finalize thread {} skipped: {:?}", thread.id, e);
                             }
                             crate::agent::kanban_updater::update_kanban_status(&cfg, thread, "skipped").await;
                             continue;
@@ -515,8 +537,9 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                             tracing::warn!("[supervisor] Failed to create error msg for failed thread {}: {:?}", thread.id, e);
                         }
                         // Mark thread as failed
-                        if let Err(e) = queries::complete_thread(&cfg.pool, thread.id, "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
-                            tracing::warn!("[supervisor] Failed to mark thread {} failed: {:?}", thread.id, e);
+                        let channel = crate::db::channels::get_channel_by_id(&cfg.pool, &thread.channel_id).await.ok().flatten();
+                        if let Err(e) = crate::agent::helpers::finalize_thread(&cfg.ctx, &cfg.pool, thread.id, None, channel.as_ref(), "failed", CompleteThreadStats { input_tokens: 0, cached_tokens: 0, output_tokens: 0, duration_ms: 0 }).await {
+                            tracing::warn!("[supervisor] Failed to finalize thread {} failed: {:?}", thread.id, e);
                         }
                         // If this thread is linked to a kanban task, mark it as blocked
                         if let Some(ref task_id) = thread.task_id {

@@ -554,6 +554,109 @@ pub async fn enqueue_reaction(
     }
 }
 
+/// Map a final thread status to the reaction emoji sent on the cause message.
+/// The platform plugin receives the raw emoji shortcode: Mattermost strips the
+/// colons, Telegram maps the known shortcodes to unicode emoji.
+pub fn status_reaction_emoji(status: &str) -> &str {
+    match status {
+        "completed" => ":white_check_mark:",
+        "failed" => ":x:",
+        "interrupted" => ":broken_heart:",
+        "skipped" => ":o:",
+        "merged" => ":handshake:",
+        other => other,
+    }
+}
+
+/// Pick the first REAL platform external id from a preference-ordered pair:
+/// never a synthetic system id (`hook:...`/`cron:...`/`kanban-action:...`)
+/// and never an empty string - the platform plugin silently drops reactions
+/// aimed at a post that does not exist.
+fn real_external_id(preferred: Option<&str>, fallback: Option<String>) -> Option<String> {
+    if let Some(id) = preferred {
+        if !id.is_empty() && !is_synthetic_external_id(id) {
+            return Some(id.to_string());
+        }
+    }
+    fallback.filter(|id| !id.is_empty() && !is_synthetic_external_id(id))
+}
+
+/// Resolve a REAL, deliverable reaction target for a thread's cause message.
+///
+/// Prefers the passed-in cause message's external_id when it is a real
+/// platform post id; otherwise falls back to the cause message persisted in
+/// the database, whose external_id may have been overwritten by the seq-0
+/// delivery save-back with the real platform post id (hooks/cron/kanban
+/// threads start with a synthetic or absent id). Returns `None` when no
+/// deliverable target exists (e.g. a non-agentic system thread whose seq-0
+/// was never delivered) - the caller logs and skips.
+pub(crate) async fn resolve_reaction_target(
+    pool: &PgPool,
+    thread_id: i64,
+    cause_msg: Option<&Message>,
+) -> Option<String> {
+    let preferred = cause_msg.and_then(|c| c.external_id.as_deref());
+    let fallback = match crate::db::threads::get_cause_message(pool, thread_id).await {
+        Ok(Some(m)) => m.external_id,
+        _ => None,
+    };
+    real_external_id(preferred, fallback)
+}
+
+/// Enqueue the status reaction for a terminal thread when a REAL deliverable
+/// reaction target exists; log-and-skip otherwise. Shared by every terminal
+/// finalization path so ALL terminal states (completed/failed/interrupted/
+/// skipped/merged) reach the platform channel.
+pub(crate) async fn enqueue_status_reaction(
+    ctx: &AppContext,
+    pool: &PgPool,
+    thread_id: i64,
+    cause_msg: Option<&Message>,
+    channel: Option<&Channel>,
+    status: &str,
+) {
+    let Some(channel) = channel else {
+        return;
+    };
+    let (Some(platform), Some(resource)) = (&channel.platform, &channel.resource_identifier) else {
+        return;
+    };
+    let Some(ext_id) = resolve_reaction_target(pool, thread_id, cause_msg).await else {
+        tracing::warn!(
+            "[finalize] No deliverable reaction target for thread {} (status {}): \
+                 the cause message has no real platform external_id",
+            thread_id,
+            status
+        );
+        return;
+    };
+    let emoji = status_reaction_emoji(status);
+    enqueue_reaction(ctx, platform, resource, &ext_id, emoji).await;
+}
+
+/// Single terminal-finalization choke point for ALL terminal thread states.
+///
+/// Persists the terminal status + real token stats via `complete_thread`
+/// (which falls back to aggregating the thread's `messages.token_usage` when
+/// the caller has no cumulative usage, and records the real LLM-call count in
+/// `iterations`), then enqueues the status reaction for the platform channel
+/// with a REAL, resolvable reaction target. Every terminal path - normal
+/// completion, interruption, provider-error failure, validation failure,
+/// fail-thread tool, skipped, merged - goes through here.
+pub(crate) async fn finalize_thread(
+    ctx: &AppContext,
+    pool: &PgPool,
+    thread_id: i64,
+    cause_msg: Option<&Message>,
+    channel: Option<&Channel>,
+    status: &str,
+    stats: CompleteThreadStats,
+) -> crate::error::AppResult<()> {
+    crate::db::threads::complete_thread(pool, thread_id, status, stats).await?;
+    enqueue_status_reaction(ctx, pool, thread_id, cause_msg, channel, status).await;
+    Ok(())
+}
+
 /// Telegram first/last-only collapse state for one thread run.
 ///
 /// When the telegram platform plugin is configured with `first_last_only`
@@ -1110,5 +1213,55 @@ mod tests {
         assert!(!is_internal_telemetry("error"));
         assert!(!is_internal_telemetry("response"));
         assert!(!is_internal_telemetry(""));
+    }
+}
+
+#[cfg(test)]
+mod reaction_tests {
+    use super::*;
+
+    #[test]
+    fn status_reaction_emoji_maps_all_terminal_states() {
+        assert_eq!(status_reaction_emoji("merged"), ":handshake:");
+        assert_eq!(status_reaction_emoji("skipped"), ":o:");
+        assert_eq!(status_reaction_emoji("completed"), ":white_check_mark:");
+        assert_eq!(status_reaction_emoji("failed"), ":x:");
+        assert_eq!(status_reaction_emoji("interrupted"), ":broken_heart:");
+        assert_eq!(status_reaction_emoji("custom"), "custom");
+    }
+
+    #[test]
+    fn real_external_id_rejects_synthetic_and_empty() {
+        assert_eq!(real_external_id(Some("hook:1:2"), None), None);
+        assert_eq!(real_external_id(Some("cron:job:3"), None), None);
+        assert_eq!(real_external_id(Some("kanban-action:t:s:4"), None), None);
+        assert_eq!(real_external_id(Some(""), None), None);
+        assert_eq!(real_external_id(None, Some(String::new())), None);
+        assert_eq!(real_external_id(None, None), None);
+    }
+
+    #[test]
+    fn real_external_id_resolves_real_targets() {
+        let real = "3nt7qohominz9fxmz7bcujms9c";
+        assert_eq!(
+            real_external_id(None, Some(real.to_string())),
+            Some(real.to_string())
+        );
+        // Passed-in real id wins over a synthetic fallback.
+        assert_eq!(
+            real_external_id(Some(real), Some("hook:1:2".to_string())),
+            Some(real.to_string())
+        );
+        // Synthetic passed-in id (hook cause before the seq-0 save-back)
+        // falls through to the real delivered post id.
+        assert_eq!(
+            real_external_id(Some("hook:1:2"), Some(real.to_string())),
+            Some(real.to_string())
+        );
+        // Kanban thread: absent passed-in id resolves via the DB fallback.
+        assert_eq!(
+            real_external_id(None, Some(real.to_string())),
+            Some(real.to_string())
+        );
     }
 }
