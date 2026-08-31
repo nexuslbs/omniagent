@@ -28,7 +28,7 @@ fn test_health() {
     assert_eq!(resp.status(), 200);
     let json: serde_json::Value = resp.json().unwrap();
     assert_eq!(json["status"], "ok");
-    assert!(json["version"].as_str().map_or(false, |v| !v.is_empty()));
+    assert!(json["version"].as_str().is_some_and(|v| !v.is_empty()));
     assert!(json["uptime"].as_u64().is_some());
 }
 
