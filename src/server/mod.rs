@@ -284,9 +284,23 @@ pub async fn start_server(config: ServerConfig) -> AppResult<()> {
     Ok(())
 }
 
-/// Simple health check: returns "ok".
-async fn health_handler() -> &'static str {
-    "ok"
+/// Process start instant, used for /health uptime reporting.
+static SERVER_START: once_cell::sync::Lazy<std::time::Instant> =
+    once_cell::sync::Lazy::new(std::time::Instant::now);
+
+/// Health payload: status + the release version (Cargo.toml, baked at build
+/// time via CARGO_PKG_VERSION) + process uptime in seconds.
+fn health_payload() -> serde_json::Value {
+    serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime": SERVER_START.elapsed().as_secs(),
+    })
+}
+
+/// Simple health check: returns JSON with status, version and uptime.
+async fn health_handler() -> impl IntoResponse {
+    Json(health_payload())
 }
 
 /// Pure decision: must `stop-thread` cancel the channel handler?
@@ -1493,8 +1507,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_handler_returns_ok() {
-        let response = health_handler().await;
-        assert_eq!(response, "ok");
+        let payload = health_payload();
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(payload["version"], env!("CARGO_PKG_VERSION"));
+        assert!(payload["uptime"].as_u64().is_some());
     }
 
     // ─── PromptPreviewResponse ──────────────────────────────────────────
