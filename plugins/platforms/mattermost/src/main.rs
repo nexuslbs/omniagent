@@ -3943,4 +3943,45 @@ mod tests {
             err
         );
     }
+    // ── first_last_only config deserialization ─────────────────────────────
+    //
+    // The core sends configure params as a FLAT string map (plugins.yml env
+    // values), so first_last_only arrives as the STRING "true"/"false", not a
+    // JSON boolean. The string-or-bool deserializer must accept both shapes
+    // identically (mirrors the telegram plugin's _as_bool coercion).
+
+    #[test]
+    fn first_last_only_accepts_bool_and_string_shapes() {
+        let parse =
+            |json: &str| -> PluginConfig { serde_json::from_str::<PluginConfig>(json).unwrap() };
+
+        // Real JSON boolean
+        assert!(parse(r#"{"server_url":"http://m:8065","first_last_only":true}"#).first_last_only);
+        // String shapes (what the core actually sends)
+        assert!(
+            parse(r#"{"server_url":"http://m:8065","first_last_only":"true"}"#).first_last_only
+        );
+        assert!(parse(r#"{"server_url":"http://m:8065","first_last_only":"1"}"#).first_last_only);
+        assert!(parse(r#"{"server_url":"http://m:8065","first_last_only":"on"}"#).first_last_only);
+        assert!(parse(r#"{"server_url":"http://m:8065","first_last_only":"yes"}"#).first_last_only);
+        // False shapes
+        assert!(
+            !parse(r#"{"server_url":"http://m:8065","first_last_only":false}"#).first_last_only
+        );
+        assert!(
+            !parse(r#"{"server_url":"http://m:8065","first_last_only":"false"}"#).first_last_only
+        );
+        assert!(!parse(r#"{"server_url":"http://m:8065","first_last_only":"0"}"#).first_last_only);
+        assert!(
+            !parse(r#"{"server_url":"http://m:8065","first_last_only":"off"}"#).first_last_only
+        );
+        assert!(!parse(r#"{"server_url":"http://m:8065","first_last_only":""}"#).first_last_only);
+        // Default when absent
+        assert!(!parse(r#"{"server_url":"http://m:8065"}"#).first_last_only);
+        // Garbage is rejected (not silently coerced)
+        assert!(serde_json::from_str::<PluginConfig>(
+            r#"{"server_url":"http://m:8065","first_last_only":"banana"}"#
+        )
+        .is_err());
+    }
 }
