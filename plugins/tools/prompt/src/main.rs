@@ -975,9 +975,9 @@ async fn build_continuation_block(pool: &PgPool, thread_id: i64) -> anyhow::Resu
     }
     prior_threads.sort_by_key(|t| t.id);
     if !prior_threads.is_empty() {
-        let mut parts = vec![format!(
-            "Prior step-threads of this task (thread, step, terminal status, last message) - resume from where the previous attempt ended; do not re-do completed work or repeat its mistakes:"
-        )];
+        let mut parts = vec![
+            "Prior step-threads of this task (thread, step, terminal status, last message) - resume from where the previous attempt ended; do not re-do completed work or repeat its mistakes:".to_string()
+        ];
         for t in &prior_threads {
             let step = t.workflow_step.as_deref().unwrap_or("-");
             let (content, msg_type) = match last_message_info(pool, t.id).await {

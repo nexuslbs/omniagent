@@ -986,7 +986,6 @@ mod tests {
         let result = count_tokens(&msgs, "nonexistent_encoding_xyz", Some(&tools));
         assert!(result > 0);
     }
-
 }
 
 #[cfg(test)]
