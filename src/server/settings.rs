@@ -365,6 +365,16 @@ fn get_all_setting_definitions() -> Vec<(String, SettingMeta)> {
             },
         ),
         (
+            "redaction_tool".into(),
+            SettingMeta {
+                field_type: "select".into(),
+                description: "Name of the MCP tool to call for redacting possible secrets from outgoing messages and tool output before delivery. Empty (default) = no redaction. Example: redaction_redact (the omni-plugins redaction tool)".into(),
+                options: None,
+                readonly: false,
+                default: Some("".into()),
+            },
+        ),
+        (
             "git_sync_tool".into(),
             SettingMeta {
                 field_type: "select".into(),

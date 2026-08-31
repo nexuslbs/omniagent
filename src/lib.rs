@@ -24,7 +24,6 @@ pub mod profile;
 pub mod profiles_yaml;
 pub mod provider;
 pub mod resolution;
-pub mod safety;
 pub mod scheduler;
 pub mod server;
 pub mod subtask;

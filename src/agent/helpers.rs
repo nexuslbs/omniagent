@@ -341,6 +341,37 @@ pub(crate) fn needs_cause_external_id_lookup(
     thread_sequence > 0 && cause_external_id.is_none_or(is_synthetic_external_id)
 }
 
+/// Invoke the configured redaction MCP tool on `content`.
+///
+/// The configured tool name is qualified as `{server}_{tool}` (e.g.
+/// "redaction_redact"). The tool receives `{"text": <content>}` and returns
+/// the redacted text as its tool result.
+async fn redact_with_tool(
+    ctx: &AppContext,
+    qualified_tool: &str,
+    content: &str,
+) -> Result<String, String> {
+    let (server, tool) = qualified_tool.split_once('_').ok_or_else(|| {
+        format!(
+            "redaction tool '{}' must be of the form '{{server}}_{{tool}}'",
+            qualified_tool
+        )
+    })?;
+    let args = serde_json::json!({ "text": content });
+    let result = ctx
+        .external_clients
+        .call_tool(server, tool, &args, None)
+        .await
+        .map_err(|e| e.to_string())?;
+    if result.is_error {
+        return Err(format!(
+            "redaction tool '{}' returned an error: {}",
+            qualified_tool, result.content
+        ));
+    }
+    Ok(result.content)
+}
+
 /// Enqueue a message for delivery to its platform.
 /// Uses the channel's platform and resource_identifier to determine
 /// the delivery target. All messages (user and system) follow the same
@@ -431,22 +462,32 @@ pub async fn enqueue_delivery(
         saved.content.clone()
     };
 
-    // ── Secret leak detection: scan outgoing content before delivery ──
+    // ── Secret redaction: configured redaction tool (default empty = none) ──
+    // Core no longer hardcodes secret patterns. When the global setting
+    // `redaction_tool` names an MCP tool (e.g. "redaction_redact"), the
+    // outgoing content is passed through it before delivery. Empty (default)
+    // means no redaction at all. Tool failures are logged and the original
+    // content is delivered unchanged (fail-open).
     let outgoing_content = {
-        let secrets = crate::safety::scan_for_secrets(&envelope_content);
-        if !secrets.is_empty() {
-            tracing::warn!(
-                "⚠️ SECRET LEAK DETECTED in message {} ({}): {:?}",
-                saved.id,
-                saved.msg_type,
-                secrets.iter().map(|s| s.pattern).collect::<Vec<_>>()
-            );
-            crate::safety::redact_secrets(&envelope_content)
-        } else {
+        let redaction_tool = crate::agent::config::get_global()
+            .map(|g| g.read().redaction_tool.clone())
+            .unwrap_or_default();
+        if redaction_tool.trim().is_empty() {
             envelope_content
+        } else {
+            match redact_with_tool(ctx, &redaction_tool, &envelope_content).await {
+                Ok(redacted) => redacted,
+                Err(e) => {
+                    tracing::warn!(
+                        "redaction tool '{}' failed ({}); delivering content unchanged",
+                        redaction_tool,
+                        e
+                    );
+                    envelope_content
+                }
+            }
         }
     };
-
     let envelope = OutboundEnvelope {
         message_id: saved.id,
         resource_identifier,

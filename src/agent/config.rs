@@ -106,6 +106,10 @@ pub struct AgentConfig {
     /// MCP tool name for compacting conversation history.
     /// Default: "prompt_compact-messages".
     pub compact_messages_tool_name: String,
+    /// MCP tool name for redacting possible secrets from outgoing messages
+    /// and tool output before delivery. Empty (default) = no redaction at
+    /// all. Example: "redaction_redact" (the omni-plugins redaction tool).
+    pub redaction_tool: String,
 
     /// Cumulative char budget for appended sub-prompts per running thread
     /// (settings `sub_prompt_max_chars`; 0 disables appends).
@@ -274,6 +278,7 @@ impl AgentConfig {
                 "prompt_compact_messages_tool",
                 "prompt_compact-messages",
             ),
+            redaction_tool: get("redaction_tool", ""),
             sub_prompt_max_chars: get("sub_prompt_max_chars", "4000").parse().unwrap_or(4000),
             sub_prompt_iteration_percent: get("sub_prompt_iteration_percent", "50")
                 .parse()
