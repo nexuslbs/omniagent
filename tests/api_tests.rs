@@ -26,8 +26,10 @@ fn get(path: &str) -> reqwest::blocking::Response {
 fn test_health() {
     let resp = get("/health");
     assert_eq!(resp.status(), 200);
-    let body = resp.text().unwrap();
-    assert_eq!(body, "ok");
+    let json: serde_json::Value = resp.json().unwrap();
+    assert_eq!(json["status"], "ok");
+    assert!(json["version"].as_str().map_or(false, |v| !v.is_empty()));
+    assert!(json["uptime"].as_u64().is_some());
 }
 
 // ---------------------------------------------------------------------------
