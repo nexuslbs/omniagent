@@ -2447,14 +2447,14 @@ Previous plan:\n{}",
             .ok()
             .flatten()
             .filter(|s| is_terminal_loop_status(s));
-        if terminal_status.is_some() {
+        if let Some(terminal_status) = terminal_status {
             // The fail round's reasoning must never be persisted after the
             // fail message (step 8 below would insert it as a later message).
             final_reasoning = None;
             info!(
                 "[executor] Thread {} ended by a tool (status='{}') - terminating the loop immediately",
                 thread.id,
-                terminal_status.unwrap()
+                terminal_status
             );
             break;
         }
@@ -3006,11 +3006,8 @@ mod truncation_tests {
     }
 }
 
-/// Iteration-percent gate for sub-prompt lookups: lookups only happen while
-/// the current iteration is within the first `percent`% of the iteration
-/// budget (`current_iter * 100 <= iter_limit * percent`). percent=0 disables
-/// the feature at the call site (the gate is never consulted).
-
+#[allow(dead_code)]
+#[allow(clippy::items_after_test_module)]
 /// Pure: should the prompt message be logged before this LLM call?
 /// Levels: "off" never; "first" only the first; "first+compact" the first or
 /// right after a condensation; "all" every non-retry call. A retry of a
@@ -3143,6 +3140,11 @@ mod thread_lifecycle_tests {
         }
     }
 }
+
+/// Iteration-percent gate for sub-prompt lookups: lookups only happen while
+/// the current iteration is within the first `percent`% of the iteration
+/// budget (`current_iter * 100 <= iter_limit * percent`). percent=0 disables
+/// the feature at the call site (the gate is never consulted).
 #[allow(dead_code)]
 #[allow(clippy::items_after_test_module)]
 pub(crate) fn sub_prompt_gate_ok(current_iter: i32, iter_limit: i32, percent: u32) -> bool {
