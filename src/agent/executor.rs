@@ -190,7 +190,7 @@ pub async fn process_thread(
         && cause_msg
             .external_id
             .as_deref()
-            .is_none_or(is_synthetic_external_id);
+            .is_none_or(helpers::is_synthetic_external_id);
     if seq0_needs_delivery {
         if let Some(ref platform_name) = channel.platform {
             if let Some(ref resource) = channel.resource_identifier {
@@ -211,7 +211,10 @@ pub async fn process_thread(
     // finishes (the guard aborts the task on every exit path).
     let _typing_guard = if let Some(ref platform_name) = channel.platform {
         if let Some(ref resource) = channel.resource_identifier {
-            let parent_id = cause_msg.external_id.clone();
+            let parent_id = cause_msg
+                .external_id
+                .clone()
+                .filter(|id| !helpers::is_synthetic_external_id(id));
             let typing_ctx = cfg.ctx.clone();
             let typing_platform = platform_name.clone();
             let typing_resource = resource.clone();
@@ -271,18 +274,9 @@ pub async fn process_thread(
     Ok(saved)
 }
 
-/// True when `id` is a synthetic external_id assigned by omniagent itself
-/// (hooks, cron, kanban-action threads) rather than a real platform post id.
-/// System threads must still post their seq-0 message to the channel, so the
-/// executor delivers them exactly like kanban threads (which use no
-/// external_id at all).
-fn is_synthetic_external_id(id: &str) -> bool {
-    id.starts_with("hook:") || id.starts_with("cron:") || id.starts_with("kanban-action:")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::is_synthetic_external_id;
+    use crate::agent::helpers::{is_synthetic_external_id, needs_cause_external_id_lookup};
 
     // ─── is_synthetic_external_id tests ───
 
@@ -355,5 +349,41 @@ mod tests {
         assert!(!needs_delivery(1, None));
         assert!(!needs_delivery(1, Some("hook:1:2")));
         assert!(!needs_delivery(2, Some("cron:1:2")));
+    }
+    // needs_cause_external_id_lookup tests (shared follow-up resolution)
+
+    #[test]
+    fn test_needs_lookup_kanban_none_id() {
+        // Kanban threads pass None: follow-ups must resolve the real post id.
+        assert!(needs_cause_external_id_lookup(None, 1));
+        assert!(needs_cause_external_id_lookup(None, 5));
+    }
+
+    #[test]
+    fn test_needs_lookup_synthetic_ids() {
+        // Cron/hooks/kanban-action threads pass a synthetic id before their
+        // seq-0 is posted; follow-ups must resolve the real post id too.
+        assert!(needs_cause_external_id_lookup(Some("hook:1:2"), 1));
+        assert!(needs_cause_external_id_lookup(Some("cron:job:3"), 2));
+        assert!(needs_cause_external_id_lookup(
+            Some("kanban-action:t:s:4"),
+            1
+        ));
+    }
+
+    #[test]
+    fn test_needs_lookup_seq0_never() {
+        // seq-0 posts top-level: it never needs a reply-target lookup.
+        assert!(!needs_cause_external_id_lookup(None, 0));
+        assert!(!needs_cause_external_id_lookup(Some("hook:1:2"), 0));
+    }
+
+    #[test]
+    fn test_needs_lookup_real_id_no_lookup() {
+        // A real platform post id (user thread) is used as-is.
+        assert!(!needs_cause_external_id_lookup(
+            Some("3nt7qohominz9fxmz7bcujms9c"),
+            1
+        ));
     }
 }

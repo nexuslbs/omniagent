@@ -328,6 +328,30 @@ pub fn is_internal_telemetry(msg_type: &str) -> bool {
     )
 }
 
+/// True when `id` is a synthetic external_id assigned by omniagent itself
+/// (hooks, cron, kanban-action threads) rather than a real platform post id.
+/// System threads must still post their seq-0 message to the channel, so
+/// deliveries treat a synthetic id exactly like no id at all: seq-0 is
+/// posted top-level and follow-up messages resolve the real platform post
+/// id from the database (see `needs_cause_external_id_lookup`).
+pub fn is_synthetic_external_id(id: &str) -> bool {
+    id.starts_with("hook:") || id.starts_with("cron:") || id.starts_with("kanban-action:")
+}
+
+/// True when a follow-up delivery (seq > 0) must resolve its reply target
+/// from the cause message's CURRENT external_id instead of trusting the
+/// passed-in value: either no id was passed (kanban threads) or the
+/// passed-in id is a synthetic system id (hooks/cron/kanban-action threads
+/// before their seq-0 post is saved back). This is the shared predicate for
+/// the kanban platform-mirroring flow: every system thread type resolves
+/// follow-up reply targets through the same database lookup.
+pub(crate) fn needs_cause_external_id_lookup(
+    cause_external_id: Option<&str>,
+    thread_sequence: i32,
+) -> bool {
+    thread_sequence > 0 && cause_external_id.is_none_or(is_synthetic_external_id)
+}
+
 /// Enqueue a message for delivery to its platform.
 /// Uses the channel's platform and resource_identifier to determine
 /// the delivery target. All messages (user and system) follow the same
@@ -369,18 +393,23 @@ pub async fn enqueue_delivery(
         return;
     }
 
-    // For non-seq-0 messages lacking a cause_external_id, look up the
-    // cause message's external_id from the database. This is needed for
-    // system-created threads (cron/kanban) whose seq-0 was delivered
-    // asynchronously and had its external_id updated after delivery.
-    let resolved_cause_external_id = if cause_external_id.is_none() && saved.thread_sequence > 0 {
-        match crate::db::threads::get_cause_message(&ctx.pool, saved.thread_id).await {
-            Ok(Some(cause_msg)) => cause_msg.external_id,
-            _ => None,
-        }
-    } else {
-        cause_external_id
-    };
+    // For non-seq-0 messages lacking a REAL cause_external_id, look up the
+    // cause message's external_id from the database. This is the same flow
+    // kanban threads use: their seq-0 cause starts with no external_id
+    // (cron/hooks/kanban-action start with a synthetic one), the seq-0
+    // delivery's save-back writes the real platform post id, and follow-up
+    // messages resolve it here so they reply under the posted seq-0 message.
+    let resolved_cause_external_id =
+        if needs_cause_external_id_lookup(cause_external_id.as_deref(), saved.thread_sequence) {
+            match crate::db::threads::get_cause_message(&ctx.pool, saved.thread_id).await {
+                Ok(Some(cause_msg)) => cause_msg
+                    .external_id
+                    .filter(|id| !is_synthetic_external_id(id)),
+                _ => None,
+            }
+        } else {
+            cause_external_id
+        };
 
     // Final thread deliveries on Telegram must be sent as a REPLY to the
     // thread's seq-0 message (reply_to_message_id = the seq-0 message's
