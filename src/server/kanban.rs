@@ -336,6 +336,8 @@ struct KanbanThreadRow {
     metadata: Option<serde_json::Value>,
     thread_status: Option<String>,
     channel_name: Option<String>,
+    workflow: Option<String>,
+    workflow_step: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -424,6 +426,8 @@ struct KanbanThreadEntry {
     metadata: Option<serde_json::Value>,
     thread_status: Option<String>,
     channel: Option<String>,
+    workflow: Option<String>,
+    workflow_step: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1839,7 +1843,9 @@ async fn list_threads_handler(
             m.created_at,
             m.metadata,
             t.status AS thread_status,
-            t.channel_id AS channel_name
+            t.channel_id AS channel_name,
+            t.workflow_id AS workflow,
+            t.workflow_step AS workflow_step
         FROM threads t
         LEFT JOIN LATERAL (
             SELECT m_sub.*
@@ -1890,6 +1896,8 @@ async fn list_threads_handler(
             metadata: r.metadata,
             thread_status: r.thread_status,
             channel: r.channel_name,
+            workflow: r.workflow,
+            workflow_step: r.workflow_step,
         })
         .collect();
 

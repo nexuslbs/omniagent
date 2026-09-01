@@ -98,6 +98,8 @@ pub struct MessageEventEntry {
     pub thread_cached_tokens: Option<i64>,
     pub processing_time_ms: Option<i64>,
     pub token_usage: Option<serde_json::Value>,
+    pub workflow: Option<String>,
+    pub workflow_step: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -169,6 +171,8 @@ struct MessageEventRow {
     thread_cached_tokens: Option<i64>,
     channel_name: Option<String>,
     msg_token_usage: Option<String>,
+    workflow: Option<String>,
+    workflow_step: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +444,8 @@ async fn events_handler(
                 t.input_tokens::bigint AS thread_input_tokens,
                 t.output_tokens::bigint AS thread_output_tokens,
                 t.cached_tokens::bigint AS thread_cached_tokens,
+                t.workflow_id AS workflow,
+                t.workflow_step AS workflow_step,
                 t.channel_id AS channel_name,
                 m.token_usage::text AS msg_token_usage
             FROM messages m
@@ -505,6 +511,8 @@ async fn events_handler(
                 t.input_tokens::bigint AS thread_input_tokens,
                 t.output_tokens::bigint AS thread_output_tokens,
                 t.cached_tokens::bigint AS thread_cached_tokens,
+                t.workflow_id AS workflow,
+                t.workflow_step AS workflow_step,
                 t.channel_id AS channel_name,
                 m.token_usage::text AS msg_token_usage
             FROM messages m
@@ -601,6 +609,8 @@ async fn events_handler(
                 thread_input_tokens: r.thread_input_tokens,
                 thread_output_tokens: r.thread_output_tokens,
                 thread_cached_tokens: r.thread_cached_tokens,
+                workflow: r.workflow,
+                workflow_step: r.workflow_step,
                 processing_time_ms: proc_time,
                 token_usage: r.msg_token_usage.as_ref().and_then(|s| {
                     let v: serde_json::Value = serde_json::from_str(s).ok()?;
