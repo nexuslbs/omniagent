@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE kanban_tasks\n         SET status = $1,\n             position = CASE WHEN status <> $2 THEN\n                 (SELECT COALESCE(MAX(position), -1) + 1 FROM kanban_tasks WHERE status = $3)\n                 ELSE position END,\n             thread_status = NULLIF($4, '')::text,\n             workflow_state = CAST($5 AS jsonb)\n         WHERE id = $6",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "72ffd330eda64f1255874e1c3a85163afd145ca5643da64dce5717f6537872e7"
+}
