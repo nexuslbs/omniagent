@@ -23,11 +23,11 @@
 //!   to `docker compose --env-file`.
 //!
 //! **Project name**: the compose project name is derived from the tool's
-//! arguments ONLY: `COMPOSE_PROJECT_NAME` from `env_file` (pinned with
-//! `--project-name`), else the compose file's own `name:` (default) or the
-//! project-dir basename. Ambient `COMPOSE_*` variables are stripped from the
-//! child environment, so the tool can never inherit the agent's own project
-//! name (e.g. the production stack) by accident.
+//! arguments ONLY: `COMPOSE_PROJECT_NAME` from `env_file` (via `--env-file`),
+//! else the compose file's own `name:` (default) or the project-dir basename.
+//! omniagent spawns this plugin with an EMPTY environment (platform-level env
+//! isolation), so the tool can never inherit the agent's own project name
+//! (e.g. the production stack) by accident.
 
 use anyhow::Result;
 use mcp_server_util::*;
@@ -135,32 +135,6 @@ fn resolve_project_file(
     Ok(resolved.display().to_string())
 }
 
-/// Read `COMPOSE_PROJECT_NAME` from an env-style file (the same variable docker
-/// compose reads for the project name). Returns the value if present.
-/// Understands `KEY=value` lines, an optional `export ` prefix, surrounding
-/// quotes, and `#` comments.
-fn env_file_project_name(env_file: &str) -> Option<String> {
-    let content = std::fs::read_to_string(env_file).ok()?;
-    for raw_line in content.lines() {
-        let mut line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("export ") {
-            line = rest.trim();
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            if key.trim() == "COMPOSE_PROJECT_NAME" {
-                let v = value.trim().trim_matches('"').trim_matches('\'');
-                if !v.is_empty() {
-                    return Some(v.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Build a tokio::process::Command for `docker compose`.
 fn build_compose_command(
     command: &str,
@@ -203,28 +177,17 @@ fn build_compose_command(
         cmd.arg(env_file);
     }
 
-    // CRITICAL (2026-09-01, production-incident fix): the project name must be
-    // determined by the TOOL'S ARGUMENTS, never by the ambient process
-    // environment. omniagent loads the production .env (COMPOSE_PROJECT_NAME=
-    // omni-stack) into spawned plugin environments, and docker compose's
-    // interpolation precedence is "process env beats --env-file", so every
-    // call used to resolve to the PRODUCTION project no matter what
-    // project_dir / env_file were passed. Fix:
-    //  - strip ambient COMPOSE_* vars (they must come from the env_file);
-    //  - if the env_file sets COMPOSE_PROJECT_NAME, pin it explicitly with
-    //    --project-name (highest precedence, argument-driven);
-    //  - otherwise leave the name to the compose file (`name:` field default
-    //    e.g. `name: ${COMPOSE_PROJECT_NAME:-omni}` -> "omni") or the
-    //    project-dir basename - never the ambient environment.
-    cmd.env_remove("COMPOSE_PROJECT_NAME");
-    cmd.env_remove("COMPOSE_PROFILES");
-    cmd.env_remove("COMPOSE_FILE");
-    if !env_file.is_empty() {
-        if let Some(name) = env_file_project_name(env_file) {
-            cmd.arg("--project-name");
-            cmd.arg(name);
-        }
-    }
+    // Platform-level env isolation (2026-09-01): omniagent spawns this plugin
+    // with an EMPTY environment, so there is no ambient COMPOSE_* to leak here.
+    // The compose child is also spawned with an empty env: interpolation
+    // resolves from --env-file (or the project-dir .env default) ONLY, never
+    // from the ambient or production environment. No per-tool stripping or
+    // --project-name pinning is needed - the platform never passes ambient env.
+    cmd.env_clear();
+    cmd.env(
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    );
 
     let parts: Vec<&str> = command.split_whitespace().collect();
     cmd.arg(verb);
@@ -807,9 +770,9 @@ async fn main() -> Result<()> {
                  so overrides merge exactly like `docker compose -f base -f overlay`. \\
                  'env_file' (optional) is a .env-style file: relative to project_dir, or an ABSOLUTE path anywhere inside \\
                  the workspace (e.g. /opt/workspace/<project>/<name>.env for a shared env file) - passed via --env-file. \
-                 PROJECT NAME: pinned to COMPOSE_PROJECT_NAME from the env_file when present; otherwise the compose \
-                 file's own name: (default) or the project-dir basename - ambient COMPOSE_* env vars are ignored, so \
-                 the tool can NEVER inherit the agent's own (production) project name by accident. \
+                 PROJECT NAME: derived from the env_file's COMPOSE_PROJECT_NAME (via --env-file), else the compose \
+                 file's own name: (default) or the project-dir basename. The tool is spawned with an EMPTY environment \
+                 (platform-level env isolation), so it can never inherit the agent's ambient project name. \
                  Use 'command' for the compose verb + flags (e.g. 'up -d', 'ps', 'build', 'logs --tail=50'). \
                  For exec/run: use 'service' (container name) and 'args' (command to run inside container). \
                  USAGE EXAMPLES: \
@@ -1187,51 +1150,49 @@ mod tests {
     }
 
     #[test]
-    fn env_file_project_name_parsing() {
-        let dir = std::env::temp_dir().join(format!("compose-env-pn-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let env = dir.join("dev.env");
-        std::fs::write(&env, "# comment\nCOMPOSE_PROJECT_NAME=omnidev\nOTHER=1\n").unwrap();
-        assert_eq!(
-            env_file_project_name(env.to_str().unwrap()).as_deref(),
-            Some("omnidev")
-        );
-        std::fs::write(&env, "export COMPOSE_PROJECT_NAME=\"omni-stack\"\n").unwrap();
-        assert_eq!(
-            env_file_project_name(env.to_str().unwrap()).as_deref(),
-            Some("omni-stack")
-        );
-        std::fs::write(&env, "FOO=bar\n").unwrap();
-        assert_eq!(env_file_project_name(env.to_str().unwrap()), None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn build_compose_command_pins_project_name_from_env_file() {
-        let dir = std::env::temp_dir().join(format!("compose-pn-cmd-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let env = dir.join("omnidev.env");
-        std::fs::write(&env, "COMPOSE_PROJECT_NAME=omnidev\n").unwrap();
-        let cmd = build_compose_command("ps", "/tmp/proj", &[], env.to_str().unwrap(), "", "", "")
-            .unwrap();
-        let repr = format!("{:?}", cmd);
-        assert!(
-            repr.contains("--project-name"),
-            "missing --project-name: {repr}"
-        );
-        assert!(repr.contains("omnidev"));
-        assert!(repr.contains("--env-file"));
-        assert!(repr.contains("--project-directory"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn build_compose_command_without_env_file_has_no_project_name() {
+    fn build_compose_command_clears_child_env() {
+        // Platform-level env isolation: the compose child must inherit NO
+        // ambient env - no COMPOSE_* stripping or --project-name pinning.
         let cmd = build_compose_command("ps", "/tmp/proj", &[], "", "", "", "").unwrap();
         let repr = format!("{:?}", cmd);
         assert!(
             !repr.contains("--project-name"),
             "unexpected --project-name: {repr}"
         );
+        // The child env must carry no ambient COMPOSE_* (Debug repr includes
+        // the env map; env_clear leaves only the explicit minimal PATH).
+        assert!(
+            !repr.contains("COMPOSE_PROJECT_NAME"),
+            "ambient COMPOSE_* leaked: {repr}"
+        );
+        assert!(
+            !repr.contains("COMPOSE_PROFILES"),
+            "ambient COMPOSE_* leaked: {repr}"
+        );
+        assert!(
+            !repr.contains("COMPOSE_FILE"),
+            "ambient COMPOSE_* leaked: {repr}"
+        );
+    }
+
+    #[test]
+    fn build_compose_command_env_file_passed_via_env_file_flag() {
+        let dir = std::env::temp_dir().join(format!("compose-envfile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let env = dir.join("omnidev.env");
+        std::fs::write(&env, "COMPOSE_PROJECT_NAME=omnidev").unwrap();
+        let cmd = build_compose_command("ps", "/tmp/proj", &[], env.to_str().unwrap(), "", "", "")
+            .unwrap();
+        let repr = format!("{:?}", cmd);
+        assert!(repr.contains("--env-file"), "missing --env-file: {repr}");
+        assert!(
+            repr.contains("omnidev.env"),
+            "env file path missing: {repr}"
+        );
+        assert!(
+            !repr.contains("--project-name"),
+            "unexpected --project-name: {repr}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

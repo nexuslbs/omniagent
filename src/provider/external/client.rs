@@ -56,6 +56,10 @@ impl ExternalProviderClient {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit());
+        // Platform-level env isolation (2026-09-01): never inherit the agent's
+        // ambient environment. Empty env + explicit minimal PATH only.
+        cmd.env_clear();
+        cmd.env("PATH", crate::process_env::MINIMAL_PATH);
         // Relative entrypoint args resolve against the plugin install dir,
         // not the omniagent process CWD.
         if let Some(dir) = &self.current_dir {

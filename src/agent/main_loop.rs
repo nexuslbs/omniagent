@@ -275,6 +275,8 @@ async fn resolve_self_project() -> Option<String> {
     // In a container $HOSTNAME is the container ID.
     let cid = std::env::var("HOSTNAME").ok()?;
     let out = tokio::process::Command::new("docker")
+        .env_clear()
+        .env("PATH", crate::process_env::MINIMAL_PATH)
         .args(build_self_inspect_cmd(&cid))
         .output()
         .await
@@ -300,13 +302,12 @@ async fn resolve_target_project(
     env_file: Option<&str>,
 ) -> Option<String> {
     let out = tokio::process::Command::new("docker")
-        // Ambient COMPOSE_* vars must not leak into the probe: the agent
-        // process (and its plugins) can carry the production project name
-        // (e.g. COMPOSE_PROJECT_NAME=omni-stack) which docker compose would
-        // prefer over the env_file - mirroring the compose-tool fix.
-        .env_remove("COMPOSE_PROJECT_NAME")
-        .env_remove("COMPOSE_PROFILES")
-        .env_remove("COMPOSE_FILE")
+        // Platform-level env isolation (2026-09-01): the probe inherits NO
+        // ambient env (the agent process carries /opt/omni/.env vars, e.g.
+        // COMPOSE_PROJECT_NAME=omni-stack, which docker compose would prefer
+        // over the env_file). Empty env + explicit minimal PATH only.
+        .env_clear()
+        .env("PATH", crate::process_env::MINIMAL_PATH)
         .args(build_target_config_cmd(
             project_dir,
             compose_files,
@@ -330,6 +331,8 @@ async fn resolve_target_project(
         project_dir
     );
     let out = tokio::process::Command::new("docker")
+        .env_clear()
+        .env("PATH", crate::process_env::MINIMAL_PATH)
         .args(vec![
             "ps".to_string(),
             "-a".to_string(),

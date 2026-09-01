@@ -228,6 +228,14 @@ impl ExternalPlatformClient {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit());
+        // Platform-level env isolation (2026-09-01): the child must NEVER
+        // inherit the agent's ambient environment (which includes the
+        // /opt/omni/.env vars loaded by the server, e.g. COMPOSE_PROJECT_NAME
+        // for the production stack). Spawn with an EMPTY environment; only the
+        // explicitly configured env below, plus an explicit minimal PATH for
+        // the child's own spawns, are passed.
+        cmd.env_clear();
+        cmd.env("PATH", crate::process_env::MINIMAL_PATH);
 
         // Run the subprocess from the plugin directory so relative entrypoint
         // args (e.g. "platform.py", "./target/release/...") resolve correctly.

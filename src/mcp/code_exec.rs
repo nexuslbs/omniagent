@@ -98,6 +98,8 @@ pub fn code_exec_tool() -> McpTool {
 /// label filter (project name varies: omnidev / omnideploy / omni).
 async fn find_toolbox_container() -> Result<String, String> {
     let out = tokio::process::Command::new("docker")
+        .env_clear()
+        .env("PATH", crate::process_env::MINIMAL_PATH)
         .args([
             "ps",
             "--filter",
@@ -137,6 +139,11 @@ fn build_run_command(
     timeout_secs: u64,
 ) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("docker");
+    // Platform-level env isolation (2026-09-01): the docker CLI child must not
+    // inherit the agent's ambient environment. Empty env + explicit minimal
+    // PATH only (the docker CLI may need PATH to locate the compose plugin).
+    cmd.env_clear();
+    cmd.env("PATH", crate::process_env::MINIMAL_PATH);
     cmd.arg("exec").arg("-i").arg(toolbox);
     // busybox `timeout` = hard container-side kill (SIGTERM preempts busy
     // loops, so even a JS `while(true){}` that starves its event loop - and

@@ -508,6 +508,11 @@ impl StdioMcpClient {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit());
+        // Platform-level env isolation (2026-09-01): never inherit the agent's
+        // ambient environment. Empty env, then only the explicitly configured
+        // env below plus an explicit minimal PATH for the child's own spawns.
+        command.env_clear();
+        command.env("PATH", crate::process_env::MINIMAL_PATH);
 
         if let Some(dir) = &self.config.current_dir {
             command.current_dir(dir);
