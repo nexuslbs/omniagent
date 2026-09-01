@@ -150,33 +150,14 @@ impl Agent {
                     // ── DB RECOVERY PHASE (flag) ──────────────────────────
                     // The agent loop collapsed on a DB error (database
                     // unreachable): enter a separate recovery phase instead
-                    // of running the agent loop. Stop every channel handler
-                    // (no agent-loop DB polling during recovery), poll the DB
-                    // until it is online again with bounded retry and backoff
-                    // (no crash-looping), reuse the STARTUP recovery logic
-                    // (skip_all_pending_threads) to mark all pending/
-                    // processing threads as skipped, then resume the normal
-                    // agentic loop below.
-                    let mut tokens = cancel_tokens.lock().await;
-                    let n = tokens.len();
-                    for t in tokens.values() {
-                        t.cancel();
-                    }
-                    tokens.clear();
-                    drop(tokens);
-                    info!(
-                        "DB recovery: cancelled {} channel handler(s), agent loop paused",
-                        n
-                    );
-                    if !crate::agent::recovery::run_recovery_phase(
-                        &agent_ctx.pool,
-                        &data_dir,
-                    )
-                    .await
-                    {
-                        error!(
-                            "DB recovery failed after bounded retries; exiting so the supervisor restarts with startup recovery"
-                        );
+                    // of running the agent loop. run_db_recovery stops every
+                    // channel handler (no agent-loop DB polling during
+                    // recovery), polls the DB until it is online again with
+                    // bounded retry and backoff (no crash-looping), reuses
+                    // the STARTUP recovery logic (skip_all_pending_threads)
+                    // to mark all pending/processing threads as skipped, and
+                    // then the normal agentic loop resumes below.
+                    if !run_db_recovery(&agent_ctx, &data_dir, &cancel_tokens).await {
                         std::process::exit(1);
                     }
                     continue;
@@ -250,6 +231,37 @@ impl Agent {
             sleep(Duration::from_secs(5)).await;
         }
     }
+}
+
+/// Cancel all channel handlers and run the DB-recovery phase. Returns `true`
+/// when recovery completed and the supervisor loop may resume; `false` when
+/// the bounded retry was exhausted (the caller exits the process so the
+/// supervisor restarts it with startup recovery).
+async fn run_db_recovery(
+    agent_ctx: &AgentContext,
+    data_dir: &str,
+    cancel_tokens: &Arc<Mutex<HashMap<String, CancellationToken>>>,
+) -> bool {
+    // Stop every channel handler: the agent loop must not run while the
+    // recovery phase polls the DB.
+    let mut tokens = cancel_tokens.lock().await;
+    let n = tokens.len();
+    for t in tokens.values() {
+        t.cancel();
+    }
+    tokens.clear();
+    drop(tokens);
+    info!(
+        "DB recovery: cancelled {} channel handler(s), agent loop paused",
+        n
+    );
+    if !crate::agent::recovery::run_recovery_phase(&agent_ctx.pool, data_dir).await {
+        error!(
+            "DB recovery failed after bounded retries; exiting so the supervisor restarts with startup recovery"
+        );
+        return false;
+    }
+    true
 }
 
 /// Cancel every in-flight task for all threads of a channel.
