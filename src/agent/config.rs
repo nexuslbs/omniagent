@@ -395,6 +395,7 @@ impl AgentConfig {
                 "prompt_compact_messages_tool",
                 "prompt_compact-messages",
             ),
+            redaction_tool: get("redaction_tool", ""),
             sub_prompt_max_chars: get("sub_prompt_max_chars", "4000").parse().unwrap_or(4000),
             sub_prompt_iteration_percent: get("sub_prompt_iteration_percent", "50")
                 .parse()
@@ -480,6 +481,7 @@ mod tests {
             kanban_dispatcher_interval_secs: 15,
             prompt_tool_name: "prompt_generate".to_string(),
             compact_messages_tool_name: "prompt_compact-messages".to_string(),
+            redaction_tool: String::new(),
             sub_prompt_max_chars: 4000,
             sub_prompt_iteration_percent: 50,
             token_budget_hard: 200000,
@@ -556,6 +558,7 @@ mod tests {
             kanban_dispatcher_interval_secs: 0,
             prompt_tool_name: String::new(),
             compact_messages_tool_name: String::new(),
+            redaction_tool: String::new(),
             sub_prompt_max_chars: 0,
             sub_prompt_iteration_percent: 0,
             token_budget_hard: 0,
