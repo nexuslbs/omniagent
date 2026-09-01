@@ -300,6 +300,13 @@ async fn resolve_target_project(
     env_file: Option<&str>,
 ) -> Option<String> {
     let out = tokio::process::Command::new("docker")
+        // Ambient COMPOSE_* vars must not leak into the probe: the agent
+        // process (and its plugins) can carry the production project name
+        // (e.g. COMPOSE_PROJECT_NAME=omni-stack) which docker compose would
+        // prefer over the env_file - mirroring the compose-tool fix.
+        .env_remove("COMPOSE_PROJECT_NAME")
+        .env_remove("COMPOSE_PROFILES")
+        .env_remove("COMPOSE_FILE")
         .args(build_target_config_cmd(
             project_dir,
             compose_files,
