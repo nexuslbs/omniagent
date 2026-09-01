@@ -22,6 +22,7 @@ pub mod helpers;
 pub mod kanban_updater;
 pub(crate) mod main_loop;
 pub mod plugin_manager;
+pub mod recovery;
 pub(crate) mod prompt_sections;
 pub(crate) mod response_handler;
 pub mod summary_trigger;
@@ -57,6 +58,7 @@ pub struct Agent {
     pub llm: Arc<LLMClient>,
     pub ctx: AppContext,
     pub plugin_manager: Arc<dyn PluginManager>,
+    pub data_dir: String,
 }
 
 impl Agent {
@@ -69,6 +71,7 @@ impl Agent {
         config: Arc<RwLock<AgentConfig>>,
         ctx: AppContext,
         plugin_manager: Arc<dyn PluginManager>,
+        data_dir: String,
     ) -> Self {
         let env_cfg = crate::llm::LLMConfig::from_env();
         // Read config fields inside a scope so the borrow is dropped before
@@ -112,6 +115,7 @@ impl Agent {
             llm,
             ctx,
             plugin_manager,
+            data_dir,
         }
     }
 
@@ -134,14 +138,21 @@ impl Agent {
             ctx: self.ctx,
             plugin_manager: self.plugin_manager,
         };
+        // The recovery phase needs the pool and the data dir (for the startup
+        // skip logic) after the agent loop collapsed on a DB error.
+        let pool = agent_ctx.pool.clone();
+        let data_dir = self.data_dir;
 
         loop {
+            // Run the normal agent loop. It breaks out of the inner loop when
+            // it collapses on a DB error (the database became unreachable);
+            // the DB recovery phase below then runs instead of the loop.
+            loop {
             let channels = match queries::find_all_channels(&agent_ctx.pool).await {
                 Ok(ch) => ch,
                 Err(e) => {
-                    error!("Failed to list channels: {:?}", e);
-                    sleep(Duration::from_secs(5)).await;
-                    continue;
+                    error!("Failed to list channels: {:?}; entering DB recovery", e);
+                    break;
                 }
             };
 
@@ -210,6 +221,33 @@ impl Agent {
 
             drop(tokens);
             sleep(Duration::from_secs(5)).await;
+        }
+        // ── DB RECOVERY PHASE (flag) ──────────────────────────────────────
+        // The agent loop collapsed on a DB error (database unreachable):
+        // enter a separate recovery phase instead of running the agent loop.
+        // Stop every channel handler (no agent-loop DB polling during
+        // recovery), poll the DB until it is online again with bounded retry
+        // and backoff (no crash-looping), reuse the STARTUP recovery logic
+        // (skip_all_pending_threads) to mark all pending/processing threads
+        // as skipped, then resume the normal agentic loop below.
+        {
+            let mut tokens = cancel_tokens.lock().await;
+            let n = tokens.len();
+            for t in tokens.values() {
+                t.cancel();
+            }
+            tokens.clear();
+            info!(
+                "DB recovery: cancelled {} channel handler(s), agent loop paused",
+                n
+            );
+        }
+        if !crate::agent::recovery::run_recovery_phase(&pool, &data_dir).await {
+            error!(
+                "DB recovery failed after bounded retries; exiting so the supervisor restarts with startup recovery"
+            );
+            std::process::exit(1);
+        }
         }
     }
 }
@@ -281,6 +319,17 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
     let active_thread = std::sync::Arc::new(std::sync::Mutex::new(None::<i64>));
 
     loop {
+        // DB recovery phase: the agent loop must not run while the DB is
+        // down. The supervisor cancels every channel handler on entry to
+        // recovery; this check covers the window before the cancellation
+        // lands.
+        if crate::agent::recovery::is_recovering() {
+            info!(
+                "Channel {} handler exiting: DB recovery phase active",
+                channel_id
+            );
+            return;
+        }
         // Use tokio::select! so cancellation is prompt rather than
         // waiting for the next iteration boundary.
         tokio::select! {

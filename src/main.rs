@@ -275,6 +275,7 @@ async fn run_server() -> AppResult<()> {
         shared_config_for_agent,
         ctx.clone(),
         plugin_manager.clone(),
+        data_dir.clone(),
     );
 
     // Spawn background vectorization workers (messages + wiki) if enabled.
