@@ -47,7 +47,7 @@ fn backoff_delay(attempt: u32) -> Duration {
 
 /// Check whether the database is reachable with a `SELECT 1`.
 async fn db_is_online(pool: &PgPool) -> bool {
-    sqlx::query_scalar::<_, i64>("SELECT 1")
+    sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(pool)
         .await
         .map(|v| v == 1)
@@ -130,17 +130,20 @@ mod tests {
 
     /// Serializes tests that mutate the `OMNIAGENT_DB_RECOVERY_MAX_RETRIES`
     /// env var and/or the global `DB_RECOVERY` flag so parallel tokio tests
-    /// cannot interleave.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// cannot interleave. tokio mutex so the guard can be held across await
+    /// without tripping clippy's await_holding_lock.
+    static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
     #[test]
     fn flag_starts_clear() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.blocking_lock();
         assert!(!is_recovering(), "recovery flag must start clear");
     }
 
     #[test]
     fn backoff_is_bounded_exponential() {
+        let _guard = ENV_LOCK.blocking_lock();
         assert_eq!(backoff_delay(1), Duration::from_secs(1));
         assert_eq!(backoff_delay(2), Duration::from_secs(2));
         assert_eq!(backoff_delay(3), Duration::from_secs(4));
@@ -156,7 +159,7 @@ mod tests {
 
     #[test]
     fn max_retries_parses_env_with_default_fallback() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.blocking_lock();
         let previous = std::env::var("OMNIAGENT_DB_RECOVERY_MAX_RETRIES").ok();
         let restore = || match &previous {
             Some(v) => std::env::set_var("OMNIAGENT_DB_RECOVERY_MAX_RETRIES", v),
@@ -170,7 +173,11 @@ mod tests {
         assert_eq!(recovery_max_retries(), DEFAULT_MAX_RETRIES, "0 falls back");
 
         std::env::set_var("OMNIAGENT_DB_RECOVERY_MAX_RETRIES", "abc");
-        assert_eq!(recovery_max_retries(), DEFAULT_MAX_RETRIES, "garbage falls back");
+        assert_eq!(
+            recovery_max_retries(),
+            DEFAULT_MAX_RETRIES,
+            "garbage falls back"
+        );
 
         std::env::set_var("OMNIAGENT_DB_RECOVERY_MAX_RETRIES", "5");
         assert_eq!(recovery_max_retries(), 5, "valid value wins");
@@ -183,7 +190,7 @@ mod tests {
         // DB-backed test against the dev database (skipped when DATABASE_URL
         // is absent, exactly like the other DB tests in this crate). Only
         // touches the row it creates itself; never production.
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         let Ok(db_url) = std::env::var("DATABASE_URL") else {
             return;
         };
@@ -226,14 +233,13 @@ mod tests {
         // Point the pool at a port that refuses connections: recovery must
         // retry a bounded number of times (env override, no real backoff
         // accumulation) and then give up instead of crash-looping.
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         let previous = std::env::var("OMNIAGENT_DB_RECOVERY_MAX_RETRIES").ok();
         std::env::set_var("OMNIAGENT_DB_RECOVERY_MAX_RETRIES", "2");
         let dead_url = "postgres://nobody:nothing@127.0.0.1:1/omniagent";
         let pool = match sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(Duration::from_secs(2))
-            .connect_timeout(Duration::from_secs(2))
             .connect(dead_url)
             .await
         {
