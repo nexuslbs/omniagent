@@ -445,7 +445,11 @@ pub async fn manual_review_decision(
 
     let thread_status = new_thread_id.map(|_| "scheduled".to_string());
     sql_forge!(
-        "UPDATE kanban_tasks SET status = :p1, thread_status = NULLIF(:thread_status, '')::text,
+        "UPDATE kanban_tasks SET status = :p1,
+                position = CASE WHEN status <> :p1 THEN
+                    (SELECT COALESCE(MAX(position), -1) + 1 FROM kanban_tasks WHERE status = :p1)
+                    ELSE position END,
+                thread_status = NULLIF(:thread_status, '')::text,
                 workflow_state = CAST(:p3 AS jsonb)
          WHERE id = :task_id",
         (
@@ -1407,7 +1411,11 @@ pub(crate) async fn engine_transition(
     };
     sql_forge!(
         "UPDATE kanban_tasks
-         SET status = :status, thread_status = NULLIF(:tstatus, '')::text,
+         SET status = :status,
+             position = CASE WHEN status <> :status THEN
+                 (SELECT COALESCE(MAX(position), -1) + 1 FROM kanban_tasks WHERE status = :status)
+                 ELSE position END,
+             thread_status = NULLIF(:tstatus, '')::text,
              workflow_state = CAST(:state AS jsonb)
          WHERE id = :task_id",
         (

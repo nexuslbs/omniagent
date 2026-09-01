@@ -1004,12 +1004,33 @@ async fn change_status_handler(
 
     let old_status = task.status.as_deref().unwrap_or("backlog");
     let old_position = task.position.unwrap_or(0);
+    let status_changed = old_status != body.status;
 
     // 2. Determine target position: an explicit position wins; without one
-    //    the moved task becomes the TOPMOST card of the destination column.
-    let target_position = body.position.unwrap_or(0);
+    //    the moved task is appended at the BOTTOM of the destination column
+    //    (after all existing tasks of that status).
+    let target_position = match body.position {
+        Some(pos) => pos,
+        None if !status_changed => {
+            // Same status without an explicit position: nothing to do.
+            return ok_json(serde_json::json!({ "success": true }));
+        }
+        None => match next_position(&state.pool, &body.status).await {
+            Ok(pos) => pos,
+            Err(e) => {
+                error!(
+                    "[kanban/tasks/{}/status] next_position query failed: {:?}",
+                    id, e
+                );
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to compute task position",
+                );
+            }
+        },
+    };
 
-    if old_status == body.status && old_position == target_position {
+    if !status_changed && old_position == target_position {
         // No-op: already there
         return ok_json(serde_json::json!({ "success": true }));
     }
@@ -1498,6 +1519,31 @@ async fn update_task_handler(
         return err_json(StatusCode::BAD_REQUEST, "No fields to update");
     }
 
+    // 4b. Status change: append the task at the BOTTOM of the new status
+    //     column (after all existing tasks of that status).
+    let status_changed = body
+        .status
+        .as_deref()
+        .map(|s| Some(s) != before.status.as_deref())
+        .unwrap_or(false);
+    let append_pos: Option<i32> = if status_changed {
+        match next_position(&state.pool, body.status.as_deref().unwrap_or("")).await {
+            Ok(pos) => Some(pos),
+            Err(e) => {
+                error!(
+                    "[kanban/tasks/{}] next_position query failed: {:?}",
+                    id, e
+                );
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to compute task position",
+                );
+            }
+        }
+    } else {
+        None
+    };
+
     // 5. Execute the update: use static SQL with sentinel/COALESCE pattern
     //    so that fields not provided keep their existing values.
     if let Err(e) = sql_forge!(
@@ -1515,7 +1561,11 @@ async fn update_task_handler(
             plan = :plan,
             workflow_id = CASE WHEN :workflow_id = '' THEN workflow_id ELSE NULLIF(:workflow_id, '')::text END,
             board = CASE WHEN :board = '' THEN board ELSE NULLIF(:board, '')::text END,
-            position = CASE WHEN :board != '' AND :board != board THEN 0 ELSE position END,
+            position = CASE
+                WHEN :append_pos = -999999 THEN
+                    CASE WHEN :board != '' AND :board != board THEN 0 ELSE position END
+                ELSE :append_pos
+            END,
             updated_at = NOW()
         WHERE id = :id
         "#,
@@ -1534,6 +1584,7 @@ async fn update_task_handler(
           :plan = body.plan.or(before.plan).unwrap_or(false),
           :workflow_id = body.workflow.as_deref().unwrap_or(""),
           :board = body.board.as_deref().unwrap_or(""),
+          :append_pos = append_pos.unwrap_or(-999_999),
     )
     )
     .execute(&state.pool)

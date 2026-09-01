@@ -561,7 +561,7 @@ pub(crate) async fn transition_with_comment(
     let from = from.unwrap_or_else(|| to.to_string());
 
     sql_forge!(
-        "UPDATE kanban_tasks SET status = :to, thread_status = NULLIF(:thread_status, '')::text WHERE id = :task_id",
+        "UPDATE kanban_tasks SET status = :to, position = CASE WHEN status <> :to THEN (SELECT COALESCE(MAX(position), -1) + 1 FROM kanban_tasks WHERE status = :to) ELSE position END, thread_status = NULLIF(:thread_status, '')::text WHERE id = :task_id",
         (
             :to = to,
             :thread_status = thread_status.unwrap_or(""),
