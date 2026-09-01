@@ -1530,10 +1530,7 @@ async fn update_task_handler(
         match next_position(&state.pool, body.status.as_deref().unwrap_or("")).await {
             Ok(pos) => Some(pos),
             Err(e) => {
-                error!(
-                    "[kanban/tasks/{}] next_position query failed: {:?}",
-                    id, e
-                );
+                error!("[kanban/tasks/{}] next_position query failed: {:?}", id, e);
                 return err_json(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Failed to compute task position",
