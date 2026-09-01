@@ -755,6 +755,7 @@ fn writable_setting_keys() -> std::collections::HashSet<&'static str> {
         "max_unfinished_subtask_retries",
         "prompt_generate_tool",
         "prompt_compact_messages_tool",
+        "redaction_tool",
         "git_sync_tool",
         "delete_after_days",
         "kanban_dispatcher_interval",
@@ -849,6 +850,7 @@ pub async fn get_settings_handler(State(state): State<Arc<AppState>>) -> Json<Se
     for tool_key in [
         "prompt_generate_tool",
         "prompt_compact_messages_tool",
+        "redaction_tool",
         "git_sync_tool",
     ] {
         if let Some((_, _, ref mut meta)) = defs
