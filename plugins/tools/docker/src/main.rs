@@ -135,7 +135,6 @@ fn resolve_project_file(
     Ok(resolved.display().to_string())
 }
 
-
 /// Read `COMPOSE_PROJECT_NAME` from an env-style file (the same variable docker
 /// compose reads for the project name). Returns the value if present.
 /// Understands `KEY=value` lines, an optional `export ` prefix, surrounding
@@ -1213,16 +1212,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let env = dir.join("omnidev.env");
         std::fs::write(&env, "COMPOSE_PROJECT_NAME=omnidev\n").unwrap();
-        let cmd = build_compose_command(
-            "ps",
-            "/tmp/proj",
-            &[],
-            env.to_str().unwrap(),
-            "",
-            "",
-            "",
-        )
-        .unwrap();
+        let cmd = build_compose_command("ps", "/tmp/proj", &[], env.to_str().unwrap(), "", "", "")
+            .unwrap();
         let repr = format!("{:?}", cmd);
         assert!(
             repr.contains("--project-name"),
