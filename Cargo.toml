@@ -23,7 +23,7 @@ resolver = "2"
 
 [package]
 name = "omniagent"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "OmniAgent: Next-generation agent system with Rust, Postgres + pgvector, Telegram support"
 

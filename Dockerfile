@@ -123,7 +123,8 @@ RUN apt-get update -qq && \
       npm && \
     rm -rf /var/lib/apt/lists/* && \
     npm config set legacy-peer-deps true && \
-    git config --global --add safe.directory '*'
+    git config --global --add safe.directory '*' && \
+    git config --system --add safe.directory '*'
 
 # Copy Rust toolchain from builder for on-demand compilation of
 # remote Rust plugins. Copy the toolchain (compiler + stdlib) from
