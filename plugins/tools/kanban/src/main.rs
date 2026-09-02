@@ -76,7 +76,11 @@ async fn handle_create(
         "priority": args["priority"].as_i64().unwrap_or(0),
         "assignee": args["assignee"].as_str().unwrap_or(""),
         "template": args["template"].as_str().unwrap_or(""),
-        "workflow_id": args["workflow_id"].as_str().unwrap_or(""),
+        // Server-side field is `workflow`; accept `workflow_id` as legacy alias.
+        "workflow": args["workflow"]
+            .as_str()
+            .or_else(|| args["workflow_id"].as_str())
+            .unwrap_or(""),
     });
     let channel_id = args["channel_id"]
         .as_str()
@@ -175,11 +179,16 @@ async fn handle_update(_pool: &PgPool, args: &Value) -> Result<(String, bool)> {
         "channel_id",
         "profile",
         "archived",
-        "workflow_id",
     ] {
         if let Some(v) = args.get(field) {
             req[field] = v.clone();
         }
+    }
+    // Server-side field is `workflow`; accept `workflow_id` as legacy alias.
+    // Explicit empty string clears the workflow (board default applies).
+    let wf = args.get("workflow").or_else(|| args.get("workflow_id"));
+    if let Some(wf) = wf {
+        req["workflow"] = wf.clone();
     }
     let _resp = api_call(
         reqwest::Method::PATCH,
@@ -459,9 +468,13 @@ async fn main() -> Result<()> {
                             "type": "string",
                             "description": "Optional template file name (without .md) to use for execution context"
                         },
+                        "workflow": {
+                            "type": "string",
+                            "description": "Optional workflow key (e.g. exec-test-review) this task belongs to; empty/null means the board default"
+                        },
                         "workflow_id": {
                             "type": "string",
-                            "description": "Optional workflow key (e.g. exec-test-review) this task belongs to"
+                            "description": "Deprecated alias for workflow (accepted for backward compatibility)"
                         }
                     },
                     "required": ["title"]
@@ -526,9 +539,13 @@ async fn main() -> Result<()> {
                             "type": "boolean",
                             "description": "Set to true to archive, false to unarchive"
                         },
+                        "workflow": {
+                            "type": "string",
+                            "description": "Set the task workflow key (e.g. exec-test-review); empty string or null clears it so the board default applies"
+                        },
                         "workflow_id": {
                             "type": "string",
-                            "description": "Set the task workflow key (e.g. exec-test-review)"
+                            "description": "Deprecated alias for workflow (accepted for backward compatibility)"
                         }
                     },
                     "required": ["id"]
