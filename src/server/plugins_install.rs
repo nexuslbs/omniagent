@@ -948,6 +948,16 @@ async fn run_capture(
     cwd: Option<&str>,
 ) -> Result<(String, String), String> {
     let mut cmd = tokio::process::Command::new(program);
+    // Platform env isolation: never pass the ambient environment to children.
+    // PATH and HOME are passed explicitly (npm/pip/python3 need them for
+    // caches and venvs); declared per-call, never inherited.
+    cmd.env_clear();
+    cmd.env("PATH", crate::process_env::MINIMAL_PATH);
+    if let Ok(h) = std::env::var("HOME") {
+        if !h.is_empty() {
+            cmd.env("HOME", h);
+        }
+    }
     cmd.args(args);
     if let Some(c) = cwd {
         cmd.current_dir(c);

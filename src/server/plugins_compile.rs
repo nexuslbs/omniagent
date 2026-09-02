@@ -175,6 +175,16 @@ pub(crate) fn read_cargo_package_name(cargo_toml_path: &str) -> Option<String> {
     None
 }
 
+/// PATH for the plugin-compile cargo child: MINIMAL_PATH extended with
+/// CARGO_HOME/bin (where the cargo/rustc shims live). The child never
+/// inherits the ambient environment; every var it gets is declared here.
+fn cargo_child_path() -> String {
+    match std::env::var("CARGO_HOME") {
+        Ok(ch) if !ch.is_empty() => format!("{}/bin:{}", ch, crate::process_env::MINIMAL_PATH),
+        _ => crate::process_env::MINIMAL_PATH.to_string(),
+    }
+}
+
 /// Compile a Rust crate at the given path. Returns true if compilation succeeded.
 ///
 /// When `force_rebuild` is true, removes the existing binary before building
@@ -233,9 +243,26 @@ pub(crate) async fn compile_rust_crate(
 
     let label = format!("{} (pkg: {})", name, pkg_name);
     for attempt in 1..=max_attempts {
-        let output = tokio::process::Command::new("cargo")
-            .args(["build", "--release", "--manifest-path", &cargo_path])
-            .env_remove("CARGO_TARGET_DIR")
+        let mut cmd = tokio::process::Command::new("cargo");
+        // Platform env isolation: the cargo child must not inherit the agent's
+        // ambient environment. PATH is extended with CARGO_HOME/bin (where the
+        // cargo/rustc shims live); CARGO_HOME/RUSTUP_HOME are passed explicitly
+        // because the rustup shims need them. Declared per-call, never inherited.
+        cmd.env_clear();
+        cmd.env("PATH", cargo_child_path());
+        if let Ok(ch) = std::env::var("CARGO_HOME") {
+            if !ch.is_empty() {
+                cmd.env("CARGO_HOME", ch);
+            }
+        }
+        if let Ok(rh) = std::env::var("RUSTUP_HOME") {
+            if !rh.is_empty() {
+                cmd.env("RUSTUP_HOME", rh);
+            }
+        }
+        cmd.env_remove("CARGO_TARGET_DIR");
+        cmd.args(["build", "--release", "--manifest-path", &cargo_path]);
+        let output = cmd
             .output()
             .await
             .map_err(|e| format!("Failed to run cargo build for '{}': {}", name, e))?;

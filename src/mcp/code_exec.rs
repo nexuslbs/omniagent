@@ -302,6 +302,8 @@ impl KillOnDrop {
         #[cfg(unix)]
         if let Some(pid) = self.child_pid() {
             let _ = std::process::Command::new("kill")
+                .env_clear()
+                .env("PATH", crate::process_env::MINIMAL_PATH)
                 .args(["-KILL", &format!("-{pid}")])
                 .status();
         }
