@@ -46,7 +46,7 @@ fn backoff_delay(attempt: u32) -> Duration {
 }
 
 /// Check whether the database is reachable with a `SELECT 1`.
-async fn db_is_online(pool: &PgPool) -> bool {
+pub(crate) async fn db_is_online(pool: &PgPool) -> bool {
     sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(pool)
         .await
@@ -194,6 +194,7 @@ mod tests {
         let Ok(db_url) = std::env::var("DATABASE_URL") else {
             return;
         };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
         let pool = sqlx::PgPool::connect(&db_url)
             .await
             .expect("connect dev db");

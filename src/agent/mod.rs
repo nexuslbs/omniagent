@@ -143,6 +143,17 @@ impl Agent {
         let data_dir = self.data_dir;
 
         loop {
+            // DB-recovery gate: the channel list comes from the YAML
+            // config, so a DB outage would otherwise go unnoticed here.
+            // Probe the DB directly; when it is unreachable, enter the
+            // recovery phase instead of running the agent loop.
+            if !crate::agent::recovery::db_is_online(&agent_ctx.pool).await {
+                error!("DB unreachable; entering DB recovery");
+                if !run_db_recovery(&agent_ctx, &data_dir, &cancel_tokens).await {
+                    std::process::exit(1);
+                }
+                continue;
+            }
             let channels = match queries::find_all_channels(&agent_ctx.pool).await {
                 Ok(ch) => ch,
                 Err(e) => {
@@ -413,6 +424,10 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                     Ok(threads) => threads,
                     Err(e) => {
                         error!("Error fetching pending threads for channel {}: {:?}", channel_id, e);
+                        // DB down: pause briefly instead of hot-looping; the
+                        // supervisor's recovery gate sets the flag and
+                        // cancels this handler.
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                         return;
                     }
                 };

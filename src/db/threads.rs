@@ -2504,6 +2504,7 @@ mod tests {
         let Ok(db_url) = std::env::var("DATABASE_URL") else {
             return;
         };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
         let pool = sqlx::PgPool::connect(&db_url)
             .await
             .expect("connect dev db");
@@ -2630,6 +2631,7 @@ mod tests {
         let Ok(db_url) = std::env::var("DATABASE_URL") else {
             return;
         };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
         let pool = sqlx::PgPool::connect(&db_url)
             .await
             .expect("connect dev db");
@@ -2876,6 +2878,7 @@ mod merged_status_tests {
         let Ok(db_url) = std::env::var("DATABASE_URL") else {
             return;
         };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
         let pool = sqlx::PgPool::connect(&db_url)
             .await
             .expect("connect dev db");

@@ -1,3 +1,7 @@
+#[cfg(test)]
+pub(crate) static DB_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 pub mod channels;
 pub mod kanban;
 pub mod memory;
