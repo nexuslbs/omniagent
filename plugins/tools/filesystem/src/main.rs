@@ -774,8 +774,8 @@ async fn main() -> Result<()> {
                     SEARCHES ARE UNRESTRICTED: any base path can be searched (defaults to the workspace root; \
                     only WRITES are confined to the workspace dir). \
                     Returns 'path:line: content' matches, capped at max_results (default 200). \
-                    Prefer this over filesystem_search (names only) and NEVER use code-exec for grep: \
-                    discovery belongs in filesystem_search/filesystem_grep, code-exec is for computation."
+                    Prefer this over filesystem_search (names only): discovery belongs in
+                    filesystem_search / filesystem_grep."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",

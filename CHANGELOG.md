@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed - builtin `code_exec` MCP tool
+
+- `builtin_code-exec` / `code_exec` removed from the MCP registry
+  (`src/mcp/code_exec.rs` deleted, registration dropped). The toolbox
+  sandbox runner is no longer a computation tool for the agent.
+- Replacement: run model-written programs with the `docker_compose` tool on
+  a TEMPORARY compose project under `/opt/workspace/tmp/` (e.g.
+  `code-runner`: pinned project name, python3 + node runtimes, `up -d` /
+  `exec` / `down`, never `--remove-orphans`). Filesystem tools are the
+  file-access path; ssh_* tools are for REMOTE development only.
 ### Added - Tool-name canonicalization (d2648f1, 1afabef)
 
 - Tools expose a single canonical full name; the `name`/`full_name` duality is

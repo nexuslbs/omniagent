@@ -242,9 +242,8 @@ pub async fn process_thread(
     // function-calling schema exposes: the profile's allowed tools, filtered
     // to what is actually registered, using FULL names. Previously this used
     // the unfiltered registry (short `t.name`), so the prompt advertised
-    // tools the model could not call (e.g. code_exec) - and names that did
-    // not match the schema (builtin_code-exec). Always full names, except
-    // plugin-internal references.
+    // tools the model could not call and names that did not match the
+    // schema. Always full names, except plugin-internal references.
     let tool_names: Vec<String> = cfg
         .plugin_manager
         .snapshot_registry()
