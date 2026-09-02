@@ -130,9 +130,29 @@ fn resolve_read_path(path: &str, workspace_dir: &str) -> String {
     }
 }
 
-/// Wrap a handler so any Err(e) becomes Ok((error_msg, true)).
-/// This prevents access-denied and file-not-found errors from
-/// triggering the circuit breaker on the MCP client side.
+/// Wrap a SYNC handler so (1) its work runs on tokio's blocking pool - never
+/// inline on an async worker thread - and (2) any Err(e) becomes
+/// Ok((error_msg, true)) so access-denied / file-not-found / invalid-input
+/// errors never trip the MCP circuit breaker on the client side.
+///
+/// CRITICAL (Sep 2026, filesystem tools timing out): the previous version
+/// called `h(args)` directly inside the async block, i.e. on a tokio WORKER
+/// thread. All filesystem handlers are synchronous std::fs work - whole-file
+/// reads (`fs::read_to_string` of arbitrarily large files before slicing),
+/// `fs::read_dir` listings, `glob::glob` tree walks, and the recursive grep
+/// walk that reads every file in a tree. A blocking call that takes a long
+/// time (large file, deep tree, slow/hung mount) holds the worker thread
+/// hostage: it CANNOT be interrupted by dropping the handler future (client
+/// timeout / notifications/cancelled), and once enough concurrent slow calls
+/// saturate every worker the WHOLE plugin wedges - every filesystem MCP call
+/// then times out (the reported 2026-09-01 symptom; same failure class as the
+/// actions-plugin incident documented in mcp-server-util's `sync_handler`).
+///
+/// Running the sync body on the blocking pool guarantees the async runtime
+/// stays responsive: a slow call ties up at most one blocking-pool thread and
+/// the handler future stays droppable (spawn_blocking tasks are detached on
+/// drop), so concurrent filesystem calls proceed in parallel and client
+/// cancellation resolves immediately.
 fn soft_error<F>(handler: F) -> ToolHandler
 where
     F: Fn(Value) -> Result<(String, bool)> + Clone + Send + Sync + 'static,
@@ -140,9 +160,10 @@ where
     Box::new(move |args: Value, _meta: Option<McpMeta>| {
         let h = handler.clone();
         Box::pin(async move {
-            match h(args) {
-                Ok((text, is_error)) => Ok((text, is_error)),
-                Err(e) => Ok((format!("{}", e), true)),
+            match tokio::task::spawn_blocking(move || h(args)).await {
+                Ok(Ok((text, is_error))) => Ok((text, is_error)),
+                Ok(Err(e)) => Ok((format!("{}", e), true)),
+                Err(e) => Ok((format!("sync handler panicked: {e}"), true)),
             }
         })
     })
