@@ -1,5 +1,11 @@
 use std::process::Command;
 
+/// Data dir of the running agent ($OMNI_DIR), falling back to the historical
+/// /opt/omni for production-like environments where the var is unset.
+fn data_dir() -> String {
+    std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/omni".to_string())
+}
+
 fn run(args: &[&str]) -> (String, String, i32) {
     let output = Command::new("docker")
         .args(["exec", "omnideploy-omniagent-1"])
@@ -100,7 +106,7 @@ fn remote_binary_path(name: &str) -> Option<String> {
     };
 
     // Read the package name from Cargo.toml (may differ from the plugin name)
-    let cargo_path = format!("/opt/omni/plugins/tools/.remote/{}/{}", name, subpath);
+    let cargo_path = format!("{}/plugins/tools/.remote/{}/{}", data_dir(), name, subpath);
     let (stdout, _, _) = run(&[
         "sh",
         "-c",
@@ -117,8 +123,11 @@ fn remote_binary_path(name: &str) -> Option<String> {
     };
 
     Some(format!(
-        "/opt/omni/plugins/tools/.remote/{}/{}/target/release/{}",
-        name, subpath, pkg_name
+        "{}/plugins/tools/.remote/{}/{}/target/release/{}",
+        data_dir(),
+        name,
+        subpath,
+        pkg_name
     ))
 }
 
@@ -129,8 +138,11 @@ fn remote_binary_path(name: &str) -> Option<String> {
 fn assert_remote_binary_exists(name: &str, msg: &str) {
     let bin_path = remote_binary_path(name).unwrap_or_else(|| {
         format!(
-            "/opt/omni/plugins/tools/.remote/{}/{}/target/release/{}",
-            name, name, name
+            "{}/plugins/tools/.remote/{}/{}/target/release/{}",
+            data_dir(),
+            name,
+            name,
+            name
         )
     });
     // Direct check (no docker exec) since this test runs inside the container
@@ -399,7 +411,11 @@ fn test_remote_plugin_uninstall() {
     let (stdout, _, _) = run(&[
         "sh",
         "-c",
-        &format!("ls /opt/omni/plugins/tools/.remote/{}/ 2>/dev/null", name),
+        &format!(
+            "ls {}/plugins/tools/.remote/{}/ 2>/dev/null",
+            data_dir(),
+            name
+        ),
     ]);
     assert!(
         stdout.is_empty(),
