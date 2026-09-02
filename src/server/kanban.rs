@@ -1449,7 +1449,30 @@ async fn change_position_handler(
         }
     }
 
-    ok_json(serde_json::json!({ "success": true }))
+    // 5. Dispatch: a cross-column move (drag onto another status column)
+    //    stops the task's old-status threads and starts the mapped role
+    //    thread for the new status, exactly like PATCH /status. The stale
+    //    skip is step-scoped inside dispatch_task_for_status; best-effort,
+    //    the move already succeeded and is never rolled back.
+    let mut dispatched_thread: Option<i64> = None;
+    if old_status != new_status {
+        match dispatch_task_for_status(&state.pool, &state.data_dir, &id, new_status).await {
+            Ok(Some(tid)) => dispatched_thread = Some(tid),
+            Ok(None) => {}
+            Err(e) => {
+                error!(
+                    "[kanban/tasks/{}/position] dispatch after status change failed: {:?}",
+                    id, e
+                );
+            }
+        }
+    }
+
+    ok_json(serde_json::json!({
+        "success": true,
+        "dispatched": dispatched_thread.is_some(),
+        "thread_id": dispatched_thread,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1694,6 +1717,20 @@ async fn update_task_handler(
         .await
         {
             error!("[kanban/tasks/{}] edit history insert failed: {:?}", id, e);
+        }
+    }
+
+    // 7. Dispatch: a PATCH that changed the task's status stops the
+    //    old-status threads and starts the mapped role thread for the new
+    //    status (same shared path as PATCH /status). Best-effort: the
+    //    update already succeeded; a dispatch failure is logged only.
+    if has_status_change {
+        let new_s = body.status.as_deref().unwrap_or("");
+        if let Err(e) = dispatch_task_for_status(&state.pool, &state.data_dir, &id, new_s).await {
+            error!(
+                "[kanban/tasks/{}] dispatch after status change failed: {:?}",
+                id, e
+            );
         }
     }
 
@@ -3041,7 +3078,7 @@ async fn redispatch_handler(
     // 4. Create the role thread for the task's CURRENT status (no stale
     //    skip - the check above guarantees no active thread) and mark
     //    thread_status='scheduled'. Task status is left unchanged.
-    match create_kanban_step_thread(&state.pool, &state.data_dir, &id, &task.status, false).await {
+    match create_kanban_step_thread(&state.pool, &state.data_dir, &id, &task.status).await {
         Ok(Some(tid)) => ok_json(serde_json::json!({
             "redispatch": true,
             "thread_id": tid,

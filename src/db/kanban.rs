@@ -79,6 +79,26 @@ pub async fn update_kanban_task_status(
     }
 
     tx.commit().await?;
+
+    // Stop the task's old-status threads: any pending/processing thread
+    // whose workflow step does not serve the new status is marked skipped
+    // (single choke point) so it can never keep running against a task
+    // that moved away from it. Step-scoped: a thread already serving the
+    // new status (e.g. a just-dispatched step thread) is untouched, and a
+    // no-op update (old == new) never skips the current-status thread.
+    if old_status != new_status {
+        if let Err(e) =
+            crate::db::threads::skip_stale_threads_for_status(pool, task_id, new_status).await
+        {
+            tracing::warn!(
+                "[kanban] failed to skip stale threads after moving task {} to {}: {:?}",
+                task_id,
+                new_status,
+                e
+            );
+        }
+    }
+
     Ok(())
 }
 

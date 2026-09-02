@@ -575,11 +575,27 @@ pub(crate) async fn transition_with_comment(
     sql_forge!(
         "INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
          VALUES (:id, 'workflow', :from, :to, :comment)",
-        (:id = task_id, :from = from, :to = to, :comment = comment)
+        (:id = task_id, :from = from.clone(), :to = to, :comment = comment)
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    // Stop the task's old-status threads when the status actually changed
+    // (workflow-driven transition). The thread that triggered this
+    // transition is already terminal; any other pending/processing thread
+    // tied to a status the task left is skipped (step-scoped, same choke
+    // point as status-change dispatch) so it cannot race the new step.
+    if from != to {
+        if let Err(e) = crate::db::threads::skip_stale_threads_for_status(pool, task_id, to).await {
+            tracing::warn!(
+                "[workflow] failed to skip stale threads after moving task {} to {}: {:?}",
+                task_id,
+                to,
+                e
+            );
+        }
+    }
 
     Ok(())
 }

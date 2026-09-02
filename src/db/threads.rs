@@ -1163,6 +1163,85 @@ pub async fn skip_thread(pool: &PgPool, thread_id: i64) -> AppResult<u64> {
     Ok(result)
 }
 
+/// Stop a kanban task's old-status threads when the task's status changes.
+///
+/// Marks terminal 'skipped' every pending/processing thread of `task_id`
+/// whose workflow step does NOT serve `new_status` (threads tied to a
+/// status the task has LEFT). A thread serves a status when its
+/// `workflow_step` equals that status; legacy kanban threads with a NULL
+/// or empty step are treated as serving `running` (same mapping as the
+/// supervisor pickup in src/agent/mod.rs). Callers invoke this AFTER the
+/// task's status update on every status-change path (UI move, API status
+/// update, workflow-driven transitions) so an old-status thread can never
+/// keep running against a task that moved away from it.
+///
+/// Same marker semantics as the existing skip paths: single choke point
+/// `mark_thread_terminal(..., "skipped")`; no hook is fired (the caller
+/// owns the transition - firing thread_finished here could double-route
+/// the workflow). Returns the number of threads skipped.
+pub(crate) async fn skip_stale_threads_for_status(
+    pool: &PgPool,
+    task_id: &str,
+    new_status: &str,
+) -> AppResult<u64> {
+    #[derive(sqlx::FromRow)]
+    struct ActiveStepRow {
+        id: i64,
+        workflow_step: Option<String>,
+    }
+    let active: Vec<ActiveStepRow> = sql_forge!(
+        ActiveStepRow,
+        r#"SELECT id, workflow_step FROM threads
+           WHERE task_id = :task_id AND status IN ('pending', 'processing')"#,
+        ( :task_id = task_id )
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut skipped: u64 = 0;
+    for t in &active {
+        // Effective step of the thread: NULL/empty legacy threads serve
+        // 'running' (same mapping as the supervisor pickup).
+        let step = t
+            .workflow_step
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("running");
+        if step == new_status {
+            // Thread already serves the task's new status: keep it running.
+            continue;
+        }
+        let n = mark_thread_terminal(pool, t.id, "skipped").await?;
+        if n == 0 {
+            continue;
+        }
+        skipped += 1;
+        // Audit the skip in kanban history (best-effort, like the existing
+        // status-change dispatch skip).
+        let comment = format!(
+            "Thread #{} skipped (task status changed to '{}')",
+            t.id, new_status
+        );
+        let _ = sql_forge!(
+            r#"
+            INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
+            VALUES (:task_id, 'workflow', :to_status, :to_status, :comment)
+            "#,
+            ( :task_id = task_id, :to_status = new_status, :comment = comment.as_str() )
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                "[kanban] history insert for skipped thread #{} failed: {:?}",
+                t.id,
+                e
+            )
+        });
+    }
+    Ok(skipped)
+}
+
 /// Count messages in a thread.
 pub async fn count_thread_messages(pool: &PgPool, thread_id: i64) -> AppResult<i32> {
     let count: Option<i64> = sql_forge!(
@@ -1252,9 +1331,6 @@ fn kanban_thread_content(title: &str, body: Option<&str>) -> String {
 /// status has no role to run (non-workflow `testing`/`review`, a workflow
 /// without that role, or a non-workflow-column status).
 ///
-/// `skip_stale` (true for status-change dispatch): any still-active
-/// pending/processing threads for the task are marked skipped FIRST (through
-/// the `mark_thread_terminal` choke point) so they cannot race the new step.
 /// Task row used by kanban status-change dispatch / redispatch / startup
 /// redispatch. The `board` column participates in the board-gated thread
 /// creation (src/boards.rs).
@@ -1278,7 +1354,6 @@ pub(crate) async fn create_kanban_step_thread(
     data_dir: &str,
     task_id: &str,
     status: &str,
-    skip_stale: bool,
 ) -> AppResult<Option<i64>> {
     // 1. Load the task detail.
     let task = match sql_forge!(
@@ -1345,42 +1420,6 @@ pub(crate) async fn create_kanban_step_thread(
     let role_cfg = role.and_then(|r| workflow.as_ref().and_then(|wf| wf.resolve_role(r)));
     if !kanban_step_actionable(status, workflow_id.as_deref(), role_cfg.is_some()) {
         return Ok(None);
-    }
-
-    // 3. Skip stale active threads (status-change dispatch only).
-    if skip_stale {
-        #[derive(sqlx::FromRow)]
-        struct StaleThreadRow {
-            id: i64,
-        }
-        let stale: Vec<StaleThreadRow> = sql_forge!(
-            StaleThreadRow,
-            r#"SELECT id FROM threads WHERE task_id = :task_id AND status IN ('pending', 'processing')"#,
-            ( :task_id = task_id )
-        )
-        .fetch_all(pool)
-        .await?;
-        for t in &stale {
-            mark_thread_terminal(pool, t.id, "skipped").await?;
-            // Audit the skip in kanban history (best-effort, like the
-            // existing re-schedule paths do).
-            let comment = format!("Thread #{} skipped (status changed to '{}')", t.id, status);
-            let _ = sql_forge!(
-                r#"
-                INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
-                VALUES (:task_id, 'workflow', :initial, :to_status, :comment)
-                "#,
-                ( :task_id = task_id, :initial = &task.status, :to_status = &task.status, :comment = comment.as_str() )
-            )
-            .execute(pool)
-            .await
-            .map_err(|e| {
-                tracing::warn!(
-                    "[kanban dispatch] history insert for skipped thread #{} failed: {:?}",
-                    t.id, e
-                )
-            });
-        }
     }
 
     // 4. Effective channel/profile/plan come from the resolved task defaults
@@ -1761,10 +1800,18 @@ pub async fn ensure_task_board_valid(
     }
 }
 
-/// Dispatch a kanban task for a target status: skip any stale active
-/// threads, create the mapped role thread (running -> executor, testing ->
-/// tester, review -> reviewer) and mark the task `thread_status='scheduled'`.
-/// Does NOT change the task's own status - the caller owns the transition.
+/// Dispatch a kanban task AFTER its status changed (UI move / API status
+/// update): first STOP the task's old-status threads (every pending or
+/// processing thread whose workflow step does not serve the new status is
+/// marked skipped - it must never keep running against a task that moved
+/// away from it), then create the mapped role thread (running -> executor,
+/// testing -> tester, review -> reviewer) and mark the task
+/// `thread_status='scheduled'`. Does NOT change the task's own status -
+/// the caller owns the transition.
+///
+/// The stale-thread skip runs even when the new status has no role to run
+/// (done/blocked/todo/backlog): the old threads are stopped regardless, and
+/// `Ok(None)` is returned when no new thread applies.
 ///
 /// Returns `Some(thread_id)` when a thread was created, `None` when the
 /// status has no role to run.
@@ -1774,7 +1821,8 @@ pub(crate) async fn dispatch_task_for_status(
     task_id: &str,
     new_status: &str,
 ) -> AppResult<Option<i64>> {
-    create_kanban_step_thread(pool, data_dir, task_id, new_status, true).await
+    skip_stale_threads_for_status(pool, task_id, new_status).await?;
+    create_kanban_step_thread(pool, data_dir, task_id, new_status).await
 }
 
 /// Skip all pending/processing threads on startup, then redispatch every
@@ -1832,9 +1880,7 @@ pub async fn skip_all_pending_threads(pool: &PgPool, data_dir: &str) -> AppResul
     .fetch_all(pool)
     .await?;
     for task in &stuck {
-        if let Err(e) =
-            create_kanban_step_thread(pool, data_dir, &task.id, &task.status, false).await
-        {
+        if let Err(e) = create_kanban_step_thread(pool, data_dir, &task.id, &task.status).await {
             tracing::warn!(
                 "[startup] failed to redispatch kanban task {} (step {}): {:?}",
                 task.id,
@@ -2928,6 +2974,121 @@ mod merged_status_tests {
         sqlx::query("DELETE FROM threads WHERE id = $1 OR id = $2")
             .bind(pending_id)
             .bind(running_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup threads");
+    }
+}
+
+#[cfg(test)]
+mod status_move_skip_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// DB-backed regression for stopping a task's old-status threads when the
+    /// task MOVES (UI move / API status update / workflow transition): every
+    /// pending/processing thread tied to a status the task LEFT is marked
+    /// skipped through the terminal choke point, while a thread already
+    /// serving the task's NEW status is untouched. Skipped when DATABASE_URL
+    /// is absent (offline/CI without a DB). Only touches rows it creates
+    /// itself, never production.
+    #[tokio::test]
+    async fn status_move_skips_only_old_status_threads() {
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let task_id = format!(
+            "task-status-stop-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+
+        // Old-status thread: a processing executor thread (workflow_step
+        // 'running') of a task that is moving to 'testing'.
+        let old_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile, task_id, workflow_step)
+             VALUES ('processing', 'user', 'test-channel-status-stop', 'test-profile', $1, 'running')
+             RETURNING id",
+        )
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert old-status thread");
+
+        // Legacy thread with no workflow_step: treated as serving 'running'.
+        let legacy_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile, task_id)
+             VALUES ('pending', 'user', 'test-channel-status-stop', 'test-profile', $1)
+             RETURNING id",
+        )
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert legacy thread");
+
+        // New-status thread: already pending for 'testing' - must survive.
+        let new_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile, task_id, workflow_step)
+             VALUES ('pending', 'user', 'test-channel-status-stop', 'test-profile', $1, 'testing')
+             RETURNING id",
+        )
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert new-status thread");
+
+        let n = skip_stale_threads_for_status(&pool, &task_id, "testing")
+            .await
+            .expect("skip stale threads");
+        assert_eq!(n, 2, "exactly the two running-serving threads are skipped");
+
+        let row: (String, bool) =
+            sqlx::query_as("SELECT status, terminal FROM threads WHERE id = $1")
+                .bind(old_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch old thread");
+        assert_eq!(row.0, "skipped", "old-status thread marked skipped");
+        assert!(row.1, "old-status thread is terminal");
+
+        let row: (String, bool) =
+            sqlx::query_as("SELECT status, terminal FROM threads WHERE id = $1")
+                .bind(legacy_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch legacy thread");
+        assert_eq!(row.0, "skipped", "legacy thread marked skipped");
+        assert!(row.1, "legacy thread is terminal");
+
+        let row: (String, bool) =
+            sqlx::query_as("SELECT status, terminal FROM threads WHERE id = $1")
+                .bind(new_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch new thread");
+        assert_eq!(row.0, "pending", "new-status thread untouched");
+        assert!(!row.1, "new-status thread not terminal");
+
+        // Idempotent: a second call (or a no-op status update) skips nothing.
+        let n = skip_stale_threads_for_status(&pool, &task_id, "testing")
+            .await
+            .expect("second skip");
+        assert_eq!(n, 0, "nothing left to skip");
+
+        sqlx::query("DELETE FROM kanban_history WHERE kanban_task_id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM threads WHERE id = $1 OR id = $2 OR id = $3")
+            .bind(old_id)
+            .bind(legacy_id)
+            .bind(new_id)
             .execute(&pool)
             .await
             .expect("cleanup threads");

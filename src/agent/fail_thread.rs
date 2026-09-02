@@ -466,13 +466,29 @@ pub async fn manual_review_decision(
     sql_forge!(
         "INSERT INTO kanban_history (kanban_task_id, action, initial_board, final_board, comment)
          VALUES (:id, 'workflow', :from, :to, :comment)",
-        (:id = task_id, :from = task.status, :to = to_status.clone(), :comment = auto_comment.clone())
+        (:id = task_id, :from = task.status.clone(), :to = to_status.clone(), :comment = auto_comment.clone())
     )
     .execute(&mut *tx)
     .await
     .map_err(err_str)?;
 
     tx.commit().await.map_err(err_str)?;
+
+    // Stop the task's old-status threads: a manual review decision moved
+    // the task out of the step its threads were serving; any
+    // pending/processing thread tied to a status the task left is marked
+    // skipped (step-scoped, so a thread already serving the target status
+    // survives).
+    if task.status != to_status {
+        if let Err(e) =
+            crate::db::threads::skip_stale_threads_for_status(pool, task_id, &to_status).await
+        {
+            tracing::warn!(
+                "[review] failed to skip stale threads after decision '{}' moved task {} to {}: {:?}",
+                decision, task_id, to_status, e
+            );
+        }
+    }
 
     // Event-driven hooks: fire new_message for the re-run thread's seq-0 cause
     // message (post-commit: the hook handler must observe the committed row).
@@ -1444,6 +1460,23 @@ pub(crate) async fn engine_transition(
     .map_err(|e| format!("insert kanban history: {e}"))?;
 
     tx.commit().await.map_err(|e| format!("commit: {e}"))?;
+
+    // Stop the task's old-status threads when the status actually changed
+    // (blocked fallback etc.): any pending/processing thread tied to a
+    // status the task left is marked skipped (step-scoped, same choke
+    // point as status-change dispatch). The triggering thread is already
+    // terminal, so only genuinely stale threads are affected.
+    if final_status != initial_status {
+        if let Err(e) =
+            crate::db::threads::skip_stale_threads_for_status(pool, task_id, final_status.as_str())
+                .await
+        {
+            tracing::warn!(
+                "[workflow] failed to skip stale threads after engine transition of task {} to {}: {:?}",
+                task_id, final_status, e
+            );
+        }
+    }
 
     // Event-driven hooks: fire new_message for the re-run/review thread's
     // seq-0 cause message (post-commit: hook handler sees the committed row).
