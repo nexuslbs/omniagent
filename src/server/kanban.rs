@@ -218,6 +218,18 @@ struct ChangePositionRequest {
     position: i32,
 }
 
+/// Deserialize the PATCH `workflow` field with triple-state semantics:
+/// ABSENT -> None (keep current), JSON `null` -> Some(None) (clear to NULL),
+/// `""` -> Some(Some("")) (clear), value -> Some(Some(v)) (set).
+/// Requires `#[serde(default)]` on the field so a missing key stays None.
+fn de_optional_workflow<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let present: Option<String> = <Option<String> as serde::Deserialize>::deserialize(d)?;
+    Ok(Some(present))
+}
+
 #[derive(Debug, Deserialize)]
 struct UpdateTaskRequest {
     title: Option<String>,
@@ -230,7 +242,11 @@ struct UpdateTaskRequest {
     archived: Option<bool>,
     template: Option<String>,
     plan: Option<bool>,
-    workflow: Option<String>,
+    /// Task workflow key. ABSENT (field not sent) keeps the current value;
+    /// an explicit JSON `null` or empty string `""` CLEARS the workflow so the
+    /// board default applies (workflow_id = NULL); a non-empty value sets it.
+    #[serde(default, deserialize_with = "de_optional_workflow")]
+    workflow: Option<Option<String>>,
     board: Option<String>,
 }
 
@@ -1467,13 +1483,20 @@ async fn update_task_handler(
         }
     };
 
-    // Workflow definitions are immutable while an execution is active.
-    if body.workflow.is_some()
+    // Workflow definitions are immutable while an execution is active:
+    // explicit null/"" clears back to the board default, so BOTH setting and
+    // clearing are workflow changes and are rejected while active (a no-op
+    // request that resolves to the current value stays allowed).
+    let workflow_intent: Option<Option<&str>> = body
+        .workflow
+        .as_ref()
+        .map(|wf| wf.as_deref().filter(|s| !s.is_empty()));
+    if workflow_intent.is_some()
         && matches!(
             before.status.as_deref(),
             Some("running" | "testing" | "review")
         )
-        && body.workflow.as_deref() != before.workflow_id.as_deref()
+        && workflow_intent.flatten() != before.workflow_id.as_deref()
     {
         return err_json(
             StatusCode::BAD_REQUEST,
@@ -1560,7 +1583,7 @@ async fn update_task_handler(
             archived = :archived,
             template = CASE WHEN :template = '' THEN template ELSE NULLIF(:template, '')::text END,
             plan = :plan,
-            workflow_id = CASE WHEN :workflow_id = '' THEN workflow_id ELSE NULLIF(:workflow_id, '')::text END,
+            workflow_id = CASE WHEN :workflow_id = :ign_wf THEN workflow_id ELSE NULLIF(:workflow_id, '')::text END,
             board = CASE WHEN :board = '' THEN board ELSE NULLIF(:board, '')::text END,
             position = CASE
                 WHEN :append_pos = -999999 THEN
@@ -1576,6 +1599,7 @@ async fn update_task_handler(
           :assignee = body.assignee.as_deref().unwrap_or(""),
           :ign_str = IGNORE_STR,
           :ign_channel = IGNORE_STR,
+          :ign_wf = IGNORE_STR,
           :channel_id = body.channel.as_deref().unwrap_or(IGNORE_STR),
           :profile = body.profile.as_deref().unwrap_or(""),
           :priority = body.priority.map(|v| v as i64).unwrap_or(IGNORE_INT),
@@ -1583,7 +1607,7 @@ async fn update_task_handler(
           :archived = body.archived.unwrap_or(before.archived.unwrap_or(false)),
           :template = body.template.as_deref().unwrap_or(""),
           :plan = body.plan.or(before.plan).unwrap_or(false),
-          :workflow_id = body.workflow.as_deref().unwrap_or(""),
+          :workflow_id = body.workflow.as_ref().map(|wf| wf.as_deref().unwrap_or("")).unwrap_or(IGNORE_STR),
           :board = body.board.as_deref().unwrap_or(""),
           :append_pos = append_pos.unwrap_or(-999_999),
     )
@@ -3072,6 +3096,38 @@ mod tests {
         let empty: CreateTaskRequest =
             serde_json::from_str(r#"{"title": "T"}"#).expect("deserialize w/o wf");
         assert!(empty.workflow.is_none());
+    }
+
+    #[test]
+    fn test_update_task_request_workflow_absent_keeps() {
+        // Field not sent -> None (server keeps the current workflow_id).
+        let req: UpdateTaskRequest =
+            serde_json::from_str(r#"{"title": "T"}"#).expect("deserialize w/o workflow");
+        assert_eq!(req.workflow, None);
+    }
+
+    #[test]
+    fn test_update_task_request_workflow_null_clears() {
+        // Explicit JSON null -> Some(None): server sets workflow_id = NULL.
+        let req: UpdateTaskRequest =
+            serde_json::from_str(r#"{"title": "T", "workflow": null}"#).expect("deserialize null");
+        assert_eq!(req.workflow, Some(None));
+    }
+
+    #[test]
+    fn test_update_task_request_workflow_empty_string_clears() {
+        // Explicit "" -> Some(Some("")): server resolves empty to NULL.
+        let req: UpdateTaskRequest =
+            serde_json::from_str(r#"{"title": "T", "workflow": ""}"#).expect("deserialize empty");
+        assert_eq!(req.workflow, Some(Some(String::new())));
+    }
+
+    #[test]
+    fn test_update_task_request_workflow_value_sets() {
+        // Non-empty value -> Some(Some("wf-x")): server sets workflow_id.
+        let req: UpdateTaskRequest = serde_json::from_str(r#"{"title": "T", "workflow": "wf-x"}"#)
+            .expect("deserialize workflow value");
+        assert_eq!(req.workflow, Some(Some("wf-x".to_string())));
     }
 
     #[test]
