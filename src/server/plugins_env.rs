@@ -41,7 +41,7 @@ pub(crate) fn reload_env_handler(
                     Err(e) => Err(format!("Reload task panicked: {}", e)),
                 }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
                 Err("Reload timed out after 10s".to_string())
             }
         };
@@ -342,17 +342,25 @@ pub(crate) async fn reload_plugins(
                                 plugin.current_dir.clone(),
                             ),
                         );
-                        match client.start().await {
-                            Ok(()) => {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(15),
+                            client.start(),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {
                                 crate::provider::registry::PROVIDER_REGISTRY
                                     .write()
                                     .register_arc(name, client);
                                 started += 1;
-                                tracing::info!("Reload: provider '{}' started successfully", name);
+                                tracing::info!("Reload: provider {} started successfully", name);
                             }
-                            Err(e) => {
-                                tracing::error!("Reload: provider '{}' start FAILED: {}", name, e);
+                            Ok(Err(e)) => {
+                                tracing::error!("Reload: provider {} start FAILED: {}", name, e);
                                 errors.push(format!("{} provider: {}", name, e));
+                            }
+                            Err(_) => {
+                                errors.push(format!("{} provider: start timed out (15s)", name));
                             }
                         }
                     } else {
