@@ -73,6 +73,14 @@ struct Config {
 // Tool: search_messages (keyword / ILIKE)
 // ---------------------------------------------------------------------------
 
+/// Escape a value for safe inclusion in a single-quoted PostgreSQL string
+/// literal. standard_conforming_strings=on means only single quotes need
+/// doubling; backslashes stay literal (the LIKE pattern ESCAPE applies at
+/// match time exactly as it did for the old bound parameter).
+fn sql_quote(s: &str) -> String {
+    s.replace("'", "''")
+}
+
 async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let query = args["query"]
         .as_str()
@@ -80,39 +88,36 @@ async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, 
     let limit = args["limit"].as_i64().unwrap_or(10).min(50);
     let channel_id = args["channel_id"].as_str().map(|s| s.to_string());
 
-    let query_owned = query.to_string();
-    let pool_ref = pool.clone();
+    // The pattern is inlined as a SQL literal on purpose. PostgreSQL can use
+    // the pg_trgm GIN index (idx_messages_content_trgm) for ILIKE only when
+    // the pattern is a constant at plan time. With the old bound parameter
+    // (content ILIKE '%' || $1 || '%') the planner cannot extract trigrams,
+    // so it falls back to a generic plan that walks messages newest-first
+    // through the created_at index and detoasts every row until it finds a
+    // match: rare keywords took ~26s on the large messages table. Escaping
+    // only single quotes keeps the exact matching semantics of the bound
+    // pattern (default backslash ESCAPE, % and _ wildcards unchanged) while
+    // making the pattern visible to the planner.
+    let pattern = sql_quote(query);
+    let pattern = format!("%{pattern}%");
 
     let results: Vec<SearchResult> = if let Some(cid) = channel_id {
-        sql_forge!(
-            SearchResult,
-            r#"
-            SELECT m.id, m.role, m.content FROM messages m
-            JOIN threads t ON t.id = m.thread_id
-            WHERE t.channel_id = :channel_id
-              AND m.content ILIKE '%' || :query || '%'
-            ORDER BY m.created_at DESC
-            LIMIT :limit
-            "#,
-            ( :channel_id = cid.as_str(), :query = &query_owned, :limit = limit )
-        )
-        .fetch_all(&pool_ref)
-        .await
-        .map_err(|e: sqlx::Error| anyhow::anyhow!("Database query failed: {e}"))?
+        let cid = sql_quote(&cid);
+        let sql = format!(
+            "SELECT m.id, m.role, m.content FROM messages m              JOIN threads t ON t.id = m.thread_id              WHERE t.channel_id = '{cid}'                AND m.content ILIKE '{pattern}'              ORDER BY m.created_at DESC              LIMIT {limit}"
+        );
+        sqlx::query_as::<_, SearchResult>(sqlx::AssertSqlSafe(sql.as_str()))
+            .fetch_all(pool)
+            .await
+            .map_err(|e: sqlx::Error| anyhow::anyhow!("Database query failed: {e}"))?
     } else {
-        sql_forge!(
-            SearchResult,
-            r#"
-            SELECT id, role, content FROM messages
-            WHERE content ILIKE '%' || :query || '%'
-            ORDER BY created_at DESC
-            LIMIT :limit
-            "#,
-            ( :query = &query_owned, :limit = limit )
-        )
-        .fetch_all(&pool_ref)
-        .await
-        .map_err(|e: sqlx::Error| anyhow::anyhow!("Database query failed: {e}"))?
+        let sql = format!(
+            "SELECT id, role, content FROM messages              WHERE content ILIKE '{pattern}'              ORDER BY created_at DESC              LIMIT {limit}"
+        );
+        sqlx::query_as::<_, SearchResult>(sqlx::AssertSqlSafe(sql.as_str()))
+            .fetch_all(pool)
+            .await
+            .map_err(|e: sqlx::Error| anyhow::anyhow!("Database query failed: {e}"))?
     };
 
     if results.is_empty() {
