@@ -25,6 +25,13 @@
       "label": "Workspace Dir (sandbox - local side of ssh_copy must stay inside)",
       "type": "string",
       "required": false
+    },
+    {
+      "key": "database_url",
+      "default": "$env:DATABASE_URL",
+      "label": "Database URL (for resolving ssh_key_secret_name from the omniagent secrets store)",
+      "type": "string",
+      "required": false
     }
   ],
   "entrypoint": {

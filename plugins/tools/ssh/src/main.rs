@@ -14,11 +14,15 @@
 //!     demand; private keys inside are chmod 600'd before any ssh/scp run.
 //!   - connect_timeout_secs: ssh ConnectTimeout (default 10).
 //!   - workspace_dir: optional sandbox for the LOCAL side of ssh_copy.
+//!   - database_url: Postgres URL of the omniagent secrets store (default
+//!     $env:DATABASE_URL); used to resolve ssh_key_secret_name at call time.
 
 use anyhow::{Context, Result};
 use mcp_server_util::*;
 use parking_lot::Mutex;
 use serde_json::Value;
+use sqlx::Connection;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::LazyLock;
@@ -33,6 +37,7 @@ struct Config {
     ssh_dir: String,
     connect_timeout_secs: u64,
     workspace_dir: String,
+    database_url: String, // secrets store URL (from the configure message)
 }
 
 impl Default for Config {
@@ -41,11 +46,108 @@ impl Default for Config {
             ssh_dir: String::new(), // resolved: {OMNI_DIR}/data/ssh
             connect_timeout_secs: 10,
             workspace_dir: "/opt/workspace".to_string(),
+            database_url: String::new(),
         }
     }
 }
 
 static CONFIG: LazyLock<Mutex<Config>> = LazyLock::new(|| Mutex::new(Config::default()));
+
+//  Secret-backed identity (ssh_key_secret_name)
+
+/// RAII guard for a private key materialized from the omniagent secrets store.
+///
+/// The key VALUE is never persisted in ssh_dir and never printed/logged: it is
+/// written to a 0600 temp file (OpenSSH refuses group/world-readable keys), the
+/// file is passed to ssh/scp with `-i`, and it is removed the moment this guard
+/// drops - on EVERY return path, including errors and timeouts.
+struct SecretKeyFile {
+    path: PathBuf,
+}
+
+impl SecretKeyFile {
+    fn create(key_value: &str) -> Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir();
+        let file_name = format!(
+            "mcp-ssh-secret-key-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = dir.join(file_name);
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts
+            .open(&path)
+            .with_context(|| format!("Failed to create temp ssh key file {}", path.display()))?;
+        f.write_all(key_value.as_bytes())
+            .context("Failed to write secret key to temp file")?;
+        if !key_value.ends_with('\n') {
+            f.write_all(b"\n").ok();
+        }
+        f.sync_all().ok();
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for SecretKeyFile {
+    fn drop(&mut self) {
+        // Best-effort cleanup on EVERY return path (errors, timeouts included).
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Resolve `ssh_key_secret_name` to the private key VALUE stored under that
+/// name in the omniagent secrets table (the same store `$secret:NAME` config
+/// references read from). The value is materialized as a short-lived 0600 temp
+/// file so the OpenSSH client can use it; the raw key material is never logged
+/// and never placed in command arguments or the shell.
+async fn resolve_secret_key(secret_name: &str) -> Result<SecretKeyFile> {
+    let database_url = {
+        let cfg = CONFIG.lock();
+        cfg.database_url.clone()
+    };
+    if database_url.is_empty() {
+        anyhow::bail!(
+            "ssh_key_secret_name '{}' was provided, but this ssh plugin has no database_url \
+             configured to look secrets up. Configure database_url in the ssh plugin settings \
+             (it defaults to $env:DATABASE_URL) or store a local key file in ssh_dir.",
+            secret_name
+        );
+    }
+    let mut conn = sqlx::postgres::PgConnection::connect(&database_url)
+        .await
+        .context("Failed to connect to the omniagent database to resolve the ssh key secret")?;
+    let value: Option<String> =
+        sqlx::query_scalar::<_, String>("SELECT current_value FROM secrets WHERE name = $1")
+            .bind(secret_name)
+            .fetch_optional(&mut conn)
+            .await
+            .context("Failed to read the secret from the secrets store")?;
+    match value {
+        None => anyhow::bail!(
+            "Secret '{}' not found in the secrets store. Store the private key under that name \
+             (e.g. via the secrets API) or use a local key file in ssh_dir instead.",
+            secret_name
+        ),
+        Some(v) if v.trim().is_empty() => anyhow::bail!(
+            "Secret '{}' exists but its value is EMPTY. Store the private key value under that \
+             name or use a local key file in ssh_dir.",
+            secret_name
+        ),
+        Some(v) => SecretKeyFile::create(v.trim()),
+    }
+}
 
 //  Helpers
 
@@ -253,6 +355,7 @@ async fn run_ssh(
     timeout_secs: Option<u64>,
     ssh_dir: &str,
     connect_timeout: u64,
+    identity: Option<&Path>,
 ) -> (String, String, i32, u128) {
     if let Err(e) = secure_ssh_dir(ssh_dir) {
         return (String::new(), e.to_string(), -1, 0);
@@ -261,6 +364,10 @@ async fn run_ssh(
     let (host_part, port) = split_host_port(host);
     let mut cmd = Command::new("ssh");
     add_ssh_options(&mut cmd, ssh_dir, connect_timeout);
+    if let Some(key_path) = identity {
+        cmd.arg("-i").arg(key_path);
+        cmd.arg("-o").arg("IdentitiesOnly=yes");
+    }
     if let Some(p) = port {
         cmd.arg("-p").arg(p.to_string());
     }
@@ -399,6 +506,15 @@ async fn handle_run(args: Value) -> Result<(String, bool)> {
         cfg.connect_timeout_secs
     };
 
+    // Optional secret-backed identity (ssh_key_secret_name): when the agent
+    // passes the NAME of a secret (e.g. SSH_PRIVATE_KEY), its VALUE is used as
+    // the private key for this connection. Local key files stay the default.
+    let secret_key = match args["ssh_key_secret_name"].as_str() {
+        Some(name) if !name.trim().is_empty() => Some(resolve_secret_key(name.trim()).await?),
+        _ => None,
+    };
+    let identity_path = secret_key.as_ref().map(|k| k.path());
+
     // Build the remote command line. The command is passed as ONE argument so
     // the remote shell (which ssh hands the whole string to) interprets shell
     // operators - exactly like docker compose exec passes args through sh -c.
@@ -422,6 +538,7 @@ async fn handle_run(args: Value) -> Result<(String, bool)> {
             timeout_secs,
             &ssh_dir,
             connect_timeout,
+            identity_path,
         )
         .await
     } else {
@@ -433,6 +550,7 @@ async fn handle_run(args: Value) -> Result<(String, bool)> {
             timeout_secs,
             &ssh_dir,
             connect_timeout,
+            identity_path,
         )
         .await
     };
@@ -512,11 +630,22 @@ async fn handle_copy(args: Value) -> Result<(String, bool)> {
         return Ok((e.to_string(), true));
     }
 
+    // Optional secret-backed identity (ssh_key_secret_name).
+    let secret_key = match args["ssh_key_secret_name"].as_str() {
+        Some(name) if !name.trim().is_empty() => Some(resolve_secret_key(name.trim()).await?),
+        _ => None,
+    };
+    let identity_path = secret_key.as_ref().map(|k| k.path());
+
     let (host_part, port) = split_host_port(&host);
 
     // Build scp args. The remote side is `host:path` (colon-prefixed).
     let mut cmd = Command::new("scp");
     add_ssh_options(&mut cmd, &ssh_dir, connect_timeout);
+    if let Some(key_path) = identity_path {
+        cmd.arg("-i").arg(key_path);
+        cmd.arg("-o").arg("IdentitiesOnly=yes");
+    }
     if let Some(p) = port {
         cmd.arg("-P").arg(p.to_string());
     }
@@ -642,6 +771,13 @@ async fn handle_status(args: Value) -> Result<(String, bool)> {
         cfg.connect_timeout_secs
     };
 
+    // Optional secret-backed identity (ssh_key_secret_name).
+    let secret_key = match args["ssh_key_secret_name"].as_str() {
+        Some(name) if !name.trim().is_empty() => Some(resolve_secret_key(name.trim()).await?),
+        _ => None,
+    };
+    let identity_path = secret_key.as_ref().map(|k| k.path());
+
     let (out, err, rc, elapsed_ms) = run_ssh(
         &host,
         &["true"],
@@ -649,6 +785,7 @@ async fn handle_status(args: Value) -> Result<(String, bool)> {
         timeout_secs,
         &ssh_dir,
         connect_timeout,
+        identity_path,
     )
     .await;
 
@@ -695,7 +832,10 @@ async fn main() -> Result<()> {
                     bounds the command in seconds - when omitted there is NO timeout (long \
                     commands run as tracked background tasks; use builtin_wait-task to follow). \
                     'ssh_dir' (optional) overrides the configured ssh dir (default \
-                    {OMNI_DIR}/data/ssh). Returns stdout, stderr, exit code and duration."
+                    {OMNI_DIR}/data/ssh). 'ssh_key_secret_name' (optional): name of a secret in the omniagent secrets store \
+                    (e.g. SSH_PRIVATE_KEY) whose VALUE is the private SSH key used for \
+                    authentication. Local key files under ssh_dir remain supported when this \
+                    param is omitted. Returns stdout, stderr, exit code and duration."
                     .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -723,6 +863,10 @@ async fn main() -> Result<()> {
                         "ssh_dir": {
                             "type": "string",
                             "description": "Override the configured ssh dir (keys/config)"
+                        },
+                        "ssh_key_secret_name": {
+                            "type": "string",
+                            "description": "Name of a secret in the omniagent secrets store (e.g. SSH_PRIVATE_KEY) whose VALUE is the private SSH key used to authenticate with this host. Fetched at call time, never persisted. Optional: when omitted, local key files under ssh_dir are used (unchanged behavior)."
                         }
                     },
                     "required": ["host"]
@@ -743,7 +887,9 @@ async fn main() -> Result<()> {
                     prefixes host:). 'recursive' (optional bool) adds -r for directories. \
                     The LOCAL side is sandboxed to the configured workspace_dir \
                     (default /opt/workspace). 'timeout' (optional) bounds the copy in seconds. \
-                    'ssh_dir' (optional) overrides the configured ssh dir."
+                    'ssh_dir' (optional) overrides the configured ssh dir. 'ssh_key_secret_name' (optional): \
+                    name of a secret whose VALUE is the private SSH key to use; local key files \
+                    remain supported when omitted."
                     .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -776,6 +922,10 @@ async fn main() -> Result<()> {
                         "ssh_dir": {
                             "type": "string",
                             "description": "Override the configured ssh dir (keys/config)"
+                        },
+                        "ssh_key_secret_name": {
+                            "type": "string",
+                            "description": "Name of a secret in the omniagent secrets store (e.g. SSH_PRIVATE_KEY) whose VALUE is the private SSH key used to authenticate with this host. Fetched at call time, never persisted. Optional: when omitted, local key files under ssh_dir are used (unchanged behavior)."
                         }
                     },
                     "required": ["host", "direction", "source", "destination"]
@@ -792,7 +942,9 @@ async fn main() -> Result<()> {
                     configured ConnectTimeout and reports ok/error plus latency. Use this \
                     to fail fast before scripting a long remote setup. 'host' (required) is \
                     a host alias OR 'user@host:port' inline. 'ssh_dir' (optional) overrides \
-                    the configured ssh dir."
+                    the configured ssh dir. 'ssh_key_secret_name' (optional): name of a secret \
+                    whose VALUE is the private SSH key to use; local key files remain \
+                    supported when omitted."
                     .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -808,6 +960,10 @@ async fn main() -> Result<()> {
                         "ssh_dir": {
                             "type": "string",
                             "description": "Override the configured ssh dir (keys/config)"
+                        },
+                        "ssh_key_secret_name": {
+                            "type": "string",
+                            "description": "Name of a secret in the omniagent secrets store (e.g. SSH_PRIVATE_KEY) whose VALUE is the private SSH key used to authenticate with this host. Fetched at call time, never persisted. Optional: when omitted, local key files under ssh_dir are used (unchanged behavior)."
                         }
                     },
                     "required": ["host"]
@@ -846,6 +1002,11 @@ async fn main() -> Result<()> {
                     cfg.workspace_dir = dir.to_string();
                 }
             }
+            if let Some(url) = params.get("database_url").and_then(|v| v.as_str()) {
+                if !url.is_empty() {
+                    cfg.database_url = url.to_string();
+                }
+            }
             tracing::info!("SSH plugin configured (ssh_dir={})", cfg.ssh_dir);
         }),
     )
@@ -869,6 +1030,7 @@ mod tests {
             let mut cfg = CONFIG.lock();
             cfg.ssh_dir = ssh_dir.to_string();
             cfg.workspace_dir = workspace.to_string();
+            cfg.database_url = String::new();
         }
         guard
     }
@@ -1063,5 +1225,44 @@ mod tests {
     async fn status_missing_host_fails() {
         let res = handle_status(serde_json::json!({})).await;
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn secret_key_file_is_0600_and_removed_on_drop() {
+        let skf = SecretKeyFile::create(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nunit-test-only\n-----END OPENSSH PRIVATE KEY-----",
+        )
+        .expect("create temp key file");
+        let path = skf.path().to_path_buf();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "key file must be 0600, got {:#o}", mode);
+        }
+        assert!(path.exists(), "key file exists while guard alive");
+        drop(skf);
+        assert!(!path.exists(), "key file removed on drop");
+    }
+
+    #[tokio::test]
+    async fn resolve_secret_key_without_database_url_fails_naming_secret() {
+        {
+            let _g = set_config("", "/opt/workspace");
+            let mut cfg = CONFIG.lock();
+            cfg.database_url.clear();
+        }
+        let msg = match resolve_secret_key("SSH_PRIVATE_KEY").await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("resolve_secret_key must fail when database_url is empty"),
+        };
+        assert!(
+            msg.contains("SSH_PRIVATE_KEY"),
+            "error must name secret: {msg}"
+        );
+        assert!(
+            msg.contains("database_url"),
+            "error must suggest config fix: {msg}"
+        );
     }
 }
