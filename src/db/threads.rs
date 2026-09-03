@@ -2804,13 +2804,23 @@ mod tests {
 /// thread as a sub-prompt (feature: sub-prompts).
 ///
 /// Match condition (per feature spec): same channel + same profile +
-/// cause='user' + status='pending' + NOT terminal, AND
-/// ((pending.parent_id IS NOT NULL
-///   AND pending.parent_id = running.parent_id)  -- reply inside the SAME
-///  Mattermost thread as the running thread (shared real parent id);
-///  top-level channel messages (parent_id NULL) never match here.
-///  OR pending.parent_id = running.id)            -- direct reply to the running
-///  thread's own message). Ordered by id ASC (oldest first).
+/// cause='user' + status='pending' + NOT terminal, and the pending
+/// thread's parent relation to the running thread is one of:
+///   1. direct child: pending.parent_id = running.id (a reply to the
+///      running thread's own seq-0 cause message);
+///   2. resolved sibling: pending.parent_id IS NOT NULL and equal to
+///      running.parent_id (a reply inside the same Mattermost thread
+///      whose root thread row still exists);
+///   3. shared parent external id: the seq-0 cause messages of both
+///      threads carry the same non-empty parent external id (metadata
+///      key 'root_id'). This covers parent-by-chat platforms (telegram:
+///      root_id = chat id, never a message external id, so it never
+///      resolves to a threads.parent_id) and Mattermost sibling replies
+///      after the root thread row was deleted or never existed.
+///
+/// Top-level channel messages (no parent external id) never match here.
+///
+/// Ordered by id ASC (oldest first).
 pub async fn list_appendable_pending_threads(
     pool: &PgPool,
     channel_id: &str,
@@ -2839,8 +2849,19 @@ pub async fn list_appendable_pending_threads(
           AND t.status = 'pending'
           AND NOT t.terminal
           AND t.id <> :running_thread_id
-          AND ((t.parent_id IS NOT NULL AND t.parent_id = (SELECT parent_id FROM threads WHERE id = :running_thread_id))
-               OR t.parent_id = :running_thread_id)
+          AND (
+               t.parent_id = :running_thread_id
+               OR (t.parent_id IS NOT NULL AND t.parent_id = (SELECT parent_id FROM threads WHERE id = :running_thread_id))
+               OR EXISTS (
+                    SELECT 1
+                    FROM messages r0, messages p0
+                    WHERE r0.thread_id = :running_thread_id AND r0.thread_sequence = 0
+                      AND p0.thread_id = t.id AND p0.thread_sequence = 0
+                      AND r0.metadata->>'root_id' IS NOT NULL
+                      AND r0.metadata->>'root_id' <> ''
+                      AND p0.metadata->>'root_id' = r0.metadata->>'root_id'
+               )
+          )
         ORDER BY t.id ASC
         "#,
         ( :channel_id = channel_id, :profile = profile, :running_thread_id = running_thread_id )
@@ -3092,5 +3113,455 @@ mod status_move_skip_tests {
             .execute(&pool)
             .await
             .expect("cleanup threads");
+    }
+}
+#[cfg(test)]
+mod sub_prompt_appendable_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CHAN_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// Insert a user thread row plus its seq-0 cause message (role 'cause',
+    /// msg_type 'Cause'), mirroring create_thread_with_cause for an inbound
+    /// platform message. parent_root_id is stored in metadata 'root_id'
+    /// (the parent external id). Returns the new thread id.
+    async fn insert_user_thread(
+        pool: &PgPool,
+        channel: &str,
+        status: &str,
+        external_id: &str,
+        parent_root_id: Option<&str>,
+        parent_id: Option<i64>,
+        msg_subtype: &str,
+    ) -> i64 {
+        let tid: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile, parent_id) \
+             VALUES ($1, 'user', $2, 'test-profile', $3) RETURNING id",
+        )
+        .bind(status)
+        .bind(channel)
+        .bind(parent_id)
+        .fetch_one(pool)
+        .await
+        .expect("insert test thread");
+        let mut meta = serde_json::json!({});
+        if let Some(root) = parent_root_id {
+            meta["root_id"] = serde_json::json!(root);
+        }
+        sqlx::query(
+            "INSERT INTO messages (thread_id, thread_sequence, role, content, msg_type, \
+             msg_subtype, external_id, metadata, channel_id) \
+             VALUES ($1, 0, 'cause', 'a user prompt', 'Cause', $2, $3, $4::jsonb, $5)",
+        )
+        .bind(tid)
+        .bind(msg_subtype)
+        .bind(external_id)
+        .bind(meta.to_string())
+        .bind(channel)
+        .execute(pool)
+        .await
+        .expect("insert cause message");
+        tid
+    }
+
+    async fn cleanup_threads(pool: &PgPool, ids: &[i64]) {
+        for id in ids {
+            let _ = sqlx::query("DELETE FROM messages WHERE thread_id = $1")
+                .bind(id)
+                .execute(pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM threads WHERE id = $1")
+                .bind(id)
+                .execute(pool)
+                .await;
+        }
+    }
+
+    fn chan(prefix: &str) -> String {
+        format!(
+            "test-channel-{prefix}-{}-{}",
+            std::process::id(),
+            CHAN_SEQ.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    #[tokio::test]
+    async fn telegram_same_chat_follow_up_merges_into_running_thread() {
+        // Telegram parent_by_chat: every inbound message of a chat carries
+        // the chat id as its parent external id (metadata 'root_id'), never
+        // a message external_id, so no threads.parent_id is ever resolved.
+        // A follow-up arriving while a same-chat thread is running must
+        // merge into that running thread. Pre-fix this listed nothing.
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+        let channel = chan("tg-merge");
+
+        let running_id = insert_user_thread(
+            &pool,
+            &channel,
+            "processing",
+            "tg-1",
+            Some("chat-9"),
+            None,
+            "telegram",
+        )
+        .await;
+        let pending_id = insert_user_thread(
+            &pool,
+            &channel,
+            "pending",
+            "tg-2",
+            Some("chat-9"),
+            None,
+            "telegram",
+        )
+        .await;
+
+        let appendable =
+            list_appendable_pending_threads(&pool, &channel, "test-profile", running_id)
+                .await
+                .expect("list appendable");
+        let ids: Vec<i64> = appendable.iter().map(|t| t.id).collect();
+        assert_eq!(
+            ids,
+            vec![pending_id],
+            "same-chat follow-up must merge into the running telegram thread"
+        );
+
+        // End-to-end: mark the pending thread merged through the terminal
+        // choke point used by main_loop after appending its sub-prompt.
+        let n = mark_thread_merged_for_sub_prompt(&pool, pending_id, running_id)
+            .await
+            .expect("mark merged");
+        assert_eq!(n, 1, "exactly the follow-up thread is flipped to merged");
+        let row: (String, bool) =
+            sqlx::query_as("SELECT status, terminal FROM threads WHERE id = $1")
+                .bind(pending_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch merged thread");
+        assert_eq!(row.0, "merged", "follow-up thread status is merged");
+        assert!(row.1, "merged thread is terminal");
+
+        cleanup_threads(&pool, &[running_id, pending_id]).await;
+    }
+
+    #[tokio::test]
+    async fn follow_up_after_thread_completed_runs_standalone() {
+        // Control: an idle follow-up sent after the previous same-chat
+        // thread COMPLETED is not merged anywhere. The merge only fires
+        // from inside a processing thread's main loop; with no active
+        // same-chat runner the follow-up is claimed later and runs as its
+        // own thread (single final answer for itself).
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+        let channel = chan("tg-idle");
+
+        // Previous same-chat thread already finished (terminal).
+        let prev_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile, terminal) \
+             VALUES ('completed', 'user', $1, 'test-profile', true) RETURNING id",
+        )
+        .bind(&channel)
+        .fetch_one(&pool)
+        .await
+        .expect("insert completed thread");
+        sqlx::query(
+            "INSERT INTO messages (thread_id, thread_sequence, role, content, msg_type, \
+             msg_subtype, external_id, metadata, channel_id) \
+             VALUES ($1, 0, 'cause', 'old prompt', 'Cause', 'telegram', 'tg-old', $2::jsonb, $3)",
+        )
+        .bind(prev_id)
+        .bind(serde_json::json!({"root_id": "chat-9"}).to_string())
+        .bind(&channel)
+        .execute(&pool)
+        .await
+        .expect("insert completed cause");
+
+        // The idle follow-up is pending at arrival time, then claimed as the
+        // new runner: nothing else is pending in the chat, so there is no
+        // sibling to absorb and it is never marked merged.
+        let follow_up = insert_user_thread(
+            &pool,
+            &channel,
+            "processing",
+            "tg-new",
+            Some("chat-9"),
+            None,
+            "telegram",
+        )
+        .await;
+
+        let appendable =
+            list_appendable_pending_threads(&pool, &channel, "test-profile", follow_up)
+                .await
+                .expect("list appendable");
+        assert!(
+            appendable.is_empty(),
+            "idle follow-up after a completed sibling has nothing to merge"
+        );
+        let row: (String, bool) =
+            sqlx::query_as("SELECT status, terminal FROM threads WHERE id = $1")
+                .bind(follow_up)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch follow-up");
+        assert_eq!(row.0, "processing", "idle follow-up runs as its own thread");
+        assert!(!row.1, "idle follow-up is not terminal");
+
+        cleanup_threads(&pool, &[prev_id, follow_up]).await;
+    }
+
+    async fn mattermost_same_root_siblings_merge_after_root_thread_gone() {
+        // Mattermost: two sequential replies inside the same root thread,
+        // sent after the root thread finished and its row no longer exists.
+        // threads.parent_id was never resolved (NULL), but both seq-0
+        // messages carry the same root post id in metadata 'root_id', so
+        // the second reply merges into the first once the first runs.
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+        let channel = chan("mm-siblings");
+
+        let running_id = insert_user_thread(
+            &pool,
+            &channel,
+            "processing",
+            "mm-r1",
+            Some("root-post-77"),
+            None,
+            "mattermost",
+        )
+        .await;
+        let pending_id = insert_user_thread(
+            &pool,
+            &channel,
+            "pending",
+            "mm-r2",
+            Some("root-post-77"),
+            None,
+            "mattermost",
+        )
+        .await;
+
+        let appendable =
+            list_appendable_pending_threads(&pool, &channel, "test-profile", running_id)
+                .await
+                .expect("list appendable");
+        let ids: Vec<i64> = appendable.iter().map(|t| t.id).collect();
+        assert_eq!(
+            ids,
+            vec![pending_id],
+            "same-root sibling reply must merge into the running sibling"
+        );
+
+        cleanup_threads(&pool, &[running_id, pending_id]).await;
+    }
+
+    #[tokio::test]
+    async fn top_level_messages_without_parent_never_merge() {
+        // Control: top-level Mattermost channel messages carry no parent
+        // external id. Two of them in one channel remain separate threads
+        // even while the first is running.
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+        let channel = chan("mm-top");
+
+        let running_id = insert_user_thread(
+            &pool,
+            &channel,
+            "processing",
+            "mm-1",
+            None,
+            None,
+            "mattermost",
+        )
+        .await;
+        let pending_id =
+            insert_user_thread(&pool, &channel, "pending", "mm-2", None, None, "mattermost").await;
+
+        let appendable =
+            list_appendable_pending_threads(&pool, &channel, "test-profile", running_id)
+                .await
+                .expect("list appendable");
+        assert!(
+            appendable.is_empty(),
+            "top-level messages without a parent external id must not merge"
+        );
+
+        cleanup_threads(&pool, &[running_id, pending_id]).await;
+    }
+
+    #[tokio::test]
+    async fn direct_child_of_running_thread_still_appendable() {
+        // Case A unchanged: a pending thread whose resolved parent_id IS the
+        // running thread (a reply to its seq-0 cause) still merges.
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+        let channel = chan("case-a");
+
+        let running_id = insert_user_thread(
+            &pool,
+            &channel,
+            "processing",
+            "mm-1",
+            None,
+            None,
+            "mattermost",
+        )
+        .await;
+        let child_id = insert_user_thread(
+            &pool,
+            &channel,
+            "pending",
+            "mm-2",
+            None,
+            Some(running_id),
+            "mattermost",
+        )
+        .await;
+
+        let appendable =
+            list_appendable_pending_threads(&pool, &channel, "test-profile", running_id)
+                .await
+                .expect("list appendable");
+        let ids: Vec<i64> = appendable.iter().map(|t| t.id).collect();
+        assert_eq!(
+            ids,
+            vec![child_id],
+            "direct child of the running thread still merges"
+        );
+
+        cleanup_threads(&pool, &[running_id, child_id]).await;
+    }
+
+    #[tokio::test]
+    async fn resolved_shared_parent_siblings_still_appendable() {
+        // Case B unchanged (resolved): two threads whose parent_id resolved
+        // to the same existing root thread row still merge via the internal
+        // parent_id relation.
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+        let channel = chan("case-b-resolved");
+
+        let root_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile, terminal) \
+             VALUES ('completed', 'user', $1, 'test-profile', true) RETURNING id",
+        )
+        .bind(&channel)
+        .fetch_one(&pool)
+        .await
+        .expect("insert root thread");
+
+        let running_id = insert_user_thread(
+            &pool,
+            &channel,
+            "processing",
+            "mm-c1",
+            None,
+            Some(root_id),
+            "mattermost",
+        )
+        .await;
+        let pending_id = insert_user_thread(
+            &pool,
+            &channel,
+            "pending",
+            "mm-c2",
+            None,
+            Some(root_id),
+            "mattermost",
+        )
+        .await;
+
+        let appendable =
+            list_appendable_pending_threads(&pool, &channel, "test-profile", running_id)
+                .await
+                .expect("list appendable");
+        let ids: Vec<i64> = appendable.iter().map(|t| t.id).collect();
+        assert_eq!(
+            ids,
+            vec![pending_id],
+            "resolved same-parent siblings still merge"
+        );
+
+        cleanup_threads(&pool, &[running_id, pending_id, root_id]).await;
+    }
+
+    #[tokio::test]
+    async fn different_parent_external_id_does_not_merge() {
+        // Control for the external-id branch: a different parent external
+        // id (another telegram chat, another Mattermost root) must never
+        // merge even inside the same channel.
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+        let channel = chan("diff-root");
+
+        let running_id = insert_user_thread(
+            &pool,
+            &channel,
+            "processing",
+            "tg-1",
+            Some("chat-a"),
+            None,
+            "telegram",
+        )
+        .await;
+        let other_id = insert_user_thread(
+            &pool,
+            &channel,
+            "pending",
+            "tg-2",
+            Some("chat-b"),
+            None,
+            "telegram",
+        )
+        .await;
+
+        let appendable =
+            list_appendable_pending_threads(&pool, &channel, "test-profile", running_id)
+                .await
+                .expect("list appendable");
+        assert!(
+            appendable.is_empty(),
+            "different parent external ids must not merge"
+        );
+
+        cleanup_threads(&pool, &[running_id, other_id]).await;
     }
 }

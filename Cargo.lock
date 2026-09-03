@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "omniagent"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "async-trait",
