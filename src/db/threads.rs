@@ -3323,6 +3323,7 @@ mod sub_prompt_appendable_tests {
         cleanup_threads(&pool, &[prev_id, follow_up]).await;
     }
 
+    #[tokio::test]
     async fn mattermost_same_root_siblings_merge_after_root_thread_gone() {
         // Mattermost: two sequential replies inside the same root thread,
         // sent after the root thread finished and its row no longer exists.
