@@ -70,15 +70,54 @@ struct Config {
 }
 
 // ---------------------------------------------------------------------------
-// Tool: search_messages (keyword / ILIKE)
+// Tool: search_messages (keyword / full-text)
 // ---------------------------------------------------------------------------
 
 /// Escape a value for safe inclusion in a single-quoted PostgreSQL string
 /// literal. standard_conforming_strings=on means only single quotes need
-/// doubling; backslashes stay literal (the LIKE pattern ESCAPE applies at
-/// match time exactly as it did for the old bound parameter).
+/// doubling.
 fn sql_quote(s: &str) -> String {
-    s.replace("'", "''")
+    s.replace('\'', "''")
+}
+
+/// Build the search_messages SQL. Matching runs on the dedicated tsvector
+/// column messages.search_tsv (GIN index idx_messages_search_tsv), so the
+/// query is index-driven by construction: it never depends on ANALYZE /
+/// planner statistics and never ILIKE-scans or detoasts the TOAST-heavy
+/// `content` column. The user query is inlined as a constant argument of
+/// plainto_tsquery() so the planner const-folds it and picks the GIN bitmap
+/// path even with cold statistics.
+///
+/// Semantics note (conscious migration): keyword matching is word-level
+/// full-text search (english stemming, stopword removal, implicit AND of
+/// terms) instead of raw ILIKE substring matching. Punctuation (underscore,
+/// dash, dot) splits tokens on the index side exactly as on the query side,
+/// so identifiers such as `search_messages`, `v0.1.7` or `deploy.py` remain
+/// findable. Result ordering is unchanged (newest first, created_at DESC).
+fn build_search_messages_sql(query: &str, channel_id: Option<&str>, limit: i64) -> String {
+    let q = sql_quote(query);
+    let tsq = format!("plainto_tsquery('english', '{q}')");
+    // Two-stage, bounded-by-construction shape:
+    //  stage 1 (inner): find the newest `limit` matching message IDs using the
+    //    tsvector GIN index (idx_messages_search_tsv) - reads only search_tsv
+    //    (a generated tsvector of the lean, capped searchable content), never
+    //    the TOAST-heavy messages.content column, so cost is proportional to
+    //    the number of matching postings, not the table size, and it works
+    //    with cold/stale planner stats.
+    //  stage 2 (outer): fetch full rows (content for the preview) only for
+    //    those <= `limit` winners, so giant tool outputs are detoasted at most
+    //    `limit` times per search.
+    match channel_id {
+        Some(cid) => {
+            let cid = sql_quote(cid);
+            format!(
+                "SELECT m.id, m.role, m.content FROM messages m              WHERE m.id IN (                  SELECT ms.id FROM messages ms                  JOIN threads t ON t.id = ms.thread_id                  WHERE t.channel_id = '{cid}'                    AND ms.search_tsv @@ {tsq}                  ORDER BY ms.created_at DESC, ms.id DESC                  LIMIT {limit}              )              ORDER BY m.created_at DESC, m.id DESC              LIMIT {limit}"
+            )
+        }
+        None => format!(
+            "SELECT id, role, content FROM messages              WHERE id IN (                  SELECT id FROM messages                  WHERE search_tsv @@ {tsq}                  ORDER BY created_at DESC, id DESC                  LIMIT {limit}              )              ORDER BY created_at DESC, id DESC              LIMIT {limit}"
+        ),
+    }
 }
 
 async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, bool)> {
@@ -88,37 +127,12 @@ async fn handle_search_messages(pool: &PgPool, args: &Value) -> Result<(String, 
     let limit = args["limit"].as_i64().unwrap_or(10).min(50);
     let channel_id = args["channel_id"].as_str().map(|s| s.to_string());
 
-    // The pattern is inlined as a SQL literal on purpose. PostgreSQL can use
-    // the pg_trgm GIN index (idx_messages_content_trgm) for ILIKE only when
-    // the pattern is a constant at plan time. With the old bound parameter
-    // (content ILIKE '%' || $1 || '%') the planner cannot extract trigrams,
-    // so it falls back to a generic plan that walks messages newest-first
-    // through the created_at index and detoasts every row until it finds a
-    // match: rare keywords took ~26s on the large messages table. Escaping
-    // only single quotes keeps the exact matching semantics of the bound
-    // pattern (default backslash ESCAPE, % and _ wildcards unchanged) while
-    // making the pattern visible to the planner.
-    let pattern = sql_quote(query);
-    let pattern = format!("%{pattern}%");
-
-    let results: Vec<SearchResult> = if let Some(cid) = channel_id {
-        let cid = sql_quote(&cid);
-        let sql = format!(
-            "SELECT m.id, m.role, m.content FROM messages m              JOIN threads t ON t.id = m.thread_id              WHERE t.channel_id = '{cid}'                AND m.content ILIKE '{pattern}'              ORDER BY m.created_at DESC              LIMIT {limit}"
-        );
+    let sql = build_search_messages_sql(query, channel_id.as_deref(), limit);
+    let results: Vec<SearchResult> =
         sqlx::query_as::<_, SearchResult>(sqlx::AssertSqlSafe(sql.as_str()))
             .fetch_all(pool)
             .await
-            .map_err(|e: sqlx::Error| anyhow::anyhow!("Database query failed: {e}"))?
-    } else {
-        let sql = format!(
-            "SELECT id, role, content FROM messages              WHERE content ILIKE '{pattern}'              ORDER BY created_at DESC              LIMIT {limit}"
-        );
-        sqlx::query_as::<_, SearchResult>(sqlx::AssertSqlSafe(sql.as_str()))
-            .fetch_all(pool)
-            .await
-            .map_err(|e: sqlx::Error| anyhow::anyhow!("Database query failed: {e}"))?
-    };
+            .map_err(|e: sqlx::Error| anyhow::anyhow!("Database query failed: {e}"))?;
 
     if results.is_empty() {
         return Ok(("No matching messages found.".to_string(), false));
@@ -1395,4 +1409,100 @@ search_messages)."
     };
 
     run_server_with_config(server_info, tools, on_configure).await
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests: search_messages SQL builder regression (DB-free)
+// ---------------------------------------------------------------------------
+// These tests pin the rearchitected query shape: the tool must search the
+// dedicated tsvector column (messages.search_tsv, GIN index
+// idx_messages_search_tsv) via a plainto_tsquery match - NEVER an ILIKE over
+// the TOAST-heavy messages.content column. They fail on the pre-fix ILIKE
+// implementation and protect the "index-driven by construction" property.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sql_quote_doubles_only_single_quotes() {
+        assert_eq!(sql_quote("it's"), "it''s");
+        assert_eq!(sql_quote("no quotes"), "no quotes");
+        assert_eq!(sql_quote("a'b'c"), "a''b''c");
+    }
+
+    #[test]
+    fn search_sql_uses_tsvector_not_content_ilike() {
+        let sql = build_search_messages_sql("deploy telegram", None, 10);
+        assert!(
+            sql.contains("search_tsv @@ plainto_tsquery('english', 'deploy telegram')"),
+            "SQL must match search_tsv with a plainto_tsquery literal: {sql}"
+        );
+        assert!(
+            !sql.contains("content ILIKE"),
+            "SQL must not ILIKE over messages.content: {sql}"
+        );
+        assert!(
+            !sql.to_lowercase().contains(" idx_messages_content_trgm"),
+            "must not reference the old content trigram path: {sql}"
+        );
+        assert!(
+            sql.trim_end().ends_with("LIMIT 10"),
+            "result must stay bounded by LIMIT: {sql}"
+        );
+        assert!(
+            !sql.contains("threads"),
+            "non-channel search must not join threads: {sql}"
+        );
+    }
+
+    #[test]
+    fn search_sql_channel_variant_joins_threads() {
+        let sql = build_search_messages_sql("omnidev", Some("telegram"), 25);
+        assert!(
+            sql.contains("JOIN threads t ON t.id = ms.thread_id"),
+            "channel search must join threads in the candidate stage: {sql}"
+        );
+        assert!(
+            sql.contains("t.channel_id = 'telegram'"),
+            "channel filter must be present: {sql}"
+        );
+        assert!(
+            sql.contains("search_tsv @@ plainto_tsquery('english', 'omnidev')"),
+            "tsvector match must be present: {sql}"
+        );
+        assert!(
+            sql.trim_end().ends_with("LIMIT 25"),
+            "outer fetch must stay bounded by LIMIT: {sql}"
+        );
+        assert!(
+            sql.contains("ms.content") || sql.contains("m.content"),
+            "content must be selected only for the bounded outer fetch: {sql}"
+        );
+    }
+
+    #[test]
+    fn search_sql_escapes_query_literal() {
+        let sql = build_search_messages_sql("o'brien", None, 10);
+        assert!(
+            sql.contains("plainto_tsquery('english', 'o''brien')"),
+            "single quotes in query must be escaped: {sql}"
+        );
+    }
+
+    #[test]
+    fn search_sql_escapes_channel_literal() {
+        let sql = build_search_messages_sql("x", Some("it's"), 10);
+        assert!(
+            sql.contains("t.channel_id = 'it''s'"),
+            "single quotes in channel must be escaped: {sql}"
+        );
+    }
+
+    #[test]
+    fn search_sql_caps_limit_at_call_site_default() {
+        // handle_search_messages caps limit to 50; the builder receives the
+        // already-capped value. Assert the builder honors whatever it gets.
+        let sql = build_search_messages_sql("deploy", None, 50);
+        assert!(sql.trim_end().ends_with("LIMIT 50"), "{sql}");
+    }
 }

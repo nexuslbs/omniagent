@@ -147,6 +147,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     create_tables(pool).await?;
     create_indexes(pool).await?;
     create_vector_support(pool).await?;
+    create_search_support(pool).await?;
     create_triggers(pool).await?;
     migrate_channels_to_yml(pool).await?;
 
@@ -1035,6 +1036,57 @@ async fn create_vector_support(pool: &PgPool) -> Result<()> {
         tracing::warn!("[migration] pgvector not available: skipping vector column");
     }
 
+    Ok(())
+}
+
+// -- Message keyword search: tsvector FTS column + GIN (by-construction index) --
+// search_messages is served from a dedicated inverted index (tsvector GIN on
+// messages.search_tsv) so keyword lookups are index-driven regardless of
+// planner statistics (no ANALYZE dependency) and never scan or detoast the
+// TOAST-heavy content column. messages_searchable_content() keeps the
+// searchable text lean: messages longer than the cap contribute only their
+// head and tail (both ends stay findable), so giant tool-output blobs cannot
+// bloat the index or the per-row tsvector.
+async fn create_search_support(pool: &PgPool) -> Result<()> {
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION messages_searchable_content(content text)
+        RETURNS text
+        LANGUAGE sql IMMUTABLE PARALLEL SAFE
+        AS $$
+            SELECT CASE
+                WHEN content IS NULL THEN ''
+                WHEN char_length(content) <= 20000 THEN content
+                ELSE left(content, 10000) || E'\n[...]\n' || right(content, 10000)
+            END
+        $$;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        ALTER TABLE messages
+        ADD COLUMN IF NOT EXISTS search_tsv tsvector
+        GENERATED ALWAYS AS (to_tsvector('english'::regconfig, messages_searchable_content(content))) STORED;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_messages_search_tsv
+        ON messages USING gin (search_tsv);
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    tracing::info!(
+        "[migration] messages.search_tsv (tsvector) + GIN index ready for FTS keyword search"
+    );
     Ok(())
 }
 
