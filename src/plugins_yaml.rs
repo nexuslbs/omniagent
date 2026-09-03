@@ -349,6 +349,22 @@ pub fn set_entry_with_source(
     Ok(entry)
 }
 
+/// Returns the existing YAML config of a plugin, or `{}` when the plugin has no
+/// YAML entry. Callers that rewrite a YAML entry (install / download / enable /
+/// disable) must pass this value through so a rewrite never wipes previously
+/// saved user configuration (e.g. a platform bot_token).
+pub fn existing_config_or_default(
+    data_dir: &str,
+    pt: &PluginYamlType,
+    name: &str,
+) -> serde_json::Value {
+    get_entry(data_dir, pt, name)
+        .ok()
+        .flatten()
+        .map(|e| e.config)
+        .unwrap_or(serde_json::json!({}))
+}
+
 /// Get a plugin entry by searching all three YAML types, returning the entry and its type.
 pub fn get_entry_with_type(
     data_dir: &str,
@@ -846,12 +862,18 @@ fn build_plugin_detail(
                         if first_word.contains('/') || first_word.contains('\\') {
                             return true;
                         }
-                        // Bare binary names like "mcp-server-ssh" or "python3" are NOT
-                        // source code: they're either pre-compiled binaries or script runners.
-                        // Known runners are checked by looking at the first word's characteristics:
-                        // - Known script runners always have extensions or are well-known names
-                        // - Plugin binaries follow the "mcp-server-*" or similar conventions
-                        // We return false here: bare binary name = no source code.
+                        // Bare first word: either a precompiled binary name
+                        // ("mcp-server-ssh") or a bare script runner ("python3", "node").
+                        // Source code is present when the entrypoint arguments reference an
+                        // actual file in the plugin dir (e.g. {"command": "python3",
+                        // "args": ["platform.py"]}) or the dir contains source files by
+                        // extension (platform.py). Only a bare binary with NO source files
+                        // stays "no source code".
+                        if entrypoint_references_file_in_dir(dir_path, ep)
+                            || has_source_file_by_extension(dir_path)
+                        {
+                            return true;
+                        }
                         return false;
                     }
                 }
@@ -1015,6 +1037,27 @@ fn has_source_file_by_extension(dir_path: &std::path::Path) -> bool {
             } else {
                 false
             }
+        })
+}
+
+/// Returns true when an entrypoint's arguments (or the tokens after the first
+/// word of its command) reference an existing file inside the plugin dir, e.g.
+/// {"command": "python3", "args": ["platform.py"]} or "python3 platform.py".
+/// Absolute paths, ".." traversal and flag tokens never count as in-dir files.
+fn entrypoint_references_file_in_dir(
+    dir_path: &std::path::Path,
+    ep: &crate::plugin::PluginEntrypoint,
+) -> bool {
+    ep.command
+        .split_whitespace()
+        .skip(1)
+        .chain(ep.args.iter().map(|s| s.as_str()))
+        .any(|token| {
+            let t = token.trim();
+            if t.is_empty() || t.starts_with('-') || t.starts_with('/') || t.contains("..") {
+                return false;
+            }
+            dir_path.join(t).is_file()
         })
 }
 
@@ -2186,6 +2229,161 @@ providers:
         assert_eq!(
             file_path(path, &PluginYamlType::Provider),
             PathBuf::from(path).join("config").join("plugins.yml")
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // has_source_code / is_script regression (telegram-style script plugin)
+    // ------------------------------------------------------------------
+
+    fn test_manifest(command: &str, args: Vec<&str>) -> PluginManifest {
+        use crate::plugin::PluginType;
+        PluginManifest {
+            name: "test-plugin".to_string(),
+            version: "1.0.0".to_string(),
+            plugin_type: PluginType::Platform,
+            description: None,
+            entrypoint: Some(crate::plugin::PluginEntrypoint {
+                command: command.to_string(),
+                args: args.iter().map(|s| s.to_string()).collect(),
+                transport: "stdio".to_string(),
+                url: None,
+            }),
+            capabilities: None,
+            config_schema: Vec::new(),
+            env: std::collections::HashMap::new(),
+            default_base_url: None,
+            api_mode: None,
+            api_modes: None,
+        }
+    }
+
+    fn write_plugin_script(dir: &std::path::Path, name: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(name), "#!/usr/bin/env python3\nprint('plugin')\n").unwrap();
+    }
+
+    #[test]
+    fn test_build_plugin_detail_script_runner_with_source_file() {
+        // Telegram-like plugin: {"command":"python3","args":["platform.py"]}
+        // with platform.py present -> has_source_code=true, is_script=true.
+        let (d, data_dir) = test_data_dir();
+        let plugin_dir = d.path().join("plugins/telegram");
+        write_plugin_script(&plugin_dir, "platform.py");
+        let manifest = test_manifest("python3", vec!["platform.py"]);
+        let detail = build_plugin_detail(
+            &manifest,
+            "remote",
+            None,
+            Some("telegram"),
+            Some(plugin_dir.to_str().unwrap()),
+            &data_dir,
+            false,
+        );
+        assert!(
+            detail.has_source_code,
+            "python3 script plugin must have source code"
+        );
+        assert!(detail.is_script, "python3 script plugin must be a script");
+    }
+
+    #[test]
+    fn test_build_plugin_detail_script_runner_arg_references_file() {
+        // Entrypoint args point at an existing file with no source extension:
+        // the arg-file reference (not the extension scan) must set has_source_code.
+        let (d, data_dir) = test_data_dir();
+        let plugin_dir = d.path().join("plugins/argref");
+        write_plugin_script(&plugin_dir, "entry_point");
+        let manifest = test_manifest("python3", vec!["entry_point"]);
+        let detail = build_plugin_detail(
+            &manifest,
+            "remote",
+            None,
+            None,
+            Some(plugin_dir.to_str().unwrap()),
+            &data_dir,
+            false,
+        );
+        assert!(
+            detail.has_source_code,
+            "arg-referenced script file must count as source"
+        );
+        assert!(detail.is_script);
+    }
+
+    #[test]
+    fn test_build_plugin_detail_bare_binary_without_source() {
+        // A bare precompiled binary with no source files stays "no source code".
+        let (d, data_dir) = test_data_dir();
+        let plugin_dir = d.path().join("plugins/mcp-server-cron");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("mcp-server-cron"),
+            b"ELF-binary-placeholder",
+        )
+        .unwrap();
+        let manifest = test_manifest("mcp-server-cron", vec![]);
+        let detail = build_plugin_detail(
+            &manifest,
+            "remote",
+            None,
+            None,
+            Some(plugin_dir.to_str().unwrap()),
+            &data_dir,
+            false,
+        );
+        assert!(
+            !detail.has_source_code,
+            "bare binary without source files stays false"
+        );
+        assert!(!detail.is_script);
+    }
+
+    #[test]
+    fn test_build_plugin_detail_api_mode_no_source() {
+        // API-mode providers keep has_source_code=false regardless of dir files.
+        let (d, data_dir) = test_data_dir();
+        let plugin_dir = d.path().join("plugins/apiprov");
+        write_plugin_script(&plugin_dir, "platform.py");
+        let mut manifest = test_manifest("python3", vec!["platform.py"]);
+        manifest.api_mode = Some("chat_completions".to_string());
+        let detail = build_plugin_detail(
+            &manifest,
+            "remote",
+            None,
+            None,
+            Some(plugin_dir.to_str().unwrap()),
+            &data_dir,
+            false,
+        );
+        assert!(
+            !detail.has_source_code,
+            "api_mode providers have no source code"
+        );
+        assert!(!detail.is_script);
+    }
+
+    #[test]
+    fn test_existing_config_or_default_preserves_config() {
+        // Rewriting a YAML entry (Install/Download/Update flows) must keep the
+        // previously saved config: the helper returns it instead of {}.
+        let (_d, path) = test_data_dir();
+        let pt = PluginYamlType::Platform;
+        assert_eq!(
+            existing_config_or_default(&path, &pt, "telegram"),
+            serde_json::json!({})
+        );
+        set_entry(
+            &path,
+            &pt,
+            "telegram",
+            true,
+            serde_json::json!({"bot_token": "12345"}),
+        )
+        .unwrap();
+        assert_eq!(
+            existing_config_or_default(&path, &pt, "telegram")["bot_token"],
+            serde_json::json!("12345")
         );
     }
 }

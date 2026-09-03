@@ -128,6 +128,9 @@ pub(crate) async fn install_plugin_handler(
     }
 
     // 4. Register in YAML with enabled=true only after successful compile
+    // Preserve any existing YAML config: (re)install must not wipe user
+    // configuration (e.g. a platform bot_token).
+    let existing_config = plugins_yaml::existing_config_or_default(data_dir, &yaml_type, &name);
     info!(
         "Install: registering plugin '{}' in YAML with enabled=true",
         name
@@ -138,7 +141,7 @@ pub(crate) async fn install_plugin_handler(
         &name,
         true,
         yaml_source,
-        serde_json::json!({}),
+        existing_config,
     ) {
         Ok(_entry) => {
             // 5. Hot-reload the tool plugin so the MCP server starts immediately
@@ -599,19 +602,22 @@ pub(crate) async fn download_plugin_handler(
         );
     }
 
-    // Ensure YAML entry has the remote source field, preserving existing enabled state
+    // Ensure YAML entry has the remote source field, preserving existing enabled
+    // state AND config: Download/Update must never wipe user configuration
+    // (e.g. a platform bot_token) while refreshing the source.
     let current_enabled = plugins_yaml::get_entry(data_dir, &yaml_type, &name)
         .ok()
         .flatten()
         .map(|e| e.enabled)
         .unwrap_or(true);
+    let existing_config = plugins_yaml::existing_config_or_default(data_dir, &yaml_type, &name);
     if let Err(e) = plugins_yaml::set_entry_with_source(
         data_dir,
         &yaml_type,
         &name,
         current_enabled,
         "remote",
-        serde_json::json!({}),
+        existing_config,
     ) {
         tracing::warn!("[plugins] Download: failed to set YAML entry: {:?}", e);
     }
