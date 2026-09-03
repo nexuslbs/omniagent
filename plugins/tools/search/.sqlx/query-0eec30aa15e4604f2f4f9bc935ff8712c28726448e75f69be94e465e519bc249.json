@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,\n            input_tokens, cached_tokens, output_tokens, duration_ms,\n            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\",\n            COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"started_at\",\n            COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"ended_at\",\n            terminal,\n            plan,\n            parent_id,\n            iterations,\n            workflow_step,\n            template\n        FROM threads t\n        WHERE t.channel_id = $1\n          AND t.profile = $2\n          AND t.cause = 'user'\n          AND t.status = 'pending'\n          AND NOT t.terminal\n          AND t.id <> $3\n          AND ((t.parent_id IS NOT NULL AND t.parent_id = (SELECT parent_id FROM threads WHERE id = $4))\n               OR t.parent_id = $5)\n        ORDER BY t.id ASC\n        ",
+  "query": "\n        SELECT\n            id, status, cause, channel_id, profile, provider, model, task_id, schedule_task_id,\n            input_tokens, cached_tokens, output_tokens, duration_ms,\n            COALESCE(TO_CHAR(created_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"created_at\",\n            COALESCE(TO_CHAR(started_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"started_at\",\n            COALESCE(TO_CHAR(ended_at, 'YYYY-MM-DD\"T\"HH24' || CHR(58) || 'MI' || CHR(58) || 'SS.US\"Z\"'), '') AS \"ended_at\",\n            terminal,\n            plan,\n            parent_id,\n            iterations,\n            workflow_step,\n            template\n        FROM threads t\n        WHERE t.channel_id = $1\n          AND t.profile = $2\n          AND t.cause = 'user'\n          AND t.status = 'pending'\n          AND NOT t.terminal\n          AND t.id <> $3\n          AND (\n               t.parent_id = $4\n               OR (t.parent_id IS NOT NULL AND t.parent_id = (SELECT parent_id FROM threads WHERE id = $5))\n               OR EXISTS (\n                    SELECT 1\n                    FROM messages r0, messages p0\n                    WHERE r0.thread_id = $6 AND r0.thread_sequence = 0\n                      AND p0.thread_id = t.id AND p0.thread_sequence = 0\n                      AND r0.metadata->>'root_id' IS NOT NULL\n                      AND r0.metadata->>'root_id' <> ''\n                      AND p0.metadata->>'root_id' = r0.metadata->>'root_id'\n               )\n          )\n        ORDER BY t.id ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -237,6 +237,7 @@
         "Text",
         "Int8",
         "Int8",
+        "Int8",
         "Int8"
       ]
     },
@@ -265,5 +266,5 @@
       true
     ]
   },
-  "hash": "939fec8e3f8cfad4e1812779344c9c48274606aaa5f938d54516ef1ead1b3b56"
+  "hash": "0eec30aa15e4604f2f4f9bc935ff8712c28726448e75f69be94e465e519bc249"
 }
