@@ -1436,6 +1436,38 @@ pub fn list_plugins(data_dir: &str) -> AppResult<Vec<PluginDetail>> {
 /// Get a single plugin by name and type, combining disk discovery with YAML state.
 /// Returns the PRIMARY source for that plugin name based on YAML configuration,
 /// unlike list_plugins which returns all sources with is_duplicated flags.
+/// Read the custom HTTP headers declared in a provider plugin's own config
+/// (`config.headers`). Same schema as models.yml `headers`: each value is a
+/// literal string or a typed value (`{ type: channel }` -> the current
+/// channel name at request time, `{ type: profile }` -> the current profile
+/// name). These headers act as the base layer for the provider; models.yml
+/// provider/model headers override them per header name. Core stays provider
+/// agnostic: this is generic plumbing any provider plugin may use.
+pub fn provider_plugin_config_headers(
+    data_dir: &str,
+    provider_name: &str,
+) -> BTreeMap<String, crate::models_yaml::HeaderValue> {
+    let mut out = BTreeMap::new();
+    let Ok(Some(detail)) = get_plugin(data_dir, provider_name, &PluginYamlType::Provider) else {
+        return out;
+    };
+    if let Some(headers) = detail.config.get("headers").and_then(|v| v.as_object()) {
+        for (name, value) in headers {
+            match serde_json::from_value::<crate::models_yaml::HeaderValue>(value.clone()) {
+                Ok(spec) => {
+                    out.insert(name.clone(), spec);
+                }
+                Err(_) => tracing::warn!(
+                    "[plugins] provider '{}' config header {:?}: expected a literal string or {{type: channel|profile}}, ignoring",
+                    provider_name,
+                    name
+                ),
+            }
+        }
+    }
+    out
+}
+
 pub fn get_plugin(
     data_dir: &str,
     name: &str,

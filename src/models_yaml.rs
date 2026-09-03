@@ -122,6 +122,14 @@ pub struct ProviderOverride {
     /// (same expansion path as plugins.yml api_key). Overrides the plugin config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+
+    /// Custom HTTP headers attached to every request to this provider. Each
+    /// value is a literal string or a typed value resolved at request time
+    /// (`{ type: channel }` -> channel name, `{ type: profile }` -> profile
+    /// name). Provider plugin config `headers` are the base layer; per-model
+    /// `model_config.<model>.headers` override provider-level ones per name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, HeaderValue>>,
     /// Provider-level token budget (soft). Precedence: model_config > provider > settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget_soft: Option<usize>,
@@ -160,6 +168,74 @@ pub struct ModelConfig {
     /// Per-model escalated output budget on truncation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens_on_truncation: Option<u32>,
+    /// Per-model custom HTTP headers (highest precedence over provider-level
+    /// `headers` for the same header name). Same typed-value schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, HeaderValue>>,
+}
+
+/// A custom HTTP header value declared for a provider (models.yml `headers`
+/// or a provider plugin's `config.headers`).
+///
+/// A header value is either a plain literal string or one of a small set of
+/// typed values that core resolves at request time against the running
+/// thread's context:
+///
+/// - `{ type: channel }` -> the current channel name (e.g. `main`)
+/// - `{ type: profile }` -> the current profile name
+///
+/// Core stays provider/plugin agnostic: providers simply declare headers and
+/// core attaches the resolved values to every outgoing request.
+///
+/// Example (models.yml):
+///
+/// ```yaml
+/// headers:
+///   x-opencode-session: { type: channel }
+///   x-custom-flag: "some literal"
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum HeaderValue {
+    /// A literal value, taken verbatim from the config.
+    Literal(String),
+    /// A typed value resolved at request time.
+    Typed {
+        #[serde(rename = "type")]
+        kind: HeaderKind,
+    },
+}
+
+/// The typed header value kinds core knows how to resolve at request time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HeaderKind {
+    /// Resolves to the current channel name.
+    Channel,
+    /// Resolves to the current profile name.
+    Profile,
+}
+
+impl HeaderValue {
+    /// Resolve this header value against the request-time context.
+    ///
+    /// Literal values always resolve. `channel`/`profile` typed values need
+    /// the channel/profile name of the running thread; when that context is
+    /// absent they cannot be resolved and `None` is returned (the caller then
+    /// simply omits the header).
+    pub fn resolve(
+        &self,
+        channel_name: Option<&str>,
+        profile_name: Option<&str>,
+    ) -> Option<String> {
+        match self {
+            HeaderValue::Literal(value) => Some(value.clone()),
+            HeaderValue::Typed { kind } => match kind {
+                HeaderKind::Channel => channel_name.map(str::to_string),
+                HeaderKind::Profile => profile_name.map(str::to_string),
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +435,10 @@ pub struct EffectiveModelConfig {
     pub token_budget_hard: usize,
     pub max_tokens: Option<u32>,
     pub max_tokens_on_truncation: Option<u32>,
+    /// Merged custom HTTP headers (model_config.<model> > providers.<name>).
+    /// Values are still typed; resolve with [`resolve_header_specs`] against
+    /// the channel/profile context at request time.
+    pub headers: Vec<(String, HeaderValue)>,
 }
 
 /// Exact per-model api_mode override from models.yml (model_config), if any.
@@ -401,6 +481,21 @@ pub fn resolve_effective(
         .map(|m| m.supports_reasoning)
         .unwrap_or(false);
 
+    // Custom headers: merge per header NAME. Precedence for the same name:
+    // model_config.<model> > providers.<provider>. Provider plugin config
+    // headers are merged separately by the caller as the base layer.
+    let mut effective_headers: BTreeMap<String, HeaderValue> = BTreeMap::new();
+    if let Some(h) = ov.and_then(|p| p.headers.as_ref()) {
+        for (name, spec) in h {
+            effective_headers.insert(name.clone(), spec.clone());
+        }
+    }
+    if let Some(h) = mc.and_then(|c| c.headers.as_ref()) {
+        for (name, spec) in h {
+            effective_headers.insert(name.clone(), spec.clone());
+        }
+    }
+
     EffectiveModelConfig {
         api_mode: mc
             .and_then(|c| c.api_mode.clone())
@@ -426,7 +521,26 @@ pub fn resolve_effective(
             .and_then(|c| c.max_tokens_on_truncation)
             .or(ov.and_then(|p| p.max_tokens_on_truncation))
             .or(defaults.max_tokens_on_truncation),
+        headers: effective_headers.into_iter().collect(),
     }
+}
+
+/// Resolve a list of (header name, typed value) specs into concrete header
+/// pairs using the request-time context. Literal values pass through; typed
+/// `channel`/`profile` values resolve to the channel/profile name when that
+/// context is available and are skipped otherwise. Header order is preserved.
+pub fn resolve_header_specs(
+    specs: &[(String, HeaderValue)],
+    channel_name: Option<&str>,
+    profile_name: Option<&str>,
+) -> Vec<(String, String)> {
+    specs
+        .iter()
+        .filter_map(|(name, spec)| {
+            spec.resolve(channel_name, profile_name)
+                .map(|value| (name.clone(), value))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -519,6 +633,140 @@ pub fn validate_models_file(file: &ModelsFile) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_header_value_parses_literal_and_typed() {
+        let lit: crate::models_yaml::HeaderValue =
+            serde_json::from_value(serde_json::json!("some literal")).unwrap();
+        assert_eq!(
+            lit,
+            crate::models_yaml::HeaderValue::Literal("some literal".into())
+        );
+        let chan: crate::models_yaml::HeaderValue =
+            serde_json::from_value(serde_json::json!({"type": "channel"})).unwrap();
+        assert_eq!(
+            chan,
+            crate::models_yaml::HeaderValue::Typed {
+                kind: crate::models_yaml::HeaderKind::Channel
+            }
+        );
+        let prof: crate::models_yaml::HeaderValue =
+            serde_json::from_value(serde_json::json!({"type": "profile"})).unwrap();
+        assert_eq!(
+            prof,
+            crate::models_yaml::HeaderValue::Typed {
+                kind: crate::models_yaml::HeaderKind::Profile
+            }
+        );
+    }
+
+    #[test]
+    fn test_header_value_resolution_literal_channel_profile() {
+        let literal = HeaderValue::Literal("fixed".into());
+        let channel = HeaderValue::Typed {
+            kind: HeaderKind::Channel,
+        };
+        let profile = HeaderValue::Typed {
+            kind: HeaderKind::Profile,
+        };
+        assert_eq!(
+            literal.resolve(Some("main"), Some("omni")),
+            Some("fixed".into())
+        );
+        assert_eq!(literal.resolve(None, None), Some("fixed".into()));
+        assert_eq!(
+            channel.resolve(Some("main"), Some("omni")),
+            Some("main".into())
+        );
+        assert_eq!(channel.resolve(None, Some("omni")), None);
+        assert_eq!(
+            profile.resolve(Some("main"), Some("omni")),
+            Some("omni".into())
+        );
+        assert_eq!(profile.resolve(Some("main"), None), None);
+    }
+
+    #[test]
+    fn test_resolve_header_specs_skips_typed_without_context() {
+        let specs = vec![
+            ("x-static".to_string(), HeaderValue::Literal("v".into())),
+            (
+                "x-chan".to_string(),
+                HeaderValue::Typed {
+                    kind: HeaderKind::Channel,
+                },
+            ),
+            (
+                "x-prof".to_string(),
+                HeaderValue::Typed {
+                    kind: HeaderKind::Profile,
+                },
+            ),
+        ];
+        let with_ctx = crate::models_yaml::resolve_header_specs(&specs, Some("main"), Some("omni"));
+        assert_eq!(
+            with_ctx,
+            vec![
+                ("x-static".to_string(), "v".to_string()),
+                ("x-chan".to_string(), "main".to_string()),
+                ("x-prof".to_string(), "omni".to_string()),
+            ]
+        );
+        let no_ctx = crate::models_yaml::resolve_header_specs(&specs, None, None);
+        assert_eq!(no_ctx, vec![("x-static".to_string(), "v".to_string())]);
+    }
+
+    #[test]
+    fn test_resolve_effective_headers_merge_and_resolve_with_context() {
+        let dir = std::env::temp_dir().join(format!("omnidev-modelsyml-{}", std::process::id()));
+        let cfg_dir = dir.join("config");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("models.yml"),
+            r#"
+providers:
+  p1:
+    plugin: false
+    api_mode: "chat_completions"
+    headers:
+      x-chan: { type: channel }
+      x-static: "from-provider"
+    model_config:
+      m1:
+        headers:
+          x-static: "from-model"
+          x-prof: { type: profile }
+"#,
+        )
+        .unwrap();
+        let defaults = crate::models_yaml::ModelGlobalDefaults {
+            token_budget_soft: 100,
+            token_budget_hard: 200,
+            max_tokens: None,
+            max_tokens_on_truncation: None,
+        };
+        let eff =
+            crate::models_yaml::resolve_effective(dir.to_str().unwrap(), "p1", "m1", &defaults);
+        let mut resolved =
+            crate::models_yaml::resolve_header_specs(&eff.headers, Some("main"), Some("omni"));
+        resolved.sort();
+        assert_eq!(
+            resolved,
+            vec![
+                ("x-chan".to_string(), "main".to_string()),
+                ("x-prof".to_string(), "omni".to_string()),
+                ("x-static".to_string(), "from-model".to_string()),
+            ]
+        );
+        assert_eq!(
+            resolved
+                .iter()
+                .find(|(k, _)| k == "x-static")
+                .map(|(_, v)| v),
+            Some(&"from-model".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     use super::*;
     use std::io::Write;
 

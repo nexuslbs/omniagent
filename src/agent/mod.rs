@@ -107,6 +107,9 @@ impl Agent {
                 .get(&provider_name)
                 .map(|m| m.supports_reasoning)
                 .unwrap_or(false),
+            // Global (non-thread) client: no channel/profile context here, so
+            // no custom headers are pre-resolved for it.
+            extra_headers: vec![],
         };
         let llm = Arc::new(LLMClient::new(llm_config));
         Self {

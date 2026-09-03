@@ -1100,6 +1100,7 @@ evaluate: if the task was completed, call the completion tool.",
                 .get(&provider_name)
                 .map(|m| m.supports_reasoning)
                 .unwrap_or(false),
+            extra_headers: vec![],
         };
         let llm = LLMClient::new(llm_config);
 

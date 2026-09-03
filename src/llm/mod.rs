@@ -426,6 +426,11 @@ pub fn resolve_llm_api_key(provider_key: Option<&str>) -> AppResult<String> {
         ))
 }
 
+/// Default User-Agent sent on every outgoing provider HTTP request so that
+/// providers can attribute traffic to omniagent (some providers flag or
+/// reject clients that send no user agent at all).
+pub const DEFAULT_USER_AGENT: &str = concat!("omniagent/", env!("CARGO_PKG_VERSION"));
+
 /// Configuration loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct LLMConfig {
@@ -441,6 +446,12 @@ pub struct LLMConfig {
     /// Whether the provider supports reasoning/thinking tokens.
     /// Set from provider metadata at config construction time.
     pub supports_reasoning: bool,
+    /// Additional HTTP headers attached to every provider request. Values are
+    /// already resolved by the caller: typed config values (channel / profile)
+    /// are turned into concrete strings before the client is built. A default
+    /// User-Agent identifying omniagent is always sent first; an entry here
+    /// overrides any header (including the User-Agent) by name.
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl LLMConfig {
@@ -483,6 +494,7 @@ impl LLMConfig {
             max_tokens: 8192,
             temperature: 0.7,
             supports_reasoning,
+            extra_headers: vec![],
         }
     }
 }
@@ -976,6 +988,27 @@ impl LLMClient {
     ///
     /// Before making the API call, a per-provider throttle permit is acquired
     /// to limit concurrent requests to the same provider.
+    /// Attach the default User-Agent plus the configured extra headers to a
+    /// request builder. Header names/values that are not valid HTTP header
+    /// material are skipped with a warning instead of failing the request.
+    fn with_provider_headers(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let mut req = req.header(reqwest::header::USER_AGENT, DEFAULT_USER_AGENT);
+        for (name, value) in &self.config.extra_headers {
+            let name_res = reqwest::header::HeaderName::from_bytes(name.as_bytes());
+            let value_res = <reqwest::header::HeaderValue as std::str::FromStr>::from_str(value);
+            match (name_res, value_res) {
+                (Ok(name), Ok(value)) => req = req.header(name, value),
+                _ => tracing::warn!(
+                    "[llm] skipping invalid custom header {:?}={:?} (provider {})",
+                    name,
+                    value,
+                    self.config.provider.0
+                ),
+            }
+        }
+        req
+    }
+
     pub async fn completion(&self, request: CompletionRequest) -> AppResult<CompletionResponse> {
         let start = std::time::Instant::now();
 
@@ -1109,11 +1142,13 @@ impl LLMClient {
         }
 
         let resp = send_with_transport_retry(
-            self.client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.config.api_key))
-                .header("Content-Type", "application/json")
-                .json(&body),
+            self.with_provider_headers(
+                self.client
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", self.config.api_key))
+                    .header("Content-Type", "application/json"),
+            )
+            .json(&body),
         )
         .await
         .ctx("Failed to send OpenAI-compatible completion request")?;
@@ -1334,6 +1369,8 @@ impl LLMClient {
             }
         }
 
+        let req = self.with_provider_headers(req);
+
         let resp = send_with_transport_retry(req.json(&body))
             .await
             .ctx("Failed to send Anthropic completion request")?;
@@ -1420,6 +1457,7 @@ mod tests {
             max_tokens: 8192,
             temperature: 0.7,
             supports_reasoning: false,
+            extra_headers: vec![],
         };
         let client = LLMClient::new(config);
         let request = CompletionRequest {
@@ -1975,6 +2013,7 @@ mod tests {
             max_tokens: 128,
             temperature: 0.0,
             supports_reasoning: false,
+            extra_headers: vec![],
         };
         let client = LLMClient::new(config);
         let request = CompletionRequest {
@@ -1998,6 +2037,78 @@ mod tests {
             count.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "429 must not be retried at the transport layer"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_completion_sends_default_ua_and_custom_headers() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        // Local HTTP/1.1 server that captures the raw request so the test can
+        // assert what headers the client actually sends on the wire.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let received: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let received2 = Arc::clone(&received);
+        let done = Arc::new(AtomicUsize::new(0));
+        let done2 = Arc::clone(&done);
+        std::thread::spawn(move || {
+            let mut stream = listener.incoming().next().expect("accept").expect("stream");
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            *received2.lock().unwrap() = String::from_utf8_lossy(&buf).to_string();
+            done2.store(1, Ordering::SeqCst);
+            let body = r#"{"id":"1","object":"chat.completion","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            let _ = stream.flush();
+        });
+
+        let config = LLMConfig {
+            provider: ProviderId::new("test-provider"),
+            api_mode: ApiMode::ChatCompletions,
+            api_key: "test-key".to_string(),
+            base_url: format!("http://{addr}"),
+            model: "test-model".to_string(),
+            max_tokens: 128,
+            temperature: 0.0,
+            supports_reasoning: false,
+            extra_headers: vec![
+                ("x-opencode-session".to_string(), "main".to_string()),
+                ("x-profile".to_string(), "omni".to_string()),
+            ],
+        };
+        let client = LLMClient::new(config);
+        let request = CompletionRequest {
+            messages: vec![ChatMessage::user("hi")],
+            max_tokens: Some(128),
+            temperature: 0.0,
+            stream: false,
+            tools: None,
+        };
+        let resp = client.completion(request).await.expect("completion ok");
+        assert_eq!(resp.content, "hi");
+        assert_eq!(done.load(Ordering::SeqCst), 1, "server never saw a request");
+        let raw = received.lock().unwrap().clone();
+        let lower = raw.to_ascii_lowercase();
+        assert!(
+            lower.contains("user-agent: omniagent/"),
+            "expected default User-Agent, got request: {raw}"
+        );
+        assert!(
+            lower.contains("x-opencode-session: main"),
+            "expected x-opencode-session: main header, got request: {raw}"
+        );
+        assert!(
+            lower.contains("x-profile: omni"),
+            "expected x-profile: omni header, got request: {raw}"
         );
     }
 }

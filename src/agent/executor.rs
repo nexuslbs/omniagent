@@ -103,6 +103,13 @@ pub async fn process_thread(
 
     let provider_name_val = provider_name.clone().unwrap_or_default();
     let model_name_val = model_name.clone().unwrap_or_default();
+
+    // Channel row (name, platform, resource) is fetched up front so custom
+    // provider headers of type `channel` can resolve to the channel name.
+    let channel = queries::get_channel_by_id(&cfg.pool, &thread.channel_id)
+        .await?
+        .unwrap_or_default();
+
     let per_thread_llm = {
         let base_url = crate::llm::resolve_default_base_url(&provider_name_val);
         // Effective API mode: models.yml model_config.<model>.api_mode first,
@@ -156,6 +163,28 @@ pub async fn process_thread(
                 _ => String::new(),
             },
         };
+
+        // Custom per-provider HTTP headers: base layer from the provider
+        // plugin config `headers` (same schema as models.yml), then models.yml
+        // provider/model headers override per header name. Channel/profile
+        // typed values resolve against the current channel and profile.
+        let header_specs: Vec<(String, crate::models_yaml::HeaderValue)> = {
+            let mut merged: std::collections::BTreeMap<String, crate::models_yaml::HeaderValue> =
+                crate::plugins_yaml::provider_plugin_config_headers(
+                    &cfg.ctx.data_dir,
+                    &provider_name_val,
+                );
+            for (name, spec) in eff_cfg.headers.clone() {
+                merged.insert(name, spec);
+            }
+            merged.into_iter().collect()
+        };
+        let extra_headers = crate::models_yaml::resolve_header_specs(
+            &header_specs,
+            Some(channel.name.as_str()),
+            Some(profile_name.as_str()),
+        );
+
         let llm_cfg = LLMConfig {
             provider: ProviderId::new(&provider_name_val),
             api_key,
@@ -165,13 +194,10 @@ pub async fn process_thread(
             max_tokens: eff_cfg.max_tokens.unwrap_or(8192),
             temperature: cfg.config_snapshot().temperature,
             supports_reasoning: eff_cfg.supports_reasoning,
+            extra_headers,
         };
         LLMClient::new(llm_cfg)
     };
-
-    let channel = queries::get_channel_by_id(&cfg.pool, &thread.channel_id)
-        .await?
-        .unwrap_or_default();
 
     // ── System-thread seq-0 delivery fix ──
     // For system-originated threads (kanban, cron) whose seq-0 cause message
