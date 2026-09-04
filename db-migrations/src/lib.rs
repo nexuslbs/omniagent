@@ -1060,7 +1060,13 @@ async fn create_search_support(pool: &PgPool) -> Result<()> {
                 ELSE left(content, 10000) || E'\n[...]\n' || right(content, 10000)
             END
         $$;
+        "#,
+    )
+    .execute(pool)
+    .await?;
 
+    sqlx::query(
+        r#"
         CREATE OR REPLACE FUNCTION messages_identifier_words(content text)
         RETURNS text
         LANGUAGE sql IMMUTABLE PARALLEL SAFE
