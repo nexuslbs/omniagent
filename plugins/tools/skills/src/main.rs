@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -368,7 +368,6 @@ fn get_skill_enabled(usage_data: &HashMap<String, Value>, name: &str, category: 
 // ---------------------------------------------------------------------------
 // Tool: view_skill
 // ---------------------------------------------------------------------------
-
 /// `view_skill`: read the full content of a skill by name.
 ///
 /// The agent is told which skills are available (via the prompt plugin's
@@ -377,13 +376,18 @@ fn get_skill_enabled(usage_data: &HashMap<String, Value>, name: &str, category: 
 /// This closes the loop: the agent can load the procedure and follow it.
 ///
 /// Accepts the skill name (case-insensitive, hyphens/underscores normalized),
-/// optionally scoped by category. Both storage layouts are supported:
+/// optionally scoped by category. Every layout list_skills can enumerate is
+/// supported:
+///   - `<skills>/<name>/SKILL.md`            (root-level skill directory)
+///   - `<skills>/<name>.md`                  (root-level flat file)
 ///   - `<skills>/<category>/<name>/SKILL.md` (directory layout)
-///   - `<skills>/<category>/<name>.md` (flat file layout)
+///   - `<skills>/<category>/<name>.md`       (flat file layout)
 ///
 /// Skills may live under either the GLOBAL skills root (`{omni_dir}/skills`)
 /// or the PROFILE-scoped root (`{omni_dir}/profiles/{profile}/skills` - where
-/// the prompt plugin lists them from). Both are searched.
+/// the prompt plugin lists them from). Both are searched, and a candidate
+/// matches by its frontmatter `name` (what list_skills reports) or by its
+/// directory/file name.
 fn handle_view_skill(args: Value, config: &Config, profile_name: &str) -> Result<(String, bool)> {
     let data_dir = &config.omni_dir;
 
@@ -406,70 +410,37 @@ fn handle_view_skill(args: Value, config: &Config, profile_name: &str) -> Result
         );
     }
 
-    // Normalize the requested name: lowercase, spaces → hyphens, strip a
+    // Normalize the requested name: lowercase, spaces to hyphens, strip a
     // trailing .md so both "docker-compose-usage" and "docker-compose-usage.md"
     // resolve.
-    let requested = name_arg
-        .trim()
-        .to_lowercase()
-        .replace(' ', "-")
-        .trim_end_matches(".md")
-        .to_string();
+    let requested = normalize_skill_name(name_arg);
 
     let mut found: Option<(String, String)> = None; // (path, content)
     for skills_root in &skills_roots {
         if !skills_root.exists() {
             continue;
         }
-        // Pattern 3: <root>/<name>.md - flat file directly in the skills
-        // root (no category subdirectory; the profile-scoped layout used by
-        // the prompt plugin).
-        let root_flat = skills_root.join(format!("{}.md", requested));
-        if root_flat.exists() {
-            let content = fs::read_to_string(&root_flat).map_err(|e| {
-                anyhow::anyhow!("Failed to read skill '{}': {}", root_flat.display(), e)
-            })?;
-            found = Some((root_flat.display().to_string(), content));
-            break;
-        }
-        // If a category was given, only look there; otherwise scan all
-        // category directories in this root.
-        let category_dirs: Vec<String> = if !category.is_empty() {
-            vec![category.to_string()]
-        } else {
-            let mut dirs: Vec<String> = fs::read_dir(skills_root)
-                .map_err(|e| anyhow::anyhow!("Failed to read skills directory: {}", e))?
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().is_dir())
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .collect();
-            dirs.sort();
-            dirs
-        };
-
-        for cat in &category_dirs {
-            if cat.starts_with('.') {
+        for (skill_file, skill_category, skill_name, path_name) in
+            enumerate_root_skills(skills_root)?
+        {
+            // Optional category scoping: when the caller passes the category
+            // list_skills reported, honour it (list reports the parent dir as
+            // category for root-level skill dirs too).
+            if !category.is_empty()
+                && normalize_skill_name(&skill_category) != normalize_skill_name(category)
+            {
                 continue;
             }
-            let cat_path = skills_root.join(cat);
-            // Pattern 1: <category>/<name>/SKILL.md
-            let dir_candidate = cat_path.join(&requested).join("SKILL.md");
-            if dir_candidate.exists() {
-                let content = fs::read_to_string(&dir_candidate).map_err(|e| {
-                    anyhow::anyhow!("Failed to read skill '{}': {}", dir_candidate.display(), e)
-                })?;
-                found = Some((dir_candidate.display().to_string(), content));
-                break;
+            let requested_matches = normalize_skill_name(&skill_name) == requested
+                || normalize_skill_name(&path_name) == requested;
+            if !requested_matches {
+                continue;
             }
-            // Pattern 2: <category>/<name>.md
-            let flat_candidate = cat_path.join(format!("{}.md", requested));
-            if flat_candidate.exists() {
-                let content = fs::read_to_string(&flat_candidate).map_err(|e| {
-                    anyhow::anyhow!("Failed to read skill '{}': {}", flat_candidate.display(), e)
-                })?;
-                found = Some((flat_candidate.display().to_string(), content));
-                break;
-            }
+            let content = fs::read_to_string(&skill_file).map_err(|e| {
+                anyhow::anyhow!("Failed to read skill '{}': {}", skill_file.display(), e)
+            })?;
+            found = Some((skill_file.display().to_string(), content));
+            break;
         }
         if found.is_some() {
             break;
@@ -513,6 +484,157 @@ fn handle_view_skill(args: Value, config: &Config, profile_name: &str) -> Result
         format!("--- Skill: {} (from {})\n\n{}", requested, path, display),
         false,
     ))
+}
+
+/// Normalize a skill name for comparison: lowercase, spaces to hyphens, and a
+/// trailing ".md" removed (so "name", "Name" and "name.md" all resolve alike).
+fn normalize_skill_name(name: &str) -> String {
+    name.trim()
+        .to_lowercase()
+        .replace(' ', "-")
+        .trim_end_matches(".md")
+        .to_string()
+}
+
+/// Return the name a skill file is known by: the frontmatter `name:` field
+/// when present (what list_skills reports), otherwise the parent directory
+/// name for a `<name>/SKILL.md` layout or the file stem for a `<name>.md`
+/// layout.
+fn skill_display_name(skill_file: &Path) -> String {
+    if let Ok(content) = fs::read_to_string(skill_file) {
+        if let Some(front) = extract_frontmatter_field(&content, "name") {
+            if !front.trim().is_empty() {
+                return front;
+            }
+        }
+    }
+    path_skill_name(skill_file)
+}
+
+/// Directory/file based name of a skill file, ignoring frontmatter.
+fn path_skill_name(skill_file: &Path) -> String {
+    let file_name = skill_file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string();
+    if file_name.eq_ignore_ascii_case("SKILL.md") {
+        skill_file
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        file_name
+            .strip_suffix(".md")
+            .unwrap_or(&file_name)
+            .to_string()
+    }
+}
+
+/// Enumerate every skill file under one skills root, mirroring exactly the
+/// layouts list_skills discovers, INCLUDING the root-level skill-directory
+/// layout `<root>/<name>/SKILL.md` that the profile skills roots use (e.g.
+/// `{omni_dir}/profiles/omni/skills/remote-development/SKILL.md`), which the
+/// old view_skill path guessing never searched.
+///
+/// Returns (skill_file_path, category, display_name, path_name). For a
+/// root-level `<name>/SKILL.md` directory, `category` is the directory name
+/// (what list_skills reports for it) and `path_name` is the directory name.
+fn enumerate_root_skills(skills_root: &Path) -> Result<Vec<(PathBuf, String, String, String)>> {
+    let mut out: Vec<(PathBuf, String, String, String)> = Vec::new();
+    if !skills_root.exists() {
+        return Ok(out);
+    }
+    let mut root_entries: Vec<PathBuf> = fs::read_dir(skills_root)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to read skills directory '{}': {}",
+                skills_root.display(),
+                e
+            )
+        })?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    root_entries.sort();
+
+    for root_entry in root_entries {
+        let entry_name = root_entry
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if entry_name.starts_with('.') {
+            continue;
+        }
+        if root_entry.is_file() && entry_name.ends_with(".md") {
+            // Root-level flat file: <root>/<name>.md
+            out.push((
+                root_entry.clone(),
+                String::new(),
+                skill_display_name(&root_entry),
+                path_skill_name(&root_entry),
+            ));
+            continue;
+        }
+        if !root_entry.is_dir() {
+            continue;
+        }
+        let direct_skill = root_entry.join("SKILL.md");
+        if direct_skill.is_file() {
+            // Root-level skill directory: <root>/<name>/SKILL.md (the layout
+            // profile skills roots use; list_skills reports the dir name as
+            // the category).
+            let display = skill_display_name(&direct_skill);
+            out.push((direct_skill, entry_name.clone(), display, entry_name));
+            continue;
+        }
+        // Category directory: scan its children (Pattern 1 + Pattern 2).
+        let category_name = entry_name;
+        let mut children: Vec<PathBuf> = fs::read_dir(&root_entry)
+            .map_err(|e| anyhow::anyhow!("Failed to read category '{}': {}", category_name, e))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .collect();
+        children.sort();
+        for child in children {
+            let child_name = child
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            if child_name.starts_with('.') {
+                continue;
+            }
+            if child.is_dir() {
+                // Pattern 1: <category>/<name>/SKILL.md
+                let skill_file = child.join("SKILL.md");
+                if skill_file.exists() {
+                    let display = skill_display_name(&skill_file);
+                    out.push((
+                        skill_file,
+                        category_name.clone(),
+                        display,
+                        child_name.clone(),
+                    ));
+                }
+            } else if child.is_file() && child_name.ends_with(".md") {
+                // Pattern 2: <category>/<name>.md flat file
+                let stem = child_name.strip_suffix(".md").unwrap();
+                if !stem.is_empty() {
+                    out.push((
+                        child.clone(),
+                        category_name.clone(),
+                        skill_display_name(&child),
+                        stem.to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -791,6 +913,93 @@ mod tests {
         .expect("view_skill should succeed");
         assert!(!is_error, "msg: {}", msg);
         assert!(msg.contains("# Workspace Development"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn view_skill_root_level_skill_directory_profile() {
+        // Profile skills roots hold skills as <skills>/<name>/SKILL.md directly
+        // (no category level), e.g. remote-development. view_skill must resolve
+        // them (previously reported 'not found').
+        let (cfg, dir) = test_config();
+        let root_level = dir
+            .join("profiles")
+            .join("omni")
+            .join("skills")
+            .join("remote-development")
+            .join("SKILL.md");
+        fs::create_dir_all(root_level.parent().unwrap()).unwrap();
+        fs::write(
+            &root_level,
+            "---\nname: remote-development\ndescription: \"Remote work\"\n---\n\n# Remote Development\n\nUse the persistent ssh config.\n",
+        )
+        .unwrap();
+        let (msg, is_error) = handle_view_skill(
+            serde_json::json!({"name": "remote-development"}),
+            &cfg,
+            "omni",
+        )
+        .expect("view_skill should succeed");
+        assert!(!is_error, "msg: {}", msg);
+        assert!(msg.contains("# Remote Development"));
+        assert!(msg.contains("Use the persistent ssh config"));
+        // Category scoping with the category list_skills reports also works.
+        let (msg2, is_error2) = handle_view_skill(
+            serde_json::json!({"name": "remote-development", "category": "remote-development"}),
+            &cfg,
+            "omni",
+        )
+        .expect("view_skill with category should succeed");
+        assert!(!is_error2, "msg: {}", msg2);
+        assert!(msg2.contains("# Remote Development"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn view_skill_root_level_skill_directory_global() {
+        // Same root-level directory layout under the GLOBAL skills root.
+        let (cfg, dir) = test_config();
+        let root_level = dir
+            .join("skills")
+            .join("remote-development")
+            .join("SKILL.md");
+        fs::create_dir_all(root_level.parent().unwrap()).unwrap();
+        fs::write(
+            &root_level,
+            "---\nname: remote-development\ndescription: \"Remote work\"\n---\n\n# Remote Development\n\nGlobal root dir layout.\n",
+        )
+        .unwrap();
+        let (msg, is_error) =
+            handle_view_skill(serde_json::json!({"name": "remote-development"}), &cfg, "")
+                .expect("view_skill should succeed");
+        assert!(!is_error, "msg: {}", msg);
+        assert!(msg.contains("# Remote Development"));
+        assert!(msg.contains("Global root dir layout."));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn view_skill_matches_by_frontmatter_name() {
+        // A skill whose frontmatter name differs from its directory name is
+        // listed by its frontmatter name; view_skill must resolve that name.
+        let (cfg, dir) = test_config();
+        let skill_file = dir
+            .join("skills")
+            .join("general")
+            .join("dir-name-differs")
+            .join("SKILL.md");
+        fs::create_dir_all(skill_file.parent().unwrap()).unwrap();
+        fs::write(
+            &skill_file,
+            "---\nname: listed-name\ndescription: \"FM name\"\n---\n\n# Listed Name\n\nFrontmatter name resolves.\n",
+        )
+        .unwrap();
+        let (msg, is_error) =
+            handle_view_skill(serde_json::json!({"name": "listed-name"}), &cfg, "")
+                .expect("view_skill should succeed");
+        assert!(!is_error, "msg: {}", msg);
+        assert!(msg.contains("# Listed Name"));
+        assert!(msg.contains("Frontmatter name resolves."));
         let _ = fs::remove_dir_all(&dir);
     }
 
