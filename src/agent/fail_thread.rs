@@ -481,7 +481,7 @@ pub async fn manual_review_decision(
     // survives).
     if task.status != to_status {
         if let Err(e) =
-            crate::db::threads::skip_stale_threads_for_status(pool, task_id, &to_status).await
+            crate::db::threads::skip_stale_threads_for_status(pool, task_id, &to_status, None).await
         {
             tracing::warn!(
                 "[review] failed to skip stale threads after decision '{}' moved task {} to {}: {:?}",
@@ -1467,9 +1467,13 @@ pub(crate) async fn engine_transition(
     // point as status-change dispatch). The triggering thread is already
     // terminal, so only genuinely stale threads are affected.
     if final_status != initial_status {
-        if let Err(e) =
-            crate::db::threads::skip_stale_threads_for_status(pool, task_id, final_status.as_str())
-                .await
+        if let Err(e) = crate::db::threads::skip_stale_threads_for_status(
+            pool,
+            task_id,
+            final_status.as_str(),
+            None,
+        )
+        .await
         {
             tracing::warn!(
                 "[workflow] failed to skip stale threads after engine transition of task {} to {}: {:?}",

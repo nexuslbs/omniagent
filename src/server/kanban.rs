@@ -248,6 +248,13 @@ struct UpdateTaskRequest {
     #[serde(default, deserialize_with = "de_optional_workflow")]
     workflow: Option<Option<String>>,
     board: Option<String>,
+    /// Thread id that issued this PATCH (kanban_update tool / agent thread).
+    /// Used to (a) reject premature self-close to done while the task's own
+    /// serving thread is still running with pending subtasks (threads must
+    /// never end 'completed' with an evident error, thread 836) and (b) never
+    /// stale-skip the closer thread that is performing the status change.
+    #[serde(default)]
+    source_thread_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1189,7 +1196,8 @@ async fn change_status_handler(
     //    surfaced in the response, never rolled back.
     let mut dispatched_thread: Option<i64> = None;
     if old_status != body.status {
-        match dispatch_task_for_status(&state.pool, &state.data_dir, &id, &body.status).await {
+        match dispatch_task_for_status(&state.pool, &state.data_dir, &id, &body.status, None).await
+        {
             Ok(Some(tid)) => dispatched_thread = Some(tid),
             Ok(None) => {}
             Err(e) => {
@@ -1456,7 +1464,7 @@ async fn change_position_handler(
     //    the move already succeeded and is never rolled back.
     let mut dispatched_thread: Option<i64> = None;
     if old_status != new_status {
-        match dispatch_task_for_status(&state.pool, &state.data_dir, &id, new_status).await {
+        match dispatch_task_for_status(&state.pool, &state.data_dir, &id, new_status, None).await {
             Ok(Some(tid)) => dispatched_thread = Some(tid),
             Ok(None) => {}
             Err(e) => {
@@ -1590,6 +1598,35 @@ async fn update_task_handler(
     } else {
         None
     };
+
+    // 4c. Completion invariant (threads must never end 'completed' with an
+    //     evident error, thread 836): a kanban task must NOT be marked done
+    //     from a thread whose run is not genuinely complete. When the request
+    //     comes from the task's OWN still-processing serving thread (the
+    //     kanban_update tool / agent) and that thread still has pending /
+    //     in_progress close-out subtasks, the close is premature: reject it
+    //     (the run continues its close-out; the platform marks the task done
+    //     when the thread genuinely completes with its final summary). This
+    //     is platform-generic - it does not depend on the provider/model.
+    if status_changed && body.status.as_deref() == Some("done") {
+        if let Some(src) = body.source_thread_id {
+            match crate::db::threads::self_close_to_done_is_premature(&state.pool, &id, src).await {
+                Ok(true) => {
+                    return err_json(
+                        StatusCode::CONFLICT,
+                        "Task cannot be marked done while its serving thread still has pending subtasks (close-out incomplete). Complete the close-out (all subtasks terminal) and end the run; the platform marks the task done when the run genuinely completes.",
+                    );
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    error!(
+                        "[kanban/tasks/{}] self-close completion check failed: {:?}",
+                        id, e
+                    );
+                }
+            }
+        }
+    }
 
     // 5. Execute the update: use static SQL with sentinel/COALESCE pattern
     //    so that fields not provided keep their existing values.
@@ -1726,7 +1763,15 @@ async fn update_task_handler(
     //    update already succeeded; a dispatch failure is logged only.
     if has_status_change {
         let new_s = body.status.as_deref().unwrap_or("");
-        if let Err(e) = dispatch_task_for_status(&state.pool, &state.data_dir, &id, new_s).await {
+        if let Err(e) = dispatch_task_for_status(
+            &state.pool,
+            &state.data_dir,
+            &id,
+            new_s,
+            body.source_thread_id,
+        )
+        .await
+        {
             error!(
                 "[kanban/tasks/{}] dispatch after status change failed: {:?}",
                 id, e

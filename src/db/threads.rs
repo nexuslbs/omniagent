@@ -1183,6 +1183,7 @@ pub(crate) async fn skip_stale_threads_for_status(
     pool: &PgPool,
     task_id: &str,
     new_status: &str,
+    exclude_thread_id: Option<i64>,
 ) -> AppResult<u64> {
     #[derive(sqlx::FromRow)]
     struct ActiveStepRow {
@@ -1200,6 +1201,13 @@ pub(crate) async fn skip_stale_threads_for_status(
 
     let mut skipped: u64 = 0;
     for t in &active {
+        // R4 (threads must never end 'completed' with an evident error, 836):
+        // the thread that itself performed the status change (the closer) is
+        // never skipped by its own move - it must survive to finish its
+        // close-out (verification, subtask completion, final summary).
+        if Some(t.id) == exclude_thread_id {
+            continue;
+        }
         // Effective step of the thread: NULL/empty legacy threads serve
         // 'running' (same mapping as the supervisor pickup).
         let step = t
@@ -1240,6 +1248,45 @@ pub(crate) async fn skip_stale_threads_for_status(
         });
     }
     Ok(skipped)
+}
+
+/// R2/R3/R4 (threads must never end 'completed' with an evident error,
+/// thread 836): when an agent thread asks to close its OWN kanban task to
+/// done while it is still the task's pending/processing serving thread with
+/// unfinished close-out subtasks, the close is PREMATURE and must be rejected:
+/// the task may only reach done when the platform lifecycle validates genuine
+/// completion (all subtasks terminal, final answer emitted), never from a raw
+/// model tool call mid-run.
+pub async fn self_close_to_done_is_premature(
+    pool: &PgPool,
+    task_id: &str,
+    source_thread_id: i64,
+) -> AppResult<bool> {
+    // Only the task's own still-serving thread can make a premature self-close.
+    let Some(thread) = get_thread_by_id(pool, source_thread_id).await? else {
+        return Ok(false);
+    };
+    if thread.task_id.as_deref() != Some(task_id) {
+        return Ok(false);
+    }
+    if !matches!(thread.status.as_str(), "pending" | "processing") {
+        return Ok(false);
+    }
+    thread_has_pending_subtasks(pool, source_thread_id).await
+}
+
+/// True when the thread still has pending/in_progress subtasks (close-out
+/// unfinished). Used to detect premature completion and silent-done states.
+pub async fn thread_has_pending_subtasks(pool: &PgPool, thread_id: i64) -> AppResult<bool> {
+    let n: Option<i64> = sql_forge!(
+        scalar Option<i64>,
+        r#"SELECT COUNT(*) FROM thread_subtasks
+           WHERE thread_id = :thread_id AND status IN ('pending', 'in_progress')"#,
+        ( :thread_id = thread_id )
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(n.unwrap_or(0) > 0)
 }
 
 /// Count messages in a thread.
@@ -1820,8 +1867,9 @@ pub(crate) async fn dispatch_task_for_status(
     data_dir: &str,
     task_id: &str,
     new_status: &str,
+    exclude_thread_id: Option<i64>,
 ) -> AppResult<Option<i64>> {
-    skip_stale_threads_for_status(pool, task_id, new_status).await?;
+    skip_stale_threads_for_status(pool, task_id, new_status, exclude_thread_id).await?;
     create_kanban_step_thread(pool, data_dir, task_id, new_status).await
 }
 
@@ -3063,7 +3111,7 @@ mod status_move_skip_tests {
         .await
         .expect("insert new-status thread");
 
-        let n = skip_stale_threads_for_status(&pool, &task_id, "testing")
+        let n = skip_stale_threads_for_status(&pool, &task_id, "testing", None)
             .await
             .expect("skip stale threads");
         assert_eq!(n, 2, "exactly the two running-serving threads are skipped");
@@ -3096,7 +3144,7 @@ mod status_move_skip_tests {
         assert!(!row.1, "new-status thread not terminal");
 
         // Idempotent: a second call (or a no-op status update) skips nothing.
-        let n = skip_stale_threads_for_status(&pool, &task_id, "testing")
+        let n = skip_stale_threads_for_status(&pool, &task_id, "testing", None)
             .await
             .expect("second skip");
         assert_eq!(n, 0, "nothing left to skip");
@@ -3110,6 +3158,180 @@ mod status_move_skip_tests {
             .bind(old_id)
             .bind(legacy_id)
             .bind(new_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup threads");
+    }
+
+    /// R4 regression (thread 836 self status-change race): the thread that
+    /// itself performs the status change (the closer) must NEVER be skipped by
+    /// its own move. skip_stale_threads_for_status with exclude_thread_id keeps
+    /// the caller processing while genuinely stale threads are still skipped.
+    #[tokio::test]
+    async fn exclude_caller_never_skipped_by_own_status_change() {
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let task_id = format!(
+            "task-selfclose-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+
+        // The closer: a processing executor thread serving 'running'.
+        let closer_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile, task_id, workflow_step)
+             VALUES ('processing', 'user', 'test-channel-selfclose', 'test-profile', $1, 'running')
+             RETURNING id",
+        )
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert closer thread");
+
+        // A genuinely stale thread of the old status that must still be skipped.
+        let stale_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile, task_id)
+             VALUES ('pending', 'user', 'test-channel-selfclose', 'test-profile', $1)
+             RETURNING id",
+        )
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert stale thread");
+
+        // Task moves to done: the closer excluded, the stale thread skipped.
+        let n = skip_stale_threads_for_status(&pool, &task_id, "done", Some(closer_id))
+            .await
+            .expect("skip stale threads");
+        assert_eq!(n, 1, "only the genuinely stale thread is skipped");
+
+        let row: (String, bool) =
+            sqlx::query_as("SELECT status, terminal FROM threads WHERE id = $1")
+                .bind(closer_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch closer");
+        assert_eq!(
+            row.0, "processing",
+            "closer thread must survive its own close"
+        );
+        assert!(!row.1, "closer thread must not be terminal");
+
+        let row: (String, bool) =
+            sqlx::query_as("SELECT status, terminal FROM threads WHERE id = $1")
+                .bind(stale_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch stale");
+        assert_eq!(row.0, "skipped", "stale thread marked skipped");
+        assert!(row.1, "stale thread terminal");
+
+        sqlx::query("DELETE FROM kanban_history WHERE kanban_task_id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM threads WHERE id = $1 OR id = $2")
+            .bind(closer_id)
+            .bind(stale_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup threads");
+    }
+
+    /// R2/R3 regression (thread 836 premature close): a kanban task must NOT be
+    /// closed to done from its own still-processing serving thread while that
+    /// thread still has pending/in_progress close-out subtasks. The platform
+    /// helper self_close_to_done_is_premature flags exactly that state; once
+    /// the subtasks are terminal the close is allowed (genuine close-out).
+    #[tokio::test]
+    async fn self_close_to_done_is_premature_while_close_out_pending() {
+        let Ok(db_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let _db_guard = crate::db::DB_TEST_LOCK.lock().await;
+        let pool = sqlx::PgPool::connect(&db_url)
+            .await
+            .expect("connect dev db");
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let task_id = format!(
+            "task-premature-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+
+        // The serving thread: processing, running step, task's own thread.
+        let serving_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile, task_id, workflow_step)
+             VALUES ('processing', 'user', 'test-channel-premature', 'test-profile', $1, 'running')
+             RETURNING id",
+        )
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert serving thread");
+
+        // One unfinished close-out subtask (the thread 836 shape: 3783 pending).
+        let sub_id: i64 = sqlx::query_scalar(
+            "INSERT INTO thread_subtasks (thread_id, description, status, priority)
+             VALUES ($1, 'verify & close', 'pending', 1) RETURNING id",
+        )
+        .bind(serving_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert pending subtask");
+
+        assert!(
+            self_close_to_done_is_premature(&pool, &task_id, serving_id)
+                .await
+                .expect("premature check"),
+            "pending close-out subtask => premature self-close to done"
+        );
+
+        // Close-out finished: the subtask is terminal -> close allowed.
+        sqlx::query("UPDATE thread_subtasks SET status = 'completed' WHERE id = $1")
+            .bind(sub_id)
+            .execute(&pool)
+            .await
+            .expect("complete subtask");
+        assert!(
+            !self_close_to_done_is_premature(&pool, &task_id, serving_id)
+                .await
+                .expect("premature check"),
+            "all subtasks terminal => close allowed"
+        );
+
+        // A thread that does NOT serve this task can never trigger the flag.
+        let other_id: i64 = sqlx::query_scalar(
+            "INSERT INTO threads (status, cause, channel_id, profile, task_id)
+             VALUES ('processing', 'user', 'test-channel-premature', 'test-profile', $1)
+             RETURNING id",
+        )
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert other thread");
+        assert!(
+            !self_close_to_done_is_premature(&pool, "task-unrelated", other_id)
+                .await
+                .expect("premature check"),
+            "thread of another task is not a self-close"
+        );
+
+        sqlx::query("DELETE FROM thread_subtasks WHERE thread_id = $1")
+            .bind(serving_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM threads WHERE id = $1 OR id = $2")
+            .bind(serving_id)
+            .bind(other_id)
             .execute(&pool)
             .await
             .expect("cleanup threads");

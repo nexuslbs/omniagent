@@ -487,26 +487,27 @@ pub async fn dispatch_todo_tasks(pool: &PgPool, data_dir: &str) -> AppResult<Dis
     //    same code as status-change dispatch and /redispatch): it skips any
     //    stale active threads, resolves the executor role/template/plan and
     //    creates the thread with workflow_step='running'.
-    let thread_id =
-        match crate::db::threads::dispatch_task_for_status(pool, data_dir, &picked.id, "running")
-            .await
-        {
-            Ok(Some(tid)) => tid,
-            Ok(None) => {
-                error!(
-                    "[kanban/dispatch] no executor role to run for task {}",
-                    picked.id
-                );
-                return Err(Error::Message("No executor role to run".to_string()));
-            }
-            Err(e) => {
-                error!(
-                    "[kanban/dispatch] failed to create thread for {}: {:?}",
-                    picked.id, e
-                );
-                return Err(Error::Message(format!("Failed to create thread: {e}")));
-            }
-        };
+    let thread_id = match crate::db::threads::dispatch_task_for_status(
+        pool, data_dir, &picked.id, "running", None,
+    )
+    .await
+    {
+        Ok(Some(tid)) => tid,
+        Ok(None) => {
+            error!(
+                "[kanban/dispatch] no executor role to run for task {}",
+                picked.id
+            );
+            return Err(Error::Message("No executor role to run".to_string()));
+        }
+        Err(e) => {
+            error!(
+                "[kanban/dispatch] failed to create thread for {}: {:?}",
+                picked.id, e
+            );
+            return Err(Error::Message(format!("Failed to create thread: {e}")));
+        }
+    };
 
     // 4. Mark the task running ("ready" was retired - see VALID_STATUSES; the
     //    executor would flip it to "running" on pickup anyway).

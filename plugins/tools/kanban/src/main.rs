@@ -165,7 +165,11 @@ async fn handle_list(_pool: &PgPool, args: &Value) -> Result<(String, bool)> {
 // Tool: update_kanban_task
 // ---------------------------------------------------------------------------
 
-async fn handle_update(_pool: &PgPool, args: &Value) -> Result<(String, bool)> {
+async fn handle_update(
+    _pool: &PgPool,
+    args: &Value,
+    meta: Option<&McpMeta>,
+) -> Result<(String, bool)> {
     let id = args["id"]
         .as_str()
         .ok_or_else(|| anyhow!("Missing required argument: 'id'"))?;
@@ -189,6 +193,12 @@ async fn handle_update(_pool: &PgPool, args: &Value) -> Result<(String, bool)> {
     let wf = args.get("workflow").or_else(|| args.get("workflow_id"));
     if let Some(wf) = wf {
         req["workflow"] = wf.clone();
+    }
+    // Forward the calling thread id so the core can (a) reject a premature
+    // self-close to done from the task's own still-processing serving thread
+    // and (b) never stale-skip the closer thread performing this status change.
+    if let Some(tid) = meta.and_then(|m| m.thread_id) {
+        req["source_thread_id"] = serde_json::json!(tid);
     }
     let _resp = api_call(
         reqwest::Method::PATCH,
@@ -369,14 +379,14 @@ async fn main() -> Result<()> {
     });
 
     let p_update = pool.clone();
-    let update_handler: ToolHandler = Box::new(move |args: Value, _meta: Option<McpMeta>| {
+    let update_handler: ToolHandler = Box::new(move |args: Value, meta: Option<McpMeta>| {
         let p = p_update.clone();
         Box::pin(async move {
             let guard = p.read().await;
 
             let pool = guard.as_ref().expect("Pool not initialized").clone();
 
-            handle_update(&pool, &args).await
+            handle_update(&pool, &args, meta.as_ref()).await
         })
     });
 

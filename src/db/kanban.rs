@@ -88,7 +88,7 @@ pub async fn update_kanban_task_status(
     // no-op update (old == new) never skips the current-status thread.
     if old_status != new_status {
         if let Err(e) =
-            crate::db::threads::skip_stale_threads_for_status(pool, task_id, new_status).await
+            crate::db::threads::skip_stale_threads_for_status(pool, task_id, new_status, None).await
         {
             tracing::warn!(
                 "[kanban] failed to skip stale threads after moving task {} to {}: {:?}",

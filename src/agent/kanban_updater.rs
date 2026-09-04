@@ -39,6 +39,45 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
         final_status,
         "failed" | "interrupted" | "skipped" | "merged"
     ) {
+        // GAP C (threads must never end 'completed' with an evident error,
+        // thread 836): if this thread's kanban task is ALREADY 'done' but the
+        // run is ending WITHOUT genuine completion (close-out subtasks still
+        // pending), the done must not persist silently. Block the task so the
+        // unfinished run is visible and can be re-dispatched/flagged. Only for
+        // run-lifecycle terminals (failed/interrupted/merged): 'skipped' is
+        // the external-stop terminal (operator/channel close) where the task
+        // move was deliberate and must not be undone.
+        if final_status != "skipped"
+            && crate::db::threads::thread_has_pending_subtasks(&cfg.pool, thread.id)
+                .await
+                .unwrap_or(false)
+        {
+            let task_status: Option<String> = sql_forge!(
+                scalar Option<String>,
+                "SELECT status FROM kanban_tasks WHERE id = :task_id",
+                ( :task_id = task_id.as_str() )
+            )
+            .fetch_one(&cfg.pool)
+            .await
+            .ok()
+            .flatten();
+            if task_status.as_deref() == Some("done") {
+                let comment = format!(
+                    "Task blocked: thread #{} ended '{}' while the task was done but close-out was unfinished (pending subtasks). The done was premature - review and re-dispatch.",
+                    thread.id, final_status
+                );
+                tracing::warn!("{}", comment);
+                if let Err(e) =
+                    transition_with_comment(&cfg.pool, task_id, "blocked", None, &comment).await
+                {
+                    tracing::warn!(
+                        "[workflow] failed to block task {} after premature done + unfinished close-out: {}",
+                        task_id, e
+                    );
+                }
+                return;
+            }
+        }
         // review_on_fail: a hard-failed executor/tester step goes to review
         // instead of blocked / executor re-run (auto_approve forces the flag
         // off via workflow_policy). Interrupted/skipped keep the existing
@@ -94,6 +133,28 @@ pub async fn update_kanban_status(cfg: &AgentContext, thread: &Thread, final_sta
     }
 
     if final_status != "completed" {
+        return;
+    }
+
+    // Phase 4 guard (thread 836 invariant): once the task is 'done', a thread
+    // that completes afterwards (e.g. the closer that self-closed after all
+    // subtasks were terminal and then emitted its final summary) must not
+    // re-route the done task elsewhere. Done is sticky.
+    let task_status: Option<String> = sql_forge!(
+        scalar Option<String>,
+        "SELECT status FROM kanban_tasks WHERE id = :task_id",
+        ( :task_id = task_id.as_str() )
+    )
+    .fetch_one(&cfg.pool)
+    .await
+    .ok()
+    .flatten();
+    if task_status.as_deref() == Some("done") {
+        tracing::info!(
+            "[workflow] thread #{} completed after task {} was already done; no further routing",
+            thread.id,
+            task_id
+        );
         return;
     }
 
@@ -587,7 +648,9 @@ pub(crate) async fn transition_with_comment(
     // tied to a status the task left is skipped (step-scoped, same choke
     // point as status-change dispatch) so it cannot race the new step.
     if from != to {
-        if let Err(e) = crate::db::threads::skip_stale_threads_for_status(pool, task_id, to).await {
+        if let Err(e) =
+            crate::db::threads::skip_stale_threads_for_status(pool, task_id, to, None).await
+        {
             tracing::warn!(
                 "[workflow] failed to skip stale threads after moving task {} to {}: {:?}",
                 task_id,
