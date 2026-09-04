@@ -335,29 +335,86 @@ fn handle_search(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let base_path = args["path"].as_str().unwrap_or(workspace_dir);
     let safe_base = resolve_read_path(base_path, workspace_dir);
 
-    let glob_pattern = format!("{}/{}", safe_base.trim_end_matches('/'), pattern);
-    let entries =
-        glob::glob(&glob_pattern).map_err(|e| anyhow::anyhow!("Invalid glob pattern: {}", e))?;
+    // Build a glob matcher for the requested pattern. The directory walk
+    // below is HARD-BOUNDED so a pattern over a huge tree (e.g. "/") can
+    // never run unbounded and wedge the whole plugin server (Sep 2026
+    // outage: filesystem read/write/list down for whole threads after one
+    // no-match search over "/").
+    let matcher =
+        glob::Pattern::new(pattern).map_err(|e| anyhow::anyhow!("Invalid glob pattern: {}", e))?;
 
-    let mut results: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
+    const MAX_DIRS: usize = 50_000;
+    const MAX_FILES: usize = 200_000;
+    const MAX_RESULTS: usize = 1000;
+    const MAX_WALK_MILLIS: u128 = 10_000;
+
+    let walk_start = std::time::Instant::now();
+    let mut results: Vec<String> = Vec::new();
+    let mut dirs_visited: usize = 0;
+    let mut files_checked: usize = 0;
+    let mut budget_exhausted = false;
+    let mut stack: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from(&safe_base)];
+    while let Some(dir) = stack.pop() {
+        dirs_visited += 1;
+        if dirs_visited > MAX_DIRS || walk_start.elapsed().as_millis() > MAX_WALK_MILLIS {
+            budget_exhausted = true;
+            break;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !ft.is_file() {
+                continue;
+            }
+            files_checked += 1;
+            if files_checked > MAX_FILES {
+                budget_exhausted = true;
+                break;
+            }
+            // Match against the path relative to the search base, which
+            // reproduces glob::glob("{base}/{pattern}") semantics while
+            // keeping the walk bounded and immune to symlink cycles.
+            if let Ok(rel) = path.strip_prefix(&safe_base) {
+                if matcher.matches_path(rel) {
+                    results.push(path.to_string_lossy().to_string());
+                    if results.len() >= MAX_RESULTS {
+                        budget_exhausted = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if budget_exhausted {
+            break;
+        }
+    }
     results.sort();
 
-    let max_results = 1000;
-    let output = if results.is_empty() {
-        format!("No files matching '{}' in {}", pattern, safe_base)
-    } else if results.len() > max_results {
-        let joined = results[..max_results].join("\n");
+    let output = if results.is_empty() && budget_exhausted {
         format!(
-            "{}\n[... truncated from {} to ~{} results]",
-            joined,
-            results.len(),
-            max_results
+            "No files matching '{}' in {} (search budget exhausted - tree too large)",
+            pattern, safe_base
         )
+    } else if results.is_empty() {
+        format!("No files matching '{}' in {}", pattern, safe_base)
     } else {
-        results.join("\n")
+        let joined = results.join("\n");
+        if budget_exhausted || results.len() >= MAX_RESULTS {
+            format!(
+                "{}\n[... truncated to {} results (search budget exhausted)]",
+                joined,
+                results.len()
+            )
+        } else {
+            joined
+        }
     };
 
     Ok((output, false))
@@ -437,19 +494,32 @@ fn handle_grep(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
         .map_err(|e| anyhow::anyhow!("Invalid regex pattern '{}': {}", pattern, e))?;
 
     // Iterative recursive walk (no recursion depth issues). Skips .git,
-    // target and node_modules to avoid noise; skips binary files (NUL sniff
-    // on the first 8 KiB). Bounded by max_results.
+    // target and node_modules to avoid noise. The walk is HARD-BOUNDED
+    // (dirs visited, files read, per-file size, elapsed time, results) so a
+    // grep over a huge tree (e.g. "/") can never run unbounded and wedge
+    // the whole plugin server (Sep 2026 outage: filesystem read/write/list
+    // down for whole threads after an unbounded recursive search).
+    const MAX_DIRS: usize = 50_000;
+    const MAX_FILES: usize = 100_000;
+    const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB per file
+    const MAX_WALK_MILLIS: u128 = 10_000;
+
+    let walk_start = std::time::Instant::now();
     let mut results: Vec<String> = Vec::new();
     let mut files_seen: usize = 0;
+    let mut dirs_visited: usize = 0;
+    let mut budget_exhausted = false;
     let mut stack: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from(&safe_base)];
     while let Some(dir) = stack.pop() {
+        dirs_visited += 1;
+        if dirs_visited > MAX_DIRS || walk_start.elapsed().as_millis() > MAX_WALK_MILLIS {
+            budget_exhausted = true;
+            break;
+        }
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
-            if results.len() >= max_results {
-                break;
-            }
             let path = entry.path();
             let Ok(ft) = entry.file_type() else { continue };
             if ft.is_dir() {
@@ -472,6 +542,13 @@ fn handle_grep(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
                     continue;
                 }
             }
+            // Skip oversized files entirely: reading them fully is both slow
+            // and a memory hazard (multi-GB logs, virtual files under /proc).
+            if let Ok(md) = fs::metadata(&path) {
+                if md.len() > MAX_FILE_BYTES {
+                    continue;
+                }
+            }
             // Skip binary files: sniff for a NUL byte in the first 8 KiB.
             let Ok(bytes) = fs::read(&path) else { continue };
             let head = &bytes[..bytes.len().min(8192)];
@@ -482,8 +559,13 @@ fn handle_grep(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
                 continue;
             };
             files_seen += 1;
+            if files_seen > MAX_FILES {
+                budget_exhausted = true;
+                break;
+            }
             for (i, line) in content.lines().enumerate() {
                 if results.len() >= max_results {
+                    budget_exhausted = true;
                     break;
                 }
                 if re.is_match(line) {
@@ -501,10 +583,21 @@ fn handle_grep(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
                     results.push(format!("{}:{}:{}", path.display(), line_num, display));
                 }
             }
+            if budget_exhausted {
+                break;
+            }
+        }
+        if budget_exhausted {
+            break;
         }
     }
 
-    let output = if results.is_empty() {
+    let output = if results.is_empty() && budget_exhausted {
+        format!(
+            "No matches for pattern '{}' in {} ({} files checked, grep budget exhausted)",
+            pattern, safe_base, files_seen
+        )
+    } else if results.is_empty() {
         format!(
             "No matches for pattern '{}' in {} ({} files checked)",
             pattern, safe_base, files_seen
@@ -517,7 +610,7 @@ fn handle_grep(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
             safe_base,
             files_seen
         );
-        if results.len() >= max_results {
+        if results.len() >= max_results || budget_exhausted {
             out.push_str(&format!("[... capped at {} results ...]\n", max_results));
         }
         out.push_str(&results.join("\n"));

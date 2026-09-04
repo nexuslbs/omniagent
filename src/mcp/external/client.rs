@@ -370,6 +370,12 @@ pub struct StdioMcpClient {
     next_id: AtomicU64,
     tools: Mutex<Vec<McpExternalTool>>,
     circuit: CircuitBreaker,
+    /// Consecutive tools/call timeouts with no success in between. Used to
+    /// detect a wedged (alive but unresponsive) plugin so the client can
+    /// auto-restart it instead of timing out for a whole thread (filesystem
+    /// MCP outage, Sep 2026: one unbounded walk left the server busy-looping
+    /// forever and every call timed out at the configured limit).
+    consecutive_timeouts: AtomicU64,
     connected: Mutex<bool>,
     last_error: Mutex<Option<String>>,
 }
@@ -472,6 +478,7 @@ impl StdioMcpClient {
     pub fn new(config: McpServerConfig) -> Self {
         Self {
             circuit: CircuitBreaker::new(config.max_retries),
+            consecutive_timeouts: AtomicU64::new(0),
             config,
             stdin_tx: Mutex::new(None),
             pending: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -977,17 +984,46 @@ impl McpServerClient for StdioMcpClient {
                     ));
                 }
                 Err(_elapsed) => {
-                    // A timeout is NOT a plugin failure - it can be caused by
-                    // many legitimate reasons (long build, slow network, busy
-                    // server). Never count it toward the circuit breaker; the
-                    // agent gets the timeout error and can retry or wait
-                    // longer. (Aug 2026: fixed tool timeouts were removed; a
-                    // timeout here only exists when explicitly configured.)
+                    // A single timeout is usually NOT a plugin failure (long
+                    // build, slow network, busy server), so it is never
+                    // counted toward the circuit breaker. But REPEATED
+                    // consecutive timeouts with no success in between mean
+                    // the plugin is wedged: alive yet unresponsive (Sep 2026
+                    // filesystem MCP outage - one unbounded directory walk
+                    // left the server busy-looping and EVERY call timed out
+                    // for whole threads). Auto-restart on the 2nd
+                    // consecutive timeout so the next call hits a fresh
+                    // server, and surface the restart loudly in the error.
+                    let n = self.consecutive_timeouts.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n == 2 {
+                        tracing::error!(
+                            "MCP server '{}' tool '{}' timed out {}x in a row - plugin unresponsive, restarting it",
+                            self.config.name, name, n
+                        );
+                        if let Err(re) = self.respawn().await {
+                            tracing::error!(
+                                "MCP server '{}' auto-restart after repeated timeouts failed: {}",
+                                self.config.name,
+                                re
+                            );
+                        } else {
+                            tracing::info!(
+                                "MCP server '{}' auto-restarted after repeated timeouts (tool '{}')",
+                                self.config.name, name
+                            );
+                        }
+                        self.consecutive_timeouts.store(0, Ordering::SeqCst);
+                    }
                     return Err(err_str!(
-                        "MCP server '{}' tool '{}' timed out after {} seconds",
+                        "MCP server '{}' tool '{}' timed out after {} seconds{}",
                         self.config.name,
                         name,
                         dur.as_secs(),
+                        if n >= 2 {
+                            " (plugin was unresponsive - auto-restarted; please retry)"
+                        } else {
+                            ""
+                        }
                     ));
                 }
             },
@@ -1025,6 +1061,7 @@ impl McpServerClient for StdioMcpClient {
             serde_json::from_value(result_value).ctx("Failed to parse tools/call result")?;
 
         self.circuit.record_success();
+        self.consecutive_timeouts.store(0, Ordering::SeqCst);
         let text = extract_tool_result_text(&result);
         Ok(McpToolResult {
             call_id: String::new(),
