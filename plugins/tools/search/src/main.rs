@@ -168,12 +168,25 @@ fn build_search_messages_sql(query: &str, channel_id: Option<&str>, limit: i64) 
     } else {
         format!("({english_tsq} || ({exact_tsq}))")
     };
-    let rank_order = |col: &str| -> String {
+    // ORDER BY fragment: exact identifier matches first (when the query has
+    // identifier runs), then descending relevance (ts_rank_cd), then newest
+    // (created_at DESC, id DESC) as tiebreak. `alias` is the alias of the
+    // messages table in that query level ("" when unaliased). created_at and
+    // id MUST be alias-qualified: the channel-variant candidate stage joins
+    // threads, which also has created_at/id, and an unqualified reference
+    // would be ambiguous and fail the query.
+    let order_clause = |alias: &str| -> String {
+        let dot = if alias.is_empty() {
+            String::new()
+        } else {
+            format!("{alias}.")
+        };
+        let ts_col = format!("{dot}search_tsv");
         if exact_tsq.is_empty() {
-            format!("ts_rank_cd({col}, {english_tsq}) DESC, created_at DESC, id DESC")
+            format!("ts_rank_cd({ts_col}, {english_tsq}) DESC, {dot}created_at DESC, {dot}id DESC")
         } else {
             format!(
-                "({col} @@ {exact_tsq}) DESC, ts_rank_cd({col}, {english_tsq}) DESC, created_at DESC, id DESC"
+                "({ts_col} @@ {exact_tsq}) DESC, ts_rank_cd({ts_col}, {english_tsq}) DESC, {dot}created_at DESC, {dot}id DESC"
             )
         }
     };
@@ -193,14 +206,14 @@ fn build_search_messages_sql(query: &str, channel_id: Option<&str>, limit: i64) 
             let cid = sql_quote(cid);
             format!(
                 "SELECT m.id, m.role, m.content FROM messages m              WHERE m.id IN (                  SELECT ms.id FROM messages ms                  JOIN threads t ON t.id = ms.thread_id                  WHERE t.channel_id = '{cid}'                    AND ms.search_tsv @@ {match_tsq}                  ORDER BY {}                  LIMIT {limit}              )              ORDER BY {}              LIMIT {limit}",
-                rank_order("ms.search_tsv"),
-                rank_order("m.search_tsv")
+                order_clause("ms"),
+                order_clause("m")
             )
         }
         None => format!(
-            "SELECT m.id, m.role, m.content FROM messages m              WHERE m.id IN (                  SELECT id FROM messages                  WHERE search_tsv @@ {match_tsq}                  ORDER BY {}                  LIMIT {limit}              )              ORDER BY {}              LIMIT {limit}",
-            rank_order("search_tsv"),
-            rank_order("m.search_tsv")
+            "SELECT m.id, m.role, m.content FROM messages m              WHERE m.id IN (                  SELECT im.id FROM messages im                  WHERE im.search_tsv @@ {match_tsq}                  ORDER BY {}                  LIMIT {limit}              )              ORDER BY {}              LIMIT {limit}",
+            order_clause("im"),
+            order_clause("m")
         ),
     }
 }
@@ -1596,7 +1609,7 @@ mod tests {
         let sql = build_search_messages_sql("deploy telegram", None, 10);
         assert!(
             sql.contains(
-                "ts_rank_cd(search_tsv, plainto_tsquery('english', 'deploy telegram')) DESC"
+                "ts_rank_cd(im.search_tsv, plainto_tsquery('english', 'deploy telegram')) DESC"
             ),
             "results must be ordered by descending relevance: {sql}"
         );
@@ -1614,7 +1627,7 @@ mod tests {
             "exact joined-token term must be added for snake_case queries: {sql}"
         );
         assert!(
-            sql.contains("(search_tsv @@ to_tsquery('english', 'parentbychat')) DESC"),
+            sql.contains("(im.search_tsv @@ to_tsquery('english', 'parentbychat')) DESC"),
             "exact identifier matches must sort first: {sql}"
         );
         assert!(
@@ -1652,5 +1665,23 @@ mod tests {
             "dash-only tokens are handled by the english host-token path"
         );
         assert!(identifier_whole_tokens("_leading and trailing_").is_empty());
+    }
+
+    #[test]
+    fn search_sql_tiebreak_columns_are_alias_qualified() {
+        let sql = build_search_messages_sql("omnidev", Some("telegram"), 10);
+        assert!(
+            sql.contains("ms.created_at DESC") && sql.contains("m.created_at DESC"),
+            "channel-variant ORDER BY must qualify created_at/id (threads join would be ambiguous): {sql}"
+        );
+        let g = build_search_messages_sql("deploy telegram", None, 10);
+        assert!(
+            g.contains("im.created_at DESC") && g.contains("m.created_at DESC"),
+            "global ORDER BY must qualify created_at/id: {g}"
+        );
+        assert!(
+            !g.contains("ts_rank_cd(search_tsv, "),
+            "global rank must use the im alias: {g}"
+        );
     }
 }
