@@ -84,21 +84,101 @@ fn sql_quote(s: &str) -> String {
 /// column messages.search_tsv (GIN index idx_messages_search_tsv), so the
 /// query is index-driven by construction: it never depends on ANALYZE /
 /// planner statistics and never ILIKE-scans or detoasts the TOAST-heavy
-/// `content` column. The user query is inlined as a constant argument of
-/// plainto_tsquery() so the planner const-folds it and picks the GIN bitmap
-/// path even with cold statistics.
+/// `content` column. The user query is inlined as constant arguments of
+/// plainto_tsquery()/to_tsquery() so the planner const-folds them and picks
+/// the GIN bitmap path even with cold statistics.
 ///
-/// Semantics note (conscious migration): keyword matching is word-level
-/// full-text search (english stemming, stopword removal, implicit AND of
-/// terms) instead of raw ILIKE substring matching. Punctuation (underscore,
-/// dash, dot) splits tokens on the index side exactly as on the query side,
-/// so identifiers such as `search_messages`, `v0.1.7` or `deploy.py` remain
-/// findable. Result ordering is unchanged (newest first, created_at DESC).
+/// Relevance ordering: results are ranked by descending ts_rank_cd (how well
+/// each message matches, rewarding tight term co-occurrence), with newest as
+/// the tiebreak - previously results were newest-first regardless of match
+/// quality.
+///
+/// Identifier precision: the index (see db-migrations messages_identifier_words)
+/// also stores underscore identifiers as single joined tokens. When the query
+/// contains underscore-joined runs (task ids such as
+/// `task_omnidev_threads_stuck_in_processing`, `parent_by_chat`, ...), the
+/// match predicate ORs the plain word-level query with the exact joined-token
+/// query, and messages that contain the identifier verbatim sort FIRST, ahead
+/// of merely word-related matches.
+fn identifier_whole_tokens(query: &str) -> Vec<String> {
+    // Maximal underscore-joined alnum runs: [A-Za-z0-9]+(_[A-Za-z0-9]+)+
+    // (mirrors messages_identifier_words on the index side). Returned tokens
+    // are the runs with underscores removed, e.g. "parent_by_chat" ->
+    // "parentbychat". The query is scanned char-by-char so no regex dep is
+    // needed and punctuation around runs (quotes, dots, commas) is skipped.
+    let b = query.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if !b[i].is_ascii_alphanumeric() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < b.len() && b[i].is_ascii_alphanumeric() {
+            i += 1;
+        }
+        let mut groups = 1usize;
+        loop {
+            let mut j = i;
+            if j < b.len() && b[j] == b'_' {
+                j += 1;
+                let k = j;
+                while j < b.len() && b[j].is_ascii_alphanumeric() {
+                    j += 1;
+                }
+                if j > k {
+                    groups += 1;
+                    i = j;
+                    continue;
+                }
+            }
+            break;
+        }
+        if groups >= 2 {
+            let token: String = query[start..i]
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .collect();
+            out.push(token);
+        }
+    }
+    out
+}
+
 fn build_search_messages_sql(query: &str, channel_id: Option<&str>, limit: i64) -> String {
     let q = sql_quote(query);
-    let tsq = format!("plainto_tsquery('english', '{q}')");
+    // Word-level english query (recall semantics unchanged from the plain FTS
+    // path when the query has no underscore identifiers).
+    let english_tsq = format!("plainto_tsquery('english', '{q}')");
+    // Exact joined-token query for underscore identifiers (empty when the
+    // query has none).
+    let wholes = identifier_whole_tokens(query);
+    let exact_tsq = if wholes.is_empty() {
+        String::new()
+    } else {
+        let terms: Vec<String> = wholes
+            .iter()
+            .map(|w| format!("to_tsquery('english', '{}')", sql_quote(w)))
+            .collect();
+        terms.join(" && ")
+    };
+    let match_tsq = if exact_tsq.is_empty() {
+        english_tsq.clone()
+    } else {
+        format!("({english_tsq} || ({exact_tsq}))")
+    };
+    let rank_order = |col: &str| -> String {
+        if exact_tsq.is_empty() {
+            format!("ts_rank_cd({col}, {english_tsq}) DESC, created_at DESC, id DESC")
+        } else {
+            format!(
+                "({col} @@ {exact_tsq}) DESC, ts_rank_cd({col}, {english_tsq}) DESC, created_at DESC, id DESC"
+            )
+        }
+    };
     // Two-stage, bounded-by-construction shape:
-    //  stage 1 (inner): find the newest `limit` matching message IDs using the
+    //  stage 1 (inner): find the top `limit` matching message IDs using the
     //    tsvector GIN index (idx_messages_search_tsv) - reads only search_tsv
     //    (a generated tsvector of the lean, capped searchable content), never
     //    the TOAST-heavy messages.content column, so cost is proportional to
@@ -106,16 +186,21 @@ fn build_search_messages_sql(query: &str, channel_id: Option<&str>, limit: i64) 
     //    with cold/stale planner stats.
     //  stage 2 (outer): fetch full rows (content for the preview) only for
     //    those <= `limit` winners, so giant tool outputs are detoasted at most
-    //    `limit` times per search.
+    //    `limit` times per search. Both stages apply the same ordering so the
+    //    final list stays relevance-ordered.
     match channel_id {
         Some(cid) => {
             let cid = sql_quote(cid);
             format!(
-                "SELECT m.id, m.role, m.content FROM messages m              WHERE m.id IN (                  SELECT ms.id FROM messages ms                  JOIN threads t ON t.id = ms.thread_id                  WHERE t.channel_id = '{cid}'                    AND ms.search_tsv @@ {tsq}                  ORDER BY ms.created_at DESC, ms.id DESC                  LIMIT {limit}              )              ORDER BY m.created_at DESC, m.id DESC              LIMIT {limit}"
+                "SELECT m.id, m.role, m.content FROM messages m              WHERE m.id IN (                  SELECT ms.id FROM messages ms                  JOIN threads t ON t.id = ms.thread_id                  WHERE t.channel_id = '{cid}'                    AND ms.search_tsv @@ {match_tsq}                  ORDER BY {}                  LIMIT {limit}              )              ORDER BY {}              LIMIT {limit}",
+                rank_order("ms.search_tsv"),
+                rank_order("m.search_tsv")
             )
         }
         None => format!(
-            "SELECT id, role, content FROM messages              WHERE id IN (                  SELECT id FROM messages                  WHERE search_tsv @@ {tsq}                  ORDER BY created_at DESC, id DESC                  LIMIT {limit}              )              ORDER BY created_at DESC, id DESC              LIMIT {limit}"
+            "SELECT m.id, m.role, m.content FROM messages m              WHERE m.id IN (                  SELECT id FROM messages                  WHERE search_tsv @@ {match_tsq}                  ORDER BY {}                  LIMIT {limit}              )              ORDER BY {}              LIMIT {limit}",
+            rank_order("search_tsv"),
+            rank_order("m.search_tsv")
         ),
     }
 }
@@ -1504,5 +1589,68 @@ mod tests {
         // already-capped value. Assert the builder honors whatever it gets.
         let sql = build_search_messages_sql("deploy", None, 50);
         assert!(sql.trim_end().ends_with("LIMIT 50"), "{sql}");
+    }
+
+    #[test]
+    fn search_sql_orders_by_relevance_rank_desc() {
+        let sql = build_search_messages_sql("deploy telegram", None, 10);
+        assert!(
+            sql.contains(
+                "ts_rank_cd(search_tsv, plainto_tsquery('english', 'deploy telegram')) DESC"
+            ),
+            "results must be ordered by descending relevance: {sql}"
+        );
+    }
+
+    #[test]
+    fn search_sql_underscore_identifier_ors_exact_token_and_sorts_first() {
+        let sql = build_search_messages_sql("parent_by_chat", None, 10);
+        assert!(
+            sql.contains("plainto_tsquery('english', 'parent_by_chat')"),
+            "word-level recall term must stay: {sql}"
+        );
+        assert!(
+            sql.contains("to_tsquery('english', 'parentbychat')"),
+            "exact joined-token term must be added for snake_case queries: {sql}"
+        );
+        assert!(
+            sql.contains("(search_tsv @@ to_tsquery('english', 'parentbychat')) DESC"),
+            "exact identifier matches must sort first: {sql}"
+        );
+        assert!(
+            sql.contains("plainto_tsquery('english', 'parent_by_chat') || (to_tsquery('english', 'parentbychat'))"),
+            "match must OR the word query with the exact token: {sql}"
+        );
+    }
+
+    #[test]
+    fn search_sql_plain_query_has_no_exact_token_terms() {
+        let sql = build_search_messages_sql("deploy telegram", None, 10);
+        assert!(
+            !sql.contains("(to_tsquery('english', '"),
+            "plain queries must not gain identifier terms: {sql}"
+        );
+    }
+
+    #[test]
+    fn identifier_whole_tokens_extracts_underscore_runs() {
+        assert_eq!(
+            identifier_whole_tokens("parent_by_chat"),
+            vec!["parentbychat"]
+        );
+        assert_eq!(
+            identifier_whole_tokens("task_omnidev_threads_stuck_in_processing"),
+            vec!["taskomnidevthreadsstuckinprocessing"]
+        );
+        assert_eq!(
+            identifier_whole_tokens("fix parent_by_chat and search_messages"),
+            vec!["parentbychat", "searchmessages"]
+        );
+        assert!(identifier_whole_tokens("plain words only").is_empty());
+        assert!(
+            identifier_whole_tokens("deepseek-v4-flash").is_empty(),
+            "dash-only tokens are handled by the english host-token path"
+        );
+        assert!(identifier_whole_tokens("_leading and trailing_").is_empty());
     }
 }

@@ -1060,20 +1060,79 @@ async fn create_search_support(pool: &PgPool) -> Result<()> {
                 ELSE left(content, 10000) || E'\n[...]\n' || right(content, 10000)
             END
         $$;
+
+        CREATE OR REPLACE FUNCTION messages_identifier_words(content text)
+        RETURNS text
+        LANGUAGE sql IMMUTABLE PARALLEL SAFE
+        AS $$
+            SELECT string_agg(replace(m[1], '_', ''), ' ')
+            FROM regexp_matches(content, '([A-Za-z0-9]+(?:_[A-Za-z0-9]+)+)', 'g') AS m
+        $$;
         "#,
     )
     .execute(pool)
     .await?;
 
+    // search_tsv indexes the lean capped content twice over:
+    //   - english parse of the text itself (word-level recall, unchanged),
+    //   - the same text with underscore identifiers appended as single joined
+    //     tokens (messages_identifier_words), so a snake_case identifier such
+    //     as `task_omnidev_threads_stuck_in_processing` or `parent_by_chat`
+    //     is matchable as one exact token and not only as its split words.
+    // The appended tokens share the english parse (one position space), so
+    // relevance ranking via ts_rank_cd stays well behaved.
     sqlx::query(
         r#"
         ALTER TABLE messages
         ADD COLUMN IF NOT EXISTS search_tsv tsvector
-        GENERATED ALWAYS AS (to_tsvector('english'::regconfig, messages_searchable_content(content))) STORED;
+        GENERATED ALWAYS AS (
+            to_tsvector('english'::regconfig,
+                messages_searchable_content(content) || ' ' ||
+                COALESCE(messages_identifier_words(messages_searchable_content(content)), ''))
+        ) STORED;
         "#,
     )
     .execute(pool)
     .await?;
+
+    // Existing installs created search_tsv with the plain english(capped)
+    // expression (underscores split into words). Detect that stale expression
+    // in the catalog and rebuild the generated column ONCE so identifiers get
+    // the joined tokens too. Guarded by the messages_identifier_words marker:
+    // the full-table rewrite happens only on the upgrade that introduces this
+    // expression, never on every container start.
+    let enriched: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_attribute a
+            JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+            WHERE a.attrelid = 'messages'::regclass
+              AND a.attname = 'search_tsv'
+              AND pg_get_expr(d.adbin, d.adrelid) LIKE '%messages_identifier_words%'
+        )
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    if !enriched {
+        sqlx::query("ALTER TABLE messages DROP COLUMN IF EXISTS search_tsv")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            r#"
+            ALTER TABLE messages
+            ADD COLUMN search_tsv tsvector
+            GENERATED ALWAYS AS (
+                to_tsvector('english'::regconfig,
+                    messages_searchable_content(content) || ' ' ||
+                    COALESCE(messages_identifier_words(messages_searchable_content(content)), ''))
+            ) STORED;
+            "#,
+        )
+        .execute(pool)
+        .await?;
+    }
 
     sqlx::query(
         r#"
