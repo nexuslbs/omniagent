@@ -694,14 +694,13 @@ When a migration/query changes, regenerate the offline SQLx cache (`.sqlx/`) so 
          `docker build` without the release arg -> default
          `OMNIAGENT_BUILD_MODE=dev`) refuse to auto-apply schema to any
          database whose host is NOT a known dev target
-         (localhost/127.0.0.1/::1/`omnidev-postgres`) unless
-         `OMNIAGENT_ALLOW_DB_WRITE=true` is set. The bare `postgres` service
-         name is deliberately NOT a dev host (the production omni-stack uses it).
-    3. `OMNIAGENT_ALLOW_DB_WRITE=true` remains an ESCAPE HATCH (explicit
-       operator override) but is no longer REQUIRED for production - release
-       images skip the dev-host check by construction. deploy.py / shared.py
-       harness envs may still set it for their own isolated deploy projects.
-       Dev stacks leave it unset/false.
+         (localhost/127.0.0.1/::1/`omnidev-postgres`). The bare `postgres`
+         service name is deliberately NOT a dev host (the production
+         omni-stack uses it).
+    3. There is NO env-var override: only release-built images auto-apply schema
+       against any database, and only a known dev host accepts a dev-built
+       binary's schema writes. A dev-built binary pointed at a non-dev DB is
+       refused - fix the DATABASE_URL, do not look for a bypass.
     4. The dev overlay (docker-compose.dev.yml) forces the dev stack onto its own
        postgres via the `omnidev-postgres` alias; a dev binary can never resolve
        to the omni-stack DB.

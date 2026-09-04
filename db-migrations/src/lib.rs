@@ -14,9 +14,8 @@ use anyhow::Result;
 use sqlx::PgPool;
 
 /// Hosts treated as "known dev targets": the DB-write guard allows schema
-/// writes from a DEV-BUILT binary to these hosts WITHOUT an explicit
-/// override. Everything else is treated as a production/live database and
-/// REFUSED for dev builds unless OMNIAGENT_ALLOW_DB_WRITE=true.
+/// writes from a DEV-BUILT binary to these hosts. Everything else is treated
+/// as a production/live database and REFUSED for dev builds.
 ///
 /// Release-built images (OMNIAGENT_BUILD_MODE=release baked at build time by
 /// the release pipeline) are NOT subject to this list: the operator
@@ -57,15 +56,14 @@ fn is_release_build_mode(value: Option<&str>) -> bool {
 }
 
 /// Guard: refuse to auto-apply declarative schema to a database that is not a
-/// known dev target when the BINARY IS DEV-BUILT, unless the operator
-/// explicitly opted in via OMNIAGENT_ALLOW_DB_WRITE=true.
+/// known dev target when the BINARY IS DEV-BUILT. There is no env-var
+/// override (the earlier DB-write env escape hatch was removed; none exists now).
 ///
 /// Decision table (checked in order):
-///   1. OMNIAGENT_ALLOW_DB_WRITE=true         -> allow (operator escape hatch)
-///   2. OMNIAGENT_BUILD_MODE=release (baked)  -> allow (release image
+///   1. OMNIAGENT_BUILD_MODE=release (baked)  -> allow (release image
 ///      auto-applies the idempotent schema on start - no manual env vars)
-///   3. DB host in KNOWN_DEV_DB_HOSTS         -> allow (dev build, dev DB)
-///   4. anything else                         -> REFUSE (dev build pointed at
+///   2. DB host in KNOWN_DEV_DB_HOSTS         -> allow (dev build, dev DB)
+///   3. anything else                         -> REFUSE (dev build pointed at
 ///      a non-dev / production database)
 ///
 /// WHY: omniagent migrations are declarative and auto-run at every startup
@@ -80,11 +78,7 @@ fn is_release_build_mode(value: Option<&str>) -> bool {
 /// against the production DB on upgrade is exactly what a version upgrade
 /// must do (no manual env vars).
 fn guard_db_write_allowed() -> Result<()> {
-    // 1. Explicit operator override (escape hatch): always allow.
-    if std::env::var("OMNIAGENT_ALLOW_DB_WRITE").as_deref() == Ok("true") {
-        return Ok(());
-    }
-    // 2. Release-built image: the operator chose to run it; auto-apply the
+    // 1. Release-built image: the operator chose to run it; auto-apply the
     //    idempotent declarative schema on container start (version upgrades).
     if is_release_build() {
         return Ok(());
@@ -109,8 +103,7 @@ fn guard_db_write_allowed() -> Result<()> {
          db-migrations must run against the omnidev dev postgres only (known \
          dev hosts: {}); NEVER against the omni-stack production DB. Build a \
          RELEASE image (--build-arg OMNIAGENT_BUILD_MODE=release) to \
-         auto-apply migrations on upgrade with no env vars, or set \
-         OMNIAGENT_ALLOW_DB_WRITE=true to override for this run.",
+         auto-apply migrations on upgrade (no env vars, no override).",
         if host.is_empty() { "<unknown>" } else { &host },
         KNOWN_DEV_DB_HOSTS.join(", "),
     ))
