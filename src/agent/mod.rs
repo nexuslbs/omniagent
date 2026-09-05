@@ -460,7 +460,10 @@ async fn channel_handler(cfg: AgentContext, channel_id: String, cancel: Cancella
                     let cause_msg = match queries::get_cause_message(&cfg.pool, thread.id).await {
                         Ok(Some(msg)) => msg,
                         Ok(None) => {
-                            error!("Thread {} has no cause message, skipping", thread.id);
+                            // LOG HYGIENE (2026-09-05): causeless threads are handled below
+                            // (user-visible error message + thread finalized failed); per-thread
+                            // lifecycle events must NOT log at ERROR level or a flood is unavoidable.
+                            debug!("Thread {} has no cause message, skipping", thread.id);
                             // Insert an error message so the user sees what happened
                             let next_seq = queries::get_max_thread_sequence(&cfg.pool, thread.id).await.unwrap_or(0) + 1;
                             let err_msg = queries::MessageNew {

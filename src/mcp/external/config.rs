@@ -6,6 +6,12 @@
 //!
 //! Each server has a name, transport type (stdio or http), and
 //! server-specific settings (command/args for stdio, url for http).
+//!
+//! LOG HYGIENE: config discovery/refresh functions run repeatedly (per server
+//! init, per config refresh), so discovery logging MUST stay at debug level.
+//! Never log discovery events at info/error: a repeated refresh would flood the
+//! journal (2026-09-05 incident: ~286k INFO lines in 21h). Guarded by
+//! tests/log_hygiene.rs.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -109,7 +115,7 @@ pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
     match config_path {
         Some(path) => match read_config_file(&path) {
             Ok(config) => {
-                tracing::info!(
+                tracing::debug!(
                     "Loaded {} external MCP server(s) from {}",
                     config.servers.len(),
                     path
@@ -121,14 +127,14 @@ pub fn load_servers_config(data_dir: &str) -> Vec<McpServerConfig> {
             }
         },
         None => {
-            tracing::info!("No MCP servers config file found (set MCP_SERVERS_CONFIG env var)");
+            tracing::debug!("No MCP servers config file found (set MCP_SERVERS_CONFIG env var)");
         }
     }
 
     // Also scan plugins/tools/ directories for mcp-config.json files
     let plugin_servers = discover_plugin_servers(data_dir);
     if !plugin_servers.is_empty() {
-        tracing::info!(
+        tracing::debug!(
             "Loaded {} MCP server(s) from plugins/tools/ directories",
             plugin_servers.len()
         );
@@ -154,14 +160,14 @@ pub fn discover_plugin_servers(data_dir: &str) -> Vec<McpServerConfig> {
     let tools =
         match crate::plugins_yaml::load_raw(data_dir, &crate::plugins_yaml::PluginYamlType::Tool) {
             Ok(tools) => {
-                tracing::info!(
+                tracing::debug!(
                     "discover_plugin_servers: load_raw OK, {} entries",
                     tools.len()
                 );
                 tools
             }
             Err(e) => {
-                tracing::info!(
+                tracing::debug!(
                     "discover_plugin_servers: load_raw failed: {:?}, falling back",
                     e
                 );
@@ -174,7 +180,7 @@ pub fn discover_plugin_servers(data_dir: &str) -> Vec<McpServerConfig> {
             continue;
         }
 
-        tracing::info!(
+        tracing::debug!(
             "discover: tool '{}' source='{}' enabled={}",
             name,
             entry.source,
@@ -319,7 +325,7 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
             .unwrap_or_else(|| format!("mcp-server-{}", dir_name));
 
         let cmd = get_bin_path(&pkg);
-        tracing::info!(
+        tracing::debug!(
             "Builtin crate '{}' at {}: resolved binary: {}",
             dir_name,
             path.display(),
@@ -383,7 +389,7 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
     let config_path_str = config_file.to_string_lossy().to_string();
     match read_config_file(&config_path_str) {
         Ok(config) => {
-            tracing::info!(
+            tracing::debug!(
                 "Loaded {} MCP server(s) from plugin config: {}",
                 config.servers.len(),
                 config_path_str
@@ -428,7 +434,7 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
                             };
 
                             if std::path::Path::new(&bin_path).exists() {
-                                tracing::info!(
+                                tracing::debug!(
                                     "Resolved command for '{}': {}",
                                     srv.name, bin_path
                                 );
@@ -452,7 +458,7 @@ fn scan_plugin_dir(plugin_dir: &str, data_dir: &str) -> Option<Vec<McpServerConf
                             };
 
                             if std::path::Path::new(&bin_path).exists() {
-                                tracing::info!(
+                                tracing::debug!(
                                     "Resolved command for '{}': {}",
                                     srv.name, bin_path
                                 );
@@ -527,7 +533,7 @@ fn scan_plugin_servers(plugins_dir: &str, data_dir: &str) -> Vec<McpServerConfig
     }
 
     let mut servers = Vec::new();
-    tracing::info!("Scanning for MCP plugin configs in: {}", plugins_dir);
+    tracing::debug!("Scanning for MCP plugin configs in: {}", plugins_dir);
 
     let entries = match std::fs::read_dir(plugins_path) {
         Ok(entries) => entries,

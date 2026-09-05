@@ -705,3 +705,12 @@ When a migration/query changes, regenerate the offline SQLx cache (`.sqlx/`) so 
        postgres via the `omnidev-postgres` alias; a dev binary can never resolve
        to the omni-stack DB.
     
+---
+
+## Log Hygiene Rule (HARD, since 2026-09-05)
+
+Events that can recur **per message / per iteration / per thread** (lifecycle anomalies, config discovery/refresh, polling loops) may ONLY log at `debug`/`trace` level, or be rate-limited. NEVER log them at `info` or `error`.
+
+Background: a single 21h window produced 28,708 ERRORs ("Thread N has no cause message, skipping") and ~285,889 INFO lines (MCP `config::external` discovery) because per-event log sites used flooding levels. The journal drowned and real signals were lost.
+
+Enforced by `tests/log_hygiene.rs` (source-scan guard tests): it fails the build if `mcp/external/config.rs` ever logs discovery at INFO or the no-cause thread skip in `src/agent/mod.rs` ever logs at ERROR again. When touching either site, keep the log at debug level.
