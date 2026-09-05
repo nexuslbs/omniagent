@@ -456,7 +456,7 @@ impl Platform for ExternalPlatformClient {
 
             // Send configure message with the plugin's config
             let config_id = self.next_id.fetch_add(1, Ordering::SeqCst);
-            let (config_name_for_log, configure_req) = {
+            let (config_name_for_log, configure_req, unresolved_secrets) = {
                 // Clone config map while holding the read lock, then drop
                 // the guard before any async work to keep the future Send.
                 let (name, config_map) = {
@@ -469,10 +469,28 @@ impl Platform for ExternalPlatformClient {
                 // references like "$env:ACCESS_TOKEN" or "$secret:my_key".
                 // ${VAR} is never interpolated - treated as a literal.
                 let mut resolved_config = config_map;
+                let secret_refs: Vec<(String, String)> = resolved_config
+                    .iter()
+                    .filter(|(_, v)| v.starts_with("$secret:"))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
                 crate::plugins_yaml::resolve_config_refs(&mut resolved_config, &pool).await;
+                // A $secret: reference that resolved to empty (or stayed a
+                // literal) means the secret is missing in the secrets table.
+                // Surface it: the plugin must not silently run credential-less
+                // while core reports a plain "configured successfully".
+                let unresolved: Vec<String> = secret_refs
+                    .iter()
+                    .filter(|(k, _)| {
+                        resolved_config
+                            .get(k)
+                            .map_or(true, |v| v.is_empty() || v.starts_with("$secret:"))
+                    })
+                    .map(|(k, orig)| format!("{}={}", k, orig))
+                    .collect();
                 let req =
                     crate::platform::external::build_configure_request(config_id, &resolved_config);
-                (name, req)
+                (name, req, unresolved)
             };
             stdin.write_all(configure_req.as_bytes()).await?;
             stdin.write_all(b"\n").await?;
@@ -486,7 +504,19 @@ impl Platform for ExternalPlatformClient {
                 let response = crate::platform::external::parse_response(line.trim())?;
                 match response {
                     crate::platform::external::PluginResponse::Success { .. } => {
-                        tracing::info!("Plugin '{}' configured successfully", config_name_for_log);
+                        if unresolved_secrets.is_empty() {
+                            tracing::info!(
+                                "Plugin '{}' configured successfully",
+                                config_name_for_log
+                            );
+                        } else {
+                            tracing::error!(
+                                "Plugin '{}' configured but {} secret reference(s) did not                                  resolve: [{}]. The plugin runs without those credentials                                  (inbound/auth may be disabled) until the secrets exist:                                  create them via the secrets API or add them to the                                  omni-deployer secrets.env and re-run the deploy/setup.",
+                                config_name_for_log,
+                                unresolved_secrets.len(),
+                                unresolved_secrets.join(", ")
+                            );
+                        }
                     }
                     crate::platform::external::PluginResponse::Error { error, .. } => {
                         return Err(err_str!(

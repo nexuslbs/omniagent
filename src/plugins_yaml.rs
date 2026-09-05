@@ -12,10 +12,11 @@ use crate::error::{AppResult, Error, ErrorContext};
 use crate::plugin::{ConfigSchemaField, PluginManifest, PluginType};
 use serde::{Deserialize, Serialize};
 use sql_forge::sql_forge;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
 // YAML types
@@ -630,17 +631,45 @@ pub async fn resolve_config_ref_value(value: &str, pool: &sqlx::PgPool) -> Strin
         {
             Ok(Some(row)) => return row.current_value,
             Ok(None) => {
-                tracing::warn!(
-                    "Config ref $secret:{} not found in secrets table",
-                    secret_name
-                );
+                report_unresolved_secret(secret_name);
             }
             Err(e) => {
                 tracing::error!("DB error resolving $secret:{}: {:?}", secret_name, e);
             }
         }
+        // A $secret: reference that does not resolve must NOT pass the raw
+        // literal "$secret:NAME" on to the plugin: the plugin would then
+        // authenticate with a garbage value and fail confusingly (401s, or a
+        // false "configured" state with a dead token). Return an empty value so
+        // the plugin surfaces its own explicit "credential missing" error, and
+        // the configure path logs exactly which secret did not resolve.
+        return String::new();
     }
     value.to_string()
+}
+
+/// Log an actionable error the first time a `$secret:` reference does not
+/// resolve, then degrade to debug so a misconfigured plugin cannot spam the
+/// logs on every (re)configure attempt.
+fn report_unresolved_secret(secret_name: &str) {
+    static REPORTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let reported = REPORTED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut set = match reported.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if set.insert(secret_name.to_string()) {
+        tracing::error!(
+            "Secret $secret:{} is referenced by a plugin config but does not exist in the              secrets table. Create it via the secrets API, or add {} to the omni-deployer              secrets.env and re-run the deploy/setup; until then the plugin runs without              that credential.",
+            secret_name,
+            secret_name
+        );
+    } else {
+        tracing::debug!(
+            "Secret $secret:{} still missing (already reported)",
+            secret_name
+        );
+    }
 }
 
 /// Resolve `$env:VAR` and `$secret:NAME` references in all values of a config map.
