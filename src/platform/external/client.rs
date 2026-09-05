@@ -484,7 +484,7 @@ impl Platform for ExternalPlatformClient {
                     .filter(|(k, _)| {
                         resolved_config
                             .get(k)
-                            .map_or(true, |v| v.is_empty() || v.starts_with("$secret:"))
+                            .is_none_or(|v| v.is_empty() || v.starts_with("$secret:"))
                     })
                     .map(|(k, orig)| format!("{}={}", k, orig))
                     .collect();
