@@ -1409,7 +1409,7 @@ async fn call_prompt_context(
 async fn run_cron_handler(
     Path(schedule_id): Path<String>,
     State(state): State<Arc<AppState>>,
-    Query(_params): Query<RunCronParams>,
+    Query(params): Query<RunCronParams>,
 ) -> impl IntoResponse {
     match crate::scheduler::fire_cron_job_by_id(
         &state.pool,
@@ -1417,7 +1417,7 @@ async fn run_cron_handler(
         &state.plugin_manager,
         &state.app_context,
         &schedule_id,
-        false,
+        params.force.unwrap_or(false),
     )
     .await
     {
