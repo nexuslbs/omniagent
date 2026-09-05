@@ -138,6 +138,16 @@ async fn run_server() -> AppResult<()> {
     }
     tracing::info!("Advisory lock acquired: sole owner of this database");
 
+    // Readiness /health during startup migrations (v0.1.9 startup-hang
+    // fix, incident 2026-09-05): bind a minimal /health listener BEFORE
+    // migrations so the process answers /health (operator / load-balancer
+    // checks) while the schema upgrade runs. The full HTTP API binds the
+    // same host:port after migrations and startup recovery; the readiness
+    // task is aborted and awaited right before that bind so the port is
+    // released. Without it, an upgrade that must backfill a large table
+    // left /health down for the whole migration -> production 500/502.
+    let readiness_server = server::spawn_readiness_server(&cfg.host, cfg.port).await;
+
     // Run migrations
     db::migrations::run(&pool)
         .await
@@ -319,6 +329,14 @@ async fn run_server() -> AppResult<()> {
     let agent_handle = tokio::spawn(async move {
         agent.run(cancel_tokens_agent).await;
     });
+
+    // Release the readiness /health listener (it holds the same host:port)
+    // before the full HTTP API server binds it.
+    if let Some(handle) = readiness_server {
+        handle.abort();
+        let _ = handle.await;
+        tracing::info!("Readiness /health server stopped; full HTTP API binding next");
+    }
 
     // Spawn HTTP server (health, /stop endpoint)
     let pool_server = pool.clone();

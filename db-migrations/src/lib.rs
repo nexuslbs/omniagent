@@ -1032,7 +1032,7 @@ async fn create_vector_support(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-// -- Message keyword search: tsvector FTS column + GIN (by-construction index) --
+// -- Message keyword search: tsvector FTS column + GIN index ---------------
 // search_messages is served from a dedicated inverted index (tsvector GIN on
 // messages.search_tsv) so keyword lookups are index-driven regardless of
 // planner statistics (no ANALYZE dependency) and never scan or detoast the
@@ -1040,7 +1040,40 @@ async fn create_vector_support(pool: &PgPool) -> Result<()> {
 // searchable text lean: messages longer than the cap contribute only their
 // head and tail (both ends stay findable), so giant tool-output blobs cannot
 // bloat the index or the per-row tsvector.
+//
+// MAINTENANCE MODEL (changed by the v0.1.9 startup-hang fix, incident
+// 2026-09-05): v0.1.9 shipped search_tsv as `GENERATED ALWAYS AS (...) STORED`.
+// Creating a STORED generated column (or converting an existing column to
+// one) makes PostgreSQL compute the value for EVERY existing row at DDL time,
+// i.e. a full-table rewrite under an AccessExclusive lock. On a large
+// messages table (73k rows, multi-GB with TOAST) that single ALTER ran for
+// 8+ minutes at container start, BEFORE the HTTP API bound, so clients saw
+// 500/502 and the operator had to roll back. This version converges every
+// schema state onto ONE representation that never needs a full-table rewrite:
+//
+//   - search_tsv is a PLAIN nullable tsvector column. DROP COLUMN only marks
+//     the attribute dropped and a plain nullable ADD COLUMN is metadata-only
+//     in PG11+; neither rewrites the table.
+//   - a BEFORE INSERT OR UPDATE OF content trigger (trg_messages_search_tsv)
+//     keeps the column populated with the SAME expression the v0.1.9
+//     generated column used (capped content + identifier words, english
+//     parse): ranking, identifier-token matching and the content cap are
+//     unchanged.
+//   - existing rows are backfilled in bounded chunks (one statement per
+//     ~1000 ids, row-level locks only), so reads such as count(*) are never
+//     blocked behind the migration and no single statement stalls for
+//     minutes.
+//   - the GIN index is (re)built after the backfill (SHARE lock only).
+// The append-only trigger (trg_messages_append_only) is dropped for the
+// backfill window and recreated by create_triggers() later in the same
+// migration run; the HTTP API is not bound yet at that point, so there are no
+// concurrent writers in the window.
+//
+// Fresh installs and databases already migrated by this version are no-ops
+// once the sync trigger exists (checked below), so routine restarts are not
+// slowed down.
 async fn create_search_support(pool: &PgPool) -> Result<()> {
+    // Helper functions (immutable; behavior identical to v0.1.9).
     sqlx::query(
         r#"
         CREATE OR REPLACE FUNCTION messages_searchable_content(content text)
@@ -1072,67 +1105,188 @@ async fn create_search_support(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // search_tsv indexes the lean capped content twice over:
-    //   - english parse of the text itself (word-level recall, unchanged),
-    //   - the same text with underscore identifiers appended as single joined
-    //     tokens (messages_identifier_words), so a snake_case identifier such
-    //     as `task_omnidev_threads_stuck_in_processing` or `parent_by_chat`
-    //     is matchable as one exact token and not only as its split words.
-    // The appended tokens share the english parse (one position space), so
-    // relevance ranking via ts_rank_cd stays well behaved.
-    sqlx::query(
-        r#"
-        ALTER TABLE messages
-        ADD COLUMN IF NOT EXISTS search_tsv tsvector
-        GENERATED ALWAYS AS (
-            to_tsvector('english'::regconfig,
-                messages_searchable_content(content) || ' ' ||
-                COALESCE(messages_identifier_words(messages_searchable_content(content)), ''))
-        ) STORED;
-        "#,
-    )
-    .execute(pool)
-    .await?;
-
-    // Existing installs created search_tsv with the plain english(capped)
-    // expression (underscores split into words). Detect that stale expression
-    // in the catalog and rebuild the generated column ONCE so identifiers get
-    // the joined tokens too. Guarded by the messages_identifier_words marker:
-    // the full-table rewrite happens only on the upgrade that introduces this
-    // expression, never on every container start.
-    let enriched: bool = sqlx::query_scalar(
+    // Column state: does search_tsv exist, and is it a STORED generated column?
+    let col_exists: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS (
-            SELECT 1
-            FROM pg_attribute a
-            JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-            WHERE a.attrelid = 'messages'::regclass
-              AND a.attname = 'search_tsv'
-              AND pg_get_expr(d.adbin, d.adrelid) LIKE '%messages_identifier_words%'
+            SELECT 1 FROM pg_attribute
+            WHERE attrelid = 'messages'::regclass
+              AND attname = 'search_tsv'
+              AND NOT attisdropped
         )
         "#,
     )
     .fetch_one(pool)
     .await?;
-    if !enriched {
-        sqlx::query("ALTER TABLE messages DROP COLUMN IF EXISTS search_tsv")
-            .execute(pool)
-            .await?;
-        sqlx::query(
+
+    let mut is_generated = false;
+    if col_exists {
+        is_generated = sqlx::query_scalar(
             r#"
-            ALTER TABLE messages
-            ADD COLUMN search_tsv tsvector
-            GENERATED ALWAYS AS (
-                to_tsvector('english'::regconfig,
-                    messages_searchable_content(content) || ' ' ||
-                    COALESCE(messages_identifier_words(messages_searchable_content(content)), ''))
-            ) STORED;
+            SELECT attgenerated <> ''
+            FROM pg_attribute
+            WHERE attrelid = 'messages'::regclass
+              AND attname = 'search_tsv'
+              AND NOT attisdropped
             "#,
         )
-        .execute(pool)
+        .fetch_one(pool)
         .await?;
     }
 
+    // The sync trigger only exists on databases this version already migrated:
+    // its presence means the plain column is trigger-maintained and the
+    // backfill already ran (so routine restarts skip it).
+    let sync_trigger_exists: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM pg_trigger
+            WHERE tgrelid = 'messages'::regclass
+              AND tgname = 'trg_messages_search_tsv'
+        )
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let needs_backfill = if !col_exists {
+        // Plain nullable ADD COLUMN: metadata only, no table rewrite. Covers
+        // fresh installs and pre-search_tsv databases (existing rows read
+        // NULL until the backfill below fills them).
+        sqlx::query("ALTER TABLE messages ADD COLUMN search_tsv tsvector")
+            .execute(pool)
+            .await?;
+        tracing::info!("[migration] messages.search_tsv: added plain tsvector column");
+        true
+    } else if is_generated {
+        // A STORED generated column cannot be altered in place; DROP COLUMN
+        // is metadata-only (no rewrite) and so is the plain ADD COLUMN that
+        // follows. Existing rows are recomputed by the chunked backfill with
+        // the same expression, so the indexed content is preserved.
+        sqlx::query("ALTER TABLE messages DROP COLUMN search_tsv")
+            .execute(pool)
+            .await?;
+        sqlx::query("ALTER TABLE messages ADD COLUMN search_tsv tsvector")
+            .execute(pool)
+            .await?;
+        tracing::info!(
+            "[migration] messages.search_tsv: converted generated column to plain (no table rewrite)"
+        );
+        true
+    } else if !sync_trigger_exists {
+        // Legacy plain column (pre-v0.1.9 install): values are stale (plain
+        // english parse) or NULL. First migration onto the trigger-maintained
+        // schema: recompute every row.
+        tracing::info!(
+            "[migration] messages.search_tsv: legacy plain column found, full backfill required"
+        );
+        true
+    } else {
+        tracing::info!(
+            "[migration] messages.search_tsv: already plain + trigger-maintained (no backfill needed)"
+        );
+        false
+    };
+
+    if needs_backfill {
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM messages")
+            .fetch_one(pool)
+            .await?;
+        if total > 0 {
+            // The append-only trigger rejects UPDATEs that touch search_tsv,
+            // so drop it for the backfill window; create_triggers() recreates
+            // it later in this same run (no writers yet: API not bound).
+            sqlx::query("DROP TRIGGER IF EXISTS trg_messages_append_only ON messages")
+                .execute(pool)
+                .await?;
+            let min_id: i64 = sqlx::query_scalar("SELECT MIN(id) FROM messages")
+                .fetch_one(pool)
+                .await?;
+            let max_id: i64 = sqlx::query_scalar("SELECT MAX(id) FROM messages")
+                .fetch_one(pool)
+                .await?;
+            let started = std::time::Instant::now();
+            let mut done: i64 = 0;
+            let mut lo = min_id;
+            let step = 1000_i64;
+            // The indexed expression (MUST stay identical to the trigger
+            // function below and to the v0.1.9 generated-column expression):
+            // english parse of the capped content plus underscore identifiers
+            // appended as single joined tokens.
+            while lo <= max_id {
+                let hi = lo.saturating_add(step - 1).min(max_id);
+                let res = sqlx::query(
+                    r#"
+                    UPDATE messages
+                    SET search_tsv = to_tsvector('english'::regconfig,
+                        messages_searchable_content(content) || ' ' ||
+                        COALESCE(messages_identifier_words(messages_searchable_content(content)), ''))
+                    WHERE id >= $1 AND id <= $2
+                    "#,
+                )
+                .bind(lo)
+                .bind(hi)
+                .execute(pool)
+                .await?;
+                let n = res.rows_affected() as i64;
+                done += n;
+                tracing::info!(
+                    "[migration] search_tsv backfill rows {}-{}: {} rows ({} / {})",
+                    lo,
+                    hi,
+                    n,
+                    done,
+                    total
+                );
+                if hi == max_id {
+                    break;
+                }
+                lo = hi.saturating_add(1);
+            }
+            tracing::info!(
+                "[migration] search_tsv backfill complete: {} rows in {:?}",
+                done,
+                started.elapsed()
+            );
+        } else {
+            tracing::info!("[migration] search_tsv backfill skipped: messages is empty");
+        }
+    }
+
+    // Sync trigger: keeps search_tsv populated for new and edited rows. The
+    // column-list trigger (UPDATE OF content) means the backfill UPDATEs above
+    // (which set only search_tsv) never fire it. Its expression is the same as
+    // the backfill expression above (content is referenced as NEW.content).
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION messages_search_tsv_sync()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            NEW.search_tsv := to_tsvector('english'::regconfig,
+                messages_searchable_content(NEW.content) || ' ' ||
+                COALESCE(messages_identifier_words(messages_searchable_content(NEW.content)), ''));
+            RETURN NEW;
+        END;
+        $$;
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("DROP TRIGGER IF EXISTS trg_messages_search_tsv ON messages")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE TRIGGER trg_messages_search_tsv \
+         BEFORE INSERT OR UPDATE OF content ON messages \
+         FOR EACH ROW EXECUTE FUNCTION messages_search_tsv_sync()",
+    )
+    .execute(pool)
+    .await?;
+
+    // GIN index over the final column contents: built once after the backfill
+    // (SHARE lock only; reads such as count(*) stay unblocked).
     sqlx::query(
         r#"
         CREATE INDEX IF NOT EXISTS idx_messages_search_tsv
@@ -1143,7 +1297,7 @@ async fn create_search_support(pool: &PgPool) -> Result<()> {
     .await?;
 
     tracing::info!(
-        "[migration] messages.search_tsv (tsvector) + GIN index ready for FTS keyword search"
+        "[migration] messages.search_tsv (plain, trigger-maintained) + GIN index ready for FTS keyword search"
     );
     Ok(())
 }

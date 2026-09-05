@@ -303,6 +303,29 @@ async fn health_handler() -> impl IntoResponse {
     Json(health_payload())
 }
 
+/// Spawn a minimal readiness HTTP server that serves GET /health on the real
+/// API host:port while startup migrations run (incident 2026-09-05: the
+/// v0.1.9 schema upgrade rewrote the messages table for 8+ minutes with the
+/// HTTP API not yet bound -> production 500/502). The full API router binds
+/// the same address afterwards, so the caller MUST abort the returned task
+/// (and await it so the listener actually closes) right before starting the
+/// real server. Returns None when the address cannot be bound (the real
+/// server then reports a bind error of its own later).
+pub async fn spawn_readiness_server(host: &str, port: u16) -> Option<tokio::task::JoinHandle<()>> {
+    let addr = format!("{}:{}", host, port);
+    let listener = tokio::net::TcpListener::bind(&addr).await.ok()?;
+    tracing::info!(
+        "Readiness /health server listening on {} while startup migrations run",
+        addr
+    );
+    let app = Router::new().route("/health", get(health_handler));
+    Some(tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!("Readiness /health server error: {}", e);
+        }
+    }))
+}
+
 /// Pure decision: must `stop-thread` cancel the channel handler?
 ///
 /// Only when the target thread was actively `processing`: the handler
