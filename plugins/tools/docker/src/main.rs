@@ -8,19 +8,29 @@
 //!
 //! **Config**: The plugin reads all configuration from the MCP `configure`
 //! message (delivered by omniagent from the plugin config / config_schema).
-//! It does NOT read environment variables. The single config key is
-//! `workspace_dir` (default `/opt/workspace`) - the root under which the agent
-//! may run compose projects.
+//! It does NOT read environment variables. Config keys:
+//! - `workspace_dir` (default `/opt/workspace`): the root under which the
+//!   agent may run compose projects.
+//! - `allow_omni_dir` (default `false`) + `omni_dir` (default `/opt/omni`):
+//!   when enabled, OMNI_DIR is whitelisted as an ADDITIONAL allowed root for
+//!   `project_dir` / `compose_file` / `env_file`, using the same sandbox
+//!   checks as `workspace_dir`. Projects resolved under the omni_dir root
+//!   (the production compose dir) are restricted to non-destructive verbs
+//!   (`ps`, `logs`, `exec`): destructive compose verbs stay REFUSED there so
+//!   cron/agent actions can reach `/opt/omni` (e.g. daily_backup exec toolbox
+//!   backup.sh) without ever changing production container state outside the
+//!   release pipeline.
 //!
 //! **Tool API**:
 //! - `project_dir` (required): the compose project directory. Must be the
-//!   workspace dir or a subdirectory of it.
-//! - `compose_file` (optional, default `docker-compose.yml`): the compose file,
-//!   relative to `project_dir` or an absolute path. Must stay inside the
-//!   configured `workspace_dir`.
+//!   workspace dir or a subdirectory of it, or the omni_dir root (when
+//!   allow_omni_dir is enabled) or a subdirectory of that root.
+//! - `compose_file` (optional, default `docker-compose.yml`): the compose
+//!   file, relative to `project_dir` or an absolute path. Must stay inside a
+//!   configured sandbox root (`workspace_dir`, or `omni_dir` when enabled).
 //! - `env_file` (optional): a `.env`-style file relative to `project_dir` or
-//!   an absolute path. Must stay inside the configured `workspace_dir`. Passed
-//!   to `docker compose --env-file`.
+//!   an absolute path inside a configured sandbox root. Passed to
+//!   `docker compose --env-file`.
 //!
 //! **Project name**: the compose project name is derived from the tool's
 //! arguments ONLY: `COMPOSE_PROJECT_NAME` from `env_file` (via `--env-file`),
@@ -54,27 +64,105 @@ fn contains_forbidden_chars(s: &str) -> bool {
     s.chars().any(|c| FORBIDDEN_CHARS.contains(&c))
 }
 
-/// Resolve the project directory against the configured workspace root.
-///
-/// `project_dir` is required and must be the workspace dir or a subdirectory
-/// of it. Returns the canonicalized absolute project directory.
-fn resolve_project_dir(project_dir: &str, configured_workspace: &str) -> Result<String> {
-    if project_dir.is_empty() {
+/// Canonicalize a configured sandbox root (workspace_dir or omni_dir),
+/// falling back to the raw path when it does not exist yet.
+fn canonical_root(root: &str) -> std::path::PathBuf {
+    std::path::Path::new(root)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::Path::new(root).to_path_buf())
+}
+
+impl Config {
+    /// The sandbox roots accepted for project_dir / compose_file / env_file:
+    /// the configured workspace_dir always, plus the configured omni_dir when
+    /// allow_omni_dir is enabled.
+    fn allowed_roots(&self) -> Vec<std::path::PathBuf> {
+        let mut roots = vec![canonical_root(&self.workspace_dir)];
+        if self.allow_omni_dir && !self.omni_dir.trim().is_empty() {
+            let omni = canonical_root(&self.omni_dir);
+            if !roots.contains(&omni) {
+                roots.push(omni);
+            }
+        }
+        roots
+    }
+
+    /// Human-readable description of the allowed sandbox roots, for error
+    /// messages. Identical wording to the legacy workspace-only message when
+    /// allow_omni_dir is disabled.
+    fn roots_label(&self) -> String {
+        if self.allow_omni_dir && !self.omni_dir.trim().is_empty() {
+            format!(
+                "workspace ({}) or omni_dir ({})",
+                self.workspace_dir, self.omni_dir
+            )
+        } else {
+            format!("workspace ({})", self.workspace_dir)
+        }
+    }
+
+    /// True when the canonicalized project directory lives under the omni_dir
+    /// root and NOT under the workspace_dir root. Projects on the omni root
+    /// are the production compose dir: they may only be reached with
+    /// non-destructive verbs (see OMNI_ROOT_SAFE_VERBS).
+    fn is_omni_root_project(&self, resolved_project: &Path) -> bool {
+        if !self.allow_omni_dir || self.omni_dir.trim().is_empty() {
+            return false;
+        }
+        let workspace = canonical_root(&self.workspace_dir);
+        let omni = canonical_root(&self.omni_dir);
+        !resolved_project.starts_with(&workspace) && resolved_project.starts_with(&omni)
+    }
+}
+
+/// Compose verbs that may target a project on the omni_dir root. Everything
+/// else (up, down, stop, restart, build, run, pull) changes container state
+/// and is REFUSED there: production container changes happen only through the
+/// release pipeline, never ad-hoc from a tool call.
+const OMNI_ROOT_SAFE_VERBS: &[&str] = &["ps", "logs", "exec"];
+
+/// Refuse destructive compose verbs against projects on the omni_dir root.
+fn check_verb_for_project(verb: &str, resolved_project_dir: &str, config: &Config) -> Result<()> {
+    if config.is_omni_root_project(Path::new(resolved_project_dir))
+        && !OMNI_ROOT_SAFE_VERBS.contains(&verb)
+    {
         anyhow::bail!(
-            "Missing 'project_dir' argument: must be the workspace dir or a subdirectory"
+            "Verb '{}' against omni_dir project '{}' is refused: the omni_dir root \
+             (production compose dir) allows only non-destructive reachability (ps, logs) \
+             and exec (e.g. the toolbox backup script). Destructive compose verbs \
+             (up, down, stop, restart, build, run, pull) may only target workspace \
+             projects: production container changes happen only via the release pipeline.",
+            verb,
+            resolved_project_dir
         );
     }
-    let configured_path = Path::new(configured_workspace)
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(configured_workspace).to_path_buf());
+    Ok(())
+}
 
+/// Resolve the project directory against the configured sandbox roots.
+///
+/// `project_dir` is required and must be the configured workspace_dir, the
+/// configured omni_dir (only when allow_omni_dir is enabled), or a
+/// subdirectory of either. Returns the canonicalized absolute project
+/// directory.
+fn resolve_project_dir(project_dir: &str, config: &Config) -> Result<String> {
+    if project_dir.is_empty() {
+        anyhow::bail!(
+            "Missing 'project_dir' argument: must be the workspace dir or a \
+             subdirectory (or the omni_dir root when allow_omni_dir is enabled)"
+        );
+    }
     let resolved = Path::new(project_dir)
         .canonicalize()
         .map_err(|e| anyhow::anyhow!("Invalid project directory '{}': {}", project_dir, e))?;
-    if !resolved.starts_with(&configured_path) {
+    let inside = config
+        .allowed_roots()
+        .iter()
+        .any(|root| resolved.starts_with(root));
+    if !inside {
         anyhow::bail!(
-            "Project directory must be inside workspace ({}), got: {}",
-            configured_workspace,
+            "Project directory must be inside {}, got: {}",
+            config.roots_label(),
             project_dir
         );
     }
@@ -86,30 +174,30 @@ fn resolve_project_dir(project_dir: &str, configured_workspace: &str) -> Result<
 
 /// Resolve a file (compose_file or env_file). The file may be:
 /// - relative to project_dir (stays inside project_dir), or
-/// - an absolute path ANYWHERE inside the configured workspace_dir
-///   (e.g. `/opt/workspace/omni-deployer/omnidev.env` while the compose
-///   project lives in `/opt/workspace/omni-stack`).
+/// - an absolute path ANYWHERE inside one of the configured sandbox roots
+///   (workspace_dir, plus omni_dir when allow_omni_dir is enabled) - e.g.
+///   `/opt/workspace/omni-deployer/omnidev.env` or `/opt/omni/.env` while the
+///   compose project lives in the other root.
 ///
-/// The workspace root is the sandbox boundary: files outside it are rejected.
+/// The configured roots are the sandbox boundary: files outside them are
+/// rejected.
 fn resolve_project_file(
     file: &str,
     project_dir: &str,
-    configured_workspace: &str,
+    config: &Config,
     what: &str,
 ) -> Result<String> {
     if contains_forbidden_chars(file) {
         anyhow::bail!("Forbidden characters in {} argument", what);
     }
-    let workspace = Path::new(configured_workspace)
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(configured_workspace).to_path_buf());
+    let roots = config.allowed_roots();
     let project = Path::new(project_dir)
         .canonicalize()
         .unwrap_or_else(|_| Path::new(project_dir).to_path_buf());
 
     let candidate = Path::new(file);
     let resolved = if candidate.is_absolute() {
-        // Absolute path: allowed anywhere inside the configured workspace.
+        // Absolute path: allowed anywhere inside one of the configured roots.
         candidate
             .canonicalize()
             .map_err(|e| anyhow::anyhow!("Invalid {} '{}': {}", what, file, e))?
@@ -121,11 +209,12 @@ fn resolve_project_file(
             .map_err(|e| anyhow::anyhow!("Invalid {} '{}': {}", what, file, e))?
     };
 
-    if !resolved.starts_with(&workspace) {
+    let inside = roots.iter().any(|root| resolved.starts_with(root));
+    if !inside {
         anyhow::bail!(
-            "{} must be inside workspace ({}), got: {}",
+            "{} must be inside {}, got: {}",
             what,
-            configured_workspace,
+            config.roots_label(),
             resolved.display()
         );
     }
@@ -134,7 +223,6 @@ fn resolve_project_file(
     }
     Ok(resolved.display().to_string())
 }
-
 /// Build a tokio::process::Command for `docker compose`.
 fn build_compose_command(
     command: &str,
@@ -487,8 +575,6 @@ fn is_detached_command(command: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> {
-    let configured_workspace = &config.workspace_dir;
-
     let command = args["command"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!(
@@ -522,7 +608,7 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
     if contains_forbidden_chars(&project_dir_arg) {
         anyhow::bail!("Forbidden characters in project_dir argument");
     }
-    let project_dir = resolve_project_dir(&project_dir_arg, configured_workspace)?;
+    let project_dir = resolve_project_dir(&project_dir_arg, config)?;
 
     // Resolve compose_file(s): each relative to project_dir or absolute inside
     // workspace. Default docker-compose.yml when omitted. Multiple entries become
@@ -533,7 +619,7 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
         resolved_compose_files.push(resolve_project_file(
             "docker-compose.yml",
             &project_dir,
-            configured_workspace,
+            config,
             "compose_file",
         )?);
     } else {
@@ -541,7 +627,7 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
             resolved_compose_files.push(resolve_project_file(
                 cf,
                 &project_dir,
-                configured_workspace,
+                config,
                 "compose_file",
             )?);
         }
@@ -551,12 +637,7 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
     let resolved_env_file = if env_file_arg.is_empty() {
         String::new()
     } else {
-        resolve_project_file(
-            &env_file_arg,
-            &project_dir,
-            configured_workspace,
-            "env_file",
-        )?
+        resolve_project_file(&env_file_arg, &project_dir, config, "env_file")?
     };
 
     let verb = command.split_whitespace().next().unwrap_or("");
@@ -574,6 +655,11 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
             ALLOWED_VERBS.join(", ")
         );
     }
+
+    // Root-aware verb gating: a project on the omni_dir root (production
+    // compose dir) may only be reached with ps/logs/exec. Destructive verbs
+    // are refused here, before any docker CLI is spawned.
+    check_verb_for_project(verb, &project_dir, config)?;
 
     let mut cmd = build_compose_command(
         &command,
@@ -726,12 +812,28 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
 #[derive(Clone)]
 struct Config {
     workspace_dir: String,
+    /// When true, the configured omni_dir is whitelisted as an ADDITIONAL
+    /// allowed root for project_dir / compose_file / env_file, with the same
+    /// sandbox checks as workspace_dir. Projects resolved under the omni_dir
+    /// root are restricted to non-destructive compose verbs (ps, logs, exec):
+    /// destructive verbs (up/down/stop/restart/build/run/pull) stay refused
+    /// there, because the omni_dir root is the production compose dir and
+    /// production container changes happen only via the release pipeline.
+    /// Default: false (workspace-only sandbox, unchanged legacy behavior).
+    allow_omni_dir: bool,
+    /// OMNI_DIR root whitelisted when allow_omni_dir is enabled. Defaults to
+    /// /opt/omni (the real production compose dir). omniagent resolves the
+    /// plugin.json schema default `$env:OMNI_DIR` when the config does not set
+    /// it explicitly.
+    omni_dir: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             workspace_dir: "/opt/workspace".to_string(),
+            allow_omni_dir: false,
+            omni_dir: "/opt/omni".to_string(),
         }
     }
 }
@@ -751,6 +853,22 @@ async fn main() -> Result<()> {
             if let Some(dir) = params.get("workspace_dir").and_then(|v| v.as_str()) {
                 if !dir.is_empty() {
                     cfg.workspace_dir = dir.to_string();
+                }
+            }
+            // allow_omni_dir may arrive as a JSON boolean or as the strings
+            // "true"/"false" (omniagent stringifies config values when it
+            // forwards them through the configure env); accept both.
+            if let Some(v) = params.get("allow_omni_dir") {
+                let enabled = match v {
+                    Value::Bool(b) => *b,
+                    Value::String(s) => s.eq_ignore_ascii_case("true") || s == "1",
+                    _ => false,
+                };
+                cfg.allow_omni_dir = enabled;
+            }
+            if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
+                if !dir.is_empty() {
+                    cfg.omni_dir = dir.to_string();
                 }
             }
         })
@@ -792,16 +910,16 @@ async fn main() -> Result<()> {
                 "properties": {
                     "project_dir": {
                         "type": "string",
-                        "description": "The compose project directory: the workspace dir or a subdirectory of it."
+                        "description": "The compose project directory: the workspace dir or a subdirectory of it, or (when allow_omni_dir is enabled) the configured omni_dir root (/opt/omni)."
                     },
                     "compose_file": {
                         "type": ["string", "array"],
                         "items": {"type": "string"},
-                        "description": "Compose file(s): a string or array of strings, each relative to project_dir (default docker-compose.yml) or an absolute path inside the workspace. Multiple entries are passed as repeated -f flags in order (base first, overrides after)."
+                        "description": "Compose file(s): a string or array of strings, each relative to project_dir (default docker-compose.yml) or an absolute path inside the workspace or the configured omni_dir root (when allow_omni_dir is enabled). Multiple entries are passed as repeated -f flags in order (base first, overrides after)."
                     },
                     "env_file": {
                         "type": "string",
-                        "description": ".env-style file: relative to project_dir, or an absolute path anywhere inside the workspace. Passed via --env-file."
+                        "description": ".env-style file: relative to project_dir, or an absolute path anywhere inside the workspace or the configured omni_dir root (when allow_omni_dir is enabled). Passed via --env-file."
                     },
                     "command": {
                         "type": "string",
@@ -1034,8 +1152,9 @@ mod tests {
     fn env_file_inside_workspace_but_outside_project_dir_is_accepted() {
         // Use case: project_dir=omni-stack, env_file=/opt/workspace/omni-deployer/omnidev.env
         let (_tmp, ws, proj) = make_layout("env_outside_proj");
+        let cfg = config_for(&ws, None);
         let env_file = format!("{ws}/envs/omnidev.env");
-        let resolved = resolve_project_file(&env_file, &proj, &ws, "env_file").unwrap();
+        let resolved = resolve_project_file(&env_file, &proj, &cfg, "env_file").unwrap();
         assert_eq!(
             Path::new(&resolved),
             Path::new(&env_file).canonicalize().unwrap()
@@ -1045,8 +1164,9 @@ mod tests {
     #[test]
     fn absolute_path_inside_workspace_is_accepted() {
         let (_tmp, ws, proj) = make_layout("abs_inside");
+        let cfg = config_for(&ws, None);
         let compose = format!("{proj}/docker-compose.yml");
-        let resolved = resolve_project_file(&compose, &proj, &ws, "compose_file").unwrap();
+        let resolved = resolve_project_file(&compose, &proj, &cfg, "compose_file").unwrap();
         assert_eq!(
             Path::new(&resolved),
             Path::new(&compose).canonicalize().unwrap()
@@ -1056,20 +1176,21 @@ mod tests {
     #[test]
     fn file_outside_workspace_is_rejected() {
         let (_tmp, ws, proj) = make_layout("outside_ws");
+        let cfg = config_for(&ws, None);
         let outside = Path::new(&ws)
             .parent()
             .unwrap()
             .join("outside")
             .join("evil.env");
         let err =
-            resolve_project_file(outside.to_str().unwrap(), &proj, &ws, "env_file").unwrap_err();
+            resolve_project_file(outside.to_str().unwrap(), &proj, &cfg, "env_file").unwrap_err();
         assert!(
             err.to_string().contains("workspace"),
             "expected workspace sandbox error, got: {err}"
         );
         // `..` traversal from inside the project must be rejected too.
         let err =
-            resolve_project_file("../../outside/evil.env", &proj, &ws, "env_file").unwrap_err();
+            resolve_project_file("../../outside/evil.env", &proj, &cfg, "env_file").unwrap_err();
         assert!(
             err.to_string().contains("workspace"),
             "expected workspace sandbox error, got: {err}"
@@ -1079,8 +1200,9 @@ mod tests {
     #[test]
     fn relative_compose_file_inside_project_dir_still_works() {
         let (_tmp, ws, proj) = make_layout("rel_backcompat");
+        let cfg = config_for(&ws, None);
         let resolved =
-            resolve_project_file("docker-compose.yml", &proj, &ws, "compose_file").unwrap();
+            resolve_project_file("docker-compose.yml", &proj, &cfg, "compose_file").unwrap();
         assert_eq!(
             Path::new(&resolved),
             Path::new(&proj)
@@ -1089,7 +1211,8 @@ mod tests {
                 .unwrap()
         );
         // Subdirectory-relative paths keep working.
-        let resolved = resolve_project_file("sub/compose.yml", &proj, &ws, "compose_file").unwrap();
+        let resolved =
+            resolve_project_file("sub/compose.yml", &proj, &cfg, "compose_file").unwrap();
         assert_eq!(
             Path::new(&resolved),
             Path::new(&proj)
@@ -1194,5 +1317,149 @@ mod tests {
             "unexpected --project-name: {repr}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // omni_dir whitelist (allow_omni_dir): default workspace-only sandbox,
+    // opt-in /opt/omni allowance with destructive-verb refusal on the omni
+    // root. Tests use throwaway temp roots (no /opt/omni dependency).
+    // -----------------------------------------------------------------------
+
+    /// <tmp>/omni_<tag>_<pid>/ with three roots: workspace/, omni/, outside/.
+    /// Each of workspace/ and omni/ contains proj/ with a compose file; omni/
+    /// also holds a .env like the real /opt/omni does.
+    fn make_omni_layout(tag: &str) -> (TempDir, String, String, String, String, String) {
+        let root = std::env::temp_dir().join(format!("omni_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = root.join("workspace");
+        let omni = root.join("omni");
+        let ws_proj = workspace.join("proj");
+        let omni_proj = omni.join("proj");
+        for d in [
+            ws_proj.join("sub"),
+            omni_proj.join("sub"),
+            workspace.join("envs"),
+            root.join("outside"),
+        ] {
+            std::fs::create_dir_all(&d).unwrap();
+        }
+        std::fs::write(ws_proj.join("docker-compose.yml"), "services: {}\n").unwrap();
+        std::fs::write(omni_proj.join("docker-compose.yml"), "services: {}\n").unwrap();
+        std::fs::write(workspace.join("envs").join("omnidev.env"), "A=1\n").unwrap();
+        std::fs::write(omni.join(".env"), "COMPOSE_PROJECT_NAME=omni-stack\n").unwrap();
+        std::fs::write(root.join("outside").join("evil.env"), "A=1\n").unwrap();
+        let canon = |p: &std::path::Path| p.canonicalize().unwrap().to_str().unwrap().to_string();
+        let outside = root.join("outside").to_str().unwrap().to_string();
+        (
+            TempDir(root),
+            canon(&workspace),
+            canon(&omni),
+            canon(&ws_proj),
+            canon(&omni_proj),
+            outside,
+        )
+    }
+
+    fn config_for(ws: &str, omni: Option<&str>) -> Config {
+        Config {
+            workspace_dir: ws.to_string(),
+            allow_omni_dir: omni.is_some(),
+            omni_dir: omni.unwrap_or("").to_string(),
+        }
+    }
+
+    #[test]
+    fn default_config_keeps_workspace_only_sandbox() {
+        let d = Config::default();
+        assert_eq!(d.workspace_dir, "/opt/workspace");
+        assert!(!d.allow_omni_dir, "allow_omni_dir must default to false");
+        assert_eq!(d.omni_dir, "/opt/omni");
+        // allowed_roots honors the flag: omni_dir is NOT added while disabled.
+        assert_eq!(d.allowed_roots(), vec![canonical_root("/opt/workspace")]);
+    }
+
+    #[test]
+    fn disabled_config_rejects_omni_dir_project_dir() {
+        let (_tmp, ws, _omni, _ws_proj, omni_proj, _outside) = make_omni_layout("reject_proj");
+        let cfg = config_for(&ws, None);
+        let err = resolve_project_dir(&omni_proj, &cfg).unwrap_err();
+        assert!(
+            err.to_string().contains("workspace"),
+            "expected workspace sandbox error, got: {err}"
+        );
+        // The same config still resolves workspace projects.
+        assert!(resolve_project_dir(&ws, &cfg).is_ok());
+    }
+
+    #[test]
+    fn disabled_config_rejects_absolute_file_in_omni_dir() {
+        let (_tmp, ws, omni, _ws_proj, _omni_proj, _outside) = make_omni_layout("reject_file");
+        let cfg = config_for(&ws, None);
+        let env = format!("{omni}/.env");
+        let err = resolve_project_file(&env, &ws, &cfg, "env_file").unwrap_err();
+        assert!(
+            err.to_string().contains("workspace"),
+            "expected workspace sandbox error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn enabled_config_accepts_omni_dir_project_dir_and_files() {
+        let (_tmp, ws, omni, _ws_proj, omni_proj, _outside) = make_omni_layout("enabled_ok");
+        let cfg = config_for(&ws, Some(&omni));
+        // project_dir on the omni root resolves.
+        let resolved = resolve_project_dir(&omni_proj, &cfg).unwrap();
+        assert_eq!(
+            Path::new(&resolved),
+            Path::new(&omni_proj).canonicalize().unwrap()
+        );
+        // Default relative compose file resolves inside the omni project.
+        let compose =
+            resolve_project_file("docker-compose.yml", &omni_proj, &cfg, "compose_file").unwrap();
+        assert!(compose.ends_with("docker-compose.yml"));
+        // Absolute env_file inside the omni root resolves (e.g. /opt/omni/.env).
+        let env = format!("{omni}/.env");
+        let resolved_env = resolve_project_file(&env, &omni_proj, &cfg, "env_file").unwrap();
+        assert_eq!(
+            Path::new(&resolved_env),
+            Path::new(&env).canonicalize().unwrap()
+        );
+        // Files under the workspace root keep working for an omni project.
+        let ws_env = format!("{ws}/envs/omnidev.env");
+        assert!(resolve_project_file(&ws_env, &omni_proj, &cfg, "env_file").is_ok());
+    }
+
+    #[test]
+    fn enabled_config_rejects_files_outside_both_roots() {
+        let (_tmp, ws, omni, _ws_proj, omni_proj, outside) = make_omni_layout("outside_roots");
+        let cfg = config_for(&ws, Some(&omni));
+        let evil = format!("{outside}/evil.env");
+        let err = resolve_project_file(&evil, &omni_proj, &cfg, "env_file").unwrap_err();
+        assert!(
+            err.to_string().contains("inside"),
+            "expected sandbox error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn omni_root_refuses_destructive_verbs_but_allows_reachability() {
+        let (_tmp, ws, omni, ws_proj, omni_proj, _outside) = make_omni_layout("verb_gate");
+        let cfg = config_for(&ws, Some(&omni));
+        // Safe reachability verbs pass on the omni root.
+        for verb in ["ps", "logs", "exec"] {
+            check_verb_for_project(verb, &omni_proj, &cfg).expect("safe verb must pass");
+        }
+        // Destructive verbs are refused on the omni root.
+        for verb in ["up", "down", "stop", "restart", "build", "run", "pull"] {
+            let err = check_verb_for_project(verb, &omni_proj, &cfg).unwrap_err();
+            assert!(
+                err.to_string().contains("refused"),
+                "verb '{verb}' must be refused on omni root, got: {err}"
+            );
+        }
+        // The same destructive verbs stay allowed on the workspace root.
+        for verb in ["up", "down", "stop", "restart", "build", "run", "pull"] {
+            check_verb_for_project(verb, &ws_proj, &cfg).expect("workspace verbs must pass");
+        }
     }
 }

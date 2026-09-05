@@ -12,6 +12,22 @@
       "default": "/opt/workspace",
       "required": false,
       "secret": false
+    },
+    {
+      "key": "omni_dir",
+      "label": "OMNI_DIR root - whitelisted for project_dir / compose_file / env_file when allow_omni_dir is enabled (default /opt/omni, the production compose dir)",
+      "type": "string",
+      "default": "$env:OMNI_DIR",
+      "required": false,
+      "secret": false
+    },
+    {
+      "key": "allow_omni_dir",
+      "label": "Allow OMNI_DIR as an ADDITIONAL compose sandbox root (project_dir / compose_file / env_file). Projects under the omni root are restricted to non-destructive verbs (ps, logs, exec); destructive verbs (up, down, stop, restart, build, run, pull) stay refused there - production container changes happen only via the release pipeline. Default: false (workspace-only).",
+      "type": "boolean",
+      "default": false,
+      "required": false,
+      "secret": false
     }
   ],
   "entrypoint": {
