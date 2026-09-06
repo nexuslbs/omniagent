@@ -497,7 +497,7 @@ async fn build_prior_attempts_block(pool: &PgPool, thread_id: i64) -> Result<Opt
 // successor thread re-derives the same knowledge (6 threads died doing that).
 
 const LEARNED_KNOWLEDGE_MAX_ENTRY_CHARS: usize = 600;
-const LEARNED_KNOWLEDGE_MAX_TOTAL_CHARS: usize = 3000;
+const LEARNED_KNOWLEDGE_MAX_TOTAL_CHARS: usize = 2000;
 
 /// A single promoted memory: title (filename minus .md) + body (frontmatter
 /// stripped, truncated).
@@ -560,18 +560,25 @@ fn load_promoted_memories(data_dir: &str, profile_name: &str) -> Vec<LearnedMemo
 /// Render the Learned Knowledge context block. Total body chars capped at
 /// LEARNED_KNOWLEDGE_MAX_TOTAL_CHARS; entries beyond the cap are dropped.
 fn render_learned_knowledge_block(memories: &[LearnedMemory]) -> String {
-    let header = "=== Learned Knowledge (promoted memories from prior threads - READ before acting; these are validated facts, do not re-derive them) ===";
+    let header = "=== Learned Knowledge (validated memories promoted from prior threads) ===";
     let mut parts = vec![header.to_string()];
     let mut total = 0usize;
     for m in memories {
-        let entry = format!("- **{}**: {}", m.title, m.body);
+        // Bodies live in wiki Memory/Promoted pages and already start with their
+        // own "# Memory: <title>" heading, so the "- **<title>**:" bullet would
+        // only duplicate the title.
+        let entry = if m.body.starts_with(&format!("# Memory: {}", m.title)) {
+            m.body.clone()
+        } else {
+            format!("- **{}**: {}", m.title, m.body)
+        };
         if total + entry.len() > LEARNED_KNOWLEDGE_MAX_TOTAL_CHARS && total > 0 {
             break;
         }
         total += entry.len();
         parts.push(entry);
     }
-    parts.join("\n")
+    parts.join("\n\n")
 }
 
 /// Build the Learned Knowledge block for this profile. When no promoted
@@ -1385,7 +1392,7 @@ async fn handle_generate_full(
                 let formatted: Vec<String> = msgs
                     .iter()
                     .rev()
-                    .map(|m| format!("[{}]: {}", m.role, truncate_str(&m.content, 500)))
+                    .map(|m| format!("[{}]: {}", m.role, truncate_str(&m.content, 400)))
                     .collect();
                 context_blocks.push(format!(
                     "Recent conversation history (current thread):\n{}",
@@ -1404,7 +1411,7 @@ async fn handle_generate_full(
                 context_blocks.push(format!(
                     "Previous channel summary (covers threads up to id={}):\n{}",
                     summary.next_thread_id,
-                    truncate_str(&summary.content, 4000)
+                    truncate_str(&summary.content, 3000)
                 ));
 
                 match get_threads_since(pool, &cid, summary.next_thread_id, 5).await {
@@ -1430,7 +1437,7 @@ async fn handle_generate_full(
     let skills = get_skills(data_dir, profile_name);
     if !skills.is_empty() {
         context_blocks.push(format!(
-            "Available skills (read one with view_skill before acting when it matches the task):\n{}\n\nAfter solving a non-trivial, repeatable task (3+ tool calls, reusable procedure), create a skill with create_skill so future threads reuse it.",
+            "Available skills (read one with view_skill before acting when it matches the task):\n{}",
             skills.join("\n")
         ));
     }
@@ -2667,6 +2674,22 @@ mod prior_attempts_tests {
             "cap logic dropped everything: {}",
             block.len()
         );
+    }
+
+    #[test]
+    fn learned_knowledge_block_dedupes_title_when_body_has_own_heading() {
+        let mems = vec![LearnedMemory {
+            title: "alpha".into(),
+            body: "# Memory: alpha\n\nvalidated fact body".into(),
+            mtime: None,
+        }];
+        let block = render_learned_knowledge_block(&mems);
+        assert!(
+            !block.contains("**alpha**"),
+            "bullet title must be deduped when the body has its own heading: {block}"
+        );
+        assert!(block.contains("# Memory: alpha"));
+        assert!(block.contains("validated fact body"));
     }
 
     #[test]
