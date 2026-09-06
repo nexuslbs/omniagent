@@ -46,9 +46,10 @@ const TOOL_GUIDANCE: &str = "TOOL USE RULES (fail the task if you violate these)
 or inspect server configuration to discover what tools exist or how to call them. \
 Available tools are listed with their name, description, and parameters in the \
 function-calling API. Reading config files to find tools is always wrong and wastes turns.\n\
-2. SEARCH BEFORE QUERY: Use search tools before querying databases for text or \
-vector searches. Only use direct data queries for structured aggregations \
-(counts, sums, averages, groupings).\n\
+2. SEARCH FIRST: before exploring a repo or asking the operator, run \
+`search_wiki` + `search_messages` (at most 2 retrieval calls, then act). Use \
+search tools before querying databases for text or vector searches; use direct \
+data queries only for structured aggregations (counts, sums, averages, groupings).\n\
 3. WRITE COMPLETE FILES: When writing a file, write the entire content in a single \
 operation. Do NOT write placeholder content expecting to fill in values afterward. \
 EXCEPTION - LARGE OUTPUTS: if the file content is too large to fit in a single \
@@ -432,6 +433,32 @@ mod tests {
         assert_eq!(sections[1].1, 100, "tool guidance 100-199");
         assert_eq!(sections[2].1, 0, "profile/persona 0");
         assert_eq!(sections[3].1, 200, "platform 200+");
+    }
+
+    #[test]
+    fn tool_guidance_is_search_first_and_bounded() {
+        let store = MemoryStore::new(".");
+        let sections = build_system_prompt_sections(
+            &store,
+            "mattermost",
+            None,
+            "omni",
+            &[],
+            &PromptBuilderConfig::default(),
+        );
+        let guidance = &sections[1].2;
+        assert!(
+            guidance.contains("2. SEARCH FIRST"),
+            "tool guidance must open rule 2 with the search-first heading"
+        );
+        assert!(
+            guidance.contains("search_wiki") && guidance.contains("search_messages"),
+            "tool guidance must name both retrieval tools"
+        );
+        assert!(
+            guidance.contains("at most 2 retrieval calls"),
+            "tool guidance must bound retrieval to at most 2 calls"
+        );
     }
 
     #[test]
