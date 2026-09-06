@@ -264,7 +264,7 @@ fn handle_search_wiki(args: &Value, omni_dir: &str, profile_name: &str) -> Resul
     let query = args["query"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required argument: 'query'"))?;
-    let limit = args["limit"].as_i64().unwrap_or(10).min(30) as usize;
+    let limit = args["limit"].as_i64().unwrap_or(10).clamp(1, 30) as usize;
     // Profile comes from the AGENT's runtime context (_meta.profile_name,
     // injected by the MCP client on every tool call) - NOT from a tool
     // argument. Only fall back to the active profile when meta is absent
@@ -282,87 +282,508 @@ fn handle_search_wiki(args: &Value, omni_dir: &str, profile_name: &str) -> Resul
         return Ok((
             format!(
                 "Wiki directory not found: {}. Is the profile correct? (active profile: {})",
-                wiki_dir,
-                omniagent::profile::default_profile_name()
+                wiki_dir, profile
             ),
             false,
         ));
     }
 
-    let query_lower = query.to_lowercase();
+    let phrase = normalize_wiki_text(query);
+    if phrase.is_empty() {
+        return Ok(("No matching wiki results found.".to_string(), false));
+    }
+    let terms = wiki_query_terms(&phrase);
 
-    let mut results: Vec<(String, String)> = Vec::new();
+    // Scan the whole wiki once, score every page, then rank (keyword only).
+    let mut hits: Vec<WikiHit> = Vec::new();
     let mut stack: Vec<std::path::PathBuf> = vec![wiki_dir_path.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
-            if results.len() >= limit {
-                break;
-            }
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
                 continue;
             }
             if path.extension().map(|e| e == "md").unwrap_or(false) {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    let lines: Vec<&str> = content.lines().collect();
-                    let title_line = lines.first().unwrap_or(&"");
-                    let title = title_line.trim_start_matches("# ").trim();
-                    let preview_lines: Vec<&str> = lines
-                        .iter()
-                        .filter(|l| l.to_lowercase().contains(&query_lower))
-                        .take(3)
-                        .map(|l| l.trim())
-                        .collect();
-                    if !preview_lines.is_empty() || title.to_lowercase().contains(&query_lower) {
-                        let rel = path.strip_prefix(wiki_dir_path).unwrap_or(&path);
-                        let filename = rel.with_extension("").to_string_lossy().to_string();
-                        let preview = if preview_lines.is_empty() {
-                            "".to_string()
-                        } else {
-                            let truncated: Vec<&str> = preview_lines
-                                .iter()
-                                .map(|l| {
-                                    if l.len() > 100 {
-                                        let trunc_to = l
-                                            .char_indices()
-                                            .nth(100)
-                                            .map(|(i, _)| i)
-                                            .unwrap_or(l.len());
-                                        &l[..trunc_to]
-                                    } else {
-                                        *l
-                                    }
-                                })
-                                .collect();
-                            format!("...{}...", truncated.join(" ... "))
-                        };
-                        results.push((filename, preview));
-                    }
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let rel = path.strip_prefix(wiki_dir_path).unwrap_or(&path);
+                let rel_stem = rel.with_extension("").to_string_lossy().to_string();
+                if let Some(hit) = score_wiki_page(&rel_stem, &content, &terms, &phrase) {
+                    hits.push(hit);
                 }
             }
         }
     }
 
-    if results.is_empty() {
+    if hits.is_empty() {
         return Ok(("No matching wiki results found.".to_string(), false));
     }
 
-    let output = results
+    // Rank: filename match > title/frontmatter match > body keyword frequency
+    // (weights in score_wiki_page). Deterministic tie-break: page path.
+    hits.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.rel_stem.cmp(&b.rel_stem))
+    });
+    hits.truncate(limit);
+
+    let output = hits
         .iter()
-        .map(|(name, preview)| {
-            if preview.is_empty() {
-                format!("[[{}]]", name)
-            } else {
-                format!("[[{}]]: {}", name, preview)
-            }
-        })
+        .map(render_wiki_hit)
         .collect::<Vec<_>>()
         .join("\n\n");
     Ok((output, false))
+}
+
+/// Lowercase free text and collapse every run of non-alphanumeric characters
+/// into a single space. Hyphen/underscore identifiers stay searchable
+/// ("task_a_b" -> "task a b"); punctuation never joins words.
+fn normalize_wiki_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_space && !out.is_empty() {
+                out.push(' ');
+            }
+            pending_space = false;
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            pending_space = true;
+        }
+    }
+    out
+}
+
+/// Unique query words in first-appearance order, capped at 10 so a very long
+/// query cannot skew scoring or cost.
+fn wiki_query_terms(phrase: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tok in phrase.split(' ') {
+        if tok.is_empty() || out.iter().any(|t| t == tok) {
+            continue;
+        }
+        out.push(tok.to_string());
+        if out.len() >= 10 {
+            break;
+        }
+    }
+    out
+}
+
+struct WikiPageMeta<'a> {
+    description: Option<String>,
+    title: Option<String>,
+    body: &'a str,
+}
+
+/// Minimal frontmatter reader for wiki pages. A page may start with a `---`
+/// fence followed by `key: value` lines until the closing `---` fence. Only
+/// `description`, `title` and `name` are read (name doubles as title only
+/// when no explicit title exists). Returns the body after the closing fence.
+fn read_wiki_frontmatter(content: &str) -> WikiPageMeta<'_> {
+    let mut out = WikiPageMeta {
+        description: None,
+        title: None,
+        body: content,
+    };
+    if content.is_empty() {
+        return out;
+    }
+    // First line must be the opening fence "---".
+    let first_nl = content.find('\n').unwrap_or(content.len());
+    if content[..first_nl].trim_end_matches('\r').trim() != "---" {
+        return out;
+    }
+    let mut scan = first_nl + 1;
+    let total = content.len();
+    while scan < total {
+        let nl = match content[scan..].find('\n') {
+            Some(rel) => scan + rel + 1,
+            None => total,
+        };
+        let line = content[scan..nl].trim_end_matches('\r');
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            out.body = &content[nl..];
+            return out;
+        }
+        if let Some(colon) = trimmed.find(':') {
+            let key = trimmed[..colon].trim().to_ascii_lowercase();
+            let raw = trimmed[colon + 1..].trim();
+            if !raw.is_empty() {
+                let value = if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+                    raw[1..raw.len() - 1].trim().to_string()
+                } else {
+                    raw.to_string()
+                };
+                if !value.is_empty() {
+                    match key.as_str() {
+                        "description" if out.description.is_none() => out.description = Some(value),
+                        "title" if out.title.is_none() => out.title = Some(value),
+                        "name" if out.title.is_none() => out.title = Some(value),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        scan = nl;
+    }
+    // No closing fence found: treat the whole file as frontmatter.
+    out.body = "";
+    out
+}
+
+/// First markdown heading (`# ...` or deeper) in the body, trimmed.
+fn first_heading(body: &str) -> Option<String> {
+    body.lines().find_map(|l| {
+        let t = l.trim();
+        if t.starts_with('#') {
+            let title = t.trim_start_matches('#').trim();
+            if !title.is_empty() {
+                return Some(title.to_string());
+            }
+        }
+        None
+    })
+}
+
+/// Clip `s` to at most `max_chars` characters on a char boundary, appending
+/// "..." when it was clipped.
+fn clip_wiki_text(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let cut = s
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    format!("{}...", &s[..cut])
+}
+
+/// Up to two body lines that best explain the match: lines containing the
+/// most query terms first, earliest line on ties. Trimmed and clipped.
+fn wiki_match_lines(body: &str, terms: &[String]) -> Vec<String> {
+    let mut candidates: Vec<(i32, usize, String)> = Vec::new();
+    for (idx, raw) in body.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_lowercase();
+        let hits = terms.iter().filter(|t| lower.contains(t.as_str())).count() as i32;
+        if hits > 0 {
+            candidates.push((hits, idx, line.to_string()));
+        }
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    candidates
+        .into_iter()
+        .take(2)
+        .map(|(_, _, line)| clip_wiki_text(&line, 120))
+        .collect()
+}
+
+/// Number of query terms present as whole words in a normalized field.
+fn field_term_matches(field: &str, terms: &[String]) -> usize {
+    terms
+        .iter()
+        .filter(|t| field.split(' ').any(|w| w == t.as_str()))
+        .count()
+}
+
+struct WikiHit {
+    rel_stem: String,
+    description: Option<String>,
+    match_lines: Vec<String>,
+    score: i64,
+}
+
+/// Score one wiki page against the query; None when nothing matched.
+///
+/// Ranking (keyword only, no semantic layer): filename match > title /
+/// frontmatter match > body keyword frequency. The score is a weighted sum
+/// whose tiers are spaced so a full-phrase hit in a LOWER field (e.g. the
+/// exact query as a page title) still outranks a partial generic-token hit in
+/// a HIGHER field (a filename sharing one common word).
+fn score_wiki_page(
+    rel_stem: &str,
+    content: &str,
+    terms: &[String],
+    phrase: &str,
+) -> Option<WikiHit> {
+    let fm = read_wiki_frontmatter(content);
+    let title = fm
+        .title
+        .clone()
+        .or_else(|| first_heading(fm.body))
+        .unwrap_or_default();
+    let f_norm = normalize_wiki_text(rel_stem);
+    let t_norm = normalize_wiki_text(&title);
+    let d_norm = fm
+        .description
+        .as_deref()
+        .map(normalize_wiki_text)
+        .unwrap_or_default();
+    let body_lower = fm.body.to_lowercase();
+
+    let f_phrase = f_norm.contains(phrase);
+    let t_phrase = t_norm.contains(phrase);
+    let d_phrase = d_norm.contains(phrase);
+    let f_matched = field_term_matches(&f_norm, terms);
+    let t_matched = field_term_matches(&t_norm, terms);
+    let d_matched = field_term_matches(&d_norm, terms);
+
+    let body_occ: i64 = terms
+        .iter()
+        .map(|t| count_substring_ci(&body_lower, t).min(250))
+        .sum::<i64>()
+        .min(500);
+
+    let mut score: i64 = 0;
+    if f_phrase {
+        score += 10_000_000;
+    } else if f_matched >= terms.len() {
+        // Every query word present in the filename (but not as one phrase).
+        score += 5_000_000;
+    }
+    score += (f_matched.min(10) as i64) * 100_000;
+    if t_phrase {
+        score += 500_000;
+    }
+    score += (t_matched.min(10) as i64) * 20_000;
+    if d_phrase {
+        score += 100_000;
+    }
+    score += (d_matched.min(10) as i64) * 10_000;
+    score += body_occ * 20;
+
+    if score == 0 {
+        return None;
+    }
+    let match_lines = wiki_match_lines(fm.body, terms);
+    Some(WikiHit {
+        rel_stem: rel_stem.to_string(),
+        description: fm.description,
+        match_lines,
+        score,
+    })
+}
+
+/// Count case-insensitive substring occurrences of `needle` in `hay_lower`
+/// (which must already be lowercase). Plain substring counting keeps stems
+/// searchable ("budget" hits "budget-cap").
+fn count_substring_ci(hay_lower: &str, needle: &str) -> i64 {
+    if needle.is_empty() || hay_lower.is_empty() {
+        return 0;
+    }
+    let mut count: i64 = 0;
+    let mut start = 0;
+    while let Some(rel) = hay_lower[start..].find(needle) {
+        count += 1;
+        start += rel + needle.len();
+    }
+    count
+}
+
+/// Render one hit: `[[path]]: description` plus up to two indented
+/// `...matching line...` snippets. Output stays bounded: description 220
+/// chars, each line 120 chars.
+fn render_wiki_hit(hit: &WikiHit) -> String {
+    let mut out = format!("[[{}]]", hit.rel_stem);
+    if let Some(desc) = &hit.description {
+        out.push_str(": ");
+        out.push_str(&clip_wiki_text(desc, 220));
+    } else if !hit.match_lines.is_empty() {
+        out.push(':');
+    }
+    for line in &hit.match_lines {
+        out.push_str("\n    ...");
+        out.push_str(line);
+        out.push_str("...");
+    }
+    out
+}
+
+#[cfg(test)]
+mod search_wiki_tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestWiki {
+        root: PathBuf,
+    }
+
+    impl TestWiki {
+        fn new() -> Self {
+            let uniq = format!(
+                "s4_wiki_{}_{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            );
+            let root = std::env::temp_dir().join(uniq);
+            fs::create_dir_all(root.join("profiles/test/wiki")).expect("create test wiki dir");
+            TestWiki { root }
+        }
+
+        fn wiki_dir(&self) -> PathBuf {
+            self.root.join("profiles/test/wiki")
+        }
+
+        fn write(&self, rel: &str, content: &str) {
+            let path = self.wiki_dir().join(rel);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create parent dir");
+            }
+            fs::write(&path, content).expect("write wiki page");
+        }
+
+        fn search(&self, query: &str, limit: i64) -> String {
+            let args = json!({ "query": query, "limit": limit });
+            let omni = self.root.to_str().expect("utf8 temp path").to_string();
+            handle_search_wiki(&args, &omni, "test")
+                .expect("search_wiki runs")
+                .0
+        }
+    }
+
+    impl Drop for TestWiki {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// `[[...]]` result markers in output order.
+    fn result_stems(output: &str) -> Vec<String> {
+        output
+            .split("\n\n")
+            .filter_map(|block| {
+                let block = block.trim_start();
+                if block.starts_with("[[") {
+                    let end = block.find("]]").map(|i| i + 2).unwrap_or(0);
+                    Some(block[..end].to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn filename_phrase_ranks_first() {
+        let w = TestWiki::new();
+        w.write(
+            "Alpha/Telemetry-Fix.md",
+            "# Telemetry Fix\n\nSample the sampler less often.\n",
+        );
+        w.write(
+            "Alpha/Other.md",
+            "# Telemetry Fix Overview\n\nDeep dive into every telemetry fix idea.\n",
+        );
+        let out = w.search("telemetry fix", 10);
+        let stems = result_stems(&out);
+        assert_eq!(stems.len(), 2, "both pages match: {out}");
+        assert!(
+            stems[0].contains("Telemetry-Fix"),
+            "filename phrase match ranks first, got: {stems:?}\n{out}"
+        );
+        assert!(stems[1].contains("Other"), "stems: {stems:?}");
+    }
+
+    #[test]
+    fn title_phrase_outranks_body_frequency() {
+        let w = TestWiki::new();
+        w.write(
+            "a/Guide.md",
+            "---\ntitle: Release rollback runbook\n---\n# Guide\n\nOne paragraph.\n",
+        );
+        let mut scratch = String::from("# Scratch\n\n");
+        for _ in 0..40 {
+            scratch.push_str("rollback runbook drill notes.\n");
+        }
+        w.write("b/Scratch.md", &scratch);
+        let out = w.search("rollback runbook", 10);
+        let stems = result_stems(&out);
+        assert_eq!(stems.len(), 2, "got: {out}");
+        assert!(
+            stems[0].contains("Guide"),
+            "title phrase beats body frequency: {stems:?}\n{out}"
+        );
+        assert!(stems[1].contains("Scratch"), "stems: {stems:?}");
+    }
+
+    #[test]
+    fn frontmatter_description_matches_and_is_rendered() {
+        let w = TestWiki::new();
+        w.write(
+            "Memory/Deepseek.md",
+            "---\nname: deepseek\nconfidence: high\ndescription: \"High confidence memory about the deepseek prefix cache setup\"\n---\n# Memory\n\nBody text with unrelated words.\n",
+        );
+        let out = w.search("prefix cache", 10);
+        assert!(
+            out.contains("[[Memory/Deepseek]]"),
+            "desc match returned: {out}"
+        );
+        assert!(
+            out.contains("deepseek prefix cache setup"),
+            "frontmatter description rendered in snippet: {out}"
+        );
+    }
+
+    #[test]
+    fn no_match_returns_not_found() {
+        let w = TestWiki::new();
+        w.write("x.md", "# Anything\n\nNothing to see here.\n");
+        let out = w.search("zzqqxxyy", 10);
+        assert!(
+            out.contains("No matching wiki results found."),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn limit_is_respected_with_stable_order() {
+        let w = TestWiki::new();
+        for i in 1..=3 {
+            let content = format!("# Notes {i}\n\nBudget cap increase for everyone.\n");
+            w.write(&format!("f{i}.md"), &content);
+        }
+        let out = w.search("budget cap", 2);
+        let stems = result_stems(&out);
+        assert_eq!(stems.len(), 2, "limit=2 respected: {out}");
+        assert!(
+            stems[0].contains("f1") && stems[1].contains("f2"),
+            "stable alphabetical tie-break: {stems:?}"
+        );
+    }
+
+    #[test]
+    fn case_and_punctuation_insensitive() {
+        let w = TestWiki::new();
+        w.write("Budgeting.md", "# Budgets\n\nRaise the BUDGET-CAP to 5k.\n");
+        let out = w.search("BUDGET-CAP!", 10);
+        assert!(
+            out.contains("[[Budgeting]]"),
+            "punctuation/case tolerant: {out}"
+        );
+        assert!(
+            out.contains("BUDGET-CAP"),
+            "matching line in snippet: {out}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
