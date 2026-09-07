@@ -37,7 +37,13 @@
 //! else the compose file's own `name:` (default) or the project-dir basename.
 //! omniagent spawns this plugin with an EMPTY environment (platform-level env
 //! isolation), so the tool can never inherit the agent's own project name
-//! (e.g. the production stack) by accident.
+//! (e.g. the production stack) by accident. An explicit resolution guard
+//! (guard_project_name) additionally derives the project name the invocation
+//! would resolve to (COMPOSE_PROJECT_NAME from the env file or the project
+//! .env, the compose file's top-level name: attribute, or the project-dir
+//! basename) and REFUSES a PRODUCTION project name (omni-stack) from any
+//! project directory that is not the omni_dir root: a dev/workspace
+//! invocation can never silently address the production containers.
 
 use anyhow::Result;
 use mcp_server_util::*;
@@ -223,6 +229,165 @@ fn resolve_project_file(
     }
     Ok(resolved.display().to_string())
 }
+/// Production compose project names. `omni-stack` is the REAL production
+/// deployment (/opt/omni, COMPOSE_PROJECT_NAME=omni-stack). A compose
+/// invocation resolving to one of these names from any project directory
+/// other than the omni_dir root is a misconfiguration: it would address the
+/// production containers through a workspace/dev compose file.
+const PROD_PROJECT_NAMES: &[&str] = &["omni-stack"];
+
+/// Read a `.env`-style file (KEY=VALUE lines, `#` comments, optional
+/// `export ` prefix, optional surrounding double quotes) into a map. Returns
+/// None when the file does not exist or cannot be read.
+fn read_env_file(path: &Path) -> Option<std::collections::HashMap<String, String>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let mut map = std::collections::HashMap::new();
+    for raw in content.lines() {
+        let mut line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(stripped) = line.strip_prefix("export ") {
+            line = stripped.trim();
+        }
+        let Some(eq) = line.find('=') else {
+            continue;
+        };
+        let key = line[..eq].trim().to_string();
+        if key.is_empty() {
+            continue;
+        }
+        let mut value = line[eq + 1..].trim().to_string();
+        if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+            value = value[1..value.len() - 1].to_string();
+        }
+        map.insert(key, value);
+    }
+    Some(map)
+}
+
+/// Read the top-level `name:` attribute of a compose file (column 0 only:
+/// indented `name:` keys inside services are NOT the project name). Returns
+/// the raw scalar value with surrounding double quotes stripped.
+fn read_compose_name_attr(compose_file: &str) -> Option<String> {
+    let content = std::fs::read_to_string(compose_file).ok()?;
+    for line in content.lines() {
+        if let Some(stripped) = line.strip_prefix("name:") {
+            let mut value = stripped.trim().to_string();
+            if let Some(ci) = value.find(" #") {
+                value.truncate(ci); // strip a trailing YAML inline comment
+            }
+            let value = value.trim().to_string();
+            if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+                return Some(value[1..value.len() - 1].to_string());
+            }
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Interpolate a compose `name:` value the way docker compose does with an
+/// EMPTY process environment (the tool spawns children env-clear): a plain
+/// literal stays literal; a single `${VAR}` / `${VAR:-default}` /
+/// `${VAR-default}` token resolves from the env map. Unresolvable or mixed
+/// expressions return None (the caller then does not guess).
+fn interpolate_name_attr(
+    value: &str,
+    env: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    let v = value.trim();
+    if !(v.starts_with("${") && v.ends_with('}') && !v[2..v.len() - 1].contains('$')) {
+        return if v.contains("${") {
+            None // mixed/unhandled expression: do not guess
+        } else {
+            Some(v.to_string()) // plain literal
+        };
+    }
+    let inner = &v[2..v.len() - 1];
+    let (var, default) = if let Some(idx) = inner.find(":-") {
+        (&inner[..idx], Some(&inner[idx + 2..]))
+    } else if let Some(idx) = inner.find('-') {
+        (&inner[..idx], Some(&inner[idx + 1..]))
+    } else {
+        (inner, None)
+    };
+    let var = var.trim();
+    match (env.get(var), default) {
+        (Some(val), _) => Some(val.clone()),
+        (None, Some(def)) => Some(def.trim().to_string()),
+        (None, None) => None,
+    }
+}
+
+/// Derive the compose project name an invocation WILL resolve to, mirroring
+/// docker compose resolution under the tool's empty child env:
+/// `COMPOSE_PROJECT_NAME` from `--env-file` (or the project-dir `.env` that
+/// compose auto-loads when no `--env-file` is given) feeds the compose
+/// file's top-level `name:` attribute interpolation; a plain literal `name:`
+/// wins; with no `name:` attribute the project-dir basename is used. Returns
+/// None only when the name cannot be determined (no guessing).
+fn derive_project_name(
+    project_dir: &str,
+    compose_files: &[String],
+    env_file: &str,
+) -> Option<String> {
+    let env_path = if env_file.is_empty() {
+        Path::new(project_dir).join(".env")
+    } else {
+        Path::new(env_file).to_path_buf()
+    };
+    let env = read_env_file(&env_path).unwrap_or_default();
+
+    let mut name_attr: Option<String> = None;
+    for cf in compose_files {
+        if let Some(raw) = read_compose_name_attr(cf) {
+            name_attr = Some(raw); // last -f file wins, like the compose merge
+        }
+    }
+    if let Some(raw) = name_attr {
+        return interpolate_name_attr(&raw, &env);
+    }
+
+    Path::new(project_dir)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+}
+
+/// C4 guard (defect class A5): a compose invocation may resolve to a
+/// PRODUCTION project name only when its project_dir is the omni_dir root
+/// (the production compose dir, reachable only with allow_omni_dir enabled
+/// and further verb-gated). Deriving a production project name from any
+/// OTHER project dir (a workspace/dev checkout) means the command would
+/// address the PRODUCTION containers through dev files: refuse before any
+/// docker CLI is spawned.
+fn guard_project_name(
+    project_dir: &str,
+    compose_files: &[String],
+    env_file: &str,
+    config: &Config,
+) -> Result<()> {
+    if config.is_omni_root_project(Path::new(project_dir)) {
+        return Ok(()); // production dir reached through its own root: verb-gated, allowed
+    }
+    let Some(name) = derive_project_name(project_dir, compose_files, env_file) else {
+        return Ok(()); // cannot determine the project name: let docker compose decide
+    };
+    if PROD_PROJECT_NAMES.contains(&name.as_str()) {
+        anyhow::bail!(
+            "Project-name guard (C4): this invocation would resolve to the PRODUCTION \
+             compose project '{name}' from project_dir '{project_dir}', which is not the \
+             omni_dir root. A dev/workspace invocation must target a dev project (pass an \
+             env_file whose COMPOSE_PROJECT_NAME is the dev project, e.g. \
+             /opt/workspace/omni-deployer/omnidev.env); reaching the real production \
+             compose dir requires its project_dir on the omni_dir root with allow_omni_dir \
+             enabled (destructive verbs stay refused there). env_file: {}",
+            env_file
+        );
+    }
+    Ok(())
+}
+
 /// Build a tokio::process::Command for `docker compose`.
 fn build_compose_command(
     command: &str,
@@ -656,6 +821,17 @@ async fn handle_compose(args: Value, config: &Config) -> Result<(String, bool)> 
         );
     }
 
+    // C4 project-name guard (defect class A5): derive the project name this
+    // invocation would resolve to and refuse PRODUCTION project names from a
+    // non-production (workspace/dev) project directory, so a dev invocation
+    // can never silently address the production omni-stack containers.
+    guard_project_name(
+        &project_dir,
+        &resolved_compose_files,
+        &resolved_env_file,
+        config,
+    )?;
+
     // Root-aware verb gating: a project on the omni_dir root (production
     // compose dir) may only be reached with ps/logs/exec. Destructive verbs
     // are refused here, before any docker CLI is spawned.
@@ -912,7 +1088,7 @@ async fn main() -> Result<()> {
                  the workspace (e.g. /opt/workspace/<project>/<name>.env for a shared env file) - passed via --env-file. \
                  PROJECT NAME: derived from the env_file's COMPOSE_PROJECT_NAME (via --env-file), else the compose \
                  file's own name: (default) or the project-dir basename. The tool is spawned with an EMPTY environment \
-                 (platform-level env isolation), so it can never inherit the agent's ambient project name. \
+                 (platform-level env isolation), so it can never inherit the agent's ambient project name. It also refuses any invocation that would resolve to a production compose project name (omni-stack) from a non-omni-root (dev/workspace) project directory. \
                  Use 'command' for the compose verb + flags (e.g. 'up -d', 'ps', 'build', 'logs --tail=50'). \
                  For exec/run: use 'service' (container name) and 'args' (command to run inside container). \
                  USAGE EXAMPLES: \
@@ -1560,5 +1736,194 @@ mod tests {
         for verb in ["up", "down", "stop", "restart", "build", "run", "pull"] {
             check_verb_for_project(verb, &ws_proj, &cfg).expect("workspace verbs must pass");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // C4 project-name resolution guard (defect class A5): a dev/workspace
+    // invocation must NEVER resolve to a PRODUCTION compose project name
+    // (omni-stack). Covers the derivation (env-file COMPOSE_PROJECT_NAME ->
+    // compose name attr interpolation; literal name attr; project-dir
+    // basename fallback) and the guard itself (refuse from workspace dirs,
+    // allow on the omni_dir root, allow dev project names).
+    // -----------------------------------------------------------------------
+
+    /// Overwrite <proj>/docker-compose.yml with a top-level `name:` expr.
+    fn compose_with_name_attr(proj: &str, name_expr: &str) -> String {
+        let path = Path::new(proj).join("docker-compose.yml");
+        std::fs::write(&path, format!("name: {name_expr}\nservices: {{}}\n")).unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn derive_project_name_env_file_drives_name_attr_interpolation() {
+        // Real dev layout: compose file `name: ${COMPOSE_PROJECT_NAME:-omni}`
+        // plus env_file COMPOSE_PROJECT_NAME=omnidev -> project "omnidev".
+        let (_tmp, ws, proj) = make_layout("c4_env_interp");
+        let cfg = config_for(&ws, None);
+        let compose = compose_with_name_attr(&proj, "${COMPOSE_PROJECT_NAME:-omni}");
+        let env_dir = Path::new(&ws).join("envs");
+        std::fs::write(
+            env_dir.join("omnidev.env"),
+            "COMPOSE_PROJECT_NAME=omnidev\n",
+        )
+        .unwrap();
+        let env = env_dir.join("omnidev.env").to_str().unwrap().to_string();
+        assert_eq!(
+            derive_project_name(&proj, std::slice::from_ref(&compose), &env).as_deref(),
+            Some("omnidev")
+        );
+        guard_project_name(&proj, &[compose], &env, &cfg).expect("dev name must pass");
+    }
+
+    #[test]
+    fn derive_project_name_literal_name_attr_wins() {
+        let (_tmp, _ws, proj) = make_layout("c4_literal");
+        let compose = compose_with_name_attr(&proj, "myproj");
+        assert_eq!(
+            derive_project_name(&proj, &[compose], "").as_deref(),
+            Some("myproj")
+        );
+    }
+
+    #[test]
+    fn derive_project_name_unset_var_uses_dash_default() {
+        // No env_file and no project .env: ${COMPOSE_PROJECT_NAME:-omni}
+        // interpolates to its default "omni" (docker compose behavior with an
+        // empty process env).
+        let (_tmp, _ws, proj) = make_layout("c4_default");
+        let compose = compose_with_name_attr(&proj, "${COMPOSE_PROJECT_NAME:-omni}");
+        assert_eq!(
+            derive_project_name(&proj, &[compose], "").as_deref(),
+            Some("omni")
+        );
+    }
+
+    #[test]
+    fn derive_project_name_falls_back_to_project_dir_basename() {
+        // No name: attribute anywhere -> docker compose uses the basename of
+        // the project directory.
+        let (_tmp, _ws, proj) = make_layout("c4_basename");
+        let compose = format!("{proj}/docker-compose.yml");
+        assert_eq!(
+            derive_project_name(&proj, &[compose], "").as_deref(),
+            Some("proj")
+        );
+    }
+
+    #[test]
+    fn read_env_file_parses_export_comments_and_quotes() {
+        let (_tmp, _ws, proj) = make_layout("c4_envparse");
+        let env_path = Path::new(&proj).join("e.env");
+        std::fs::write(
+            &env_path,
+            "# comment\nexport COMPOSE_PROJECT_NAME=\"omnidev\"\nOTHER=x # inline\nEMPTY=\n",
+        )
+        .unwrap();
+        let map = read_env_file(&env_path).expect("env file exists");
+        assert_eq!(
+            map.get("COMPOSE_PROJECT_NAME").map(|s| s.as_str()),
+            Some("omnidev")
+        );
+        assert_eq!(map.get("OTHER").map(|s| s.as_str()), Some("x # inline"));
+        assert_eq!(map.get("EMPTY").map(|s| s.as_str()), Some(""));
+        assert!(!map.contains_key("MISSING"));
+    }
+
+    #[test]
+    fn read_compose_name_attr_only_takes_top_level_name() {
+        // Indented `name:` keys inside services are NOT the project name.
+        let (_tmp, _ws, proj) = make_layout("c4_namedepth");
+        let path = Path::new(&proj).join("docker-compose.yml");
+        std::fs::write(&path, "services:\n  name: inner\nname: outer\nother: {}\n").unwrap();
+        assert_eq!(
+            read_compose_name_attr(path.to_str().unwrap()).as_deref(),
+            Some("outer")
+        );
+    }
+
+    #[test]
+    fn guard_refuses_prod_project_name_from_workspace_env_file() {
+        // The regression: a workspace project_dir + an env_file whose
+        // COMPOSE_PROJECT_NAME=omni-stack would address the PRODUCTION
+        // containers through the dev compose checkout - refused.
+        let (_tmp, ws, proj) = make_layout("c4_refuse_env");
+        let cfg = config_for(&ws, None);
+        let compose = compose_with_name_attr(&proj, "${COMPOSE_PROJECT_NAME:-omni}");
+        let env_dir = Path::new(&ws).join("envs");
+        std::fs::write(
+            env_dir.join("omni.env"),
+            "COMPOSE_PROJECT_NAME=omni-stack\n",
+        )
+        .unwrap();
+        let env = env_dir.join("omni.env").to_str().unwrap().to_string();
+        let err = guard_project_name(&proj, &[compose], &env, &cfg).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("omni-stack"), "names the prod project: {msg}");
+        assert!(msg.contains("PRODUCTION"), "labels it production: {msg}");
+    }
+
+    #[test]
+    fn guard_refuses_prod_basename_without_dev_env() {
+        // The historical incident shape: a workspace checkout whose dir
+        // basename is the production project name and NO env_file (or .env)
+        // overrides it resolves to the production project by docker compose
+        // default - refused. project_dir=/opt/workspace/omni-stack with no
+        // omnidev.env must not reach the omni-stack containers.
+        let root = std::env::temp_dir().join(format!("c4_bn_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let workspace = root.join("workspace");
+        let proj_dir = workspace.join("omni-stack");
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        std::fs::write(proj_dir.join("docker-compose.yml"), "services: {}\n").unwrap();
+        let ws = workspace
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let proj = proj_dir
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let cfg = config_for(&ws, None);
+        let compose = format!("{proj}/docker-compose.yml");
+        let err = guard_project_name(&proj, &[compose], "", &cfg).unwrap_err();
+        assert!(
+            err.to_string().contains("omni-stack"),
+            "basename-only prod resolution must be refused: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn guard_allows_dev_name_from_workspace() {
+        // Dev convention: project_dir on the workspace + omnidev.env -> the
+        // guard passes and the invocation targets the dev project.
+        let (_tmp, ws, proj) = make_layout("c4_allow_dev");
+        let cfg = config_for(&ws, None);
+        let compose = compose_with_name_attr(&proj, "${COMPOSE_PROJECT_NAME:-omni}");
+        let env_dir = Path::new(&ws).join("envs");
+        std::fs::write(
+            env_dir.join("omnidev.env"),
+            "COMPOSE_PROJECT_NAME=omnidev\n",
+        )
+        .unwrap();
+        let env = env_dir.join("omnidev.env").to_str().unwrap().to_string();
+        guard_project_name(&proj, &[compose], &env, &cfg).expect("dev name must pass");
+    }
+
+    #[test]
+    fn guard_allows_prod_name_on_omni_root() {
+        // The ONLY legitimate production targeting: project_dir on the omni_dir
+        // root (allow_omni_dir enabled). There the prod name passes the name
+        // guard; destructive verbs are separately refused by the verb gate.
+        let (_tmp, ws, omni, _ws_proj, omni_proj, _outside) = make_omni_layout("c4_omni_ok");
+        let cfg = config_for(&ws, Some(&omni));
+        let compose = format!("{omni_proj}/docker-compose.yml");
+        let env = format!("{omni}/.env");
+        guard_project_name(&omni_proj, &[compose], &env, &cfg)
+            .expect("prod name on the omni root must pass the name guard");
     }
 }
