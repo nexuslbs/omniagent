@@ -1057,6 +1057,10 @@ Previous plan:\n{}",
     // across iterations of the same run).
     let mut used_sub_prompt_chars: usize = 0;
     let mut sub_prompts_exhausted: bool = false;
+    // True once a merged sub-prompt tracking subtask was created this run:
+    // keeps the mid-run subtask reminders active even when plan mode is off,
+    // so the appended obligation stays visible between tool rounds.
+    let mut sub_prompt_tracking_active: bool = false;
 
     // WS-4b: engine-level read guard - (tool, args-hash) -> (iteration, len)
     // for read-only tools. Cleared whenever a state-changing tool runs.
@@ -1178,8 +1182,55 @@ Previous plan:\n{}",
                             "merged",
                         )
                         .await;
-                        // Push into the in-memory prompt BEFORE condensation.
-                        messages.push(ChatMessage::user(&appended));
+                        // Track the merged sub-prompt as an obligation the
+                        // executor cannot silently drop: create a tracking
+                        // subtask (deterministic description) and surface it
+                        // right next to the appended prompt. Completion of
+                        // this thread is blocked until the executor COMPLETES
+                        // the tracking subtask (appended request executed) or
+                        // CANCELS it (explicit deferral, reason stated in the
+                        // final answer) - see the final-answer subtask
+                        // enforcement gate below. Without this the appended
+                        // prompt is just one more user message a mid-run
+                        // executor can ignore and still finish (bug threads
+                        // 1047/1048).
+                        let tracking_desc = sub_prompt_subtask_description(pt.id, &prompt_text);
+                        let tracking_id: Option<i64> = match crate::subtask::add_subtask(
+                            &cfg.pool,
+                            thread.id,
+                            &tracking_desc,
+                            3,
+                        )
+                        .await
+                        {
+                            Ok(st) => {
+                                sub_prompt_tracking_active = true;
+                                info!(
+                                        "[sub-prompt] Tracking subtask #{} created for merged prompt from thread #{} (thread #{})",
+                                        st.id, pt.id, thread.id
+                                    );
+                                Some(st.id)
+                            }
+                            Err(e) => {
+                                warn!(
+                                        "[sub-prompt] Failed to create tracking subtask for merged prompt from thread #{}: {:?}",
+                                        pt.id, e
+                                    );
+                                None
+                            }
+                        };
+                        let tracking_note = match tracking_id {
+                            Some(id) => format!(
+                                "\n\n[Tracking] This merged sub-prompt is tracked as subtask #{}: you MUST execute \
+                                 the request above or EXPLICITLY DEFER it (call `subtasks_manage-subtasks` with \
+                                 action=\"update\", subtask_id={}, status=\"cancelled\") before this thread may \
+                                 complete. Never finish this thread without addressing it.",
+                                id, id
+                            ),
+                            None => String::new(),
+                        };
+                        let combined = format!("{}{}", appended, tracking_note);
+                        messages.push(ChatMessage::user(&combined));
                         used_sub_prompt_chars = next_used;
                         info!(
                                 "[sub-prompt] Appended prompt from pending thread #{} to running thread #{} ({} chars)",
@@ -1708,18 +1759,25 @@ Previous plan:\n{}",
                     truncation_retries_used = 0;
                 }
             }
-            // Subtask enforcement: only when subtask mode is active
-            if enable_subtasks {
-                // Check if all subtasks are completed/cancelled before allowing final answer
-                let pending_subtasks =
-                    match crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
-                        Ok(list) => list
-                            .into_iter()
-                            .filter(|st| st.status == "pending" || st.status == "in_progress")
-                            .collect::<Vec<_>>(),
-                        Err(_) => Vec::new(),
-                    };
+            // Subtask enforcement (final-answer gate). Two kinds of pending
+            // subtasks block completion here: plan-created subtasks (plan
+            // mode) and MERGED SUB-PROMPT tracking subtasks (created when a
+            // pending thread's prompt is appended into this running thread).
+            // A merged sub-prompt is an obligation: the executor must EXECUTE
+            // the appended request or EXPLICITLY DEFER it (cancel the tracking
+            // subtask and state the deferral reason in the final answer)
+            // before this thread may complete. Silent ignore is a bug, so the
+            // gate is active whenever pending subtasks exist, independent of
+            // plan mode (non-plan threads never have other subtasks).
+            let pending_subtasks = match crate::subtask::list_subtasks(&cfg.pool, thread.id).await {
+                Ok(list) => list
+                    .into_iter()
+                    .filter(|st| st.status == "pending" || st.status == "in_progress")
+                    .collect::<Vec<_>>(),
+                Err(_) => Vec::new(),
+            };
 
+            if enable_subtasks || !pending_subtasks.is_empty() {
                 if !pending_subtasks.is_empty()
                     && unfinished_subtask_retries
                         < cfg.config_snapshot().max_unfinished_subtask_retries
@@ -1730,12 +1788,23 @@ Previous plan:\n{}",
                         .iter()
                         .map(|st| format!("#{}: {} ({})", st.id, st.description, st.status))
                         .collect();
+                    let has_merged_subprompt = pending_subtasks
+                        .iter()
+                        .any(|st| sub_prompt_subtask_original_thread_id(&st.description).is_some());
+                    let subprompt_note = if has_merged_subprompt {
+                        " MERGED SUB-PROMPT subtasks are obligations appended from another thread: complete \
+                         them only AFTER executing the appended request, or cancel them ONLY as an explicit \
+                         deferral (state the deferral reason in your final answer)."
+                    } else {
+                        ""
+                    };
                     let feedback = format!(
                         "[Subtask Required] You cannot end this thread while subtasks are still pending. \
                          BEFORE writing your final answer, call `subtasks_manage-subtasks(action=\"update\", subtask_id=N, status=\"completed\")` \
-                         for each subtask you've already finished. If any subtask is no longer needed, use status=\"cancelled\".\n\n\
+                         for each subtask you've already finished. If any subtask is no longer needed, use status=\"cancelled\".{}\n\n\
                          Remaining unfinished subtasks:\n{}\n\n\
                          You will be retried (attempt {}/{}): use this chance to manage them.",
+                        subprompt_note,
                         names.join("\n"),
                         unfinished_subtask_retries,
                         max_retries,
@@ -1771,7 +1840,7 @@ Previous plan:\n{}",
                 }
             }
 
-            // Normal text response: all subtasks done (or subtask mode off)
+            // Normal text response: all subtasks done (no pending subtasks remain)
             final_content = if response.content.is_empty() {
                 // When both content and reasoning are empty (e.g. context too large
                 // caused the LLM to return nothing), produce a fallback error message
@@ -2479,8 +2548,10 @@ Previous plan:\n{}",
         }
 
         // Proactive subtask reminder: if the LLM has made several tool call
-        // rounds without managing subtasks, inject a gentle nudge.
-        if enable_subtasks {
+        // rounds without managing subtasks, inject a gentle nudge. Active in
+        // plan mode AND whenever a merged sub-prompt tracking subtask exists,
+        // so the appended obligation stays visible mid-run without plan mode.
+        if enable_subtasks || sub_prompt_tracking_active {
             // Check if any tool call in this round was manage_subtasks
             let called_manage = response.tool_calls.iter().any(|tc| {
                 tc.function.name == "subtasks_manage-subtasks"
@@ -3213,5 +3284,74 @@ mod plan_iteration_tests {
         // should_plan=false: no plan phase at all; first prompt is iteration 1.
         assert_eq!(plan_iterations_consumed(&None), 0);
         assert_eq!(1 + plan_iterations_consumed(&None), 1);
+    }
+}
+
+/// Build the deterministic tracking-subtask description for a merged
+/// sub-prompt appended from pending thread `pt_id`. The "#{pt_id}:" marker
+/// lets the final-answer enforcement recognise sub-prompt tracking subtasks;
+/// descriptions are single-line and bounded.
+fn sub_prompt_subtask_description(pt_id: i64, prompt: &str) -> String {
+    let collapsed: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let excerpt: String = collapsed.chars().take(140).collect();
+    format!("Merged sub-prompt from thread #{}: {}", pt_id, excerpt)
+}
+
+/// Parse a tracking-subtask description back to the source thread id, or None
+/// when the description is not a merged sub-prompt tracking subtask.
+fn sub_prompt_subtask_original_thread_id(description: &str) -> Option<i64> {
+    let rest = description.strip_prefix("Merged sub-prompt from thread #")?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    rest.strip_prefix(&digits)?.strip_prefix(':')?;
+    digits.parse().ok()
+}
+
+#[cfg(test)]
+mod merged_sub_prompt_tracking_tests {
+    use super::*;
+
+    #[test]
+    fn description_carries_source_thread_marker_and_bounded_excerpt() {
+        let long = format!("verify step one {}", "word ".repeat(200));
+        let desc = sub_prompt_subtask_description(1048, &long);
+        assert!(
+            desc.starts_with("Merged sub-prompt from thread #1048: verify step one word word"),
+            "desc: {}",
+            desc
+        );
+        assert!(desc.chars().count() <= 200, "description must stay bounded");
+        assert_eq!(sub_prompt_subtask_original_thread_id(&desc), Some(1048));
+    }
+
+    #[test]
+    fn parser_rejects_non_tracking_descriptions() {
+        assert_eq!(
+            sub_prompt_subtask_original_thread_id("Handle merged sub-prompt"),
+            None
+        );
+        assert_eq!(
+            sub_prompt_subtask_original_thread_id("Merged sub-prompt from thread #abc: x"),
+            None
+        );
+        assert_eq!(
+            sub_prompt_subtask_original_thread_id("Merged sub-prompt from thread #12 x"),
+            None
+        );
+    }
+
+    #[test]
+    fn whitespace_collapsed_and_empty_prompt_handled() {
+        let desc = sub_prompt_subtask_description(7, "  multi\nline \t prompt  ");
+        assert_eq!(desc, "Merged sub-prompt from thread #7: multi line prompt");
+        assert_eq!(sub_prompt_subtask_original_thread_id(&desc), Some(7));
+        let empty = sub_prompt_subtask_description(9, "");
+        assert_eq!(
+            sub_prompt_subtask_original_thread_id(&empty),
+            Some(9),
+            "empty prompt still tracks the source thread"
+        );
     }
 }
