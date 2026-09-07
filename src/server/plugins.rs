@@ -127,8 +127,14 @@ pub(crate) async fn update_config_handler(
     // Determine the YAML type from the path type
     let yaml_type = plugins_yaml::PluginYamlType::from_type_str(&p_type);
 
-    // Update config in YAML
-    match plugins_yaml::update_config(&state.data_dir, &yaml_type, &name, body.config.clone()) {
+    // Update config in YAML. Boolean config values are first normalized to
+    // canonical JSON booleans (schema-driven): the dashboard checkbox sends
+    // "on"/"off" form strings and other truthy spellings can arrive from any
+    // client. Storing a canonical boolean keeps re-reads, sandbox decisions
+    // and the generic boolean renderer consistent.
+    let mut new_config = body.config.clone();
+    canonicalize_config_booleans(&mut new_config, &state.data_dir, &name, &yaml_type);
+    match plugins_yaml::update_config(&state.data_dir, &yaml_type, &name, new_config) {
         Ok(_entry) => {
             // If this is a platform plugin, trigger a hot-reload of the subprocess
             if yaml_type == plugins_yaml::PluginYamlType::Platform {
@@ -247,6 +253,138 @@ pub(crate) async fn refresh_models_handler(
                 })),
             )
                 .into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Boolean config normalization (schema-driven)
+// ---------------------------------------------------------------------------
+
+/// Normalize the boolean values of `config` to canonical JSON booleans for the
+/// fields the plugin's config_schema declares as `type: boolean`. Accepts JSON
+/// booleans, numbers, and every truthy/falsy string spelling a form/API/config
+/// path can produce ("true"/"false"/"on"/"off"/"yes"/"no"/"1"/"0",
+/// case-insensitive). Values for other field types and unknown keys are left
+/// untouched.
+fn canonicalize_config_booleans_with_schema(
+    config: &mut serde_json::Value,
+    schema: &[crate::plugin::ConfigSchemaField],
+) {
+    let Some(obj) = config.as_object_mut() else {
+        return;
+    };
+    for field in schema {
+        if field.field_type != crate::plugin::FieldType::Boolean {
+            continue;
+        }
+        let Some(value) = obj.get_mut(&field.key) else {
+            continue;
+        };
+        let parsed = match value {
+            serde_json::Value::Bool(b) => Some(*b),
+            serde_json::Value::String(s) => Some(parse_boolish_config(s)),
+            serde_json::Value::Number(n) => Some(n.as_f64().is_some_and(|f| f != 0.0)),
+            _ => None,
+        };
+        if let Some(b) = parsed {
+            *value = serde_json::Value::Bool(b);
+        }
+    }
+}
+
+/// Fetch the plugin's declared schema and normalize its boolean config values.
+/// Schema lookup failures are not fatal: values are left untouched and the
+/// plugin's own parser decides.
+fn canonicalize_config_booleans(
+    config: &mut serde_json::Value,
+    data_dir: &str,
+    name: &str,
+    yaml_type: &plugins_yaml::PluginYamlType,
+) {
+    let Ok(Some(detail)) = plugins_yaml::get_plugin(data_dir, name, yaml_type) else {
+        return;
+    };
+    canonicalize_config_booleans_with_schema(config, &detail.config_schema);
+}
+
+/// Every truthy/falsy spelling a form/API/config path can produce.
+fn parse_boolish_config(s: &str) -> bool {
+    matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "true" | "on" | "yes" | "1"
+    )
+}
+
+#[cfg(test)]
+mod boolean_normalize_tests {
+    use super::*;
+
+    #[test]
+    fn parse_boolish_accepts_every_spelling() {
+        for truthy in ["true", "TRUE", "on", "On", "yes", "YES", "1", " true "] {
+            assert!(
+                parse_boolish_config(truthy),
+                "truthy spelling rejected: '{truthy}'"
+            );
+        }
+        for falsy in ["false", "FALSE", "off", "Off", "no", "NO", "0", "", "maybe"] {
+            assert!(
+                !parse_boolish_config(falsy),
+                "falsy spelling accepted: '{falsy}'"
+            );
+        }
+    }
+
+    #[test]
+    fn canonicalize_turns_bool_schema_fields_into_booleans() {
+        let schema: Vec<crate::plugin::ConfigSchemaField> =
+            serde_json::from_value(serde_json::json!([
+                {
+                    "key": "allow_omni_dir",
+                    "label": "Allow OMNI_DIR",
+                    "type": "boolean",
+                    "required": false,
+                    "secret": false
+                }
+            ]))
+            .expect("schema parses");
+        let mut cfg = serde_json::json!({
+            "allow_omni_dir": "on",
+            "workspace_dir": "/opt/workspace",
+            "count": 3
+        });
+        canonicalize_config_booleans_with_schema(&mut cfg, &schema);
+        assert_eq!(cfg["allow_omni_dir"], serde_json::Value::Bool(true));
+        // Non-boolean keys are untouched.
+        assert_eq!(cfg["workspace_dir"], serde_json::json!("/opt/workspace"));
+        assert_eq!(cfg["count"], serde_json::json!(3));
+
+        for raw in [
+            serde_json::json!("off"),
+            serde_json::json!("0"),
+            serde_json::json!(false),
+        ] {
+            let mut cfg = serde_json::json!({ "allow_omni_dir": raw });
+            canonicalize_config_booleans_with_schema(&mut cfg, &schema);
+            assert_eq!(
+                cfg["allow_omni_dir"],
+                serde_json::Value::Bool(false),
+                "raw: {raw}"
+            );
+        }
+        for raw in [
+            serde_json::json!("yes"),
+            serde_json::json!("1"),
+            serde_json::json!(true),
+        ] {
+            let mut cfg = serde_json::json!({ "allow_omni_dir": raw });
+            canonicalize_config_booleans_with_schema(&mut cfg, &schema);
+            assert_eq!(
+                cfg["allow_omni_dir"],
+                serde_json::Value::Bool(true),
+                "raw: {raw}"
+            );
         }
     }
 }

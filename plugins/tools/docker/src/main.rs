@@ -839,6 +839,30 @@ impl Default for Config {
 }
 
 // ---------------------------------------------------------------------------
+// Config value parsing helpers
+// ---------------------------------------------------------------------------
+
+/// Parse a plugin config value that may arrive as a JSON boolean, a JSON
+/// number, or any string spelling a form/API/config path can produce. Accepts
+/// every truthy/falsy spelling: true/false/on/off/yes/no/1/0 (case-insensitive).
+/// Anything else (empty, unknown words) is false.
+fn parse_boolish_str(s: &str) -> bool {
+    matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "true" | "on" | "yes" | "1"
+    )
+}
+
+fn boolish(v: &Value) -> bool {
+    match v {
+        Value::Bool(b) => *b,
+        Value::String(s) => parse_boolish_str(s),
+        Value::Number(n) => n.as_i64().map(|i| i != 0).unwrap_or(false),
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -855,16 +879,14 @@ async fn main() -> Result<()> {
                     cfg.workspace_dir = dir.to_string();
                 }
             }
-            // allow_omni_dir may arrive as a JSON boolean or as the strings
-            // "true"/"false" (omniagent stringifies config values when it
-            // forwards them through the configure env); accept both.
+            // allow_omni_dir may arrive as a JSON boolean, a JSON number, or any
+            // string spelling a form/API/config path can produce (omniagent
+            // stringifies config values when it forwards them through the MCP
+            // configure message, and the dashboard checkbox sends "on"/"off");
+            // accept every truthy/falsy spelling so a truthy value is never
+            // silently treated as disabled (bug report: "on" was ignored).
             if let Some(v) = params.get("allow_omni_dir") {
-                let enabled = match v {
-                    Value::Bool(b) => *b,
-                    Value::String(s) => s.eq_ignore_ascii_case("true") || s == "1",
-                    _ => false,
-                };
-                cfg.allow_omni_dir = enabled;
+                cfg.allow_omni_dir = boolish(v);
             }
             if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
                 if !dir.is_empty() {
@@ -1365,6 +1387,83 @@ mod tests {
             workspace_dir: ws.to_string(),
             allow_omni_dir: omni.is_some(),
             omni_dir: omni.unwrap_or("").to_string(),
+        }
+    }
+
+    #[test]
+    fn allow_omni_dir_accepts_every_truthy_and_falsy_spelling() {
+        // Regression: live config carried allow_omni_dir: "on" (dashboard HTML
+        // checkbox value) which the old parser read as false.
+        for truthy in ["true", "TRUE", "on", "On", "yes", "YES", "1", " true "] {
+            assert!(
+                parse_boolish_str(truthy),
+                "truthy spelling rejected: '{truthy}'"
+            );
+        }
+        for falsy in [
+            "false", "FALSE", "off", "Off", "no", "NO", "0", "", "disabled",
+        ] {
+            assert!(
+                !parse_boolish_str(falsy),
+                "falsy spelling accepted: '{falsy}'"
+            );
+        }
+        assert!(boolish(&serde_json::Value::Bool(true)));
+        assert!(!boolish(&serde_json::Value::Bool(false)));
+        assert!(boolish(&serde_json::json!("on")));
+        assert!(!boolish(&serde_json::json!("off")));
+        assert!(boolish(&serde_json::json!(1)));
+        assert!(!boolish(&serde_json::json!(0)));
+        assert!(!boolish(&serde_json::json!(["on"])));
+    }
+
+    #[test]
+    fn on_config_enables_omni_dir_whitelist_regression() {
+        // The operator scenario: allow_omni_dir arrives as "on" through the
+        // configure message; the omni-dir project_dir must then resolve, while
+        // destructive verbs stay refused on the omni root.
+        let (_tmp, ws, omni, _ws_proj, omni_proj, _outside) =
+            make_omni_layout("omni_on_regression");
+        let mut cfg = config_for(&ws, Some(&omni));
+        cfg.allow_omni_dir = false; // start from the disabled (default) state
+        let params = serde_json::json!({
+            "workspace_dir": ws,
+            "omni_dir": omni,
+            "allow_omni_dir": "on",
+        });
+        if let Some(dir) = params.get("workspace_dir").and_then(|v| v.as_str()) {
+            if !dir.is_empty() {
+                cfg.workspace_dir = dir.to_string();
+            }
+        }
+        if let Some(dir) = params.get("omni_dir").and_then(|v| v.as_str()) {
+            if !dir.is_empty() {
+                cfg.omni_dir = dir.to_string();
+            }
+        }
+        if let Some(v) = params.get("allow_omni_dir") {
+            cfg.allow_omni_dir = boolish(v);
+        }
+        assert!(cfg.allow_omni_dir, "\"on\" must parse as true");
+        let roots = cfg.allowed_roots();
+        assert!(
+            roots.contains(&canonical_root(&ws)) && roots.contains(&canonical_root(&omni)),
+            "expected both roots whitelisted, got: {roots:?}"
+        );
+        let resolved = resolve_project_dir(&omni_proj, &cfg).unwrap_or_else(|e| {
+            panic!("omni project_dir must resolve when allow_omni_dir is truthy: {e}")
+        });
+        assert_eq!(
+            Path::new(&resolved),
+            Path::new(&omni_proj).canonicalize().unwrap()
+        );
+        // Destructive verbs stay refused on the omni root even when enabled.
+        for verb in ["up", "down", "restart"] {
+            let err = check_verb_for_project(verb, &omni_proj, &cfg).unwrap_err();
+            assert!(
+                err.to_string().contains("refused"),
+                "verb '{verb}' must be refused: {err}"
+            );
         }
     }
 
