@@ -1065,6 +1065,56 @@ fn find_write_keyword(cleaned: &str) -> Option<String> {
 /// Max rows returned by search_database.
 const MAX_QUERY_ROWS: usize = 1000;
 
+/// Statement timeout (ms) applied to every search_database statement via SET
+/// LOCAL. search_database is for structured aggregations only: message-content
+/// lookups belong to search_messages (tsvector over messages.search_tsv). An
+/// ILIKE '%term%' scan over messages.content has no usable index and costs
+/// ~30 s per call, so this 8 s cap makes that mistake fail fast with a hint
+/// instead of blocking the thread.
+const SEARCH_DB_STATEMENT_TIMEOUT_MS: i64 = 8000;
+
+/// Static SET LOCAL statement run inside the read-only transaction before the
+/// user query. Static on purpose: sqlx only accepts literal-safe SQL here, and
+/// the value is a compile-time constant (never user input).
+const SEARCH_DB_TIMEOUT_SQL: &str = "SET LOCAL statement_timeout = 8000";
+
+/// Slow-query log threshold (ms): any search_database statement slower than
+/// this is logged (with its SQL) so costly scans stay visible.
+const SEARCH_DB_SLOW_QUERY_LOG_MS: u128 = 2000;
+
+/// True when a sqlx error text reports a PostgreSQL statement-timeout
+/// cancellation (SQLSTATE 57014, "canceling statement due to statement
+/// timeout").
+fn is_statement_timeout_error(err_text: &str) -> bool {
+    let lower = err_text.to_lowercase();
+    lower.contains("statement timeout") || lower.contains("57014")
+}
+
+/// Hint returned when the statement-timeout guard fires: tells the agent to
+/// use search_messages (tsvector) for content lookups instead of running
+/// ILIKE scans over messages.content.
+fn search_db_timeout_hint() -> String {
+    format!(
+        "search_database query canceled after {SEARCH_DB_STATEMENT_TIMEOUT_MS} ms by the \
+         statement-timeout guard (8 s). If you were searching for message CONTENT, do not \
+         use ILIKE '%..%' over messages.content: that full-table scan has no usable index \
+         and costs ~30 s per call. Use search_messages instead: it searches the \
+         GIN-indexed messages.search_tsv tsvector column and returns in well under 3 s. For \
+         structured aggregations, add a tighter WHERE clause and a LIMIT."
+    )
+}
+
+/// Collapse a SQL statement to one bounded line for slow-query logs.
+fn one_line_sql(sql: &str) -> String {
+    let joined: String = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    if joined.chars().count() > 200 {
+        let head: String = joined.chars().take(200).collect();
+        format!("{head}...")
+    } else {
+        joined
+    }
+}
+
 /// Decode a single result cell by its PostgreSQL column type so timestamps,
 /// UUIDs, JSONB, bytea and arrays serialize as real values instead of NULL.
 fn decode_column_value(row: &sqlx::postgres::PgRow, i: usize) -> serde_json::Value {
@@ -1188,6 +1238,18 @@ async fn handle_search_database(pool: &PgPool, args: &Value) -> Result<(String, 
         .await
         .map_err(|e| anyhow::anyhow!("Failed to begin read-only transaction: {e}"))?;
 
+    // Latency guard (slowness fix #3): SET LOCAL statement_timeout bounds every
+    // single statement to 8 s (transaction-scoped, rolled back with it). An
+    // ILIKE '%term%' scan over messages.content has no usable index and costs
+    // ~30 s per call (verified 2026-09-07); the guard makes that mistake fail
+    // fast with a search_messages hint instead of blocking the thread.
+    sqlx::query(SEARCH_DB_TIMEOUT_SQL)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to set statement timeout: {e}"))?;
+
+    let query_started = std::time::Instant::now();
+
     let results: Vec<serde_json::Value> = {
         let rows = match sqlx::query(sqlx::AssertSqlSafe(sql_owned.as_str()))
             .fetch_all(&mut *conn)
@@ -1196,7 +1258,26 @@ async fn handle_search_database(pool: &PgPool, args: &Value) -> Result<(String, 
             Ok(rows) => rows,
             Err(e) => {
                 let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-                return Err(anyhow::anyhow!("Query failed: {e}"));
+                let err_text = e.to_string();
+                let elapsed_ms = query_started.elapsed().as_millis();
+                if is_statement_timeout_error(&err_text) {
+                    eprintln!(
+                        "[search_database] statement timeout after {elapsed_ms} ms: {}",
+                        one_line_sql(&sql_owned)
+                    );
+                    return Err(anyhow::anyhow!(
+                        "{}\n\nOriginal error: {}",
+                        search_db_timeout_hint(),
+                        err_text
+                    ));
+                }
+                if elapsed_ms > SEARCH_DB_SLOW_QUERY_LOG_MS {
+                    eprintln!(
+                        "[search_database] failed slow query ({elapsed_ms} ms): {}",
+                        one_line_sql(&sql_owned)
+                    );
+                }
+                return Err(anyhow::anyhow!("Query failed: {err_text}"));
             }
         };
 
@@ -1220,6 +1301,14 @@ async fn handle_search_database(pool: &PgPool, args: &Value) -> Result<(String, 
         .execute(&mut *conn)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to commit read-only transaction: {e}"))?;
+
+    let elapsed_ms = query_started.elapsed().as_millis();
+    if elapsed_ms > SEARCH_DB_SLOW_QUERY_LOG_MS {
+        eprintln!(
+            "[search_database] slow query ({elapsed_ms} ms): {}",
+            one_line_sql(&sql_owned)
+        );
+    }
 
     let output = serde_json::to_string_pretty(&results)?;
     Ok((output, false))
@@ -1814,7 +1903,12 @@ ALTER/...) are rejected, and the query runs inside a read-only transaction, so w
 blocked at the database level.\n\n\
 Available tables: messages, threads, summaries, kanban_tasks, \
 profiles. Include the full table/column names in your SQL.\n\n\
-For common lookups prefer the purpose-built tools: search_messages (keyword), \
+Message-CONTENT lookups: ALWAYS use search_messages (tsvector over \
+messages.search_tsv, returns in <3 s) - NEVER run ILIKE '%..%' over \
+messages.content in search_database: that full-table scan has no usable \
+index and costs ~30 s per call, so the 8 s statement timeout cancels it \
+and returns a hint to switch tools.\n\nFor common lookups prefer the \
+purpose-built tools: search_messages (keyword), \
 search_thread-messages (thread contents), search_channel-prompts (channel prompt history), \
 search_channels (channel ids)."
                     .to_string(),
@@ -2104,5 +2198,97 @@ mod tests {
             !g.contains("ts_rank_cd(search_tsv, "),
             "global rank must use the im alias: {g}"
         );
+    }
+}
+
+#[cfg(test)]
+mod search_db_latency_guard_tests {
+    use super::*;
+
+    #[test]
+    fn timeout_error_text_is_detected() {
+        assert!(is_statement_timeout_error(
+            "error returned from database: canceling statement due to statement timeout"
+        ));
+        assert!(is_statement_timeout_error(
+            "db error: ERROR: canceling statement due to statement timeout\nSQLSTATE 57014"
+        ));
+        assert!(!is_statement_timeout_error(
+            "db error: ERROR: relation \"messages\" does not exist"
+        ));
+        assert!(!is_statement_timeout_error(""));
+    }
+
+    #[test]
+    fn timeout_hint_directs_content_lookups_to_search_messages() {
+        let hint = search_db_timeout_hint();
+        assert!(hint.contains("search_messages"), "hint: {hint}");
+        assert!(hint.contains("messages.content"), "hint: {hint}");
+        assert!(hint.contains("ILIKE"), "hint: {hint}");
+        assert!(hint.contains("tsvector"), "hint: {hint}");
+    }
+
+    #[test]
+    fn timeout_guard_sits_in_5_to_10_second_band() {
+        assert!(
+            (5000..=10000).contains(&SEARCH_DB_STATEMENT_TIMEOUT_MS),
+            "statement timeout must be 5-10 s, got {SEARCH_DB_STATEMENT_TIMEOUT_MS}"
+        );
+    }
+
+    #[test]
+    fn slow_query_log_threshold_is_about_2_seconds() {
+        assert!(
+            (1500..=3000).contains(&SEARCH_DB_SLOW_QUERY_LOG_MS),
+            "slow threshold ~2 s, got {SEARCH_DB_SLOW_QUERY_LOG_MS}"
+        );
+    }
+
+    #[test]
+    fn one_line_sql_collapses_and_bounds() {
+        let sql = "SELECT count(*)\nFROM messages m\nWHERE m.content ILIKE '%foo%'";
+        assert_eq!(
+            one_line_sql(sql),
+            "SELECT count(*) FROM messages m WHERE m.content ILIKE '%foo%'"
+        );
+        let long = format!("SELECT '{}'", "x".repeat(500));
+        let l2 = one_line_sql(&long);
+        assert!(l2.chars().count() <= 204, "bounded: {}", l2.chars().count());
+        assert!(l2.ends_with("..."));
+    }
+
+    /// End-to-end guard proof against a real PostgreSQL (omnidev dev DB):
+    /// a statement that would take 30 s is canceled at the 8 s statement
+    /// timeout and the tool answers with the search_messages hint. Skips
+    /// cleanly when no DATABASE_URL is set (plain CI without a DB).
+    #[tokio::test]
+    async fn timeout_guard_cancels_long_statement_with_hint() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipped: no DATABASE_URL (no live DB in this environment)");
+            return;
+        };
+        let pool = omniagent::db::connect(&url)
+            .await
+            .expect("connect to dev database for guard test");
+        let args = serde_json::json!({ "sql": "SELECT pg_sleep(30)" });
+        let started = std::time::Instant::now();
+        let res = handle_search_database(&pool, &args).await;
+        let elapsed_ms = started.elapsed().as_millis();
+        let err = res.expect_err("pg_sleep(30) must be canceled by the 8 s guard");
+        let text = err.to_string();
+        assert!(
+            text.contains("statement-timeout guard"),
+            "error must mention the guard: {text}"
+        );
+        assert!(
+            text.contains("search_messages"),
+            "error must steer content lookups to search_messages: {text}"
+        );
+        assert!(
+            elapsed_ms < 15_000,
+            "guard must cut the 30 s statement short, took {elapsed_ms} ms"
+        );
+        eprintln!("guard live check: canceled after {elapsed_ms} ms with hint; ok");
+        pool.close().await;
     }
 }
