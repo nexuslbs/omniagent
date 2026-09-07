@@ -544,6 +544,84 @@ fn plan_iterations_consumed(plan_content: &Option<String>) -> i32 {
     }
 }
 
+// ── Interactive-thread round budget (slowness fix #2) ─────────────────────
+// Measured across threads 1157/1159/1140/1137/1138/1141/1120, ~95% of wall
+// clock on simple operator requests is serial LLM round time and the loop
+// granted unbounded rounds (thread 1157: 44 LLM rounds / ~22 min on a
+// one-container check); WASTE GUARDRAILS prose could not stop the loop.
+// Interactive threads (a direct operator conversation: cause=user and NOT a
+// delegated kanban/schedule workflow) therefore get a hard, configurable
+// round cap (`interactive_max_iterations`, default 12) plus an auto-answer
+// path: when the cap is hit while the model still requests tools, that
+// round's tools run and ONE final no-tools LLM call forces a real final
+// answer (knowns + remaining uncertainty). Kanban/dev/schedule threads keep
+// their delegated plan/no-plan budgets (interactive=false).
+
+/// True when the thread is a direct operator conversation: cause 'user' and
+/// not linked to a delegated kanban task, scheduled/cron job or hook. Those
+/// keep their own round budgets; interactive threads get the tighter cap.
+fn is_interactive_thread(thread: &Thread) -> bool {
+    thread.cause == "user" && thread.task_id.is_none() && thread.schedule_task_id.is_none()
+}
+
+/// Effective total iteration budget for a thread: when `interactive` and the
+/// configured `interactive_max_iterations` cap is > 0, the budget is the cap
+/// MIN'd with the existing plan/no-plan budget (the cap never loosens an
+/// existing bound); 0 disables the cap and returns the base unchanged.
+fn interactive_iter_limit(base: i32, interactive_cap: u32, interactive: bool) -> i32 {
+    if interactive && interactive_cap > 0 {
+        base.min(interactive_cap as i32)
+    } else {
+        base
+    }
+}
+
+/// What the loop does when the iteration budget is exhausted while the model
+/// still requested tool calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapHitHandling {
+    /// Non-interactive: record the interruption without executing the pending
+    /// tools (historical behavior).
+    InterruptSynthetic,
+    /// Interactive: execute the round's tools (they may hold the answer) and
+    /// synthesize the final answer after the loop.
+    RunToolsThenSynthesize,
+}
+
+fn cap_hit_handling(interactive: bool) -> CapHitHandling {
+    if interactive {
+        CapHitHandling::RunToolsThenSynthesize
+    } else {
+        CapHitHandling::InterruptSynthetic
+    }
+}
+
+/// Whether the post-loop epilogue should force the final answer: only for an
+/// interactive thread that exhausted its budget on a tool round with no final
+/// content yet and no force-failed error path.
+fn cap_finalize_due(
+    interactive: bool,
+    cap_hit_with_tools: bool,
+    final_content_empty: bool,
+    force_failed: bool,
+) -> bool {
+    interactive && cap_hit_with_tools && final_content_empty && !force_failed
+}
+
+/// The mid-budget iteration at which the once-per-thread auto-answer nudge is
+/// injected on an interactive thread (asks the model to finalize when the
+/// latest tool results already satisfy the ask instead of exploring further).
+/// None for budgets too small to nudge. Deterministic: halfway through the
+/// budget, at least iteration 3, never on the final round.
+fn auto_answer_nudge_iteration(iter_limit: i32) -> Option<i32> {
+    if iter_limit <= 3 {
+        return None;
+    }
+    let half = iter_limit / 2;
+    let at = half.max(3).min(iter_limit - 1);
+    Some(at)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_main_loop(
     cfg: &AgentContext,
@@ -992,8 +1070,17 @@ Previous plan:\n{}",
     // Use the plugin's runtime plan decision for the iteration budget too,
     // so complex tasks get the plan budget (max_iterations_plan) and simple
     // ones stay within max_iterations_no_plan.
-    let iter_limit =
-        queries::max_iterations_for_plan(&cfg.config_snapshot(), prompt_parts.plan) as i32;
+    // Slowness fix #2: interactive operator threads (cause=user, no delegated kanban/
+    // schedule workflow) get a hard configurable round cap MIN'd with the plan/no-plan
+    // budget, so the tool-calling loop can never run past `interactive_max_iterations`
+    // rounds (default 12) on a direct operator request, regardless of plan mode.
+    // Kanban/dev/schedule threads keep the delegated budgets (interactive=false).
+    let interactive_thread = is_interactive_thread(thread);
+    let iter_limit = {
+        let snap = cfg.config_snapshot();
+        let base = queries::max_iterations_for_plan(&snap, prompt_parts.plan) as i32;
+        interactive_iter_limit(base, snap.interactive_max_iterations, interactive_thread)
+    };
     // The plan phase consumed an iteration slot ONLY when a plan was actually
     // generated (plan_content.is_some()). A failed or skipped plan consumes
     // nothing: the first main-loop prompt then stays at iteration 1 instead
@@ -1008,6 +1095,11 @@ Previous plan:\n{}",
     current_iter = plan_consumed; // 0 when plan failed/skipped, 1 when a plan was generated
     let mut unfinished_subtask_retries: u32 = 0;
     let mut calls_since_subtask_management: u32 = 0;
+    // Slowness fix #2 state: cap-hit-with-tools (interactive threads run the final
+    // round's tools, then the post-loop epilogue forces a synthesized final answer)
+    // and the once-per-thread mid-budget auto-answer nudge.
+    let mut cap_hit_with_tools: bool = false;
+    let mut auto_answer_nudged: bool = false;
     // How many consecutive LLM errors (provider errors, truncation,
     // empty responses) we tolerate before marking the thread failed.
     // A correct (non-error) response resets the counter to 0. The limit
@@ -1082,10 +1174,36 @@ Previous plan:\n{}",
         // If this LLM call will reach the iteration limit, hint to the model
         // to produce a final answer rather than more tool calls.
         if current_iter >= iter_limit {
-            messages.push(ChatMessage::system(
-                "This is your last turn. You must provide your final answer now. \
-                 Do not request additional tool calls.",
-            ));
+            if interactive_thread {
+                messages.push(ChatMessage::system(
+                    "This is your last interactive round. You must provide your final answer \
+                     now: state what is known (with the evidence gathered above) and what \
+                     remains uncertain or unverified. Do not request additional tool calls.",
+                ));
+            } else {
+                messages.push(ChatMessage::system(
+                    "This is your last turn. You must provide your final answer now. \
+                     Do not request additional tool calls.",
+                ));
+            }
+        } else if interactive_thread && !auto_answer_nudged {
+            // Auto-answer nudge (mid-budget, once): when the latest tool results already
+            // satisfy the ask, the model should finalize instead of continuing to explore
+            // adjacent topics. Tools stay enabled; the nudge only asks the model to
+            // self-stop once the evidence suffices (enforcement is the cap + epilogue).
+            if let Some(nudge_at) = auto_answer_nudge_iteration(iter_limit) {
+                if current_iter >= nudge_at {
+                    auto_answer_nudged = true;
+                    let nudge_text = format!(
+                        "[Auto-answer] You have used {current_iter} of {iter_limit} interactive \
+                         rounds. If the latest tool results already answer the operator's \
+                         request, write your final answer now instead of continuing to \
+                         explore. Do not audit adjacent topics. If more evidence is genuinely \
+                         required, gather only that and answer by the final round.",
+                    );
+                    messages.push(ChatMessage::system(&nudge_text));
+                }
+            }
         }
 
         // ── Sub-prompts: append pending user prompts to this running thread ──
@@ -2016,18 +2134,33 @@ Previous plan:\n{}",
             // non-empty: prevents a false "empty response" detection when
             // the iteration budget runs out while the LLM was making tools.
             if !response.tool_calls.is_empty() {
-                let tool_names: Vec<String> = response
-                    .tool_calls
-                    .iter()
-                    .map(|tc| tc.function.name.clone())
-                    .collect();
-                final_content = format!(
-                    "Iteration limit reached. Last tool calls issued: {}. The task was interrupted before completion.",
-                    tool_names.join(", "),
-                );
-                final_tool_call = false;
+                match cap_hit_handling(interactive_thread) {
+                    // Non-interactive (kanban/dev/schedule) threads keep the historical
+                    // behavior: record the interruption without executing the pending tools.
+                    CapHitHandling::InterruptSynthetic => {
+                        let tool_names: Vec<String> = response
+                            .tool_calls
+                            .iter()
+                            .map(|tc| tc.function.name.clone())
+                            .collect();
+                        final_content = format!(
+                            "Iteration limit reached. Last tool calls issued: {}. The task was interrupted before completion.",
+                            tool_names.join(", "),
+                        );
+                        final_tool_call = false;
+                        break;
+                    }
+                    // Interactive threads: this is the hard cap. Run the round's tools
+                    // (their results may hold the answer) and let the loop end; the
+                    // post-loop epilogue then forces a real final answer (knowns +
+                    // remaining uncertainty) instead of the generic interruption text.
+                    CapHitHandling::RunToolsThenSynthesize => {
+                        cap_hit_with_tools = true;
+                    }
+                }
+            } else {
+                break;
             }
-            break;
         }
 
         // We have tool calls: add assistant message with tool_calls
@@ -2621,6 +2754,90 @@ Previous plan:\n{}",
             }
         }
     } // end for _turn
+
+    // Interactive cap-hit epilogue (slowness fix #2): the thread exhausted its
+    // interactive round budget while the model was still requesting tools. The
+    // last round's tools WERE executed (results are in the message stream);
+    // force ONE final no-tools LLM call that produces a real final answer
+    // (knowns + remaining uncertainty) instead of the generic interruption text
+    // or another exploration round. Kanban/dev/schedule threads never reach
+    // here (cap_hit_with_tools stays false for them: InterruptSynthetic).
+    if cap_finalize_due(
+        interactive_thread,
+        cap_hit_with_tools,
+        final_content.is_empty(),
+        force_failed,
+    ) {
+        let terminal_status = queries::get_thread_status(&cfg.pool, thread.id)
+            .await
+            .ok()
+            .flatten()
+            .filter(|st| is_terminal_loop_status(st));
+        if terminal_status.is_none() {
+            let mut cap_messages = messages.clone();
+            cap_messages.push(ChatMessage::system(
+                "Your interactive round budget is exhausted and tools are disabled for this \
+                 call. Produce your FINAL answer now: summarize what is known (with the \
+                 evidence from the tool results above), what remains uncertain or unverified, \
+                 and any follow-up the operator could request. Do not call tools and do not \
+                 continue exploring.",
+            ));
+            let cap_request = CompletionRequest {
+                messages: cap_messages,
+                max_tokens: effective_max_tokens(escalated_max_tokens, base_max_tokens),
+                temperature: cfg.config_snapshot().temperature,
+                stream: false,
+                tools: None,
+            };
+            match per_thread_llm.completion(cap_request).await {
+                Ok(cap_resp) => {
+                    helpers::merge_usage(&mut cumulative_usage, cap_resp.usage.clone());
+                    if !cap_resp.content.trim().is_empty() {
+                        final_content = cap_resp.content;
+                        if cap_resp.reasoning.is_some() {
+                            final_reasoning = cap_resp.reasoning.clone();
+                        }
+                        final_tool_call = false;
+                        limit_reached = false; // real answer: complete normally
+                        info!(
+                            "[executor] Interactive cap-hit final answer synthesized for thread {} ({} chars)",
+                            thread.id,
+                            final_content.chars().count(),
+                        );
+                        if let Err(e) = queries::update_thread_progress(
+                            &cfg.pool,
+                            thread.id,
+                            current_iter,
+                            thread_progress_stats(&cumulative_usage, &start_time),
+                        )
+                        .await
+                        {
+                            warn!(
+                                "[executor] Failed to update thread {} progress: {:?}",
+                                thread.id, e
+                            );
+                        }
+                    } else {
+                        warn!(
+                            "[executor] Interactive cap-hit final synthesis returned empty content for thread {}; falling back to interruption text",
+                            thread.id
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "[executor] Interactive cap-hit final synthesis failed for thread {}: {:?}",
+                        thread.id, e
+                    );
+                }
+            }
+        } else {
+            info!(
+                "[executor] Thread {} became terminal during the cap-hit tool round - skipping final synthesis",
+                thread.id
+            );
+        }
+    }
 
     // If we exited the loop without a final text response, provide a truthful
     // fallback. The old hardcoded "I've completed the requested operations"
@@ -3391,5 +3608,117 @@ mod merged_sub_prompt_tracking_tests {
             Some(9),
             "empty prompt still tracks the source thread"
         );
+    }
+}
+
+#[cfg(test)]
+mod interactive_round_budget_tests {
+    use super::*;
+    use crate::db::types::Thread;
+
+    fn thread(cause: &str, task_id: Option<String>, sched: Option<String>) -> Thread {
+        Thread {
+            id: 1,
+            status: "pending".to_string(),
+            cause: cause.to_string(),
+            channel_id: "ch".to_string(),
+            profile: "p".to_string(),
+            provider: None,
+            model: None,
+            input_tokens: 0,
+            cached_tokens: 0,
+            output_tokens: 0,
+            duration_ms: 0,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            ended_at: None,
+            terminal: false,
+            task_id,
+            schedule_task_id: sched,
+            plan: false,
+            parent_id: None,
+            iterations: 0,
+            workflow_step: None,
+            template: None,
+        }
+    }
+
+    #[test]
+    fn plain_user_thread_is_interactive() {
+        assert!(is_interactive_thread(&thread("user", None, None)));
+    }
+
+    #[test]
+    fn kanban_executor_thread_is_not_interactive() {
+        // Kanban executor threads carry a task_id and must keep their delegated budget.
+        assert!(!is_interactive_thread(&thread(
+            "user",
+            Some("task_x".to_string()),
+            None
+        )));
+    }
+
+    #[test]
+    fn scheduled_and_hook_threads_are_not_interactive() {
+        assert!(!is_interactive_thread(&thread(
+            "user",
+            None,
+            Some("sched_x".to_string())
+        )));
+        assert!(!is_interactive_thread(&thread("hook", None, None)));
+        assert!(!is_interactive_thread(&thread("system", None, None)));
+    }
+
+    #[test]
+    fn interactive_cap_is_min_with_base_when_enabled() {
+        // cap-hit: default interactive cap 12 always wins over 30/120 budgets.
+        assert_eq!(interactive_iter_limit(30, 12, true), 12);
+        assert_eq!(interactive_iter_limit(120, 12, true), 12);
+    }
+
+    #[test]
+    fn interactive_cap_never_loosens_and_zero_disables() {
+        assert_eq!(interactive_iter_limit(30, 12, false), 30); // kanban/dev keep budget
+        assert_eq!(interactive_iter_limit(30, 0, true), 30); // disabled -> base
+        assert_eq!(interactive_iter_limit(30, 40, true), 30); // cap > base keeps tighter base
+    }
+
+    #[test]
+    fn cap_hit_interactive_runs_tools_then_synthesizes() {
+        assert_eq!(
+            cap_hit_handling(true),
+            CapHitHandling::RunToolsThenSynthesize
+        );
+    }
+
+    #[test]
+    fn cap_hit_non_interactive_interrupts_synthetically() {
+        assert_eq!(cap_hit_handling(false), CapHitHandling::InterruptSynthetic);
+    }
+
+    #[test]
+    fn cap_finalize_due_only_for_interactive_cap_hit_without_content_or_failure() {
+        assert!(cap_finalize_due(true, true, true, false));
+        assert!(!cap_finalize_due(false, true, true, false)); // not interactive
+        assert!(!cap_finalize_due(true, false, true, false)); // no cap-hit tool round
+        assert!(!cap_finalize_due(true, true, false, false)); // content already present
+        assert!(!cap_finalize_due(true, true, true, true)); // force-failed path
+    }
+
+    #[test]
+    fn auto_answer_nudge_fires_mid_budget_once() {
+        assert_eq!(auto_answer_nudge_iteration(12), Some(6));
+        assert_eq!(auto_answer_nudge_iteration(8), Some(4));
+        assert_eq!(auto_answer_nudge_iteration(30), Some(15));
+        let at = auto_answer_nudge_iteration(12).unwrap();
+        assert!(at < 12, "nudge must never land on the final round");
+    }
+
+    #[test]
+    fn auto_answer_nudge_disabled_on_tiny_budgets() {
+        assert_eq!(auto_answer_nudge_iteration(3), None);
+        assert_eq!(auto_answer_nudge_iteration(2), None);
+        assert_eq!(auto_answer_nudge_iteration(1), None);
+        assert_eq!(auto_answer_nudge_iteration(0), None);
     }
 }

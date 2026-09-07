@@ -86,6 +86,15 @@ pub struct AgentConfig {
     pub max_iterations_no_plan: u32,
     /// Max iterations for threads with planning enabled.
     pub max_iterations_plan: u32,
+    /// Hard LLM-round cap for INTERACTIVE operator threads (cause=user with no delegated
+    /// kanban/schedule workflow). When > 0, an interactive thread's total iteration budget
+    /// is MIN'd to this cap (default 12) so a simple operator request can never burn the
+    /// full 30/120-round plan budgets (thread 1157: 44 rounds / ~22 min on a one-container
+    /// check). On cap-hit while the model still requests tools, the loop runs that round's
+    /// tools and then forces one final no-tools answer (knowns + remaining uncertainty).
+    /// 0 disables the cap (existing plan/no-plan budgets apply unchanged). Kanban/dev/
+    /// schedule threads always keep their delegated budgets (not interactive).
+    pub interactive_max_iterations: u32,
     /// Max retries for unfinished subtasks before marking the thread as failed.
     pub max_unfinished_subtask_retries: u32,
     /// Max consecutive LLM provider errors before the thread is marked failed.
@@ -265,6 +274,9 @@ impl AgentConfig {
             temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
             max_iterations_plan: get("max_iterations_plan", "120").parse().unwrap_or(120),
+            interactive_max_iterations: get("interactive_max_iterations", "12")
+                .parse()
+                .unwrap_or(12),
             max_unfinished_subtask_retries: get("max_unfinished_subtask_retries", "1")
                 .parse()
                 .unwrap_or(3),
@@ -382,6 +394,9 @@ impl AgentConfig {
             temperature: get("temperature", "0.7").parse().unwrap_or(0.7),
             max_iterations_no_plan: get("max_iterations_no_plan", "30").parse().unwrap_or(30),
             max_iterations_plan: get("max_iterations_plan", "120").parse().unwrap_or(120),
+            interactive_max_iterations: get("interactive_max_iterations", "12")
+                .parse()
+                .unwrap_or(12),
             max_unfinished_subtask_retries: get("max_unfinished_subtask_retries", "1")
                 .parse()
                 .unwrap_or(3),
@@ -475,6 +490,7 @@ mod tests {
             temperature: 0.7,
             max_iterations_no_plan: 30,
             max_iterations_plan: 120,
+            interactive_max_iterations: 12,
             max_unfinished_subtask_retries: 1,
             provider_max_retries: 3,
             delete_after_days: 30,
@@ -552,6 +568,7 @@ mod tests {
             temperature: 0.0,
             max_iterations_no_plan: 0,
             max_iterations_plan: 0,
+            interactive_max_iterations: 0,
             max_unfinished_subtask_retries: 0,
             provider_max_retries: 0,
             delete_after_days: 0,
