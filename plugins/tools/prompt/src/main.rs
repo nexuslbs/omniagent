@@ -1763,6 +1763,14 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
         }
     };
 
+    // Engine override: when the omniagent's post-call provider usage shows the
+    // context is still over the hard budget (the local measure can under-count
+    // versus the provider tokenizer: chars/4 fallback, unmeasured tool-schema
+    // overhead), the core re-invokes us with force_compact=true so the gate
+    // cannot silently under-trigger (0-compaction incident, threads 1139/1140).
+    // Force skips the threshold check and compacts toward the soft budget
+    // whenever drainable turns exist; null-contract otherwise preserved.
+    let force_compact = args["force_compact"].as_bool().unwrap_or(false);
     let before = messages.len();
     // WS-2/WS-3: durable context dump + compaction event plumbing.
     let thread_dir = args["thread_dir"].as_str().map(std::path::PathBuf::from);
@@ -1770,7 +1778,7 @@ async fn handle_compact_messages(args: &Value, cfg: &PluginConfig) -> Result<(St
     let mut entries = 0usize;
     let mut dump_file: Option<String> = None;
 
-    if current_size > hard_budget {
+    if force_compact || current_size > hard_budget {
         // Reduce to the soft budget: compact, and if still over soft, keep
         // compacting with a progressively smaller keep_recent. Compaction
         // stops when size <= soft or there is nothing more to compact
@@ -2824,6 +2832,57 @@ mod token_counting_tests {
         let (out, is_error) = handle_compact_messages(&args, cfg).await.unwrap();
         assert!(!is_error, "compact-messages must not error: {out}");
         serde_json::from_str(&out).unwrap()
+    }
+
+    // (a0) force_compact bypasses the threshold gate (core over-budget
+    // escalation, 0-compaction incident threads 1139/1140): even when the
+    // locally measured size is BELOW the hard budget, an explicit engine
+    // force must compact toward the soft budget. Null-contract preserved when
+    // not forced and under budget.
+    #[tokio::test]
+    async fn force_compact_bypasses_gate_and_null_contract_is_preserved() {
+        let msgs = vec![
+            user_msg("force compaction"),
+            tool_call_msg("git_status", r#"{"repo_dir":"/tmp"}"#, "git status"),
+            tool_result("git_status", "On branch main - nothing to commit"),
+        ];
+        let cfg = compact_cfg("");
+        let estimated = measure_size(&msgs, "");
+        // Negative control: budgets above the local estimate, no force -> no-op.
+        let out = run_compact(&msgs, &cfg, 0, None, estimated + 100000, estimated + 100000).await;
+        assert_eq!(
+            out["was_compacted"], false,
+            "no force -> no compaction under budget"
+        );
+        assert_eq!(
+            out["messages"],
+            serde_json::Value::Null,
+            "null-contract under budget"
+        );
+
+        // Same tiny conversation WITH force_compact=true must compact.
+        let arr: Vec<serde_json::Value> = msgs
+            .iter()
+            .map(|m| serde_json::to_value(m).unwrap())
+            .collect();
+        let args = json!({
+            "messages": arr,
+            "keep_recent": 0,
+            "soft_budget": 1,
+            "hard_budget": 1,
+            "force_compact": true,
+        });
+        let (out_s, is_error) = handle_compact_messages(&args, &cfg).await.unwrap();
+        assert!(!is_error, "forced compact must not error: {out_s}");
+        let out_v: serde_json::Value = serde_json::from_str(&out_s).unwrap();
+        assert_eq!(
+            out_v["was_compacted"], true,
+            "force must compact even under budget"
+        );
+        assert!(
+            out_v["messages"].is_array(),
+            "forced compact must return the compacted array"
+        );
     }
 
     // (a) The measurement is ALWAYS a token estimate: real tiktoken tokens

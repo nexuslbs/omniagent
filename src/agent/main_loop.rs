@@ -1066,6 +1066,16 @@ Previous plan:\n{}",
     // for read-only tools. Cleared whenever a state-changing tool runs.
     let mut read_guard: std::collections::HashMap<(String, u64), (u32, usize)> =
         std::collections::HashMap::new();
+    // No-progress loop guard (thread 1139: ~181 git read calls / 40 min, one
+    // commit attempt): counts engine-blocked duplicate reads and escalates to a
+    // STOP nudge so a verification cycle cannot burn iterations forever.
+    let mut read_dup_blocks: u32 = 0;
+    let mut stop_nudge_sent = false;
+    // Compaction over-budget escalation (0-compaction incident, threads 1139/1140):
+    // set when the provider's billed prompt tokens exceed the effective hard
+    // budget; the next condense call is then forced (force_compact=true) so the
+    // plugin gate cannot silently under-trigger on a local chars/4 measure.
+    let mut prev_over_budget = false;
     for _turn in 0..max_llm_calls {
         current_iter += 1; // increment before each LLM call
 
@@ -1272,6 +1282,7 @@ Previous plan:\n{}",
                     "thread_dir": thread_dir,
                     "soft_budget": eff_model_cfg.token_budget_soft,
                     "hard_budget": eff_model_cfg.token_budget_hard,
+                    "force_compact": prev_over_budget,
                 }),
                 id: String::new(),
             };
@@ -1322,6 +1333,7 @@ Previous plan:\n{}",
                                 serde_json::from_value(serde_json::Value::Array(condensed.clone()))
                                     .unwrap_or(messages);
                             last_condense_iteration = current_iter;
+                            prev_over_budget = false; // compaction applied - re-evaluate from provider usage
                             info!(
                                 "[context] Condensed messages via {}: {} → {} (iteration {})",
                                 condense_tool, before, after, current_iter,
@@ -1619,6 +1631,27 @@ Previous plan:\n{}",
 
         // Track cumulative token usage
         helpers::merge_usage(&mut cumulative_usage, response.usage.clone());
+
+        // Compaction over-budget escalation: provider usage is ground truth. When
+        // the billed context exceeds the effective hard budget, log loudly ONCE per
+        // span and force compaction on the next iteration (the plugin's local
+        // measure can under-count: chars/4 fallback, tool-schema overhead).
+        let billed_prompt = response
+            .usage
+            .as_ref()
+            .map(|u| u.prompt_tokens as usize)
+            .unwrap_or(0);
+        if eff_model_cfg.token_budget_hard > 0 && billed_prompt > eff_model_cfg.token_budget_hard {
+            if !prev_over_budget {
+                error!(
+                    "[context] Thread {}: provider billed {} prompt tokens > hard budget {} and condensation did not reduce it - forcing compaction on the next iteration",
+                    thread.id, billed_prompt, eff_model_cfg.token_budget_hard
+                );
+            }
+            prev_over_budget = true;
+        } else {
+            prev_over_budget = false;
+        }
 
         // Live progress: incrementally update the threads table after EVERY
         // LLM call (iterations, tokens, elapsed time) so processing threads
@@ -2116,18 +2149,22 @@ Previous plan:\n{}",
             let guard_key = (tool_name.clone(), args_hash);
             if helpers::is_guarded_read_only(&tool_name) {
                 if let Some((guard_iter, _len)) = read_guard.get(&guard_key) {
-                    tool_results[idx] = Some((
-                        tc_id.clone(),
-                        tool_name.clone(),
-                        format!(
-                            "[duplicate of {tool_name} at iteration {guard_iter} - see your notes; re-reading the same input is forbidden by rule 11]"
-                        ),
-                    ));
+                    read_dup_blocks += 1;
+                    let mut note = format!(
+                        "[duplicate of {tool_name} at iteration {guard_iter} - see your notes; re-reading the same input is forbidden by rule 11]"
+                    );
+                    if read_dup_blocks >= 3 && !stop_nudge_sent {
+                        stop_nudge_sent = true;
+                        note.push_str(" NO-PROGRESS STOP: you are repeating read-only verification calls with no state change. If the state you are checking is already confirmed, produce your final report now (what is done, what remains). If you expect the state to have changed, say what changed and issue ONE fresh call.");
+                    }
+                    tool_results[idx] = Some((tc_id.clone(), tool_name.clone(), note));
                     continue;
                 }
                 read_guard.insert(guard_key, (current_iter as u32, 0));
             } else {
                 read_guard.clear();
+                read_dup_blocks = 0;
+                stop_nudge_sent = false;
             }
             let qualified_name = tool_name.clone(); // qualified_name is identity, no registry needed
 

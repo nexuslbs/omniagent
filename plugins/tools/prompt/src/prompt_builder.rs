@@ -90,7 +90,17 @@ with the subtasks tool (subtasks_manage-subtasks, action=\"add\"); as you finish
 each step mark its subtask completed (action=\"update\", subtask_id=N, \
 status=\"completed\"); cancel any subtask that is no longer needed \
 (status=\"cancelled\"); before your final answer, complete or cancel ALL subtasks \
-so none remain pending.";
+so none remain pending.\n\
+14. NO-REPETITION + VERIFY-ONCE + NO-PROGRESS STOP: never re-issue a tool call \
+(same tool + same effective arguments/scope) whose result is already in your \
+context or notes when nothing relevant changed in between - including read-only \
+verification commands (git log/status/rev-parse, search, list, info, status). \
+After a state-changing operation (commit+push, file write), verify ONCE (e.g. one \
+git rev-parse showing local == origin/main) and move on; never re-verify an \
+unchanged state. If you catch yourself repeating the same checks with no state \
+change and no progress, STOP exploring and produce your final report of what is \
+done and what remains. Repeated no-progress read-only calls are blocked by the \
+engine and will not re-execute.";
 
 fn build_active_profile_hint(profile_name: &str) -> String {
     format!("Active profile: {profile_name}.")
@@ -458,6 +468,32 @@ mod tests {
         assert!(
             guidance.contains("at most 2 retrieval calls"),
             "tool guidance must bound retrieval to at most 2 calls"
+        );
+    }
+
+    #[test]
+    fn tool_guidance_has_no_repetition_and_no_progress_stop_rule() {
+        let store = MemoryStore::new(".");
+        let sections = build_system_prompt_sections(
+            &store,
+            "mattermost",
+            None,
+            "omni",
+            &[],
+            &PromptBuilderConfig::default(),
+        );
+        let guidance = &sections[1].2;
+        assert!(
+            guidance.contains("14. NO-REPETITION"),
+            "tool guidance must carry the no-repetition rule"
+        );
+        assert!(
+            guidance.contains("NO-PROGRESS STOP"),
+            "tool guidance must carry the no-progress stop wording"
+        );
+        assert!(
+            guidance.contains("verify ONCE"),
+            "tool guidance must carry verify-once wording"
         );
     }
 

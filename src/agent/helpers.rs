@@ -197,6 +197,13 @@ pub fn is_guarded_read_only(tool: &str) -> bool {
             | "search_messages"
             | "search_wiki"
             | "note_read"
+            | "notes_note-read"
+            | "memory_list-memories"
+            | "skills_list-skills"
+            | "skills_view-skill"
+            | "search_database"
+            | "search_channel-prompts"
+            | "search_thread-messages"
     ) || (tool.starts_with("git_")
         && !matches!(
             tool,
