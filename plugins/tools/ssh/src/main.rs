@@ -1022,10 +1022,17 @@ mod tests {
     use super::*;
 
     /// Point CONFIG at a temp ssh dir + workspace for sandbox/perms tests.
-    /// Returns a guard for a static test lock (CONFIG is shared state).
-    fn set_config(ssh_dir: &str, workspace: &str) -> parking_lot::MutexGuard<'static, ()> {
-        static TEST_LOCK: Mutex<()> = Mutex::new(());
-        let guard = TEST_LOCK.lock();
+    ///
+    /// Returns a guard for a static async test lock. CONFIG is shared mutable
+    /// state, so every test that calls `set_config` must bind the returned
+    /// guard (`let _g = set_config(...).await`) and HOLD it across awaits.
+    /// The guard is a Send-able `tokio::sync::MutexGuard` (mirrors the
+    /// git-plugin TEST_LOCK fix): a parallel test can never flip CONFIG
+    /// mid-await, and a panicking test never poisons the lock.
+    async fn set_config(ssh_dir: &str, workspace: &str) -> tokio::sync::MutexGuard<'static, ()> {
+        static TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+            LazyLock::new(|| tokio::sync::Mutex::new(()));
+        let guard = TEST_LOCK.lock().await;
         {
             let mut cfg = CONFIG.lock();
             cfg.ssh_dir = ssh_dir.to_string();
@@ -1087,17 +1094,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ssh_dir_resolution_defaults_to_omni_data() {
-        let _g = set_config("", "/opt/workspace");
+    #[tokio::test]
+    async fn ssh_dir_resolution_defaults_to_omni_data() {
+        let _g = set_config("", "/opt/workspace").await;
         // OMNI_DIR may be set in the test env; fall back to /opt/omni.
         let omni = std::env::var("OMNI_DIR").unwrap_or_else(|_| "/opt/omni".to_string());
         assert_eq!(resolve_ssh_dir(None), format!("{}/data/ssh", omni));
     }
 
-    #[test]
-    fn ssh_dir_resolution_override_wins() {
-        let _g = set_config("/cfg/ssh", "/opt/workspace");
+    #[tokio::test]
+    async fn ssh_dir_resolution_override_wins() {
+        let _g = set_config("/cfg/ssh", "/opt/workspace").await;
         assert_eq!(resolve_ssh_dir(None), "/cfg/ssh");
         // Per-call override beats config.
         assert_eq!(resolve_ssh_dir(Some("/tmp/override")), "/tmp/override");
@@ -1105,10 +1112,10 @@ mod tests {
         assert_eq!(resolve_ssh_dir(Some("")), "/cfg/ssh");
     }
 
-    #[test]
-    fn secure_ssh_dir_creates_and_chmods_keys() {
+    #[tokio::test]
+    async fn secure_ssh_dir_creates_and_chmods_keys() {
         let dir = temp_dir("perms");
-        let _g = set_config(&dir, "/opt/workspace");
+        let _g = set_config(&dir, "/opt/workspace").await;
         // Create a world-readable key + a .pub (untouched) + config (untouched).
         let key = Path::new(&dir).join("id_ed25519");
         std::fs::write(&key, "PRIVATE").expect("write key");
@@ -1128,12 +1135,12 @@ mod tests {
         assert_eq!(pub_mode & 0o7777, 0o644);
     }
 
-    #[test]
-    fn secure_ssh_dir_rejects_unfixable_world_readable_key() {
+    #[tokio::test]
+    async fn secure_ssh_dir_rejects_unfixable_world_readable_key() {
         // A key the plugin cannot chmod (chmod fails -> clear error), or a
         // key that remains group/world accessible after the attempt.
         let dir = temp_dir("unfixable");
-        let _g = set_config(&dir, "/opt/workspace");
+        let _g = set_config(&dir, "/opt/workspace").await;
         let key = Path::new(&dir).join("id_rsa");
         std::fs::write(&key, "PRIVATE").expect("write key");
         use std::os::unix::fs::PermissionsExt;
@@ -1153,18 +1160,18 @@ mod tests {
         assert_eq!(p.to_str().unwrap(), "/opt/workspace");
     }
 
-    #[test]
-    fn local_path_sandbox_accepts_inside() {
-        let _g = set_config("", "/opt/workspace");
+    #[tokio::test]
+    async fn local_path_sandbox_accepts_inside() {
+        let _g = set_config("", "/opt/workspace").await;
         let r = resolve_local_path("/opt/workspace/omniagent/x", "/opt/workspace", "source");
         assert!(r.is_ok());
         let r = resolve_local_path("omniagent/x", "/opt/workspace", "source");
         assert!(r.is_ok(), "relative paths resolve against the workspace");
     }
 
-    #[test]
-    fn local_path_sandbox_rejects_outside() {
-        let _g = set_config("", "/opt/workspace");
+    #[tokio::test]
+    async fn local_path_sandbox_rejects_outside() {
+        let _g = set_config("", "/opt/workspace").await;
         let r = resolve_local_path("/tmp/escape", "/opt/workspace", "source");
         assert!(r.is_err());
         assert!(r
@@ -1207,8 +1214,7 @@ mod tests {
 
     #[tokio::test]
     async fn copy_rejects_local_path_outside_workspace() {
-        let _g = set_config("", "/opt/workspace");
-        drop(_g);
+        let _g = set_config("", "/opt/workspace").await;
         let (msg, is_error) = handle_copy(serde_json::json!({
             "host": "h",
             "direction": "to-remote",
@@ -1247,8 +1253,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_secret_key_without_database_url_fails_naming_secret() {
+        let _g = set_config("", "/opt/workspace").await;
         {
-            let _g = set_config("", "/opt/workspace");
             let mut cfg = CONFIG.lock();
             cfg.database_url.clear();
         }
