@@ -1,0 +1,16 @@
+name: core-boundary-lint
+
+on:
+  push:
+    branches: [main, stable]
+  pull_request:
+    branches: [main, stable]
+
+jobs:
+  lint-core-platform-boundary:
+    name: Core/Platform boundary grep lint (code-plan C6)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run core-platform boundary lint
+        run: python3 scripts/lint-core-platform-boundary.py

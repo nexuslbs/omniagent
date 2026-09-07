@@ -714,3 +714,50 @@ Events that can recur **per message / per iteration / per thread** (lifecycle an
 Background: a single 21h window produced 28,708 ERRORs ("Thread N has no cause message, skipping") and ~285,889 INFO lines (MCP `config::external` discovery) because per-event log sites used flooding levels. The journal drowned and real signals were lost.
 
 Enforced by `tests/log_hygiene.rs` (source-scan guard tests): it fails the build if `mcp/external/config.rs` ever logs discovery at INFO or the no-cause thread skip in `src/agent/mod.rs` ever logs at ERROR again. When touching either site, keep the log at debug level.
+
+---
+
+## Core-Platform Boundary Rule (HARD, since 2026-09-07, code-plan C6)
+
+**Core delivery NEVER references a platform by name or by its plugin config.**
+Core (`src/agent`, `src/platform`) delivers the agent's message stream
+generically to every platform; each platform plugin decides its own rendering
+(collapse, suppression, reply threading, formatting). Platform-specific
+behavior must never leak back into core delivery (defect class A4). Incidents
+2026-08-31 (threads 518/519, commits a501507/9e883d9/d3660bd): telegram
+first/last-only message collapse and an `is_internal_telemetry` suppression
+were hardcoded in `src/agent/helpers.rs` and driven by reading the telegram
+platform plugin's `first_last_only` config from plugins.yml.
+
+Rules:
+1. No delivery code in `src/agent` or `src/platform` may branch on, read, or
+   hardcode a platform name (`telegram`, `mattermost`, ...) or a
+   platform-specific delivery key (`first_last_only`, `is_internal_telemetry`,
+   ...) to decide what, whether, or how to deliver. Comments that explain why
+   delivery is generic may name platforms; code that branches on them may not.
+2. No `plugins_yaml::get_plugin(...)` config read in the core delivery path
+   (src/agent, src/platform), EXCEPT the documented LLM-provider api-key
+   fallback in `src/agent/executor.rs`, which resolves
+   `PluginYamlType::Provider` (the LLM provider, not a platform). Reading a
+   PLATFORM plugin's config from delivery code to shape delivery is the A4
+   leak shape and is forbidden.
+3. If a platform needs message collapse / suppression / transformation, that
+   logic lives in the platform's own plugin. Core delivers the full message
+   stream generically.
+
+Enforced by `scripts/lint-core-platform-boundary.py` (CI workflow
+`.github/workflows/boundary-lint.yml`, runs on push/PR to main/stable) and by
+the `core_delivery_*` guard tests at the bottom of `tests/plugin_tests.rs`
+(source-scan regression guards, run under plain `cargo test`).
+
+### Review checklist item (every code review + pre-push self-check)
+
+- [ ] Run `python3 scripts/lint-core-platform-boundary.py` from the repo root;
+      it must exit 0 (no delivery-path code references a platform by
+      name/config, no `plugins_yaml::get_plugin` read in the delivery path
+      outside the executor.rs LLM-provider fallback).
+- [ ] Confirm the change adds no per-message rendering flag that is read from
+      one platform's plugin config by core delivery; new rendering flags are
+      either generic (apply to every platform) or live in the platform plugin.
+- [ ] Confirm delivery behavior changes were not made in core on behalf of a
+      single platform (telegram collapse/suppression incidents 518/519).

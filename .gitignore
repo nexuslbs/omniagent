@@ -68,3 +68,5 @@ patch_clobber.py
 *.rej
 *.orig
 *_mod*.py
+
+!scripts/lint-core-platform-boundary.py

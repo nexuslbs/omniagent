@@ -503,3 +503,169 @@ fn test_all_plugin_statuses_are_valid() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Core/Platform boundary guard tests (code-plan C6; defect class A4).
+//
+// Regression guards for the 2026-08-31 incidents (threads 518/519; commits
+// a501507, 9e883d9, d3660bd): telegram first/last-only message collapse and an
+// `is_internal_telemetry` suppression were once hardcoded in core delivery
+// (src/agent/helpers.rs) and driven by reading the telegram platform plugin's
+// `first_last_only` config from plugins.yml. Core delivery must stay
+// platform-generic: every platform plugin receives the full message stream and
+// decides its own rendering (collapse, suppression, reply threading).
+//
+// Unlike the live-server tests above (which need a running agent and are
+// #[ignore]d), these are NON-ignored source-scan guards in the style of
+// tests/log_hygiene.rs: they read the delivery-path sources (src/agent,
+// src/platform) and fail the build if a platform name, a platform-specific
+// delivery key, or a platform-plugin config read ever reappears in core
+// delivery code. They cover the three guard scenarios: (a) no platform-name
+// branch in core delivery means the full message stream (user, tool,
+// multi-tool, tool-result, plan, reasoning) is delivered generically to every
+// platform; (b) no `first_last_only` in core means enabling telegram collapse
+// cannot change delivery to other platforms; (c) no `is_internal_telemetry` in
+// core means no per-platform suppression path can alter or fail a run.
+// Keep in sync with scripts/lint-core-platform-boundary.py (same rules, same
+// file scope, same comment/test skipping logic).
+// ---------------------------------------------------------------------------
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+/// Every .rs file under src/agent and src/platform (the core delivery path).
+fn delivery_src_files() -> Vec<PathBuf> {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    for dir in ["src/agent", "src/platform"] {
+        let mut stack = vec![manifest.join(dir)];
+        while let Some(dir_path) = stack.pop() {
+            for entry in std::fs::read_dir(&dir_path)
+                .unwrap_or_else(|e| panic!("read_dir {}: {}", dir_path.display(), e))
+            {
+                let entry = entry.unwrap_or_else(|e| panic!("read_dir entry: {}", e));
+                let p = entry.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// 1-based line numbers that lie inside a `#[cfg(test)] mod ... { }` block.
+/// Test code may name platforms freely (fixtures, mock handshakes); the
+/// guards inspect production code only. Mirrors the lint script's skipper.
+fn test_region_lines(text: &str) -> HashSet<usize> {
+    let mut skipped = HashSet::new();
+    let mut in_test = false;
+    let mut depth: i64 = 0;
+    for (i, raw) in text.lines().enumerate() {
+        if !in_test && raw.contains("#[cfg(test)]") {
+            in_test = true;
+            depth = 0;
+        }
+        if in_test {
+            depth += raw.matches('{').count() as i64 - raw.matches('}').count() as i64;
+            if depth <= 0 && raw.contains('}') {
+                in_test = false;
+            }
+            skipped.insert(i + 1);
+        }
+    }
+    skipped
+}
+
+/// Code portion of a line: everything before the first `//` comment marker
+/// (doc comments `///` and `//!` therefore yield an empty code part).
+fn code_part(raw: &str) -> &str {
+    raw.split_once("//").map(|(c, _)| c).unwrap_or(raw).trim()
+}
+
+/// (line_no, lowercased code) pairs for production (non-test, non-comment)
+/// code lines of a file.
+fn production_code_lines(path: &Path) -> Vec<(usize, String)> {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+    let skipped = test_region_lines(&text);
+    let mut out = Vec::new();
+    for (i, raw) in text.lines().enumerate() {
+        let ln = i + 1;
+        if skipped.contains(&ln) {
+            continue;
+        }
+        let code = code_part(raw);
+        if !code.is_empty() {
+            out.push((ln, code.to_lowercase()));
+        }
+    }
+    out
+}
+
+/// Guards (b) + (c) plus the platform-name rule: no production delivery code
+/// line may reference a platform name or a platform-specific delivery key.
+/// If telegram-specific collapse (`first_last_only`) or suppression
+/// (`is_internal_telemetry`) logic is ever reintroduced into core delivery
+/// (the src/agent/helpers.rs incident, threads 518/519), this test fails.
+#[test]
+fn core_delivery_never_branches_on_platform_name_or_delivery_keys() {
+    let banned = ["telegram", "first_last_only", "is_internal_telemetry"];
+    let mut hits = Vec::new();
+    for path in delivery_src_files() {
+        for (ln, code_lower) in production_code_lines(&path) {
+            for token in banned {
+                if code_lower.contains(token) {
+                    hits.push(format!("{}:{}: '{}'", path.display(), ln, token));
+                }
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "core delivery (src/agent, src/platform) must never reference a \
+         platform name or a platform-specific delivery key in code (AGENTS.md \
+         Core-Platform Boundary Rule, code-plan C6):\n  {}",
+        hits.join("\n  ")
+    );
+}
+
+/// Guard rule 2 (the A4 leak shape): no `plugins_yaml::get_plugin(...)`
+/// config read in the core delivery path, EXCEPT the documented LLM-provider
+/// api-key fallback in src/agent/executor.rs (which resolves
+/// PluginYamlType::Provider - the LLM provider, not a platform). Reading a
+/// PLATFORM plugin's config from delivery code to shape delivery is exactly
+/// the telegram first_last_only leak shape and is forbidden.
+#[test]
+fn core_delivery_never_reads_platform_plugin_config() {
+    for path in delivery_src_files() {
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+        let skipped = test_region_lines(&text);
+        for (i, raw) in text.lines().enumerate() {
+            let ln = i + 1;
+            if skipped.contains(&ln) || !raw.contains("plugins_yaml::get_plugin") {
+                continue;
+            }
+            let is_executor_provider_fallback = path.ends_with("src/agent/executor.rs")
+                && text
+                    .lines()
+                    .skip(i)
+                    .take(14)
+                    .any(|l| l.contains("PluginYamlType::Provider"));
+            assert!(
+                is_executor_provider_fallback,
+                "{}:{}: plugins_yaml::get_plugin config read in the core \
+                 delivery path (AGENTS.md Core-Platform Boundary Rule rule 2): \
+                 only the LLM-provider api-key fallback in src/agent/executor.rs \
+                 may read plugin config here; platform config reads that shape \
+                 delivery are the A4 leak shape (threads 518/519)",
+                path.display(),
+                ln
+            );
+        }
+    }
+}
