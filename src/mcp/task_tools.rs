@@ -222,6 +222,93 @@ pub async fn handle_read_task_logs(args: Value, _ctx: AppContext) -> AppResult<M
     })
 }
 
+/// Handle the builtin `wait-for-status` tool: wait until a kanban task or
+/// thread reaches one of the target statuses (bounded by timeout_s). The
+/// waiting core is crate::status_wait (DB status observation); this handler
+/// only parses args and shapes the outcome JSON.
+pub async fn handle_wait_for_status(args: Value, ctx: AppContext) -> AppResult<McpToolResult> {
+    let task_id = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let thread_id: Option<i64> = match args.get("thread_id") {
+        Some(v) => v
+            .as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok())),
+        None => None,
+    };
+
+    // Exactly one of task_id / thread_id.
+    let (entity, id) = match (task_id, thread_id) {
+        (Some(tid), None) => (crate::status_wait::WaitEntity::KanbanTask, tid),
+        (None, Some(th)) => (crate::status_wait::WaitEntity::Thread, th.to_string()),
+        (Some(_), Some(_)) => {
+            return Ok(McpToolResult {
+                call_id: String::new(),
+                content: "Error: pass exactly ONE of task_id (kanban task) or thread_id (thread), not both."
+                    .to_string(),
+                is_error: true,
+            });
+        }
+        (None, None) => {
+            return Ok(McpToolResult {
+                call_id: String::new(),
+                content: "Error: pass task_id (kanban task) or thread_id (thread) to wait on."
+                    .to_string(),
+                is_error: true,
+            });
+        }
+    };
+
+    let until_raw = args.get("until").and_then(|v| v.as_str()).unwrap_or("");
+    let until = crate::status_wait::parse_until(until_raw);
+    if until.is_empty() {
+        return Ok(McpToolResult {
+            call_id: String::new(),
+            content: "Error: 'until' must be a non-empty comma-separated status list, e.g. until=done,blocked or until=completed,failed."
+                .to_string(),
+            is_error: true,
+        });
+    }
+
+    let timeout_s = args
+        .get("timeout_s")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(900);
+    let outcome = crate::status_wait::wait_for_status(
+        &ctx.pool,
+        entity,
+        &id,
+        &until,
+        timeout_s,
+        std::time::Duration::from_millis(1000),
+    )
+    .await?;
+
+    let result = if outcome.reached {
+        "matched"
+    } else if outcome.status.is_none() {
+        "not_found"
+    } else {
+        "timeout"
+    };
+    Ok(McpToolResult {
+        call_id: String::new(),
+        content: serde_json::json!({
+            "status": result,
+            "entity": outcome.entity.as_str(),
+            "entity_id": outcome.id,
+            "current_status": outcome.status,
+            "until": until,
+            "elapsed_secs": outcome.elapsed_secs,
+            "detail": outcome.detail,
+        })
+        .to_string(),
+        is_error: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -89,6 +89,10 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
             "/kanban/tasks/{id}",
             patch(update_task_handler).put(update_task_handler),
         )
+        // 7c. Long-poll: wait until the task status changes (kanban/thread
+        // status-change listener - incident 1136/1146). GET
+        // /kanban/tasks/{id}/wait?until=done,blocked&timeout_s=900
+        .route("/kanban/tasks/{id}/wait", get(wait_task_status_handler))
         // 8. Delete task
         .route("/kanban/tasks/{id}", delete(delete_task_handler))
         // 9. Threads
@@ -3518,5 +3522,67 @@ mod tests {
         assert!(!validate_goal_code("user-blocked-"));
         assert!(!validate_goal_code("user--blocked"));
         assert!(!validate_goal_code(&"x".repeat(65)));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 7c. GET /kanban/tasks/{id}/wait: long-poll until the task status changes
+// ---------------------------------------------------------------------------
+#[derive(Deserialize)]
+struct WaitTaskQuery {
+    /// Comma-separated target statuses, e.g. "done,blocked".
+    until: String,
+    /// Max seconds to wait (default 900).
+    timeout_s: Option<u64>,
+}
+
+/// Long-poll status-change listener (incident 1136/1146): returns as soon as
+/// the task's status is one of `until`, the task disappears, or timeout_s
+/// elapses. Wakes ~1-2s after a real transition (checks the DB status ~1/s).
+async fn wait_task_status_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<WaitTaskQuery>,
+) -> impl IntoResponse {
+    let until = crate::status_wait::parse_until(&params.until);
+    if until.is_empty() {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            "Query param 'until' must be a non-empty comma-separated status list, e.g. until=done,blocked",
+        );
+    }
+    let timeout_s = params.timeout_s.unwrap_or(900);
+    match crate::status_wait::wait_for_status(
+        &state.pool,
+        crate::status_wait::WaitEntity::KanbanTask,
+        &id,
+        &until,
+        timeout_s,
+        std::time::Duration::from_millis(1000),
+    )
+    .await
+    {
+        Ok(outcome) => {
+            let result = if outcome.reached {
+                "matched"
+            } else if outcome.status.is_none() {
+                "not_found"
+            } else {
+                "timeout"
+            };
+            ok_json(serde_json::json!({
+                "entity": outcome.entity.as_str(),
+                "id": outcome.id,
+                "result": result,
+                "current_status": outcome.status,
+                "until": until,
+                "elapsed_secs": outcome.elapsed_secs,
+                "detail": outcome.detail,
+            }))
+        }
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("wait failed: {}", e),
+        ),
     }
 }

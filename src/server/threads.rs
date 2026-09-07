@@ -30,6 +30,9 @@ pub fn threads_router() -> Router<Arc<AppState>> {
         .route("/threads/filters", get(thread_filters_handler))
         .route("/threads/{id}/subtasks", get(thread_subtasks_handler))
         .route("/listen/thread/{id}", get(listen_thread_handler))
+        // Thread status-change listener (incident 1136/1146): GET
+        // /threads/{id}/wait?until=completed,failed&timeout_s=900
+        .route("/threads/{id}/wait", get(wait_thread_status_handler))
         .route("/listen/channel/{channel_id}", get(listen_channel_handler))
 }
 
@@ -673,5 +676,67 @@ async fn listen_channel_handler(
             });
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /threads/{id}/wait: long-poll until the thread status changes
+// ---------------------------------------------------------------------------
+#[derive(Deserialize)]
+struct WaitThreadQuery {
+    /// Comma-separated target statuses, e.g. "completed,failed".
+    until: String,
+    /// Max seconds to wait (default 900).
+    timeout_s: Option<u64>,
+}
+
+/// Long-poll status-change listener (incident 1136/1146): returns as soon as
+/// the thread's status is one of `until`, the thread disappears, or timeout_s
+/// elapses. Wakes ~1-2s after a real transition (checks the DB status ~1/s).
+async fn wait_thread_status_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<WaitThreadQuery>,
+) -> impl IntoResponse {
+    let until = crate::status_wait::parse_until(&params.until);
+    if until.is_empty() {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            "Query param 'until' must be a non-empty comma-separated status list, e.g. until=completed,failed",
+        );
+    }
+    let timeout_s = params.timeout_s.unwrap_or(900);
+    match crate::status_wait::wait_for_status(
+        &state.pool,
+        crate::status_wait::WaitEntity::Thread,
+        &id,
+        &until,
+        timeout_s,
+        std::time::Duration::from_millis(1000),
+    )
+    .await
+    {
+        Ok(outcome) => {
+            let result = if outcome.reached {
+                "matched"
+            } else if outcome.status.is_none() {
+                "not_found"
+            } else {
+                "timeout"
+            };
+            ok_json(serde_json::json!({
+                "entity": outcome.entity.as_str(),
+                "id": outcome.id,
+                "result": result,
+                "current_status": outcome.status,
+                "until": until,
+                "elapsed_secs": outcome.elapsed_secs,
+                "detail": outcome.detail,
+            }))
+        }
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("wait failed: {}", e),
+        ),
     }
 }

@@ -653,6 +653,49 @@ fn wait_task_tool() -> McpTool {
     }
 }
 
+/// Build the `wait-for-status` tool: wait until a kanban task or thread
+/// reaches one of the target statuses (threads 1136/1146 incident: the agent
+/// had no status-change listener and burned 3x1h blind wait-task calls on a
+/// dead background watcher while the target task was already done). Unlike
+/// wait-task/poll-task (background TOOL tasks), this listens to the real
+/// kanban/thread DB status and returns within ~1-2s of a transition.
+fn wait_for_status_tool() -> McpTool {
+    McpTool {
+        name: tool_qualify("builtin", "wait_for_status"),
+        description: "Wait until a KANBAN TASK or THREAD reaches one of the target statuses; returns as soon as it does (checks the real DB status about every second). This is the first-class way to 'listen' to kanban/thread state changes - use it when you must act when a task or thread transitions (incident 1136/1146). It does NOT track background tool tasks: use builtin_wait-task / builtin_poll-task for docker/ssh exec processes that returned status=processing. Pass exactly one of task_id (kanban task, statuses e.g. done/blocked/review/testing/running/todo) or thread_id (conversation thread, statuses e.g. pending/processing/completed/failed/skipped). 'until' is a comma-separated list of target statuses. Bounded by timeout_s (default 900): on timeout it returns a timeout STATUS (not an error) - then re-check the real state (kanban_list-kanban-tasks / GET /kanban/tasks/{id}) and re-wait in bounded chunks only if the wait still makes sense.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Kanban task id to wait on (e.g. task_omnidev_...). Mutually exclusive with thread_id."
+                },
+                "thread_id": {
+                    "type": "integer",
+                    "description": "Thread id to wait on (e.g. 1234). Mutually exclusive with task_id."
+                },
+                "until": {
+                    "type": "string",
+                    "description": "Comma-separated target statuses, e.g. 'done,blocked' for a kanban task, or 'completed,failed' for a thread. Returns as soon as the entity's status is one of these."
+                },
+                "timeout_s": {
+                    "type": "integer",
+                    "description": "Maximum seconds to wait (default: 900). The wait ends as soon as the status matches, so a long value costs nothing for fast transitions. Prefer bounded waits; when it returns 'timeout', re-check the real state before waiting again.",
+                    "default": 900
+                }
+            },
+            "required": ["until"]
+        }),
+        server_name: None,
+        // No declared timeout: like wait-task, the handler self-bounds by its
+        // own timeout_s argument and returns a timeout STATUS (not an error).
+        timeout_secs: None,
+        handler: std::sync::Arc::new(|args: Value, ctx: crate::mcp::AppContext| {
+            Box::pin(crate::mcp::task_tools::handle_wait_for_status(args, ctx))
+        }),
+    }
+}
+
 /// Build the `cancel-task` tool: cancel a running background task.
 fn cancel_task_tool() -> McpTool {
     McpTool {
@@ -1003,27 +1046,37 @@ pub async fn default_registry(ctx: &mut AppContext) -> McpRegistry {
         registry.register(tool);
     }
 
-    // Populate tool catalog (all registered tool definitions in OpenAI function format)
-    // so the list_tool_details introspection tool can serve them to the LLM.
-    ctx.tool_catalog = registry.to_openai_tools_all();
-
-    // ── list_tool_details: always-available introspection tool ──
-    // Registered last so the catalog excludes itself (it reads from AppContext.tool_catalog
-    // which was populated just above).
-    registry.register(list_tool_details_tool());
-
     // ── read_attached_file: platform-generic file reading ──
     // Allows the agent to read file attachments that exceed the inline
     // size limit by delegating to the platform's read_file implementation.
     registry.register(read_attached_file_tool());
 
     // ── Task management tools for non-blocking tool execution ──
+    // (wait-for-status listens to kanban/thread status changes - incident
+    // 1136/1146 - while poll/wait/cancel/read-task-logs track background
+    // TOOL tasks.)
     registry.register(poll_task_tool());
     registry.register(wait_task_tool());
+    registry.register(wait_for_status_tool());
     registry.register(cancel_task_tool());
     registry.register(read_task_logs_tool());
     registry.register(omniagent_api_tool());
     registry.register(fail_thread_tool());
+
+    // Populate tool catalog (all registered tool definitions in OpenAI
+    // function format) so the list_tool_details introspection tool can serve
+    // them to the LLM. Populated AFTER every builtin above so wait/poll/
+    // cancel/read-task-logs/read-attached-file/omniagent-api/fail-thread/
+    // wait-for-status appear in the catalog (bug fix 2026-09-07: they were
+    // registered after catalog population, so builtin_list-tool-details
+    // reported them as 'Unknown tool' although they exist and are callable -
+    // threads 1136/1146).
+    ctx.tool_catalog = registry.to_openai_tools_all();
+
+    // ── list_tool_details: always-available introspection tool ──
+    // Registered LAST so the catalog excludes only itself (it reads from
+    // AppContext.tool_catalog which was populated just above).
+    registry.register(list_tool_details_tool());
 
     tracing::info!(
         "MCP registry initialized with {} tools (external + built-in)",

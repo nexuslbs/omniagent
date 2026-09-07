@@ -27,6 +27,7 @@ pub mod provider;
 pub mod resolution;
 pub mod scheduler;
 pub mod server;
+pub mod status_wait;
 pub mod subtask;
 pub mod tasks_yaml;
 pub mod vectorizer;

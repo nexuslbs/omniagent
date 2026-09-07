@@ -2272,6 +2272,7 @@ Previous plan:\n{}",
                         | "builtin_cancel-task"
                         | "builtin_read-task-logs"
                         | "builtin_read-attached-file"
+                        | "builtin_wait-for-status"
                 );
 
                 let result = if is_builtin_task_tool {
