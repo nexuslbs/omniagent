@@ -1002,68 +1002,90 @@ pub(crate) async fn engine_transition(
             // broke the empty default (tester fail → blocked instead of
             // executor re-run / review).
             let normalized = step.as_str();
-            if auto_approve {
-                // auto_approve: every fail-thread outcome goes DIRECTLY to
-                // blocked - no executor re-run, no review (failures are
-                // final when there is no effective reviewer).
-                rerun_step = None;
-                final_status = "blocked".to_string();
-                block_reason = "auto_approve (failures are final)";
+            // Retry accounting (operator 2026-09-08): a FAILURE must ALWAYS
+            // consume the retry budget. route_fail_tool receives
+            // `effective_review_on_fail` (already forced off when auto_approve
+            // is set), so an auto_approve executor/tester fail re-runs its
+            // step and the retry guard below blocks only once the step's
+            // limit is reached - never an instant block on the first failure
+            // while budget remains, never a zero-retry fail. Deliberate block
+            // decisions (explicit 'blocked' F3, invalid step F4, missing
+            // role) still block immediately: they are agent decisions, not
+            // failures being retried.
+            let (target, status) = route_fail_tool(
+                normalized,
+                caller_step,
+                has_wf,
+                has_executor_role,
+                has_tester_role,
+                effective_review_on_fail,
+            );
+            rerun_step = target.map(|s| s.to_string());
+            final_status = status.to_string();
+            if status == "review" {
+                // review_on_fail: a non-reviewer fail routes to review -
+                // mirror the D7 review-thread path (create a review thread
+                // when the workflow has a reviewer role; otherwise the task
+                // lands in `review` as a manual state).
+                review_thread = has_reviewer_role;
+                block_reason = "review_on_fail routing";
             } else {
-                let (target, status) = route_fail_tool(
-                    normalized,
-                    caller_step,
-                    has_wf,
-                    has_executor_role,
-                    has_tester_role,
-                    effective_review_on_fail,
-                );
-                rerun_step = target.map(|s| s.to_string());
-                final_status = status.to_string();
-                if status == "review" {
-                    // review_on_fail: a non-reviewer fail routes to review -
-                    // mirror the D7 review-thread path (create a review thread
-                    // when the workflow has a reviewer role; otherwise the task
-                    // lands in `review` as a manual state).
-                    review_thread = has_reviewer_role;
-                    block_reason = "review_on_fail routing";
-                } else {
-                    block_reason = match normalized {
-                        "executor" => "no workflow",
-                        "running"
-                            if !matches!(
-                                caller_step,
-                                Some("testing") | Some("review") | Some("running")
-                            ) =>
-                        {
-                            "invalid caller for workflow_step 'running'"
-                        }
-                        "running" if !has_executor_role => "no executor role in workflow",
-                        "testing" if caller_step != Some("review") => {
-                            "invalid caller for workflow_step 'testing'"
-                        }
-                        "testing" if !has_tester_role => "no tester role in workflow",
-                        "blocked" => "workflow_step 'blocked'",
-                        _ => "invalid workflow_step",
-                    };
-                }
+                block_reason = match normalized {
+                    "executor" => "no workflow",
+                    "running"
+                        if !matches!(
+                            caller_step,
+                            Some("testing") | Some("review") | Some("running")
+                        ) =>
+                    {
+                        "invalid caller for workflow_step 'running'"
+                    }
+                    "running" if !has_executor_role => "no executor role in workflow",
+                    "testing" if caller_step != Some("review") => {
+                        "invalid caller for workflow_step 'testing'"
+                    }
+                    "testing" if !has_tester_role => "no tester role in workflow",
+                    "blocked" => "workflow_step 'blocked'",
+                    _ => "invalid workflow_step",
+                };
             }
         }
         RerunKind::Failed => {
-            // Row 2: executor non-success terminal → re-run the executor step (F0).
-            if auto_approve {
-                // auto_approve: failures are FINAL - blocked (no re-run;
-                // there is no reviewer to rework).
-                block_reason = "auto_approve (failed)";
-                final_status = "blocked".to_string();
-            } else if has_wf {
-                rerun_step = Some("running".to_string());
-                final_status = "running".to_string();
-            } else {
-                block_reason = "no workflow";
-                // R8-N: plain task (no workflow) - a failed thread must land
-                // on 'blocked' (visible fail), not stay a zombie 'running'.
-                final_status = "blocked".to_string();
+            // Retry accounting (operator 2026-09-08): an engine-terminal
+            // failure (LLM/API/tool error - retryable or not, incl. the
+            // deterministic billing/credit HTTP errors) MUST consume the
+            // retry budget. The failing step is re-run so its execution
+            // counter advances, and the retry guard below blocks only once
+            // the step's limit is reached. Two prior bugs fixed here:
+            //  - auto_approve used to block on the FIRST failure (zero
+            //    retries consumed); it now re-runs the executor step until
+            //    the guard blocks at the limit.
+            //  - a failed REVIEWER thread re-ran 'running', which D7 had just
+            //    cleared, so executions['review'] never advanced and the
+            //    executor loop re-armed forever (infinite retry loop); a
+            //    failed reviewer now re-runs the reviewer step, whose counter
+            //    is never cleared, so the loop terminates at the reviewer
+            //    limit.
+            match caller_step {
+                Some("review") if has_wf && !auto_approve => {
+                    rerun_step = Some("review".to_string());
+                    final_status = "review".to_string();
+                }
+                _ if auto_approve && has_wf => {
+                    rerun_step = Some("running".to_string());
+                    final_status = "running".to_string();
+                }
+                _ if has_wf => {
+                    rerun_step = Some("running".to_string());
+                    final_status = "running".to_string();
+                }
+                _ => {
+                    block_reason = "no workflow";
+                    // R8-N: plain task (no workflow) - a failed thread must
+                    // land on 'blocked' (visible fail), not stay a zombie
+                    // 'running'.
+                    final_status = "blocked".to_string();
+                }
             }
         }
         RerunKind::Interrupted => {
@@ -2229,7 +2251,7 @@ mod tests_r8n_no_workflow_blocked {
     async fn latest_history_comment(pool: &sqlx::PgPool, task_id: &str) -> String {
         sql_forge!(
             scalar String,
-            "SELECT comment FROM kanban_history WHERE kanban_task_id = :task_id ORDER BY id DESC LIMIT 1",
+            "SELECT comment FROM kanban_history WHERE kanban_task_id = :task_id AND comment NOT LIKE 'Thread #%' ORDER BY id DESC LIMIT 1",
             ( :task_id = task_id )
         )
         .fetch_one(pool)
@@ -2571,12 +2593,34 @@ mod tests_r8n_no_workflow_blocked {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
+    /// Throwaway data_dir with a workflow carrying a reviewer role and
+    /// per-step retry budget `retries` (executor/tester/reviewer all inherit
+    /// the workflow default; retry limit = retries + 1).
+    fn temp_data_dir_review(tag: &str, retries: u64) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("rv-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        std::fs::write(
+            dir.join("config").join("workflows.yml"),
+            format!(
+                "workflows:\n  test-wf:\n    profile: test\n    provider: noop\n    model: noop\n    plan_mode: manual\n    retries: {retries}\n    clear_executions_on_review: true\n    roles:\n      executor:\n        template: \"executor system prompt\"\n        provider: noop\n        model: noop\n      tester:\n        template: \"tester system prompt\"\n        provider: noop\n        model: noop\n      reviewer:\n        template: \"reviewer system prompt\"\n        provider: noop\n        model: noop\n"
+            ),
+        )
+        .unwrap();
+        dir
+    }
+
     #[tokio::test]
     #[ignore = "requires a live DATABASE_URL"]
-    async fn fail_tool_auto_approve_forces_review_on_fail_false() {
-        // auto_approve=true + review_on_fail=true: the flag is FORCED off -
-        // an executor F0 fail behaves as review_on_fail=false (executor
-        // re-run), NOT review.
+    async fn auto_approve_consumes_budget_before_blocking() {
+        // Retry accounting (operator 2026-09-08): auto_approve + a failing
+        // executor must NEVER hard-block on the first failure with zero
+        // retries consumed (the old code blocked instantly). The failure
+        // re-runs the executor step (budget consumed) and the retry guard
+        // blocks only once the budget is exhausted. temp_data_dir_flagged
+        // uses retries 0, so the retry limit is 1: failure 1 re-runs,
+        // failure 2 blocks. review_on_fail=true is also set but FORCED off
+        // by auto_approve (no review routing).
         let Ok(url) = std::env::var("DATABASE_URL") else {
             eprintln!("skipping: DATABASE_URL not set");
             return;
@@ -2585,15 +2629,17 @@ mod tests_r8n_no_workflow_blocked {
             eprintln!("skipping: cannot connect to {url}");
             return;
         };
-        let data_dir = temp_data_dir_flagged("f0-aa", true, true);
-        let task_id = format!("rof-aa-{}", std::process::id());
+        let data_dir = temp_data_dir_flagged("aa-budget", true, true);
+        let task_id = format!("rof-aab-{}", std::process::id());
         let parent = parent_thread(
             setup(&pool, &task_id, Some("test-wf"), Some("running")).await,
             task_id.clone(),
             Some("running".to_string()),
         );
 
-        let result = engine_transition(
+        // Failure 1: budget remains (count 0 < limit 1) -> executor re-run,
+        // never an instant block while budget remains.
+        let new_id = engine_transition(
             &pool,
             data_dir.to_str().unwrap(),
             &parent,
@@ -2602,24 +2648,210 @@ mod tests_r8n_no_workflow_blocked {
             },
         )
         .await
-        .expect("engine_transition should succeed");
+        .expect("engine_transition should succeed")
+        .expect("auto_approve first failure must re-run the executor step, never block instantly");
+        let step: String = sql_forge!(
+            scalar String,
+            "SELECT workflow_step FROM threads WHERE id = :new_id",
+            ( :new_id = new_id )
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fetch rerun thread step");
+        assert_eq!(
+            step, "running",
+            "auto_approve failure must consume one retry via an executor re-run"
+        );
+        assert_eq!(task_status(&pool, &task_id).await, "running");
 
+        // Failure 2 (the re-run thread fails again): budget exhausted
+        // (count 1 >= limit 1) -> the retry guard blocks the task.
+        let parent2 = parent_thread(new_id, task_id.clone(), Some("running".to_string()));
+        let result = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent2,
+            RerunKind::FailTool {
+                step: "executor".to_string(),
+            },
+        )
+        .await
+        .expect("engine_transition should succeed");
         assert_eq!(
             result, None,
-            "auto_approve: F0 fail must NOT create a re-run thread"
+            "auto_approve: a failure at the retry limit must NOT create a re-run thread"
         );
         assert_eq!(
             task_status(&pool, &task_id).await,
             "blocked",
-            "auto_approve: executor/tester fail goes DIRECTLY to blocked"
+            "auto_approve: blocks only after the retry budget is consumed"
         );
         let comment = latest_history_comment(&pool, &task_id).await;
         assert!(
-            comment.contains("blocked"),
+            comment.contains("retry limit reached"),
             "unexpected kanban_history comment: {comment}"
         );
 
-        cleanup(&pool, &task_id, &[parent.id]).await;
+        cleanup(&pool, &task_id, &[parent.id, new_id]).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn failed_reviewer_reruns_review_and_terminates_at_limit() {
+        // Retry accounting (operator 2026-09-08): a hard-failing REVIEWER
+        // thread (the billing/credit 402 path) must re-run the REVIEWER step
+        // so executions['review'] advances. The old code re-ran 'running',
+        // which clear_executions_on_review had just zeroed, so the review
+        // counter never grew and the executor loop re-armed forever (the
+        // reported infinite retry loop).
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+        // retries 1 -> retry limit 2 for every step (incl. the reviewer,
+        // whose counter is never cleared).
+        let data_dir = temp_data_dir_review("wf-revfail", 1);
+        let task_id = format!("rv-revfail-{}", std::process::id());
+        let parent = parent_thread(
+            setup(&pool, &task_id, Some("test-wf"), Some("review")).await,
+            task_id.clone(),
+            Some("review".to_string()),
+        );
+
+        // R1 hard-fails: re-run the REVIEWER step (review count 0 -> 1).
+        let r2 = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent,
+            RerunKind::Failed,
+        )
+        .await
+        .expect("engine_transition should succeed")
+        .expect("failed reviewer must create a re-run thread");
+        let step2: String = sql_forge!(
+            scalar String,
+            "SELECT workflow_step FROM threads WHERE id = :r2",
+            ( :r2 = r2 )
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fetch reviewer rerun step");
+        assert_eq!(
+            step2, "review",
+            "a failed reviewer must re-run the reviewer step (old code re-ran 'running' -> infinite loop)"
+        );
+        assert_eq!(task_status(&pool, &task_id).await, "review");
+
+        // R2 hard-fails: re-run again (review count 1 -> 2).
+        let parent2 = parent_thread(r2, task_id.clone(), Some("review".to_string()));
+        let r3 = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent2,
+            RerunKind::Failed,
+        )
+        .await
+        .expect("engine_transition should succeed")
+        .expect("second failed reviewer must create a re-run thread");
+
+        // R3 hard-fails: reviewer budget (limit 2) exhausted -> BLOCKED. The
+        // reviewer counter is never cleared, so the loop terminates here.
+        let parent3 = parent_thread(r3, task_id.clone(), Some("review".to_string()));
+        let result = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent3,
+            RerunKind::Failed,
+        )
+        .await
+        .expect("engine_transition should succeed");
+        assert_eq!(
+            result, None,
+            "failed reviewer at the retry limit must not create another thread"
+        );
+        assert_eq!(
+            task_status(&pool, &task_id).await,
+            "blocked",
+            "reviewer retry loop must terminate in blocked once the budget is consumed"
+        );
+        let comment = latest_history_comment(&pool, &task_id).await;
+        assert!(
+            comment.contains("retry limit reached"),
+            "unexpected kanban_history comment: {comment}"
+        );
+
+        cleanup(&pool, &task_id, &[parent.id, r2, r3]).await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a live DATABASE_URL"]
+    async fn failed_executor_consumes_budget_then_blocks() {
+        // Retry accounting (operator 2026-09-08): engine-terminal failures
+        // (RerunKind::Failed - the path LLM/API errors incl. the deterministic
+        // billing/credit HTTP errors take) must EACH consume the retry budget
+        // and terminate in blocked at the limit: never an instant first-
+        // failure block while budget remains, never an unbounded retry loop.
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: cannot connect to {url}");
+            return;
+        };
+        // temp_data_dir: executor-only workflow, retries 0 -> retry limit 1.
+        let data_dir = temp_data_dir("wf-term", Some("test-wf"));
+        let task_id = format!("r8n-term-{}", std::process::id());
+        let parent = parent_thread(
+            setup(&pool, &task_id, Some("test-wf"), Some("running")).await,
+            task_id.clone(),
+            Some("running".to_string()),
+        );
+
+        // Failure 1: budget remains -> executor re-run, NOT blocked.
+        let new_id = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent,
+            RerunKind::Failed,
+        )
+        .await
+        .expect("engine_transition should succeed")
+        .expect("first engine-terminal failure must consume one retry via an executor re-run");
+        assert_eq!(
+            task_status(&pool, &task_id).await,
+            "running",
+            "first failure while budget remains must not block"
+        );
+
+        // Failure 2: budget exhausted -> the guard blocks (loop terminates).
+        let parent2 = parent_thread(new_id, task_id.clone(), Some("running".to_string()));
+        let result = engine_transition(
+            &pool,
+            data_dir.to_str().unwrap(),
+            &parent2,
+            RerunKind::Failed,
+        )
+        .await
+        .expect("engine_transition should succeed");
+        assert_eq!(
+            result, None,
+            "a failure at the retry limit must not create another thread"
+        );
+        assert_eq!(task_status(&pool, &task_id).await, "blocked");
+        let comment = latest_history_comment(&pool, &task_id).await;
+        assert!(
+            comment.contains("retry limit reached"),
+            "unexpected kanban_history comment: {comment}"
+        );
+
+        cleanup(&pool, &task_id, &[parent.id, new_id]).await;
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
