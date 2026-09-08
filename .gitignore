@@ -70,3 +70,39 @@ patch_clobber.py
 *_mod*.py
 
 !scripts/lint-core-platform-boundary.py
+
+# ─────────────────────────────────────────────
+# Never-commit secret guardrails (code-plan C9)
+# ─────────────────────────────────────────────
+# Real env files and secret material must never be committed. Commit only
+# the *.env.example / *.sample / *.dist placeholder templates (see
+# scripts/secret-scan.py; pre-commit hook + CI job enforce this).
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.dist
+*.env
+!*.env.example
+!*.env.sample
+!*.env.dist
+config.yml
+config.local.yml
+*.pem
+*.key
+*.p12
+*.pfx
+*.pkcs12
+*.jks
+*.keystore
+*.secret
+*.credential
+secrets.env
+secrets.env.*
+id_rsa
+id_ecdsa
+id_ed25519
+
+# Re-include the C9 scanner + installer (repo .gitignore ignores scripts/*)
+!scripts/secret-scan.py
+!scripts/install-pre-commit-secret-scan.sh

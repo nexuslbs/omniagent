@@ -1,0 +1,14 @@
+# gitleaks config for omniagent (code-plan C9 never-commit guardrail).
+# Mirrors the allowlist in scripts/secret-scan.py: committed source/test
+# fixtures that reference secret formats but contain NO live secret values.
+# New secrets anywhere else still fail `gitleaks detect`.
+title = "omniagent gitleaks config (code-plan C9)"
+
+[allowlist]
+description = "Committed code/test fixtures referencing secret formats without real values"
+paths = [
+  '''plugins/tools/git/src/git_sync.rs''',
+  '''plugins/tools/git/src/main.rs''',
+  '''plugins/tools/ssh/src/main.rs''',
+  '''tests/api_tests.rs''',
+]
