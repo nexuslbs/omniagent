@@ -35,7 +35,22 @@ pub(crate) fn reload_env_handler(
         // spawn_blocking or MCP init can't hang the endpoint forever.
         let state_clone = state.clone();
         let result = tokio::select! {
-            result = tokio::spawn(async move { reload_plugins(state_clone).await }) => {
+            result = tokio::spawn(async move {
+                // 1) Registry-level reload: tools (MCP servers) and providers.
+                let (mut started, mut stopped, mut errors) =
+                    reload_plugins(state_clone.clone()).await?;
+                // 2) Platform process reconciliation: converge every running
+                //    platform poller to the freshly-read config (restart with
+                //    any new tokens/config, start missing ones, stop disabled
+                //    or removed ones). Closes the lifecycle bug where a platform
+                //    started at boot kept running with stale config forever.
+                let (p_started, p_stopped, p_errors) =
+                    reconcile_platforms_on_reload(&state_clone).await;
+                started += p_started;
+                stopped += p_stopped;
+                errors.extend(p_errors);
+                Ok((started, stopped, errors))
+            }) => {
                 match result {
                     Ok(r) => r,
                     Err(e) => Err(format!("Reload task panicked: {}", e)),
@@ -391,6 +406,97 @@ pub(crate) async fn reload_plugins(
     }
 
     Ok((started, stopped, errors))
+}
+
+/// Reconcile running platform plugin processes against the current on-disk
+/// config. Called by POST /api/reload AFTER the registry-level reload
+/// (tools/providers) has run.
+///
+/// Platform lifecycle bug (2026-09-08): the reload API used to re-read only
+/// tool and provider plugins; a platform poller started at boot kept running
+/// with stale tokens/config forever because nothing ever tore it down. This
+/// makes the reload API converge every running platform process to the
+/// freshly-read config:
+///   * platform enabled in config and running          -> signal a restart: the
+///     client tears down the old subprocess, re-reads its config from disk
+///     (re-resolving $secret:/$env: refs) and respawns with the new values;
+///   * platform enabled in config and NOT running      -> start it dynamically;
+///   * platform running but disabled/absent in config  -> stop it (polling,
+///     websocket, whatever transport the plugin runs).
+///
+/// Returns (platforms_started_or_restarted, platforms_stopped, errors).
+async fn reconcile_platforms_on_reload(state: &Arc<AppState>) -> (u32, u32, Vec<String>) {
+    use std::sync::atomic::Ordering;
+
+    let configs = crate::platform::external::load_plugins_config(&state.data_dir);
+    let enabled: std::collections::HashSet<String> = configs
+        .iter()
+        .filter(|c| c.enabled)
+        .map(|c| c.name.clone())
+        .collect();
+
+    // Snapshot platforms with a live client (boot-time and dynamically started
+    // clients both register here before their outer loop spawns the subprocess).
+    let running: Vec<String> = {
+        let signals = state.platform_restart_signals.lock().await;
+        signals.keys().cloned().collect()
+    };
+
+    let mut started = 0u32;
+    let mut stopped = 0u32;
+    let mut errors: Vec<String> = Vec::new();
+
+    // 1. Enabled platforms: restart the running ones (fresh config, new
+    //    tokens), start the ones that are not running yet.
+    for name in &enabled {
+        let signal = {
+            let signals = state.platform_restart_signals.lock().await;
+            signals.get(name).cloned()
+        };
+        match signal {
+            Some((restart_count, _stopped, restart_notify)) => {
+                restart_count.fetch_add(1, Ordering::SeqCst);
+                restart_notify.notify_one();
+                tracing::info!(
+                    "Reload: platform plugin '{}' is running - signalling restart (count: {}) so it is torn down and respawned from the freshly-read config",
+                    name,
+                    restart_count.load(Ordering::SeqCst)
+                );
+                started += 1;
+            }
+            None => {
+                tracing::info!(
+                    "Reload: platform plugin '{}' is enabled but not running - starting it",
+                    name
+                );
+                match start_platform_plugin(state, name).await {
+                    Ok(()) => started += 1,
+                    Err(e) => errors.push(format!("{} platform: {}", name, e)),
+                }
+            }
+        }
+    }
+
+    // 2. Running platforms that are disabled or no longer present in config:
+    //    stop their processes (polling, websocket, whatever transport).
+    for name in &running {
+        if !enabled.contains(name) {
+            tracing::info!(
+                "Reload: platform plugin '{}' is running but disabled/absent in config - stopping it",
+                name
+            );
+            stop_platform_plugin(state, name).await;
+            stopped += 1;
+        }
+    }
+
+    tracing::info!(
+        "Reload: platform reconciliation done: {} started/restarted, {} stopped, {} error(s)",
+        started,
+        stopped,
+        errors.len()
+    );
+    (started, stopped, errors)
 }
 
 #[cfg(test)]
