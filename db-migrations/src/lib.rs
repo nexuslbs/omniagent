@@ -189,6 +189,10 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await
         .ok();
+    sqlx::query("ALTER TABLE kanban_tags ADD COLUMN IF NOT EXISTS color TEXT")
+        .execute(pool)
+        .await
+        .ok();
     tracing::info!("[migration] Kanban tags tables (kanban_tags, task_tags) added");
 
     // -- Event-driven Hooks (thread_started / thread_finished / new_message) --

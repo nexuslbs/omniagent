@@ -216,6 +216,21 @@ where
     Ok(new_def)
 }
 
+pub fn remove_channel(name: &str) -> AppResult<bool> {
+    let dir = data_dir().ok_or_else(|| {
+        Error::Message("channels_yaml::set_data_dir() was not called".to_string())
+    })?;
+    let _guard = SAVE_LOCK
+        .lock()
+        .map_err(|e| Error::Message(format!("channels.yml save lock poisoned: {}", e)))?;
+    let mut file = load_channels_from(dir)?;
+    let removed = file.channels.remove(name).is_some();
+    if removed {
+        save_channels_file(dir, &file)?;
+    }
+    Ok(removed)
+}
+
 // ── Lookups ─────────────────────────────────────────────────────────────────
 
 /// Get a channel definition by its name (yml key). Missing → None.

@@ -22,7 +22,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, patch},
+    routing::{delete, get, patch},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,27 @@ pub fn channels_router() -> Router<Arc<AppState>> {
         .route("/channels", get(list_channels_handler))
         .route("/channels/{id}", get(get_channel_handler))
         .route("/channels/{id}", patch(update_channel_handler))
+        .route("/channels/{id}", delete(delete_channel_handler))
+}
+
+/// DELETE /channels/{id}: remove the channel from channels.yml entirely
+/// (definition + runtime state). No provider/DB teardown beyond the yml-key
+/// removal; cancels nothing else. 404 for unknown channels.
+async fn delete_channel_handler(
+    State(_state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let removed = match crate::db::channels::delete_channel(&id) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("[channels/{}] delete failed: {:?}", id, e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete channel");
+        }
+    };
+    if !removed {
+        return err_json(StatusCode::NOT_FOUND, &format!("Channel '{}' not found", id));
+    }
+    ok_json(serde_json::json!({ "deleted": true, "id": id }))
 }
 
 // ---------------------------------------------------------------------------

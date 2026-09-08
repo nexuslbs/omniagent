@@ -206,6 +206,12 @@ pub async fn is_channel_closed(_pool: &PgPool, name: &str) -> AppResult<bool> {
         .unwrap_or(false))
 }
 
+/// Delete a channel from channels.yml entirely (definition + runtime state).
+/// No provider/DB teardown beyond the yml-key removal.
+pub fn delete_channel(name: &str) -> Result<bool, crate::error::Error> {
+    channels_yaml::remove_channel(name)
+}
+
 /// Get channel status with thread counts (thread counts still come from DB).
 pub async fn get_channel_status(pool: &PgPool, name: &str) -> AppResult<Option<ChannelStatus>> {
     let ch = match get_channel_by_name(pool, name).await? {

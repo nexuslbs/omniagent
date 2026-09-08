@@ -111,6 +111,12 @@ pub fn kanban_router() -> Router<Arc<AppState>> {
         .route("/kanban/tasks/{id}/tags", get(list_tags_handler))
         .route("/kanban/tasks/{id}/tags", post(add_tag_handler))
         .route("/kanban/tasks/{id}/tags/{tag}", delete(remove_tag_handler))
+        // 11c. Tag registry CRUD (kanban_tags name + color). Deleting a
+        // registry tag cascades to task_tags (FK ON DELETE CASCADE).
+        .route("/kanban/tags", get(list_registry_tags_handler))
+        .route("/kanban/tags", post(create_registry_tag_handler))
+        .route("/kanban/tags/{tag}", patch(update_registry_tag_handler))
+        .route("/kanban/tags/{tag}", delete(delete_registry_tag_handler))
         // 12. History
         .route("/kanban/tasks/{id}/history", get(list_history_handler))
         // 12b. History (by query param task_id, for frontend kanban-history page)
@@ -269,6 +275,192 @@ struct AddDependencyRequest {
 #[derive(Debug, Deserialize)]
 struct TagRequest {
     tag: String,
+}
+
+// ---------------------------------------------------------------------------
+// 11c. Tag registry CRUD
+// ---------------------------------------------------------------------------
+
+/// A "#rrggbb" hex color.
+fn valid_tag_color(color: &str) -> bool {
+    color.len() == 7
+        && color.starts_with('#')
+        && color[1..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
+#[derive(Debug, Deserialize)]
+struct TagRegistryRequest {
+    name: String,
+    color: Option<String>,
+}
+
+#[derive(FromRow)]
+struct RegistryTagRow {
+    name: String,
+    color: Option<String>,
+}
+
+/// "" and null both mean "no color"; anything else must be "#rrggbb".
+fn normalize_tag_color(raw: Option<String>) -> Result<Option<String>, String> {
+    match raw {
+        None => Ok(None),
+        Some(c) => {
+            let c = c.trim().to_string();
+            if c.is_empty() {
+                Ok(None)
+            } else if valid_tag_color(&c) {
+                Ok(Some(c))
+            } else {
+                Err("Color must be a hex value like #aabbcc".to_string())
+            }
+        }
+    }
+}
+
+/// GET /kanban/tags: list all registry tags (name + color), sorted by name.
+async fn list_registry_tags_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let rows = match sqlx::query_as::<_, RegistryTagRow>(
+        "SELECT name, color FROM kanban_tags ORDER BY name",
+    )
+    .fetch_all(&state.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            error!("[kanban/tags] list failed: {:?}", e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to list tags");
+        }
+    };
+    let out: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|r| serde_json::json!({ "name": r.name, "color": r.color }))
+        .collect();
+    ok_json(out)
+}
+
+/// POST /kanban/tags: create a registry tag (name + optional color). 409 when
+/// the name already exists.
+async fn create_registry_tag_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TagRegistryRequest>,
+) -> impl IntoResponse {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "Tag name cannot be empty");
+    }
+    let color = match normalize_tag_color(body.color) {
+        Ok(c) => c,
+        Err(msg) => return err_json(StatusCode::BAD_REQUEST, &msg),
+    };
+    let res = match sqlx::query(
+        "INSERT INTO kanban_tags (name, color) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
+    )
+    .bind(&name)
+    .bind(&color)
+    .execute(&state.pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            error!("[kanban/tags] create failed: {:?}", e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to create tag");
+        }
+    };
+    if res.rows_affected() == 0 {
+        return err_json(StatusCode::CONFLICT, "Tag already exists");
+    }
+    ok_json(serde_json::json!({ "name": name, "color": color }))
+}
+
+/// PATCH /kanban/tags/{tag}: set name + color (rename propagates to every task
+/// automatically - task_tags references the tag id).
+async fn update_registry_tag_handler(
+    State(state): State<Arc<AppState>>,
+    Path(tag): Path<String>,
+    Json(body): Json<TagRegistryRequest>,
+) -> impl IntoResponse {
+    let old_name = tag.trim().to_string();
+    if old_name.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "Tag cannot be empty");
+    }
+    let new_name = body.name.trim().to_string();
+    if new_name.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "Tag name cannot be empty");
+    }
+    let color = match normalize_tag_color(body.color) {
+        Ok(c) => c,
+        Err(msg) => return err_json(StatusCode::BAD_REQUEST, &msg),
+    };
+    let row: Option<(i64,)> = match sqlx::query_as("SELECT id FROM kanban_tags WHERE name = $1")
+        .bind(&old_name)
+        .fetch_optional(&state.pool)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            error!("[kanban/tags] lookup failed: {:?}", e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to update tag");
+        }
+    };
+    let Some((tag_id,)) = row else {
+        return err_json(StatusCode::NOT_FOUND, &format!("Tag '{}' not found", old_name));
+    };
+    if new_name != old_name {
+        let dup: Option<(i64,)> =
+            match sqlx::query_as("SELECT id FROM kanban_tags WHERE name = $1 AND id <> $2")
+                .bind(&new_name)
+                .bind(tag_id)
+                .fetch_optional(&state.pool)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    error!("[kanban/tags] dup check failed: {:?}", e);
+                    return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to update tag");
+                }
+            };
+        if dup.is_some() {
+            return err_json(StatusCode::CONFLICT, "Tag already exists");
+        }
+    }
+    if let Err(e) = sqlx::query("UPDATE kanban_tags SET name = $1, color = $2 WHERE id = $3")
+        .bind(&new_name)
+        .bind(&color)
+        .bind(tag_id)
+        .execute(&state.pool)
+        .await
+    {
+        error!("[kanban/tags] update failed: {:?}", e);
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to update tag");
+    }
+    ok_json(serde_json::json!({ "name": new_name, "color": color }))
+}
+
+/// DELETE /kanban/tags/{tag}: remove the registry tag; the task_tags FK
+/// (ON DELETE CASCADE) removes it from every task that used it.
+async fn delete_registry_tag_handler(
+    State(state): State<Arc<AppState>>,
+    Path(tag): Path<String>,
+) -> impl IntoResponse {
+    let name = tag.trim().to_string();
+    if name.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "Tag cannot be empty");
+    }
+    let res = match sqlx::query("DELETE FROM kanban_tags WHERE name = $1")
+        .bind(&name)
+        .execute(&state.pool)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            error!("[kanban/tags] delete failed: {:?}", e);
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete tag");
+        }
+    };
+    if res.rows_affected() == 0 {
+        return err_json(StatusCode::NOT_FOUND, &format!("Tag '{}' not found", name));
+    }
+    ok_json(serde_json::json!({ "deleted": true, "name": name }))
 }
 
 // ---------------------------------------------------------------------------
