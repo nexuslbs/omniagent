@@ -283,9 +283,7 @@ struct TagRequest {
 
 /// A "#rrggbb" hex color.
 fn valid_tag_color(color: &str) -> bool {
-    color.len() == 7
-        && color.starts_with('#')
-        && color[1..].chars().all(|c| c.is_ascii_hexdigit())
+    color.len() == 7 && color.starts_with('#') && color[1..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[derive(Debug, Deserialize)]
@@ -403,7 +401,10 @@ async fn update_registry_tag_handler(
         }
     };
     let Some((tag_id,)) = row else {
-        return err_json(StatusCode::NOT_FOUND, &format!("Tag '{}' not found", old_name));
+        return err_json(
+            StatusCode::NOT_FOUND,
+            &format!("Tag '{}' not found", old_name),
+        );
     };
     if new_name != old_name {
         let dup: Option<(i64,)> =

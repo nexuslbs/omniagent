@@ -57,11 +57,17 @@ async fn delete_channel_handler(
         Ok(r) => r,
         Err(e) => {
             error!("[channels/{}] delete failed: {:?}", id, e);
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, "Failed to delete channel");
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to delete channel",
+            );
         }
     };
     if !removed {
-        return err_json(StatusCode::NOT_FOUND, &format!("Channel '{}' not found", id));
+        return err_json(
+            StatusCode::NOT_FOUND,
+            &format!("Channel '{}' not found", id),
+        );
     }
     ok_json(serde_json::json!({ "deleted": true, "id": id }))
 }
