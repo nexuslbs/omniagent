@@ -41,17 +41,36 @@ The plan boolean for a thread is resolved at creation time through a multi-level
 |----------|--------|-------------|
 | 1 (highest) | `task_plan` | Explicit override from external client (platform plugins: mattermost, telegram) or cron/kanban scheduler. Passed as `ThreadCauseParams.task_plan`. |
 | 2 | channel `plan` column | DB column on `channels` table. Set via `PATCH /api/channels/{id} {"plan": false}`. Accessed via `get_channel_plan()` function. |
-| 3 (deprecated) | channel `metadata["plan"]` | Legacy JSON field for backward compatibility. Only used if the DB column is NULL. |
-| 4 (fallback) | Prompt plugin decides | When neither task_plan nor channel plan is set, the prompt plugin decides at runtime. The builtin prompt plugin uses heuristic (content length, complexity). |
+| 3 | profile `plan` | `plan` from the profile the thread resolves to (`profiles.yml`), third argument of `resolve_thread_plan()`. |
+| 4 (fallback) | Prompt plugin decides | When task_plan, channel plan, and profile plan are all unset, the prompt plugin decides at runtime. The builtin prompt plugin uses a heuristic (content length, complexity). |
 
-In code: `resolve_thread_plan()` in `db/threads.rs`:
+In code: `resolve_thread_plan()` in `src/db/threads.rs:127` (signature `resolve_thread_plan(channel_plan, task_plan, profile_plan)`):
 ```rust
-// Priority: task_plan > channel_plan (column > metadata) > None (plugin decides)
-let channel_plan = channel_plan_from_column.or(channel_plan_from_metadata);
-resolve_thread_plan(channel_plan, task_plan)
-// → Some(task_plan) if set
-// → Some(channel_plan) if set
-// → None (let plugin decide)
+/// Priority order (highest first):
+/// 1. Task/Cron explicit setting (`task_plan`)
+/// 2. Channel setting (`channel_plan`)
+/// 3. Profile setting (`profile_plan` - profiles.yml `plan`)
+/// 4. None (let the plugin decide at runtime)
+pub fn resolve_thread_plan(
+    channel_plan: Option<bool>,
+    task_plan: Option<bool>,
+    profile_plan: Option<bool>,
+) -> Option<bool> {
+    // 1. Task/Cron explicit setting (highest priority)
+    if let Some(val) = task_plan {
+        return Some(val);
+    }
+    // 2. Channel setting
+    if let Some(val) = channel_plan {
+        return Some(val);
+    }
+    // 3. Profile setting (profiles.yml `plan`)
+    if let Some(val) = profile_plan {
+        return Some(val);
+    }
+    // 4. None: plugin decides at runtime
+    None
+}
 ```
 
 #### Prompt Plugin Interaction
@@ -65,8 +84,8 @@ The prompt plugin (`prompt_generate` tool) receives the resolved plan value as i
 5. `should_plan = thread.plan` determines whether the planning phase runs
 
 The **builtin prompt plugin** behavior:
-- If channel plan is explicitly set (`true` or `false`): respects it, returns the same value
-- If channel plan is `None` (not set): decides based on content complexity, returns its decision
+- If the thread's resolved plan is explicitly set (`true` or `false`): respects it, returns the same value
+- If the resolved plan is `None` (nothing set at task/channel/profile level): decides based on content complexity, returns its decision
 - The decision is persisted to the thread so subsequent checks use the resolved value
 
 #### Configuration via API
@@ -123,7 +142,7 @@ If the prompt plugin's `generate` call fails, propagate the error. Do NOT fall b
 |------|-------------|--------|
 | `src/prompt_builder.rs` | omniagent core | DELETED |
 | `src/mcp/prompt_tools.rs` | omniagent MCP | DELETED |
-| `src/agent/executor.rs` inline planning | Lines 487-523 | MUST BE REMOVED: use parts approach |
+| `src/agent/executor.rs` inline planning | Lines 487-523 | REMOVED: no planning code remains in `executor.rs`; planning is owned by the prompt plugin |
 | `prompt_preview_handler` inline MEMORY.md read | `src/server/mod.rs` | MUST BE REMOVED: call MCP plugin |
 | `build_thread_context` direct call | Both executor + preview | Can remain as a utility, but must NOT be the sole source of context: context comes from the plugin's generate tool |
 | `prompt-tools` crate | Workspace member | DELETED (merged into plugin) |
@@ -666,45 +685,45 @@ cargo test --workspace --release
 
 When a migration/query changes, regenerate the offline SQLx cache (`.sqlx/`) so `SQLX_OFFLINE` builds pass. Never commit scratch files (`*.patch`, `.task*`, `.push*`, `.smoke*`, `.g4x-*`, `_run_*.py`, `apply_*.py`) - scratch helper/driver scripts belong ONLY in `OMNI_DIR/data/scripts/` or `omni-stack/data/scripts/` (both gitignored, never versioned); never create them inside the repo tree.
 
-    ## DB Write Guard: dev-built omniagent/migrations must NEVER write to the production DB (MANDATORY)
+## DB Write Guard: dev-built omniagent/migrations must NEVER write to the production DB (MANDATORY)
 
-    Omniagent migrations are DECLARATIVE and auto-run at every startup
-    (CREATE TABLE IF NOT EXISTS ...; there is no schema_migrations versioning).
-    A dev-built binary pointed at the production postgres will silently create
-    tables in the live DB before the feature is even committed.
+Omniagent migrations are DECLARATIVE and auto-run at every startup
+(CREATE TABLE IF NOT EXISTS ...; there is no schema_migrations versioning).
+A dev-built binary pointed at the production postgres will silently create
+tables in the live DB before the feature is even committed.
 
-    INCIDENT (2026-08-27/28): the kanban-tags feature executor ran its dev workflow
-    (`cargo sqlx prepare` + live API verification) against the PRODUCTION omni-stack
-    postgres from a dev container, creating `kanban_tags`/`task_tags` (+ a 'v1.0.0'
-    tag row) in the prod DB before the feature was committed.
+INCIDENT (2026-08-27/28): the kanban-tags feature executor ran its dev workflow
+(`cargo sqlx prepare` + live API verification) against the PRODUCTION omni-stack
+postgres from a dev container, creating `kanban_tags`/`task_tags` (+ a 'v1.0.0'
+tag row) in the prod DB before the feature was committed.
 
-    RULES:
-    1. **Dev verification (sqlx prepare, live API tests, migration application) runs
-       against the omnidev stack DB ONLY** (project `omnidev`, its own postgres
-       container `omnidev-postgres-1`, dev-only alias `omnidev-postgres`).
-       NEVER point a dev binary/`db-migrations` at `omni-stack-postgres-1` or the
-       omni-stack postgres IP (172.18.0.4:5432).
-    2. The DB-write guard distinguishes BUILD MODE, not just DB host:
-       - **Release-built images** (publish pipeline: `docker build --build-arg
-         OMNIAGENT_BUILD_MODE=release`, baked as ENV in the image) AUTO-APPLY
-         the idempotent declarative schema on container start against ANY
-         database - no manual env vars, no operator step. Version upgrades
-         just work.
-       - **Dev-built binaries/images** (Dockerfile.dev, `cargo run`,
-         `docker build` without the release arg -> default
-         `OMNIAGENT_BUILD_MODE=dev`) refuse to auto-apply schema to any
-         database whose host is NOT a known dev target
-         (localhost/127.0.0.1/::1/`omnidev-postgres`). The bare `postgres`
-         service name is deliberately NOT a dev host (the production
-         omni-stack uses it).
-    3. There is NO env-var override: only release-built images auto-apply schema
-       against any database, and only a known dev host accepts a dev-built
-       binary's schema writes. A dev-built binary pointed at a non-dev DB is
-       refused - fix the DATABASE_URL, do not look for a bypass.
-    4. The dev overlay (docker-compose.dev.yml) forces the dev stack onto its own
-       postgres via the `omnidev-postgres` alias; a dev binary can never resolve
-       to the omni-stack DB.
-    
+RULES:
+1. **Dev verification (sqlx prepare, live API tests, migration application) runs
+   against the omnidev stack DB ONLY** (project `omnidev`, its own postgres
+   container `omnidev-postgres-1`, dev-only alias `omnidev-postgres`).
+   NEVER point a dev binary/`db-migrations` at `omni-stack-postgres-1` or the
+   omni-stack postgres IP (172.18.0.4:5432).
+2. The DB-write guard distinguishes BUILD MODE, not just DB host:
+   - **Release-built images** (publish pipeline: `docker build --build-arg
+     OMNIAGENT_BUILD_MODE=release`, baked as ENV in the image) AUTO-APPLY
+     the idempotent declarative schema on container start against ANY
+     database - no manual env vars, no operator step. Version upgrades
+     just work.
+   - **Dev-built binaries/images** (Dockerfile.dev, `cargo run`,
+     `docker build` without the release arg -> default
+     `OMNIAGENT_BUILD_MODE=dev`) refuse to auto-apply schema to any
+     database whose host is NOT a known dev target
+     (localhost/127.0.0.1/::1/`omnidev-postgres`). The bare `postgres`
+     service name is deliberately NOT a dev host (the production
+     omni-stack uses it).
+3. There is NO env-var override: only release-built images auto-apply schema
+   against any database, and only a known dev host accepts a dev-built
+   binary's schema writes. A dev-built binary pointed at a non-dev DB is
+   refused - fix the DATABASE_URL, do not look for a bypass.
+4. The dev overlay (docker-compose.dev.yml) forces the dev stack onto its own
+   postgres via the `omnidev-postgres` alias; a dev binary can never resolve
+   to the omni-stack DB.
+
 ---
 
 ## Log Hygiene Rule (HARD, since 2026-09-05)
@@ -761,3 +780,49 @@ the `core_delivery_*` guard tests at the bottom of `tests/plugin_tests.rs`
       either generic (apply to every platform) or live in the platform plugin.
 - [ ] Confirm delivery behavior changes were not made in core on behalf of a
       single platform (telegram collapse/suppression incidents 518/519).
+
+
+## Repository layout
+
+- `src/agent/` - executor, main loop, context builder/compactor, prompt sections, recovery, response handling
+- `src/platform/` - platform plugin runners (external client supervision of the mattermost/telegram subprocesses)
+- `src/server/` - HTTP API routers + handlers (`mod.rs` is the route table; `api-reference.md` is curated from it)
+- `src/db/` - DB access and queries (`threads.rs` holds `resolve_thread_plan()` and the thread lifecycle)
+- `src/mcp/`, `src/plugin/`, `src/provider/`, `src/llm/` - MCP registry/execute, plugin manager, provider adapters, LLM calls
+- `src/` top level - scheduler, kanban dispatch, boards/workflows/channels/models/plugins YAML loaders, hooks, `status_wait`
+- `plugins/{platforms,providers,tools}/` - built-in plugin crates
+- `scripts/` - guard linters + release helpers (e.g. `scripts/lint-core-platform-boundary.py`)
+- `tests/` - integration + source-scan guard tests (`plugin_tests.rs`, `log_hygiene.rs`, `api_tests.rs`)
+- `db-migrations/` - declarative schema (auto-applied at startup); `.sqlx/` - offline query cache
+
+## Building and testing (omnidev)
+
+Develop ONLY in the omnidev dev stack: compose project `omnidev` (project dir
+`/opt/workspace/omni-stack`, env file `/opt/workspace/omni-deployer/omnidev.env`),
+containers `omnidev-*`, dev DB `omnidev-postgres`. NEVER point a dev build,
+`cargo sqlx prepare`, migration, or test at the production omni-stack DB (see
+the DB Write Guard rule above; incident 2026-08-27/28). The repo is
+bind-mounted at `/app` inside `omnidev-omniagent-1`:
+
+```bash
+docker exec omnidev-omniagent-1 cargo fmt --check
+docker exec omnidev-omniagent-1 cargo check
+docker exec omnidev-omniagent-1 cargo clippy --workspace --all-targets -- -D warnings
+docker exec omnidev-omniagent-1 cargo test --test plugin_tests core_delivery_   # boundary guards
+python3 scripts/lint-core-platform-boundary.py   # exit 0 required (C6 guard)
+```
+
+Dev builds validate queries against the live omnidev DB: plain cargo, never
+`SQLX_OFFLINE=true` (CI-only). Production omni-stack containers and the
+production DB are never touched by dev workflows; core code changes ship only
+in the next release image.
+
+## Where durable knowledge lives
+
+- AGENTS.md sections above: hard rules + incident lore for this repo.
+- Profile wiki (omni-root `wiki/Projects/Omniagent/`): standing improvement
+  plans (e.g. `Omniagent-Code-Improvement-Plan.md`) and deep dives.
+- `wiki/Memory/Promoted/`: validated cross-thread memories surfaced by
+  `search_wiki`; MEMORY.md holds only short cross-cutting rules.
+- `CHANGELOG.md` / `RELEASE.md`: release notes. User docs: `README.md` +
+  `api-reference.md` (curated from `src/server/*.rs` routers).

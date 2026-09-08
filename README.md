@@ -107,7 +107,7 @@ On the Mattermost platform, the `$new` command creates/updates a channel by that
 | `current_profile` | Default profile for the channel |
 | `current_provider` | Overrides the profile's provider |
 | `current_model` | Overrides the profile's model |
-| `planning_mode` | Default planning mode for threads in this channel |
+| `plan` | Boolean plan default for threads in this channel (`NULL` = the prompt plugin decides at runtime) |
 | `template` | Optional template name injected into every user message's prompt (also the default template for cron/kanban tasks in this channel) |
 | `readonly` | Protects the channel from deletion (e.g. the default cron channel) |
 | `closed` | Stops processing new messages (they remain pending) while retaining history |
@@ -281,7 +281,7 @@ VALUES ('job-1', 'daily-report', '0 9 * * *', 'cron-default', 'Write the daily r
 
 ### Cron Planning Mode
 
-Cron-dispatched threads can run in planning mode; the channel's `planning_mode` field is the default.
+Cron-dispatched threads can run in planning mode; the channel's `plan` field is the default.
 
 ### Knowledge Pipeline
 
@@ -424,3 +424,18 @@ The agent exposes an HTTP API on port 8080 (see `api-reference.md` for the full 
 ### Builtin `omniagent-api` Tool
 
 The agent exposes its own API to itself as the MCP tool `omniagent-api` (builtin): it fetches `http://localhost:8080/...` internally - no host/scheme/port configuration needed. It replaced the old `kanban_*` / `cron_*` plugin tools; the plugin's `fetch` tool gates unsafe methods via the `allow_unsafe_methods` config.
+
+
+## Related repositories
+
+| Repository | Description |
+|-----------|-------------|
+| [omni-stack](https://github.com/nexuslbs/omni-stack) | Docker Compose stack + OMNI_DIR config (`config/*.yml`) - deployment home for this core |
+| [omni-root](https://github.com/nexuslbs/omni-root) | Runtime config/wiki/state mirror fork of omni-stack (what a live deployment reads) |
+| [omni-deployer](https://github.com/nexuslbs/omni-deployer) | `deploy.py` test harness + omnidev/omnistable lifecycle + integration suite |
+| [omni-dashboard](https://github.com/nexuslbs/omni-dashboard) | Web dashboard (Vite + TypeScript SPA) |
+| [omni-plugins](https://github.com/nexuslbs/omni-plugins) | Remote-installable plugins + plugin-less provider definitions (`models.yml`) |
+
+This repo is the Rust core. Developer/agent rules for this repo (architecture,
+build/test gates, no-prod rules) live in `AGENTS.md`; the full HTTP surface is
+in `api-reference.md`.
