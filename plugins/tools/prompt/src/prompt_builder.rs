@@ -518,3 +518,34 @@ mod tests {
         assert_eq!(sections[3].2, "custom deployment msg");
     }
 }
+
+#[cfg(test)]
+mod clear_delete_directive_tests {
+    use super::*;
+
+    #[test]
+    fn identity_carries_clear_delete_directives_clause() {
+        // Fix 39bac16 (2026-09-08): an explicit clear/delete/set directive must
+        // be EXECUTED on the named target and its observable end state VERIFIED
+        // there before "done"/"no change applied" may be reported.
+        let store = MemoryStore::new(".");
+        let sections = build_system_prompt_sections(
+            &store,
+            "mattermost",
+            None,
+            "omni",
+            &[],
+            &PromptBuilderConfig::default(),
+        );
+        let identity = &sections[0].2;
+        assert!(
+            identity.contains("CLEAR/DELETE DIRECTIVES"),
+            "identity must carry the clear/delete directives clause"
+        );
+        assert!(
+            identity.contains("EXECUTED the change")
+                && identity.contains("VERIFIED the observable end state"),
+            "clear/delete clause must demand execute + verify end state on the target"
+        );
+    }
+}
