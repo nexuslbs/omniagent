@@ -40,7 +40,7 @@ The plan boolean for a thread is resolved at creation time through a multi-level
 | Priority | Source | Description |
 |----------|--------|-------------|
 | 1 (highest) | `task_plan` | Explicit override from external client (platform plugins: mattermost, telegram) or cron/kanban scheduler. Passed as `ThreadCauseParams.task_plan`. |
-| 2 | channel `plan` column | DB column on `channels` table. Set via `PATCH /api/channels/{id} {"plan": false}`. Accessed via `get_channel_plan()` function. |
+| 2 | channel `plan` | `plan` from the channel's `channels.yml` entry (`ChannelDef.plan`), read via `get_channel_plan()`. Set via `PATCH /channels/{id} {"plan": false}`. |
 | 3 | profile `plan` | `plan` from the profile the thread resolves to (`profiles.yml`), third argument of `resolve_thread_plan()`. |
 | 4 (fallback) | Prompt plugin decides | When task_plan, channel plan, and profile plan are all unset, the prompt plugin decides at runtime. The builtin prompt plugin uses a heuristic (content length, complexity). |
 
@@ -90,7 +90,7 @@ The **builtin prompt plugin** behavior:
 
 #### Configuration via API
 
-Channel-level plan can be set via `PATCH /api/channels/{id}`:
+Channel-level plan can be set via `PATCH /channels/{id}`:
 ```json
 {"plan": false}
 ```
@@ -106,8 +106,8 @@ Global settings that affect planning behavior (via `PUT /settings`):
 flowchart LR
     subgraph Thread_Creation["Thread Creation"]
         A[External Client] -->|task_plan: Some(false)| B[create_thread_with_cause]
-        C[channels.plan column] -->|get_channel_plan| D{resolve_thread_plan}
-        E[metadata['plan']] -->|deprecated fallback| D
+        C[channels.yml plan field] -->|get_channel_plan| D{resolve_thread_plan}
+        P[profile plan (profiles.yml)] -->|ProfileRegistry| D
         B --> D
         D -->|plan: false| F[Thread created with plan=false]
     end
