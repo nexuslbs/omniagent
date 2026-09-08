@@ -549,13 +549,18 @@ fn plan_iterations_consumed(plan_content: &Option<String>) -> i32 {
 // clock on simple operator requests is serial LLM round time and the loop
 // granted unbounded rounds (thread 1157: 44 LLM rounds / ~22 min on a
 // one-container check); WASTE GUARDRAILS prose could not stop the loop.
-// Interactive threads (a direct operator conversation: cause=user and NOT a
-// delegated kanban/schedule workflow) therefore get a hard, configurable
-// round cap (`interactive_max_iterations`, default 12) plus an auto-answer
-// path: when the cap is hit while the model still requests tools, that
-// round's tools run and ONE final no-tools LLM call forces a real final
-// answer (knowns + remaining uncertainty). Kanban/dev/schedule threads keep
-// their delegated plan/no-plan budgets (interactive=false).
+// Direct operator conversations (cause=user and NOT a delegated kanban/
+// schedule workflow) therefore get a hard, configurable round cap
+// (`interactive_max_iterations`, default 12) plus an auto-answer path: when
+// the cap is hit while the model still requests tools, that round's tools
+// run and ONE final no-tools LLM call forces a real final answer (knowns +
+// remaining uncertainty).
+// The cap applies ONLY to NON-PLAN interactive threads (quick Q&A): an
+// interactive thread that opted into PLAN mode is a substantive multi-step
+// operator request and keeps its full delegated plan budget (thread 1473 was
+// cut at ~11 of 300 rounds because the 12-round cap ignored plan mode).
+// Kanban/dev/schedule threads always keep their delegated budgets
+// (interactive=false).
 
 /// True when the thread is a direct operator conversation: cause 'user' and
 /// not linked to a delegated kanban task, scheduled/cron job or hook. Those
@@ -564,12 +569,17 @@ fn is_interactive_thread(thread: &Thread) -> bool {
     thread.cause == "user" && thread.task_id.is_none() && thread.schedule_task_id.is_none()
 }
 
-/// Effective total iteration budget for a thread: when `interactive` and the
-/// configured `interactive_max_iterations` cap is > 0, the budget is the cap
-/// MIN'd with the existing plan/no-plan budget (the cap never loosens an
-/// existing bound); 0 disables the cap and returns the base unchanged.
-fn interactive_iter_limit(base: i32, interactive_cap: u32, interactive: bool) -> i32 {
-    if interactive && interactive_cap > 0 {
+/// Effective total iteration budget for a thread. The hard interactive cap
+/// (`interactive_max_iterations`) applies ONLY to NON-PLAN interactive
+/// threads (quick operator Q&A): their budget is the cap MIN'd with the
+/// existing no-plan budget (the cap never loosens an existing bound). An
+/// interactive thread that opted into PLAN mode is substantive multi-step
+/// work and keeps its full delegated plan budget (thread 1473 was cut at
+/// ~11/300 rounds because the 12 cap ignored plan mode). Non-interactive
+/// (kanban/dev/schedule) threads are unchanged. 0 disables the cap and
+/// returns the base unchanged.
+fn interactive_iter_limit(base: i32, interactive_cap: u32, interactive: bool, plan: bool) -> i32 {
+    if interactive && !plan && interactive_cap > 0 {
         base.min(interactive_cap as i32)
     } else {
         base
@@ -1071,15 +1081,23 @@ Previous plan:\n{}",
     // so complex tasks get the plan budget (max_iterations_plan) and simple
     // ones stay within max_iterations_no_plan.
     // Slowness fix #2: interactive operator threads (cause=user, no delegated kanban/
-    // schedule workflow) get a hard configurable round cap MIN'd with the plan/no-plan
-    // budget, so the tool-calling loop can never run past `interactive_max_iterations`
-    // rounds (default 12) on a direct operator request, regardless of plan mode.
+    // schedule workflow) get a hard configurable round cap MIN'd with the no-plan
+    // budget, so a quick direct operator question can never run past
+    // `interactive_max_iterations` rounds (default 12). The cap applies ONLY to
+    // NON-PLAN interactive threads: an interactive thread that opted into plan mode
+    // is substantive multi-step work and keeps its full delegated plan budget
+    // (thread 1473 was cut at ~11 of 300 rounds because the cap ignored plan mode).
     // Kanban/dev/schedule threads keep the delegated budgets (interactive=false).
     let interactive_thread = is_interactive_thread(thread);
     let iter_limit = {
         let snap = cfg.config_snapshot();
         let base = queries::max_iterations_for_plan(&snap, prompt_parts.plan) as i32;
-        interactive_iter_limit(base, snap.interactive_max_iterations, interactive_thread)
+        interactive_iter_limit(
+            base,
+            snap.interactive_max_iterations,
+            interactive_thread,
+            prompt_parts.plan,
+        )
     };
     // The plan phase consumed an iteration slot ONLY when a plan was actually
     // generated (plan_content.is_some()). A failed or skipped plan consumes
@@ -1175,16 +1193,18 @@ Previous plan:\n{}",
         // to produce a final answer rather than more tool calls.
         if current_iter >= iter_limit {
             if interactive_thread {
-                messages.push(ChatMessage::system(
-                    "This is your last interactive round. You must provide your final answer \
-                     now: state what is known (with the evidence gathered above) and what \
-                     remains uncertain or unverified. Do not request additional tool calls.",
-                ));
-            } else {
-                messages.push(ChatMessage::system(
-                    "This is your last turn. You must provide your final answer now. \
+                messages.push(ChatMessage::system(&format!(
+                    "This is your last round within the iteration budget ({iter_limit}). \
+                     You must provide your final answer now: state what is known (with the \
+                     evidence gathered above) and what remains uncertain or unverified. \
                      Do not request additional tool calls.",
-                ));
+                )));
+            } else {
+                messages.push(ChatMessage::system(&format!(
+                    "This is your last turn within the iteration budget ({iter_limit}). \
+                     You must provide your final answer now. Do not request additional \
+                     tool calls.",
+                )));
             }
         } else if interactive_thread && !auto_answer_nudged {
             // Auto-answer nudge (mid-budget, once): when the latest tool results already
@@ -1195,11 +1215,12 @@ Previous plan:\n{}",
                 if current_iter >= nudge_at {
                     auto_answer_nudged = true;
                     let nudge_text = format!(
-                        "[Auto-answer] You have used {current_iter} of {iter_limit} interactive \
-                         rounds. If the latest tool results already answer the operator's \
-                         request, write your final answer now instead of continuing to \
-                         explore. Do not audit adjacent topics. If more evidence is genuinely \
-                         required, gather only that and answer by the final round.",
+                        "[Auto-answer] You have used {current_iter} of {iter_limit} rounds in \
+                         this thread's iteration budget. If the latest tool results already \
+                         answer the operator's request, write your final answer now instead \
+                         of continuing to explore. Do not audit adjacent topics. If more \
+                         evidence is genuinely required, gather only that and answer within \
+                         the remaining budget.",
                     );
                     messages.push(ChatMessage::system(&nudge_text));
                 }
@@ -2144,7 +2165,7 @@ Previous plan:\n{}",
                             .map(|tc| tc.function.name.clone())
                             .collect();
                         final_content = format!(
-                            "Iteration limit reached. Last tool calls issued: {}. The task was interrupted before completion.",
+                            "Iteration limit ({iter_limit}) reached. Last tool calls issued: {}. The task was interrupted before completion.",
                             tool_names.join(", "),
                         );
                         final_tool_call = false;
@@ -2755,13 +2776,15 @@ Previous plan:\n{}",
         }
     } // end for _turn
 
-    // Interactive cap-hit epilogue (slowness fix #2): the thread exhausted its
-    // interactive round budget while the model was still requesting tools. The
-    // last round's tools WERE executed (results are in the message stream);
-    // force ONE final no-tools LLM call that produces a real final answer
-    // (knowns + remaining uncertainty) instead of the generic interruption text
-    // or another exploration round. Kanban/dev/schedule threads never reach
-    // here (cap_hit_with_tools stays false for them: InterruptSynthetic).
+    // Interactive cap-hit epilogue (slowness fix #2): an interactive thread
+    // exhausted its iteration budget while the model was still requesting tools
+    // (a non-plan quick thread hit the interactive cap, or a plan-mode thread
+    // burned its full delegated budget). The last round's tools WERE executed
+    // (results are in the message stream); force ONE final no-tools LLM call
+    // that produces a real final answer (knowns + remaining uncertainty)
+    // instead of the generic interruption text or another exploration round.
+    // Kanban/dev/schedule threads never reach here (cap_hit_with_tools stays
+    // false for them: InterruptSynthetic).
     if cap_finalize_due(
         interactive_thread,
         cap_hit_with_tools,
@@ -2775,13 +2798,13 @@ Previous plan:\n{}",
             .filter(|st| is_terminal_loop_status(st));
         if terminal_status.is_none() {
             let mut cap_messages = messages.clone();
-            cap_messages.push(ChatMessage::system(
-                "Your interactive round budget is exhausted and tools are disabled for this \
-                 call. Produce your FINAL answer now: summarize what is known (with the \
-                 evidence from the tool results above), what remains uncertain or unverified, \
-                 and any follow-up the operator could request. Do not call tools and do not \
-                 continue exploring.",
-            ));
+            cap_messages.push(ChatMessage::system(&format!(
+                "Your iteration budget ({iter_limit} rounds) is exhausted and tools are \
+                 disabled for this call. Produce your FINAL answer now: summarize what is \
+                 known (with the evidence from the tool results above), what remains \
+                 uncertain or unverified, and any follow-up the operator could request. \
+                 Do not call tools and do not continue exploring.",
+            )));
             let cap_request = CompletionRequest {
                 messages: cap_messages,
                 max_tokens: effective_max_tokens(escalated_max_tokens, base_max_tokens),
@@ -3670,17 +3693,28 @@ mod interactive_round_budget_tests {
     }
 
     #[test]
-    fn interactive_cap_is_min_with_base_when_enabled() {
-        // cap-hit: default interactive cap 12 always wins over 30/120 budgets.
-        assert_eq!(interactive_iter_limit(30, 12, true), 12);
-        assert_eq!(interactive_iter_limit(120, 12, true), 12);
+    fn interactive_cap_is_min_with_base_for_non_plan_quick_threads() {
+        // Non-plan interactive (quick Q&A): default cap 12 wins over the no-plan budget.
+        assert_eq!(interactive_iter_limit(150, 12, true, false), 12);
+        assert_eq!(interactive_iter_limit(30, 12, true, false), 12);
     }
 
     #[test]
-    fn interactive_cap_never_loosens_and_zero_disables() {
-        assert_eq!(interactive_iter_limit(30, 12, false), 30); // kanban/dev keep budget
-        assert_eq!(interactive_iter_limit(30, 0, true), 30); // disabled -> base
-        assert_eq!(interactive_iter_limit(30, 40, true), 30); // cap > base keeps tighter base
+    fn plan_mode_interactive_keeps_full_delegated_plan_budget() {
+        // Plan-mode interactive threads are substantive multi-step requests:
+        // they keep the FULL plan budget (thread 1473 was cut at ~11/300 because
+        // the 12-round cap ignored plan mode).
+        assert_eq!(interactive_iter_limit(300, 12, true, true), 300);
+        assert_eq!(interactive_iter_limit(120, 12, true, true), 120);
+    }
+
+    #[test]
+    fn interactive_cap_never_loosens_non_interactive_and_zero_disables() {
+        assert_eq!(interactive_iter_limit(150, 12, false, false), 150); // kanban/dev keep budget
+        assert_eq!(interactive_iter_limit(300, 12, false, true), 300); // delegated plan budget
+        assert_eq!(interactive_iter_limit(150, 0, true, false), 150); // disabled -> base
+        assert_eq!(interactive_iter_limit(150, 40, true, false), 40); // cap < base applies
+        assert_eq!(interactive_iter_limit(150, 400, true, false), 150); // cap > base keeps tighter base
     }
 
     #[test]

@@ -87,13 +87,15 @@ pub struct AgentConfig {
     /// Max iterations for threads with planning enabled.
     pub max_iterations_plan: u32,
     /// Hard LLM-round cap for INTERACTIVE operator threads (cause=user with no delegated
-    /// kanban/schedule workflow). When > 0, an interactive thread's total iteration budget
-    /// is MIN'd to this cap (default 12) so a simple operator request can never burn the
-    /// full 30/120-round plan budgets (thread 1157: 44 rounds / ~22 min on a one-container
-    /// check). On cap-hit while the model still requests tools, the loop runs that round's
-    /// tools and then forces one final no-tools answer (knowns + remaining uncertainty).
-    /// 0 disables the cap (existing plan/no-plan budgets apply unchanged). Kanban/dev/
-    /// schedule threads always keep their delegated budgets (not interactive).
+    /// kanban/schedule workflow). When > 0, a NON-PLAN interactive thread's total iteration
+    /// budget is MIN'd to this cap (default 12) so a simple operator question can never burn
+    /// the full no-plan budget (thread 1157: 44 rounds / ~22 min on a one-container check).
+    /// Interactive threads that opted into PLAN mode are substantive multi-step requests and
+    /// keep their full delegated plan budget (thread 1473 was cut at ~11/300 because the cap
+    /// ignored plan mode). On cap-hit while the model still requests tools, the loop runs
+    /// that round's tools and then forces one final no-tools answer (knowns + remaining
+    /// uncertainty). 0 disables the cap (existing plan/no-plan budgets apply unchanged).
+    /// Kanban/dev/schedule threads always keep their delegated budgets (not interactive).
     pub interactive_max_iterations: u32,
     /// Max retries for unfinished subtasks before marking the thread as failed.
     pub max_unfinished_subtask_retries: u32,
