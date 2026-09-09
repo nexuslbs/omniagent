@@ -1,7 +1,8 @@
 //! mcp-server-filesystem: standalone MCP server for local file operations.
 //! Communicates via stdio JSON-RPC (MCP protocol).
 //!
-//! Tools: filesystem_read, filesystem_write, filesystem_list, filesystem_search, filesystem_info,
+//! Tools: filesystem_read (char paging; line-numbered output + line paging via lines=true),
+//! filesystem_write, filesystem_list, filesystem_search, filesystem_info,
 //! filesystem_grep (ripgrep-backed recursive content search, caps + spill to file),
 //! filesystem_str_replace, filesystem_insert, filesystem_apply_patch (precise, reviewable
 //! file-edit primitives)
@@ -188,6 +189,54 @@ fn format_size(size: u64) -> String {
 // Tool: filesystem_read
 // ---------------------------------------------------------------------------
 
+/// R6: render a LINE-NUMBERED, line-paged read of `content`. Line numbers are
+/// 1-based and use the plugin's own line convention (a trailing newline does
+/// not open an extra empty line), so they match the line numbers reported by
+/// filesystem_insert and filesystem_apply_patch. `offset` is the 1-based
+/// number of the first line to show; `limit` is the max number of lines. The
+/// returned text always ends with a bracket note describing the shown line
+/// range and the file's total line count, so callers can page forward
+/// deterministically without ever re-reading a line they already saw.
+fn read_numbered_lines(content: &str, offset: usize, limit: usize) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    if total == 0 {
+        return "[file is empty (0 lines)]".to_string();
+    }
+    if limit == 0 {
+        return format!(
+            "[no lines shown: limit must be >= 1 (file has {} line(s))]",
+            total
+        );
+    }
+    if offset > total {
+        return format!(
+            "[file has {} line(s); nothing to show: offset {} is past the end]",
+            total, offset
+        );
+    }
+    let first = offset.max(1);
+    let last = first.saturating_add(limit).saturating_sub(1).min(total);
+    let mut out = String::new();
+    for n in first..=last {
+        out.push_str(&format!("{}:{}\n", n, lines[n - 1]));
+    }
+    let note = if last < total {
+        format!(
+            "[... truncated: showing lines {}-{} of {} total lines]",
+            first, last, total
+        )
+    } else {
+        format!(
+            "[showing lines {}-{} of {} total lines]",
+            first, last, total
+        )
+    };
+    out.push('\n');
+    out.push_str(&note);
+    out
+}
+
 fn handle_read(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let path = args["path"]
         .as_str()
@@ -196,6 +245,16 @@ fn handle_read(args: Value, workspace_dir: &str) -> Result<(String, bool)> {
     let safe_path = resolve_read_path(path, workspace_dir);
     let content = fs::read_to_string(&safe_path)
         .map_err(|e| anyhow::anyhow!("Failed to read file '{}': {}", safe_path, e))?;
+    // R6: optional LINE-NUMBERED mode (lines=true). Each shown line is
+    // prefixed with its 1-based number and paging is in lines, so reads are
+    // cheap to reference (numbers match filesystem_insert/apply_patch) and
+    // deterministic to page without re-reading.
+    if args["lines"].as_bool().unwrap_or(false) {
+        let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
+        let limit = args["limit"].as_u64().unwrap_or(500) as usize;
+        let out = read_numbered_lines(&content, offset, limit);
+        return Ok((out, false));
+    }
     // Char-based paged reads: offset = starting char position (default 0),
     // limit = max chars returned (default 50_000, the legacy truncation).
     // The response reports the total file size and the returned slice so the
@@ -1297,7 +1356,7 @@ async fn main() -> Result<()> {
                 description:
                     "READ A LOCAL FILE from disk. Use this to read any file on the filesystem (markdown, text files, config files, code files, research documents). This is the ONLY tool for reading existing file content. Do NOT use search_messages for file reading. \
                     READS ARE UNRESTRICTED: any path on the filesystem can be read (only WRITES are confined to the workspace dir). \
-                    LARGE FILES: reads are CHAR-BASED SLICES. 'offset' (default 0) is the starting char position; 'limit' (default 50000) is the max chars returned. The response always reports the total file size and which slice was returned, e.g. \"[showing chars 50000-100000 of 250000 total chars]\", so you can page deterministically: call again with offset=50000, then offset=100000, ... until the note no longer says 'truncated'. No args = legacy behavior (first 50000 chars, with a truncation note when the file is bigger)."
+                    LARGE FILES: reads are CHAR-BASED SLICES. 'offset' (default 0) is the starting char position; 'limit' (default 50000) is the max chars returned. The response reports the slice returned, e.g. \"[showing chars 50000-100000 of 250000 total chars]\", so you can page deterministically. No args = first 50000 chars, with a truncation note when the file is bigger. LINE-NUMBERED READS (lines=true): use when you need to reference specific lines. Every shown line is prefixed with its 1-based line number ('N:line'; the numbers match filesystem_insert/filesystem_apply_patch line numbering). 'offset' (default 1) is the 1-based first line to show; 'limit' (default 500) is the max number of lines. The response always ends with a bracket note, e.g. \"[showing lines 1-500 of 1200 total lines]\" or \"[... truncated: showing lines 1-500 of 1200 total lines]\", so you know exactly which lines you saw and can page forward deterministically without re-reading."
                         .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
@@ -1306,13 +1365,17 @@ async fn main() -> Result<()> {
                             "type": "string",
                             "description": "Absolute path to the file to read"
                         },
+                        "lines": {
+                            "type": "boolean",
+                            "description": "Read in line-numbered mode (default false): paging in lines and every shown line prefixed with its 1-based number, e.g. '12:let x = 1;'"
+                        },
                         "offset": {
                             "type": "integer",
-                            "description": "Starting char position, 0-based (default 0). Use together with 'limit' to page through large files in slices."
+                            "description": "Char mode: starting char position, 0-based (default 0). Lines mode: first line to show, 1-based (default 1)."
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Maximum chars to return (default 50000)."
+                            "description": "Char mode: maximum chars to return (default 50000). Lines mode: maximum lines to return (default 500)."
                         }
                     },
                     "required": ["path"]
@@ -2334,6 +2397,119 @@ mod tests {
         assert_eq!(
             hits, 300,
             "spill must contain ALL 300 hits, not just overflow"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_lines_mode_numbers_and_pages() {
+        let dir = std::env::temp_dir().join(format!("fs-read-lines-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("ten.txt");
+        let body: Vec<String> = (1..=10).map(|i| format!("line {}", i)).collect();
+        fs::write(&p, body.join("\n")).unwrap();
+        let ws = dir.to_string_lossy().to_string();
+        // Page 1: lines 1-3 with 1-based numbers and a truncation note.
+        let (msg, is_error) = handle_read(
+            serde_json::json!({"path": p.to_string_lossy(), "lines": true, "limit": 3}),
+            &ws,
+        )
+        .expect("read must succeed");
+        assert!(!is_error, "msg: {msg}");
+        assert!(
+            msg.starts_with("1:line 1\n2:line 2\n3:line 3\n\n[... truncated: showing lines 1-3 of 10 total lines]"),
+            "msg: {msg}"
+        );
+        // Page 2: deterministic resume at line 4.
+        let (msg2, _) = handle_read(
+            serde_json::json!({"path": p.to_string_lossy(), "lines": true, "offset": 4, "limit": 3}),
+            &ws,
+        )
+        .expect("read must succeed");
+        assert!(
+            msg2.starts_with("4:line 4\n5:line 5\n6:line 6\n\n[... truncated: showing lines 4-6 of 10 total lines]"),
+            "msg: {msg2}"
+        );
+        // Tail page: complete note without 'truncated'.
+        let (msg3, _) = handle_read(
+            serde_json::json!({"path": p.to_string_lossy(), "lines": true, "offset": 9, "limit": 5}),
+            &ws,
+        )
+        .expect("read must succeed");
+        assert!(
+            msg3.starts_with("9:line 9\n10:line 10\n\n[showing lines 9-10 of 10 total lines]"),
+            "msg: {msg3}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_lines_mode_conventions_match_edit_tools() {
+        // A trailing newline does not open an extra empty line: 'a\nb\n' has
+        // exactly 2 lines (the same convention filesystem_insert uses).
+        let dir = std::env::temp_dir().join(format!("fs-read-lines-c-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("ab.txt");
+        fs::write(&p, "a\nb\n").unwrap();
+        let ws = dir.to_string_lossy().to_string();
+        let (msg, is_error) = handle_read(
+            serde_json::json!({"path": p.to_string_lossy(), "lines": true}),
+            &ws,
+        )
+        .expect("read must succeed");
+        assert!(!is_error, "msg: {msg}");
+        assert!(
+            msg.starts_with("1:a\n2:b\n\n[showing lines 1-2 of 2 total lines]"),
+            "msg: {msg}"
+        );
+        // Empty file: self-describing note.
+        let pe = dir.join("empty.txt");
+        fs::write(&pe, "").unwrap();
+        let (msge, _) = handle_read(
+            serde_json::json!({"path": pe.to_string_lossy(), "lines": true}),
+            &ws,
+        )
+        .expect("read must succeed");
+        assert!(msge.contains("[file is empty (0 lines)]"), "msg: {msge}");
+        // Offset past the end: nothing shown, note explains why.
+        let (msgp, _) = handle_read(
+            serde_json::json!({"path": p.to_string_lossy(), "lines": true, "offset": 5}),
+            &ws,
+        )
+        .expect("read must succeed");
+        assert!(msgp.contains("offset 5 is past the end"), "msg: {msgp}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_char_mode_is_unchanged_default() {
+        // Default (no 'lines') keeps the char-based behavior: raw content,
+        // no line-number prefixes, char-offset truncation note when partial.
+        let dir = std::env::temp_dir().join(format!("fs-read-char-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("multi.txt");
+        fs::write(&p, "hello world\nsecond line\n").unwrap();
+        let ws = dir.to_string_lossy().to_string();
+        let (msg, is_error) = handle_read(serde_json::json!({"path": p.to_string_lossy()}), &ws)
+            .expect("read must succeed");
+        assert!(!is_error, "msg: {msg}");
+        assert_eq!(msg, "hello world\nsecond line\n", "msg: {msg}");
+        // A truncated char read reports chars (not lines) and adds no prefixes.
+        let pb = dir.join("big.txt");
+        fs::write(&pb, "x".repeat(60000)).unwrap();
+        let (msgb, _) = handle_read(serde_json::json!({"path": pb.to_string_lossy()}), &ws)
+            .expect("read must succeed");
+        assert!(
+            msgb.ends_with("[... truncated: showing chars 0-50000 of 60000 total chars]"),
+            "msg tail: {}",
+            &msgb[msgb.len().saturating_sub(120)..]
+        );
+        assert!(
+            !msgb.contains(":x"),
+            "char mode must not prefix line numbers"
         );
         let _ = fs::remove_dir_all(&dir);
     }
