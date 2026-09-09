@@ -27,6 +27,7 @@ pub mod recovery;
 pub(crate) mod response_handler;
 pub mod summary_trigger;
 pub mod task_registry;
+pub(crate) mod terminal_summary;
 pub(crate) mod tool_result_pruner;
 
 use parking_lot::RwLock;

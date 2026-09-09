@@ -1,5 +1,9 @@
 use crate::agent::config::AgentContext;
 use crate::agent::helpers;
+use crate::agent::terminal_summary::{
+    deterministic_activity_summary, deterministic_interrupted_summary, is_continuation_intent,
+    sanitize_terminal_content,
+};
 use crate::db::types as queries;
 use crate::db::types::{CompleteThreadStats, Message, MessageNew, Thread};
 use crate::error::AppResult;
@@ -113,7 +117,7 @@ pub(crate) async fn handle_response(
         };
 
         let _summary_start = std::time::Instant::now();
-        let (summary_text, summary_token_usage) = match per_thread_llm
+        let (mut summary_text, summary_token_usage) = match per_thread_llm
             .completion(summary_request)
             .await
         {
@@ -151,6 +155,29 @@ pub(crate) async fn handle_response(
             }
         };
 
+        // Terminal-content hygiene (interrupted threads must end with a PROPER
+        // summary; thread 1596). DeepSeek in text-tool mode sometimes answers
+        // the summary prompt (tools:None) with a raw DSML/XML tool-call block
+        // or with continuation prose ("I'll update the subtasks..."). Persist
+        // neither: strip tool-call markup, and when nothing coherent remains or
+        // the text is only continuation intent, fall back to the deterministic
+        // digest-based summary so the terminal message is always a genuine,
+        // well-formed summary with no pending tool-call intent.
+        let cleaned = sanitize_terminal_content(&summary_text);
+        if cleaned.trim().is_empty() || is_continuation_intent(&cleaned) {
+            summary_text = deterministic_interrupted_summary(
+                &cause_msg.content,
+                build_tool_evidence_digest(messages).as_deref(),
+                current_iter,
+                iter_limit,
+            );
+            info!(
+                "[summary] thread {}: summary response was empty/DSML/continuation-only; using deterministic interrupted summary",
+                thread.id
+            );
+        } else {
+            summary_text = cleaned;
+        }
         let summary_msg = MessageNew {
             thread_id: thread.id,
             role: "agent".to_string(),
@@ -203,7 +230,7 @@ pub(crate) async fn handle_response(
                 stream: false,
                 tools: None,
             };
-            let (summary_text, _summary_token_usage) =
+            let (mut summary_text, _summary_token_usage) =
                 match per_thread_llm.completion(summary_request).await {
                     Ok(resp) => {
                         let tokens = resp
@@ -230,6 +257,20 @@ pub(crate) async fn handle_response(
                         (format!("Summary generation failed: {}", e), None)
                     }
                 };
+            // Terminal-content hygiene: same protection as the interrupted path
+            // (thread 1596): never persist DSML/XML tool-call markup or
+            // continuation prose as the activity summary.
+            let cleaned = sanitize_terminal_content(&summary_text);
+            if cleaned.trim().is_empty() || is_continuation_intent(&cleaned) {
+                summary_text =
+                    deterministic_activity_summary(&cause_msg.content, Some(digest.as_str()));
+                info!(
+                    "[summary] thread {}: empty-final summary response was empty/DSML/continuation-only; using deterministic activity summary",
+                    thread.id
+                );
+            } else {
+                summary_text = cleaned;
+            }
             let summary_msg = MessageNew {
                 thread_id: thread.id,
                 role: "agent".to_string(),
@@ -306,11 +347,31 @@ pub(crate) async fn handle_response(
             saved
         }
     } else {
-        // Normal completion: the agent's final message IS the summary
+        // Normal completion: the agent's final message IS the summary. Hygiene
+        // still applies: the model occasionally emits a raw DSML/XML tool-call
+        // block as its "final answer" content (threads 1550/1588 persisted
+        // exactly that as their last message). Strip tool-call markup so it is
+        // never persisted or parsed as a terminal summary, falling back to the
+        // deterministic digest summary when the whole "final" text was markup.
+        let cleaned_final = sanitize_terminal_content(&final_content);
+        let final_text = if cleaned_final.trim().is_empty() {
+            info!(
+                "[summary] thread {}: final content was DSML/XML tool-call markup only; using deterministic interrupted summary",
+                thread.id
+            );
+            deterministic_interrupted_summary(
+                &cause_msg.content,
+                build_tool_evidence_digest(messages).as_deref(),
+                current_iter,
+                iter_limit,
+            )
+        } else {
+            cleaned_final
+        };
         let agent_msg = MessageNew {
             thread_id: thread.id,
             role: "agent".to_string(),
-            content: final_content.clone(),
+            content: final_text,
             thread_sequence: next_seq,
             external_id: None,
             metadata: serde_json::json!({
